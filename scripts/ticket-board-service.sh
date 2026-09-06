@@ -552,41 +552,91 @@ verify_local_socket_available() {
         log "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
         return 1
     fi
-    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" <<'PY'
+    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" "$BOARD_CURRENT_LINK" <<'SMOKEPY'
 import json
+import os
 import socket
 import sys
 import time
+from pathlib import Path
 
 socket_path = sys.argv[1]
 deadline = time.monotonic() + float(sys.argv[2])
-body = json.dumps({"role": "ops"}).encode("utf-8")
-request = (
-    b"POST /api/register-caller HTTP/1.1\r\n"
+sys.path.insert(0, str(Path(sys.argv[3]) / "scripts"))
+
+
+def send(request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1.0)
+        sock.connect(socket_path)
+        sock.sendall(request)
+        return sock.recv(4096)
+
+
+def status_of(response):
+    return response.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+
+
+# Reachability: a read needs no caller role, so this proves the socket is
+# serving without depending on the authorization path.
+read_request = (
+    b"GET /api/board HTTP/1.1\r\n"
     b"Host: localhost\r\n"
-    b"Content-Type: application/json\r\n"
-    + f"Content-Length: {len(body)}\r\n".encode("ascii")
-    + b"Connection: close\r\n\r\n"
-    + body
+    b"Connection: close\r\n\r\n"
 )
 last_error = "not attempted"
+serving = False
 while time.monotonic() < deadline:
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1.0)
-            sock.connect(socket_path)
-            sock.sendall(request)
-            response = sock.recv(4096)
-        status_line = response.split(b"\r\n", 1)[0]
-        if b" 200 " in status_line:
-            sys.exit(0)
-        last_error = status_line.decode("utf-8", errors="replace")
+        line = status_of(send(read_request))
+        if " 200 " in line:
+            serving = True
+            break
+        last_error = line
     except OSError as exc:
         last_error = str(exc)
     time.sleep(0.25)
-print(f"ticket-board Unix socket verification failed for {socket_path}: {last_error}", file=sys.stderr)
-sys.exit(1)
-PY
+if not serving:
+    print("ticket-board Unix socket verification failed for %s: %s" % (socket_path, last_error), file=sys.stderr)
+    sys.exit(1)
+
+# SYRD-39: a peer outside every role pane must not be able to claim a role.
+# Asserted only when this probe really is outside one -- an operator deploying
+# from inside their own pane legitimately has a role session, and failing the
+# deploy for that would be wrong.
+try:
+    from ticket_board.peer_identity import session_identity
+except Exception as exc:
+    print("ticket-board socket role-binding check skipped: %s" % exc)
+    sys.exit(0)
+
+if session_identity(os.getpid()) is not None:
+    print("ticket-board socket role-binding check skipped: deploy runs inside a role session")
+    sys.exit(0)
+
+body = json.dumps({"role": "director"}).encode("utf-8")
+claim = (
+    b"POST /api/register-caller HTTP/1.1\r\n"
+    b"Host: localhost\r\n"
+    b"Content-Type: application/json\r\n"
+    + ("Content-Length: %d\r\n" % len(body)).encode("ascii")
+    + b"Connection: close\r\n\r\n"
+    + body
+)
+try:
+    line = status_of(send(claim))
+except OSError as exc:
+    print("ticket-board socket role-binding check failed: %s" % exc, file=sys.stderr)
+    sys.exit(1)
+if " 200 " in line:
+    print(
+        "ticket-board socket role-binding check FAILED: a peer outside every role session "
+        "was granted director (%s)" % line,
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print("ticket-board socket role binding refused an unbound peer as expected (%s)" % line)
+SMOKEPY
     then
         return 1
     fi

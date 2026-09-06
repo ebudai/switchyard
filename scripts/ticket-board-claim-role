@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Claim this pane's board caller role, then exec the role's CLI.
+
+The board binds write authority to the pane process the launcher starts, and
+learns which role that pane is the first time the pane talks to it. Left to
+first use, a pane that has not written yet holds nothing, and another role could
+take its name in the meantime. Running this as the pane's first act closes that
+window: the claim is made by the process that becomes the CLI, so the identity
+the board records is the pane itself (SYRD-39).
+
+It never blocks a role from starting. A board that is down, a socket that is not
+configured, an older board that does not know the endpoint -- all of these are
+reported on stderr and then the CLI is exec'd anyway, because refusing to launch
+the role would be a worse failure than launching it unclaimed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+
+CLAIM_TIMEOUT_SECONDS = 5.0
+
+
+def claim(socket_path: str, role: str) -> str:
+    body = json.dumps({"role": role}).encode("utf-8")
+    request = (
+        b"POST /api/register-caller HTTP/1.1\r\n"
+        b"Host: localhost\r\n"
+        b"Content-Type: application/json\r\n"
+        + ("Content-Length: %d\r\n" % len(body)).encode("ascii")
+        + b"Connection: close\r\n\r\n"
+        + body
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(CLAIM_TIMEOUT_SECONDS)
+        sock.connect(socket_path)
+        sock.sendall(request)
+        response = sock.recv(4096)
+    return response.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 3:
+        print("usage: ticket-board-claim-role ROLE COMMAND [ARG...]", file=sys.stderr)
+        return 2
+    role = argv[1].strip().lower()
+    command = argv[2:]
+    socket_path = (os.environ.get("TICKET_BOARD_SOCKET") or "").strip()
+    if not socket_path:
+        print("ticket-board-claim-role: TICKET_BOARD_SOCKET is not set; starting unclaimed", file=sys.stderr)
+    else:
+        try:
+            status = claim(socket_path, role)
+            if " 200 " not in status:
+                print(
+                    "ticket-board-claim-role: board refused the %s claim (%s)" % (role, status),
+                    file=sys.stderr,
+                )
+        except OSError as exc:
+            print("ticket-board-claim-role: could not reach the board (%s)" % exc, file=sys.stderr)
+    os.execvp(command[0], command)
+    return 127  # unreachable: execvp either replaces this process or raises
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

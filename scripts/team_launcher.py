@@ -2476,6 +2476,11 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
     )
 
 
+def claim_role_script_path() -> Path:
+    """The pane-side helper that claims a role before the CLI starts."""
+    return Path(__file__).resolve().parent / "ticket-board-claim-role"
+
+
 def cli_command_for_role(
     role: RoleConfig,
     *,
@@ -2483,6 +2488,7 @@ def cli_command_for_role(
     pane_state_dir: Path | None = None,
     resume: bool = False,
     bin_user: str = "",
+    claim_role: bool = False,
 ) -> list[str]:
     session_id = session_id_for_role(role, session_dir) if resume else ""
     if session_id and _uses_fresh_session_per_ticket(role):
@@ -2522,6 +2528,12 @@ def cli_command_for_role(
             )
         pane_path_dirs.insert(0, str(directorctl_path.parent))
     env["PATH"] = _prepend_paths(env.get("PATH") or default_pane_base_path(bin_user), pane_path_dirs)
+    if claim_role:
+        # The pane claims its board role before the CLI takes over, so the
+        # board binds authority to this pane rather than learning the role from
+        # whichever command happens to write first (SYRD-39). exec keeps the pid,
+        # so the claimed session is the pane process itself.
+        command = [str(claim_role_script_path()), role.role, *command]
     return ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env), *command]
 
 
@@ -2534,7 +2546,14 @@ def tmux_new_session_args(
     bin_user: str = "",
 ) -> list[str]:
     shell_command = _quote_command(
-        cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume, bin_user=bin_user)
+        cli_command_for_role(
+            role,
+            session_dir=session_dir,
+            pane_state_dir=pane_state_dir,
+            resume=resume,
+            bin_user=bin_user,
+            claim_role=True,
+        )
     )
     return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, "-n", role.role, shell_command]
 

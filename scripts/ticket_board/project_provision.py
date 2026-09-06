@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import grp
 import os
+import pwd
 import re
 import sys
 from dataclasses import asdict, dataclass
@@ -781,6 +783,14 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
         if operation_allowed_roles
         else ""
     )
+    # The tenant reaches the board socket through its own group rather than the
+    # socket being world-writable, so the service joins that group and the
+    # server chgrps the socket to it at bind (SYRD-39).
+    tenant_group = tenant_primary_group(plan.owner_user)
+    tenant_group_line = f"SupplementaryGroups={tenant_group}\n" if tenant_group else ""
+    socket_group_env_line = (
+        f"Environment=TICKET_BOARD_SOCKET_GROUP={tenant_group}\n" if tenant_group else ""
+    )
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
@@ -789,8 +799,9 @@ Wants=postgresql.service
 [Service]
 Type=simple
 User={plan.service_user}
-WorkingDirectory={plan.board_current}
+{tenant_group_line}WorkingDirectory={plan.board_current}
 RuntimeDirectory={plan.runtime_directory}
+RuntimeDirectoryMode=0750
 ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
 Restart=on-failure
 RestartSec=2
@@ -806,7 +817,8 @@ Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.service_role}
 Environment=TICKET_BOARD_SOCKET={plan.socket_path}
-Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
+Environment=TICKET_BOARD_TENANT_USER={plan.owner_user}
+{socket_group_env_line}Environment=TICKET_BOARD_DATABASE_URL={plan.board_database_url}
 Environment=TICKET_BOARD_DRAFT_ROLES={env_list(plan.draft_roles)}
 Environment=TICKET_BOARD_IMPLEMENTER_ROLES={env_list(plan.implementer_roles)}
 Environment=TICKET_BOARD_ASSIGNEES={env_list(plan.assignee_roles)}
@@ -821,6 +833,26 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def tenant_primary_group(owner_user: str) -> str:
+    """The group the board socket is shared with, or '' when it is unknown.
+
+    Returning empty rather than guessing keeps a provisioning run on a host
+    where the account does not exist yet from baking a wrong group into the
+    unit; the server logs loudly when the group is unset (SYRD-39).
+    """
+    name = (owner_user or "").strip()
+    if not name:
+        return ""
+    try:
+        gid = pwd.getpwnam(name).pw_gid
+    except KeyError:
+        return ""
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return ""
 
 
 def render_listener_unit(plan: ProjectBoardProvision) -> str:

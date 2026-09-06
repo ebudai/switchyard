@@ -11,6 +11,8 @@ import re
 import secrets
 import socket
 import socketserver
+import grp
+import pwd
 import struct
 import subprocess
 import threading
@@ -29,6 +31,7 @@ from PIL import Image
 from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now, project_slug
 from .frontend import render_html
+from .peer_identity import SessionIdentity, session_identity, session_is_live
 from .runtime_paths import directorctl_path
 
 LOGGER = logging.getLogger(__name__)
@@ -41,7 +44,10 @@ REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
 LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LEGACY_WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
-PANE_SOCKET_MODE = 0o666
+# 0666 let every local user, including other tenants' Unix accounts, connect to
+# this tenant's board. Group access is granted by the runtime directory instead,
+# which the unit chgrps to the tenant group (SYRD-39).
+PANE_SOCKET_MODE = 0o660
 IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 THUMBNAIL_MAX_SIZE = 512
 THUMBNAIL_QUALITY = 80
@@ -244,15 +250,39 @@ class CallerRegistration:
     role: str
     uid: int
     gid: int
+    session: "SessionIdentity"
     connection_count: int = 0
 
 
+class CallerIdentityError(PermissionError):
+    """The peer may not act as the role it asked for."""
+
+
 class CallerRegistry:
-    def __init__(self, *, pid_alive: Callable[[int], bool] | None = None) -> None:
+    """Binds a caller role to the durable role session, not to one command.
+
+    Before SYRD-39 this keyed on the pid that opened the connection. Every
+    ticket-board-write invocation is its own short-lived process, so the binding
+    was created and released around a single action and any local process could
+    claim any role in the gap -- including director. Registrations are now keyed
+    on the pane process the role launcher started, which every command a role
+    runs descends from, so a role is held for the life of its session and a
+    different session cannot take it.
+    """
+
+    def __init__(
+        self,
+        *,
+        pid_alive: Callable[[int], bool] | None = None,
+        resolve_session: Callable[[int], SessionIdentity | None] | None = None,
+        session_alive: Callable[[SessionIdentity], bool] | None = None,
+    ) -> None:
         self._pid_alive = pid_alive or self._default_pid_alive
+        self._resolve_session = resolve_session or session_identity
+        self._session_alive = session_alive or session_is_live
         self._lock = threading.Lock()
-        self._by_pid: dict[int, CallerRegistration] = {}
-        self._role_to_pid: dict[str, int] = {}
+        self._by_session: dict[tuple[int, int], CallerRegistration] = {}
+        self._role_to_session: dict[str, tuple[int, int]] = {}
 
     @staticmethod
     def _default_pid_alive(pid: int) -> bool:
@@ -266,93 +296,226 @@ class CallerRegistry:
             return True
         return True
 
-    def register(self, credentials: PeerCredentials, role: str, *, allowed_roles: set[str] | None = None) -> None:
+    def session_for_pid(self, pid: int) -> SessionIdentity:
+        """The role session a connecting pid belongs to.
+
+        A peer with no role session is refused rather than defaulted: the whole
+        point is that authority comes from the launcher-started pane, so a
+        process outside every pane has no role to inherit.
+        """
+        identity = self._resolve_session(pid)
+        if identity is None:
+            LOGGER.warning(
+                "Rejected local board caller pid=%s: not part of any role session process tree",
+                pid,
+            )
+            raise CallerIdentityError(
+                "local board writes must come from a role session started by the launcher"
+            )
+        return identity
+
+    def register(
+        self,
+        credentials: PeerCredentials,
+        role: str,
+        *,
+        allowed_roles: set[str] | None = None,
+        session: SessionIdentity | None = None,
+    ) -> SessionIdentity:
         normalized_role = role.strip().lower()
         if normalized_role not in (allowed_roles if allowed_roles is not None else CALLER_ROLES) - {"user", "unassigned"}:
             raise ValueError(f"invalid local caller role: {role}")
+        identity = session or self.session_for_pid(credentials.pid)
+        key = identity.key()
         with self._lock:
             self._drop_stale_locked()
-            existing_pid = self._role_to_pid.get(normalized_role)
-            if existing_pid is not None and existing_pid != credentials.pid:
+            existing = self._by_session.get(key)
+            if existing is not None and existing.role != normalized_role:
                 LOGGER.warning(
-                    "Rejected caller registration for role %s from pid=%s uid=%s gid=%s; already held by live pid=%s",
+                    "Rejected caller registration as %s from peer pid=%s uid=%s session pid=%s: "
+                    "session already holds role %s",
                     normalized_role,
                     credentials.pid,
                     credentials.uid,
-                    credentials.gid,
-                    existing_pid,
-                )
-                raise PermissionError(f"role {normalized_role} is already registered by live pid {existing_pid}")
-            existing = self._by_pid.get(credentials.pid)
-            if existing is not None and existing.role != normalized_role:
-                LOGGER.warning(
-                    "Rejected caller registration for pid=%s as %s; pid already registered as %s",
-                    credentials.pid,
-                    normalized_role,
+                    identity.pid,
                     existing.role,
                 )
-                raise PermissionError(f"pid {credentials.pid} is already registered as {existing.role}")
+                raise CallerIdentityError(
+                    f"role session {identity.pid} is already registered as {existing.role}"
+                )
+            holder = self._role_to_session.get(normalized_role)
+            if holder is not None and holder != key:
+                LOGGER.warning(
+                    "Rejected caller registration as %s from peer pid=%s uid=%s session pid=%s: "
+                    "role is held by live session pid=%s",
+                    normalized_role,
+                    credentials.pid,
+                    credentials.uid,
+                    identity.pid,
+                    holder[0],
+                )
+                raise CallerIdentityError(
+                    f"role {normalized_role} is held by live role session {holder[0]}"
+                )
             if existing is None:
-                self._by_pid[credentials.pid] = CallerRegistration(
+                self._by_session[key] = CallerRegistration(
                     role=normalized_role,
                     uid=credentials.uid,
                     gid=credentials.gid,
+                    session=identity,
                     connection_count=1,
                 )
-                self._role_to_pid[normalized_role] = credentials.pid
+                self._role_to_session[normalized_role] = key
+                LOGGER.info(
+                    "Registered caller role %s for role session pid=%s (peer pid=%s uid=%s gid=%s)",
+                    normalized_role,
+                    identity.pid,
+                    credentials.pid,
+                    credentials.uid,
+                    credentials.gid,
+                )
             else:
                 existing.connection_count += 1
-            LOGGER.info(
-                "Registered local caller role %s for pid=%s uid=%s gid=%s",
-                normalized_role,
-                credentials.pid,
-                credentials.uid,
-                credentials.gid,
-            )
+        return identity
 
-    def release(self, pid: int) -> None:
+    def release(self, session: SessionIdentity | None) -> None:
+        """Drop one connection's hold.
+
+        The registration itself survives: it belongs to the pane, not to the
+        command that happened to open this connection. It is reclaimed when the
+        pane exits, which is what lets a restarted role take its role back.
+        """
+        if session is None:
+            return
         with self._lock:
-            registration = self._by_pid.get(pid)
+            registration = self._by_session.get(session.key())
             if registration is None:
                 return
-            registration.connection_count -= 1
             if registration.connection_count > 0:
-                return
-            self._by_pid.pop(pid, None)
-            if self._role_to_pid.get(registration.role) == pid:
-                self._role_to_pid.pop(registration.role, None)
-            LOGGER.info("Released local caller role %s for pid=%s", registration.role, pid)
+                registration.connection_count -= 1
+            self._drop_stale_locked()
 
     def role_for_pid(self, pid: int) -> str:
+        identity = self.session_for_pid(pid)
         with self._lock:
-            registration = self._by_pid.get(pid)
+            registration = self._by_session.get(identity.key())
             if registration is None:
-                raise ValueError(f"pid {pid} has not registered a caller role")
-            if not self._pid_alive(pid):
-                self._release_locked(pid)
-                raise ValueError(f"pid {pid} registration is stale")
+                raise ValueError(
+                    f"role session {identity.pid} has not registered a caller role"
+                )
+            if not self._session_alive(registration.session):
+                self._release_locked(identity.key())
+                raise ValueError(f"role session {identity.pid} registration is stale")
             return registration.role
+
+    def registered_role_for_session(self, session: SessionIdentity) -> str | None:
+        with self._lock:
+            registration = self._by_session.get(session.key())
+            return registration.role if registration is not None else None
 
     def pid_for_role(self, role: str) -> int | None:
         with self._lock:
             self._drop_stale_locked()
-            return self._role_to_pid.get(role)
+            key = self._role_to_session.get(role)
+            return key[0] if key is not None else None
 
-    def _release_locked(self, pid: int) -> None:
-        registration = self._by_pid.pop(pid, None)
-        if registration is not None and self._role_to_pid.get(registration.role) == pid:
-            self._role_to_pid.pop(registration.role, None)
+    def _release_locked(self, key: tuple[int, int]) -> None:
+        registration = self._by_session.pop(key, None)
+        if registration is not None and self._role_to_session.get(registration.role) == key:
+            self._role_to_session.pop(registration.role, None)
 
     def _drop_stale_locked(self) -> None:
-        for pid in list(self._by_pid):
-            if not self._pid_alive(pid):
-                self._release_locked(pid)
+        for key, registration in list(self._by_session.items()):
+            if not self._session_alive(registration.session):
+                LOGGER.info(
+                    "Released caller role %s: role session pid=%s is gone",
+                    registration.role,
+                    registration.session.pid,
+                )
+                self._release_locked(key)
 
 
 def peer_credentials(connection: socket.socket) -> PeerCredentials:
     raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize(SO_PEERCRED_FORMAT))
     pid, uid, gid = struct.unpack(SO_PEERCRED_FORMAT, raw)
     return PeerCredentials(pid=pid, uid=uid, gid=gid)
+
+
+def restrict_socket_to_tenant(socket_path: Path, *, environ: Mapping[str, str] | None = None) -> None:
+    """Hand socket access to the tenant group and no one else.
+
+    The socket used to be 0666 inside a world-traversable directory, so any
+    local account -- including another tenant's -- could connect and claim a
+    role. Ownership stays with the board service; the tenant reaches it through
+    a group the unit grants as a supplementary group, which is why this needs no
+    privilege at runtime. Left permissive and logged, never silently, when the
+    group is unset or unknown, so a half-configured deployment is visible rather
+    than quietly unprotected (SYRD-39).
+    """
+    source = os.environ if environ is None else environ
+    group_name = str(source.get("TICKET_BOARD_SOCKET_GROUP") or "").strip()
+    if not group_name:
+        LOGGER.warning(
+            "TICKET_BOARD_SOCKET_GROUP is not set for %s; the socket is reachable by any "
+            "local account that can traverse its directory",
+            socket_path,
+        )
+        return
+    try:
+        gid = grp.getgrnam(group_name).gr_gid
+    except KeyError:
+        LOGGER.warning(
+            "TICKET_BOARD_SOCKET_GROUP=%s does not resolve to a local group; leaving %s as is",
+            group_name,
+            socket_path,
+        )
+        return
+    for target, mode in ((socket_path.parent, 0o750), (socket_path, PANE_SOCKET_MODE)):
+        try:
+            os.chown(target, -1, gid)
+            target.chmod(mode)
+        except OSError as exc:
+            LOGGER.warning(
+                "Could not restrict %s to group %s (%s); the board service must be a member "
+                "of that group",
+                target,
+                group_name,
+                exc,
+            )
+
+
+def allowed_peer_uids(environ: Mapping[str, str] | None = None) -> set[int]:
+    """Unix uids permitted on this tenant's local socket.
+
+    Empty means unrestricted, which is what an older deployment that has not
+    been through the socket repair still gets; the caller logs that state rather
+    than pretending the check is active. Configured deployments name the tenant
+    owner, so another tenant's Unix account is refused even if socket
+    permissions were loosened by hand (SYRD-39).
+    """
+    source = os.environ if environ is None else environ
+    uids: set[int] = set()
+    raw_uids = str(source.get("TICKET_BOARD_ALLOWED_PEER_UIDS") or "").strip()
+    for chunk in raw_uids.replace(",", " ").split():
+        try:
+            uids.add(int(chunk))
+        except ValueError:
+            LOGGER.warning("Ignoring non-numeric TICKET_BOARD_ALLOWED_PEER_UIDS entry %r", chunk)
+    tenant_user = str(source.get("TICKET_BOARD_TENANT_USER") or "").strip()
+    if tenant_user:
+        try:
+            uids.add(pwd.getpwnam(tenant_user).pw_uid)
+        except KeyError:
+            LOGGER.warning(
+                "TICKET_BOARD_TENANT_USER=%s does not resolve to a local account; "
+                "peer uid enforcement will not admit it",
+                tenant_user,
+            )
+    if uids:
+        # The board's own account always reaches its socket, so health checks and
+        # in-process helpers do not depend on the tenant list being complete.
+        uids.add(os.getuid())
+    return uids
 
 
 def director_target(project: str | None = None) -> str:
@@ -481,7 +644,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         self._local_peer_credentials: PeerCredentials | None = None
-        self._registered_local_pid: int | None = None
+        self._registered_session: SessionIdentity | None = None
         if self.caller_registry is not None:
             self._local_peer_credentials = peer_credentials(self.connection)  # type: ignore[arg-type]
 
@@ -489,8 +652,27 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         try:
             super().finish()
         finally:
-            if self._registered_local_pid is not None and self.caller_registry is not None:
-                self.caller_registry.release(self._registered_local_pid)
+            if self._registered_session is not None and self.caller_registry is not None:
+                self.caller_registry.release(self._registered_session)
+
+    def require_allowed_peer(self) -> PeerCredentials:
+        """Refuse local peers that are not this tenant.
+
+        Socket permissions are the enforcing boundary; this is the second check
+        that makes a misconfigured socket fail closed and leaves a log line
+        naming the uid that tried (SYRD-39).
+        """
+        if self._local_peer_credentials is None:
+            raise ValueError("local socket request missing peer credentials")
+        allowed = allowed_peer_uids()
+        if allowed and self._local_peer_credentials.uid not in allowed:
+            LOGGER.warning(
+                "Rejected local board connection from uid=%s pid=%s: not a permitted tenant peer",
+                self._local_peer_credentials.uid,
+                self._local_peer_credentials.pid,
+            )
+            raise PermissionError("this board socket does not serve that local user")
+        return self._local_peer_credentials
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         return
@@ -617,9 +799,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
     def caller_role(self) -> str:
         if self.caller_registry is not None:
-            if self._local_peer_credentials is None:
-                raise ValueError("local socket request missing peer credentials")
-            return self.caller_registry.role_for_pid(self._local_peer_credentials.pid)
+            credentials = self.require_allowed_peer()
+            # Derived from the peer's process tree, never from the header or
+            # payload the caller supplies.
+            return self.caller_registry.role_for_pid(credentials.pid)
         # Keep the legacy name while clients transition. A server-side alias only
         # protects old clients on a new board; clients must dual-send to support
         # new tooling talking to an older deployed board.
@@ -648,20 +831,42 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise PermissionError(f"missing or invalid {REPORT_TOKEN_HEADER}")
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
-        if self.caller_registry is None or self._local_peer_credentials is None:
+        """Claim, or confirm, this role session's caller role.
+
+        The supplied role is a claim to be checked, not an assertion to be
+        believed. It is accepted only when this peer's role session either
+        already holds it or holds nothing and nothing else holds it; a session
+        that already answers to another role, or a role held by a different live
+        session, is refused and logged with the real peer pid (SYRD-39).
+        """
+        if self.caller_registry is None:
             raise ValueError("caller registration is only available on the local Unix socket")
+        credentials = self.require_allowed_peer()
         role = str(payload.get("role", "")).strip().lower()
-        if self._registered_local_pid is not None:
-            current_role = self.caller_registry.role_for_pid(self._registered_local_pid)
-            if role != current_role:
-                raise PermissionError(f"connection is already registered as {current_role}")
-            self.send_json({"role": current_role, "pid": self._registered_local_pid})
+        session = self.caller_registry.session_for_pid(credentials.pid)
+        established = self.caller_registry.registered_role_for_session(session)
+        if established is not None:
+            if role and role != established:
+                LOGGER.warning(
+                    "Rejected role claim %r from peer pid=%s uid=%s: role session pid=%s is %s",
+                    role,
+                    credentials.pid,
+                    credentials.uid,
+                    session.pid,
+                    established,
+                )
+                raise CallerIdentityError(
+                    f"this role session is registered as {established}, not {role}"
+                )
+            self._registered_session = session
+            self.send_json({"role": established, "pid": session.pid})
             return
-        if role not in getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))() or role == "user":
+        allowed = set(getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))())
+        if role not in allowed or role == "user":
             raise ValueError(f"invalid local caller role: {role}")
-        self.caller_registry.register(self._local_peer_credentials, role, allowed_roles=set(getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))()))
-        self._registered_local_pid = self._local_peer_credentials.pid
-        self.send_json({"role": role, "pid": self._local_peer_credentials.pid})
+        self.caller_registry.register(credentials, role, allowed_roles=allowed, session=session)
+        self._registered_session = session
+        self.send_json({"role": role, "pid": session.pid})
 
     def require_operation_allowed(self, operation: str, caller_role: str, ticket_id: str | None = None) -> None:
         cfg = getattr(self.app, "workflow_configuration", lambda: None)()
@@ -1340,6 +1545,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
             pass
         super().__init__(str(socket_path), TicketBoardHandler)
         socket_path.chmod(PANE_SOCKET_MODE)
+        restrict_socket_to_tenant(socket_path)
 
     def server_close(self) -> None:
         super().server_close()

@@ -419,3 +419,80 @@ guard only for a positively detected non-empty human composer: markerless
 agent/tool output is delivered to the director, and a still-busy composer waits
 only for the bounded retry count before delivering with a warning so
 pane-to-director escalations cannot starve forever.
+
+## Local write authority and its threat boundary
+
+Board writes over the tenant Unix socket carry a caller role. That role is
+**derived from the connecting process, never taken from what the caller says**.
+
+### How a role is established
+
+`SO_PEERCRED` tells the board which process connected. It does not say which
+role that process belongs to, and `ticket-board-write` is a fresh short-lived
+process per command, so a role bound to the connecting pid is bound to something
+that exits immediately. Authority is therefore bound to the **role session**:
+the pane process the launcher starts for a role, which every command that role
+runs descends from.
+
+- `scripts/ticket_board/peer_identity.py` walks `/proc` from the peer up to the
+  ancestor whose parent is the tmux server. That is the pane process. Parentage
+  is maintained by the kernel, so a process cannot rewrite it.
+- The identity is the pane's pid **and** its start time, so a recycled pid does
+  not inherit a dead pane's authority.
+- A pane claims its role at start, before the role's CLI takes over, via
+  `scripts/ticket-board-claim-role`. The claim is made by the process that
+  becomes the CLI, so there is no window in which a started pane holds no role.
+- One session holds one role, and one role is held by one live session. A
+  restarted role reclaims its role once the old pane is gone.
+- A peer that is inside no pane at all gets no role, whatever it asks for.
+- `X-Ticket-Board-Caller-Role` and the `register-caller` payload are checked
+  against the derived identity. A mismatch is refused and logged with the real
+  peer pid, the resolved role, and the reason. They cannot change the identity.
+
+### Socket reach
+
+The socket used to be mode `0666` in a world-traversable directory, so any local
+account -- including another tenant's -- could connect. Now:
+
+- the runtime directory is `0750` and the socket `0660`, both group-owned by the
+  tenant's group, which the unit grants the board service as a supplementary
+  group;
+- the board additionally refuses peers whose uid is not the tenant owner or the
+  board's own account, when `TICKET_BOARD_TENANT_USER` is configured.
+
+A board restart repairs the ownership and mode of an already-deployed socket, so
+provisioning and `switchyard upgrade` both carry the repair before roles launch.
+If the group is unset or unknown the board logs a warning and leaves the socket
+as it is, so a half-configured deployment is visible rather than quietly
+unprotected.
+
+### What this does and does not protect against
+
+**It does protect against** another tenant's Unix user reaching this board at
+all, and against any process talking to the socket asserting a role it does not
+occupy -- including the raw `POST /api/register-caller {"role":"director"}` that
+a non-Director pane could previously use to obtain Director authority.
+
+**It does not, on its own, isolate roles from each other.** Every role in a
+project currently runs as the **same Unix uid** and shares **one tmux server**.
+Under that arrangement a role process can still:
+
+- drive tmux to run a command inside another role's pane, and so borrow that
+  pane's ancestry; and
+- `ptrace` or otherwise interfere with another role's processes, subject to the
+  host's `ptrace_scope`.
+
+Process-tree binding raises the cost from "any process can name any role" to
+"must execute inside the target role's pane", and it makes the attempt visible
+in the board log. It is defence in depth, not a security boundary. Do not treat
+environment variables, prompt text, or the no-impersonation rule in the role
+skill as enforcement; none of them are.
+
+**The minimum isolation change** that would make this a real boundary is one
+Unix uid per role: a separate account per role, each with its own tmux server
+and its own socket group membership. Then the kernel enforces what is presently
+only derived, `SO_PEERCRED`'s uid alone distinguishes roles, and tmux-driving and
+`ptrace` across roles both stop working. Anything short of that -- extra env
+vars, tokens readable by the same uid, or wrapper scripts -- can be read or
+driven by any role that shares the uid, and should not be presented as
+isolation.

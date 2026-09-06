@@ -45,12 +45,28 @@ SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 SESSION_START_FRESH_SOURCE = "startup"
 BOARD_SKILL_NAME = "switchyard-board"
+DIRECTOR_SKILL_NAME = "switchyard-director"
+DIRECTOR_ROLE = "director"
 # A pointer, not the skill: every runtime already has the body installed in its
 # own skills directory, and pasting it into each session would crowd out the
 # thing the session was started to do.
 BOARD_SKILL_INSTRUCTION = (
     f"Load the {BOARD_SKILL_NAME} skill before reading from or writing to the ticket board."
 )
+# The Director overlay is named only to the Director. Every role's home holds
+# the file -- panes share a home -- so this decides which session is told to
+# read it, not which session can. The board refuses privileged operations from
+# any other caller either way.
+DIRECTOR_SKILL_INSTRUCTION = (
+    f"Load the {BOARD_SKILL_NAME} and {DIRECTOR_SKILL_NAME} skills before reading from or "
+    "writing to the ticket board."
+)
+
+
+def _skill_instruction_for_role(role: str) -> str:
+    if role.strip().lower() == DIRECTOR_ROLE:
+        return DIRECTOR_SKILL_INSTRUCTION
+    return BOARD_SKILL_INSTRUCTION
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 
 
@@ -459,19 +475,20 @@ def _is_session_start_hook_source(source: str) -> bool:
     return source.endswith(".SessionStart") or source in SESSION_START_HOOK_SOURCES
 
 
-def _with_board_skill_instruction(context: str) -> str:
-    if BOARD_SKILL_INSTRUCTION in context:
+def _with_board_skill_instruction(context: str, role: str = "") -> str:
+    instruction = _skill_instruction_for_role(role)
+    if instruction in context:
         return context
     if not context.strip():
-        return BOARD_SKILL_INSTRUCTION
-    return f"{BOARD_SKILL_INSTRUCTION}\n\n{context}"
+        return instruction
+    return f"{instruction}\n\n{context}"
 
 
-def _session_start_context(context: str) -> dict[str, object]:
+def _session_start_context(context: str, role: str = "") -> dict[str, object]:
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _with_board_skill_instruction(context),
+            "additionalContext": _with_board_skill_instruction(context, role),
         }
     }
 
@@ -501,15 +518,15 @@ def _session_start_additional_context_output(
         and not resume_session_id.strip()
     )
     # A stored prompt is the director's own words for this role, so it wins over the
-    # packaged remit file. Both are gated on fresh_start: a prompt changed mid-session
-    # is picked up by the next fresh conversation or an explicit restart, never by
+    # packaged remit file. Both are gated on fresh_start: a prompt changed mid-session is
+    # picked up by the next fresh conversation or an explicit restart, never by
     # interrupting or silently rewriting the one that is running.
     onboarding_prompt = environ.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", "").strip()
     if onboarding_prompt and fresh_start:
-        # The board-skill instruction is prepended by _session_start_context, so the
-        # role body is passed on its own rather than carrying its own copy.
+        # The skill instruction is prepended by _session_start_context, which also picks
+        # the director overlay, so the role body is passed on its own.
         return _session_start_context(
-            f"Your {role} session started.\n\n{onboarding_prompt}"
+            f"Your {role} session started.\n\n{onboarding_prompt}", role
         )
     onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
     if onboarding and fresh_start:
@@ -517,23 +534,23 @@ def _session_start_additional_context_output(
         if not path.is_absolute() or not path.is_file():
             raise ValueError(f"configured role onboarding is unavailable: {path}")
         return _session_start_context(
-            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()
+            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text(),
+            role,
         )
-    # The director used to have its own branch here, discovering the onboarding packet
-    # at session start. That remit is now ordinary role data like every other role's:
-    # provisioning seeds it as an onboarding_prompt, the director can change it with
-    # `switchyard role-prompt`, and clearing it leaves the director with the same
-    # generic fallback as any other role rather than a private code path.
+    # The director used to have its own branch here, discovering the onboarding packet at
+    # session start. That remit is now ordinary role data: provisioning seeds it as an
+    # onboarding_prompt, the director changes it with `switchyard role-prompt`, and
+    # clearing it leaves the same generic fallback every other role has.
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         # A fresh role session with nothing else to say is exactly the one that
         # would otherwise reach for the board unaided.
-        return _session_start_context("") if fresh_start else None
+        return _session_start_context("", role) if fresh_start else None
     board_url = _default_board_url(environ)
     ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
     if ticket is None:
         return None
     return _session_start_context(
-        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source)
+        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source), role
     )
 
 

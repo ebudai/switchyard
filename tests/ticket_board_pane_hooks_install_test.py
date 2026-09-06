@@ -49,6 +49,14 @@ from scripts.ticket_board.codex_hook_trust import codex_command_hook_trust_entri
 INSTALLER = ROOT / "scripts" / "ticket-board-install-pane-hooks"
 HOOK_NAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
+DIRECTOR_SKILL_NAME = "switchyard-director"
+
+
+def _skill_instruction(role: str) -> str:
+    """The pointer a role's fresh session receives, taken from the hook itself."""
+    return _load_hook_module()._skill_instruction_for_role(role)
+
+
 BOARD_SKILL_INSTRUCTION = (
     "Load the switchyard-board skill before reading from or writing to the ticket board."
 )
@@ -166,6 +174,13 @@ def _load_toml(path: Path) -> dict[str, Any]:
     parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     assert isinstance(parsed, dict)
     return parsed
+
+
+def _write_onboarding_packet(project_dir: Path) -> None:
+    onboarding_dir = project_dir / "docs" / "onboarding"
+    onboarding_dir.mkdir(parents=True)
+    (onboarding_dir / "README.md").write_text("Onboarding packet\n", encoding="utf-8")
+    (onboarding_dir / "switchyard-director-guide.md").write_text("Director guide\n", encoding="utf-8")
 
 
 def _resolve_from_cwd(path_text: str, cwd: Path) -> Path:
@@ -880,10 +895,130 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
     assert no_ticket.stdout == ""
 
 
-# The director-only onboarding tests that lived here were removed with the branch they
-# covered: the director's remit is ordinary role data now, so it is exercised alongside
-# every other role's in tests/role_onboarding_prompt_test.py rather than as a special
-# case here.
+# The director pointer tests that asserted the removed session-start branch are gone
+# with it; the director's remit is ordinary role data now and is exercised in
+# tests/role_onboarding_prompt_test.py. The absence assertions below still hold.
+
+
+def test_director_onboarding_pointer_skips_resumed_launches() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        _write_onboarding_packet(project_dir)
+        state_dir = Path(tmp) / "state"
+        session_dir = Path(tmp) / "sessions"
+        with _board_with_tickets([]) as board_url:
+            resume_source = subprocess.run(
+                [
+                    str(ROOT / "scripts" / HOOK_NAME),
+                    "idle",
+                    "--target",
+                    "pgu-director:0.0",
+                    "--source",
+                    "claude.SessionStart",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session-dir",
+                    str(session_dir),
+                    "--record-session",
+                ],
+                input=json.dumps({"source": "resume", "session_id": "resumed-director-session"}),
+                text=True,
+                cwd=project_dir,
+                capture_output=True,
+                check=True,
+                env=_hook_env(TICKET_BOARD_URL=board_url),
+            )
+        resumed_launch = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-director:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(state_dir),
+                "--session-dir",
+                str(session_dir),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "resumed-director-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(TICKET_BOARD_PANE_SESSION_ID="resumed-director-session"),
+        )
+
+    assert resume_source.stdout == ""
+    assert resumed_launch.stdout == ""
+
+
+def test_director_onboarding_pointer_is_scoped_to_director_role() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        _write_onboarding_packet(project_dir)
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-ops:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(Path(tmp) / "state"),
+                "--session-dir",
+                str(Path(tmp) / "sessions"),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "fresh-ops-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert context == _skill_instruction("ops") == BOARD_SKILL_INSTRUCTION
+    assert DIRECTOR_SKILL_NAME not in context
+    assert "onboarding packet" not in context
+
+
+def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
+        project_dir = Path(tmp) / "project"
+        project_dir.mkdir()
+        proc = subprocess.run(
+            [
+                str(ROOT / "scripts" / HOOK_NAME),
+                "idle",
+                "--target",
+                "pgu-director:0.0",
+                "--source",
+                "claude.SessionStart",
+                "--state-dir",
+                str(Path(tmp) / "state"),
+                "--session-dir",
+                str(Path(tmp) / "sessions"),
+                "--record-session",
+            ],
+            input=json.dumps({"source": "startup", "session_id": "fresh-director-session"}),
+            text=True,
+            cwd=project_dir,
+            capture_output=True,
+            check=True,
+            env=_hook_env(),
+        )
+
+    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    # The Director is the one role pointed at the overlay as well.
+    assert context == _skill_instruction("director")
+    assert DIRECTOR_SKILL_NAME in context
+    assert "onboarding packet" not in context
 
 
 def test_clear_session_start_injects_assigned_in_progress_ticket_context() -> None:

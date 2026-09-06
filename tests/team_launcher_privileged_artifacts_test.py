@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""SYRD-39: generated artifacts root consumes must not become tenant-writable.
+"""SYRD-39: what root installs must come from data and paths root controls.
 
 `switchyard upgrade` regenerates the board unit, the role-control sudoers grant,
-the tmpfiles and polkit fragments and the SQL root runs as postgres. Handing any
-of those to the tenant -- or leaving root to install them out of a directory the
-tenant owns -- means the tenant chooses what root runs. This exercises the real
-root branch in a user namespace with a genuinely distinct tenant uid.
+the tmpfiles and polkit fragments and the SQL root runs as postgres. The plan
+those are rendered from used to be the tenant's, and they were written through
+the tenant's own directory. Either one lets the tenant choose what root runs.
+These cases exercise the real root branch in a user namespace against a
+genuinely distinct tenant uid.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import pwd
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,6 +47,12 @@ def test_classification_covers_every_generated_artifact() -> None:
     assert produced == classified, produced.symmetric_difference(classified)
 
 
+def edit_tenant_plan(plan_path: Path, **fields: object) -> None:
+    stored = json.loads(plan_path.read_text())
+    stored.update(fields)
+    plan_path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n")
+
+
 def privileged_refresh(owner: str) -> None:
     """Run the root upgrade branch against a tenant-owned provision directory."""
     identity = pwd.getpwnam(owner)
@@ -70,62 +76,135 @@ def privileged_refresh(owner: str) -> None:
         )
         write_artifacts(plan, provision, enable_owner_linger=False)
         config_path = launcher.write_new_project_launcher_artifacts(
-            plan,
-            provision,
-            repository=repository,
-            print_func=lambda _text: None,
+            plan, provision, repository=repository, print_func=lambda _text: None
         )
         # Provisioning hands the project's .switchyard tree to the tenant with a
-        # recursive chown. That is the shape refresh actually runs against: a
-        # tenant-owned directory holding artifacts root installs.
+        # recursive chown. That is the shape refresh actually runs against.
         subprocess.run(["chown", "-R", f"{owner}:{owner}", str(provision)], check=True)
-
-        # A role added declaratively: the tenant's own plan write, which is what
-        # the refresh has to pick up.
+        config = launcher.load_project_config("porter", config_path)
         plan_path = provision / "plan.json"
-        stored = json.loads(plan_path.read_text())
-        stored["role_accounts"] = [*stored["role_accounts"], ["inspector", "porter-inspector"]]
-        plan_path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n")
+        mirror = privileged_root / "porter"
+        mirrored_unit = mirror / plan.board_unit
 
         def runner(args, **kwargs):
             if args[0] == "chown":
                 return subprocess.run(args, **kwargs)
             return subprocess.CompletedProcess(args, 0, "", "")
 
-        config = launcher.load_project_config("porter", config_path)
-        result = launcher.refresh_generated_project_runtime_artifacts(
-            config, config_path=config_path, runner=runner
+        def refresh():
+            said: list[str] = []
+            outcome = launcher.refresh_generated_project_runtime_artifacts(
+                config, config_path=config_path, runner=runner, print_func=said.append
+            )
+            return outcome, said
+
+        # A tenant plan that would run the board as root is not adopted as
+        # root's baseline at all: there is nothing to sanitise afterwards,
+        # because a plan root did not write is not evidence of anything.
+        edit_tenant_plan(plan_path, service_user="root", board_current="/tmp/tenant-controlled-release")
+        outcome, _said = refresh()
+        assert "refusing to adopt" in outcome.message and "service_user" in outcome.message, outcome.message
+        # The tenant's own copies may be regenerated from the tenant's own plan
+        # -- they are its view of its project -- but nothing root installs was
+        # produced from it.
+        assert not mirror.exists(), sorted(f.name for f in mirror.iterdir()) if mirror.exists() else ()
+
+        # Restored to what provisioning produced, root adopts it once and keeps
+        # its own copy of it from then on.
+        edit_tenant_plan(plan_path, service_user=plan.service_user, board_current=plan.board_current)
+        outcome, _said = refresh()
+        assert outcome.changed, outcome.message
+        assert (mirror / "plan.json").stat().st_uid == 0
+        baseline_unit = mirrored_unit.read_text()
+        assert f"User={plan.service_user}" in baseline_unit
+        assert "/tmp/tenant-controlled-release" not in baseline_unit
+
+        # The one thing the unprivileged projection may say: a role it added,
+        # under that role's own canonical account.
+        stored = json.loads(plan_path.read_text())
+        edit_tenant_plan(
+            plan_path, role_accounts=[*stored["role_accounts"], ["inspector", "porter-inspector"]]
         )
-        assert result.changed, result.message
-
-        board_unit = provision / plan.board_unit
-        mirror = privileged_root / "porter"
-        mirrored_unit = mirror / plan.board_unit
-
-        # The table the tenant wrote reached the unit root installs.
+        outcome, _said = refresh()
+        assert outcome.changed, outcome.message
         assert "inspector=porter-inspector" in mirrored_unit.read_text()
-        assert "inspector=porter-inspector" in board_unit.read_text()
 
-        # Everything root consumes stayed root's, including the sudoers grant.
+        # Everything else it might say is refused and reported: another role's
+        # account, a non-canonical account, and the fields that decide what root
+        # runs. The unit keeps the baseline's answers.
+        stored = json.loads(plan_path.read_text())
+        edit_tenant_plan(
+            plan_path,
+            service_user="root",
+            board_current="/tmp/tenant-controlled-release",
+            role_accounts=[
+                *stored["role_accounts"],
+                ["smuggled", "porter-director"],
+                ["main", "porter-smuggled"],
+            ],
+        )
+        outcome, said = refresh()
+        unit = mirrored_unit.read_text()
+        assert f"User={plan.service_user}" in unit and "User=root" not in unit
+        assert "/tmp/tenant-controlled-release" not in unit
+        assert "smuggled=porter-director" not in unit and "porter-smuggled" not in unit
+        assert any("smuggled=porter-director" in line for line in said), said
+        assert any("main=porter-smuggled" in line for line in said), said
+
+        # A symlink at a generated target cannot reach its referent, because
+        # root does not write into the tenant's directory at all.
+        victim = root / "victim"
+        victim.write_text("do not overwrite\n")
         for name in privileged_artifact_names(plan):
-            path = provision / name
-            assert path.stat().st_uid == 0 and path.stat().st_gid == 0, (name, path.stat())
-            assert (mirror / name).stat().st_uid == 0, name
-        assert (provision / "plan.json").stat().st_uid == identity.pw_uid
+            target = provision / name
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            target.symlink_to(victim)
+        stored = json.loads(plan_path.read_text())
+        edit_tenant_plan(
+            plan_path,
+            service_user=plan.service_user,
+            board_current=plan.board_current,
+            role_accounts=[*stored["role_accounts"], ["scribe", "porter-scribe"]],
+        )
+        outcome, _said = refresh()
+        assert outcome.changed, outcome.message
+        assert victim.read_text() == "do not overwrite\n"
+        for name in privileged_artifact_names(plan):
+            entry = provision / name
+            # The tenant's copy is republished by replacing the entry, so the
+            # symlink is gone rather than followed: the referent is untouched.
+            assert not entry.is_symlink(), name
+            assert entry.is_file(), name
+        assert "scribe=porter-scribe" in mirrored_unit.read_text()
 
-        # Root's own copy is unreachable: the mirror and every parent of it are
-        # root-owned, so the tenant cannot replace a file by replacing its
-        # directory either.
-        for directory in (mirror, *[p for p in mirror.parents if p.is_relative_to(privileged_root)]):
-            assert directory.stat().st_uid == 0, directory
-            assert directory.stat().st_mode & 0o022 == 0, (directory, oct(directory.stat().st_mode))
+        # Replacing the tenant's copy cannot reach root's: root's bytes never
+        # come from there, so there is no window to race.
+        for name in privileged_artifact_names(plan):
+            entry = provision / name
+            entry.unlink()
+            entry.write_text("[Service]\nExecStart=/tmp/evil\n")
+        stored = json.loads(plan_path.read_text())
+        edit_tenant_plan(
+            plan_path, role_accounts=[*stored["role_accounts"], ["porter", "porter-porter"]]
+        )
+        outcome, _said = refresh()
+        assert outcome.changed, outcome.message
+        assert "/tmp/evil" not in mirrored_unit.read_text()
+        assert "porter=porter-porter" in mirrored_unit.read_text()
 
-        # The printed install command must name root's copy, not the tenant's.
+        # The install command names root's copy.
         status = launcher.tenant_release_status(config, config_path=config_path, runner=runner)
         assert status is not None
         assert status.provisioned_system_unit == mirrored_unit, status.provisioned_system_unit
 
-        # And the tenant genuinely cannot rewrite it.
+        # Root's copy and every parent of it are root's, and stay that way.
+        for directory in (mirror, *[p for p in mirror.parents if p.is_relative_to(privileged_root)]):
+            assert directory.stat().st_uid == 0, directory
+            assert directory.stat().st_mode & 0o022 == 0, (directory, oct(directory.stat().st_mode))
+        for name in (*privileged_artifact_names(plan), "plan.json"):
+            assert (mirror / name).stat().st_uid == 0, name
+
         child = os.fork()
         if child == 0:
             try:
@@ -143,7 +222,6 @@ def privileged_refresh(owner: str) -> None:
                     except (PermissionError, OSError):
                         continue
                     raise AssertionError(f"tenant could modify root's install source: {attempt}")
-                # The tenant does still own its own plan.
                 (provision / "plan.json").read_text()
             except BaseException:
                 import traceback
@@ -152,7 +230,7 @@ def privileged_refresh(owner: str) -> None:
                 os._exit(1)
             os._exit(0)
         assert os.waitpid(child, 0)[1] == 0
-        assert "inspector=porter-inspector" in mirrored_unit.read_text()
+        assert "/tmp/evil" not in mirrored_unit.read_text()
 
 
 def main() -> int:

@@ -21,7 +21,7 @@ import tempfile
 import time
 import tomllib
 import unicodedata
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -31,6 +31,7 @@ from scripts.ticket_board.project_provision import (
     DEFAULT_PG_IDENT_MAP,
     ProjectBoardProvision,
     ROLE_RE,
+    NON_PROCESS_ROLES,
     TENANT_ARTIFACT_NAMES,
     build_plan,
     privileged_artifact_names,
@@ -5179,6 +5180,71 @@ def upgrade_generated_project_layout(
     return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
 
 
+def _plan_replacements(source_repo: Path | None, commit_git_dir: str | None) -> dict[str, str]:
+    """Values the operator supplied on the command line, which the plan does not choose."""
+    replacements: dict[str, str] = {}
+    if source_repo is not None:
+        replacements["source_repo"] = str(source_repo.expanduser().resolve(strict=False))
+    if commit_git_dir is not None:
+        selected = commit_git_dir.strip()
+        if not selected:
+            raise SystemExit("switchyard: --commit-git-dir must not be empty")
+        replacements["commit_git_dir"] = selected
+    return replacements
+
+
+def publish_tenant_artifact(
+    config: ProjectConfig, provision_dir: Path, name: str, body: bytes
+) -> tuple[bool, str]:
+    """Write the tenant's copy of a generated file without following anything.
+
+    These are untrusted output: root produces them for the tenant's own tooling
+    and never reads them back to decide what root installs. The write still runs
+    as root, so every path component is opened with O_NOFOLLOW and the file is
+    replaced by rename rather than truncated in place -- a symlink left at the
+    destination is replaced, never followed to its referent (SYRD-39).
+    """
+    destination = provision_dir / name
+    relative = Path(str(provision_dir).lstrip("/")) / name
+    dir_fd, problem = _walk_no_follow(Path(provision_dir.anchor or "/"), relative)
+    if dir_fd < 0:
+        return False, f"switchyard: refusing to write {destination}: {problem}"
+    mode = 0o755 if name.endswith(".sh") else 0o644
+    staged = f".{name}.new"
+    try:
+        descriptor = os.open(
+            staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode, dir_fd=dir_fd
+        )
+        try:
+            os.write(descriptor, body)
+            os.fchmod(descriptor, mode)
+            if os.geteuid() == 0 and config.run_as_user:
+                try:
+                    owner = pwd.getpwnam(config.run_as_user)
+                except KeyError:
+                    owner = None
+                if owner is not None:
+                    os.fchown(descriptor, owner.pw_uid, owner.pw_gid)
+        finally:
+            os.close(descriptor)
+        os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        return False, f"switchyard: could not write {destination}: {exc}"
+    finally:
+        os.close(dir_fd)
+    return True, ""
+
+
+def _tenant_copy_is_current(path: Path, body: bytes) -> bool:
+    """A symlink is never current: it is an entry to replace, not a file to read."""
+    if os.path.islink(path) or not path.is_file():
+        return False
+    try:
+        return path.read_bytes() == body
+    except OSError:
+        return False
+
+
 def refresh_generated_project_runtime_artifacts(
     config: ProjectConfig,
     *,
@@ -5187,64 +5253,101 @@ def refresh_generated_project_runtime_artifacts(
     source_repo: Path | None = None,
     commit_git_dir: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
 ) -> LauncherUpgradeResult:
+    """Refresh the tenant's plan, and the artifacts root installs, separately.
+
+    The two have different provenance and must not be confused. The tenant's
+    plan.json is the tenant's: root rewrites it for the tenant's tooling and
+    never reads it back to decide what to install. Everything root installs is
+    rendered from a root-owned baseline into a root-owned directory, and the
+    only thing the tenant's plan is allowed to contribute is a role the workflow
+    projection added, under that role's own canonical account (SYRD-39).
+    """
     provision_dir = config_path.expanduser().resolve(strict=False).parent
-    plan_path = provision_dir / "plan.json"
-    if not plan_path.is_file():
+    tenant_plan_path = provision_dir / "plan.json"
+    if not tenant_plan_path.is_file():
         return LauncherUpgradeResult(False, f"switchyard: {config.project} has no generated runtime plan; leaving artifacts unchanged")
+    replacements = _plan_replacements(source_repo, commit_git_dir)
+    changed: list[str] = []
+
     try:
-        plan = _project_board_provision_from_json(plan_path)
+        tenant_plan = _project_board_provision_from_json(tenant_plan_path)
     except SystemExit as exc:
         return LauncherUpgradeResult(
             False,
             f"switchyard: {config.project} runtime plan is incomplete and cannot be refreshed automatically: {exc}",
         )
-    replacements: dict[str, str] = {}
-    if source_repo is not None:
-        replacements["source_repo"] = str(source_repo.expanduser().resolve(strict=False))
-    if commit_git_dir is not None:
-        selected_commit_git_dir = commit_git_dir.strip()
-        if not selected_commit_git_dir:
-            raise SystemExit("switchyard: --commit-git-dir must not be empty")
-        replacements["commit_git_dir"] = selected_commit_git_dir
+    # The tenant's own view of its generated files, rendered from the tenant's
+    # own plan. Nothing root installs comes from here.
+    tenant_rendered = render_privileged_artifacts(
+        replace(tenant_plan, **replacements), enable_owner_linger=False
+    )
+    for name in sorted(tenant_rendered):
+        if _tenant_copy_is_current(provision_dir / name, tenant_rendered[name]):
+            continue
+        if not dry_run:
+            published, problem = publish_tenant_artifact(config, provision_dir, name, tenant_rendered[name])
+            if not published:
+                return LauncherUpgradeResult(False, problem)
+        changed.append(name)
+
+    target = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
+    if os.geteuid() != 0:
+        message = (
+            f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed)}"
+            if changed
+            else f"switchyard: {config.project} generated runtime artifacts are already current"
+        )
+        if not target.is_dir():
+            message += (
+                f"; run `switchyard upgrade {config.project}` as root to stage the units, grants "
+                "and SQL root installs"
+            )
+        return LauncherUpgradeResult(bool(changed), message)
+
+    baseline, reason = _privileged_baseline_plan(config.project, tenant_plan_path)
+    if baseline is None:
+        return LauncherUpgradeResult(bool(changed), reason)
+    plan, added_roles, refused = authoritative_refresh_plan(baseline, _load_json(tenant_plan_path))
+    for entry in refused:
+        print_func(
+            f"switchyard: ignoring {config.project} plan entry {entry}: an unprivileged workflow "
+            "projection may only add a role under that role's own canonical account"
+        )
     if replacements:
         plan = replace(plan, **replacements)
-    mirrored: Path | None = None
-    with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-runtime-artifacts.") as tmp:
-        staged = Path(tmp)
-        write_artifacts(plan, staged, enable_owner_linger=False)
-        changed_names = sorted(
-            path.name
-            for path in staged.iterdir()
-            if not (provision_dir / path.name).is_file()
-            or (provision_dir / path.name).read_bytes() != path.read_bytes()
+    rendered = render_privileged_artifacts(plan)
+    privileged_changed = sorted(
+        name
+        for name, body in rendered.items()
+        if not (target / name).is_file() or (target / name).read_bytes() != body
+    )
+    if not changed and not privileged_changed:
+        return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
+    if dry_run:
+        return LauncherUpgradeResult(
+            False,
+            f"switchyard: {config.project} generated runtime artifacts can be refreshed: "
+            + ", ".join([*changed, *privileged_changed]),
         )
-        if not changed_names:
-            # Ownership is still repaired: a tenant handed these by an earlier
-            # release keeps them until something takes them back, and "already
-            # current" content says nothing about who owns it (SYRD-39).
-            if not dry_run:
-                secure_privileged_provision_artifacts(plan, provision_dir, print_func=print)
-            return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
-        if dry_run:
+    if privileged_changed:
+        try:
+            install_privileged_artifacts(plan, rendered)
+        except OSError as exc:
             return LauncherUpgradeResult(
-                False,
-                f"switchyard: {config.project} generated runtime artifacts can be refreshed: {', '.join(changed_names)}",
+                bool(changed),
+                f"switchyard: could not stage {config.project} privileged artifacts under {target}: {exc}. "
+                "Nothing privileged was installed; the previous root-owned copy is unchanged.",
             )
-        for name in changed_names:
-            target = provision_dir / name
-            shutil.copyfile(staged / name, target)
-            target.chmod((staged / name).stat().st_mode & 0o777)
-            # Ownership follows what the artifact is FOR, not the fact that it
-            # sits in the tenant's directory. Handing the board unit, the
-            # sudoers grant or the SQL root runs to the tenant would let the
-            # tenant choose what root then executes (SYRD-39).
-            if name in TENANT_ARTIFACT_NAMES:
-                ensure_owner_file(config, target, runner=runner)
-        mirrored = secure_privileged_provision_artifacts(plan, provision_dir, print_func=print)
-    message = f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed_names)}"
-    if mirrored is not None:
-        message += f"; root installs from {mirrored}"
+    message = (
+        f"switchyard: refreshed {config.project} generated runtime artifacts: "
+        + ", ".join([*changed, *privileged_changed])
+    )
+    if privileged_changed:
+        message += f"; root installs from {target}"
+    if added_roles:
+        message += f"; role accounts added from the workflow projection: {', '.join(added_roles)}"
     return LauncherUpgradeResult(True, message)
 
 
@@ -5261,91 +5364,187 @@ def switchyard_privileged_provision_root() -> Path:
     return Path(configured).expanduser() if configured else DEFAULT_PRIVILEGED_PROVISION_ROOT
 
 
-def _keep_artifact_root_owned(path: Path) -> None:
-    """Return a generated artifact root consumes to root ownership.
-
-    Called on every refresh, so a tenant that was handed one of these by an
-    earlier release -- every tenant, before this -- has it taken back rather
-    than needing a manual repair nobody would run.
-    """
-    if os.geteuid() != 0:
-        return
-    os.chown(path, 0, 0)
-    path.chmod(0o755 if path.name.endswith(".sh") else 0o644)
+def privileged_baseline_plan_path(project: str) -> Path:
+    """Root's own copy of the plan, the only one it renders privileged artifacts from."""
+    return privileged_provision_dir(project, root=switchyard_privileged_provision_root()) / "plan.json"
 
 
-def secure_privileged_provision_artifacts(
-    plan: ProjectBoardProvision,
-    provision_dir: Path,
-    *,
-    privileged_root: Path | None = None,
-    print_func: Callable[[str], None] | None = None,
-) -> Path | None:
-    """Take back every generated artifact root consumes, then mirror it.
-
-    Provisioning hands the whole project directory to the tenant with a
-    recursive chown, so this repairs ALL of them rather than only the ones a
-    refresh happened to rewrite. Returns the directory root can install from,
-    or None -- and when it is None it says why, because the fallback is
-    installing out of a directory the tenant owns (SYRD-39).
-    """
-    warn = print_func or (lambda _text: None)
-    for name in privileged_artifact_names(plan):
-        path = provision_dir / name
-        if not path.is_file():
-            continue
-        try:
-            _keep_artifact_root_owned(path)
-        except OSError as exc:
-            warn(
-                f"switchyard: could not return {path} to root ownership: {exc}. "
-                "Root must not install from it while the tenant can rewrite it."
-            )
-            return None
-    try:
-        return mirror_privileged_provision_artifacts(plan, provision_dir, privileged_root=privileged_root)
-    except OSError as exc:
-        warn(
-            f"switchyard: could not stage {plan.project} privileged artifacts under "
-            f"{privileged_provision_dir(plan.project, root=privileged_root or switchyard_privileged_provision_root())}: {exc}. "
-            "The printed install commands then read from the tenant-owned provision directory."
+def _canonical_generated_names(project: str) -> dict[str, str]:
+    """The names provisioning gives the files root installs, derived from the project alone."""
+    reference = build_plan(project=project, owner_user="switchyard-reference", source_repo=Path("/"))
+    return {
+        field: getattr(reference, field)
+        for field in (
+            "board_unit",
+            "canary_unit",
+            "listener_unit",
+            "tmpfiles_name",
+            "polkit_name",
+            "role_control_sudoers_name",
+            "runtime_directory",
+            "socket_path",
         )
-        return None
+    }
 
 
-def mirror_privileged_provision_artifacts(
+def _account_is_root(name: str) -> bool:
+    if name.strip().lower() == "root":
+        return True
+    try:
+        return pwd.getpwnam(name).pw_uid == 0
+    except KeyError:
+        return False
+
+
+def privileged_plan_objections(plan: ProjectBoardProvision, project: str) -> list[str]:
+    """Why a plan root did not write cannot be trusted to render what root installs.
+
+    Only used to adopt an existing tenant's plan as a baseline once. A plan that
+    selects the account the service runs as, or the paths the unit executes,
+    chooses what root runs; the checks below are the ones that would have to
+    hold for provisioning to have produced it (SYRD-39).
+    """
+    objections: list[str] = []
+    if plan.project != project:
+        objections.append(f"project is {plan.project!r}, not {project!r}")
+    if not plan.owner_user or _account_is_root(plan.owner_user):
+        objections.append(f"owner_user {plan.owner_user!r} is root or empty")
+    if not plan.service_user or _account_is_root(plan.service_user):
+        objections.append(f"service_user {plan.service_user!r} would run the board as root")
+    for field, expected in _canonical_generated_names(project).items():
+        actual = getattr(plan, field, "")
+        if actual != expected:
+            objections.append(f"{field} is {actual!r}, not the generated {expected!r}")
+    owner_home = Path(plan.owner_home) if plan.owner_home else None
+    for field in ("owner_home", "board_root", "board_current"):
+        value = str(getattr(plan, field, "") or "")
+        if not value.startswith("/"):
+            objections.append(f"{field} {value!r} is not an absolute path")
+    if owner_home is not None and owner_home.is_absolute():
+        for field in ("board_root", "board_current"):
+            value = Path(str(getattr(plan, field, "") or "/"))
+            if not value.is_relative_to(owner_home):
+                objections.append(f"{field} {str(value)!r} is outside the tenant home {str(owner_home)!r}")
+    return objections
+
+
+def _privileged_baseline_plan(project: str, tenant_plan_path: Path) -> tuple[ProjectBoardProvision | None, str]:
+    """Root's baseline, adopting the tenant's plan once only if it could be root's."""
+    baseline_path = privileged_baseline_plan_path(project)
+    if baseline_path.is_file():
+        try:
+            return _project_board_provision_from_json(baseline_path), ""
+        except SystemExit as exc:
+            return None, f"switchyard: {project} root-owned runtime baseline {baseline_path} is unusable: {exc}"
+    try:
+        candidate = _project_board_provision_from_json(tenant_plan_path)
+    except SystemExit as exc:
+        return None, f"switchyard: {project} runtime plan is incomplete and cannot be refreshed automatically: {exc}"
+    objections = privileged_plan_objections(candidate, project)
+    if objections:
+        return None, (
+            f"switchyard: refusing to adopt {tenant_plan_path} as {project}'s privileged baseline: "
+            + "; ".join(objections)
+            + ". Re-provision the project so root generates its own baseline."
+        )
+    return candidate, ""
+
+
+def authoritative_refresh_plan(
+    baseline: ProjectBoardProvision, tenant_data: dict[str, Any]
+) -> tuple[ProjectBoardProvision, list[str], list[str]]:
+    """Apply the one thing an unprivileged projection is allowed to say.
+
+    A workflow document can introduce a role, and that role needs its account in
+    the table the board resolves uids through. Nothing else crosses: not the
+    account for a role root already knows, not a non-canonical account, and not
+    any other field of the plan (SYRD-39).
+    """
+    known = {role: account for role, account in baseline.role_accounts}
+    accepted: list[tuple[str, str]] = []
+    refused: list[str] = []
+    entries = tenant_data.get("role_accounts")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            refused.append(repr(entry))
+            continue
+        role, account = str(entry[0]).strip(), str(entry[1]).strip()
+        if role in known:
+            if account != known[role]:
+                refused.append(f"{role}={account}")
+            continue
+        canonical = role_account_name(baseline.project, role)
+        if not ROLE_RE.fullmatch(role) or role in NON_PROCESS_ROLES or account != canonical:
+            refused.append(f"{role}={account}")
+            continue
+        accepted.append((role, canonical))
+    if not accepted:
+        return baseline, [], refused
+    worktree_base = _new_project_worktree_base(baseline.project, baseline.owner_user)
+    worktrees = list(baseline.role_worktrees)
+    if worktrees:
+        worktrees.extend((role, str(worktree_base / role)) for role, _account in accepted)
+    return (
+        replace(
+            baseline,
+            role_accounts=(*baseline.role_accounts, *accepted),
+            role_worktrees=tuple(worktrees),
+        ),
+        [role for role, _account in accepted],
+        refused,
+    )
+
+
+def render_privileged_artifacts(
+    plan: ProjectBoardProvision, *, enable_owner_linger: bool = False
+) -> dict[str, bytes]:
+    """Render everything root installs, in a directory only root can reach.
+
+    Rendering into root's own temporary directory rather than reading the
+    tenant's copies back means the bytes root publishes are the bytes root
+    generated, with no window in which they could be replaced (SYRD-39).
+    """
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-{plan.project}-privileged.") as tmp:
+        staged = Path(tmp)
+        os.chmod(staged, 0o700)
+        write_artifacts(plan, staged, enable_owner_linger=enable_owner_linger)
+        return {
+            name: (staged / name).read_bytes()
+            for name in (*privileged_artifact_names(plan), "plan.json")
+            if (staged / name).is_file()
+        }
+
+
+def install_privileged_artifacts(
     plan: ProjectBoardProvision,
-    provision_dir: Path,
+    rendered: dict[str, bytes],
     *,
     privileged_root: Path | None = None,
-) -> Path | None:
-    """Copy the artifacts root installs into a directory no tenant can reach.
+) -> Path:
+    """Publish rendered bytes into a directory only root can reach.
 
-    The provision directory belongs to the tenant, so a root-owned file inside
-    it can still be unlinked and replaced by the directory's owner: ownership
-    alone does not make the install source trustworthy. Root therefore installs
-    from its own copy. Returns that directory, or None when this is not running
-    as root and cannot make one (SYRD-39).
+    The provision directory belongs to the tenant, and a directory's owner can
+    replace what is inside it, so root neither writes there nor reads back from
+    there: these bytes come straight from the render above. Each file is written
+    beside its target and renamed, so an operator never reads a half-written
+    unit (SYRD-39).
     """
-    if os.geteuid() != 0:
-        return None
     target = privileged_provision_dir(plan.project, root=privileged_root or switchyard_privileged_provision_root())
     for directory in (*reversed(target.parents), target):
-        if directory.exists():
-            continue
-        directory.mkdir(mode=0o755)
-        os.chown(directory, 0, 0)
-    os.chown(target, 0, 0)
-    target.chmod(0o755)
-    for name in privileged_artifact_names(plan):
-        source = provision_dir / name
-        if not source.is_file():
-            continue
+        if not directory.exists():
+            directory.mkdir(mode=0o755)
+        if directory.is_relative_to(privileged_root or switchyard_privileged_provision_root()) or directory == target:
+            os.chown(directory, 0, 0)
+            directory.chmod(0o755)
+    for name, body in rendered.items():
         staged = target / f".{name}.new"
-        shutil.copyfile(source, staged)
-        os.chown(staged, 0, 0)
-        staged.chmod(0o755 if name.endswith(".sh") else 0o644)
-        # Replace in one step so an operator never reads a half-written unit.
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, body)
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o755 if name.endswith(".sh") else 0o644)
+        finally:
+            os.close(descriptor)
         staged.replace(target / name)
     return target
 
@@ -7566,11 +7765,20 @@ def new_project_command(
         ),
     )
     write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
-    if execute:
-        # The provision directory is handed to the tenant, so root keeps its own
-        # copy of everything it later installs or executes and installs from
-        # that instead (SYRD-39).
-        mirrored_privileged = secure_privileged_provision_artifacts(plan, artifact_dir, print_func=print_func)
+    if execute and os.geteuid() == 0:
+        # The provision directory is handed to the tenant, so root publishes its
+        # own copy of everything it later installs or executes -- rendered here
+        # from the plan root just computed, never copied back out of the tenant's
+        # directory -- and installs from that instead (SYRD-39).
+        rendered_privileged = render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
+        try:
+            mirrored_privileged = install_privileged_artifacts(plan, rendered_privileged)
+        except OSError as exc:
+            mirrored_privileged = None
+            print_func(
+                f"switchyard: could not stage {plan.project} privileged artifacts for root: {exc}. "
+                f"Run `switchyard upgrade {plan.project}` as root before installing its units."
+            )
         if mirrored_privileged is not None:
             print_func(
                 f"switchyard: root installs {plan.project} units, grants and SQL from {mirrored_privileged}"

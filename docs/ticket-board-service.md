@@ -603,30 +603,39 @@ role cannot touch, then pushes from there.
 No polkit is involved in ordinary role work: it is a plain `sudo -u` grant
 between two unprivileged accounts.
 
-### Who owns a generated artifact
+### Where what root installs comes from
 
-The provisioning directory holds two kinds of file and they are owned
-differently, by what the file is *for* rather than by where it sits.
+The provisioning directory is the tenant's. It holds `plan.json`, which the
+unprivileged workflow projection writes, and a copy of each generated file for
+the tenant's own tooling. None of it decides anything root does.
 
-`plan.json` is the tenant's. The unprivileged workflow projection writes it, so
-it is chowned to the project owner and stays that way.
+What root installs is rendered from a **root-owned baseline plan** kept at
+`/etc/switchyard/provision/<project>/plan.json`, into that same root-owned
+directory. Provisioning writes the baseline from the plan it just computed. An
+existing tenant that predates the baseline can have its plan adopted as one, but
+only once and only if that plan could plausibly have been generated: it may not
+name a `service_user` that resolves to uid 0, may not move `board_root` or
+`board_current` outside the tenant home, and must use the generated names for
+every unit and fragment. A plan that fails those checks is refused with the
+reasons, and the project is re-provisioned instead. Sanitising it would be the
+wrong shape: a plan root did not write is not evidence of anything.
 
-Everything else generated is consumed by root: the board, canary and listener
-units it installs, the tmpfiles and polkit fragments, the role-control sudoers
-grant, the SQL it runs as postgres, and `operator-commands.sh`. Those are
-returned to `root:root` on every refresh, not only when their content changed --
-provisioning hands the whole project tree to the tenant with a recursive chown,
-so a tenant that was given one by an earlier release has it taken back rather
-than needing a repair nobody would run.
+Exactly one thing crosses from the tenant's plan into the baseline: a role the
+workflow projection added, and only under `<project>-<role>`, that role's own
+canonical account. An account for a role root already knows, a non-canonical
+account, and every other field are ignored and reported.
 
-Ownership alone is not enough, because the provision *directory* belongs to the
-tenant and a directory's owner can unlink and replace a root-owned file inside
-it. Root therefore keeps its own copy under `/etc/switchyard/provision/<project>`
--- root-owned, with root-owned parents, replaced one file at a time by rename so
-an operator never reads a half-written unit -- and the printed install commands
-name that copy. If it cannot be staged (running somewhere root cannot write
-`/etc`), the commands fall back to the provision directory and say plainly that
-the source is tenant-owned and what to run to fix it.
+The bytes are never routed through a tenant path. They are rendered into a
+root-only temporary directory, compared against the root-owned copy, and written
+into it with `O_NOFOLLOW` and a rename, so an operator never reads a
+half-written unit. The tenant's copies are published the same way -- replaced by
+rename with `O_NOFOLLOW`, so a symlink left at one of those names is replaced
+rather than followed to whatever it points at -- and root never reads them back.
+
+The printed install commands name root's copy. If it has not been staged (the
+refresh has only ever run unprivileged), they fall back to the provision
+directory and say plainly that the source is tenant-owned and what to run to fix
+it.
 
 ### What a deploy checks
 

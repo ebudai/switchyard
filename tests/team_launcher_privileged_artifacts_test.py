@@ -68,11 +68,14 @@ def privileged_refresh(owner: str) -> None:
         privileged_root = root / "etc-switchyard"
         os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(privileged_root)
 
+        # Provisioned the way root would rebuild it: the owner's real home, so
+        # the untampered case reconstructs to the same plan and the tampered
+        # cases below are the only difference.
         plan = build_plan(
             project="porter",
             project_name="Porter",
             owner_user=owner,
-            owner_home=root / "owner-home",
+            owner_home=Path(pwd.getpwnam(owner).pw_dir),
             source_repo=ROOT,
         )
         write_artifacts(plan, provision, enable_owner_linger=False)
@@ -111,32 +114,37 @@ def privileged_refresh(owner: str) -> None:
                 edit_tenant_plan(plan_path, **tamper)
             return refresh()
 
-        # Root does not adopt the tenant's document at all, so a field in it
-        # that would decide what root runs decides nothing. Each is tampered
-        # with on its own, so each is shown to be independently ineffective.
-        outcome, _said = rebuild_baseline(service_user="root")
-        assert outcome.changed, outcome.message
-        unit = mirrored_unit.read_text()
-        assert f"User={plan.service_user}" in unit and "User=root" not in unit
+        def refuses(field: str, **tamper: object) -> None:
+            """A recorded value root regenerates is never silently replaced.
 
-        outcome, _said = rebuild_baseline(board_current="/tmp/tenant-controlled-release")
-        assert outcome.changed, outcome.message
-        unit = mirrored_unit.read_text()
-        assert "/tmp/tenant-controlled-release" not in unit
-        assert f"WorkingDirectory={real_home}/porter-ticketboard-live/current" in unit, unit
+            Tampering and legitimate divergence are the same observation here:
+            the document is not an authority, so root neither installs what it
+            says nor quietly installs something else. Each field is tried on its
+            own, so no case can be masked by another field's objection.
+            """
+            outcome, _said = rebuild_baseline(**tamper)
+            assert "cannot establish a root-owned baseline" in outcome.message, (field, outcome.message)
+            assert field in outcome.message, (field, outcome.message)
+            assert not mirror.exists(), field
 
-        # owner_home anchored every path check that would have been made
-        # against it, so it is taken from the passwd database and not from the
-        # document. "/" makes any containment test vacuously true.
-        outcome, _said = rebuild_baseline(owner_home="/", board_current="/tmp/tenant-controlled-release")
-        assert outcome.changed, outcome.message
-        unit = mirrored_unit.read_text()
-        assert "/tmp/tenant-controlled-release" not in unit
-        assert f"WorkingDirectory={real_home}/porter-ticketboard-live/current" in unit, unit
+        refuses("service_user", service_user="root")
+        refuses("board_current", board_current="/tmp/tenant-controlled-release")
+        refuses("owner_home", owner_home="/")
+        refuses("board_root", board_root="/srv/porter-live")
+        refuses("asset_dir", asset_dir="/srv/porter-assets")
+        refuses("frame_dir", frame_dir="/srv/porter-frames")
+        refuses("commit_git_dir", commit_git_dir="/srv/porter-src/.git")
+        refuses("database", database="postgres")
+        refuses("owner_user", owner_user="root")
+        refuses("board_unit", board_unit="porter-smuggled.service")
+        refuses("role_control_sudoers_name", role_control_sudoers_name="00-porter-anything")
+        refuses("socket_path", socket_path="/tmp/porter.sock")
 
-        # role_accounts renders both the board's authoritative uid table and a
-        # passwordless sudoers grant root installs. The whole table is
-        # regenerated; nothing in the document reaches it.
+        # role_accounts is the exception, deliberately. It is regenerated from
+        # validated role names and completed by the delta path, and it is also
+        # the channel a tenant would use to smuggle an account into a sudoers
+        # grant root installs, so what the document says about it is ignored
+        # rather than reported.
         outcome, _said = rebuild_baseline(
             role_accounts=[["director", "root"], ["ops", "porter-ops"]]
         )
@@ -149,14 +157,7 @@ def privileged_refresh(owner: str) -> None:
             role, account = pair.split("=")
             assert account == f"porter-{role}", pair
         assert "root)" not in sudoers and " root " not in sudoers, sudoers
-
-        # What cannot be regenerated and cannot be trusted is refused, with the
-        # reason, rather than guessed at: root will not run a project's SQL
-        # against a database it did not choose.
-        outcome, _said = rebuild_baseline(database="postgres")
-        assert "cannot establish a root-owned baseline" in outcome.message, outcome.message
-        assert "database" in outcome.message, outcome.message
-        assert not mirror.exists(), sorted(f.name for f in mirror.iterdir()) if mirror.exists() else ()
+        assert f"WorkingDirectory={real_home}/porter-ticketboard-live/current" in unit, unit
 
         outcome, _said = rebuild_baseline()
         assert outcome.changed, outcome.message

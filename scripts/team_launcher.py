@@ -5307,7 +5307,11 @@ def refresh_generated_project_runtime_artifacts(
         return LauncherUpgradeResult(bool(changed), message)
 
     baseline, reason = _privileged_baseline_plan(
-        config, provision_dir, tenant_plan_path, source_repo=source_repo
+        config,
+        provision_dir,
+        tenant_plan_path,
+        source_repo=source_repo,
+        operator_commit_git_dir=commit_git_dir is not None,
     )
     if baseline is None:
         return LauncherUpgradeResult(bool(changed), reason)
@@ -5331,7 +5335,7 @@ def refresh_generated_project_runtime_artifacts(
         return LauncherUpgradeResult(
             False,
             f"switchyard: {config.project} generated runtime artifacts can be refreshed: "
-            + ", ".join([*changed, *privileged_changed]),
+            + ", ".join(sorted({*changed, *privileged_changed})),
         )
     if privileged_changed:
         try:
@@ -5342,12 +5346,12 @@ def refresh_generated_project_runtime_artifacts(
                 f"switchyard: could not stage {config.project} privileged artifacts under {target}: {exc}. "
                 "Nothing privileged was installed; the previous root-owned copy is unchanged.",
             )
-    message = (
-        f"switchyard: refreshed {config.project} generated runtime artifacts: "
-        + ", ".join([*changed, *privileged_changed])
-    )
+    parts: list[str] = []
+    if changed:
+        parts.append(f"tenant copies: {', '.join(changed)}")
     if privileged_changed:
-        message += f"; root installs from {target}"
+        parts.append(f"root installs {', '.join(privileged_changed)} from {target}")
+    message = f"switchyard: refreshed {config.project} generated runtime artifacts; " + "; ".join(parts)
     if added_roles:
         message += f"; role accounts added from the workflow projection: {', '.join(added_roles)}"
     return LauncherUpgradeResult(True, message)
@@ -5406,12 +5410,64 @@ def _validated_role_names(value: Any, field: str, objections: list[str]) -> tupl
     return tuple(names)
 
 
+# Fields root regenerates rather than reads. A project provisioned with any of
+# them set differently was not built the way root would rebuild it, so
+# installing the regenerated artifacts would change what runs -- a board that
+# will not start, or, for commit_git_dir, one that resolves commit provenance
+# against a different repository without saying so. Divergence is refused, never
+# reconciled toward the document: the document is not an authority.
+#
+# The role tables are deliberately absent. Those are regenerated from validated
+# role names and completed by the delta path, and that is also the channel a
+# tenant would use to smuggle an account, so ignoring what the document says
+# about them is the intended behaviour rather than a divergence to report.
+REGENERATED_PLAN_FIELDS: tuple[str, ...] = (
+    "owner_user",
+    "owner_home",
+    "service_user",
+    "service_role",
+    "listener_role",
+    "database",
+    "commit_git_dir",
+    "board_root",
+    "board_current",
+    "asset_dir",
+    "frame_dir",
+    "board_log",
+    "listener_log",
+    "socket_path",
+    "runtime_directory",
+    "board_unit",
+    "canary_unit",
+    "listener_unit",
+    "tmpfiles_name",
+    "polkit_name",
+    "role_control_sudoers_name",
+)
+
+
+def _regenerated_field_divergence(
+    plan: ProjectBoardProvision, tenant_data: dict[str, Any], *, skip: Sequence[str] = ()
+) -> list[str]:
+    """Which recorded values the regenerated plan would silently replace."""
+    diverged: list[str] = []
+    for field in REGENERATED_PLAN_FIELDS:
+        if field in skip:
+            continue
+        recorded = str(tenant_data.get(field) or "").strip()
+        regenerated = str(getattr(plan, field, "") or "")
+        if recorded and recorded != regenerated:
+            diverged.append(f"{field}: provisioned {recorded!r}, regenerated {regenerated!r}")
+    return diverged
+
+
 def reconstruct_privileged_baseline(
     project: str,
     provision_dir: Path,
     tenant_data: dict[str, Any],
     *,
     source_repo: Path | None = None,
+    operator_commit_git_dir: bool = False,
 ) -> tuple[ProjectBoardProvision | None, str]:
     """Build root's baseline from facts root holds, not from the tenant's document.
 
@@ -5450,12 +5506,6 @@ def reconstruct_privileged_baseline(
     if not isinstance(port, int) or isinstance(port, bool) or not 1024 <= port <= 65535:
         objections.append(f"port {port!r} is not a usable unprivileged port")
         port = None
-    database = str(tenant_data.get("database") or "").strip()
-    if database and database != reference.database:
-        objections.append(
-            f"database {database!r} is not the generated {reference.database!r}; root will not run "
-            "this project's SQL against a database it did not choose"
-        )
     traversal = tenant_data.get("board_service_traversal", True)
     if not isinstance(traversal, bool):
         objections.append(f"board_service_traversal {traversal!r} is not a boolean")
@@ -5496,6 +5546,17 @@ def reconstruct_privileged_baseline(
             f"switchyard: cannot establish a root-owned baseline for {project}: {exc}. "
             "Re-provision the project so root generates its own."
         )
+    diverged = _regenerated_field_divergence(
+        plan, tenant_data, skip=("commit_git_dir",) if operator_commit_git_dir else ()
+    )
+    if diverged:
+        return None, (
+            f"switchyard: cannot establish a root-owned baseline for {project}: it was provisioned "
+            "with values root regenerates rather than trusts, and installing the regenerated ones "
+            "would change what runs:\n  "
+            + "\n  ".join(diverged)
+            + "\nRe-provision the project so root generates its own baseline."
+        )
     worktree_base = _new_project_worktree_base(project, owner_user)
     plan = replace(
         plan,
@@ -5510,6 +5571,7 @@ def _privileged_baseline_plan(
     tenant_plan_path: Path,
     *,
     source_repo: Path | None = None,
+    operator_commit_git_dir: bool = False,
 ) -> tuple[ProjectBoardProvision | None, str]:
     """Root's baseline: its own stored copy, or one it reconstructs for a legacy tenant."""
     baseline_path = privileged_baseline_plan_path(config.project)
@@ -5523,7 +5585,11 @@ def _privileged_baseline_plan(
     except SystemExit as exc:
         return None, f"switchyard: {config.project} runtime plan cannot be read: {exc}"
     return reconstruct_privileged_baseline(
-        config.project, provision_dir, tenant_data, source_repo=source_repo
+        config.project,
+        provision_dir,
+        tenant_data,
+        source_repo=source_repo,
+        operator_commit_git_dir=operator_commit_git_dir,
     )
 
 

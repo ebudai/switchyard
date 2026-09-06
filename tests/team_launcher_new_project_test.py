@@ -912,7 +912,10 @@ def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None
             assert role.workdir not in migration, role.role
         assert "switchyard upgrade porter" in migration
         assert "visudo -c" in migration
-        assert "systemctl restart porter-ticket-board.service" in migration
+        # SYRD-48: the upgrade's transaction deploys, health-checks and restarts
+        # the board itself. A second restart here bounces a board that is already
+        # serving the roles the transaction just verified.
+        assert "systemctl restart porter-ticket-board.service" not in migration
 
 
 
@@ -1656,7 +1659,10 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
     assert "switchyard upgrade porter" in body
     assert "ticket-board-install-pane-hooks' install --home '/home/porter-director'" in body
     assert "switchyard seed-role-credentials porter" in body
-    assert "systemctl restart porter-ticket-board.service" in body
+    # SYRD-48: the upgrade's transaction restarts the board itself, and the step
+    # after it is the director's own write, not an operator's restart.
+    assert "systemctl restart porter-ticket-board.service" not in body
+    assert "switchyard finish-upgrade porter" in body
 
 
 def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:

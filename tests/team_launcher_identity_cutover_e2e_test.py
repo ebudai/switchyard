@@ -420,9 +420,10 @@ def end_to_end(owner: str) -> None:
             artifact = team_launcher.render_role_account_migration(config)
             for role in config.roles:
                 assert f"chown -R" not in artifact or role.workdir not in artifact, artifact
-            # It hands back to the ordered driver rather than jumping straight
-            # to the cutover, which must not run before the director phase.
+            # It hands back to the ordered driver rather than driving the cutover
+            # itself, and it does not restart the board the transaction restarts.
             assert "switchyard upgrade porter" in artifact, artifact
+            assert "systemctl restart porter-ticket-board.service" not in artifact, artifact
 
             # PREPARATION, while the configuration still names no accounts.
             assert all(not role.run_as_user for role in config.roles)

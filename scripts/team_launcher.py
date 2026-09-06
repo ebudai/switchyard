@@ -12823,22 +12823,39 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         "# The accounts now exist, but the running workers still hold the shared"
     )
     lines.append(
-        "# uid. Moving them is the next phase, and it must not happen before the"
+        "# uid. Moving them is root's next phase, not yours: one transaction stops"
     )
     lines.append(
-        "# director has made its own board write: restarting the director under a"
+        "# the roles, transfers their worktrees, switches the board release,"
     )
     lines.append(
-        "# new uid while the board still authorizes the shared account leaves it"
+        "# installs the authority units, restarts and health-checks the board, and"
     )
     lines.append(
-        "# unable to make that write at all. Rerun the upgrade, which runs"
+        "# brings every role back under its own account. Rerun the upgrade, which"
     )
     lines.append(
-        "# whichever phase is next in order (SYRD-45)."
+        "# runs whichever phase is next in order (SYRD-45)."
     )
     lines.append(f"sudo switchyard upgrade {config.project}")
-    lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
+    lines.append(
+        "# That transaction deploys and restarts the board itself, so there is no"
+    )
+    lines.append(
+        "# second restart to make here, and no release left for you to deploy."
+    )
+    lines.append(
+        "# What remains is the director's own board write, which is authorized"
+    )
+    lines.append(
+        "# from the director's uid and cannot be made by root or by you:"
+    )
+    lines.append(
+        f"#     switchyard finish-upgrade {config.project}    # in the director's own session"
+    )
+    lines.append(
+        "# (SYRD-48)."
+    )
     return "\n".join(lines) + "\n"
 UPGRADE_JOURNAL_SCHEMA = "switchyard.upgrade-journal.v1"
 # The order a tenant upgrade has to happen in, and who owns each step. The

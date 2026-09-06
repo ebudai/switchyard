@@ -1147,6 +1147,61 @@ def test_the_upgrade_documentation_describes_the_flow_that_exists() -> None:
     assert "as the only\nremaining step" in guide
 
 
+def _artifact_commands(artifact: str) -> list[str]:
+    """The lines an operator's shell actually runs, not the prose around them."""
+    return [
+        line.strip()
+        for line in artifact.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+def test_the_operator_artifact_describes_the_sequence_that_exists() -> None:
+    """The generated hand-off still carried the pre-transaction flow (SYRD-48)."""
+    with tempfile.TemporaryDirectory(prefix="role-account-artifact.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        config = team_launcher.load_project_config("porter", config_path)
+        artifact = team_launcher.render_role_account_migration(config)
+        commands = _artifact_commands(artifact)
+
+        # It hands back to the ordered driver, and that is the last thing it runs.
+        assert "sudo switchyard upgrade porter" in commands, commands
+        assert commands[-1] == "sudo switchyard upgrade porter", commands[-5:]
+        # The transaction restarts the board itself; a second restart bounces a
+        # board that is already serving the roles it just verified.
+        assert not any("systemctl restart" in command for command in commands), commands
+        assert "porter-ticket-board.service" not in artifact, artifact
+        # The director's write is named, but never executed from this script: it
+        # is authorized from the director's own uid.
+        assert not any("finish-upgrade" in command for command in commands), commands
+        assert "switchyard finish-upgrade porter" in artifact, artifact
+        assert "in the director's own session" in artifact, artifact
+        # And it is named after the upgrade, not before the uid move.
+        assert artifact.index("sudo switchyard upgrade porter") < artifact.index(
+            "switchyard finish-upgrade porter"
+        ), artifact
+        assert "must not happen before the" not in artifact, artifact
+        assert "director has made its own board write" not in artifact, artifact
+        # Nothing else about the artifact changed: it still creates the accounts
+        # and still refuses to move a worktree.
+        for role in config.roles:
+            account = f"porter-{role.role}"
+            assert f"if ! getent passwd '{account}'" in artifact, role.role
+            assert role.workdir not in artifact, role.role
+        assert "sudo switchyard seed-role-credentials porter" in commands, commands
+
+
+def test_the_upgrade_writes_that_artifact_when_the_accounts_are_missing() -> None:
+    """The corrected text is what a real upgrade puts in front of an operator."""
+    with tempfile.TemporaryDirectory(prefix="role-account-artifact-written.") as tmp:
+        config_path, _ = _declarative_tenant(Path(tmp))
+        _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
+        written = config_path.with_name("porter-role-accounts.sh").read_text(encoding="utf-8")
+        assert "porter-role-accounts.sh" in output, output
+        assert "systemctl restart" not in written, written
+        assert "switchyard finish-upgrade porter" in written, written
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_upgrade_cutover_test: ok")

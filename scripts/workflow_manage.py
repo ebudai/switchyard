@@ -136,6 +136,7 @@ def main(argv=None):
             "show-role-prompt",
             "set-role-prompt",
             "clear-role-prompt",
+            "migrate-director-onboarding",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -238,6 +239,26 @@ def main(argv=None):
         }
         # Persist the rollback document too, including retained historical identities.
         files.update(projection_files(args.config, cfg))
+    elif args.operation == "migrate-director-onboarding":
+        # The same migration the apply tail performs, exposed so upgrade and recovery can
+        # invoke it deliberately. Short-circuits when there is nothing to fill, so
+        # running it repeatedly costs no revision and no journal.
+        from scripts import team_launcher as launcher
+
+        if not current.get("document"):
+            print(json.dumps({"migrated": False, "reason": "no active workflow configuration"}))
+            return 0
+        candidate = copy.deepcopy(current["document"])
+        project_dir = _project_dir_for(args.config, candidate)
+        if project_dir is None:
+            print(json.dumps({"migrated": False, "reason": "project directory could not be resolved"}))
+            return 0
+        candidate, seeded = launcher.seed_director_onboarding(candidate, project_dir)
+        if not seeded:
+            print(json.dumps({"migrated": False, "reason": "director onboarding already stored"}))
+            return 0
+        cfg = validate(candidate)
+        files = projection_files(args.config, cfg)
     elif args.operation in {"set-role-prompt", "clear-role-prompt"}:
         # The whole document is rewritten, but the director edits one field through a
         # command rather than hand-editing generated JSON. Everything below -- schema

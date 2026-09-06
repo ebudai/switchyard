@@ -115,6 +115,13 @@ def main() -> int:
 
                 launcher_dir = root / "launcher"
                 launcher_dir.mkdir()
+                # The projection resolves the project artifact one level above the
+                # launcher config; the migration reads the project directory from it.
+                project_dir = root / "project"
+                (project_dir / "docs" / "onboarding").mkdir(parents=True)
+                (root / "cerulean.project.json").write_text(
+                    json.dumps({"project": {"repository": str(project_dir)}}), encoding="utf-8"
+                )
                 config_path = launcher_dir / "cerulean.json"
                 config_path.write_text(
                     json.dumps({"project": "cerulean", "layout": "layout.json", "roles": []}),
@@ -129,6 +136,16 @@ def main() -> int:
                 wm = importlib.reload(importlib.import_module("scripts.workflow_manage"))
 
                 base_args = ["--board-url", base, "--config", str(config_path)]
+
+                # The shipped example leaves the director without stored onboarding,
+                # which is the state every existing tenant starts in.
+                def _director() -> dict:
+                    return next(
+                        r for r in _board_document(base)["document"]["roles"]
+                        if r["name"] == "director"
+                    )
+
+                assert not _director().get("onboarding_prompt"), _director()
 
                 # --- set ------------------------------------------------------
                 before = _board_document(base)["revision"]
@@ -201,6 +218,27 @@ def main() -> int:
                 ops = _ops_role(_board_document(base)["document"])
                 assert ops["onboarding"] == "/srv/cerulean/docs/onboarding/ops.md"
                 assert ops["onboarding_prompt"] == "newer remit"
+
+                # --- director migration --------------------------------------
+                # Migration rides on ordinary use: the first write above already filled
+                # the director, so no tenant needs a manual step.
+                assert str(project_dir) in _director()["onboarding_prompt"], _director()
+
+                # The explicit operation is therefore idempotent here: nothing to do, no
+                # revision spent, no journal written.
+                revision_before = _board_document(base)["revision"]
+                repeat = _run(wm, ["migrate-director-onboarding", *base_args])
+                assert repeat["migrated"] is False, repeat
+                assert repeat["reason"] == "director onboarding already stored"
+                assert _board_document(base)["revision"] == revision_before
+
+                # It fills only the director; no unrelated role acquires a prompt.
+                seeded_roles = sorted(
+                    r["name"]
+                    for r in _board_document(base)["document"]["roles"]
+                    if r.get("onboarding_prompt")
+                )
+                assert seeded_roles == ["director", "ops"], seeded_roles
 
                 # --- clear ----------------------------------------------------
                 _run(wm, ["clear-role-prompt", "--role", "ops", *base_args])

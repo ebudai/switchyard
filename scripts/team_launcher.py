@@ -10882,6 +10882,42 @@ def provision_runtime_command(user_name: str | None, config: ProjectConfig | Non
     return 0
 
 
+def migrate_declarative_director_onboarding(
+    config: "ProjectConfig",
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Run the shared director-onboarding migration for a declarative tenant.
+
+    Upgrade and recovery call this so an existing project is migrated by ordinary
+    maintenance rather than by a manual per-tenant step. It is a no-op for a project
+    with no workflow document, and idempotent for one already migrated.
+    """
+    if not _load_json(config_path).get("workflow"):
+        return False
+    if dry_run:
+        print_func("switchyard: would migrate the director's onboarding prompt if unset")
+        return False
+    from scripts import workflow_manage
+
+    try:
+        workflow_manage.main(
+            [
+                "migrate-director-onboarding",
+                "--board-url",
+                config.board_url,
+                "--config",
+                str(config_path),
+            ]
+        )
+    except Exception as exc:  # a migration failure must not fail the whole upgrade
+        print_func(f"warning: switchyard: director onboarding migration skipped: {exc}")
+        return False
+    return True
+
+
 def upgrade_project_command(
     config: ProjectConfig,
     *,
@@ -10951,6 +10987,11 @@ def upgrade_project_command(
         deploy_ref=deploy_ref,
         runner=runner,
         print_func=print_func,
+    )
+    # Migrates an existing declarative tenant whose director predates stored onboarding.
+    # Idempotent and silent once done, so ordinary upgrades carry it without a manual step.
+    migrate_declarative_director_onboarding(
+        config, config_path=config_path, dry_run=dry_run, print_func=print_func
     )
     return 0
 

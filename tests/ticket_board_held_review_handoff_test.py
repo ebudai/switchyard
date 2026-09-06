@@ -128,6 +128,17 @@ def main():
                     )
                 )
 
+            def snapshot(conn, ticket):
+                # Compare the persisted generation and exact queue identities,
+                # not just the number of rows (a replacement schedule has four too).
+                return conn.execute(
+                    "SELECT to_jsonb(ns), (SELECT jsonb_agg(to_jsonb(q) ORDER BY q.id) "
+                    "FROM ticket_board.ticket_notification_queue q "
+                    "WHERE q.ticket_id=ns.ticket_id AND q.kind='awaiting_role') "
+                    "FROM ticket_board.ticket_notification_state ns WHERE ticket_id=%s",
+                    (ticket,),
+                ).fetchone()
+
             try:
                 cases = [
                     (
@@ -254,6 +265,37 @@ def main():
                             conn.rollback()
                         else:
                             raise AssertionError("private handoff helper was callable")
+                # Exercise the private helper's defensive boundary as the test
+                # database owner. A normal reviewer cannot invoke this helper;
+                # the denial above remains part of the public contract. These
+                # controlled, rolled-back states model a delayed helper after a
+                # hold release or stage change, without weakening production RBAC.
+                for change, state, held in [
+                    ("manually_controlled=false", "inspection", False),
+                    ("state='audit'", "audit", True),
+                ]:
+                    with psycopg.connect(
+                        admin, options="-c client_encoding=UTF8"
+                    ) as conn:
+                        conn.execute(
+                            "UPDATE ticket_board.tickets SET "
+                            + change
+                            + " WHERE id='PGU-3'"
+                        )
+                        actual = conn.execute(
+                            "SELECT state,manually_controlled,inspector_signoff "
+                            "FROM ticket_board.tickets WHERE id='PGU-3'"
+                        ).fetchone()
+                        assert actual == (state, held, True), (change, actual)
+                        prior = snapshot(conn, "PGU-3")
+                        conn.execute(
+                            "SELECT ticket_board.notify_held_review_completion('PGU-3','inspection')"
+                        )
+                        assert snapshot(conn, "PGU-3") == prior, (
+                            "legacy helper changed wait after hold/stage change",
+                            change,
+                        )
+                        conn.rollback()
                 # Only retained PGU-1 rows participate in the focused delivery test.
                 sql(
                     "DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id NOT IN ('PGU-1','PGU-6') OR kind<>'awaiting_role'"
@@ -461,6 +503,42 @@ def main():
                     == "director_review"
                 )
                 assert count("PGU-7") == 0
+                # Activate a real declared workflow through the supported API,
+                # then probe the legacy helper with a still-held, approved audit
+                # ticket. It must neither create a legacy wait nor replace one
+                # owned by the configured executor.
+                app.clear_awaiting_role("PGU-2", caller_role="director")
+                # The example retires the custom legacy research recipient;
+                # resolve that earlier fixture's handoff before configuration.
+                app.clear_awaiting_role("PGU-8", caller_role="director")
+                cfg = json.loads(
+                    (ROOT / "examples/workflows/inspection.json").read_text()
+                )
+                cfg["project"] = "pgu"
+                for role in cfg["roles"]:
+                    if role.get("target"):
+                        role["target"] = role["target"].replace("cerulean-", "pgu-", 1)
+                app.apply_workflow(
+                    cfg, expected_revision=0, dry_run=False, caller_role="director"
+                )
+                with psycopg.connect(
+                    admin, autocommit=True, options="-c client_encoding=UTF8"
+                ) as conn:
+                    assert conn.execute(
+                        "SELECT ticket_board.declared_workflow() IS NOT NULL"
+                    ).fetchone() == (True,)
+                    assert conn.execute(
+                        "SELECT state,manually_controlled,audit_signoff "
+                        "FROM ticket_board.tickets WHERE id='PGU-2'"
+                    ).fetchone() == ("audit", True, True)
+                    prior = snapshot(conn, "PGU-2")
+                    assert app.get_ticket("PGU-2")["awaiting_role"] == ""
+                    conn.execute(
+                        "SELECT ticket_board.notify_held_review_completion('PGU-2','audit')"
+                    )
+                    assert (
+                        snapshot(conn, "PGU-2") == prior
+                    ), "declared board got legacy handoff"
                 print(
                     "held review: audit/inspection/UAT gates, state hold, persisted schedule, busy/failure retry, real pane receipt, repeat/clear/retarget and migration idempotence passed"
                 )

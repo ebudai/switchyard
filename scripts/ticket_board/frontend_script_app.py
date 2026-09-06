@@ -942,6 +942,20 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       }
     });
 
+    const LIVE_UPDATE_FAILURE_LIMIT = 3;
+
+    function setLiveUpdateWarning(reason) {
+      if (state.liveUpdateWarning === reason) {
+        return;
+      }
+      state.liveUpdateWarning = reason;
+      if (!reason) {
+        setCreateStatus('Live updates restored; the board is current again.');
+        return;
+      }
+      setCreateStatus(`Live updates are not reaching this board (${reason}). Reload to see current state.`, true);
+    }
+
     function connectEvents() {
       if (!window.EventSource) {
         setCreateStatus('EventSource unavailable; live updates disabled.', true);
@@ -965,7 +979,18 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         }
       });
       eventSource.addEventListener('board', () => {
+        state.eventFailures = 0;
         void requestBoardReload();
+      });
+      // The server says so when its reconciler stops working. A board that
+      // looks current and is not is worse than one that says it might be.
+      eventSource.addEventListener('sync', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          setLiveUpdateWarning(payload.degraded ? (payload.reason || 'the board service cannot read its own state') : '');
+        } catch (error) {
+          setLiveUpdateWarning('live update status could not be read');
+        }
       });
       eventSource.onerror = () => {
         if (state.eventSource !== eventSource) {
@@ -973,6 +998,11 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         }
         eventSource.close();
         state.eventSource = null;
+        state.eventFailures = (state.eventFailures || 0) + 1;
+        if (state.eventFailures >= LIVE_UPDATE_FAILURE_LIMIT) {
+          // Reconnecting quietly forever leaves a stale board looking healthy.
+          setLiveUpdateWarning('lost the live connection to the board service');
+        }
         state.eventReconnectTimer = window.setTimeout(() => {
           state.eventReconnectTimer = null;
           connectEvents();

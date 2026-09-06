@@ -699,6 +699,15 @@ SELECT
     t.id,
     t.row_updated_at::text AS row_updated_at,
     t.updated_text,
+    -- What the board actually renders, not just when a writer remembered to
+    -- stamp a timestamp. ticket_board.perform_workflow_action moves state,
+    -- assignee and commit_hash without touching row_updated_at, and no trigger
+    -- maintains it, so a signature built only from timestamps cannot see a
+    -- committed transition -- from this server, another one, a migration, or
+    -- psql. Reading the columns themselves removes that whole class.
+    t.state,
+    t.assignee,
+    t.commit_hash,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id) AS blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id AND b.resolved) AS resolved_blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id) AS comment_count,
@@ -727,6 +736,9 @@ ORDER BY t.ticket_number;
                 str(row["id"]),
                 str(row["row_updated_at"]),
                 str(row["updated_text"]),
+                str(row["state"]),
+                str(row["assignee"]),
+                str(row["commit_hash"]),
                 int(row["blocker_count"]),
                 int(row["resolved_blocker_count"]),
                 int(row["comment_count"]),

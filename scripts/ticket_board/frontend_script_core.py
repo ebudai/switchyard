@@ -33,6 +33,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       detailDraft: null,
       eventSource: null,
       eventReconnectTimer: null,
+      eventFailures: 0,
+      liveUpdateWarning: '',
       loadInFlight: null,
       loadQueued: false,
       loadSequence: 0,

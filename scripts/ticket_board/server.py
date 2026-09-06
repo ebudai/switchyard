@@ -572,6 +572,13 @@ class TicketBoardEventHub:
     #: current and is not.
     DEGRADED_AFTER_FAILURES = 3
 
+    #: What a browser is told. A database error's text routinely carries the
+    #: connection string, host, user and database name, and this frame is sent
+    #: to every open client. The raw exception is logged server-side, where the
+    #: operator who may already see the conninfo is; what crosses the wire is
+    #: this fixed string and nothing derived from the failure.
+    DEGRADED_REASON = "the board service cannot read its own state"
+
     def __init__(self, app: TicketBoardApp, scan_interval_seconds: float = 1.0) -> None:
         self.app = app
         self.scan_interval_seconds = scan_interval_seconds
@@ -583,9 +590,10 @@ class TicketBoardEventHub:
         self.degraded_reason = ""
         try:
             self._signature = self.app.store_signature()
-        except Exception as exc:  # noqa: BLE001 - a board that cannot read must still serve
+        except Exception:  # noqa: BLE001 - a board that cannot read must still serve
+            LOGGER.warning("board reconciliation could not read its initial state", exc_info=True)
             self._signature = ()
-            self.degraded_reason = str(exc)
+            self.degraded_reason = self.DEGRADED_REASON
         self._thread = threading.Thread(target=self._watch_loop, name="ticket-board-events", daemon=True)
         self._thread.start()
 
@@ -646,7 +654,8 @@ class TicketBoardEventHub:
                 and not self.degraded_reason
             )
             if crossed:
-                self.degraded_reason = str(exc) or exc.__class__.__name__
+                self.degraded_reason = self.DEGRADED_REASON
+        # Raw here, where the operator is; never in the frame the browser gets.
         LOGGER.warning("board reconciliation scan failed: %s", exc)
         if crossed:
             # Wake every open client so it learns the board may be stale.

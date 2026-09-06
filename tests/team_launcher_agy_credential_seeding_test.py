@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import os
 import pwd
+import re
 import stat as stat_module
+from contextlib import contextmanager
 
 from team_launcher_test_helpers import *
 
@@ -31,6 +33,7 @@ class _SeedingRunner(FakeRunner):
         owner_exists: bool = False,
         failing_install_fragment: str = "",
         failing_chown_fragment: str = "",
+        swap_credential_dir_to: Path | None = None,
     ) -> None:
         super().__init__()
         self.owner_user = owner_user
@@ -39,6 +42,7 @@ class _SeedingRunner(FakeRunner):
         self.owner_exists = owner_exists
         self.failing_install_fragment = failing_install_fragment
         self.failing_chown_fragment = failing_chown_fragment
+        self.swap_credential_dir_to = swap_credential_dir_to
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
@@ -76,6 +80,11 @@ class _SeedingRunner(FakeRunner):
         target = Path(args[-1])
         if "-d" in args and self._in_sandbox(target):
             target.mkdir(parents=True, exist_ok=True)
+            # Simulate the owner winning the race: they control this directory, so they
+            # can replace it with a symlink the instant install(1) returns.
+            if self.swap_credential_dir_to is not None and target.name == "antigravity-cli":
+                target.rmdir()
+                target.symlink_to(self.swap_credential_dir_to, target_is_directory=True)
         return subprocess.CompletedProcess(args, 0)
 
     def _run_project_git(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -103,6 +112,37 @@ def _seed_source_token(
     return token
 
 
+def _host_setting_path(tmp_path: Path) -> Path:
+    return tmp_path / "etc" / "agy-credential.json"
+
+
+@contextmanager
+def _invoking_human(user: str):
+    """Pin who switchyard considers the invoking human, so the proposal is deterministic."""
+    previous = os.environ.get(team_launcher.GUI_USER_ENV)
+    os.environ[team_launcher.GUI_USER_ENV] = user
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(team_launcher.GUI_USER_ENV, None)
+        else:
+            os.environ[team_launcher.GUI_USER_ENV] = previous
+
+
+def _scripted_input(answers: dict[str, str] | None) -> Callable[[str], str]:
+    """Answer prompts by matching their text, since prompt order is not this test's concern."""
+    keyed = dict(answers or {})
+
+    def _input(prompt: str) -> str:
+        for fragment, reply in keyed.items():
+            if fragment in prompt:
+                return reply
+        return ""
+
+    return _input
+
+
 def _provision(
     tmp_path: Path,
     *,
@@ -111,8 +151,16 @@ def _provision(
     failing_install_fragment: str = "",
     failing_chown_fragment: str = "",
     allow_existing_owner_user: bool = True,
+    swap_credential_dir_to: Path | None = None,
+    no_agy_credential: bool = False,
+    yes: bool = True,
+    answers: dict[str, str] | None = None,
 ) -> tuple[object, _SeedingRunner, str, Path, Path]:
-    """Run a fresh noninteractive provision; returns (result_or_exit, runner, stdout, home_base, project_dir)."""
+    """Run a provision; returns (result_or_exit, runner, stdout, home_base, project_dir).
+
+    The host-setting path is always redirected under tmp_path so no test can read or
+    write this machine's real /etc/switchyard/agy-credential.json.
+    """
     home_base = tmp_path / "home"
     source_repo = tmp_path / "source-repo"
     source_repo.mkdir(exist_ok=True)
@@ -125,6 +173,7 @@ def _provision(
         owner_exists=owner_exists,
         failing_install_fragment=failing_install_fragment,
         failing_chown_fragment=failing_chown_fragment,
+        swap_credential_dir_to=swap_credential_dir_to,
     )
     stdout = StringIO()
     outcome: object
@@ -138,14 +187,16 @@ def _provision(
                 source_repo=source_repo,
                 commit_git_dir="/srv/git/review-cache.git",
                 role_clis=LEGACY_SWITCHYARD_ROLE_CLIS,
-                yes=True,
+                yes=yes,
                 allow_existing_owner_user=allow_existing_owner_user,
                 agy_credential_source=agy_credential_source,
+                no_agy_credential=no_agy_credential,
+                agy_credential_settings_path=_host_setting_path(tmp_path),
                 home_base=home_base,
                 euid_getter=lambda: 0,
                 runner=runner,
                 pane_state_dir=tmp_path / "pane-state",
-                input_func=lambda _prompt: "",
+                input_func=_scripted_input(answers),
                 port_in_use=lambda _port: False,
                 socket_exists=lambda _path: False,
                 session_record_timeout=0,
@@ -159,7 +210,8 @@ def _provision(
 
 
 def _token_chown_calls(runner: _SeedingRunner) -> list[list[str]]:
-    return [call for call in runner.calls if call[:1] == ["chown"] and call[-1].endswith(TOKEN_NAME)]
+    """Ownership is assigned through the open descriptor, so the path is /proc/<pid>/fd/N."""
+    return [call for call in runner.calls if call[:1] == ["chown"] and "/fd/" in call[-1]]
 
 
 def _mutated(runner: _SeedingRunner) -> list[list[str]]:
@@ -189,7 +241,9 @@ def test_fresh_provision_seeds_agy_token_into_created_owner_home() -> None:
     assert outcome == 0
     assert seeded_text == SEED_TOKEN_TEXT
     assert seeded_mode == 0o600
-    assert chown_calls == [["chown", "otto-agent:otto-agent", str(_seeded_token_path(home_base))]]
+    assert len(chown_calls) == 1
+    assert chown_calls[0][:2] == ["chown", f"{OWNER_USER}:{OWNER_USER}"]
+    assert re.fullmatch(r"/proc/\d+/fd/\d+", chown_calls[0][2]), chown_calls[0][2]
     # The private directory is created owner-only before the token lands in it.
     assert any(
         c[:1] == ["install"] and "-d" in c and "0700" in c and c[-1].endswith(".gemini/antigravity-cli")
@@ -337,7 +391,7 @@ def test_failed_ownership_assignment_rolls_back_the_partial_token() -> None:
         outcome, _runner, _output, home_base, _project_dir = _provision(
             tmp_path,
             agy_credential_source=SEED_SOURCE_USER,
-            failing_chown_fragment=TOKEN_NAME,
+            failing_chown_fragment="/fd/",
         )
         leftover = _seeded_token_path(home_base).exists()
 
@@ -362,7 +416,7 @@ def test_failed_seed_leaves_the_credential_absent_for_the_retry() -> None:
         outcome, _runner, _output, home_base, _project_dir = _provision(
             tmp_path,
             agy_credential_source=SEED_SOURCE_USER,
-            failing_chown_fragment=TOKEN_NAME,
+            failing_chown_fragment="/fd/",
         )
         state = team_launcher._agy_credential_state("otto-agent", home_base)
 
@@ -446,6 +500,33 @@ def test_target_owned_by_another_user_is_refused_not_reported_installed() -> Non
     assert not _token_chown_calls(runner)
     # Refused, not silently repaired or overwritten.
     assert preserved == "owned-by-someone-else\n"
+
+
+def test_credential_directory_swapped_for_a_symlink_is_refused() -> None:
+    """The owner controls this directory and can replace it after install(1) returns.
+
+    Naming the path again would let a root-run write land outside the owner's home, so
+    the directory is walked with O_NOFOLLOW and every later step uses that descriptor.
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        escape = tmp_path / "outside-the-home"
+        escape.mkdir()
+        _seed_source_token(tmp_path / "home")
+
+        outcome, runner, _output, home_base, _project_dir = _provision(
+            tmp_path,
+            agy_credential_source=SEED_SOURCE_USER,
+            swap_credential_dir_to=escape,
+        )
+        escaped_files = sorted(p.name for p in escape.iterdir())
+        swap_happened = (home_base / OWNER_USER / ".gemini" / "antigravity-cli").is_symlink()
+
+    assert isinstance(outcome, SystemExit)
+    assert "replaced path component" in str(outcome)
+    assert escaped_files == [], f"credential written outside the owner home: {escaped_files}"
+    assert swap_happened, "fixture did not actually perform the swap"
+    assert not _token_chown_calls(runner)
 
 
 def test_world_readable_existing_target_is_refused() -> None:
@@ -563,6 +644,189 @@ def test_artifact_rejects_non_string_agy_credential_source() -> None:
 def test_artifact_defaults_agy_credential_source_to_disabled() -> None:
     grants = team_launcher._artifact_capability_grants(None, path=Path("artifact.json"))
     assert grants["agy_credential_source"] == ""
+
+
+def _artifact_grants(project_dir: Path) -> dict:
+    raw = json.loads((project_dir / ".switchyard" / "porter.project.json").read_text(encoding="utf-8"))
+    return raw["project"]["capability_grants"]
+
+
+def test_recorded_host_source_is_used_without_a_per_project_flag() -> None:
+    """The point of the host setting: no ceremony on each provision."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        team_launcher.write_host_agy_credential_source(
+            SEED_SOURCE_USER, settings_path=_host_setting_path(tmp_path)
+        )
+
+        outcome, runner, output, home_base, project_dir = _provision(
+            tmp_path, agy_credential_source=None
+        )
+        seeded = _seeded_token_path(home_base)
+        seeded_text = seeded.read_text(encoding="utf-8") if seeded.exists() else ""
+        grants = _artifact_grants(project_dir)
+
+    assert outcome == 0
+    assert seeded_text == SEED_TOKEN_TEXT
+    assert _token_chown_calls(runner)
+    assert grants["agy_credential_source"] == SEED_SOURCE_USER
+    assert grants["agy_credential_source_origin"] == "host_default"
+    assert f"seeded agy credential for {OWNER_USER} from {SEED_SOURCE_USER}" in output
+
+
+def test_per_project_flag_overrides_the_host_source_and_is_recorded_as_such() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        team_launcher.write_host_agy_credential_source(
+            "root", settings_path=_host_setting_path(tmp_path)
+        )
+
+        outcome, _runner, _output, _home_base, project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER
+        )
+        grants = _artifact_grants(project_dir)
+
+    assert outcome == 0
+    assert grants["agy_credential_source"] == SEED_SOURCE_USER
+    assert grants["agy_credential_source_origin"] == "project_override"
+
+
+def test_opt_out_ignores_the_host_source_and_seeds_nothing() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        team_launcher.write_host_agy_credential_source(
+            SEED_SOURCE_USER, settings_path=_host_setting_path(tmp_path)
+        )
+
+        outcome, runner, output, home_base, project_dir = _provision(
+            tmp_path, agy_credential_source=None, no_agy_credential=True
+        )
+        seeded_exists = _seeded_token_path(home_base).exists()
+        grants = _artifact_grants(project_dir)
+
+    assert outcome == 0
+    assert not seeded_exists
+    assert not _token_chown_calls(runner)
+    assert grants["agy_credential_source"] == ""
+    assert grants["agy_credential_source_origin"] == "opt_out"
+    assert "seeded agy credential" not in output
+
+
+def test_noninteractive_never_infers_an_account_when_nothing_is_recorded() -> None:
+    """--yes must not silently fall back to SUDO_USER or the current user."""
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")  # a usable token exists for the invoking user
+        assert not _host_setting_path(tmp_path).exists()
+
+        outcome, runner, output, home_base, project_dir = _provision(
+            tmp_path, agy_credential_source=None
+        )
+        seeded_exists = _seeded_token_path(home_base).exists()
+        grants = _artifact_grants(project_dir)
+        recorded_anything = _host_setting_path(tmp_path).exists()
+
+    assert outcome == 0
+    assert not seeded_exists, "a source was inferred without being configured"
+    assert not _token_chown_calls(runner)
+    assert grants["agy_credential_source"] == ""
+    assert grants["agy_credential_source_origin"] == "unset"
+    assert not recorded_anything
+    assert "seeded agy credential" not in output
+
+
+def test_interactive_proposal_requires_confirmation_and_records_it() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        setting = _host_setting_path(tmp_path)
+
+        # Declining records nothing and seeds nothing.
+        with _invoking_human(SEED_SOURCE_USER):
+            declined, runner, output, home_base, project_dir = _provision(
+                tmp_path, agy_credential_source=None, yes=False, answers={"Record": "n", "Proceed": "y"}
+            )
+        declined_recorded = setting.exists()
+        declined_seeded = _seeded_token_path(home_base).exists()
+        declined_grants = _artifact_grants(project_dir) if declined == 0 else {}
+
+    assert declined == 0, output[-400:]
+    assert not declined_recorded
+    assert not declined_seeded
+    assert declined_grants.get("agy_credential_source_origin") == "unset"
+    assert "no agy credential source is recorded for this host" in output
+    assert "set one later with" in output
+
+
+def test_interactive_confirmation_records_the_host_source() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        setting = _host_setting_path(tmp_path)
+
+        with _invoking_human(SEED_SOURCE_USER):
+            outcome, _runner, output, home_base, project_dir = _provision(
+                tmp_path, agy_credential_source=None, yes=False, answers={"Record": "y", "Proceed": "y"}
+            )
+        recorded = json.loads(setting.read_text(encoding="utf-8")) if setting.exists() else {}
+        seeded_exists = _seeded_token_path(home_base).exists()
+        grants = _artifact_grants(project_dir) if outcome == 0 else {}
+
+    assert outcome == 0, output[-400:]
+    assert recorded.get("source_user") == SEED_SOURCE_USER
+    assert seeded_exists
+    assert grants.get("agy_credential_source_origin") == "host_default"
+
+
+def test_existing_owner_confirmation_states_the_shared_account() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        _seed_source_token(tmp_path / "home")
+        _outcome, _runner, output, _home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+
+    assert f"the agy credential from {SEED_SOURCE_USER} will be installed into {OWNER_USER}" in output
+    assert "every role of this project will be able to act as the Google account" in output
+
+
+def test_host_setting_show_set_and_clear() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-host.") as tmp:
+        setting = Path(tmp) / "agy-credential.json"
+        lines: list[str] = []
+
+        team_launcher.switchyard_agy_credential_command(
+            "show", settings_path=setting, print_func=lines.append
+        )
+        assert "no agy credential source recorded" in lines[-1]
+
+        team_launcher.switchyard_agy_credential_command(
+            "set", source_user=SEED_SOURCE_USER, settings_path=setting, print_func=lines.append
+        )
+        assert team_launcher.read_host_agy_credential_source(setting) == SEED_SOURCE_USER
+        assert any("act as the Google account" in line for line in lines)
+
+        team_launcher.switchyard_agy_credential_command(
+            "show", settings_path=setting, print_func=lines.append
+        )
+        assert f"agy credential source: {SEED_SOURCE_USER}" in lines[-1]
+
+        team_launcher.switchyard_agy_credential_command(
+            "clear", settings_path=setting, print_func=lines.append
+        )
+        assert not setting.exists()
+        assert team_launcher.read_host_agy_credential_source(setting) == ""
+
+        try:
+            team_launcher.switchyard_agy_credential_command(
+                "set", source_user=ABSENT_SOURCE_USER, settings_path=setting, print_func=lines.append
+            )
+            raise AssertionError("expected refusal for a non-existent user")
+        except SystemExit as exc:
+            assert "is not a user on this machine" in str(exc)
 
 
 def main() -> int:

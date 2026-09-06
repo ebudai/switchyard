@@ -71,9 +71,12 @@ PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS = {
     "shell": "fish",
     # Empty means no credential sharing. A username here grants every role pane of
     # this project the ability to act as that user's Google account in agy; see
-    # _seed_agy_credential_for_owner.
+    # _seed_agy_credential_for_owner. The origin records how that value was chosen, so a
+    # host default is distinguishable from a per-project override or an explicit opt-out.
     "agy_credential_source": "",
+    "agy_credential_source_origin": "unset",
 }
+AGY_SOURCE_ORIGINS = frozenset({"unset", "host_default", "project_override", "opt_out"})
 PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
     {
         "stages",
@@ -144,6 +147,7 @@ SWITCHYARD_COMMANDS = (
     "add-role",
     "present",
     "set-vcs-close-role",
+    "agy-credential",
     "stop",
     "teardown",
     "status",
@@ -195,6 +199,12 @@ DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
 AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
 AGY_CREDENTIAL_DIR_NAME = ".gemini/antigravity-cli"
 AGY_CREDENTIAL_TOKEN_NAME = "antigravity-oauth-token"
+# Machine-scoped, so the operator names the account once instead of on every provision.
+DEFAULT_AGY_CREDENTIAL_SETTING_PATH = Path("/etc/switchyard/agy-credential.json")
+AGY_SOURCE_FROM_HOST = "host_default"
+AGY_SOURCE_FROM_OVERRIDE = "project_override"
+AGY_SOURCE_FROM_OPT_OUT = "opt_out"
+AGY_SOURCE_UNSET = "unset"
 CLAUDE_PROJECTS_DIR_NAME = ".claude/projects"
 CODEX_SESSIONS_DIR_NAME = ".codex/sessions"
 HERMES_HOME_DIR_NAME = ".hermes"
@@ -1282,6 +1292,13 @@ def _artifact_capability_grants(raw: Any, *, path: Path) -> dict[str, object]:
                     f"user name, not {candidate!r}"
                 )
             result[key] = candidate
+        elif key == "agy_credential_source_origin":
+            if not isinstance(value, str) or value.strip() not in AGY_SOURCE_ORIGINS:
+                raise SystemExit(
+                    f"{path} field 'capability_grants.agy_credential_source_origin' must be "
+                    f"one of {', '.join(sorted(AGY_SOURCE_ORIGINS))}"
+                )
+            result[key] = value.strip()
         elif not isinstance(value, bool):
             raise SystemExit(f"{path} field 'capability_grants.{key}' must be a JSON boolean")
         else:
@@ -7456,12 +7473,21 @@ def _confirm_existing_owner_user(
     allow_existing_owner_user: bool,
     input_func: Callable[[str], str],
     print_func: Callable[[str], None],
+    agy_credential_source: str = "",
 ) -> None:
     existing = _existing_owner_user(owner_user)
     if existing is None:
         return
     detail = f"{existing.name} (uid {existing.uid}, home {existing.home})"
     print_func(f"warning: switchyard: owner user {detail} already exists")
+    if agy_credential_source:
+        # Reusing an existing account and installing a credential into it are separate
+        # things to consent to, so the confirmation has to name both.
+        print_func(
+            f"warning: switchyard: the agy credential from {agy_credential_source} will be "
+            f"installed into {existing.name}, and every role of this project will be able "
+            f"to act as the Google account {agy_credential_source} signed in to agy with"
+        )
     if allow_existing_owner_user:
         return
     try:
@@ -7900,6 +7926,7 @@ def _write_initial_switchyard_project_artifact(
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
     agy_credential_source: str = "",
+    agy_credential_source_origin: str = "unset",
 ) -> None:
     resolved_audit_roles = tuple(audit_roles) if audit_roles is not None else (("audit",) if include_audit else ())
     role_overlap = set(implementer_roles) & set(resolved_audit_roles)
@@ -7934,6 +7961,7 @@ def _write_initial_switchyard_project_artifact(
             **PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS,
             "shell": owner_shell,
             "agy_credential_source": agy_credential_source,
+            "agy_credential_source_origin": agy_credential_source_origin,
         },
     )
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9199,6 +9227,206 @@ def _agy_credential_state(owner_user: str, home_base: Path) -> str:
     return AGY_CREDENTIAL_INSTALLED
 
 
+def _has_usable_agy_token(user_name: str, home_base: Path) -> bool:
+    try:
+        os.close(_open_agy_source_token(user_name, home_base))
+    except SystemExit:
+        return False
+    return True
+
+
+def _resolve_agy_credential_source(
+    *,
+    override: str | None,
+    opt_out: bool,
+    artifact_value: str,
+    home_base: Path,
+    settings_path: Path | None,
+    yes: bool,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+) -> tuple[str, str]:
+    """Decide the credential source and where the decision came from.
+
+    The invoking human is only ever a *proposal*: it is offered interactively and stored
+    only once confirmed. A noninteractive run uses a recorded host setting or an explicit
+    override and otherwise seeds nothing, so SUDO_USER is never inferred silently.
+    """
+    if opt_out:
+        return "", AGY_SOURCE_FROM_OPT_OUT
+    explicit = (override or "").strip()
+    if explicit:
+        if not _is_valid_owner_user_name(explicit):
+            raise SystemExit(
+                f"switchyard: --agy-credential-source must be a plain Unix user name, not "
+                f"{explicit!r}"
+            )
+        return explicit, AGY_SOURCE_FROM_OVERRIDE
+    if artifact_value:
+        return artifact_value, AGY_SOURCE_FROM_OVERRIDE
+    recorded = read_host_agy_credential_source(settings_path)
+    if recorded:
+        return recorded, AGY_SOURCE_FROM_HOST
+    if yes:
+        return "", AGY_SOURCE_UNSET
+    proposed = default_gui_user()
+    if (
+        not proposed
+        or proposed == "root"
+        or not _is_valid_owner_user_name(proposed)
+        or _uid_for_user(proposed) is None
+        or not _has_usable_agy_token(proposed, home_base)
+    ):
+        # Nothing worth offering: no invoking human, or that account has no agy token to
+        # share. Offering one anyway would train the operator to accept a prompt that
+        # cannot work.
+        return "", AGY_SOURCE_UNSET
+    print_func(
+        f"switchyard: no agy credential source is recorded for this host. Seeding one lets "
+        f"each new project's panes use agy without their own login, by sharing the Google "
+        f"account that user signed in with."
+    )
+    if not _prompt_bool(
+        f"Record {proposed} as this host's agy credential source", default=False, input_func=input_func
+    ):
+        print_func(
+            "switchyard: continuing without an agy credential source; set one later with "
+            "`switchyard agy-credential set USER`"
+        )
+        return "", AGY_SOURCE_UNSET
+    path = write_host_agy_credential_source(proposed, settings_path=settings_path, confirmed_by=proposed)
+    print_func(f"switchyard: recorded agy credential source {proposed} ({path})")
+    return proposed, AGY_SOURCE_FROM_HOST
+
+
+def _agy_credential_setting_path(settings_path: Path | None = None) -> Path:
+    return settings_path or DEFAULT_AGY_CREDENTIAL_SETTING_PATH
+
+
+def read_host_agy_credential_source(settings_path: Path | None = None) -> str:
+    """The account this host seeds agy credentials from, or empty when unset."""
+    path = _agy_credential_setting_path(settings_path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    source = str(raw.get("source_user") or "").strip()
+    if source and not _is_valid_owner_user_name(source):
+        raise SystemExit(
+            f"switchyard: {path} records source_user {source!r}, which is not a plain Unix "
+            "user name; fix or clear it with `switchyard agy-credential clear`"
+        )
+    return source
+
+
+def write_host_agy_credential_source(
+    source_user: str,
+    *,
+    settings_path: Path | None = None,
+    confirmed_by: str = "",
+) -> Path:
+    path = _agy_credential_setting_path(settings_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(
+        path,
+        {
+            "source_user": source_user,
+            "confirmed_by": confirmed_by or current_user_name(),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+    )
+    return path
+
+
+def switchyard_agy_credential_command(
+    action: str,
+    *,
+    source_user: str | None = None,
+    settings_path: Path | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """show / set / clear the host-wide agy credential source."""
+    path = _agy_credential_setting_path(settings_path)
+    if action == "show":
+        current = read_host_agy_credential_source(settings_path)
+        if current:
+            print_func(f"switchyard: agy credential source: {current} ({path})")
+        else:
+            print_func(f"switchyard: no agy credential source recorded ({path})")
+        return 0
+    if action == "set":
+        candidate = (source_user or "").strip()
+        if not _is_valid_owner_user_name(candidate):
+            raise SystemExit(
+                f"switchyard: agy credential source must be a plain Unix user name, not "
+                f"{candidate!r}"
+            )
+        if _uid_for_user(candidate) is None:
+            raise SystemExit(f"switchyard: {candidate!r} is not a user on this machine")
+        write_host_agy_credential_source(candidate, settings_path=settings_path)
+        print_func(f"switchyard: agy credential source set to {candidate} ({path})")
+        print_func(
+            f"switchyard: new projects will seed from {candidate}, so each project's role "
+            "panes can act as the Google account it signed in to agy with"
+        )
+        return 0
+    if action == "clear":
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            print_func(f"switchyard: no agy credential source recorded ({path})")
+            return 0
+        print_func(f"switchyard: cleared agy credential source ({path})")
+        return 0
+    raise SystemExit(f"switchyard: unknown agy-credential action {action!r}")
+
+
+def _open_owner_credential_dir(
+    owner_user: str,
+    home_base: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> int:
+    """Create the owner's private credential directory and return a descriptor for it.
+
+    The owner controls their own home, so naming the directory by path again after
+    install(1) returns would let them replace a component with a symlink and redirect a
+    root-run write out of the home. Each component is therefore walked with openat and
+    O_NOFOLLOW, and every later step uses the returned descriptor instead of the path.
+
+    A real directory that survives that walk is necessarily inside the owner's own home,
+    which is theirs to arrange, so the escape this guards against is the symlink one.
+    """
+    target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
+    dir_result = runner(
+        ["install", "-d", "-m", "0700", "-o", owner_user, "-g", owner_user, str(target_dir)]
+    )
+    if dir_result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to create {target_dir} for {owner_user}")
+    fd = os.open(home_base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in (owner_user, *Path(AGY_CREDENTIAL_DIR_NAME).parts):
+            nested = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+            )
+            os.close(fd)
+            fd = nested
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise SystemExit(
+                f"switchyard: a path component of {target_dir} is a symlink or not a "
+                f"directory; refusing to write {owner_user}'s credential through a "
+                "replaced path component"
+            ) from exc
+        raise SystemExit(
+            f"switchyard: failed to open {target_dir} for {owner_user} ({exc.strerror})"
+        ) from exc
+    return fd
+
+
 def _copy_fd_contents(source_fd: int, target_fd: int) -> None:
     """Copy fd to fd in the kernel, so the token's bytes never enter this process."""
     offset = 0
@@ -9226,16 +9454,17 @@ def _seed_agy_credential_for_owner(
     _validate_agy_credential_source(source_user, owner_user, home_base)
     target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
     target_token = target_dir / AGY_CREDENTIAL_TOKEN_NAME
-    dir_result = runner(
-        ["install", "-d", "-m", "0700", "-o", owner_user, "-g", owner_user, str(target_dir)]
-    )
-    if dir_result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to create {target_dir} for {owner_user}")
+    dir_fd = _open_owner_credential_dir(owner_user, home_base, runner=runner)
     source_fd = _open_agy_source_token(source_user, home_base)
     created_target = False
     try:
         try:
-            target_fd = os.open(target_token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            target_fd = os.open(
+                AGY_CREDENTIAL_TOKEN_NAME,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=dir_fd,
+            )
         except FileExistsError as exc:
             raise SystemExit(
                 f"switchyard: {target_token} already exists; refusing to overwrite it"
@@ -9248,22 +9477,32 @@ def _seed_agy_credential_for_owner(
         try:
             os.fchmod(target_fd, 0o600)
             _copy_fd_contents(source_fd, target_fd)
+            # Ownership is assigned to the open description, not to the path. Naming the
+            # path again here would hand the owner a second chance to substitute a
+            # different object between the copy and the chown.
+            own_result = runner(
+                [
+                    "chown",
+                    f"{owner_user}:{owner_user}",
+                    f"/proc/{os.getpid()}/fd/{target_fd}",
+                ]
+            )
+            if own_result.returncode != 0:
+                raise SystemExit(f"switchyard: failed to assign {target_token} to {owner_user}")
         finally:
             os.close(target_fd)
-        own_result = runner(["chown", f"{owner_user}:{owner_user}", str(target_token)])
-        if own_result.returncode != 0:
-            raise SystemExit(f"switchyard: failed to assign {target_token} to {owner_user}")
     except BaseException:
-        # Leave nothing half-installed: a token with unverified ownership would read as
-        # already present on the retry and suppress the seed that fixes it.
+        # Remove only the entry proven to have been created, resolved through the same
+        # anchored directory rather than by walking the path again.
         if created_target:
             try:
-                os.unlink(target_token)
+                os.unlink(AGY_CREDENTIAL_TOKEN_NAME, dir_fd=dir_fd)
             except OSError:
                 pass
         raise
     finally:
         os.close(source_fd)
+        os.close(dir_fd)
     print_func(f"switchyard: seeded agy credential for {owner_user} from {source_user}")
     print_func(
         f"switchyard: {owner_user} can now act as the Google account that {source_user} signed "
@@ -9941,6 +10180,8 @@ def switchyard_new_command(
     desktop_policy: Path | None = None,
     allow_existing_owner_user: bool = False,
     agy_credential_source: str | None = None,
+    no_agy_credential: bool = False,
+    agy_credential_settings_path: Path | None = None,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
@@ -9994,16 +10235,21 @@ def switchyard_new_command(
         include_designer = True
         include_audit = True
         selected_audit_roles = ("audit",)
-    resolved_agy_credential_source = (agy_credential_source or "").strip()
-    if not resolved_agy_credential_source and from_artifact is not None:
-        resolved_agy_credential_source = str(
+    artifact_agy_source = ""
+    if from_artifact is not None:
+        artifact_agy_source = str(
             artifact.capability_grants.get("agy_credential_source") or ""
         ).strip()
-    if resolved_agy_credential_source and not _is_valid_owner_user_name(resolved_agy_credential_source):
-        raise SystemExit(
-            f"switchyard: --agy-credential-source must be a plain Unix user name, not "
-            f"{resolved_agy_credential_source!r}"
-        )
+    resolved_agy_credential_source, agy_source_origin = _resolve_agy_credential_source(
+        override=agy_credential_source,
+        opt_out=no_agy_credential,
+        artifact_value=artifact_agy_source,
+        home_base=home_base,
+        settings_path=agy_credential_settings_path,
+        yes=yes,
+        input_func=input_func,
+        print_func=print_func,
+    )
     if desktop_policy is None:
         if yes:
             raise SystemExit("switchyard: --yes does not grant desktop access; provide --desktop-policy FILE (explicit headless or approved Wayland policy)")
@@ -10029,6 +10275,7 @@ def switchyard_new_command(
         allow_existing_owner_user=allow_existing_owner_user,
         input_func=input_func,
         print_func=print_func,
+        agy_credential_source=resolved_agy_credential_source,
     )
     _confirm_switchyard_new(
         slug=resolved_slug,
@@ -10165,6 +10412,7 @@ def switchyard_new_command(
             include_audit=include_audit,
             audit_roles=selected_audit_roles,
             agy_credential_source=resolved_agy_credential_source,
+            agy_credential_source_origin=agy_source_origin,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():
@@ -11385,9 +11633,15 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         "--agy-credential-source",
         metavar="USER",
         help=(
-            "copy USER's agy OAuth token into a newly created owner user so the project's panes "
-            "do not need their own agy login; the project then shares that one Google account"
+            "override this host's recorded agy credential source for this project; copies USER's "
+            "agy OAuth token into the owner user so the project's panes do not need their own "
+            "agy login, sharing that one Google account across every role"
         ),
+    )
+    parser.add_argument(
+        "--no-agy-credential",
+        action="store_true",
+        help="do not seed any agy credential for this project, ignoring this host's recorded source",
     )
     parser.add_argument(
         "--layout",
@@ -11563,6 +11817,7 @@ Commands:
   present          map persistent role sessions into stable display slots at runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
+  agy-credential   show, set, or clear this host's agy credential source
   stop             stop a project's configured tmux pane sessions
   teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
@@ -11695,9 +11950,18 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             desktop_policy=args.desktop_policy,
             allow_existing_owner_user=args.allow_existing_owner_user,
             agy_credential_source=args.agy_credential_source,
+            no_agy_credential=args.no_agy_credential,
             layout_mode=args.layout,
             git_init=not args.no_git_init,
         )
+    if argv[0].casefold() == "agy-credential":
+        parser = argparse.ArgumentParser(prog="switchyard agy-credential")
+        parser.add_argument("action", choices=("show", "set", "clear"))
+        parser.add_argument("user", nargs="?", help="Unix user to seed agy credentials from (set only)")
+        args = parser.parse_args(argv[1:])
+        if args.action == "set" and not args.user:
+            raise SystemExit("switchyard: agy-credential set requires a user name")
+        return switchyard_agy_credential_command(args.action, source_user=args.user)
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)

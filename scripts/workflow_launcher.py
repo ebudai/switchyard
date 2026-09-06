@@ -151,7 +151,19 @@ def assign_projection_owner(config, config_path: Path, *, runner) -> None:
     from scripts import team_launcher as launcher
 
     raw = json.loads(config_path.read_text())
-    files = projection_files(config_path, raw["workflow"])
+    # Initially legacy projects need writable controls too: their first workflow
+    # is applied after startup. Enumerate the projection paths without requiring
+    # an existing workflow document or rendering a replacement configuration.
+    layout = Path(raw["layout"])
+    if not layout.is_absolute():
+        layout = config_path.parent / layout
+    files = [
+        config_path,
+        layout,
+        config_path.parent / "workflow.json",
+        config_path.parent / "plan.json",
+        config_path.parent.parent / f'{raw["project"]}.project.json',
+    ]
     # This is deliberately non-recursive: service receipts and unrelated host
     # paths are not part of tenant configuration ownership.
     for path in [config_path.parent, *files]:

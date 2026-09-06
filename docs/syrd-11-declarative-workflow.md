@@ -88,7 +88,7 @@ gate before removing the stage; rollback does not waive review automatically.
 The host projection preserves unrelated top-level metadata, including desktop
 policy and presentation-controller fields. It updates launcher JSON, generated
 layout, saved plan/workflow JSON and existing project artifact. Retired runtime
-metadata remains under `retired_workflow_roles`. Apply starts/stops no sessions. Initial privileged provisioning assigns only
+metadata remains under `retired_workflow_roles`. Apply starts/stops no sessions. Initial privileged provisioning, with or without an initial workflow, assigns only
 generated workflow control files and their directory to the tenant; later
 management requires no recurring ownership change. Existing root-owned
 controls require that one-time operator preparation.

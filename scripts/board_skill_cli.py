@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ticket_board.board_skill import (  # noqa: E402
+    CanonicalSkill,
     default_source,
     install_command,
     resolve_source_commit,
@@ -34,7 +35,8 @@ def _stderr(message: str) -> None:
 def install(args: argparse.Namespace) -> int:
     return install_command(
         home=Path(args.home).expanduser(),
-        source=Path(args.source).expanduser(),
+        tree_root=Path(args.tree_root).expanduser(),
+        source=Path(args.source).expanduser() if args.source else None,
         source_commit=args.source_commit,
         force=args.force,
         dry_run=args.dry_run,
@@ -51,7 +53,12 @@ def verify(args: argparse.Namespace) -> int:
 
 
 def source_commit(args: argparse.Namespace) -> int:
-    print(resolve_source_commit(Path(args.source).expanduser()))
+    source = (
+        default_source(_repo_root(), CanonicalSkill(args.skill))
+        if args.skill
+        else Path(args.source).expanduser()
+    )
+    print(resolve_source_commit(source))
     return 0
 
 
@@ -62,7 +69,16 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser("install", help="project the canonical skill into every CLI skill tree")
     install_parser.add_argument("--home", default=home_default, help="home directory whose CLI skill trees are written")
-    install_parser.add_argument("--source", default=str(default_source(_repo_root())), help="canonical SKILL.md to project")
+    install_parser.add_argument(
+        "--source",
+        default="",
+        help="one canonical SKILL.md to project (default: every canonical skill in the tree)",
+    )
+    install_parser.add_argument(
+        "--tree-root",
+        default=str(_repo_root()),
+        help="Switchyard tree holding the canonical skills (default: the tree this script ships in)",
+    )
     install_parser.add_argument(
         "--source-commit",
         default="",
@@ -80,6 +96,11 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
     source_parser = subparsers.add_parser("source-commit", help="print the provenance commit for the canonical source")
     source_parser.add_argument("--source", default=str(default_source(_repo_root())))
+    source_parser.add_argument(
+        "--skill",
+        default="",
+        help="canonical skill name to resolve instead of --source",
+    )
     source_parser.set_defaults(func=source_commit)
     return parser
 

@@ -86,10 +86,15 @@ compute_settle_delay_ms() {
 # installed as /etc/sudoers.d/49-<project>-role-control -- rather than assuming
 # a shared server. Targets naming this account's own session, and any target
 # whose account cannot be resolved, run tmux directly as before.
-role_account_for_target() {
+tmux_account_for_target() {
+    # Which account's tmux server holds this target's session. Role sessions
+    # live in that role's account; display and viewer sessions stay in the
+    # project owner's server (SYRD-39). Prints nothing when it cannot tell, and
+    # the caller then runs tmux directly as itself.
     local target="$1"
     local session="${target%%:*}"
     local project="${TICKET_BOARD_PROJECT:-}"
+    local owner="${SWITCHYARD_PROJECT_OWNER:-}"
     local role
 
     [ -n "$project" ] || return 1
@@ -97,9 +102,14 @@ role_account_for_target() {
         "$project"-*) role="${session#"$project"-}" ;;
         *) return 1 ;;
     esac
-    # Display and viewer sessions belong to the project owner, not to a role.
     case "$role" in
-        display-*|viewer) return 1 ;;
+        display-*|viewer)
+            # The isolated director account reaches these through the same
+            # role-control interface, granted tmux as the owner.
+            [ -n "$owner" ] || return 1
+            printf '%s' "$owner"
+            return 0
+            ;;
     esac
     printf '%s-%s' "$project" "$role"
 }
@@ -108,7 +118,7 @@ role_tmux() {
     local target="$1"
     shift
     local account
-    if account="$(role_account_for_target "$target")" \
+    if account="$(tmux_account_for_target "$target")" \
         && [ -n "$account" ] \
         && [ "$account" != "$(id -un)" ] \
         && id -u "$account" >/dev/null 2>&1; then

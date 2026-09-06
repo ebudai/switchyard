@@ -28,6 +28,7 @@ from scripts.ticket_board.project_provision import (
     role_account_table,
     role_accounts_command,
     role_control_sudoers,
+    role_runtime_command,
     render_tmpfiles,
     render_vcs_close_role_sql,
     render_workflow_sql,
@@ -895,23 +896,51 @@ def test_role_accounts_rollout_is_idempotent_and_doubles_as_migration() -> None:
     assert "sudo gpasswd -a 'boardsvc' 'otto-roles'" in commands
     assert "sudo gpasswd -a 'otto-agent' 'otto-roles'" in commands
 
+    # Account creation is a prerequisite; the runtime preparation needs the
+    # deployed release and the created worktrees, so it is a separate step.
+    runtime = role_runtime_command(plan)
+    for _role, account in plan.role_accounts:
+        assert f"/home/{account}/.local/bin/ticket-board-pane-idle-hook" in runtime, account
+        assert f"sudo -u '{account}' -H env TICKET_BOARD_PROJECT='otto'" in runtime, account
+        assert "ticket-board-install-pane-hooks' install" in runtime
+        assert f"switchyard-board-skill' install --home '/home/{account}'" in runtime, account
+        assert f"/home/{account}/.local/state/otto-ticket-board/pane-sessions" in runtime, account
 
-def test_role_control_interface_is_explicit_and_narrow() -> None:
-    """Director control without a shared tmux server, and without root."""
+
+def test_role_control_interface_covers_every_control_path_narrowly() -> None:
+    """Director control and board notifications without a shared tmux server.
+
+    Three grants are needed and no more: the owner runs the notify listener and
+    must reach role panes; the director drives the other roles; and the display
+    and viewer sessions stay in the owner's server, so the isolated director
+    account needs tmux as the owner too (SYRD-39).
+    """
     plan = build_plan(project="otto", owner_user="otto-agent")
     sudoers = role_control_sudoers(plan)
+    accounts = dict(plan.role_accounts)
+    director_account = accounts["director"]
 
-    director_account = dict((role, account) for role, account in plan.role_accounts)["director"]
-    assert sudoers.startswith("#"), sudoers
-    assert f"{director_account} ALL=(" in sudoers, sudoers
-    assert "NOPASSWD: /usr/bin/tmux\n" in sudoers, sudoers
-    # Exactly tmux, as the other role accounts, and nothing else.
-    assert "ALL:ALL" not in sudoers
-    assert director_account not in sudoers.split("ALL=(")[1].split(")")[0], sudoers
-    for role, account in plan.role_accounts:
-        if role == "director":
+    grants = {}
+    for line in sudoers.splitlines():
+        if "ALL=(" not in line:
             continue
-        assert account in sudoers, role
+        who = line.split()[0]
+        targets = set(line.split("ALL=(")[1].split(")")[0].split(","))
+        grants.setdefault(who, set()).update(targets)
+
+    # The listener runs as the owner and must reach every role pane.
+    assert grants["otto-agent"] == set(accounts.values()), grants["otto-agent"]
+    # The director drives the other roles, and the owner's display/viewer server.
+    assert director_account in grants
+    assert grants[director_account] == (set(accounts.values()) - {director_account}) | {"otto-agent"}, grants[director_account]
+
+    # Every grant is tmux only: no root, no other command, no blanket target.
+    for line in sudoers.splitlines():
+        if "ALL=(" not in line:
+            continue
+        assert line.endswith("NOPASSWD: /usr/bin/tmux"), line
+        assert "ALL=(ALL" not in line, line
+    assert sudoers.startswith("#"), sudoers
 
 
 def test_cli_writes_reviewable_artifacts() -> None:

@@ -144,6 +144,11 @@ def test_stop_project_kills_only_configured_sessions_as_owner_and_is_idempotent(
 
     assert runner.existing_sessions == {"viewer", "pgu-viewer", "pgu-director", "pgu-ops"}
     kill_calls = [call for call in runner.calls if call[4:6] == ["tmux", "kill-session"]]
+    # This tenant has not been migrated: no role declares its own account, so
+    # every session is still in the project owner's tmux server and the owner
+    # is the right target. The migrated case is pinned separately below.
+    killed_as = {call[-1]: call[2] for call in kill_calls}
+    assert set(killed_as.values()) == {"otto-agent"}, killed_as
     assert [call[-1] for call in kill_calls] == [
         "otto-viewer",
         "otto-designer",
@@ -956,6 +961,60 @@ def test_removed_bootstrap_command_names_new_as_replacement() -> None:
 
     assert "bootstrap has been removed" in message
     assert "switchyard new" in message
+
+
+def test_stop_kills_each_migrated_role_in_its_own_tmux_server() -> None:
+    """SYRD-39: with one account per role there is no shared tmux server.
+
+    Killing every role through the project owner's server reports them stopped
+    while their sessions are still running, because the owner's server does not
+    contain them. The viewer stays with the owner.
+    """
+    calls: list[list[str]] = []
+
+    def runner(args, **_kwargs):
+        calls.append(list(args))
+        # Every has-session probe succeeds so each role reaches its kill.
+        return subprocess.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-stop-migrated.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = tmp_path / "otto.json"
+        roles = []
+        for index, name in enumerate(("director", "ops")):
+            workdir = tmp_path / "worktrees" / name
+            workdir.mkdir(parents=True)
+            roles.append(
+                {
+                    "role": name,
+                    "slot": index,
+                    "tmux_session": f"otto-{name}",
+                    "target": f"otto-{name}:0.0",
+                    "cli": ["codex"],
+                    "workdir": str(workdir),
+                    "run_as_user": f"otto-{name}",
+                }
+            )
+        config_path.write_text(
+            json.dumps({"project": "otto", "run_as_user": "otto-agent", "roles": roles}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        config = load_project_config("otto", config_path)
+
+        original_current_user_name = team_launcher.current_user_name
+        team_launcher.current_user_name = lambda: "operator"
+        try:
+            team_launcher.stop_project(config, runner=runner, print_func=lambda _message: None)
+        finally:
+            team_launcher.current_user_name = original_current_user_name
+
+    kills = [call for call in calls if "kill-session" in call]
+    killed_as = {call[-1]: call[2] for call in kills if call[:2] == ["sudo", "-u"]}
+    assert killed_as.get("otto-director") == "otto-director", killed_as
+    assert killed_as.get("otto-ops") == "otto-ops", killed_as
+    # The viewer session is the project owner's, not any role's.
+    assert killed_as.get("otto-viewer") == "otto-agent", killed_as
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())

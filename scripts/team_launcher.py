@@ -1635,6 +1635,46 @@ def role_run_as_user(config: ProjectConfig, role: RoleConfig) -> str:
     return role.run_as_user or config.run_as_user
 
 
+def role_process_runner_for(
+    config: ProjectConfig,
+    role: RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> Callable[..., subprocess.CompletedProcess[Any]]:
+    """A runner that acts as the account owning this role's tmux server.
+
+    With one Unix account per role there is no shared tmux server, so probing,
+    stopping, reloading or recovering a role has to address that role's own
+    server. Using the project owner's runner for this reports roles stopped
+    while their sessions are still alive (SYRD-39).
+    """
+    account = role_run_as_user(config, role)
+    if account and current_user_name() != account:
+        return _owner_process_runner(owner_user=account, runner=runner)
+    return runner
+
+
+def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
+    """Where this role's CLI keeps its resumable session records.
+
+    A role account cannot write the project owner's state directory, so a role
+    with its own account gets its own path. Roles still sharing the project
+    account keep the project-wide directory (SYRD-39).
+    """
+    account = role_run_as_user(config, role)
+    if account and account != config.run_as_user:
+        return default_session_dir_for_user(account)
+    return config.session_dir
+
+
+def role_pane_state_dir(config: ProjectConfig, role: RoleConfig) -> Path:
+    """Where this role's pane hooks record busy/idle state."""
+    account = role_run_as_user(config, role)
+    if account and account != config.run_as_user:
+        return default_pane_state_dir_for_user(account, project=config.project)
+    return default_pane_state_dir_for_user(config.run_as_user, project=config.project)
+
+
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
     env = {
         "TICKET_BOARD_PROJECT": config.project,
@@ -1645,6 +1685,10 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
         "TICKET_BOARD_CALLER_ROLE": role.role,
         "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(session_role_map, sort_keys=True, separators=(",", ":")),
     }
+    if config.run_as_user:
+        # directorctl needs the owner's name to reach the display and viewer
+        # sessions, which stay in the owner's tmux server (SYRD-39).
+        env["SWITCHYARD_PROJECT_OWNER"] = config.run_as_user
     if config.upstream_report_url:
         env["TICKET_BOARD_REPORT_URL"] = config.upstream_report_url
         env["TICKET_BOARD_REPORT_ORIGIN_PROJECT"] = config.project
@@ -4492,10 +4536,16 @@ def _running_project_roles(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> list[RoleConfig]:
+    """Which roles have a live session, asked of each role's own tmux server.
+
+    Probing them all through the project owner's server cannot see a role that
+    runs as its own account, so restart and liveness both misreport (SYRD-39).
+    """
     running_roles: list[RoleConfig] = []
     for role in config.roles:
-        result = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if result.returncode == 0 and live_command_matches_role(role, runner=runner):
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        result = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if result.returncode == 0 and live_command_matches_role(role, runner=role_runner):
             running_roles.append(role)
     return running_roles
 
@@ -5504,7 +5554,7 @@ def sync_reload_config_to_live_sessions(
         if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
             updated_roles.append(role)
             continue
-        live_model = live_model_for_role(role, session_dir=config.session_dir, runner=runner)
+        live_model = live_model_for_role(role, session_dir=role_session_dir(config, role), runner=runner)
         if not live_model:
             updated_roles.append(role)
             continue
@@ -5813,7 +5863,7 @@ def launch_project(
             result = run_detached_role(
                 role,
                 mode=mode,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=effective_pane_state_dir,
                 force_reload=force_reload,
                 bin_user=role_run_as_user(config, role),
@@ -5850,7 +5900,7 @@ def launch_project(
                 result = ensure_visible_role_session_for_viewer(
                     role,
                     mode=mode,
-                    session_dir=config.session_dir,
+                    session_dir=role_session_dir(config, role),
                     pane_state_dir=effective_pane_state_dir,
                     force_reload=force_reload,
                     bin_user=role_run_as_user(config, role),
@@ -5907,7 +5957,7 @@ def launch_project(
                     result = ensure_visible_role_session_for_viewer(
                         role,
                         mode=mode,
-                        session_dir=config.session_dir,
+                        session_dir=role_session_dir(config, role),
                         pane_state_dir=effective_pane_state_dir,
                         force_reload=force_reload,
                         bin_user=role_run_as_user(config, role),
@@ -7247,6 +7297,15 @@ def new_project_command(
         selected = validate_policy(selected, project=plan.project, tenant=plan.owner_user)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(artifact_dir / "desktop-policy.json", selected)
+    # The rollout must hand each role the tree it works in, so record those
+    # paths on the plan before the operator artifact is rendered (SYRD-39).
+    _role_worktree_base = _new_project_worktree_base(plan.project, plan.owner_user)
+    plan = replace(
+        plan,
+        role_worktrees=tuple(
+            (role, str(_role_worktree_base / role)) for role, _account in plan.role_accounts
+        ),
+    )
     write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
     config_path = write_new_project_launcher_artifacts(
         plan,
@@ -10891,6 +10950,7 @@ def render_role_account_migration(config: ProjectConfig) -> str:
     """
     from scripts.ticket_board.project_provision import (
         DEFAULT_SERVICE_USER,
+        role_runtime_commands,
         roles_group_name,
         shell_quote,
     )
@@ -10912,24 +10972,16 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         account = role_run_as_user(config, role)
         if not account or account == owner:
             continue
-        q_account = shell_quote(account)
-        home = shell_quote(f"/home/{account}")
         lines.extend(
-            [
-                f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
-                f"    sudo useradd -m -d {home} -s /bin/bash {q_account}",
-                "fi",
-                f"sudo gpasswd -a {q_account} {shell_quote(group)} >/dev/null",
-                f"sudo install -d -m 0750 -o {q_account} -g {shell_quote(group)} {home}",
-                f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
-                # The role must own what it works in and writes to, or it loses
-                # access the moment it stops running as the project owner.
-                f"sudo chown -R {q_account}: {shell_quote(role.workdir)}",
-                f"sudo install -d -m 0700 -o {q_account} -g {q_account} "
-                + shell_quote(str(default_session_dir_for_user(account))),
-                f"sudo install -d -m 0700 -o {q_account} -g {q_account} "
-                + shell_quote(str(default_pane_state_dir_for_user(account, project=config.project))),
-            ]
+            role_runtime_commands(
+                project=config.project,
+                runtime_directory=f"{config.project}-ticket-board",
+                board_current=f"/home/{owner}/{config.project}-ticketboard-live/current",
+                roles_group=group,
+                account=account,
+                home=f"/home/{account}",
+                worktree=role.workdir,
+            )
         )
     lines.append(
         "# Refresh the director control interface for the current role set:"
@@ -11623,6 +11675,7 @@ def add_project_role_command(
                 role,
                 updated_config.run_as_user or current_user_name(),
                 board_service_user(updated_config),
+                worktree=pane_role.workdir,
             )
         else:
             pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
@@ -11671,18 +11724,22 @@ def stop_project(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    role_runner = runner
+    # The viewer and display sessions belong to the project owner; each role's
+    # session lives in that role's own tmux server, so it has to be probed and
+    # killed there or stop reports success while the session is still alive
+    # (SYRD-39).
+    owner_runner = runner
     if config.run_as_user and current_user_name() != config.run_as_user:
-        role_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
+        owner_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
     exit_code = 0
     viewer_session = viewer_session_for_project(config.project)
-    viewer_exists = role_runner(
+    viewer_exists = owner_runner(
         tmux_has_session_by_name_args(viewer_session),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     ).returncode == 0
     if viewer_exists:
-        result = role_runner(
+        result = owner_runner(
             tmux_kill_session_by_name_args(viewer_session),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -11705,6 +11762,7 @@ def stop_project(
     )
     exit_code = exit_code or presentation_stop
     for role in config.roles:
+        role_runner = role_process_runner_for(config, role, runner=runner)
         exists = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:
             print_func(f"already stopped {role.role}: {role.tmux_session}")
@@ -12644,7 +12702,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=config_path,
                 role_name=role.role,
                 slot=args.slot,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=pane_state_dir,
             )
         if args.pane_mode == "detach-role":
@@ -12657,7 +12715,7 @@ def main(argv: list[str] | None = None) -> int:
             return ensure_visible_role_session_for_viewer(
                 role,
                 mode=args.pane_mode,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
                 bin_user=pane_user,
@@ -12666,7 +12724,7 @@ def main(argv: list[str] | None = None) -> int:
             return run_detached_role(
                 role,
                 mode=args.pane_mode,
-                session_dir=config.session_dir,
+                session_dir=role_session_dir(config, role),
                 pane_state_dir=pane_state_dir,
                 force_reload=args.force,
                 bin_user=pane_user,
@@ -12674,7 +12732,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_role_pane(
             role,
             mode=args.pane_mode,
-            session_dir=config.session_dir,
+            session_dir=role_session_dir(config, role),
             pane_state_dir=pane_state_dir,
             force_reload=args.force,
             bin_user=pane_user,

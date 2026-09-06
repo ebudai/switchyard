@@ -907,6 +907,96 @@ def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None
         assert "systemctl restart porter-ticket-board.service" in migration
 
 
+
+def test_each_role_gets_its_own_runtime_paths_and_prepared_tooling() -> None:
+    """SYRD-39: a role account must be able to use the paths it is handed.
+
+    The launcher used to pass one project-wide session directory under the
+    owner's home into every role's CLI, which a role account cannot write, and
+    the rollout prepared hooks and the board skill only for the owner.
+    """
+    current_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-runtime.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "project-repo"
+        source_repo.mkdir()
+        project_repo.mkdir()
+
+        with redirect_stdout(StringIO()):
+            assert (
+                new_project_command(
+                    "porter",
+                    owner_user=current_user,
+                    source_repo=source_repo,
+                    commit_git_dir="/srv/git/review-cache.git",
+                    repository=project_repo,
+                    output_dir=output_dir,
+                    runner=FakeRunner(),
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+        config = load_project_config("porter", output_dir / "porter.json")
+        commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+
+    for role in config.roles:
+        account = f"porter-{role.role}"
+        # The CLI is handed a session directory the role account owns, not the
+        # project owner's.
+        session_dir = str(team_launcher.role_session_dir(config, role))
+        assert account in session_dir, (role.role, session_dir)
+        assert str(config.session_dir) != session_dir, (role.role, session_dir)
+        state_dir = str(team_launcher.role_pane_state_dir(config, role))
+        assert account in state_dir or state_dir.startswith("/run/user/"), (role.role, state_dir)
+
+        # And the rollout actually prepares that role: its worktree, its runtime
+        # paths, its pane hooks and its board skill.
+        assert f"sudo chown -R '{account}': '{role.workdir}'" in commands, role.role
+        assert f"/home/{account}/.local/state/porter-ticket-board/pane-sessions" in commands, role.role
+        assert f"/home/{account}/.local/bin/ticket-board-pane-idle-hook" in commands, role.role
+        assert f"ticket-board-install-pane-hooks' install --home '/home/{account}'" in commands, role.role
+        assert f"switchyard-board-skill' install --home '/home/{account}'" in commands, role.role
+
+    # Role runtime preparation runs from the deployed release, so it must come
+    # after the board deploy rather than beside account creation.
+    assert commands.index("useradd -m -d '/home/porter-director'") < commands.index(
+        "ticket-board-install-pane-hooks' install --home '/home/porter-director'"
+    ), "role runtime prepared before the release it installs from"
+
+
+def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
+    """SYRD-39: a rerun after creating the account must find a usable role.
+
+    Creating the account alone leaves the role with an owner-owned worktree and
+    no hooks, skill or runtime paths, so it would start under the right uid and
+    be unable to work.
+    """
+    from scripts.ticket_board.project_provision import role_account_commands
+
+    commands = role_account_commands(
+        "otto",
+        "perf",
+        "otto-agent",
+        "boardsvc",
+        worktree="/home/otto-agent/otto-worktrees/perf",
+    )
+    assert "if ! getent passwd 'otto-perf'" in commands
+    assert "sudo gpasswd -a 'otto-perf' 'otto-roles'" in commands
+    # The tree it will work in becomes its own.
+    assert "sudo chown -R 'otto-perf': '/home/otto-agent/otto-worktrees/perf'" in commands
+    # The runtime paths the launcher will hand it.
+    assert "/home/otto-perf/.local/state/otto-ticket-board/pane-sessions" in commands
+    # Its own tooling, installed as itself.
+    assert "ticket-board-install-pane-hooks' install --home '/home/otto-perf'" in commands
+    assert "switchyard-board-skill' install --home '/home/otto-perf'" in commands
+    # And the control interface is refreshed so the director can drive it.
+    assert "role-control-sudoers" in commands
+    assert "visudo -c" in commands
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_new_project_test: ok")

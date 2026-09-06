@@ -9383,6 +9383,30 @@ def switchyard_agy_credential_command(
     raise SystemExit(f"switchyard: unknown agy-credential action {action!r}")
 
 
+def _require_owner_traversable(dir_fd: int, owner_user: str, component: str, target_dir: Path) -> None:
+    """Refuse a pre-existing component the pane owner cannot enter.
+
+    A directory switchyard did not create carries no guarantee at all: it may be left
+    over from a run whose ownership assignment failed, or simply be someone else's. A
+    token written beneath one the owner cannot traverse is unreachable to agy, which is
+    the very failure this ticket exists to fix, so it is a refusal rather than a warning.
+    """
+    owner_uid = _uid_for_user(owner_user)
+    if owner_uid is None:
+        raise SystemExit(
+            f"switchyard: {owner_user!r} is not a user on this machine, so {target_dir} "
+            "cannot be shown to be reachable by it"
+        )
+    info = os.fstat(dir_fd)
+    if info.st_uid != owner_uid or not info.st_mode & stat.S_IXUSR:
+        raise SystemExit(
+            f"switchyard: existing directory {component!r} of {target_dir} is owned by uid "
+            f"{info.st_uid} with mode {stat.S_IMODE(info.st_mode):04o}, so {owner_user} "
+            f"(uid {owner_uid}) could not enter it and agy could not read a credential "
+            "below it; remove or fix that directory and rerun"
+        )
+
+
 def _open_owner_credential_dir(
     owner_user: str,
     home_base: Path,
@@ -9391,22 +9415,21 @@ def _open_owner_credential_dir(
 ) -> int:
     """Create the owner's private credential directory and return a descriptor for it.
 
-    The owner controls their own home, so naming the directory by path again after
-    install(1) returns would let them replace a component with a symlink and redirect a
-    root-run write out of the home. Each component is therefore walked with openat and
-    O_NOFOLLOW, and every later step uses the returned descriptor instead of the path.
+    Two things are being defended against. The owner controls this part of the tree, so
+    no privileged command is handed the whole path: install(1) follows a symlink that
+    names a directory and would apply mode and ownership to whatever it points at.
+    Instead each component is created with mkdirat and opened with openat and O_NOFOLLOW
+    relative to the descriptor above it, and everything later uses those descriptors.
 
-    A real directory that survives that walk is necessarily inside the owner's own home,
-    which is theirs to arrange, so the escape this guards against is the symlink one.
+    And a component that already exists is proven reachable by the owner rather than
+    assumed to be, because a directory switchyard did not just create and chown may be
+    left over from a failed attempt or belong to someone else entirely.
     """
     target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
     fd = os.open(home_base, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        # The owner's home is created by useradd as root; from there every component is
-        # owner-controlled, so it is created and opened relative to the descriptor above
-        # it. No privileged command is ever handed the whole path: install(1) follows a
-        # symlink that names a directory and would apply mode and ownership to whatever
-        # it points at, mutating an out-of-home directory before any check could run.
+        # The owner's home is created by useradd as root; everything below it is
+        # owner-controlled.
         fd = _openat_no_follow(fd, owner_user, target_dir)
         for component in Path(AGY_CREDENTIAL_DIR_NAME).parts:
             created = False
@@ -9420,22 +9443,52 @@ def _open_owner_credential_dir(
                     f"switchyard: failed to create {target_dir} for {owner_user} "
                     f"({exc.strerror})"
                 ) from exc
-            fd = _openat_no_follow(fd, component, target_dir)
-            if created:
-                # Only directories switchyard just made are given mode and ownership.
-                # One the owner already had is theirs, and is left as it is.
-                os.fchmod(fd, 0o700)
-                own = runner(
-                    ["chown", f"{owner_user}:{owner_user}", f"/proc/{os.getpid()}/fd/{fd}"]
-                )
-                if own.returncode != 0:
-                    raise SystemExit(
-                        f"switchyard: failed to assign {target_dir} to {owner_user}"
+            parent_fd = fd
+            child_fd = _openat_no_follow_keep_parent(parent_fd, component, target_dir)
+            try:
+                if created:
+                    os.fchmod(child_fd, 0o700)
+                    own = runner(
+                        ["chown", f"{owner_user}:{owner_user}", f"/proc/{os.getpid()}/fd/{child_fd}"]
                     )
+                    if own.returncode != 0:
+                        raise SystemExit(
+                            f"switchyard: failed to assign {target_dir} to {owner_user}"
+                        )
+                else:
+                    _require_owner_traversable(child_fd, owner_user, component, target_dir)
+            except BaseException:
+                os.close(child_fd)
+                if created:
+                    # Do not leave a directory whose ownership was never established: the
+                    # retry would find it existing and, without this, trust it.
+                    try:
+                        os.rmdir(component, dir_fd=parent_fd)
+                    except OSError:
+                        pass
+                raise
+            os.close(parent_fd)
+            fd = child_fd
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def _openat_no_follow_keep_parent(parent_fd: int, component: str, target_dir: Path) -> int:
+    """Like _openat_no_follow, but the caller keeps ownership of parent_fd."""
+    try:
+        return os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise SystemExit(
+                f"switchyard: path component {component!r} of {target_dir} is a symlink "
+                "or not a directory; refusing to write a credential through a replaced "
+                "path component"
+            ) from exc
+        raise SystemExit(
+            f"switchyard: failed to open {component!r} of {target_dir} ({exc.strerror})"
+        ) from exc
 
 
 def _openat_no_follow(parent_fd: int, component: str, target_dir: Path) -> int:

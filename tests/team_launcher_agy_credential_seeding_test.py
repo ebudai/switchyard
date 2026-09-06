@@ -510,52 +510,81 @@ def test_target_owned_by_another_user_is_refused_not_reported_installed() -> Non
     assert preserved == "owned-by-someone-else\n"
 
 
-def _planted_symlink_leaves_target_untouched(component: str) -> None:
-    """A planted directory symlink must not have its target mutated, metadata included.
+def _external_dir(tmp_path: Path) -> Path:
+    escape = tmp_path / "outside-the-home"
+    escape.mkdir()
+    os.chmod(escape, 0o755)
+    return escape
 
-    install(1) follows a symlink that names a directory and applies the requested mode
-    and ownership to whatever it points at, so a privileged full-path create would change
-    an out-of-home directory before any check could run. Creation is therefore anchored:
-    every component is made and opened relative to the descriptor above it.
-    """
-    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
-        tmp_path = Path(tmp)
-        escape = tmp_path / "outside-the-home"
-        escape.mkdir(mode=0o755)
-        os.chmod(escape, 0o755)
-        before = escape.stat()
 
-        home_base = tmp_path / "home"
-        _seed_source_token(home_base)
-        owner_home = home_base / OWNER_USER
-        planted = owner_home / ".gemini" / component if component != ".gemini" else owner_home / ".gemini"
-        planted.parent.mkdir(parents=True, exist_ok=True)
-        planted.symlink_to(escape, target_is_directory=True)
-
-        outcome, runner, _output, home_base, _project_dir = _provision(
-            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
-        )
-        after = escape.stat()
-        escaped = sorted(p.name for p in escape.iterdir())
-        still_symlink = planted.is_symlink()
-
-    assert isinstance(outcome, SystemExit), f"expected refusal for planted {component}"
-    assert "replaced path component" in str(outcome)
-    assert escaped == [], f"credential written outside the owner home: {escaped}"
+def _assert_untouched(escape: Path, before: os.stat_result) -> None:
+    after = escape.stat()
+    assert sorted(x.name for x in escape.iterdir()) == [], "something was written outside the home"
     assert stat_module.S_IMODE(after.st_mode) == stat_module.S_IMODE(before.st_mode), (
         f"external directory mode changed {oct(before.st_mode)} -> {oct(after.st_mode)}"
     )
     assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+def test_planted_intermediate_directory_symlink_leaves_target_untouched() -> None:
+    """install(1) would follow this and chmod/chown the target; the anchored walk must not.
+
+    Driven through a whole provision, since .gemini is the first owner-controlled
+    component and needs no owner-owned parent to reach.
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        escape = _external_dir(tmp_path)
+        before = escape.stat()
+        home_base = tmp_path / "home"
+        _seed_source_token(home_base)
+        planted = home_base / OWNER_USER / ".gemini"
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.symlink_to(escape, target_is_directory=True)
+
+        outcome, runner, _output, _home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+        _assert_untouched(escape, before)
+        still_symlink = planted.is_symlink()
+
+    assert isinstance(outcome, SystemExit)
+    assert "replaced path component" in str(outcome)
     assert still_symlink, "fixture did not actually plant the symlink"
     assert not _fd_chown_calls(runner)
 
 
 def test_planted_final_directory_symlink_leaves_target_untouched() -> None:
-    _planted_symlink_leaves_target_untouched("antigravity-cli")
+    """Reaching the final component needs an owner-traversable parent.
 
+    Only the test runner's own uid can own a directory this harness creates, so the
+    helper is driven directly with the runner as the owner rather than staging ownership
+    the harness cannot actually produce.
+    """
+    runner_user = team_launcher.current_user_name()
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-dir.") as tmp:
+        tmp_path = Path(tmp)
+        escape = _external_dir(tmp_path)
+        before = escape.stat()
+        home_base = tmp_path / "home"
+        gemini = home_base / runner_user / ".gemini"
+        gemini.mkdir(parents=True, mode=0o700)
+        os.chmod(gemini, 0o700)
+        planted = gemini / "antigravity-cli"
+        planted.symlink_to(escape, target_is_directory=True)
 
-def test_planted_intermediate_directory_symlink_leaves_target_untouched() -> None:
-    _planted_symlink_leaves_target_untouched(".gemini")
+        try:
+            team_launcher._open_owner_credential_dir(
+                runner_user, home_base, runner=_DirRunner()
+            )
+            raise AssertionError("expected refusal for a planted final-component symlink")
+        except SystemExit as exc:
+            message = str(exc)
+        _assert_untouched(escape, before)
+        still_symlink = planted.is_symlink()
+
+    assert "replaced path component" in message
+    assert still_symlink, "fixture did not actually plant the symlink"
 
 
 def test_no_privileged_command_is_given_the_whole_credential_path() -> None:
@@ -646,10 +675,14 @@ def test_failed_directory_ownership_aborts_before_copying() -> None:
             failing_chown_kind="dir",
         )
         seeded_exists = _seeded_token_path(home_base).exists()
+        leftover = (home_base / OWNER_USER / ".gemini").exists()
 
     assert isinstance(outcome, SystemExit)
     assert "failed to assign" in str(outcome)
     assert not seeded_exists
+    # A directory whose ownership was never established must not survive: the retry
+    # would find it existing and, without rollback, seed a token beneath it.
+    assert not leftover
 
 
 def test_source_user_must_be_a_plain_user_name() -> None:
@@ -874,6 +907,91 @@ def test_host_setting_show_set_and_clear() -> None:
             raise AssertionError("expected refusal for a non-existent user")
         except SystemExit as exc:
             assert "is not a user on this machine" in str(exc)
+
+
+class _DirRunner:
+    """Minimal runner for exercising _open_owner_credential_dir directly."""
+
+    def __init__(self, *, fail_chown: bool = False) -> None:
+        self.fail_chown = fail_chown
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        if args[:1] == ["chown"] and self.fail_chown:
+            return subprocess.CompletedProcess(args, 1)
+        return subprocess.CompletedProcess(args, 0)
+
+
+def test_failed_directory_ownership_rolls_back_so_the_retry_can_succeed() -> None:
+    """Audit's reproduction: fail the first descriptor chown, then run again.
+
+    Without rollback the retry finds .gemini already there, leaves it alone, and seeds a
+    token beneath a parent the pane owner cannot enter.
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-dir.") as tmp:
+        home_base = Path(tmp) / "home"
+        (home_base / OWNER_USER).mkdir(parents=True)
+        gemini = home_base / OWNER_USER / ".gemini"
+
+        try:
+            team_launcher._open_owner_credential_dir(
+                OWNER_USER, home_base, runner=_DirRunner(fail_chown=True)
+            )
+            raise AssertionError("expected the failed ownership assignment to abort")
+        except SystemExit as exc:
+            first_message = str(exc)
+        after_failure = gemini.exists()
+
+        fd = team_launcher._open_owner_credential_dir(
+            OWNER_USER, home_base, runner=_DirRunner()
+        )
+        os.close(fd)
+        after_retry = (home_base / OWNER_USER / ".gemini" / "antigravity-cli").is_dir()
+
+    assert "failed to assign" in first_message
+    assert not after_failure, "a directory with unestablished ownership survived"
+    assert after_retry
+
+
+def test_existing_component_the_owner_cannot_enter_is_refused() -> None:
+    """A leftover or foreign directory is proven reachable, not assumed to be."""
+    assert pwd.getpwnam(OWNER_USER).pw_uid != os.getuid(), "fixture needs a real uid mismatch"
+
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-dir.") as tmp:
+        home_base = Path(tmp) / "home"
+        (home_base / OWNER_USER).mkdir(parents=True)
+        # Owned by the test runner, not by the project owner: exactly the state a failed
+        # ownership assignment used to leave behind.
+        (home_base / OWNER_USER / ".gemini").mkdir(mode=0o700)
+
+        try:
+            team_launcher._open_owner_credential_dir(
+                OWNER_USER, home_base, runner=_DirRunner()
+            )
+            raise AssertionError("expected refusal for an unreachable existing component")
+        except SystemExit as exc:
+            message = str(exc)
+
+    assert "could not enter it" in message
+    assert "agy could not read a credential below it" in message
+
+
+def test_provisioning_refuses_an_unreachable_existing_credential_directory() -> None:
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        home_base = tmp_path / "home"
+        _seed_source_token(home_base)
+        (home_base / OWNER_USER / ".gemini").mkdir(parents=True, mode=0o700)
+
+        outcome, runner, _output, home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=SEED_SOURCE_USER, owner_exists=True
+        )
+        seeded_exists = _seeded_token_path(home_base).exists()
+
+    assert isinstance(outcome, SystemExit)
+    assert "could not enter it" in str(outcome)
+    assert not seeded_exists
 
 
 def main() -> int:

@@ -62,7 +62,7 @@ class PresentationRunner:
 
     @staticmethod
     def _session(target: str) -> str:
-        return target.split(":", 1)[0]
+        return target.removeprefix("=").split(":", 1)[0]
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
@@ -206,7 +206,7 @@ def test_runtime_mapping_preserves_worker_identity_and_restores_defaults() -> No
             slot=1, environ=DIRECTOR_ENV, runner=runner,
         )
         assert focused["focused_slot"] == 1
-        assert ["tmux", "select-pane", "-t", "porter-viewer:0.1"] in runner.calls
+        assert ["tmux", "select-pane", "-t", "=porter-viewer:0.1"] in runner.calls
         assert [entry["action"] for entry in restored["history"]] == [
             "bootstrap", "swap", "hide", "show", "restore"
         ]
@@ -501,7 +501,7 @@ def test_failed_proxy_update_rolls_back_mapping_and_revision() -> None:
             layout="viewer", environ=DIRECTOR_ENV, runner=runner,
         )
         before = state_path.read_bytes()
-        runner.fail_next_respawn_target = "porter-display-1:0.0"
+        runner.fail_next_respawn_target = "=porter-display-1:0.0"
         try:
             presentation.presentation_action(
                 config, config_path=config_path, state_path=state_path, action="swap",
@@ -514,7 +514,7 @@ def test_failed_proxy_update_rolls_back_mapping_and_revision() -> None:
         assert state_path.read_bytes() == before
         assert runner.proxy_roles["porter-display-0"] == "director"
         assert runner.proxy_roles["porter-display-1"] == "app"
-        runner.fail_next_select_target = "porter-viewer:0.1"
+        runner.fail_next_select_target = "=porter-viewer:0.1"
         try:
             presentation.presentation_action(
                 config, config_path=config_path, state_path=state_path, action="focus",
@@ -597,9 +597,115 @@ def test_separate_bootstrap_attaches_konsole_leaves_to_stable_slots() -> None:
         layout_path = root / ".switchyard" / "porter" / "porter-presentation-layout.json"
         leaves = team_launcher._layout_leaves(json.loads(layout_path.read_text(encoding="utf-8")))
         assert [shlex.split(leaf["Command"])[-1] for leaf in leaves] == [
-            "porter-display-0", "porter-display-1"
+            "=porter-display-0", "=porter-display-1"
         ]
         assert {"porter-display-0", "porter-display-1"} <= runner.sessions
+
+
+def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> None:
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="switchyard-presentation-collision.") as tmp:
+        root = Path(tmp)
+        tmux_tmp = root / "tmux"
+        tmux_tmp.mkdir(mode=0o700)
+        config_path = _write_presentation_config(root)
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        raw["desktop_access"] = {"mode": "headless"}
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        codex = bin_dir / "codex"
+        codex.write_text("#!/bin/sh\nexec sleep 300\n", encoding="utf-8")
+        codex.chmod(0o755)
+        for role in raw["roles"]:
+            if role["role"] == "app":
+                role["env"] = {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+        config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        config = load_project_config("porter", config_path)
+        state_path = root / "presentation.json"
+        tmux_env = dict(os.environ)
+        tmux_env.pop("TMUX", None)
+        tmux_env.pop("TMUX_PANE", None)
+        tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+
+        def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+            call_env = dict(tmux_env)
+            supplied_env = kwargs.pop("env", None)
+            if supplied_env:
+                call_env.update(supplied_env)
+            return subprocess.run(args, env=call_env, **kwargs)
+
+        collisions = ("porter-app-extra", "porter-display-0-extra", "porter-viewer-extra")
+
+        def collision_snapshot() -> dict[str, tuple[str, str, str, str]]:
+            snapshot: dict[str, tuple[str, str, str, str]] = {}
+            for session in collisions:
+                pane_pid = runner(
+                    ["tmux", "display-message", "-p", "-t", f"={session}:0.0", "#{pane_pid}"],
+                    check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+                attached = runner(
+                    ["tmux", "display-message", "-p", "-t", f"={session}", "#{session_attached}"],
+                    check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+                status_left = runner(
+                    ["tmux", "show-options", "-v", "-t", f"={session}:", "status-left"],
+                    check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+                role_label = runner(
+                    [
+                        "tmux", "show-options", "-p", "-v", "-t", f"={session}:0.0",
+                        "@switchyard_role",
+                    ],
+                    check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+                snapshot[session] = (pane_pid, attached, status_left, role_label)
+            return snapshot
+
+        try:
+            for session in collisions:
+                runner(["tmux", "new-session", "-d", "-s", session, "sleep", "300"], check=True)
+                runner([
+                    "tmux", "set-option", "-t", f"={session}:",
+                    "status-left", f" safe-{session} ",
+                ], check=True)
+                runner([
+                    "tmux", "set-option", "-p", "-t", f"={session}:0.0",
+                    "@switchyard_role", f"safe-{session}",
+                ], check=True)
+            before = collision_snapshot()
+
+            report = presentation.presentation_report(
+                config, config_path=config_path, state_path=state_path, runner=runner,
+            )
+            assert report["slots"][0]["client_state"] == "disconnected"
+            assert report["slots"][1]["worker"] == {
+                "role": "app", "state": "missing", "live": False, "resumable": False,
+            }
+            assert collision_snapshot() == before
+
+            presentation.launch_presentation(
+                config, config_path=config_path, state_path=state_path,
+                layout="viewer", runner=runner,
+            )
+            for session in ("porter-display-0", "porter-display-1", "porter-viewer"):
+                runner(["tmux", "has-session", "-t", f"={session}"], check=True)
+            assert collision_snapshot() == before
+
+            presentation.presentation_action(
+                config, config_path=config_path, state_path=state_path, action="recover",
+                role_name="app", environ=DIRECTOR_ENV, runner=runner,
+            )
+            runner(["tmux", "has-session", "-t", "=porter-app"], check=True)
+            assert presentation._role_status(config, "app", runner=runner)["state"] == "live"
+            assert collision_snapshot() == before
+
+            assert presentation.stop_presentation(config, runner=runner) == 0
+            for session in collisions:
+                runner(["tmux", "has-session", "-t", f"={session}"], check=True)
+            assert collision_snapshot() == before
+        finally:
+            runner(["tmux", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() -> None:

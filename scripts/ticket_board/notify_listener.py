@@ -75,6 +75,11 @@ DEFAULT_ROLE_RUNTIMES = {
     "inspector": "gemini",
 }
 IMMEDIATE_DELIVERY_KINDS = frozenset({"ticket_update"})
+# Reminders addressed to the same role they are about. Their whole claim is
+# "you appear idle on this ticket", so observing that role work voids them.
+# 'escalation' is deliberately absent: it goes to the director about someone
+# else's stall, so the director's own pane says nothing about that stall.
+SELF_REMINDER_KINDS = frozenset({"nudge", "idle_reminder"})
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
@@ -528,11 +533,20 @@ class PaneActivityGate:
         return idle_since
 
     def turn_end_idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
-        return {
-            role: datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
-            for role, state in self._idle_hook_states_by_role(roles).items()
-            if state.source in IDLE_TURN_END_SOURCES
-        }
+        turn_end_idle_since: dict[str, str] = {}
+        for role, state in self._idle_hook_states_by_role(roles).items():
+            if state.source not in IDLE_TURN_END_SOURCES:
+                continue
+            target = self.role_targets.get(role)
+            # A turn-end hook only reports that the previous turn finished, and
+            # agy raises PostInvocation between the turns of one review. Consult
+            # the live gate before minting a reminder, exactly as
+            # idle_since_by_role already does for the stall generator, so
+            # generation and delivery agree about who is working (SYRD-32).
+            if target is not None and self.is_busy(target):
+                continue
+            turn_end_idle_since[role] = datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
+        return turn_end_idle_since
 
     def _tmux_session_for_target(self, target: str) -> str:
         return target.split(":", 1)[0]
@@ -776,12 +790,12 @@ class PaneActivityGate:
     def pre_send_anti_clobber_busy(self, target: str) -> bool:
         return self._record_trace(target, self.pre_send_anti_clobber_trace(target))
 
-    def is_busy(self, target: str) -> bool:
+    def _full_activity_trace(self, target: str, *, check_trusted_working: bool) -> ActivityTrace:
         state = self.state_store.read(target)
         if state is None:
             if target == self.director_target:
                 self._reset_director_startup_hold()
-            return self._record_trace(target, ActivityTrace(True, "no_hook_state"))
+            return ActivityTrace(True, "no_hook_state")
         previous = self._last_hook_state_by_target.get(target)
         current = (state.state, state.updated_at)
         self._last_hook_state_by_target[target] = current
@@ -791,11 +805,30 @@ class PaneActivityGate:
             reason = "hook_blocked" if state.state == "blocked" else "hook_busy"
             stale_trace = self._stale_codex_busy_trace(target, state)
             if stale_trace is not None:
-                return self._record_trace(target, stale_trace)
-            return self._record_trace(target, ActivityTrace(True, reason))
+                return stale_trace
+            return ActivityTrace(True, reason)
         if previous is not None and previous[0] != "idle" and target == self.director_target:
             self._reset_director_startup_hold()
-        return self._record_trace(target, self._idle_cursor_trace(target, state))
+        return self._idle_cursor_trace(target, state, check_trusted_working=check_trusted_working)
+
+    def is_busy(self, target: str) -> bool:
+        return self._record_trace(target, self._full_activity_trace(target, check_trusted_working=False))
+
+    def pre_send_busy(self, target: str) -> bool:
+        """Full activity gate for the pre-send recheck.
+
+        The anti-clobber gate deliberately reports a working agent as free so an
+        immediate ticket_update still reaches a busy pane; it only guards a
+        human's half-typed line. Reusing it for the pre-send recheck of every
+        kind (SYRD-32) let a reminder that passed the first gate during a brief
+        turn gap land in a pane that had gone busy again, because a busy hook
+        was reported as "hook_idle". This keeps the full gate's strength, and
+        carries check_trusted_working so a subclass that overrides
+        _trusted_idle_source_trace can re-probe a trusted idle hook at send time;
+        the base implementation returns None, so today that flag adds nothing on
+        its own.
+        """
+        return self._record_trace(target, self._full_activity_trace(target, check_trusted_working=True))
 
     def is_working(self, target: str) -> bool:
         return self.is_busy(target)
@@ -952,10 +985,21 @@ FROM ticket_board.claim_notification()
     def _activity_state_for_notification(self, kind: str, target: str, *, pre_send_recheck: bool = False) -> tuple[bool, ActivityTrace]:
         gate_owner = getattr(self.activity_gate, "__self__", None)
         if pre_send_recheck:
-            pre_send_busy = getattr(gate_owner, "pre_send_anti_clobber_busy", None)
-            if callable(pre_send_busy):
-                pane_busy = bool(pre_send_busy(target))
-                return pane_busy, self._activity_trace(target, pane_busy)
+            # The pre-send recheck must not be weaker than the gate that already
+            # admitted this notification. Only immediate kinds may fall back to
+            # the anti-clobber gate, which reports a working agent as free.
+            # SYRD-32: applying that gate to every kind meant a reminder claimed
+            # during a turn gap was still sent after the pane went busy again.
+            if kind in IMMEDIATE_DELIVERY_KINDS:
+                pre_send_busy = getattr(gate_owner, "pre_send_anti_clobber_busy", None)
+                if callable(pre_send_busy):
+                    pane_busy = bool(pre_send_busy(target))
+                    return pane_busy, self._activity_trace(target, pane_busy)
+            else:
+                pre_send_full_busy = getattr(gate_owner, "pre_send_busy", None)
+                if callable(pre_send_full_busy):
+                    pane_busy = bool(pre_send_full_busy(target))
+                    return pane_busy, self._activity_trace(target, pane_busy)
         if kind in IMMEDIATE_DELIVERY_KINDS:
             anti_clobber_busy = getattr(gate_owner, "anti_clobber_busy", None)
             if callable(anti_clobber_busy):
@@ -966,6 +1010,78 @@ FROM ticket_board.claim_notification()
 
     def _should_defer_for_activity(self, activity_trace: ActivityTrace) -> bool:
         return activity_trace.busy
+
+    def _reminder_is_stale_for_activity(self, kind: str, activity_trace: ActivityTrace) -> bool:
+        """Whether a queued self-directed reminder has been voided by real work.
+
+        Requeueing such a reminder behind a busy pane only re-delivers a claim
+        that is already false, which is how SYRD-32 was seen live: the Inspector
+        was mid-review and still received "you appear idle". The idle generators
+        raise a fresh reminder if the owner genuinely stalls again, so dropping
+        loses nothing. Only work evidence counts -- a pane held busy for some
+        other reason still requeues.
+        """
+        return kind in SELF_REMINDER_KINDS and activity_trace.reason in WORK_EVIDENCE_REASONS
+
+    def _drop_stale_reminder(
+        self,
+        conn: Any,
+        *,
+        notification_id: int,
+        ticket_id: str,
+        target_role: str,
+        kind: str,
+        target: str,
+        message: str,
+        attempts: int,
+        activity_trace: ActivityTrace,
+        composer_before: ComposerSnapshot,
+        phase: str,
+    ) -> None:
+        self.logger.info(
+            "Dropping stale %s notification %s for %s: %s is working (%s)",
+            kind,
+            notification_id,
+            ticket_id,
+            target,
+            activity_trace.reason,
+        )
+        self._trace_notification(
+            conn,
+            notification_id=notification_id,
+            ticket_id=ticket_id,
+            target_role=target_role,
+            kind=kind,
+            event="drop",
+            pane_busy=True,
+            busy_reason="stale_reminder_work_observed",
+            region_digest=activity_trace.region_digest,
+            detail={
+                **self._delivery_diagnostic_detail(
+                    target=target,
+                    message=message,
+                    attempts=attempts,
+                    activity_trace=activity_trace,
+                    before=composer_before,
+                    decision="drop",
+                    reason="stale_reminder_work_observed",
+                ),
+                "phase": phase,
+            },
+        )
+        self._trace_notification(
+            conn,
+            notification_id=notification_id,
+            ticket_id=ticket_id,
+            target_role=target_role,
+            kind=kind,
+            event="listener_discard",
+            detail={"reason": "stale_reminder_work_observed", "phase": phase},
+        )
+        # Never ack here: this reminder was suppressed, not delivered, and
+        # ack_notification would credit it as a completed reminder round.
+        self._discard_notification(conn, notification_id, "stale_reminder_work_observed")
+        self._traced_gate_defer_notifications.discard(notification_id)
 
     def _delivery_diagnostic_detail(
         self,
@@ -1053,6 +1169,18 @@ SELECT ticket_board.record_notification_trace(
 
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
+
+    def _discard_notification(self, conn: Any, notification_id: int, reason: str) -> None:
+        """Remove a queued notification that was never delivered.
+
+        Not an ack: ack_notification records delivery accounting, and for an
+        idle_reminder that means incrementing idle_reminder_count, which turns
+        the next idle wave into an escalation to the director (SYRD-32).
+        """
+        conn.execute(
+            "SELECT ticket_board.discard_notification(%s::bigint, %s::text)",
+            (notification_id, reason),
+        )
 
     def _requeue_notification(
         self,
@@ -1602,6 +1730,21 @@ SELECT EXISTS (
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
             composer_before = self._composer_snapshot(target)
             if self._should_defer_for_activity(activity_trace):
+                if self._reminder_is_stale_for_activity(kind, activity_trace):
+                    self._drop_stale_reminder(
+                        conn,
+                        notification_id=notification_id,
+                        ticket_id=ticket_id,
+                        target_role=target_role,
+                        kind=kind,
+                        target=target,
+                        message=message,
+                        attempts=attempts,
+                        activity_trace=activity_trace,
+                        composer_before=composer_before,
+                        phase="activity_gate",
+                    )
+                    continue
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
                 if notification_id not in self._traced_gate_defer_notifications:
                     self._trace_notification(
@@ -1639,6 +1782,21 @@ SELECT EXISTS (
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target, pre_send_recheck=True)
             composer_before = self._composer_snapshot(target)
             if self._should_defer_for_activity(activity_trace):
+                if self._reminder_is_stale_for_activity(kind, activity_trace):
+                    self._drop_stale_reminder(
+                        conn,
+                        notification_id=notification_id,
+                        ticket_id=ticket_id,
+                        target_role=target_role,
+                        kind=kind,
+                        target=target,
+                        message=message,
+                        attempts=attempts,
+                        activity_trace=activity_trace,
+                        composer_before=composer_before,
+                        phase="pre_send_recheck",
+                    )
+                    continue
                 self.logger.info(
                     "Pane %s became active before send; requeueing notification %s for %s",
                     target,

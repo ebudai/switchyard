@@ -104,6 +104,7 @@ class FakeConnection:
         self.idle_turn_end_result = idle_turn_end_result
         self.idle_stall_result = idle_stall_result
         self.acked: list[int] = []
+        self.discarded: list[tuple[int, str]] = []
         self.requeued: list[tuple[int, tuple[Any, ...] | None]] = []
         self.dead_lettered: list[tuple[int, tuple[Any, ...] | None]] = []
         self.traces: list[tuple[Any, ...] | None] = []
@@ -174,7 +175,12 @@ class FakeConnection:
             if row is not None and len(row) == 4:
                 row = (row[0], row[1], row[2], row[3], False)
             return FakeResult([] if row is None else [row])
-        if "ack_notification" in statement_text:
+        if "discard_notification" in statement_text:
+            # Must stay distinct from ack: ack_notification carries delivery
+            # accounting (idle_reminder_count), discard_notification does not.
+            assert params is not None
+            self.discarded.append((int(params[0]), str(params[1])))
+        elif "ack_notification" in statement_text:
             assert params is not None
             self.acked.append(int(params[0]))
         if "dead_letter_notification" in statement_text:
@@ -2319,6 +2325,282 @@ def test_director_restart_window_timeout_releases_flat_idle_without_busy_cycle()
 
     assert sent == [("pgu-director:0.0", "PGU-358 -- Director notification")]
     assert released_conn.traces[1][6] == "hook_idle"
+
+
+def _agy_inspector_gate(store: "PaneHookStateStore") -> "PaneActivityGate":
+    """Gate shaped like the live syrd Inspector: agy/Gemini, no human at the keyboard."""
+    return PaneActivityGate(
+        state_store=store,
+        cursor_position_runner=constant_cursor_runner("2 23 24"),
+        capture_pane_runner=targeted_capture_runner("pgu-inspector:0.0", ""),
+        role_runtimes={"inspector": "gemini"},
+        idle_working_timer_sample_delay_seconds=0.0,
+        sleeper=lambda _seconds: None,
+    )
+
+
+def _agy_listener(gate: "PaneActivityGate", conn: "FakeConnection", sent: list, **kwargs: Any) -> "TicketBoardNotifyListener":
+    return TicketBoardNotifyListener(
+        conninfo="dbname=test",
+        sender=lambda target, message: sent.append((target, message)),
+        activity_gate=gate.is_working,
+        connector=lambda *args, **kwargs_: conn,
+        poll_seconds=0,
+        **kwargs,
+    )
+
+
+def test_turn_end_generation_consults_the_gate_not_just_the_hook() -> None:
+    """SYRD-32 generation side: the turn-end generator minted reminders from the
+    raw hook alone, while the stall generator already filtered through the gate.
+
+    A turn-end hook is trusted about the agent, so it is deliberately not
+    re-probed, but it says nothing about a human typing in that pane. Generation
+    now agrees with delivery on who counts as busy.
+    """
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        composing_gate = PaneActivityGate(
+            state_store=store,
+            cursor_position_runner=constant_cursor_runner("5 23 24"),
+            capture_pane_runner=targeted_capture_runner("pgu-inspector:0.0", ""),
+            role_runtimes={"inspector": "gemini"},
+            idle_working_timer_sample_delay_seconds=0.0,
+            sleeper=lambda _seconds: None,
+        )
+        store.write("pgu-inspector:0.0", "idle", source="gemini.PostInvocation", now=1_800_000_000.0)
+
+        assert composing_gate.is_busy("pgu-inspector:0.0") is True
+        assert composing_gate.last_trace("pgu-inspector:0.0").reason == "human_composing"  # type: ignore[union-attr]
+        assert composing_gate.turn_end_idle_since_by_role(["inspector"]) == {}
+
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        settled_gate = _agy_inspector_gate(store)
+        store.write("pgu-inspector:0.0", "idle", source="gemini.PostInvocation", now=1_800_000_000.0)
+
+        assert list(settled_gate.turn_end_idle_since_by_role(["inspector"])) == ["inspector"]
+
+
+def test_pre_send_recheck_drops_reminder_when_agy_turn_starts_after_idle_check() -> None:
+    """SYRD-32, the live incident: gate one sampled during the gap between agy
+    turns and admitted the reminder; the Inspector then started its next turn.
+
+    The pre-send recheck exists for exactly that race, but it used the
+    anti-clobber gate, which reports a working agent as free ("hook_idle"), so
+    the nudge landed in a pane that was mid-review.
+    """
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = _agy_inspector_gate(store)
+        store.write("pgu-inspector:0.0", "idle", source="gemini.PostInvocation", now=1_800_000_000.0)
+
+        def start_next_agy_turn(_seconds: float) -> None:
+            store.write("pgu-inspector:0.0", "busy", source="gemini.PreInvocation", now=1_800_000_001.0)
+
+        conn = FakeConnection(
+            [
+                queue_row(
+                    901,
+                    "PGU-901",
+                    kind="nudge",
+                    state="inspection",
+                    assignee="inspector",
+                    target_role="inspector",
+                    message="PGU-901 -- still assigned to you",
+                )
+            ]
+        )
+        listener = _agy_listener(
+            gate,
+            conn,
+            sent,
+            pre_send_recheck_delay_seconds=0.5,
+            sleeper=start_next_agy_turn,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.requeued == []
+    assert conn.acked == []
+    assert conn.discarded == [(901, "stale_reminder_work_observed")]
+    assert conn.traces[1][6] == "stale_reminder_work_observed"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["phase"] == "pre_send_recheck"
+    assert detail["decision"] == "drop"
+    assert detail["anti_clobber"]["reason"] == "hook_busy"
+
+
+def test_pre_send_recheck_holds_transition_when_agy_turn_starts_after_idle_check() -> None:
+    """The same race for a handoff must hold it, not drop it: the Inspection
+    transition is the notification that legitimately starts the work."""
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = _agy_inspector_gate(store)
+        store.write("pgu-inspector:0.0", "idle", source="gemini.PostInvocation", now=1_800_000_000.0)
+
+        def start_next_agy_turn(_seconds: float) -> None:
+            store.write("pgu-inspector:0.0", "busy", source="gemini.PreInvocation", now=1_800_000_001.0)
+
+        conn = FakeConnection(
+            [
+                queue_row(
+                    902,
+                    "PGU-902",
+                    kind="transition",
+                    state="inspection",
+                    assignee="inspector",
+                    target_role="inspector",
+                    message="PGU-902 -- Run live acceptance entered Inspection",
+                )
+            ]
+        )
+        listener = _agy_listener(
+            gate,
+            conn,
+            sent,
+            pre_send_recheck_delay_seconds=0.5,
+            sleeper=start_next_agy_turn,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.acked == []
+    assert len(conn.requeued) == 1
+    assert conn.traces[1][6] == "hook_busy"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["phase"] == "pre_send_recheck"
+    assert detail["decision"] == "defer"
+
+
+def test_queued_inspector_reminder_goes_stale_once_agy_is_observed_working() -> None:
+    """A reminder already queued when the Inspector starts work must not
+    survive to be delivered later; the idle generators raise a fresh one if it
+    really does stall again."""
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = _agy_inspector_gate(store)
+        store.write("pgu-inspector:0.0", "busy", source="gemini.PreInvocation", now=1_800_000_000.0)
+
+        conn = FakeConnection(
+            [
+                queue_row(
+                    903,
+                    "PGU-903",
+                    kind="idle_reminder",
+                    state="inspection",
+                    assignee="inspector",
+                    target_role="inspector",
+                    message="PGU-903 -- idle without advancing",
+                )
+            ]
+        )
+        listener = _agy_listener(gate, conn, sent)
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.requeued == []
+    assert conn.acked == []
+    assert conn.discarded == [(903, "stale_reminder_work_observed")]
+    assert conn.traces[1][6] == "stale_reminder_work_observed"
+    detail = json.loads(conn.traces[1][8])
+    assert detail["phase"] == "activity_gate"
+    assert detail["anti_clobber"]["reason"] == "hook_busy"
+
+
+def test_busy_director_escalation_requeues_instead_of_going_stale() -> None:
+    """An escalation is addressed to the director about someone else's stall,
+    so the director's own working pane must hold it, never void it."""
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = _agy_inspector_gate(store)
+        store.write("pgu-director:0.0", "busy", source="claude.UserPromptSubmit", now=1_800_000_000.0)
+
+        conn = FakeConnection(
+            [
+                queue_row(
+                    904,
+                    "PGU-904",
+                    kind="escalation",
+                    state="inspection",
+                    assignee="inspector",
+                    target_role="director",
+                    message="PRIORITY PGU-904 -- appears stuck",
+                )
+            ]
+        )
+        listener = _agy_listener(gate, conn, sent)
+
+        assert listener.listen_once(max_notifications=1) == 0
+
+    assert sent == []
+    assert conn.acked == []
+    assert len(conn.requeued) == 1
+    assert conn.traces[1][6] == "hook_busy"
+
+
+def test_ticket_update_still_reaches_a_working_agy_inspector() -> None:
+    """The anti-clobber gate keeps its narrower meaning for immediate kinds:
+    an update to the ticket in hand is wanted even mid-turn."""
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = _agy_inspector_gate(store)
+        store.write("pgu-inspector:0.0", "busy", source="gemini.PreInvocation", now=1_800_000_000.0)
+
+        conn = FakeConnection(
+            [
+                queue_row(
+                    905,
+                    "PGU-905",
+                    kind="ticket_update",
+                    state="inspection",
+                    assignee="inspector",
+                    target_role="inspector",
+                    message="PGU-905 -- comment added",
+                )
+            ]
+        )
+        listener = _agy_listener(gate, conn, sent)
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert [target for target, _message in sent] == ["pgu-inspector:0.0"]
+
+
+def test_inspection_transition_still_reaches_an_idle_agy_inspector() -> None:
+    """The handoff that legitimately starts Inspection work must keep working."""
+    sent: list[tuple[str, str]] = []
+    with TemporaryStateDir() as tmp_path:
+        store = PaneHookStateStore(tmp_path)
+        gate = _agy_inspector_gate(store)
+        store.write("pgu-inspector:0.0", "idle", source="gemini.Stop", now=1_800_000_000.0)
+
+        conn = FakeConnection(
+            [
+                queue_row(
+                    906,
+                    "PGU-906",
+                    kind="transition",
+                    state="inspection",
+                    assignee="inspector",
+                    target_role="inspector",
+                    message="PGU-906 -- Run live acceptance entered Inspection",
+                )
+            ]
+        )
+        listener = _agy_listener(gate, conn, sent)
+
+        assert listener.listen_once(max_notifications=1) == 1
+
+    assert [target for target, _message in sent] == ["pgu-inspector:0.0"]
 
 
 def test_director_pre_send_recheck_blocks_typing_that_starts_after_initial_idle_check() -> None:

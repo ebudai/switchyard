@@ -1,0 +1,33 @@
+#!/bin/sh
+# One presentation pane's terminal program. SYRD-43.
+#
+# Konsole runs this as the tab's program instead of running the attach command
+# from an interactive shell. When the tmux client detaches, exits or fails, the
+# tab must not fall back to a prompt: whatever shell Konsole would return to is
+# the shell that started the window, and a window started by a privileged
+# invocation would return to a root prompt that anything pasted into the tab
+# would then run.
+#
+# There is deliberately no shell here after the client. The pane says why it
+# ended and then waits, inert, until the tab is closed or the project is
+# relaunched. Typed and pasted input reach nothing.
+set -u
+
+if [ "$#" -eq 0 ]; then
+    printf 'switchyard: switchyard-pane-window needs the pane command to run\n' >&2
+    exit 2
+fi
+
+"$@"
+status=$?
+
+printf '\n'
+if [ "$status" -eq 0 ]; then
+    printf 'switchyard: this pane detached. It is inert -- close the tab, or relaunch the\n'
+else
+    printf 'switchyard: this pane exited with status %s. It is inert -- close the tab, or relaunch the\n' "$status"
+fi
+printf 'project to reattach. Nothing typed or pasted here runs anywhere.\n'
+
+# exec so no shell remains in this process at all.
+exec sleep infinity

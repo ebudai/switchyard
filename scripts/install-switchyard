@@ -279,7 +279,7 @@ export_release() {
         release_marker_json "$commit" >"$tmp_dir/.switchyard-release.json"
         run_cmd find "$tmp_dir" -type d -exec chmod 0755 {} +
         run_cmd find "$tmp_dir" -type f -exec chmod go-w {} +
-        run_cmd chmod 0755 "$tmp_dir/switchyard" "$tmp_dir/scripts/team-launcher" "$tmp_dir/scripts/install-switchyard"
+        run_cmd chmod 0755 "$tmp_dir/switchyard" "$tmp_dir/scripts/team-launcher" "$tmp_dir/scripts/install-switchyard" "$tmp_dir/scripts/switchyard-pane-window"
         run_cmd mv "$tmp_dir" "$release_dir"
     fi
     verify_release_marker "$release_dir" "$commit"

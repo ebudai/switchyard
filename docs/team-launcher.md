@@ -158,6 +158,43 @@ checkout is behind the ref, because otherwise merged launcher/config fixes can
 silently fail to reach the live team. `--dry-run` does not perform this fetch or
 verification.
 
+## Who the presentation window runs as
+
+Nothing in a role presentation window runs as root.
+
+A terminal emulator is a shell factory: every tab it opens is a shell owned by
+whoever started the emulator, and a pane's tmux client is a child of that shell.
+When the client detaches, exits or crashes, the tab falls back to it. A window
+opened by a privileged `switchyard` invocation therefore put a root prompt
+behind every pane, and anything typed or pasted into a detached tab ran as root.
+
+Two things prevent it, and both have to hold.
+
+A root invocation crosses to the desktop account before any GUI process starts.
+The account comes from `TEAM_LAUNCHER_GUI_USER`, else `SUDO_USER`, else the
+invoking user; `sudo` resets the environment, and the few variables the GUI needs
+-- the Wayland display, the runtime directory, the home -- are named explicitly
+rather than inherited, so no privileged environment or credential crosses with
+it. If no unprivileged account can be identified, no window opens at all: a
+refused launch is a recoverable inconvenience and a root terminal is not.
+
+The tab's program is `scripts/switchyard-pane-window`, not the attach command
+itself. It runs the pane's client, and when that ends it says why and `exec`s an
+inert wait. No shell remains in the process, so the tab has nothing to hand
+input to; the same is true of a role whose worktree failed to prepare, and of the
+display-slot proxies, which have always ended this way. A pane that cannot run
+is a dead tab, never a prompt.
+
+A window opened by an earlier release can still be running as root, and the
+tenant cannot signal it. `switchyard <project>`, `switchyard status` and
+`switchyard upgrade` look for one and refuse to report the project safely
+attached while it exists, naming the pids. `sudo switchyard replace-window
+<project>` is the way off it: it stops those GUI processes and opens a
+replacement as the desktop account. It never touches a worker session -- losing
+a role's session loses that role's work, which is worse than the window -- and it
+lists what was running before and after so that is checkable rather than
+promised.
+
 ## Modes
 
 ```bash

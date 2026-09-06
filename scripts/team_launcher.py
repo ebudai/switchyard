@@ -137,13 +137,14 @@ SWITCHYARD_COMMANDS = (
     "register",
     "upgrade",
     "add-role",
+    "present",
     "set-vcs-close-role",
     "stop",
     "teardown",
     "status",
     "validate-models",
 )
-SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(SWITCHYARD_COMMANDS)
+SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(command for command in SWITCHYARD_COMMANDS if command != "present")
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -5621,6 +5622,9 @@ def launch_project(
         if result != 0:
             return result
     resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+    from scripts import presentation_controller
+
+    use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)
     if resolved_layout_mode == LAYOUT_MODE_VIEWER:
         viewer_roles = visible_roles_for_viewer(config)
         for role in viewer_roles:
@@ -5657,7 +5661,15 @@ def launch_project(
                 return result
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
-        if launchable_viewer_roles:
+        if use_runtime_presentation:
+            launch_result = presentation_controller.launch_presentation(
+                config,
+                config_path=config_path,
+                layout=LAYOUT_MODE_VIEWER,
+                state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
+                runner=runner,
+            )
+        elif launchable_viewer_roles:
             launch_result = launch_tmux_viewer_session(
                 launchable_viewer_roles,
                 viewer_session=viewer_session_for_project(config.project),
@@ -5670,13 +5682,54 @@ def launch_project(
             launch_result = 0
     else:
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
-        launch_result = launch_konsole_window(
-            output_path,
-            project=config.project,
-            window_title=window_title,
-            runner=runner,
-            process_launcher=konsole_process_launcher,
-        )
+        if use_runtime_presentation:
+            for role in visible_roles_for_viewer(config):
+                if role.role in failed_roles:
+                    continue
+                if delegate_role_sessions_to_owner:
+                    result = runner(
+                        pane_command_args(
+                            config.project,
+                            role,
+                            config_path=config_path,
+                            mode=mode,
+                            script_path=pane_script_path,
+                            pane_state_dir=effective_pane_state_dir,
+                            force_reload=force_reload,
+                            skip_launcher_check=True,
+                            allow_stale_launcher=allow_stale_launcher,
+                            no_attach=True,
+                            run_as_user=config.run_as_user,
+                        )
+                    ).returncode
+                else:
+                    result = ensure_visible_role_session_for_viewer(
+                        role,
+                        mode=mode,
+                        session_dir=config.session_dir,
+                        pane_state_dir=effective_pane_state_dir,
+                        force_reload=force_reload,
+                        bin_user=config.run_as_user,
+                        runner=role_process_runner,
+                    )
+                if result != 0:
+                    return result
+            launch_result = presentation_controller.launch_presentation(
+                config,
+                config_path=config_path,
+                layout=LAYOUT_MODE_SEPARATE,
+                state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
+                runner=runner,
+                process_launcher=konsole_process_launcher,
+            )
+        else:
+            launch_result = launch_konsole_window(
+                output_path,
+                project=config.project,
+                window_title=window_title,
+                runner=runner,
+                process_launcher=konsole_process_launcher,
+            )
     if launch_result != 0:
         return launch_result
     if mode == "attach-or-start" and resolved_layout_mode != LAYOUT_MODE_VIEWER:
@@ -6081,6 +6134,15 @@ def _new_project_launcher_config_payload(
         "board_socket": plan.socket_path,
         "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
         "pane_launcher": str(switchyard_shared_pane_launcher()),
+        "presentation": {
+            "slot_count": min(len(role_defs), MAX_VISIBLE_PANES_PER_WINDOW),
+            "layouts": {
+                "default": {
+                    str(index): role
+                    for index, (role, _cli) in enumerate(role_defs[:MAX_VISIBLE_PANES_PER_WINDOW])
+                }
+            },
+        },
         "roles": roles,
     }
     if upstream_report_url:
@@ -10609,6 +10671,14 @@ def stop_project(
             print_func(f"stopped viewer: {viewer_session}")
     else:
         print_func(f"already stopped viewer: {viewer_session}")
+    from scripts import presentation_controller
+
+    presentation_stop = presentation_controller.stop_presentation(
+        config,
+        runner=runner,
+        print_func=print_func,
+    )
+    exit_code = exit_code or presentation_stop
     for role in config.roles:
         exists = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
         if not exists:
@@ -11034,6 +11104,67 @@ def _build_switchyard_status_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_present_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard present",
+        description="Map persistent project role sessions into stable display slots.",
+    )
+    parser.add_argument("project", help="registered project name or slug")
+    actions = parser.add_subparsers(dest="action", required=True)
+    list_parser = actions.add_parser("list", help="show desired and actual display state")
+    list_parser.add_argument("--json", action="store_true", help="emit machine-readable presentation state")
+    show_parser = actions.add_parser("show", help="move a role into a display slot")
+    show_parser.add_argument("role")
+    show_parser.add_argument("--slot", type=int, required=True)
+    swap_parser = actions.add_parser("swap", help="swap two display slots")
+    swap_parser.add_argument("slot_a", type=int)
+    swap_parser.add_argument("slot_b", type=int)
+    hide_parser = actions.add_parser("hide", help="hide the role in a display slot")
+    hide_parser.add_argument("--slot", type=int, required=True)
+    focus_parser = actions.add_parser("focus", help="select a display slot in the project viewer")
+    focus_parser.add_argument("--slot", type=int, required=True)
+    restore_parser = actions.add_parser("restore", help="restore a configured presentation layout")
+    restore_parser.add_argument("--layout", default="default")
+    bootstrap_parser = actions.add_parser("bootstrap", help="create stable slots and a presentation window")
+    bootstrap_parser.add_argument("--layout", choices=(LAYOUT_MODE_VIEWER, LAYOUT_MODE_SEPARATE), default=LAYOUT_MODE_VIEWER)
+    recover_parser = actions.add_parser("recover", help="make one bounded start/resume attempt for a role")
+    recover_parser.add_argument("role")
+    return parser
+
+
+def switchyard_present_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    args: argparse.Namespace,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    from scripts import presentation_controller
+
+    if args.action == "list":
+        report = presentation_controller.presentation_report(
+            config,
+            config_path=config_path,
+            runner=runner,
+        )
+        presentation_controller.print_presentation_report(report, json_output=args.json, print_func=print_func)
+        return 0
+    presentation_controller.presentation_action(
+        config,
+        config_path=config_path,
+        action=args.action,
+        role_name=getattr(args, "role", None),
+        slot=getattr(args, "slot", getattr(args, "slot_a", None)),
+        other_slot=getattr(args, "slot_b", None),
+        layout=getattr(args, "layout", "default"),
+        runner=runner,
+    )
+    report = presentation_controller.presentation_report(config, config_path=config_path, runner=runner)
+    presentation_controller.print_presentation_report(report, json_output=False, print_func=print_func)
+    return 0
+
+
 def switchyard_help_text() -> str:
     commands = ", ".join(SWITCHYARD_COMMANDS)
     return f"""Usage:
@@ -11046,6 +11177,7 @@ Commands:
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
   add-role         add an implementer or auditor role, worktree, pane, and board registration
+  present          map persistent role sessions into stable display slots at runtime
   set-vcs-close-role
                    set which existing project role can mark tickets done
   stop             stop a project's configured tmux pane sessions
@@ -11213,6 +11345,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             start=not args.no_start,
             script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         )
+    if argv[0].casefold() == "present":
+        args = _build_switchyard_present_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return switchyard_present_command(config, config_path=entry.config_path, args=args)
     if argv[0].casefold() == "set-vcs-close-role":
         args = _build_switchyard_set_vcs_close_role_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

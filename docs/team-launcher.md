@@ -170,6 +170,17 @@ Provisioning records that human instead, and installs a narrow bridge for them.
 `switchyard <project>`, `switchyard stop <project>` and `switchyard status
 <project>` then work from their own account with no password and no `su`.
 
+`switchyard status <project>` is new: the unscoped listing reads every tenant,
+so it still takes the root path, but one project can be answered by its own
+owner and therefore needs no root at all. That is what makes it reachable over
+the bridge. The classifier the `/usr/local/bin/switchyard` trampoline consults
+also has to know this -- it escalates *before* any of the routing below runs, so
+if it insisted on root for `stop` and `status` the recorded human would meet a
+sudo prompt and never reach the bridge at all. It defers only for these verbs,
+only in the exact `<verb> <slug>` shape, and only when the installed grant names
+the calling account; anything else, including an unknown project or an error
+reading the grant, still requires root.
+
 **What is installed.** Two root-owned files per tenant, both privileged
 artifacts root installs from its own mirror rather than from the tenant's
 provision directory:
@@ -194,6 +205,10 @@ path, no shell fragment, no environment override, no role identity:
   name. It must equal the `authorized_user` in the grant.
 * **What.** One of `start`, `stop`, `status`. Anything else is refused before
   any file is read, so the refusal does not depend on what happens to exist.
+  Each verb becomes the command line the CLI actually parses -- `switchyard
+  <project>`, `switchyard stop <project>`, `switchyard status <project>` -- and
+  those are written out in full rather than appended to the project, because the
+  three do not take the project in the same position.
 * **Where.** The owner, the launcher and the project all come from the grant.
   The grant must be root-owned and not writable by anyone else, or it is not an
   authority.

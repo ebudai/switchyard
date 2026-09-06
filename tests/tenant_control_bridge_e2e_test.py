@@ -98,16 +98,24 @@ def _record_path(work: Path, name: str, accounts: Accounts) -> Path:
     return box / name
 
 
-def _write_launcher(directory: Path, record: Path, *, mode: int = 0o755, uid: int = 0) -> Path:
+def _write_launcher(
+    directory: Path,
+    record: Path,
+    *,
+    mode: int = 0o755,
+    uid: int = 0,
+    source: str = "",
+) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     launcher = directory / "switchyard"
-    launcher.write_text(LAUNCHER_SOURCE.replace("@RECORD@", str(record)), encoding="utf-8")
+    body = (source or LAUNCHER_SOURCE).replace("@RECORD@", str(record)).replace("@REPO@", str(ROOT))
+    launcher.write_text(body, encoding="utf-8")
     os.chown(launcher, uid, 0)
     os.chmod(launcher, mode)
     return launcher
 
 
-def _shared_release(work: Path, record: Path) -> Path:
+def _shared_release(work: Path, record: Path, *, source: str = LAUNCHER_SOURCE) -> Path:
     """A root-controlled release tree shaped like the real shared install.
 
     /opt/switchyard/current is a root-owned symlink into a root-owned release
@@ -116,7 +124,7 @@ def _shared_release(work: Path, record: Path) -> Path:
     """
     releases = SHARED_ROOT / "releases" / "r1"
     releases.mkdir(parents=True, exist_ok=True)
-    launcher = _write_launcher(releases, record)
+    launcher = _write_launcher(releases, record, source=source)
     current = SHARED_ROOT / "current"
     if current.is_symlink() or current.exists():
         current.unlink()
@@ -202,7 +210,16 @@ def case_authorized_human_starts_another_accounts_tenant(accounts: Accounts, wor
 
 
 def case_each_verb_reaches_its_own_launcher_argv(accounts: Accounts, work: Path) -> None:
-    for operation, expected in (("start", []), ("stop", ["stop"]), ("status", ["status"])):
+    # The public command line for each verb, which is NOT the project followed
+    # by the verb: `stop` and `status` take the project after the word, and only
+    # a start is the bare project. tenant_control_bridge_e2e_test's dispatcher
+    # case proves these are lines the real CLI accepts; this one proves the
+    # bridge emits exactly them and nothing else.
+    for operation, expected in (
+        ("start", [PROJECT]),
+        ("stop", ["stop", PROJECT]),
+        ("status", ["status", PROJECT]),
+    ):
         record = _record_path(work, f"{operation}-record.json", accounts)
         launcher = _shared_release(work, record)
         _write_grant(
@@ -216,7 +233,7 @@ def case_each_verb_reaches_its_own_launcher_argv(accounts: Accounts, work: Path)
         result = _run(accounts.human.pw_uid, PROJECT, operation)
         assert result.returncode == 0, (operation, result.stdout)
         ran = json.loads(record.read_text(encoding="utf-8"))
-        assert ran["argv"] == [str(launcher.resolve()), PROJECT, *expected], (operation, ran["argv"])
+        assert ran["argv"] == [str(launcher.resolve()), *expected], (operation, ran["argv"])
         assert ran["uid"] == accounts.owner.pw_uid
 
 
@@ -503,6 +520,218 @@ def case_nothing_reusable_is_ever_written_down(accounts: Accounts, work: Path) -
     assert not [name for name in environ if "PASS" in name.upper() or "TOKEN" in name.upper()], environ
 
 
+#: The real public dispatcher, with only the leaf that boots a tmux team
+#: replaced. Everything the rollout review was about -- argv parsing, project
+#: resolution, the owner policy and which operation each verb reaches -- is the
+#: production code path running for real.
+DISPATCHER_SOURCE = """#!/usr/bin/env python3
+import json, os, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, "@REPO@")
+from scripts import team_launcher
+
+record = {
+    "argv": sys.argv[1:],
+    "uid": os.getuid(),
+    "caller": os.environ.get("SWITCHYARD_TENANT_CONTROL_CALLER", ""),
+}
+
+
+def fake_launch(config, **kwargs):
+    record["operation"] = "start"
+    record["project"] = config.project
+    record["run_as_user"] = config.run_as_user
+    return 0
+
+
+team_launcher.launch_project = fake_launch
+team_launcher.prepare_project_desktop = lambda config: config
+team_launcher.run_switchyard_launch_first_run_auth = (
+    lambda config, **kw: team_launcher.FirstRunAuthReport({}, [])
+)
+team_launcher.stop_before_launch_for_missing_owner_clis = lambda report: False
+team_launcher.report_first_run_auth_warnings = lambda report: None
+
+_stop = team_launcher.stop_project
+
+
+def traced_stop(config, *args, **kwargs):
+    record["operation"] = "stop"
+    record["project"] = config.project
+    record["run_as_user"] = config.run_as_user
+    return _stop(config, *args, **kwargs)
+
+
+team_launcher.stop_project = traced_stop
+
+_status = team_launcher.switchyard_status_command
+
+
+def traced_status(**kwargs):
+    record["operation"] = "status"
+    record["project"] = kwargs.get("project", "")
+    return _status(**kwargs)
+
+
+team_launcher.switchyard_status_command = traced_status
+
+code = 0
+try:
+    code = team_launcher.switchyard_main(sys.argv[1:])
+except SystemExit as exc:
+    code = exc.code
+    record["exit_message"] = str(exc)
+except Exception as exc:
+    record["error"] = f"{type(exc).__name__}: {exc}"
+    code = 1
+record["code"] = code if isinstance(code, int) else 1
+json.dump(record, open("@RECORD@", "w"))
+raise SystemExit(0)
+"""
+
+
+def _register_project(accounts: Accounts, work: Path) -> Path:
+    """A really registered project, owned by the tenant owner account."""
+    provision = work / "provision"
+    provision.mkdir(parents=True, exist_ok=True)
+    layout = provision / "layout.json"
+    layout.write_text('{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8")
+    config_path = provision / f"{PROJECT}.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "desktop_access": {"mode": "headless"},
+                "project": PROJECT,
+                "project_name": "Demo Project",
+                "layout": str(layout),
+                "run_as_user": accounts.owner.pw_name,
+                "pane_launcher": "/opt/switchyard/current/scripts/team-launcher",
+                "roles": [{"role": "director", "slot": 0, "cli": ["claude"]}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # Owned by the tenant owner, because that is what the wrapper reads to
+    # decide whose project this is.
+    for path in (provision, layout, config_path):
+        os.chown(path, accounts.owner.pw_uid, accounts.owner.pw_gid)
+    os.chmod(provision, 0o755)
+    os.chmod(config_path, 0o644)
+
+    registry = Path("/etc/switchyard/projects")
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / f"{PROJECT}.json").write_text(
+        json.dumps(
+            {
+                "config_path": str(config_path),
+                "name": "Demo Project",
+                "schema": "switchyard.project-registry.v1",
+                "slug": PROJECT,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def _requires_root_as(user: str, argv: list[str]) -> bool:
+    """Ask the real public classifier, running as that account.
+
+    This is what the installed /usr/local/bin/switchyard trampoline consults
+    before it decides to escalate, so it is where a spurious password prompt
+    would come from -- earlier than any routing inside the dispatcher.
+    """
+    program = (
+        "import sys; sys.path.insert(0, %r); sys.dont_write_bytecode = True\n"
+        "from scripts.team_launcher import switchyard_invocation_requires_root as f\n"
+        "print('YES' if f(%r) else 'NO')\n" % (str(ROOT), argv)
+    )
+    entry = pwd.getpwnam(user)
+    result = subprocess.run(
+        ["setpriv", f"--reuid={entry.pw_uid}", f"--regid={entry.pw_gid}", "--clear-groups",
+         sys.executable, "-c", program],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp"},
+    )
+    assert result.returncode == 0, result.stdout
+    answer = result.stdout.strip().splitlines()[-1]
+    assert answer in {"YES", "NO"}, result.stdout
+    return answer == "YES"
+
+
+def case_all_three_verbs_run_through_the_real_public_dispatcher(accounts: Accounts, work: Path) -> None:
+    """start, stop and status, end to end, through the production dispatcher.
+
+    The earlier version of this suite asserted the argv the bridge BUILDS and
+    never fed it to the real CLI, so it proved only that the bridge did what the
+    bridge intended. It did not notice that `switchyard <project> stop` is not a
+    command: the dispatcher reads it as a two-word project selector and refuses,
+    and `status` took no project at all and unconditionally re-escalated to
+    root. Only start actually worked (SYRD-50 rollout review).
+
+    So this runs each verb the whole way: the public classifier the trampoline
+    consults, then the bridge, then the real switchyard_main, and reads back
+    which operation was reached, for which project, under which uid.
+    """
+    record = _record_path(work, "dispatch-record.json", accounts)
+    launcher = _shared_release(work, record, source=DISPATCHER_SOURCE)
+    _register_project(accounts, work)
+    _write_grant(
+        {
+            "project": PROJECT,
+            "owner": accounts.owner.pw_name,
+            "authorized_user": accounts.human.pw_name,
+            "launcher": str(launcher),
+        }
+    )
+
+    for operation, argv in (
+        ("start", [PROJECT]),
+        ("stop", ["stop", PROJECT]),
+        ("status", ["status", PROJECT]),
+    ):
+        if record.exists():
+            record.unlink()
+
+        # 1. The trampoline must not escalate: this is where the password
+        #    prompt the ticket forbids would actually appear.
+        assert not _requires_root_as(accounts.human.pw_name, argv), (
+            f"{operation} would still be escalated to root before routing"
+        )
+
+        # 2. The bridge runs it as the owner.
+        result = _run(accounts.human.pw_uid, PROJECT, operation)
+        assert result.returncode == 0, (operation, result.stdout)
+        assert "password" not in result.stdout.lower(), (operation, result.stdout)
+        assert record.exists(), (operation, result.stdout)
+        ran = json.loads(record.read_text(encoding="utf-8"))
+
+        # 3. The real dispatcher reached the intended operation, for the
+        #    intended project, as the owner -- and did not die in argument
+        #    parsing or project resolution on the way.
+        assert "error" not in ran, (operation, ran)
+        assert ran["code"] == 0, (operation, ran)
+        assert ran.get("operation") == operation, (operation, ran)
+        assert ran.get("project") == PROJECT, (operation, ran)
+        assert ran["uid"] == accounts.owner.pw_uid, (operation, ran)
+        assert ran["caller"] == accounts.human.pw_name, (operation, ran)
+        # The argv the bridge chose is a command line the CLI actually accepts.
+        assert ran["argv"] == argv, (operation, ran["argv"])
+
+    # An unauthorized local user gets no help from the classifier either: it
+    # still says root is required, so they meet the ordinary sudo policy rather
+    # than a silently widened path.
+    for argv in (["stop", PROJECT], ["status", PROJECT]):
+        assert _requires_root_as(accounts.intruder.pw_name, argv), argv
+
+    # And the verbs the bridge does not serve keep the operator path for
+    # everyone, the authorized human included.
+    for argv in (["upgrade", PROJECT], ["teardown", PROJECT], ["status"]):
+        assert _requires_root_as(accounts.human.pw_name, argv), argv
+
+
 def case_repair_reinstalls_the_same_bridge_for_the_same_human(accounts: Accounts, work: Path) -> None:
     """Run the generated repair commands for real, twice, as root.
 
@@ -588,6 +817,7 @@ def end_to_end() -> None:
             case_a_launcher_the_owner_can_replace_is_not_pinned,
             case_a_grant_anyone_could_rewrite_is_not_trusted,
             case_nothing_reusable_is_ever_written_down,
+            case_all_three_verbs_run_through_the_real_public_dispatcher,
             case_repair_reinstalls_the_same_bridge_for_the_same_human,
         ):
             case_work = work / case.__name__

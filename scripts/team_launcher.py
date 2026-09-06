@@ -7204,7 +7204,7 @@ def new_project_command(
             if from_artifact
             else None,
             effective_repository,
-        ),
+        )[0],
         owner_user=effective_owner,
         owner_home=owner_home,
         port=port,
@@ -7638,6 +7638,9 @@ def _switchyard_dir(project_dir: Path) -> Path:
     return project_dir / SWITCHYARD_PROJECT_DIR_NAME
 
 
+from scripts.ticket_board.workflow_config import DIRECTOR_ROLE  # noqa: E402
+
+
 def director_onboarding_seed_text(project_dir: Path) -> str:
     """The director's remit, as ordinary role data rather than a special case.
 
@@ -7657,19 +7660,27 @@ def director_onboarding_seed_text(project_dir: Path) -> str:
 
 
 def seed_director_onboarding(document, project_dir: Path):
-    """Give the director role stored onboarding when it has none.
+    """Give the configured director stored onboarding when it has none.
 
-    Only fills a gap: a director that already carries a prompt or a remit path is left
-    alone, so this cannot overwrite what an operator set.
+    Idempotent, and only ever fills a gap: a director that already carries a prompt or a
+    remit path is left untouched, as is every other role. The director is located through
+    the workflow model's own required-role constant rather than a literal, because a
+    document without that role is rejected by validation -- it is structural, not a
+    tenant-chosen name.
+
+    Returns the document and whether anything was seeded, so callers can report an
+    automatic configuration change rather than making it silently.
     """
     if not document:
-        return document
+        return document, False
+    seeded = False
     for role in document.get("roles", []):
-        if role.get("name") != "director":
+        if role.get("name") != DIRECTOR_ROLE:
             continue
         if not role.get("onboarding_prompt") and not role.get("onboarding"):
             role["onboarding_prompt"] = director_onboarding_seed_text(project_dir)
-    return document
+            seeded = True
+    return document, seeded
 
 
 def _write_switchyard_onboarding_files(

@@ -87,6 +87,42 @@ def _document_with_role_prompt(current: dict, args, parser: argparse.ArgumentPar
     return validate(document)
 
 
+def _project_dir_for(config_path: Path, document: dict) -> Path | None:
+    """Where this tenant's project lives, from the artifact the projection already knows."""
+    project = document.get("project")
+    if not project:
+        return None
+    artifact_path = config_path.parent.parent / f"{project}.project.json"
+    try:
+        repository = json.loads(artifact_path.read_text())["project"]["repository"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+    return Path(repository)
+
+
+def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
+    """Fill a configured director's missing onboarding before the document is written.
+
+    Runs on every path that persists a document -- apply, rollback/recovery, and the
+    role-prompt operations -- so a tenant is migrated by ordinary use rather than by a
+    manual per-tenant step. It is idempotent and only ever fills a gap, and it reports
+    when it changes something so an automatic configuration change is not silent.
+    """
+    from scripts import team_launcher as launcher
+
+    project_dir = _project_dir_for(config_path, cfg)
+    if project_dir is None:
+        return cfg
+    cfg, seeded = launcher.seed_director_onboarding(cfg, project_dir)
+    if seeded:
+        print(
+            f"workflow: seeded the director's onboarding prompt from {project_dir}; "
+            "it had none stored. Change it with `switchyard role-prompt set director`.",
+            file=sys.stderr,
+        )
+    return cfg
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -224,6 +260,8 @@ def main(argv=None):
         baseline = validate(json.loads(args.rollback_document.read_text()))
         projection_files(args.config, baseline)
         rollback_baseline = {**current, "document": baseline}
+    cfg = _migrate_director_onboarding(args.config, cfg)
+    files = projection_files(args.config, cfg)
     for path in files:
         parent = path.parent
         while not parent.exists():

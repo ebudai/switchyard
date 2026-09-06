@@ -13,6 +13,10 @@ ROLE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 KINDS = {"system", "draft", "implementer", "reviewer", "support", "user"}
 PRIMITIVES = {"move", "approve", "return", "reopen"}
 RUNTIMES = {"claude", "codex", "agy", "hermes"}
+# The director is a structural role of this model, not a tenant-chosen name: a
+# document without it is rejected below. Anything needing to find the director role
+# derives it from here rather than repeating the literal.
+DIRECTOR_ROLE = "director"
 # A role remit, not a document. Bounded so a stored prompt cannot grow the tenant
 # configuration without limit, and so it stays small enough to prepend to a session.
 ONBOARDING_PROMPT_MAX_CHARS = 16384
@@ -231,7 +235,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             )
         roles[name] = role
     need(
-        all(name in roles for name in ("director", "user", "unassigned")),
+        all(name in roles for name in (DIRECTOR_ROLE, "user", "unassigned")),
         "director, user and unassigned identities are required",
     )
     need(
@@ -248,7 +252,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         and len(set(removed)) == len(removed),
         "invalid explicit stage removals",
     )
-    need(roles["director"]["active"], "director must remain active")
+    need(roles[DIRECTOR_ROLE]["active"], "director must remain active")
     stages: dict[str, Any] = {}
     for stage in cfg["stages"]:
         need(isinstance(stage, dict), "stage must be an object")

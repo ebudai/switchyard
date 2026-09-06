@@ -271,23 +271,30 @@ def test_the_removed_director_branch_is_gone_from_the_hook() -> None:
 
 def test_provisioning_seeds_the_director_and_leaves_other_roles_alone() -> None:
     document = {"roles": [{"name": "director"}, {"name": "ops"}]}
-    seeded = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
+    seeded, changed = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
     director = next(r for r in seeded["roles"] if r["name"] == "director")
     ops = next(r for r in seeded["roles"] if r["name"] == "ops")
+    assert changed is True, "seeding must report the change it made"
     assert "docs/onboarding" in director["onboarding_prompt"]
     assert "onboarding_prompt" not in ops
+
+    # Idempotent: a second pass changes nothing and reports nothing.
+    again, changed_again = team_launcher.seed_director_onboarding(seeded, Path("/srv/porter"))
+    assert changed_again is False
+    assert again == seeded
 
 
 def test_provisioning_never_overwrites_onboarding_an_operator_already_set() -> None:
     for existing in ({"onboarding_prompt": "mine"}, {"onboarding": "/etc/remit.md"}):
         document = {"roles": [{"name": "director", **existing}]}
-        seeded = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
+        seeded, changed = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
         director = seeded["roles"][0]
+        assert changed is False, "an operator's own onboarding must not be reported as seeded"
         assert director == {"name": "director", **existing}, director
 
 
 def test_seeding_tolerates_a_project_with_no_workflow_document() -> None:
-    assert team_launcher.seed_director_onboarding(None, Path("/srv/porter")) is None
+    assert team_launcher.seed_director_onboarding(None, Path("/srv/porter")) == (None, False)
 
 
 class _Plan:

@@ -278,6 +278,26 @@ a unit without installing it would leave the workers moved and the authority
 not. Account existence is
 never taken as evidence of process identity.
 
+**Owning a path is not reaching it.** A role's worktree lives beneath an owner
+home that is 0710, and a linked worktree's `.git` points into the owner's
+control repository, so chowning the leaf leaves the role unable to open either.
+Provisioning therefore grants the roles group `--x` on the owner home and on
+each directory between it and the control repository -- traversal only, never
+read -- and `rwX` with default entries on the control repository itself, which
+every role's commit writes objects and refs into. The owner's credential
+directories are 0700, are not named in any grant, and stay unreadable.
+
+**The director can run its own commands.** Its configuration is a 0600 file
+under that same home, so the entrypoint used to see a foreign owner, escalate to
+root, and hand `finish-upgrade` to the one identity it refuses. The configured
+director account is granted traversal to the provisioning directory and `rwX`
+inside it, with default entries so an atomically written replacement keeps the
+contract; `finish-upgrade` is classified unprivileged so the wrapper never
+escalates it; and the entrypoint does not escalate an unprivileged command for a
+caller that can already read the configuration. The exception is bound to the
+account the configuration names, never to a role the caller claims, and the
+board still decides authority from the peer uid on its own.
+
 **Role accounts can reach the board clients.** They cannot traverse the owner's
 0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
 `ticket_board` package they import are staged root-owned under

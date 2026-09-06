@@ -57,6 +57,15 @@ from scripts.ticket_board.commit_repos import commit_git_dir_env_for_project
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
+# The shell helpers already honour this; the Python entrypoint now does too, so
+# a role account's invocation can be exercised against a real registry that is
+# not the host's (SYRD-49).
+SWITCHYARD_REGISTRY_DIR_ENV = "SWITCHYARD_PROJECT_REGISTRY_DIR"
+
+
+def switchyard_registry_dir() -> Path:
+    configured = os.environ.get(SWITCHYARD_REGISTRY_DIR_ENV, "").strip()
+    return Path(configured).expanduser() if configured else DEFAULT_SWITCHYARD_REGISTRY_DIR
 SWITCHYARD_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 SWITCHYARD_NAME = "switchyard"
 TEAM_LAUNCHER_NAME = "team-launcher"
@@ -178,7 +187,10 @@ SWITCHYARD_COMMANDS = (
 # invoking user, which is the point: the director sets a role's remit without root
 # and without hand-editing a generated artifact.
 SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
-    {"present", "board-skill", "role-prompt", "set-role-runtime"}
+    # `finish-upgrade` is the director's own phase and refuses to run as root by
+    # design; classifying it privileged made the wrapper escalate it into the
+    # refusal, leaving the director no way to run it at all (SYRD-49).
+    {"present", "board-skill", "role-prompt", "set-role-runtime", "finish-upgrade"}
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
     command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
@@ -1591,7 +1603,7 @@ def _resolve_launcher_project_config(
     if explicit_config is not None:
         return SwitchyardProjectEntry(slug=project, name=project, config_path=explicit_config)
     effective_config_dir = config_dir or DEFAULT_CONFIG_DIR
-    effective_registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    effective_registry_dir = registry_dir or switchyard_registry_dir()
     try:
         return _resolve_switchyard_project(
             project,
@@ -7669,7 +7681,7 @@ def _teardown_project_context(
     home_base: Path,
 ) -> tuple[ProjectBoardProvision, Path, Path, bool]:
     project_slug = _validate_project_slug(project)
-    registry_path = (registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR) / f"{project_slug}.json"
+    registry_path = (registry_dir or switchyard_registry_dir()) / f"{project_slug}.json"
     entry, broken_entries = _usable_switchyard_entry_for_project(
         project_slug,
         config_dir=config_dir,
@@ -8069,7 +8081,7 @@ def precheck_new_project(
                 )
             else:
                 effective_config_dir = config_dir or DEFAULT_CONFIG_DIR
-                effective_registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+                effective_registry_dir = registry_dir or switchyard_registry_dir()
                 broken_entry_detail = f"  unusable launch entry: {broken_entries[0]}\n" if broken_entries else ""
                 errors.append(
                     f"project {plan.project!r} is partially provisioned but not registered "
@@ -11556,7 +11568,7 @@ def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEn
 
 
 def _registry_project_entries(registry_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
-    registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    registry_dir = registry_dir or switchyard_registry_dir()
     entries: list[SwitchyardProjectEntry] = []
     try:
         paths = sorted(path for path in registry_dir.iterdir() if path.is_file() and path.suffix == ".json")
@@ -11652,7 +11664,7 @@ def _register_switchyard_project(
     slug = _validate_project_slug(raw_slug)
     load_project_config(slug, resolved_config_path)
     name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
-    registry_dir = registry_dir or DEFAULT_SWITCHYARD_REGISTRY_DIR
+    registry_dir = registry_dir or switchyard_registry_dir()
     registry_path = registry_dir / f"{slug}.json"
     _check_switchyard_registration_available(
         slug=slug,
@@ -12732,6 +12744,77 @@ def upgrade_role_accounts_in_config(config_path: Path, *, dry_run: bool = False)
     return True, "team-launcher: gave " + ", ".join(sorted(added)) + " their own Unix accounts"
 
 
+def director_role_name(config: ProjectConfig, *, config_path: Path | None = None) -> str:
+    """Which configured role is the director, from configuration and not a claim."""
+    document = None
+    if config_path is not None:
+        try:
+            document = (_load_json(config_path) or {}).get("workflow")
+        except SystemExit:
+            document = None
+    names = {role.role for role in config.roles}
+    if isinstance(document, Mapping):
+        for role in document.get("roles") or []:
+            if isinstance(role, Mapping) and str(role.get("name") or "") == "director":
+                return "director" if "director" in names else ""
+    return "director" if "director" in names else ""
+
+
+def role_path_access_commands(config: ProjectConfig) -> list[str]:
+    """ACL grants that make each role's own worktree and git metadata reachable."""
+    from scripts.ticket_board.project_provision import (
+        role_worktree_access_commands,
+        roles_group_name,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    owner_home = str(home_dir_for_user(owner) or Path("/home") / owner)
+    worktree_base = str(
+        config.worktree_base
+        or (Path(config.roles[0].workdir).parent if config.roles else Path(owner_home))
+    )
+    control = config.control_repository
+    if control is None:
+        return []
+    return role_worktree_access_commands(
+        owner_home=owner_home,
+        roles_group=roles_group_name(config.project),
+        worktree_base=worktree_base,
+        control_repository=str(control.expanduser()),
+    )
+
+
+def director_control_access_commands_for(
+    config: ProjectConfig, *, config_path: Path | None = None
+) -> list[str]:
+    """ACL grants that let the configured director run its own commands."""
+    from scripts.ticket_board.project_provision import director_control_access_commands
+
+    director = director_role_name(config, config_path=config_path)
+    if not director:
+        return []
+    role = _role_by_name(config, director)
+    account = (role.run_as_user if role is not None else "") or role_account_name(
+        config.project, director
+    )
+    owner = config.run_as_user or current_user_name()
+    owner_home = str(home_dir_for_user(owner) or Path("/home") / owner)
+    project_dir = _project_dir_from_generated_config_path(config_path) if config_path else None
+    if project_dir is None and config.repository is not None:
+        project_dir = config.repository
+    provision_dir = (
+        str(config_path.parent)
+        if config_path is not None
+        else str((project_dir or Path(owner_home)) / ".switchyard" / "provision")
+    )
+    return director_control_access_commands(
+        owner_home=owner_home,
+        director_account=account,
+        provision_dir=provision_dir,
+        project_dir=str(project_dir or ""),
+    )
+
+
 def render_role_account_migration(config: ProjectConfig) -> str:
     """Operator commands that move an existing tenant onto per-role accounts.
 
@@ -12768,6 +12851,11 @@ def render_role_account_migration(config: ProjectConfig) -> str:
             config.project, str(switchyard_shared_install_root() / "current")
         )
     )
+    # Owning a worktree is not reaching it: the owner home above it is 0710.
+    # These grant traversal and the shared git metadata, and nothing else
+    # (SYRD-49).
+    lines.extend(role_path_access_commands(config))
+    lines.extend(director_control_access_commands_for(config))
     for role in config.roles:
         # Canonical rather than configured: this artifact is what CREATES the
         # accounts, so it has to be renderable before the configuration names
@@ -14357,6 +14445,21 @@ def finish_upgrade_command(
             "root. Run it from the director's own session."
         )
         return 1
+    # Bound to the configured account, not to anything the caller says about
+    # itself. The board decides the same question from the peer uid; this is so
+    # the wrong account gets an answer instead of a rejected write (SYRD-49).
+    director = director_role_name(config, config_path=config_path)
+    caller = current_user_name()
+    owner = (config.run_as_user or "").strip()
+    if director:
+        role = _role_by_name(config, director)
+        account = (role.run_as_user if role is not None else "") or ""
+        if account and caller not in {account, owner}:
+            print_func(
+                f"switchyard: finish-upgrade makes {config.project}'s director-authority board "
+                f"write, which the board authorizes for {account}. This process is {caller}."
+            )
+            return 1
     if dry_run:
         print_func(
             f"switchyard: would migrate {config.project}'s declarative director onboarding as "
@@ -14984,12 +15087,22 @@ def add_project_role_command(
         if pane_user and not account_exists(pane_user):
             from scripts.ticket_board.project_provision import role_account_commands
 
+            add_role_owner = updated_config.run_as_user or current_user_name()
             pending_account_commands = role_account_commands(
                 updated_config.project,
                 role,
-                updated_config.run_as_user or current_user_name(),
+                add_role_owner,
                 board_service_user(updated_config),
                 worktree=pane_role.workdir,
+                owner_home=str(home_dir_for_user(add_role_owner) or Path("/home") / add_role_owner),
+                worktree_base=str(
+                    updated_config.worktree_base or Path(pane_role.workdir).parent
+                ),
+                control_repository=(
+                    str(updated_config.control_repository.expanduser())
+                    if updated_config.control_repository is not None
+                    else ""
+                ),
             )
         else:
             pane_script_path = updated_config.pane_launcher or script_path or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
@@ -15885,9 +15998,36 @@ def _project_config_path_owner_user(path: Path) -> str:
         return ""
 
 
+def _configured_role_account_caller(config: ProjectConfig) -> str:
+    """The configured role this caller's Unix account IS, or empty.
+
+    Bound to the account, never to a role name the caller supplies: the
+    configuration says which account belongs to which role, and the board still
+    decides authority from the peer uid on its own (SYRD-49).
+    """
+    caller = current_user_name()
+    owner = (config.run_as_user or "").strip()
+    for role in config.roles:
+        account = (role.run_as_user or "").strip()
+        if account and account != owner and account == caller:
+            return role.role
+    return ""
+
+
+def _switchyard_command_is_unprivileged(argv: Sequence[str]) -> bool:
+    return bool(argv) and argv[0].casefold() in SWITCHYARD_UNPRIVILEGED_COMMANDS
+
+
 def _require_switchyard_owner_hint_or_root(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> None:
     owner = _project_config_path_owner_user(entry.config_path)
     if not owner or current_user_name() == owner or os.geteuid() == 0:
+        return
+    if _switchyard_command_is_unprivileged(argv) and os.access(entry.config_path, os.R_OK):
+        # A role account running its own unprivileged command. It can read the
+        # configuration because provisioning granted that account exactly that,
+        # and escalating here would hand the command to root -- which the
+        # commands that matter then refuse, leaving no way to run them at all
+        # (SYRD-49).
         return
     _switchyard_exec_with_root(argv)
 
@@ -15895,6 +16035,8 @@ def _require_switchyard_owner_hint_or_root(entry: SwitchyardProjectEntry, argv: 
 def _require_switchyard_project_owner_or_root(config: ProjectConfig, argv: Sequence[str]) -> None:
     owner = (config.run_as_user or "").strip()
     if not owner or current_user_name() == owner or os.geteuid() == 0:
+        return
+    if _switchyard_command_is_unprivileged(argv) and _configured_role_account_caller(config):
         return
     _switchyard_exec_with_root(argv)
 

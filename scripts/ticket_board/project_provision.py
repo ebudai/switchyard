@@ -559,6 +559,93 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     return commands
 
 
+def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
+    """Let one principal walk THROUGH the owner's home without reading it.
+
+    The owner home is 0710 and holds the owner's credentials, so it must stay
+    unreadable; but a role that owns a worktree beneath it still cannot reach
+    that worktree without traversal. `--x` grants exactly that and nothing else,
+    which is the same grant the board service already holds (SYRD-49).
+    """
+    return [f"sudo setfacl -m {principal}:--x {shell_quote(owner_home)}"]
+
+
+def role_worktree_access_commands(
+    *,
+    owner_home: str,
+    roles_group: str,
+    worktree_base: str,
+    control_repository: str,
+) -> list[str]:
+    """Make each role's own worktree and its git metadata reachable.
+
+    Chowning a worktree leaf does not make it reachable: every directory above
+    it has to be traversable, and a linked worktree's gitdir lives inside the
+    owner's control repository, which the role must also read and write to
+    record a commit. Neither grant exposes the owner's credentials, which stay
+    0700 and are not named here (SYRD-49).
+    """
+    group = f"g:{roles_group}"
+    commands = owner_home_traversal_commands(owner_home, group)
+    commands.append(f"sudo setfacl -m {group}:--x {shell_quote(worktree_base)}")
+    # Every component between the home and the control repository, so the
+    # gitdir a linked worktree points at can be opened at all.
+    seen: list[str] = []
+    parts = PurePosixPath(control_repository).parts
+    for index in range(1, len(parts)):
+        candidate = str(PurePosixPath(*parts[:index + 1]))
+        if candidate.startswith(owner_home) and candidate != owner_home:
+            seen.append(candidate)
+    for directory in seen[:-1]:
+        commands.append(f"sudo setfacl -m {group}:--x {shell_quote(directory)}")
+    # The repository itself is shared: a commit made in any role's worktree
+    # writes objects, refs and logs here. Default entries so the objects git
+    # creates later inherit the same access.
+    commands.append(f"sudo setfacl -R -m {group}:rwX {shell_quote(control_repository)}")
+    commands.append(f"sudo setfacl -R -m d:{group}:rwX {shell_quote(control_repository)}")
+    return commands
+
+
+def director_control_access_commands(
+    *,
+    owner_home: str,
+    director_account: str,
+    provision_dir: str,
+    project_dir: str,
+) -> list[str]:
+    """Let the configured director account use its own unprivileged commands.
+
+    The director's board write is authorized by the board from its peer uid, and
+    the command that makes it has to read and update the durable control
+    artifacts -- the launcher config, the workflow projection, the plan and the
+    upgrade record. Those live in a 0600 file under the 0710 owner home, so the
+    director could not read them and the entrypoint escalated to root, which
+    that command then correctly refuses. The grant is bound to the configured
+    account and reaches only the provisioning directory (SYRD-49).
+    """
+    principal = f"u:{director_account}"
+    commands = owner_home_traversal_commands(owner_home, principal)
+    seen: list[str] = []
+    parts = PurePosixPath(provision_dir).parts
+    for index in range(1, len(parts)):
+        candidate = str(PurePosixPath(*parts[:index + 1]))
+        if candidate.startswith(owner_home) and candidate != owner_home:
+            seen.append(candidate)
+    for directory in seen[:-1]:
+        commands.append(f"sudo setfacl -m {principal}:--x {shell_quote(directory)}")
+    if (
+        project_dir
+        and project_dir.startswith(owner_home)
+        and f"sudo setfacl -m {principal}:--x {shell_quote(project_dir)}" not in commands
+    ):
+        commands.append(f"sudo setfacl -m {principal}:--x {shell_quote(project_dir)}")
+    commands.append(f"sudo setfacl -R -m {principal}:rwX {shell_quote(provision_dir)}")
+    # Default entries so an atomically written replacement keeps the contract:
+    # every projection writes a new file and renames it into place.
+    commands.append(f"sudo setfacl -R -m d:{principal}:rwX {shell_quote(provision_dir)}")
+    return commands
+
+
 def role_runtime_commands(
     *,
     project: str,
@@ -645,6 +732,9 @@ def role_account_commands(
     runtime_directory: str = "",
     board_current: str = "",
     worktree: str = "",
+    owner_home: str = "",
+    worktree_base: str = "",
+    control_repository: str = "",
 ) -> str:
     """Operator commands to add ONE role's Unix account to an existing project.
 
@@ -677,6 +767,18 @@ def role_account_commands(
             worktree=worktree,
         )
     )
+    resolved_owner_home = owner_home or f"/home/{owner_user}"
+    if control_repository:
+        # A role added later needs the same reachability as one provisioned with
+        # the project: owning the leaf is not reaching it (SYRD-49).
+        lines.extend(
+            role_worktree_access_commands(
+                owner_home=resolved_owner_home,
+                roles_group=group,
+                worktree_base=worktree_base or str(PurePosixPath(worktree).parent) if worktree else resolved_owner_home,
+                control_repository=control_repository,
+            )
+        )
     lines.extend(
         [
             "# Refresh the director control interface so it can drive the new role:",

@@ -50,6 +50,36 @@ All presentation worker, display-slot, and viewer targets use tmux exact-name
 selection. A missing session therefore cannot prefix-match, attach to, relabel,
 respawn, or stop a longer session name owned by another role.
 
+## Client sizing and status bars
+
+A presentation client stack has three layers: the worker session, the display
+slot that proxies it, and — in viewer mode — the viewer that aggregates the
+slots. Each layer is a tmux session, so each one could draw a status line and
+each one could resize the layer below it.
+
+Only the worker draws a status line. Display slots and the viewer both set
+`status off`; the slot label lives in the display session's window title and
+its `@switchyard_slot`/`@switchyard_role` pane options, and the viewer repeats
+it on the pane borders. A client therefore shows one status bar per visible
+worker rather than one per layer.
+
+Sizing follows the window an operator is actually looking at:
+
+- Viewer panes attach to their display slot with the `ignore-size` client flag.
+  A viewer that is smaller than a separate window showing the same slot no
+  longer shrinks that slot, and when the viewer pane is a slot's only client
+  tmux still sizes the slot from it.
+- A display slot attaches to its worker as that worker's sizing client, so the
+  worker follows the presentation window as it is resized. When the worker is
+  already attached to a client of its own — an ordinary project window that is
+  still open, for instance — the slot attaches with `ignore-size` instead and
+  leaves the geometry that window is showing alone.
+
+Reconciliation applies both rules, so `show`, `swap`, `hide`, `restore` and
+`recover` repair a running presentation instead of leaving the policy to the
+next bootstrap. Reconciliation also re-applies `ignore-size` to the viewer's
+live clients, which repairs a viewer that an earlier build started.
+
 `list` distinguishes missing or dead workers from disconnected display
 clients, reports whether a resume record exists, and lists configured roles
 that are hidden. `recover` is the only presentation operation that may make one

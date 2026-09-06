@@ -574,7 +574,11 @@ def test_a_failed_migration_stops_the_upgrade_rather_than_warning() -> None:
 
     assert "director onboarding migration failed" in message
     assert "board rejected the document" in message
-    assert "role-prompt clear director" in message, "the message should name the deliberate way out"
+    # SYRD-45: an authorization or board failure is not a reason to discard the
+    # director's configured onboarding, and offering that as the way out taught
+    # exactly that. The message says to resolve it, and says why not.
+    assert "role-prompt clear director" not in message, message
+    assert "Clearing the director's onboarding is not a recovery" in message, message
 
 
 def test_the_write_path_hands_the_projection_to_the_tenant_when_privileged() -> None:

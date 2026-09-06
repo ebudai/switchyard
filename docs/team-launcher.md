@@ -200,6 +200,50 @@ a role's session loses that role's work, which is worse than the window -- and i
 lists what was running before and after so that is checkable rather than
 promised.
 
+## Upgrading a tenant
+
+`switchyard upgrade` is ordered, journaled, and stops at the phases root does
+not own. The order exists because the failure modes do.
+
+| phase | owner | what it does |
+| --- | --- | --- |
+| `artifacts` | root | regenerate what is safe while the current roles keep running |
+| `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, ownership and credentials |
+| `identities` | root | write those accounts into the configuration and refresh the board authority table |
+| `director` | director | `switchyard finish-upgrade <project>`, the one board write only the director may make |
+| `deploy` | operator | deploy the matching board release |
+
+Each phase is recorded in `<project>-upgrade.json` beside the configuration, so
+an interrupted upgrade resumes rather than repeats and a partial state is
+visible rather than inferred. Every phase is idempotent; rerunning is the
+supported way to continue.
+
+**The configuration is not written before the accounts exist.** A configuration
+naming per-role accounts that do not exist is not a migration in progress: those
+roles cannot start, and installing the matching authority table would stop the
+board recognising the panes that *are* running. If an upgrade finds that state
+on a tenant with live sessions it says so and returns those roles to the project
+account, which is the identity the running sessions actually have. A freshly
+provisioned project is the other case -- it names its accounts before the
+operator creates them and has nothing running -- so it is left as provisioned
+and simply waits.
+
+**Root does not make the director's board write.** The declarative onboarding
+migration is authorized by the board from the caller's uid. Root has no role
+there, and manufacturing `TICKET_BOARD_CALLER_ROLE=director` would be
+impersonation, so root reports the phase and the director runs `switchyard
+finish-upgrade <project>` from their own session. That command refuses to run as
+root. If the migration fails, the message says to resolve it: clearing the
+director's configured onboarding is not a recovery for an error, and is no
+longer offered as one.
+
+**The deploy instruction is withheld until it is safe to follow.** Installing
+the generated unit is what makes the role-account table authoritative, so the
+release deploy commands are not printed while a tenant's configuration names
+accounts that do not all exist, or while the director phase is outstanding. A
+tenant that never opted into per-role accounts is consistent as it stands and is
+not withheld from ordinary release upgrades.
+
 ## Modes
 
 ```bash

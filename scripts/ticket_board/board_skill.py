@@ -85,6 +85,25 @@ def _release_marker_commit(root: Path) -> str:
     return str(payload.get("commit") or "").strip()
 
 
+def _commit_carries_source(
+    root: Path,
+    commit: str,
+    body: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """True when ``commit`` really contains the body we are about to install."""
+    proc = runner(
+        ["git", "-C", str(root), "show", f"{commit}:{CANONICAL_RELATIVE_SOURCE.as_posix()}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    return str(getattr(proc, "stdout", "") or "") == body
+
+
 def resolve_source_commit(
     source: Path,
     *,
@@ -92,10 +111,17 @@ def resolve_source_commit(
 ) -> str:
     """Provenance for ``source``: its immutable release marker, else its checkout.
 
+    A release tree is an export of one commit, so its marker is the answer. A
+    working checkout is not: `HEAD` there can be any commit, including one that
+    predates this file entirely. Stamping it anyway would produce a copy whose
+    footer names a release that does not contain the body it carries, so the
+    commit is claimed only when it actually holds these bytes.
+
     Callers that already know the release commit -- the launcher does, and it
     resolves it the same way for onboarding docs -- should pass it in rather
     than rely on this fallback.
     """
+    source = Path(source).expanduser()
     root = source_root_for(source)
     marker_commit = _release_marker_commit(root)
     if marker_commit:
@@ -108,7 +134,16 @@ def resolve_source_commit(
     )
     if proc.returncode != 0:
         return UNKNOWN_COMMIT
-    return str(getattr(proc, "stdout", "") or "").strip() or UNKNOWN_COMMIT
+    commit = str(getattr(proc, "stdout", "") or "").strip()
+    if not commit:
+        return UNKNOWN_COMMIT
+    try:
+        body = source.read_text(encoding="utf-8")
+    except OSError:
+        return UNKNOWN_COMMIT
+    if not _commit_carries_source(root, commit, body, runner=runner):
+        return UNKNOWN_COMMIT
+    return commit
 
 
 @dataclass(frozen=True)
@@ -195,6 +230,16 @@ def verify_board_skill(*, home: Path, expected_commit: str = "") -> list[Adapter
             results.append(AdapterResult(runtime, path, "unmanaged", "no Switchyard provenance footer"))
             continue
         commit, _source = provenance
+        if commit == UNKNOWN_COMMIT:
+            results.append(
+                AdapterResult(
+                    runtime,
+                    path,
+                    "unprovenanced",
+                    "installed from a tree that could not name the commit carrying this body",
+                )
+            )
+            continue
         if expected_commit and commit != expected_commit:
             results.append(AdapterResult(runtime, path, "stale", f"installed from {commit}"))
             continue
@@ -203,4 +248,68 @@ def verify_board_skill(*, home: Path, expected_commit: str = "") -> list[Adapter
 
 
 def failed_runtimes(results: Iterable[AdapterResult]) -> list[str]:
-    return [result.runtime for result in results if result.action in {"failed", "missing", "stale", "unmanaged"}]
+    return [
+        result.runtime
+        for result in results
+        if result.action in {"failed", "missing", "stale", "unmanaged", "unprovenanced"}
+    ]
+
+
+def default_source(tree_root: Path) -> Path:
+    return Path(tree_root).expanduser() / CANONICAL_RELATIVE_SOURCE
+
+
+def install_command(
+    *,
+    home: Path,
+    source: Path,
+    source_commit: str = "",
+    force: bool = False,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+    error_func: Callable[[str], None] = print,
+) -> int:
+    source = Path(source).expanduser()
+    if not source.is_file():
+        error_func(f"switchyard: canonical board skill {source} is missing")
+        return 1
+    commit = source_commit.strip() or resolve_source_commit(source)
+    results = install_board_skill(
+        home=home, source=source, source_commit=commit, force=force, dry_run=dry_run
+    )
+    for result in results:
+        print_func(result.describe())
+    if commit == UNKNOWN_COMMIT:
+        # Loud, because an unprovenanced copy is exactly what must not be
+        # mistaken for evidence that a release shipped this skill.
+        error_func(
+            f"switchyard: warning: no release commit carries {source}; installed copies are "
+            "stamped 'unknown' and verify will report them unprovenanced"
+        )
+    failures = [result for result in results if result.action == "failed"]
+    if failures:
+        error_func("switchyard: could not install " + ", ".join(result.runtime for result in failures))
+        return 1
+    return 0
+
+
+def verify_command(
+    *,
+    home: Path,
+    source_commit: str = "",
+    print_func: Callable[[str], None] = print,
+    error_func: Callable[[str], None] = print,
+) -> int:
+    results = verify_board_skill(home=home, expected_commit=source_commit)
+    for result in results:
+        print_func(result.describe())
+    unusable = failed_runtimes(results)
+    if unusable:
+        error_func(
+            f"switchyard: {SKILL_NAME} is not usable for "
+            + ", ".join(unusable)
+            + "; re-run `switchyard board-skill install`"
+        )
+        return 1
+    return 0
+

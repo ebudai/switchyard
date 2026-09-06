@@ -174,8 +174,8 @@ covering the same tool usage and safety rules in the compact form an agent loads
 while working. It is a projection of one source, so it says the same thing on all
 four runtimes. Load it when you are about to touch the board; read this guide when
 you need the mechanics behind it. If a session reports it cannot find the skill,
-`switchyard-board-skill verify` says which runtime is missing it and
-`switchyard-board-skill install` restores it.
+`switchyard board-skill verify` says which runtime is missing it and
+`switchyard board-skill install` restores it.
 
 ---
 

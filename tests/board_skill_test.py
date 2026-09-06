@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import json
+import os
 import importlib.util
 import re
 import subprocess
@@ -22,6 +23,7 @@ from scripts.ticket_board import board_skill  # noqa: E402
 from scripts.ticket_board import notify_listener  # noqa: E402
 
 INSTALLER = ROOT / "scripts" / "switchyard-board-skill"
+PUBLIC_SWITCHYARD = ROOT / "scripts" / "switchyard"
 CANONICAL = ROOT / board_skill.CANONICAL_RELATIVE_SOURCE
 PANE_HOOK = ROOT / "scripts" / "ticket-board-pane-idle-hook"
 
@@ -118,6 +120,108 @@ def test_provenance_footer_never_displaces_the_frontmatter() -> None:
                                    source_commit="deadbeef") == stamped
 
 
+def _git(repo: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+             "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@example.invalid"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def _skill_checkout(root: Path, body: str) -> Path:
+    source = root / board_skill.CANONICAL_RELATIVE_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(body, encoding="utf-8")
+    return source
+
+
+def test_recovery_runs_through_the_public_switchyard_command() -> None:
+    """The documented recovery path must not depend on a pane's own PATH.
+
+    Only `switchyard` is installed host-wide; `switchyard-board-skill` lives in
+    the deployed tree's scripts directory, which a pane happens to have on PATH
+    and an operator's shell does not.
+    """
+    from scripts import team_launcher
+
+    assert "board-skill" in team_launcher.SWITCHYARD_COMMANDS
+    assert not team_launcher.switchyard_invocation_requires_root(["board-skill", "verify"])
+    assert "board-skill" not in team_launcher.SWITCHYARD_PRIVILEGED_COMMANDS
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-public.") as tmp:
+        home = Path(tmp)
+        public = subprocess.run(
+            [sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "install", "--home", str(home)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert public.returncode == 0, public.stderr
+        assert public.stdout.count(": installed ") == 4
+        verified = subprocess.run(
+            [sys.executable, str(PUBLIC_SWITCHYARD), "board-skill", "verify", "--home", str(home)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        assert verified.returncode == 0, verified.stderr
+        assert verified.stdout.count(": present ") == 4
+
+
+def test_a_checkout_only_claims_a_commit_that_carries_this_body() -> None:
+    """The provenance footer must never name a release that lacks the skill."""
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-provenance.") as tmp:
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        (repo / "unrelated.txt").write_text("seed\n", encoding="utf-8")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-m", "before the skill existed")
+        before = _git(repo, "rev-parse", "HEAD")
+
+        # Written but not committed: HEAD does not carry it.
+        source = _skill_checkout(repo, "---\nname: switchyard-board\n---\n\nBody.\n")
+        assert board_skill.resolve_source_commit(source) == board_skill.UNKNOWN_COMMIT
+
+        _git(repo, "add", str(board_skill.CANONICAL_RELATIVE_SOURCE))
+        _git(repo, "commit", "-q", "-m", "add the skill")
+        carrying = _git(repo, "rev-parse", "HEAD")
+        assert carrying != before
+        assert board_skill.resolve_source_commit(source) == carrying
+
+        # Edited since that commit: the commit no longer describes these bytes.
+        source.write_text("---\nname: switchyard-board\n---\n\nEdited.\n", encoding="utf-8")
+        assert board_skill.resolve_source_commit(source) == board_skill.UNKNOWN_COMMIT
+
+
+def test_a_release_export_is_trusted_through_its_marker() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-release.") as tmp:
+        release = Path(tmp) / "release"
+        source = _skill_checkout(release, "---\nname: switchyard-board\n---\n\nBody.\n")
+        # A release tree is a git-less export plus the marker, so the marker is
+        # the only thing that can name the commit.
+        (release / board_skill.RELEASE_MARKER_NAME).write_text(
+            json.dumps({"commit": "a" * 40}) + "\n", encoding="utf-8"
+        )
+        assert board_skill.resolve_source_commit(source) == "a" * 40
+
+
+def test_an_unprovenanced_copy_is_reported_rather_than_counted_as_installed() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-unknown.") as tmp:
+        home = Path(tmp)
+        result = _run_installer(
+            "install", "--home", str(home), "--source-commit", board_skill.UNKNOWN_COMMIT
+        )
+        assert result.returncode == 0
+        assert "warning" in result.stderr and "unprovenanced" in result.stderr
+
+        verified = _run_installer("verify", "--home", str(home))
+        assert verified.returncode == 1
+        assert verified.stdout.count(": unprovenanced ") == 4
+        assert board_skill.failed_runtimes(board_skill.verify_board_skill(home=home)) == [
+            runtime for runtime, _root in board_skill.SKILL_ADAPTERS
+        ]
+
+
 def test_install_projects_one_identical_body_into_every_runtime() -> None:
     with tempfile.TemporaryDirectory(prefix="switchyard-board-skill.") as tmp:
         home = Path(tmp)
@@ -174,6 +278,7 @@ def test_a_skill_switchyard_did_not_write_is_never_overwritten() -> None:
         verified = _run_installer("verify", "--home", str(home))
         assert verified.returncode == 1
         assert "codex" in verified.stderr
+        assert "switchyard board-skill install" in verified.stderr
 
         forced = _run_installer("install", "--home", str(home), "--source-commit", "c0ffee", "--force")
         assert forced.returncode == 0

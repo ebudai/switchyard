@@ -135,6 +135,7 @@ DEFAULT_TMUX_HISTORY_LIMIT = 200_000
 MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
 SWITCHYARD_COMMANDS = (
+    "board-skill",
     "new",
     "register",
     "upgrade",
@@ -146,7 +147,12 @@ SWITCHYARD_COMMANDS = (
     "status",
     "validate-models",
 )
-SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(command for command in SWITCHYARD_COMMANDS if command != "present")
+# `present` and `board-skill` act on the caller's own runtime -- display slots
+# and the caller's CLI skill trees -- so neither needs to escalate.
+SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset({"present", "board-skill"})
+SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
+    command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
+)
 YOLO_ARGS_BY_CLI = {
     "agy": ["--dangerously-skip-permissions"],
     "claude": ["--dangerously-skip-permissions"],
@@ -11387,6 +11393,7 @@ def switchyard_help_text() -> str:
   switchyard <command> [options]
 
 Commands:
+  board-skill      install or verify the portable board skill for every agent CLI
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
@@ -11560,6 +11567,10 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             start=not args.no_start,
             script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         )
+    if argv[0].casefold() == "board-skill":
+        from scripts import board_skill_cli
+
+        return board_skill_cli.main(argv[1:], prog="switchyard board-skill")
     if argv[0].casefold() == "present":
         args = _build_switchyard_present_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

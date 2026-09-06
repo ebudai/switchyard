@@ -18,8 +18,8 @@ of that ticket's own `workflow_actions`.
 
 ## Adapter locations
 
-`scripts/switchyard-board-skill install` writes the same file, byte for byte,
-to each runtime's own discovery path under the project owner's home:
+`switchyard board-skill install` writes the same file, byte for byte, to each
+runtime's own discovery path under the project owner's home:
 
 | Runtime | Installed path |
 |---|---|
@@ -46,8 +46,14 @@ Each installed copy ends with a footer naming the Switchyard commit it came from
 <!-- Switchyard board skill snapshot: source commit <sha>; source skills/switchyard-board/SKILL.md. -->
 ```
 
-The commit comes from the immutable release marker (`.switchyard-release.json`)
-that governs the deployed tree, falling back to the checkout's `HEAD`.
+A deployed tree is an export of exactly one commit, so its release marker
+(`.switchyard-release.json`) is the answer and is trusted. A working checkout is
+not: `HEAD` there can be any commit, including one that predates this file. The
+installer therefore claims a checkout's `HEAD` only when that commit actually
+contains these bytes, and otherwise stamps `unknown` and says so on stderr. A
+copy stamped `unknown` is reported by `verify` as `unprovenanced` and fails it —
+so a hand-projected copy can never be mistaken for evidence that a release
+shipped the skill.
 
 That footer is also the ownership marker:
 
@@ -81,17 +87,26 @@ The body is installed once; sessions get a pointer, never a paste.
 If a pane says it cannot find the skill:
 
 ```bash
-switchyard-board-skill verify                 # per runtime: present, stale, unmanaged, missing
-switchyard-board-skill install                # reinstall from the canonical source
-switchyard-board-skill install --dry-run      # show what would change first
-switchyard-board-skill source-commit          # provenance the source would stamp
+switchyard board-skill verify              # per runtime: present, stale, unmanaged, unprovenanced, missing
+switchyard board-skill install             # reinstall from the canonical source
+switchyard board-skill install --dry-run   # show what would change first
+switchyard board-skill source-commit       # provenance the source would stamp
 ```
 
-`verify` exits non-zero and names the runtimes that cannot use the skill. Run
-both from the deployed Switchyard tree (`scripts/` beside the launcher the project
-runs), so the source and the provenance match what the tenant is running. A
-runtime reported `unmanaged` has a hand-written skill at that path — read it before
-using `--force`.
+Use `switchyard`, not a bare `switchyard-board-skill`. Only `switchyard` is
+installed host-wide; `switchyard-board-skill` lives in the deployed tree's
+`scripts/` directory, which a role pane happens to have on `PATH` and an
+operator's shell does not. If you do need that script directly — from a
+provisioning context, say — its guaranteed path is
+`<board-root>/current/scripts/switchyard-board-skill`, and inside a pane
+`"$(dirname "$TICKET_BOARD_DIRECTORCTL")/switchyard-board-skill"` resolves it.
+`switchyard board-skill` needs no root.
+
+`verify` exits non-zero and names the runtimes that cannot use the skill.
+`unmanaged` means a hand-written skill sits at that path — read it before using
+`--force`. `unprovenanced` means the copy was installed from a tree that could
+not name the commit carrying it; reinstall from a deployed release rather than
+from a working checkout.
 
 Installing the file is not the same as the runtime using it. A CLI reads its skill
 directory at startup, so restart the pane's CLI after an install, and confirm by

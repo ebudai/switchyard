@@ -2990,6 +2990,37 @@ def test_final_review_handoff_ignores_only_scheduling_flags() -> None:
         assert conn.acked == [notification_id]
 
 
+def test_final_review_handoff_exemption_does_not_broaden_manual_holds() -> None:
+    for notification_id, state in ((59, "analysis"), (60, "dat")):
+        ticket_id = f"PGU-{notification_id}"
+        sent: list[tuple[str, str]] = []
+        conn = FakeConnection(
+            [
+                queue_row(
+                    notification_id,
+                    ticket_id,
+                    state=state,
+                    assignee="director",
+                    target_role="director",
+                )
+            ],
+            ticket_rows={ticket_id: (state, "director", True, False, False)},
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="dbname=test",
+            sender=lambda target, text: sent.append((target, text)),
+            activity_gate=lambda _target: False,
+            connector=lambda *args, conn=conn, **kwargs: conn,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        )
+
+        assert listener.listen_once(max_notifications=1) == 0
+        assert sent == []
+        assert conn.acked == [notification_id]
+        assert trace_events(conn) == ["listener_claim", "drop", "listener_ack"]
+
+
 def test_final_review_handoff_drops_after_review_identity_changes() -> None:
     for notification_id, target_role, ticket_row in (
         (56, "director", ("done", "director", True, False, False)),

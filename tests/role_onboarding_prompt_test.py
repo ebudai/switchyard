@@ -271,30 +271,35 @@ def test_the_removed_director_branch_is_gone_from_the_hook() -> None:
 
 def test_provisioning_seeds_the_director_and_leaves_other_roles_alone() -> None:
     document = {"roles": [{"name": "director"}, {"name": "ops"}]}
-    seeded, changed = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
+    seeded, outcome = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
     director = next(r for r in seeded["roles"] if r["name"] == "director")
     ops = next(r for r in seeded["roles"] if r["name"] == "ops")
-    assert changed is True, "seeding must report the change it made"
+    assert outcome.seeded is True, "seeding must report the prompt it filled"
+    assert outcome.marked is True
     assert "docs/onboarding" in director["onboarding_prompt"]
     assert "onboarding_prompt" not in ops
 
     # Idempotent: a second pass changes nothing and reports nothing.
-    again, changed_again = team_launcher.seed_director_onboarding(seeded, Path("/srv/porter"))
-    assert changed_again is False
+    again, repeat = team_launcher.seed_director_onboarding(seeded, Path("/srv/porter"))
+    assert repeat.changed is False
     assert again == seeded
 
 
 def test_provisioning_never_overwrites_onboarding_an_operator_already_set() -> None:
     for existing in ({"onboarding_prompt": "mine"}, {"onboarding": "/etc/remit.md"}):
         document = {"roles": [{"name": "director", **existing}]}
-        seeded, changed = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
+        seeded, outcome = team_launcher.seed_director_onboarding(document, Path("/srv/porter"))
         director = seeded["roles"][0]
-        assert changed is False, "an operator's own onboarding must not be reported as seeded"
+        assert outcome.seeded is False, "an operator's own onboarding must not be overwritten"
+        # But the marker still changed, and must be persisted: without it a later clear
+        # would look like a legacy gap and the default would be restored.
+        assert outcome.marked is True and outcome.changed is True
         assert director == {"name": "director", **existing}, director
 
 
 def test_seeding_tolerates_a_project_with_no_workflow_document() -> None:
-    assert team_launcher.seed_director_onboarding(None, Path("/srv/porter")) == (None, False)
+    document, outcome = team_launcher.seed_director_onboarding(None, Path("/srv/porter"))
+    assert document is None and outcome.changed is False
 
 
 class _Plan:
@@ -425,6 +430,60 @@ def test_reload_runs_the_migration_and_attach_does_not() -> None:
         team_launcher.migrate_declarative_director_onboarding = original
 
 
+def test_reload_uses_the_migrated_config_not_the_one_loaded_before_it() -> None:
+    """The migration rewrites the projection, so the config loaded before it is stale.
+
+    Asserts the role data a restart would actually use, rather than only that the
+    migration was called: every later path reads role env off this object.
+    """
+    import tempfile
+
+    seen: list[Any] = []
+    original_migrate = team_launcher.migrate_declarative_director_onboarding
+    original_load = team_launcher.load_project_config
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _config, config_path = _declarative_config(tmp)
+
+        def _migrate(config, *, config_path, dry_run=False, print_func=print):
+            # Stand in for the real migration: rewrite the projection on disk, report
+            # that it changed something.
+            raw = json.loads(config_path.read_text())
+            raw["roles"][0].setdefault("env", {})[
+                "TICKET_BOARD_ROLE_ONBOARDING_PROMPT"
+            ] = "migrated remit"
+            config_path.write_text(json.dumps(raw), encoding="utf-8")
+            return True
+
+        def _recording_load(project, path):
+            loaded = original_load(project, path)
+            seen.append(loaded)
+            return loaded
+
+        team_launcher.migrate_declarative_director_onboarding = _migrate
+        team_launcher.load_project_config = _recording_load
+        try:
+            try:
+                team_launcher.launch_project(
+                    _config,
+                    config_path=config_path,
+                    mode="reload",
+                    script_path=Path("/nonexistent/team-launcher"),
+                    runner=lambda *a, **k: None,
+                )
+            except (Exception, SystemExit):
+                # The launch cannot complete in a temp directory; the reload happens
+                # immediately after the mode gate, so it has already run by now.
+                pass
+        finally:
+            team_launcher.migrate_declarative_director_onboarding = original_migrate
+            team_launcher.load_project_config = original_load
+
+    assert seen, "reload did not reload the configuration after migrating it"
+    ops = next(r for r in seen[-1].roles if r.role == "ops")
+    assert ops.env.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT") == "migrated remit", ops.env
+
+
 def test_a_failed_migration_stops_the_upgrade_rather_than_warning() -> None:
     """Fail-safe, not fail-open.
 
@@ -479,9 +538,22 @@ def test_the_write_path_hands_the_projection_to_the_tenant_when_privileged() -> 
             workflow_launcher.assign_projection_owner = (
                 lambda config, path, *, runner: handed.append(Path(path))
             )
+            original_ensure = team_launcher.ensure_owner_file
+            team_launcher.ensure_owner_file = (
+                lambda config, path, *, runner: handed.append(Path(path))
+            )
             team_launcher.load_project_config = lambda project, path: _OwnerConfig()
-            wm._hand_projection_to_tenant(config_path)
-            assert handed == [config_path], handed
+            try:
+                # The rollback journal is part of the tenant's recovery path, and
+                # assign_projection_owner enumerates a fixed set that does not include it,
+                # so it must be handed over explicitly or a root-driven upgrade leaves it
+                # root-owned.
+                journal = config_path.parent / "workflow-before-7.json"
+                journal.write_text("{}", encoding="utf-8")
+                wm._hand_projection_to_tenant(config_path, journal)
+            finally:
+                team_launcher.ensure_owner_file = original_ensure
+            assert handed == [config_path, journal], handed
     finally:
         os.geteuid = original_euid
         workflow_launcher.assign_projection_owner = original_assign

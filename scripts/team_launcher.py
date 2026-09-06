@@ -5593,9 +5593,14 @@ def launch_project(
         # Reload re-projects the stored document, so an unmigrated tenant would reload
         # into the same missing director onboarding forever. Run the one-time backfill
         # first; it is idempotent and marked, so a migrated tenant pays nothing.
-        migrate_declarative_director_onboarding(
+        if migrate_declarative_director_onboarding(
             config, config_path=config_path, print_func=print_func
-        )
+        ):
+            # The migration rewrote the projection on disk, so the config loaded before
+            # it is now stale. Every later path -- session sync, detached restarts, the
+            # viewer -- reads role env off this object, and would otherwise restart roles
+            # without the prompt that was just projected.
+            config = load_project_config(config.project, config_path)
     worktree_runner = runner
     role_process_runner = runner
     owner_runner_anchor = config.repository or config.pane_launcher
@@ -7669,6 +7674,18 @@ def director_onboarding_seed_text(project_dir: Path) -> str:
     )
 
 
+@dataclass(frozen=True)
+class DirectorSeedResult:
+    """What the backfill changed: the marker, the prompt, or neither."""
+
+    marked: bool
+    seeded: bool
+
+    @property
+    def changed(self) -> bool:
+        return self.marked or self.seeded
+
+
 def seed_director_onboarding(document, project_dir: Path):
     """Give the configured director stored onboarding when it has none.
 
@@ -7682,13 +7699,13 @@ def seed_director_onboarding(document, project_dir: Path):
     automatic configuration change rather than making it silently.
     """
     if not document:
-        return document, False
+        return document, DirectorSeedResult(False, False)
     migrations = document.setdefault("migrations", {})
     if migrations.get(DIRECTOR_ONBOARDING_MIGRATION):
         # Already considered once. A director with nothing stored now means the operator
         # cleared it, not that this tenant predates the feature, so refilling here would
         # make `role-prompt clear director` impossible to persist.
-        return document, False
+        return document, DirectorSeedResult(False, False)
     seeded = False
     for role in document.get("roles", []):
         if role.get("name") != DIRECTOR_ROLE:
@@ -7697,9 +7714,11 @@ def seed_director_onboarding(document, project_dir: Path):
             role["onboarding_prompt"] = director_onboarding_seed_text(project_dir)
             seeded = True
     # Marked whether or not anything was filled: a director that already had its own
-    # onboarding is equally "considered", and must not be revisited later either.
+    # onboarding is equally "considered". Reported separately from seeding, because a
+    # tenant that needs only the marker still needs that marker persisted -- otherwise a
+    # later clear would look like a legacy gap and be refilled.
     migrations[DIRECTOR_ONBOARDING_MIGRATION] = True
-    return document, seeded
+    return document, DirectorSeedResult(True, seeded)
 
 
 def _write_switchyard_onboarding_files(
@@ -10919,18 +10938,23 @@ def migrate_declarative_director_onboarding(
     if dry_run:
         print_func("switchyard: would migrate the director's onboarding prompt if unset")
         return False
+    import contextlib
+    import io as _io
+
     from scripts import workflow_manage
 
+    captured = _io.StringIO()
     try:
-        workflow_manage.main(
-            [
-                "migrate-director-onboarding",
-                "--board-url",
-                config.board_url,
-                "--config",
-                str(config_path),
-            ]
-        )
+        with contextlib.redirect_stdout(captured):
+            workflow_manage.main(
+                [
+                    "migrate-director-onboarding",
+                    "--board-url",
+                    config.board_url,
+                    "--config",
+                    str(config_path),
+                ]
+            )
     except Exception as exc:
         # Deliberately fatal. The hook no longer carries a legacy director source, so
         # deploying it over an unmigrated document would leave that director with no
@@ -10941,6 +10965,17 @@ def migrate_declarative_director_onboarding(
             "Resolve it before deploying, or clear the director's onboarding deliberately "
             "with `switchyard role-prompt clear director`."
         ) from exc
+    # Report whether the document actually changed, so callers know when their loaded
+    # configuration has gone stale. An already-migrated tenant changes nothing.
+    try:
+        report = json.loads(captured.getvalue() or "{}")
+    except json.JSONDecodeError:
+        return True
+    if report.get("migrated") is False:
+        return False
+    print_func(
+        f"switchyard: migrated the director's onboarding for {config_path}"
+    )
     return True
 
 

@@ -8,6 +8,7 @@ board and real projection files, rather than calling the mutation helper directl
 from __future__ import annotations
 
 import contextlib
+import copy
 import importlib
 import io
 import json
@@ -242,7 +243,7 @@ def main() -> int:
                 revision_before = _board_document(base)["revision"]
                 repeat = _run(wm, ["migrate-director-onboarding", *base_args])
                 assert repeat["migrated"] is False, repeat
-                assert repeat["reason"] == "director onboarding already stored"
+                assert repeat["reason"] == "already migrated"
                 assert _board_document(base)["revision"] == revision_before
 
                 # It fills only the director; no unrelated role acquires a prompt.
@@ -323,6 +324,47 @@ def main() -> int:
                 assert ops["onboarding"] == "/srv/cerulean/docs/onboarding/ops.md"
                 assert "onboarding_prompt" not in _ops_role(json.loads(workflow_json.read_text()))
 
+                # --- a customised director is marked, not skipped -------------
+                # Nothing needs seeding here, but the marker still must be persisted:
+                # without it a later clear looks like a legacy gap and gets refilled.
+                # Reproduced on a fresh document so this is the customised-tenant path.
+                custom = copy.deepcopy(_board_document(base)["document"])
+                for role in custom["roles"]:
+                    if role["name"] == "director":
+                        role["onboarding_prompt"] = "director's own words"
+                custom.pop("migrations", None)
+                t.post_json(
+                    base,
+                    "/api/tickets/actions/configure_workflow",
+                    {"document": custom, "expected_revision": _board_document(base)["revision"]},
+                    caller="director",
+                )
+                assert "migrations" not in _board_document(base)["document"]
+
+                # Distinct journals: these writes land on revisions the earlier ones
+                # already journaled, and reusing a journal path is refused by design.
+                marked = _run(
+                    wm,
+                    ["migrate-director-onboarding", *base_args,
+                     "--journal", str(launcher_dir / "journal-marker.json")],
+                )
+                assert marked.get("migrated") is not False, marked
+                persisted = _board_document(base)["document"]
+                assert persisted.get("migrations", {}).get("director_onboarding") is True, persisted
+                assert _director()["onboarding_prompt"] == "director's own words", _director()
+
+                # Clearing immediately after that migration must stick.
+                with _contextlib.redirect_stdout(io.StringIO()):
+                    wm.main(["clear-role-prompt", "--role", "director", *base_args])
+                _run(
+                    wm,
+                    ["set-role-prompt", "--role", "ops", "--prompt", "another write", *base_args,
+                     "--journal", str(launcher_dir / "journal-after-custom-clear.json")],
+                )
+                assert not _director().get("onboarding_prompt"), (
+                    "a customised director's clear was undone because the marker was dropped"
+                )
+
                 # --- clearing the director must persist -----------------------
                 # The migration runs on every write, so without durable state it would
                 # treat a deliberately cleared director as unmigrated and refill it on
@@ -332,7 +374,11 @@ def main() -> int:
                     wm.main(["clear-role-prompt", "--role", "director", *base_args])
                 assert not _director().get("onboarding_prompt"), _director()
 
-                _run(wm, ["set-role-prompt", "--role", "ops", "--prompt", "unrelated", *base_args])
+                _run(
+                    wm,
+                    ["set-role-prompt", "--role", "ops", "--prompt", "unrelated", *base_args,
+                     "--journal", str(launcher_dir / "journal-after-clear.json")],
+                )
                 assert not _director().get("onboarding_prompt"), (
                     "a cleared director prompt was restored by the shared write tail"
                 )

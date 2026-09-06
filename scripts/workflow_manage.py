@@ -101,13 +101,14 @@ def _project_dir_for(config_path: Path, document: dict) -> Path | None:
     return Path(repository)
 
 
-def _hand_projection_to_tenant(config_path: Path) -> None:
+def _hand_projection_to_tenant(config_path: Path, *extra: Path) -> None:
     """Give the projection back to the tenant when this write ran privileged.
 
     `switchyard upgrade` re-executes as root, so a migration applied from there would
     otherwise leave root-owned controls the tenant cannot rewrite. Provisioning already
-    has the handover; this reuses it rather than inventing a second one. It is a no-op
-    for an ordinary unprivileged write, where the files are already the tenant's.
+    has the handover; this reuses it rather than inventing a second one, and names any
+    extra paths -- the rollback journal -- that its fixed projection set does not cover.
+    It is a no-op for an ordinary unprivileged write, where the files are the tenant's.
     """
     if os.geteuid() != 0:
         return
@@ -120,6 +121,12 @@ def _hand_projection_to_tenant(config_path: Path) -> None:
         return
     config = launcher.load_project_config(project, config_path)
     assign_projection_owner(config, config_path, runner=subprocess.run)
+    # The rollback journal is part of the tenant's recovery path, so it must be theirs
+    # too. assign_projection_owner enumerates a fixed projection set and deliberately
+    # does not sweep the directory, so the journal has to be named explicitly.
+    for path in extra:
+        if path.exists():
+            launcher.ensure_owner_file(config, path, runner=subprocess.run)
 
 
 def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
@@ -135,8 +142,8 @@ def _migrate_director_onboarding(config_path: Path, cfg: dict) -> dict:
     project_dir = _project_dir_for(config_path, cfg)
     if project_dir is None:
         return cfg
-    cfg, seeded = launcher.seed_director_onboarding(cfg, project_dir)
-    if seeded:
+    cfg, outcome = launcher.seed_director_onboarding(cfg, project_dir)
+    if outcome.seeded:
         print(
             f"workflow: seeded the director's onboarding prompt from {project_dir}; "
             "it had none stored. Change it with `switchyard role-prompt set director`.",
@@ -275,10 +282,13 @@ def main(argv=None):
         if project_dir is None:
             print(json.dumps({"migrated": False, "reason": "project directory could not be resolved"}))
             return 0
-        candidate, seeded = launcher.seed_director_onboarding(candidate, project_dir)
-        if not seeded:
-            print(json.dumps({"migrated": False, "reason": "director onboarding already stored"}))
+        candidate, outcome = launcher.seed_director_onboarding(candidate, project_dir)
+        if not outcome.changed:
+            print(json.dumps({"migrated": False, "reason": "already migrated"}))
             return 0
+        # A tenant whose director already had its own onboarding still needs the marker
+        # persisted. Short-circuiting on "nothing seeded" would drop it, and a later
+        # clear would then look like a legacy gap and be refilled.
         cfg = validate(candidate)
         files = projection_files(args.config, cfg)
     elif args.operation in {"set-role-prompt", "clear-role-prompt"}:
@@ -336,9 +346,12 @@ def main(argv=None):
             )
         )
         return 0
+    # Every operation that persists a document writes a journal, so every one of them
+    # may name it. The default is keyed on the expected revision, which collides when
+    # two writes are prepared against the same revision.
     journal = (
         args.journal
-        if args.operation == "apply" and args.journal
+        if args.journal and args.operation != "rollback"
         else args.config.parent / f"workflow-before-{expected}.json"
     )
     if journal.exists():
@@ -365,7 +378,7 @@ def main(argv=None):
     result = client.configure_workflow(cfg, expected_revision=expected)
     try:
         apply_files(files)
-        _hand_projection_to_tenant(args.config)
+        _hand_projection_to_tenant(args.config, journal)
     except Exception as exc:
         raise RuntimeError(
             f'board revision {result["revision"]} applied; local projection pending. Preserve {journal} and rerun apply with the same document: {exc}'

@@ -270,7 +270,7 @@ its runtime directory for the roles group, so strict units in front of an old
 binary can leave the role accounts unable to reach the socket at all. If any of that does not hold -- including the display slots
 failing to reconnect -- the worktrees go back to the uid and gid they had, the
 configuration is restored, the projection is re-rendered, the release pointer and
-the release pointer and the previously installed units are put back, the board is
+the previously installed units are put back, the board is
 restarted onto them, the listener is returned to exactly the active or inactive
 state it was in, and the roles are started as they were. Restoring the file alone would leave the
 old workers running without write access to their own repositories; regenerating
@@ -300,9 +300,18 @@ not from what the staged unit omits.
 do.** A board predating the phase-one schema returns "not migrated" for the same
 call that returns "not migrated" when there was nothing to do. Completion is
 therefore read from the board's own workflow document and the local projection,
-never from that return value, and the release that makes the migration possible
-is its own `compatibility` phase -- the one deploy instruction that *is* printed
-while the rest is withheld.
+never from that return value. The board that can accept the migration is already
+running by then: the identities transaction switches the release inside itself,
+so there is no separate compatibility deploy to print ahead of the director.
+
+**The release phase is derived, not assumed.** Because the transaction deploys
+the release, a successful cutover leaves nothing for an operator to deploy, and
+the phase is recorded `done` from the reading that produced the report -- the
+deployed sha already matching the pinned ref. The output then says so plainly and
+names the director's `finish-upgrade` as the one step left. It is recorded `ready`
+only when a deploy really is owed: a tenant already on per-role accounts whose
+deployed release differs from the pinned one, or one whose release cannot be read
+at all.
 
 **Phase records: two files, one authority.** `<project>-upgrade.json` beside the
 configuration is the tenant's readable copy and is published as untrusted
@@ -323,7 +332,7 @@ longer offered as one.
 **The deploy instruction is withheld until it is safe to follow.** Installing
 the generated unit is what makes the role-account table authoritative, so the
 release deploy commands are not printed while a tenant's configuration names
-accounts that do not all exist, or while the director phase is outstanding. A
+accounts that do not all exist. A
 tenant that never opted into per-role accounts is consistent as it stands and is
 not withheld from ordinary release upgrades.
 

@@ -1363,6 +1363,26 @@ WHERE id = %s
                 and expected_state in TERMINAL_STATES
                 and current_state == expected_state
             )
+        if kind == "awaiting_role":
+            # Wait identity, not delivery ACK or comments, controls resolution.
+            # Expired windows prevent a restart from delivering a reminder burst.
+            if current_state not in {"in_progress", "inspection", "audit"}:
+                return False
+            expected_target = "director" if parsed.get("step") == 4 else parsed.get("awaiting_role")
+            if target_role != expected_target:
+                return False
+            row = conn.execute(
+                """
+SELECT EXISTS (
+    SELECT 1 FROM ticket_board.ticket_notification_state
+    WHERE ticket_id = %s AND awaiting_role = %s
+      AND awaiting_since_at = %s::timestamptz
+      AND clock_timestamp() < %s::timestamptz
+)
+""",
+                (ticket_id, parsed.get("awaiting_role"), parsed.get("awaiting_since_at"), parsed.get("expires_at")),
+            ).fetchone()
+            return bool(row["exists"] if isinstance(row, dict) else row[0])
         if kind == "escalation":
             return (
                 target_role == "director"
@@ -1602,6 +1622,16 @@ WHERE id = %s
                     attempts,
                     PANE_BUSY_REQUEUE_ERROR,
                 )
+                continue
+            # Activity probing can take time. Recheck handoffs immediately before
+            # sending so a resolution during that probe suppresses this delivery.
+            if kind == "awaiting_role" and not self._notification_is_current(conn, ticket_id, target_role, payload):
+                self._trace_notification(
+                    conn, notification_id=notification_id, ticket_id=ticket_id,
+                    target_role=target_role, kind=kind, event="drop",
+                    busy_reason="stale_notification", detail={"phase": "pre_send_recheck"},
+                )
+                self._ack_notification(conn, notification_id)
                 continue
             directorctl_diagnostic: dict[str, Any] = {}
             try:

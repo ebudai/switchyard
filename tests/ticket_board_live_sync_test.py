@@ -50,6 +50,7 @@ for _leaked in (
 
 import ticket_board_write_api_test as t  # noqa: E402
 from scripts.ticket_board.write_client import TicketBoardWriteClient  # noqa: E402
+from temporary_cluster import temporary_cluster  # noqa: E402
 
 WORKFLOW_PATH = ROOT / "examples" / "workflows" / "inspection.json"
 EVENT_TIMEOUT_SECONDS = 10.0
@@ -180,143 +181,138 @@ def main() -> int:  # noqa: C901 - one integration scenario, read top to bottom
     )
     tickets = (pushed, reconnected_ticket, out_of_band, first_rapid, second_rapid)
 
-    with tempfile.TemporaryDirectory(prefix="ticket-board-live-sync.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
+    # The cluster's lifetime is tied to this process rather than to reaching the
+    # end of the block: `pg_ctl start` daemonises, so an interrupted run used to
+    # leave a live cluster and its tree in /tmp with nothing left to stop it
+    # (SYRD-54).
+    with temporary_cluster(prefix="ticket-board-live-sync.") as cluster:
+        root = cluster.root
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         frames = root / "frames"
         assets = root / "assets"
-        for directory in (socket_dir, frames, assets):
+        for directory in (frames, assets):
             directory.mkdir()
-        port = t.free_port()
         dbname = "ticket_board_live_sync_test"
         admin_conn = t.conninfo(socket_dir, port, dbname)
-        t.run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
+        t.run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        t.psql(admin_conn, t.SCHEMA_PATH.read_text(encoding="utf-8"))
+        t.create_roles(admin_conn)
+        t.psql(admin_conn, t.RBAC_PATH.read_text(encoding="utf-8"))
+        for seeded in tickets:
+            t.seed_postgres_ticket(
+                admin_conn, seeded, title=f"Live sync {seeded}", state=origin, assignee="director"
+            )
+
+        service_conn = t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE)
+        app = t.TicketBoardApp(frames, assets, project=project, ticket_prefix="PGU", database_url=service_conn)
+        app.apply_workflow(document, expected_revision=0, dry_run=False, caller_role="director")
+        assert app.workflow_configuration() is not None, "the fixture must exercise the declared path"
+
+        # Deliberately long, so scenarios 1, 2 and 4 prove the push path
+        # itself: with a fast reconciler in the same hub, a missing push is
+        # invisible because polling covers for it within a scan.
+        hub = t.TicketBoardEventHub(app, scan_interval_seconds=30.0)
+        server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier(), events=hub)
+        t.TEST_WRITE_TOKEN = server.write_token
+        unix_socket = root / "board.sock"
+        unix_server = t.TicketBoardUnixServer(
+            unix_socket,
+            app,
+            events=hub,
+            director_notifier=t.QuietNotifier(),
+            # The socket resolves the caller from the kernel-supplied uid
+            # against the board's own account table, so the fixture states
+            # that this account is the Director rather than the client
+            # claiming it (SYRD-39).
+            role_authority=t.local_role_authority_as("director"),
+        )
+        threads = [
+            threading.Thread(target=server.serve_forever, daemon=True),
+            threading.Thread(target=unix_server.serve_forever, daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        # The Director's own path: the tenant Unix socket, no token, no root.
+        director = TicketBoardWriteClient(
+            board_url=base, caller_role="director", socket_path=str(unix_socket)
+        )
         try:
-            t.run(
-                ["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"],
-                capture=False,
-            )
-            t.run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            t.psql(admin_conn, t.SCHEMA_PATH.read_text(encoding="utf-8"))
-            t.create_roles(admin_conn)
-            t.psql(admin_conn, t.RBAC_PATH.read_text(encoding="utf-8"))
-            for seeded in tickets:
-                t.seed_postgres_ticket(
-                    admin_conn, seeded, title=f"Live sync {seeded}", state=origin, assignee="director"
-                )
+            # 1. A transition over the socket reaches an already-open client.
+            stream = EventStream(base)
+            assert stream.await_event("version")["build_id"] == server.build_id
+            stream.await_event("board")
+            stream.drain()
 
-            service_conn = t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE)
-            app = t.TicketBoardApp(frames, assets, project=project, ticket_prefix="PGU", database_url=service_conn)
-            app.apply_workflow(document, expected_revision=0, dry_run=False, caller_role="director")
-            assert app.workflow_configuration() is not None, "the fixture must exercise the declared path"
+            director.workflow_action(
+                pushed, handoff["action"], {"state": destination, "assignee": implementers[0]}
+            )
 
-            # Deliberately long, so scenarios 1, 2 and 4 prove the push path
-            # itself: with a fast reconciler in the same hub, a missing push is
-            # invisible because polling covers for it within a scan.
-            hub = t.TicketBoardEventHub(app, scan_interval_seconds=30.0)
-            server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier(), events=hub)
-            t.TEST_WRITE_TOKEN = server.write_token
-            unix_socket = root / "board.sock"
-            unix_server = t.TicketBoardUnixServer(
-                unix_socket,
-                app,
-                events=hub,
-                director_notifier=t.QuietNotifier(),
-                # The socket resolves the caller from the kernel-supplied uid
-                # against the board's own account table, so the fixture states
-                # that this account is the Director rather than the client
-                # claiming it (SYRD-39).
-                role_authority=t.local_role_authority_as("director"),
+            stream.await_event("board")
+            assert _board_state(base, pushed) == destination
+
+            # 2. A mutation during a disconnect is reconciled on reconnect.
+            stream.close()
+            director.workflow_action(reconnected_ticket, quiet["action"], {})
+            reconnected = EventStream(base)
+            reconnected.await_event("version")
+            reconnected.await_event("board")
+            assert _board_state(base, reconnected_ticket) == quiet_destination
+
+            # 3. A writer this server never saw. Nothing can push for it, so
+            #    only the reconciler can catch it -- and it cannot if the
+            #    signature ignores the columns a transition moves. Its own
+            #    hub, so this asserts polling rather than the push above.
+            elsewhere = t.TicketBoardApp(
+                frames, assets, project=project, ticket_prefix="PGU", database_url=service_conn
             )
-            threads = [
-                threading.Thread(target=server.serve_forever, daemon=True),
-                threading.Thread(target=unix_server.serve_forever, daemon=True),
-            ]
-            for thread in threads:
-                thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            # The Director's own path: the tenant Unix socket, no token, no root.
-            director = TicketBoardWriteClient(
-                board_url=base, caller_role="director", socket_path=str(unix_socket)
+            watcher_hub = t.TicketBoardEventHub(app, scan_interval_seconds=0.2)
+            watcher = t.TicketBoardServer(
+                ("127.0.0.1", 0), app, director_notifier=t.QuietNotifier(), events=watcher_hub
             )
+            watcher_thread = threading.Thread(target=watcher.serve_forever, daemon=True)
+            watcher_thread.start()
             try:
-                # 1. A transition over the socket reaches an already-open client.
-                stream = EventStream(base)
-                assert stream.await_event("version")["build_id"] == server.build_id
-                stream.await_event("board")
-                stream.drain()
-
-                director.workflow_action(
-                    pushed, handoff["action"], {"state": destination, "assignee": implementers[0]}
+                watching = EventStream(f"http://127.0.0.1:{watcher.server_port}")
+                watching.await_event("version")
+                watching.await_event("board")
+                watching.drain()
+                elsewhere.perform_workflow_action(
+                    out_of_band, quiet["action"], {}, caller_role="director"
                 )
-
-                stream.await_event("board")
-                assert _board_state(base, pushed) == destination
-
-                # 2. A mutation during a disconnect is reconciled on reconnect.
-                stream.close()
-                director.workflow_action(reconnected_ticket, quiet["action"], {})
-                reconnected = EventStream(base)
-                reconnected.await_event("version")
-                reconnected.await_event("board")
-                assert _board_state(base, reconnected_ticket) == quiet_destination
-
-                # 3. A writer this server never saw. Nothing can push for it, so
-                #    only the reconciler can catch it -- and it cannot if the
-                #    signature ignores the columns a transition moves. Its own
-                #    hub, so this asserts polling rather than the push above.
-                elsewhere = t.TicketBoardApp(
-                    frames, assets, project=project, ticket_prefix="PGU", database_url=service_conn
-                )
-                watcher_hub = t.TicketBoardEventHub(app, scan_interval_seconds=0.2)
-                watcher = t.TicketBoardServer(
-                    ("127.0.0.1", 0), app, director_notifier=t.QuietNotifier(), events=watcher_hub
-                )
-                watcher_thread = threading.Thread(target=watcher.serve_forever, daemon=True)
-                watcher_thread.start()
-                try:
-                    watching = EventStream(f"http://127.0.0.1:{watcher.server_port}")
-                    watching.await_event("version")
-                    watching.await_event("board")
-                    watching.drain()
-                    elsewhere.perform_workflow_action(
-                        out_of_band, quiet["action"], {}, caller_role="director"
-                    )
-                    watching.await_event("board", timeout=RECONCILE_TIMEOUT_SECONDS)
-                    assert _board_state(base, out_of_band) == quiet_destination
-                    watching.close()
-                finally:
-                    watcher.shutdown()
-                    watcher.server_close()
-                    watcher_hub.close()
-                    watcher_thread.join(timeout=5)
-
-                # 4. Back-to-back mutations may coalesce into one notification,
-                #    but the final state must not be missed.
-                reconnected.drain()
-                director.workflow_action(first_rapid, quiet["action"], {})
-                director.workflow_action(second_rapid, quiet["action"], {})
-                reconnected.await_event("board")
-                _await(
-                    lambda: (
-                        _board_state(base, first_rapid) == quiet_destination
-                        and _board_state(base, second_rapid) == quiet_destination
-                    ),
-                    timeout=EVENT_TIMEOUT_SECONDS,
-                    message="a coalesced notification lost one of two rapid mutations",
-                )
-                reconnected.close()
+                watching.await_event("board", timeout=RECONCILE_TIMEOUT_SECONDS)
+                assert _board_state(base, out_of_band) == quiet_destination
+                watching.close()
             finally:
-                server.shutdown()
-                server.server_close()
-                unix_server.shutdown()
-                unix_server.server_close()
-                hub.close()
-                for thread in threads:
-                    thread.join(timeout=5)
+                watcher.shutdown()
+                watcher.server_close()
+                watcher_hub.close()
+                watcher_thread.join(timeout=5)
+
+            # 4. Back-to-back mutations may coalesce into one notification,
+            #    but the final state must not be missed.
+            reconnected.drain()
+            director.workflow_action(first_rapid, quiet["action"], {})
+            director.workflow_action(second_rapid, quiet["action"], {})
+            reconnected.await_event("board")
+            _await(
+                lambda: (
+                    _board_state(base, first_rapid) == quiet_destination
+                    and _board_state(base, second_rapid) == quiet_destination
+                ),
+                timeout=EVENT_TIMEOUT_SECONDS,
+                message="a coalesced notification lost one of two rapid mutations",
+            )
+            reconnected.close()
         finally:
-            t.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], capture=False)
+            server.shutdown()
+            server.server_close()
+            unix_server.shutdown()
+            unix_server.server_close()
+            hub.close()
+            for thread in threads:
+                thread.join(timeout=5)
 
     print("ticket_board_live_sync_test: ok")
     return 0

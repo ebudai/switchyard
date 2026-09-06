@@ -345,6 +345,18 @@ def _write_runtime_projection(
     return team_launcher.load_project_config(config.project, config_path)
 
 
+def _session_is_live(
+    role: team_launcher.RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    return runner(
+        team_launcher.tmux_has_session_args(role),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+
 def _default_start(
     role: team_launcher.RoleConfig,
     *,
@@ -369,6 +381,7 @@ def _restart_worker(
     pane_state_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     start: Callable[..., int] = _default_start,
+    on_stopped: Callable[[], None] | None = None,
 ) -> bool:
     """Replace the role's session with one running the configured runtime.
 
@@ -376,22 +389,27 @@ def _restart_worker(
     cleared rather than handed to a CLI that cannot read it. Returns whether a
     live session was actually replaced, which is what tells a later reader
     configured state from live state.
+
+    ``on_stopped`` fires between the stop and the start. A stop that is not
+    recorded the moment it happens is invisible to rollback if the start then
+    fails, which leaves the role down while the command reports the switch
+    cleanly undone.
     """
     role = team_launcher._role_by_name(config, role_name)
-    existed = runner(
-        team_launcher.tmux_has_session_args(role),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ).returncode == 0
+    existed = _session_is_live(role, runner=runner)
     if existed:
         kill = runner(team_launcher.tmux_kill_session_args(role))
         if kill.returncode != 0:
             raise RuntimeError(f"could not stop {role.tmux_session} (exit {kill.returncode})")
+        if on_stopped is not None:
+            on_stopped()
     team_launcher.clear_session_record_for_role(role, config.session_dir)
     team_launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
     result = start(role, config=config, pane_state_dir=pane_state_dir, runner=runner)
     if result != 0:
         raise RuntimeError(f"{role_name} did not come back up under its new runtime (exit {result})")
+    if not _session_is_live(role, runner=runner):
+        raise RuntimeError(f"{role_name} reported a successful start but left no live session")
     return existed
 
 
@@ -418,33 +436,62 @@ def _rollback(
     state an operator knows about is recoverable, one they do not is not.
     """
     problems: list[str] = []
-    for step in reversed(journal.steps_applied):
+    applied = set(journal.steps_applied)
+
+    def attempt(step: str, undo: Callable[[], None]) -> bool:
         try:
-            if step == "workflow":
-                client.configure_workflow(
-                    journal.previous_workflow_document,
-                    expected_revision=0,
-                    dry_run=False,
-                )
-            elif step == "projection":
-                Path(journal.config_path).write_text(journal.previous_config_bytes, encoding="utf-8")
-            elif step == "worker":
-                config = team_launcher.load_project_config(journal.project, config_path)
-                _restart_worker(
-                    config,
-                    role_name=journal.role,
-                    pane_state_dir=pane_state_dir,
-                    runner=runner,
-                    start=start,
-                )
-            elif step == "slots":
-                config = team_launcher.load_project_config(journal.project, config_path)
-                presentation_controller.reconnect_role_slots(
-                    config, config_path=config_path, role_name=journal.role, runner=runner
-                )
+            undo()
         except Exception as exc:  # noqa: BLE001 - every failure must be reported, not raised
             problems.append(f"{step}: {exc}")
             print_func(f"switchyard: rollback of {step} failed: {exc}")
+            return False
+        return True
+
+    # Durable records first, runtime second. Undoing this strictly in reverse
+    # would restart the worker while the projection still named the new runtime,
+    # bringing the role back up under the CLI that just failed to start.
+    if "projection" in applied:
+        attempt(
+            "projection",
+            lambda: Path(journal.config_path).write_text(journal.previous_config_bytes, encoding="utf-8"),
+        )
+    if "workflow" in applied:
+        attempt(
+            "workflow",
+            lambda: client.configure_workflow(
+                journal.previous_workflow_document, expected_revision=0, dry_run=False
+            ),
+        )
+
+    restored_worker = True
+    if "worker_stopped" in applied:
+        # The role is down right now. Bringing it back is the whole point of the
+        # rollback, so a clean report is only honest once its session is live.
+        def restart_previous() -> None:
+            config = team_launcher.load_project_config(journal.project, config_path)
+            _restart_worker(
+                config,
+                role_name=journal.role,
+                pane_state_dir=pane_state_dir,
+                runner=runner,
+                start=start,
+            )
+            role = team_launcher._role_by_name(config, journal.role)
+            if not _session_is_live(role, runner=runner):
+                raise RuntimeError(f"{journal.role} is still not running {journal.previous_runtime}")
+
+        restored_worker = attempt("worker", restart_previous)
+
+    if restored_worker and (journal.slots or "slots" in applied):
+        attempt(
+            "slots",
+            lambda: presentation_controller.reconnect_role_slots(
+                team_launcher.load_project_config(journal.project, config_path),
+                config_path=config_path,
+                role_name=journal.role,
+                runner=runner,
+            ),
+        )
     return "; ".join(problems)
 
 
@@ -550,8 +597,17 @@ def switch_role_runtime(
         journal.record("projection")
         journal.write(journal_path)
 
+        def note_stopped() -> None:
+            journal.record("worker_stopped")
+            journal.write(journal_path)
+
         live_changed = _restart_worker(
-            updated, role_name=role_name, pane_state_dir=state_dir, runner=runner, start=start
+            updated,
+            role_name=role_name,
+            pane_state_dir=state_dir,
+            runner=runner,
+            start=start,
+            on_stopped=note_stopped,
         )
         journal.record("worker")
         journal.write(journal_path)

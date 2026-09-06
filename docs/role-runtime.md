@@ -55,8 +55,18 @@ reported as "no display slot showed it" rather than passed over in silence.
 
 ## When something fails
 
-Every applied step is undone in reverse and the command says the switch was
-undone. If the undo cannot finish, the command says so explicitly, names what is
+Every applied step is undone and the command says the switch was undone. The
+undo is not a strict reverse: the launcher config and the workflow document go
+back first, and only then is the worker restarted, because restarting it while
+the config still named the new runtime would bring the role back up under the
+CLI that just failed to start.
+
+Stopping the worker is journalled the moment it happens rather than after the
+replacement starts. A stop recorded only on success is invisible to the undo if
+the start then fails, which leaves the role down while the command reports a
+clean rollback — the same class of silent failure this command exists to
+prevent. A rollback is only called clean once the previous session is proven
+live again. If the undo cannot finish, the command says so explicitly, names what is
 still wrong, and leaves the journal in place:
 
 ```

@@ -120,10 +120,21 @@ def _write_config(root: Path, *, project: str = "porter") -> Path:
 class RuntimeRunner:
     """tmux and process calls, recorded; sessions exist unless killed."""
 
-    def __init__(self, *, live: set[str] | None = None, fail_start: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        live: set[str] | None = None,
+        fail_start: bool = False,
+        fail_starts: int = 0,
+    ) -> None:
         self.live = live if live is not None else {"porter-director", "porter-audit", "porter-research"}
         self.calls: list[list[str]] = []
+        # `fail_starts` fails only the first N starts, which is what a broken new
+        # runtime looks like: the old one still launches perfectly well.
         self.fail_start = fail_start
+        self.remaining_start_failures = fail_starts
+        # (session, runtime the config named when the start was attempted)
+        self.starts: list[tuple[str, str]] = []
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         command = [str(part) for part in args]
@@ -135,7 +146,8 @@ class RuntimeRunner:
             self.live.discard(command[command.index("-t") + 1].removeprefix("=").split(":", 1)[0])
             return subprocess.CompletedProcess(command, 0)
         if command[:2] == ["tmux", "new-session"]:
-            if self.fail_start:
+            if self.fail_start or self.remaining_start_failures > 0:
+                self.remaining_start_failures = max(0, self.remaining_start_failures - 1)
                 return subprocess.CompletedProcess(command, 3, stderr="injected start failure")
             self.live.add(command[command.index("-s") + 1])
             return subprocess.CompletedProcess(command, 0)
@@ -165,7 +177,14 @@ def _idle_state(config_path: Path, *targets: str) -> Path:
 
 
 def _fake_start(role: Any, *, config: Any, pane_state_dir: Path, runner: Any) -> int:
-    """Stand in for the launcher's start path, which has its own suites."""
+    """Stand in for the launcher's start path, which has its own suites.
+
+    Records the runtime the config named at the moment of the start. The real
+    launcher builds the command from exactly that, so a start whose config still
+    named the failed runtime would have launched the wrong binary -- which is
+    invisible in the end state and has to be asserted here.
+    """
+    runner.starts.append((role.tmux_session, team_launcher._role_cli_name(role)))
     return runner(["tmux", "new-session", "-d", "-s", role.tmux_session]).returncode
 
 
@@ -308,7 +327,7 @@ def test_a_new_runtime_that_fails_to_start_is_rolled_back_to_the_old_one() -> No
         _idle_state(config_path)
         before = config_path.read_text(encoding="utf-8")
         board = FakeBoard()
-        runner = RuntimeRunner(fail_start=True)
+        runner = RuntimeRunner(fail_starts=1)
         role_runtime._readiness_blockers = _ready
 
         try:
@@ -321,12 +340,94 @@ def test_a_new_runtime_that_fails_to_start_is_rolled_back_to_the_old_one() -> No
         # Both records are back where they started, and they agree.
         assert board.runtime_of("audit") == "claude"
         assert config_path.read_text(encoding="utf-8") == before
+        # And the role is actually running again. Restoring the records while
+        # leaving the worker stopped is the failure this asserts against: the
+        # operator is told it was undone and is looking at a dead pane.
+        assert "porter-audit" in runner.live, "the old session was left stopped"
         # Nothing is left for an operator to clean up.
         assert not role_runtime.journal_path_for(
             team_launcher.load_project_config("porter", config_path),
             config_path=config_path,
             role_name="audit",
         ).exists()
+
+
+def test_a_clean_rollback_restarts_the_previous_runtime_under_the_previous_config() -> None:
+    """Restoring the records is not restoring the role.
+
+    Reported by Director against 58299ed: after a failed replacement start the
+    board and projection returned to the old CLI, but the old worker stayed
+    stopped and the command still called it a clean undo. Two things caused it --
+    the stop was never journalled, so rollback did not know to restart; and a
+    strictly reversed rollback would have restarted the worker while the
+    projection still named the runtime that had just failed.
+    """
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-runtime-restore.") as tmp:
+        root = Path(tmp)
+        config_path = _write_config(root)
+        _idle_state(config_path)
+        board = FakeBoard()
+        runner = RuntimeRunner(fail_starts=1)
+        role_runtime._readiness_blockers = _ready
+
+        try:
+            _switch(config_path, role="audit", runtime="agy", board=board, runner=runner)
+            raise AssertionError("a failed start reported success")
+        except role_runtime.RoleRuntimeRefusal:
+            pass
+
+        # The session is live again...
+        assert "porter-audit" in runner.live
+        # ...and the restore ran against the restored projection, so it came
+        # back as claude rather than as the runtime that had just failed. The
+        # end state cannot show this: only what the config said at start time.
+        assert runner.starts == [("porter-audit", "agy"), ("porter-audit", "claude")], runner.starts
+        commands = [" ".join(call) for call in runner.calls]
+        starts = [
+            i for i, c in enumerate(commands)
+            if c.startswith("tmux new-session") and "-s porter-audit" in c
+        ]
+        assert len(starts) == 2, commands
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        assert next(role["cli"] for role in raw["roles"] if role["role"] == "audit") == ["claude"]
+        # The slot showing it was reconnected too, so no pane is left parked.
+        reconnects = [
+            i for i, c in enumerate(commands)
+            if ("respawn-pane" in c or "-s porter-display-" in c) and "set-hook" not in c
+        ]
+        assert reconnects and min(reconnects) > starts[-1], "a slot was reconnected before the restore"
+        assert not role_runtime.journal_path_for(
+            team_launcher.load_project_config("porter", config_path),
+            config_path=config_path,
+            role_name="audit",
+        ).exists()
+
+
+def test_a_worker_that_cannot_be_restored_is_not_called_a_clean_rollback() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-role-runtime-downed.") as tmp:
+        root = Path(tmp)
+        config_path = _write_config(root)
+        _idle_state(config_path)
+        board = FakeBoard()
+        # Every start fails: the new runtime will not come up and neither will
+        # the old one, which is the case an operator has to be told about.
+        runner = RuntimeRunner(fail_start=True)
+        role_runtime._readiness_blockers = _ready
+
+        try:
+            _switch(config_path, role="audit", runtime="agy", board=board, runner=runner)
+            raise AssertionError("a downed role reported a clean rollback")
+        except role_runtime.RoleRuntimeRefusal as refusal:
+            assert "needs an operator" in str(refusal), refusal
+            assert "worker" in str(refusal)
+        assert "porter-audit" not in runner.live
+        journal = role_runtime.journal_path_for(
+            team_launcher.load_project_config("porter", config_path),
+            config_path=config_path,
+            role_name="audit",
+        )
+        assert journal.exists()
+        assert "worker_stopped" in json.loads(journal.read_text(encoding="utf-8"))["steps_applied"]
 
 
 def test_a_rollback_that_cannot_finish_is_reported_with_the_journal_that_repairs_it() -> None:

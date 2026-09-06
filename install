@@ -90,12 +90,42 @@ dry_run_install() {
         SWITCHYARD_SHARED_INSTALL_ROOT="${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}" \
         SWITCHYARD_INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}" \
         "$SWITCHYARD_INSTALL_SCRIPT" --print-commands
+    install_source_checkout_policy
 }
 
 print_final_next_step() {
     printf '\nNEXT STEP\n'
     printf 'Switchyard does not install agent CLIs. Install at least one of claude, codex, agy, or hermes yourself, with that vendor'"'"'s own installer, for the user that will own the project.\n'
     printf 'Then run `switchyard new`: it detects which agent CLIs are installed and walks you through signing in to each one before any pane starts.\n'
+}
+
+install_source_checkout_policy() {
+    # The warning-only pre-commit policy for this source clone. Installed as the human
+    # who ran the installer, not as root: these are their hooks and their local git
+    # config, and a root-owned .git/hooks would leave them unable to change it.
+    # Repository-local only -- core.hooksPath is set with `git config --local` inside
+    # this checkout, and no global configuration or unrelated home is touched.
+    local installer="$REPO_ROOT/scripts/repository_hooks.py"
+    if [[ ! -x "$installer" ]]; then
+        printf 'install: skipping pre-commit policy; %s is missing\n' "$installer" >&2
+        return 0
+    fi
+    local -a policy_cmd=(
+        "$installer" --repository "$REPO_ROOT" --project switchyard --local-only
+    )
+    if [[ "$ORIGINAL_USER" != "root" && "${EUID:-$(id -u)}" -eq 0 ]]; then
+        policy_cmd=("$SUDO_BIN" -u "$ORIGINAL_USER" "${policy_cmd[@]}")
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        # A dry run reports and changes nothing. The sub-installers have their own
+        # dry-run flags; this one does not, so it must not be executed here.
+        print_command "${policy_cmd[@]}"
+        return 0
+    fi
+    # Warning-only policy: failing to install it must not fail an otherwise good install.
+    if ! run_cmd "${policy_cmd[@]}"; then
+        printf 'warning: install: could not install the pre-commit policy into %s\n' "$REPO_ROOT" >&2
+    fi
 }
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -113,4 +143,5 @@ run_cmd env \
     SWITCHYARD_SHARED_INSTALL_ROOT="${SWITCHYARD_SHARED_INSTALL_ROOT:-/opt/switchyard}" \
     SWITCHYARD_INSTALL_PATH="${SWITCHYARD_INSTALL_PATH:-/usr/local/bin/switchyard}" \
     "$SWITCHYARD_INSTALL_SCRIPT" --apply
+install_source_checkout_policy
 print_final_next_step

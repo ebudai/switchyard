@@ -7,11 +7,22 @@ set -euo pipefail
 
 SERVICE_USER="${SERVICE_USER:-boardsvc}"
 SERVICE_ROLE="${SERVICE_ROLE:-ticket_board_service}"
-PG_DATABASE="${PG_DATABASE:-pgu}"
-PG_IDENT_MAP="${PG_IDENT_MAP:-pgu_ticket_board_service}"
-BOARD_ROOT="${BOARD_ROOT:-/home/agent/pgu-ticketboard-live}"
-ASSET_ROOT="${ASSET_ROOT:-/home/agent/.claude/pgu-tickets-assets}"
-FRAME_ROOT="${FRAME_ROOT:-/tmp/pgu-frames}"
+PROJECT_SLUG="${TICKET_BOARD_PROJECT:-${PGU_TICKET_BOARD_PROJECT:-pgu}}"
+if [[ -z "${PG_DATABASE:-}" ]]; then
+    PG_DATABASE="${PROJECT_SLUG//-/_}"
+    [[ "$PROJECT_SLUG" == "pgu" ]] || PG_DATABASE="${PG_DATABASE}_ticket_board"
+fi
+PG_IDENT_MAP="${PG_IDENT_MAP:-${PROJECT_SLUG//-/_}_ticket_board_service}"
+OWNER_HOME="${TICKET_BOARD_OWNER_HOME:-}"
+BOARD_ROOT="${BOARD_ROOT:-${OWNER_HOME:+$OWNER_HOME/$PROJECT_SLUG-ticketboard-live}}"
+ASSET_ROOT="${ASSET_ROOT:-${OWNER_HOME:+$OWNER_HOME/.claude/$PROJECT_SLUG-tickets-assets}}"
+if [[ -z "${FRAME_ROOT:-}" ]]; then
+    if [[ "$PROJECT_SLUG" == "pgu" ]]; then
+        FRAME_ROOT="/tmp/pgu-frames"
+    else
+        FRAME_ROOT="${OWNER_HOME:+$OWNER_HOME/.claude/$PROJECT_SLUG-ticket-frames}"
+    fi
+fi
 
 usage() {
     cat <<EOF
@@ -22,7 +33,7 @@ Usage:
 
 Creates the $SERVICE_USER OS user, installs reachable peer-auth pg_hba/pg_ident
 rules for $SERVICE_ROLE, reloads PostgreSQL, and grants $SERVICE_USER access to the
-deploy, asset, and frame directories using ACLs. Defaults are shown by
+configured tenant deploy, asset, and frame directories using ACLs. Values are shown by
 --print-root-commands.
 EOF
 }
@@ -33,21 +44,13 @@ set -euo pipefail
 
 # 1. Create $SERVICE_USER, add peer auth for $SERVICE_ROLE, reload PostgreSQL,
 #    and grant deploy/assets/frames ACL access.
-sudo PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP BOARD_ROOT=$BOARD_ROOT \\
+sudo TICKET_BOARD_PROJECT=$PROJECT_SLUG TICKET_BOARD_OWNER_HOME=$OWNER_HOME \\
+  PG_DATABASE=$PG_DATABASE PG_IDENT_MAP=$PG_IDENT_MAP BOARD_ROOT=$BOARD_ROOT \\
   ASSET_ROOT=$ASSET_ROOT FRAME_ROOT=$FRAME_ROOT SERVICE_USER=$SERVICE_USER SERVICE_ROLE=$SERVICE_ROLE \\
   scripts/ticket-board-boardsvc-setup.sh --apply
 
-# 2. Install the proposed system unit, tmpfiles entry, and deploy polkit rule
-#    after reviewing/editing PGDATABASE.
-sudo install -m 0644 deploy/systemd/pgu-ticket-board.service.boardsvc /etc/systemd/system/pgu-ticket-board.service
-sudo install -m 0644 deploy/systemd/pgu-ticket-board-canary.service /etc/systemd/system/pgu-ticket-board-canary.service
-sudo install -m 0644 deploy/tmpfiles/pgu-ticket-board.conf /etc/tmpfiles.d/pgu-ticket-board.conf
-sudo install -m 0644 deploy/polkit/49-pgu-board-deploy.rules /etc/polkit-1/rules.d/49-pgu-board-deploy.rules
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/pgu-ticket-board.conf
-
-# 3. Reload systemd and start the board under $SERVICE_USER.
-sudo systemctl daemon-reload
-sudo systemctl enable --now pgu-ticket-board.service
+# Install the project-specific service, tmpfiles, and polkit artifacts with the
+# generated operator-commands.sh. Shared source does not embed tenant units.
 EOF
 }
 
@@ -56,6 +59,21 @@ require_root() {
         printf 'ERROR: --apply must be run as root during the supervised cutover.\n' >&2
         exit 1
     fi
+}
+
+require_storage_paths() {
+    local name value
+    for name in OWNER_HOME BOARD_ROOT ASSET_ROOT FRAME_ROOT; do
+        value="${!name:-}"
+        if [[ -z "$value" ]]; then
+            printf 'ERROR: %s is required; set TICKET_BOARD_OWNER_HOME or the explicit tenant path variables.\n' "$name" >&2
+            exit 1
+        fi
+        if [[ "$value" != /* ]]; then
+            printf 'ERROR: %s must be an absolute tenant path: %s\n' "$name" "$value" >&2
+            exit 1
+        fi
+    done
 }
 
 append_once() {
@@ -194,6 +212,8 @@ apply_peer_auth() {
 }
 
 apply_setup() {
+    require_root
+    require_storage_paths
     apply_peer_auth
 
     if ! command -v setfacl >/dev/null 2>&1; then
@@ -203,7 +223,7 @@ apply_setup() {
     local asset_parent
     asset_parent="$(dirname "$ASSET_ROOT")"
     mkdir -p "$asset_parent"
-    setfacl -m "u:$SERVICE_USER:--x" /home/agent
+    setfacl -m "u:$SERVICE_USER:--x" "$OWNER_HOME"
     setfacl -m "u:$SERVICE_USER:--x" "$asset_parent"
     grant_read_exec_acl "$BOARD_ROOT"
     grant_write_acl "$ASSET_ROOT"

@@ -10,7 +10,8 @@ fi
 readonly PROJECT_SLUG PROJECT_DB_IDENT DEFAULT_DATABASE_NAME
 readonly SERVICE_NAME="${TICKET_BOARD_NOTIFY_LISTENER_SERVICE_NAME:-$PROJECT_SLUG-ticket-board-notify-listener.service}"
 readonly SOURCE_REPO="${SOURCE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/$PROJECT_SLUG-ticketboard-live}"
+readonly OWNER_HOME="${TICKET_BOARD_OWNER_HOME:-}"
+readonly BOARD_ROOT="${BOARD_ROOT:-${OWNER_HOME:+$OWNER_HOME/$PROJECT_SLUG-ticketboard-live}}"
 readonly BOARD_RELEASES_DIR="$BOARD_ROOT/releases"
 readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
 readonly LISTENER_SCRIPT="${LISTENER_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board-notify-listener}"
@@ -58,6 +59,11 @@ die() {
 
 log() {
     printf '[ticket-board-notify-listener-service] %s\n' "$*" >&2
+}
+
+require_tenant_paths() {
+    [[ -n "$BOARD_ROOT" ]] || die "BOARD_ROOT is required (or set TICKET_BOARD_OWNER_HOME so the tenant release root can be derived); refusing to select another tenant's home"
+    [[ "$BOARD_ROOT" == /* ]] || die "BOARD_ROOT must be an absolute tenant path: $BOARD_ROOT"
 }
 
 runtime_dir() {
@@ -219,7 +225,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$BOARD_CURRENT_LINK
-ExecStart=$PYTHON_BIN $LISTENER_SCRIPT
+ExecStart=$PYTHON_BIN $LISTENER_SCRIPT --directorctl $BOARD_CURRENT_LINK/scripts/directorctl
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
@@ -229,6 +235,7 @@ Environment=PGUSER=ticket_board_listener
 Environment=TICKET_BOARD_DATABASE_URL=$LISTENER_DATABASE_URL
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL=$LISTENER_DATABASE_URL
 Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
+Environment=TICKET_BOARD_DIRECTORCTL=$BOARD_CURRENT_LINK/scripts/directorctl
 Environment=TICKET_BOARD_PANE_STATE_DIR=%t/$PROJECT_SLUG-ticket-board/pane-state
 EnvironmentFile=-%h/.config/$PROJECT_SLUG/ticket-board-notify-listener.env
 StandardOutput=append:$LOG_PATH
@@ -286,6 +293,15 @@ main() {
     }
 
     case "$1" in
+        -h|--help)
+            usage
+            return
+            ;;
+    esac
+    if [[ "$1" != "ensure-roles" ]]; then
+        require_tenant_paths
+    fi
+    case "$1" in
         install)
             install_service
             ;;
@@ -310,9 +326,6 @@ main() {
             ;;
         logs)
             show_logs
-            ;;
-        -h|--help)
-            usage
             ;;
         *)
             die "unknown command: $1"

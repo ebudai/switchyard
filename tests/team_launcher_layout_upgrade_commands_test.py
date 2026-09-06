@@ -442,6 +442,17 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
         (board_root / "current").symlink_to(old_release)
         provision_dir = root / "otto" / ".switchyard" / "provision"
         provision_dir.mkdir(parents=True)
+        team_launcher.write_artifacts(
+            team_launcher.build_plan(
+                project="otto",
+                owner_user=team_launcher.current_user_name(),
+                owner_home=root,
+                board_root=board_root,
+                source_repo=source_repo,
+            ),
+            provision_dir,
+            enable_owner_linger=False,
+        )
         layout_path = provision_dir / "otto-konsole-layout.json"
         layout_path.write_text(
             json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
@@ -469,15 +480,19 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
 
     assert f"old: {old_sha} at {old_release}" in rendered
     assert f"new: {target_sha} from origin/main" in rendered
-    assert "privileged release update command for Eric" in rendered
-    assert "sudo env" in rendered
+    assert "matching-release deployment sequence" in rendered
+    assert "systemctl --user stop otto-ticket-board-notify-listener.service" in rendered
+    assert "systemctl --user daemon-reload && systemctl --user start otto-ticket-board-notify-listener.service" in rendered
+    assert f"HOME={root}" in rendered
+    assert f"TICKET_BOARD_OWNER_HOME={root}" in rendered
     assert "TICKET_BOARD_PROJECT=otto" in rendered
     assert f"SOURCE_REPO={source_repo}" in rendered
     assert f"BOARD_ROOT={board_root}" in rendered
     assert "DEPLOY_REF=origin/main" in rendered
-    assert f"{source_repo}/scripts/ticket-board-service.sh deploy" in rendered
+    assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" in rendered
+    assert f"{source_repo}/scripts/ticket-board-service.sh deploy-restart" in rendered
     assert "panes must be restarted after the release update" in rendered
-    assert "deploy-restart" not in rendered
+    assert "deploy-restart" in rendered
 
 
 def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy_command() -> None:
@@ -506,13 +521,20 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
             (board_root / "current").symlink_to(old_release)
             provision_dir = root / "otto" / ".switchyard" / "provision"
             provision_dir.mkdir(parents=True)
+            team_launcher.write_artifacts(
+                team_launcher.build_plan(
+                    project="otto",
+                    owner_user=team_launcher.current_user_name(),
+                    owner_home=root,
+                    board_root=board_root,
+                    source_repo=release,
+                ),
+                provision_dir,
+                enable_owner_linger=False,
+            )
             layout_path = provision_dir / "otto-konsole-layout.json"
             layout_path.write_text(
                 json.dumps(team_launcher._new_project_layout_payload(6), indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            (provision_dir / "plan.json").write_text(
-                json.dumps({"board_root": str(board_root)}) + "\n",
                 encoding="utf-8",
             )
             config_path = _write_launcher_config(
@@ -539,16 +561,18 @@ def test_switchyard_upgrade_from_shared_release_prints_clone_first_tenant_deploy
         assert "cannot determine artifact source checkout freshness" not in rendered
         assert f"old: {old_sha} at {old_release}" in rendered
         assert f"new: {target_sha} from origin/main" in rendered
-        assert "privileged release update command for Eric" in rendered
+        assert "matching-release deployment sequence" in rendered
+        assert f"TICKET_BOARD_OWNER_HOME={root}" in rendered
         assert f"git clone {origin} \"$tmpdir\"" in rendered
         assert 'SOURCE_REPO="$tmpdir"' in rendered
         assert f"BOARD_ROOT={board_root}" in rendered
         assert "DEPLOY_REF=origin/main" in rendered
-        assert '"$tmpdir/scripts/ticket-board-service.sh" deploy' in rendered
+        assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" in rendered
+        assert '"$tmpdir/scripts/ticket-board-service.sh" deploy-restart' in rendered
         assert f"SOURCE_REPO={release}" not in rendered
-        assert f"{release}/scripts/ticket-board-service.sh deploy" not in rendered
+        assert f"{release}/scripts/ticket-board-service.sh deploy-restart" not in rendered
         assert "panes must be restarted after the release update" in rendered
-        assert "deploy-restart" not in rendered
+        assert "deploy-restart" in rendered
     finally:
         if original_shared_root is None:
             os.environ.pop("SWITCHYARD_SHARED_INSTALL_ROOT", None)
@@ -600,7 +624,7 @@ def test_switchyard_upgrade_reports_unchanged_tenant_release() -> None:
     assert f"old: {target_sha} at {release}" in rendered
     assert f"new: {target_sha} from origin/main" in rendered
     assert "deployed board release unchanged; no release deploy needed" in rendered
-    assert "sudo env" not in rendered
+    assert "matching-release deployment sequence" not in rendered
     assert "panes must be restarted after the release update" not in rendered
 
 def test_switchyard_upgrade_pgu_without_tenant_release_emits_no_release_report() -> None:
@@ -632,7 +656,7 @@ def test_switchyard_upgrade_pgu_without_tenant_release_emits_no_release_report()
         rendered = stdout.getvalue()
 
     assert "deployed board release" not in rendered
-    assert "privileged release update command" not in rendered
+    assert "matching-release deployment sequence" not in rendered
     assert "sudo env" not in rendered
     assert "panes must be restarted after the release update" not in rendered
 

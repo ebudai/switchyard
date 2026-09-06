@@ -20,6 +20,8 @@ from typing import Any, Callable
 import psycopg
 from psycopg import sql
 
+from .runtime_paths import directorctl_path
+
 CHANNEL = "ticket_board_state_transition"
 DEFAULT_DATABASE_URL = (
     os.environ.get("TICKET_BOARD_NOTIFY_DATABASE_URL")
@@ -105,7 +107,7 @@ STATE_RANK = {
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
 LOGGER = logging.getLogger(__name__)
-DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
+DEFAULT_DIRECTORCTL = directorctl_path(__file__)
 WORK_EVIDENCE_REASONS = frozenset(
     {
         "hook_busy",

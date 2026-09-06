@@ -29,10 +29,11 @@ from PIL import Image
 from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now
 from .frontend import render_html
+from .runtime_paths import directorctl_path
 
 LOGGER = logging.getLogger(__name__)
 DIRECTOR_TARGET = "pgu-director:0.0"
-DEFAULT_DIRECTORCTL = "/home/agent/bin/directorctl"
+DEFAULT_DIRECTORCTL = directorctl_path(__file__)
 DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS = 0.35
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"

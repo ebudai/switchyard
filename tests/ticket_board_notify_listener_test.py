@@ -3265,7 +3265,7 @@ def test_default_sender_delegates_to_directorctl_send() -> None:
 
 
 def test_default_directorctl_path_is_canonical_runtime() -> None:
-    assert DEFAULT_DIRECTORCTL == "/home/agent/bin/directorctl"
+    assert DEFAULT_DIRECTORCTL == str(ROOT / "scripts" / "directorctl")
 
 
 def test_live_pane_shellout_guard_rejects_capture_pane_without_calling_tmux() -> None:

@@ -461,8 +461,10 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
     commands = render_operator_commands(plan)
     board_root = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/otto-ticketboard-live'"
     deploy = (
-        "sudo env TICKET_BOARD_PROJECT='otto' "
+        "sudo -u 'otto-agent' -H env HOME='/home/otto-agent' "
+        "TICKET_BOARD_OWNER_HOME='/home/otto-agent' TICKET_BOARD_PROJECT='otto' "
         "TICKET_BOARD_COMMIT_GIT_DIR='/data/git/otto_scheduler.git' "
+        'TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate" '
         f"SOURCE_REPO='{ROOT}' "
         "BOARD_ROOT='/home/otto-agent/otto-ticketboard-live'"
     )

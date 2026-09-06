@@ -54,7 +54,7 @@ class FakeEventHub:
 
 
 def main() -> int:
-    assert server_module.DEFAULT_DIRECTORCTL == "/home/agent/bin/directorctl"
+    assert server_module.DEFAULT_DIRECTORCTL == str(ROOT / "scripts" / "directorctl")
 
     with patch.object(sys, "argv", ["ticket-board"]):
         args = parse_args()

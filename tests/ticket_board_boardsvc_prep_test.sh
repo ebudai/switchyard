@@ -63,13 +63,17 @@ grep -q 'grant_write_acl "\$FRAME_ROOT"' "$SCRIPT" || {
     echo "FAIL: setup script does not grant shared frame directory write access" >&2
     exit 1
 }
-grep -q '49-pgu-board-deploy.rules' "$SCRIPT" || {
-    echo "FAIL: setup command plan does not install the board deploy polkit rule" >&2
+if grep -q '/home/agent' "$SCRIPT"; then
+    echo "FAIL: setup script still selects the PGU owner home" >&2
     exit 1
-}
+fi
 "$SCRIPT" --print-root-commands >"$TMPDIR_T/root-commands.out"
 grep -q '^set -euo pipefail$' "$TMPDIR_T/root-commands.out" || {
     echo "FAIL: printed root commands must stop on the first failed step" >&2
+    exit 1
+}
+grep -q 'generated operator-commands.sh' "$TMPDIR_T/root-commands.out" || {
+    echo "FAIL: setup command plan does not delegate tenant unit installation to generated artifacts" >&2
     exit 1
 }
 grep -q -- '--apply-peer-auth)' "$SCRIPT" || {

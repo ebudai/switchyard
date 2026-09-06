@@ -34,7 +34,9 @@ PY
 }
 COMMIT_GIT_DIR="$(resolve_commit_git_dir)"
 readonly COMMIT_GIT_DIR
-readonly BOARD_ROOT="${BOARD_ROOT:-/home/agent/$PROJECT_SLUG-ticketboard-live}"
+readonly OWNER_HOME="${TICKET_BOARD_OWNER_HOME:-}"
+readonly RUNTIME_HOME="${OWNER_HOME:-$HOME}"
+readonly BOARD_ROOT="${BOARD_ROOT:-${OWNER_HOME:+$OWNER_HOME/$PROJECT_SLUG-ticketboard-live}}"
 readonly BOARD_RELEASES_DIR="$BOARD_ROOT/releases"
 readonly BOARD_CURRENT_LINK="$BOARD_ROOT/current"
 readonly BOARD_SCRIPT="${BOARD_SCRIPT:-$BOARD_CURRENT_LINK/scripts/ticket-board.py}"
@@ -61,7 +63,7 @@ if [[ -z "${FRAME_ROOT:-}" ]]; then
     if [[ "$PROJECT_SLUG" == "pgu" ]]; then
         FRAME_ROOT="/tmp/pgu-frames"
     else
-        FRAME_ROOT="$HOME/.claude/$PROJECT_SLUG-ticket-frames"
+        FRAME_ROOT="$RUNTIME_HOME/.claude/$PROJECT_SLUG-ticket-frames"
     fi
 fi
 readonly FRAME_ROOT
@@ -69,6 +71,7 @@ readonly LOG_PATH="${LOG_PATH:-/tmp/$PROJECT_SLUG-ticket-board.log}"
 readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly SYSTEM_UNIT_PATH="${TICKET_BOARD_SYSTEM_UNIT_PATH:-/etc/systemd/system/$SERVICE_NAME}"
+readonly PROVISIONED_SYSTEM_UNIT="${TICKET_BOARD_PROVISIONED_SYSTEM_UNIT:-}"
 readonly SYSTEM_UNIT_HASH_RECORD="${TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD:-$BOARD_ROOT/system-unit.sha256}"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly SWITCHYARD_RELEASE_MARKER_NAME=".switchyard-release.json"
@@ -107,6 +110,14 @@ die() {
 
 log() {
     printf '[ticket-board-service] %s\n' "$*" >&2
+}
+
+require_tenant_paths() {
+    [[ -n "$BOARD_ROOT" ]] || die "BOARD_ROOT is required (or set TICKET_BOARD_OWNER_HOME so the tenant release root can be derived); refusing to select another tenant's home"
+    [[ "$BOARD_ROOT" == /* ]] || die "BOARD_ROOT must be an absolute tenant path: $BOARD_ROOT"
+    if [[ -n "$OWNER_HOME" ]]; then
+        [[ "$OWNER_HOME" == /* ]] || die "TICKET_BOARD_OWNER_HOME must be absolute: $OWNER_HOME"
+    fi
 }
 
 runtime_dir() {
@@ -790,8 +801,10 @@ ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
 ExecStart=$PYTHON_BIN $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
 Restart=on-failure
 RestartSec=2
-EnvironmentFile=-$HOME/.config/$PROJECT_SLUG/ticket-board.env
+EnvironmentFile=-$RUNTIME_HOME/.config/$PROJECT_SLUG/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
+Environment=HOME=$RUNTIME_HOME
+Environment=TICKET_BOARD_DIRECTORCTL=$BOARD_CURRENT_LINK/scripts/directorctl
 Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
 Environment=TICKET_BOARD_SOCKET=$BOARD_UNIX_SOCKET
 Environment=TICKET_BOARD_COMMIT_GIT_DIR=$COMMIT_GIT_DIR
@@ -816,7 +829,14 @@ render_system_unit_for_release() {
 
 system_unit_candidate_path_for_release() {
     local release_dir="$1"
-    local production_unit="$release_dir/deploy/systemd/$SERVICE_NAME.boardsvc"
+    local production_unit
+    if [[ -n "$PROVISIONED_SYSTEM_UNIT" ]]; then
+        [[ "$PROVISIONED_SYSTEM_UNIT" == /* ]] || die "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT must be absolute: $PROVISIONED_SYSTEM_UNIT"
+        printf '%s\n' "$PROVISIONED_SYSTEM_UNIT"
+        [[ -f "$PROVISIONED_SYSTEM_UNIT" ]] || return 1
+        return 0
+    fi
+    production_unit="$release_dir/deploy/systemd/$SERVICE_NAME.boardsvc"
     if [[ ! -f "$production_unit" && "$PROJECT_SLUG" == "pgu" ]]; then
         production_unit="$release_dir/deploy/systemd/pgu-ticket-board.service.boardsvc"
     fi
@@ -1006,6 +1026,15 @@ main() {
     }
 
     case "$1" in
+        -h|--help)
+            usage
+            return
+            ;;
+    esac
+    if [[ "$1" != "ensure-roles" ]]; then
+        require_tenant_paths
+    fi
+    case "$1" in
         install)
             install_service
             ;;
@@ -1046,9 +1075,6 @@ main() {
             ;;
         logs)
             show_logs
-            ;;
-        -h|--help)
-            usage
             ;;
         *)
             die "unknown command: $1"

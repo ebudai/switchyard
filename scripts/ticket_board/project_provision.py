@@ -47,8 +47,10 @@ class ProjectBoardProvision:
     project_name: str
     ticket_prefix: str
     owner_user: str
+    owner_home: str
     service_user: str
     board_unit: str
+    canary_unit: str
     listener_unit: str
     tmpfiles_name: str
     polkit_name: str
@@ -167,6 +169,7 @@ def build_plan(
     project: str,
     project_name: str | None = None,
     owner_user: str,
+    owner_home: Path | None = None,
     port: int | None = None,
     database: str | None = None,
     service_user: str = "boardsvc",
@@ -269,7 +272,9 @@ def build_plan(
     ident = _identifier_from_project(project)
     unit_prefix = f"{project}-ticket-board"
     runtime_directory = unit_prefix
-    home = Path("/home") / owner_user
+    home = (owner_home or (Path("/home") / owner_user)).expanduser()
+    if not home.is_absolute():
+        raise SystemExit("owner home must be an absolute path")
     resolved_board_root = board_root or home / f"{project}-ticketboard-live"
     resolved_source_repo = source_repo or Path(__file__).resolve().parents[2]
     resolved_commit_git_dir = str(commit_git_dir) if commit_git_dir is not None else commit_git_dir_env_for_project(project=project, owner_home=home)
@@ -280,6 +285,13 @@ def build_plan(
         resolved_frame_dir = Path("/tmp/pgu-frames")
     else:
         resolved_frame_dir = home / ".claude" / f"{project}-ticket-frames"
+    for path_name, tenant_path in (
+        ("board root", resolved_board_root),
+        ("asset directory", resolved_asset_dir),
+        ("frame directory", resolved_frame_dir),
+    ):
+        if not tenant_path.is_absolute():
+            raise SystemExit(f"{path_name} must be an absolute tenant path")
     resolved_database = database or ("pgu" if project == "pgu" else f"{ident}_ticket_board")
     resolved_port = port if port is not None else allocated_port(project)
     if not (1 <= resolved_port <= 65535):
@@ -290,8 +302,10 @@ def build_plan(
         project_name=resolved_project_name,
         ticket_prefix=resolved_ticket_prefix,
         owner_user=owner_user,
+        owner_home=str(home),
         service_user=service_user,
         board_unit=f"{unit_prefix}.service",
+        canary_unit=f"{unit_prefix}-canary.service",
         listener_unit=f"{unit_prefix}-notify-listener.service",
         tmpfiles_name=f"{unit_prefix}.conf",
         polkit_name=f"49-{unit_prefix}-deploy.rules",
@@ -716,8 +730,8 @@ def env_operation_role_map(values: Sequence[tuple[str, Sequence[str]]]) -> str:
     return ";".join(f"{operation}={env_list(roles)}" for operation, roles in values)
 
 
-def owned_ancestor_dirs(owner_user: str, target: str, *, include_target: bool) -> tuple[str, ...]:
-    home = PurePosixPath("/home") / owner_user
+def owned_ancestor_dirs(owner_home: str, target: str, *, include_target: bool) -> tuple[str, ...]:
+    home = PurePosixPath(owner_home)
     path = PurePosixPath(target)
     try:
         path.relative_to(home)
@@ -771,9 +785,10 @@ RuntimeDirectory={plan.runtime_directory}
 ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
 Restart=on-failure
 RestartSec=2
-EnvironmentFile=-/home/{plan.owner_user}/.config/{plan.project}/ticket-board.env
+EnvironmentFile=-{plan.owner_home}/.config/{plan.project}/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
-Environment=HOME=/home/{plan.owner_user}
+Environment=HOME={plan.owner_home}
+Environment=TICKET_BOARD_DIRECTORCTL={plan.board_current}/scripts/directorctl
 Environment=TICKET_BOARD_PROJECT={plan.project}
 {systemd_environment("TICKET_BOARD_PROJECT_NAME", plan.project_name)}
 Environment=TICKET_BOARD_TICKET_PREFIX={plan.ticket_prefix}
@@ -808,7 +823,7 @@ Wants=postgresql.service
 [Service]
 Type=simple
 WorkingDirectory={plan.board_current}
-ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board-notify-listener
+ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board-notify-listener --directorctl {plan.board_current}/scripts/directorctl
 Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
@@ -825,6 +840,27 @@ StandardError=append:{plan.listener_log}
 
 [Install]
 WantedBy=default.target
+"""
+
+
+def render_canary_unit(plan: ProjectBoardProvision) -> str:
+    return f"""[Unit]
+Description={plan.project} Ticket Board Deploy Canary
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User={plan.service_user}
+WorkingDirectory={plan.board_root}
+EnvironmentFile={plan.board_root}/canary.env
+RuntimeDirectory={plan.runtime_directory}-canary
+ExecStart=/bin/sh -eu -c 'PYTHONUNBUFFERED=1 TICKET_BOARD_PROJECT="${{TICKET_BOARD_PROJECT:-{plan.project}}}" TICKET_BOARD_SOCKET="$BOARD_CANARY_SOCKET" TICKET_BOARD_DATABASE_URL="$BOARD_CANARY_DATABASE_URL" exec {default_ticket_board_python()} "$BOARD_CANARY_RELEASE_DIR"/scripts/ticket-board.py --host "$BOARD_CANARY_HOST" --port "$BOARD_CANARY_PORT" --unix-socket "$BOARD_CANARY_SOCKET" --frames "$BOARD_CANARY_FRAME_DIR" --assets "$BOARD_CANARY_ASSET_DIR" >>"$BOARD_CANARY_LOG" 2>&1'
+Restart=no
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/tmp
 """
 
 
@@ -1295,17 +1331,18 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_commit_git_dir = shell_quote(plan.commit_git_dir)
     q_deploy_script = shell_quote(f"{plan.source_repo}/scripts/ticket-board-service.sh")
     q_board_unit = shell_quote(f"/etc/systemd/system/{plan.board_unit}")
+    q_canary_unit = shell_quote(f"/etc/systemd/system/{plan.canary_unit}")
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
     q_listener_unit = shell_quote(
-        f"/home/{plan.owner_user}/.config/systemd/user/{plan.listener_unit}"
+        f"{plan.owner_home}/.config/systemd/user/{plan.listener_unit}"
     )
-    q_owner_home = shell_quote(f"/home/{plan.owner_user}")
+    q_owner_home = shell_quote(plan.owner_home)
     q_hook_installer = shell_quote(f"{plan.board_current}/scripts/ticket-board-install-pane-hooks")
     q_hook_source = shell_quote(f"{plan.board_current}/scripts/ticket-board-pane-idle-hook")
-    q_hook_bin = shell_quote(f"/home/{plan.owner_user}/.local/bin/ticket-board-pane-idle-hook")
+    q_hook_bin = shell_quote(f"{plan.owner_home}/.local/bin/ticket-board-pane-idle-hook")
     q_pane_session_dir = shell_quote(
-        f"/home/{plan.owner_user}/.local/state/{plan.runtime_directory}/pane-sessions"
+        f"{plan.owner_home}/.local/state/{plan.runtime_directory}/pane-sessions"
     )
     workflow_seed_command = ""
     if plan.workflow_seed != "pgu-full":
@@ -1316,15 +1353,15 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         workflow_seed_command += "\n"
     install_board_root = owned_directory_command(
         plan,
-        owned_ancestor_dirs(plan.owner_user, plan.board_root, include_target=True),
+        owned_ancestor_dirs(plan.owner_home, plan.board_root, include_target=True),
     )
     if not install_board_root:
         install_board_root = f"sudo install -d -m 0755 {q_board_root}"
     install_asset_frame_parent = owned_directory_command(
         plan,
         (
-            *owned_ancestor_dirs(plan.owner_user, plan.asset_dir, include_target=False),
-            *owned_ancestor_dirs(plan.owner_user, plan.frame_dir, include_target=False),
+            *owned_ancestor_dirs(plan.owner_home, plan.asset_dir, include_target=False),
+            *owned_ancestor_dirs(plan.owner_home, plan.frame_dir, include_target=False),
         ),
     )
     if plan.project == "pgu" and plan.frame_dir == "/tmp/pgu-frames":
@@ -1351,15 +1388,15 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     install_listener_unit_parent = owned_directory_command(
         plan,
         owned_ancestor_dirs(
-            plan.owner_user,
-            f"/home/{plan.owner_user}/.config/systemd/user",
+            plan.owner_home,
+            f"{plan.owner_home}/.config/systemd/user",
             include_target=True,
         ),
     )
     q_owner_user = shell_quote(plan.owner_user)
-    q_board_env_file = shell_quote(f"/home/{plan.owner_user}/.config/{plan.project}/ticket-board.env")
-    q_owner_config_dir = shell_quote(f"/home/{plan.owner_user}/.config")
-    q_board_env_dir = shell_quote(f"/home/{plan.owner_user}/.config/{plan.project}")
+    q_board_env_file = shell_quote(f"{plan.owner_home}/.config/{plan.project}/ticket-board.env")
+    q_owner_config_dir = shell_quote(f"{plan.owner_home}/.config")
+    q_board_env_dir = shell_quote(f"{plan.owner_home}/.config/{plan.project}")
     install_board_env_parent = "\n".join(
         [
             f"sudo install -d -m 0755 -o {q_owner_user} -g {q_owner_user} {q_owner_config_dir}",
@@ -1375,8 +1412,8 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         )
         grant_home_traversal = "\n".join(
             [
-                f"sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user)}",
-                f"sudo setfacl -m u:{plan.service_user}:--x {shell_quote('/home/' + plan.owner_user + '/.claude')}",
+                f"sudo setfacl -m u:{plan.service_user}:--x {shell_quote(plan.owner_home)}",
+                f"sudo setfacl -m u:{plan.service_user}:--x {shell_quote(plan.owner_home + '/.claude')}",
             ]
         )
         effective_grant_asset_frame = grant_asset_frame
@@ -1407,10 +1444,13 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
 set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
+provision_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+system_unit_candidate="$provision_dir/{plan.board_unit}"
+canary_unit_candidate="$provision_dir/{plan.canary_unit}"
 {service_user_command(plan.service_user)}
 {peer_auth_command(plan)}
 {install_board_root}
-sudo env TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
+sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {grant_board_root}
 {install_asset_frame}
 {grant_home_traversal}
@@ -1421,7 +1461,8 @@ if ! sudo -u {q_owner_user} test -s {q_board_env_file}; then
     printf 'TICKET_BOARD_TENANT_REPORT_TOKEN=%s\\n' "$report_token" | sudo -u {q_owner_user} tee {q_board_env_file} >/dev/null
     sudo -u {q_owner_user} chmod 0600 {q_board_env_file}
 fi
-sudo install -m 0644 {shell_quote(plan.board_unit)} {q_board_unit}
+sudo install -m 0644 "$system_unit_candidate" {q_board_unit}
+sudo install -m 0644 "$canary_unit_candidate" {q_canary_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 sudo systemd-tmpfiles --create {q_tmpfiles}
@@ -1458,6 +1499,7 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
     files = {
         "plan.json": json.dumps(asdict(plan), indent=2, sort_keys=True) + "\n",
         plan.board_unit: render_board_unit(plan),
+        plan.canary_unit: render_canary_unit(plan),
         plan.listener_unit: render_listener_unit(plan),
         plan.tmpfiles_name: render_tmpfiles(plan),
         plan.polkit_name: render_polkit_rule(plan),
@@ -1477,6 +1519,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", required=True, help="project slug, e.g. pgu or stellaris")
     parser.add_argument("--project-name", help="display name shown by the ticket board")
     parser.add_argument("--owner-user", required=True, help="Unix user that owns this project/team")
+    parser.add_argument("--owner-home", type=Path, help="absolute owner home; default /home/<owner-user>")
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database name; omitted means <project>_ticket_board")
     parser.add_argument("--ticket-prefix", help="ticket id prefix; omitted means normalized project slug")
@@ -1537,6 +1580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         project=args.project,
         project_name=args.project_name,
         owner_user=args.owner_user,
+        owner_home=args.owner_home,
         port=args.port,
         database=args.database,
         ticket_prefix=args.ticket_prefix,

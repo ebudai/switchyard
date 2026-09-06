@@ -6,6 +6,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import pwd
 from pathlib import Path
 import shutil
 import subprocess
@@ -34,7 +35,108 @@ def rejects(fn):
     raise AssertionError("expected invalid configuration rejection")
 
 
+def provisioning_ownership(owner):
+    """Run real file generation/chown in an isolated user namespace."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    from team_launcher_test_helpers import FakeRunner
+
+    identity = pwd.getpwnam(owner)
+    assert os.geteuid() == 0 and identity.pw_uid != 0
+    with tempfile.TemporaryDirectory(prefix="workflow-owner-") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        repository = root / "repository"
+        repository.mkdir()
+        for configured in (False, True):
+            output = root / str(configured) / "provision"
+            output.mkdir(parents=True)
+            artifact = output.parent / "cerulean.project.json"
+            artifact.write_text("{}")
+            receipt = output / "desktop-receipt.json"
+            receipt.write_text("protected receipt")
+            unrelated = output / "unrelated" / "keep"
+            unrelated.parent.mkdir()
+            unrelated.write_text("unrelated")
+            policy = root / "workflow.json"
+            policy.write_text((ROOT / "examples/workflows/inspection.json").read_text())
+            host = FakeRunner()
+            assigned = []
+
+            def runner(args, **kwargs):
+                if args[0] == "chown":
+                    assert len(args) == 3 and args[1] == f"{owner}:{owner}"
+                    path = Path(args[-1])
+                    assert path.is_relative_to(root)
+                    assigned.append(path)
+                    return subprocess.run(args, **kwargs)
+                # Provisioning/services/auth commands remain simulated. Only
+                # scoped chown executes, against disposable namespace files.
+                return host(args, **kwargs)
+
+            assert (
+                launcher.new_project_command(
+                    "cerulean",
+                    owner_user=owner,
+                    owner_home=root / "owner-home",
+                    repository=repository,
+                    source_repo=ROOT,
+                    output_dir=output,
+                    workflow_config=policy if configured else None,
+                    execute=True,
+                    runner=runner,
+                    port_in_use=lambda port: False,
+                    socket_exists=lambda path: False,
+                    print_func=lambda text: None,
+                )
+                == 0
+            )
+            config = output / "cerulean.json"
+            raw = json.loads(config.read_text())
+            layout = Path(raw["layout"])
+            if not layout.is_absolute():
+                layout = output / layout
+            expected = {output, config, layout, output / "plan.json", artifact}
+            if (output / "workflow.json").exists():
+                expected.add(output / "workflow.json")
+            assert set(assigned) == expected, assigned
+            assert all(p.stat().st_uid == identity.pw_uid for p in expected)
+            assert all(p.stat().st_gid == identity.pw_gid for p in expected)
+            assert receipt.stat().st_uid == unrelated.stat().st_uid == 0
+            assert unrelated.parent.stat().st_uid == 0
+            assert receipt.read_text() == "protected receipt"
+            # The owner can atomically update controls and add its first
+            # workflow after privileged setup, without another chown.
+            child = os.fork()
+            if child == 0:
+                try:
+                    os.setgid(identity.pw_gid)
+                    os.setuid(identity.pw_uid)
+                    replacement = output / "plan.tmp"
+                    replacement.write_bytes((output / "plan.json").read_bytes())
+                    replacement.replace(output / "plan.json")
+                    (output / "workflow.json").write_text(policy.read_text())
+                except BaseException:
+                    import traceback
+
+                    traceback.print_exc()
+                    os._exit(1)
+                os._exit(0)
+            assert os.waitpid(child, 0)[1] == 0
+
+
 def main():
+    owner = pwd.getpwuid(os.geteuid()).pw_name
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--ownership-child",
+        owner,
+    ]
+    if os.geteuid() != 0:
+        command = ["unshare", "--user", "--map-auto", "--map-root-user", *command]
+    else:
+        command[-1] = "www-data"
+    subprocess.run(command, check=True)
     with tempfile.TemporaryDirectory(prefix="workflow-export-") as tmp:
         root = Path(tmp)
         release = root / "release"
@@ -251,4 +353,7 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if len(sys.argv) == 3 and sys.argv[1] == "--ownership-child":
+        provisioning_ownership(sys.argv[2])
+    else:
+        raise SystemExit(main())

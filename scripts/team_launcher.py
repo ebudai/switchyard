@@ -7026,9 +7026,8 @@ def new_project_command(
     if config.desktop_access is not None:
         configure_project_desktop(config, config_path=config_path,
             helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
-    if plan.workflow is not None:
-        from scripts.workflow_launcher import assign_projection_owner
-        assign_projection_owner(config, config_path, runner=runner)
+    from scripts.workflow_launcher import assign_projection_owner
+    assign_projection_owner(config, config_path, runner=runner)
     print_func(f"team-launcher: provisioned {plan.project}; launcher config {config_path}")
     return 0
 

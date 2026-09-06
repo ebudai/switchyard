@@ -335,6 +335,144 @@ def test_other_roles_get_no_seeded_prompt_from_the_launcher() -> None:
     assert "TICKET_BOARD_ROLE_ONBOARDING_PROMPT" not in env
 
 
+# --- add-role leaves the document alone --------------------------------------
+
+
+def test_add_role_refuses_outright_for_a_declarative_tenant() -> None:
+    """So it cannot seed or clear onboarding on any role, related or not.
+
+    add-role builds the launcher role dict only; for a project with a workflow document
+    it refuses and directs the operator to the apply path, which is where role data
+    actually lives. The document is therefore preserved by construction rather than by
+    add-role being careful.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        launcher_dir = Path(tmp) / "launcher"
+        launcher_dir.mkdir()
+        config_path = launcher_dir / "porter.json"
+        document = {
+            "schema": "switchyard.workflow.v1",
+            "roles": [],
+            "stages": [],
+            "transitions": [],
+        }
+        config_path.write_text(
+            json.dumps(
+                {
+                    "project": "porter",
+                    "layout": "layout.json",
+                    "roles": [
+                        {
+                            "role": "ops",
+                            "cli": ["claude"],
+                            "target": "porter-ops:0.0",
+                            "tmux_session": "porter-ops",
+                            "detached": True,
+                        }
+                    ],
+                    "workflow": document,
+                }
+            ),
+            encoding="utf-8",
+        )
+        config = team_launcher.load_project_config("porter", config_path)
+        try:
+            team_launcher._project_plan_for_added_role(
+                config, config_path=config_path, role_name="perf"
+            )
+            raise AssertionError("expected add-role to refuse for a declarative tenant")
+        except SystemExit as exc:
+            message = str(exc)
+        unchanged = json.loads(config_path.read_text())["workflow"]
+
+    assert "ticket-board-workflow apply" in message
+    assert unchanged == document, "add-role must leave the workflow document untouched"
+
+
+# --- tenant ownership of what the write path produces ------------------------
+
+
+class _OwnerConfig:
+    """Just enough of a project config for the ownership helpers."""
+
+    run_as_user = "porter-agent"
+
+
+def test_the_intended_ownership_operation_names_the_tenant_uid_and_gid() -> None:
+    """Non-root coverage of the operation itself.
+
+    ensure_owner_file no-ops unless euid is 0, so asserting its effect as an ordinary
+    user would prove nothing. What can be asserted without root is the command it would
+    run: the tenant as both user and group, on that exact path.
+    """
+    args = team_launcher.chown_owner_file_args(_OwnerConfig(), Path("/srv/porter/workflow.json"))
+    assert args == ["chown", "porter-agent:porter-agent", "/srv/porter/workflow.json"]
+
+
+def test_ownership_is_refused_when_no_tenant_is_configured() -> None:
+    try:
+        team_launcher.chown_owner_file_args(type("C", (), {"run_as_user": ""})(), Path("/srv/x"))
+        raise AssertionError("expected a refusal with no run_as_user")
+    except ValueError as exc:
+        assert "requires run_as_user" in str(exc)
+
+
+def test_projection_paths_are_handed_to_the_tenant_and_nothing_else() -> None:
+    """The handover covers the projection and its directory, and is not recursive."""
+    import tempfile
+
+    from scripts import workflow_launcher
+
+    handed: list[Path] = []
+    original = team_launcher.ensure_owner_file
+    team_launcher.ensure_owner_file = lambda config, path, *, runner: handed.append(Path(path))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launcher_dir = root / "launcher"
+            launcher_dir.mkdir()
+            config_path = launcher_dir / "porter.json"
+            config_path.write_text(
+                json.dumps({"project": "porter", "layout": "layout.json"}), encoding="utf-8"
+            )
+            (launcher_dir / "layout.json").write_text("{}", encoding="utf-8")
+            (launcher_dir / "workflow.json").write_text("{}", encoding="utf-8")
+            unrelated = launcher_dir / "service-receipt.json"
+            unrelated.write_text("{}", encoding="utf-8")
+
+            workflow_launcher.assign_projection_owner(
+                _OwnerConfig(), config_path, runner=lambda *a, **k: None
+            )
+            names = sorted(p.name for p in handed)
+    finally:
+        team_launcher.ensure_owner_file = original
+
+    assert names == ["launcher", "layout.json", "porter.json", "workflow.json"], names
+    assert "service-receipt.json" not in names, "the handover must not sweep unrelated files"
+
+
+def test_real_ownership_change_when_running_privileged() -> None:
+    """Exercised only as root; skipped otherwise rather than faked."""
+    import os
+    import tempfile
+
+    if os.geteuid() != 0:
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "workflow.json"
+        target.write_text("{}", encoding="utf-8")
+        import subprocess
+
+        subprocess.run(
+            team_launcher.chown_owner_file_args(_OwnerConfig(), target), check=True
+        )
+        import pwd as _pwd
+
+        assert target.stat().st_uid == _pwd.getpwnam(_OwnerConfig.run_as_user).pw_uid
+
+
 # --- the mutation the command performs ---------------------------------------
 
 

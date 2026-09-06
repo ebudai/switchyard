@@ -122,9 +122,22 @@ def main() -> int:
                 (root / "cerulean.project.json").write_text(
                     json.dumps({"project": {"repository": str(project_dir)}}), encoding="utf-8"
                 )
-                config_path = launcher_dir / "cerulean.json"
+                config_path = launcher_dir / "cerulean.json"  # noqa: E501
                 config_path.write_text(
-                    json.dumps({"project": "cerulean", "layout": "layout.json", "roles": []}),
+                    json.dumps(
+                        {
+                            "project": "cerulean",
+                            "layout": "layout.json",
+                            # A role entry is required for switchyard to recognise this as
+                            # a project config, which the public command's resolution needs.
+                            "roles": [{"role": "ops"}],
+                            "board_url": base,
+                            # Distinct per-role workdirs; without this every role would
+                            # default to the same directory and the config is rejected.
+                            "worktree_base": str(root / "worktrees"),
+                            "repository": str(project_dir),
+                        }
+                    ),
                     encoding="utf-8",
                 )
                 workflow_json = launcher_dir / "workflow.json"
@@ -239,6 +252,67 @@ def main() -> int:
                     if r.get("onboarding_prompt")
                 )
                 assert seeded_roles == ["director", "ops"], seeded_roles
+
+                # --- the public command --------------------------------------
+                # Everything above drives the entry point the command forwards to; this
+                # drives `switchyard role-prompt` itself, including project resolution
+                # and the board URL taken from the tenant's own config.
+                import contextlib as _contextlib
+
+                launcher_module = importlib.import_module("scripts.team_launcher")
+                previous_config_dir = launcher_module.DEFAULT_CONFIG_DIR
+                launcher_module.DEFAULT_CONFIG_DIR = launcher_dir
+                try:
+                    assert "role-prompt" in launcher_module.SWITCHYARD_UNPRIVILEGED_COMMANDS
+                    assert "role-prompt" not in launcher_module.SWITCHYARD_PRIVILEGED_COMMANDS
+
+                    # Compare against what the board actually holds now rather than the
+                    # value set at the top; earlier sections have changed it since.
+                    expected_now = _ops_role(_board_document(base)["document"])["onboarding_prompt"]
+                    out = io.StringIO()
+                    with _contextlib.redirect_stdout(out):
+                        assert (
+                            launcher_module.switchyard_main(
+                                ["role-prompt", "show", "ops", "--project", "cerulean"]
+                            )
+                            == 0
+                        )
+                    assert json.loads(out.getvalue())["onboarding_prompt"] == expected_now
+
+                    public_prompt = "Set through the public command.\n\nSecond line.\n"
+                    with _contextlib.redirect_stdout(io.StringIO()):
+                        assert (
+                            launcher_module.switchyard_main(
+                                [
+                                    "role-prompt", "set", "ops",
+                                    "--project", "cerulean",
+                                    "--prompt", public_prompt,
+                                ]
+                            )
+                            == 0
+                        )
+                    assert _ops_role(_board_document(base)["document"])["onboarding_prompt"] == public_prompt
+
+                    with _contextlib.redirect_stdout(io.StringIO()):
+                        assert (
+                            launcher_module.switchyard_main(
+                                ["role-prompt", "clear", "ops", "--project", "cerulean"]
+                            )
+                            == 0
+                        )
+                    assert "onboarding_prompt" not in _ops_role(_board_document(base)["document"])
+
+                    # Restore the prompt so the assertions below still describe reality.
+                    _run(wm, ["set-role-prompt", "--role", "ops", "--prompt", PROMPT, *base_args])
+                finally:
+                    launcher_module.DEFAULT_CONFIG_DIR = previous_config_dir
+
+                # --- tenant ownership ----------------------------------------
+                # The projection is written by the invoking tenant, so it must remain
+                # owned by that tenant rather than by anything the write path escalated to.
+                for written in (config_path, workflow_json):
+                    assert written.stat().st_uid == os.getuid(), written
+                    assert written.stat().st_gid == os.getgid(), written
 
                 # --- clear ----------------------------------------------------
                 _run(wm, ["clear-role-prompt", "--role", "ops", *base_args])

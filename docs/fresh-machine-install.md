@@ -24,6 +24,36 @@ naming a CLI.
 Authentication cannot be automated and is not attempted at install time. It
 happens once per detected CLI at project creation.
 
+For `agy` there is one exception, because its sign-in cannot be completed by a
+headless owner user: switchyard can copy an existing agy OAuth token into a new
+project's owner home so the project's panes start already signed in. Nothing is
+authenticated on your behalf — an existing token is reused.
+
+Name the account once per machine:
+
+```
+sudo switchyard agy-credential set USER     # record it
+sudo switchyard agy-credential show         # see what is recorded
+sudo switchyard agy-credential clear        # stop seeding new projects
+```
+
+New projects then seed from that account with no extra flags. Per project,
+`switchyard new --agy-credential-source USER` overrides the recorded account and
+`--no-agy-credential` skips seeding entirely. If nothing is recorded, an
+interactive `switchyard new` offers the account you are running as and stores it
+only if you confirm; a `--yes` run never infers one, so it seeds nothing unless
+you pass the flag.
+
+Understand what this shares before recording it: every role pane of a seeded
+project can act as the one Google account that user signed in to agy with, and
+the refresh token it copies does not expire. The effective source and how it was
+chosen — host default, per-project override, or opt-out — are recorded in the
+project artifact under `capability_grants`.
+
+Seeding only ever fills in a missing credential. A token already in place and
+owned by the project owner is left untouched; anything else at that path is a
+hard error rather than something switchyard overwrites.
+
 ## System Packages
 
 ### apt

@@ -60,6 +60,7 @@ Commands:
   upgrade          update generated project artifacts and report release drift
   add-role         add an implementer or auditor role, worktree, pane, and board registration
   present          map persistent role sessions into stable display slots at runtime
+  replace-window   replace a root-owned presentation window without stopping any worker
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes
@@ -72,7 +73,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, add-role, present, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
 ```
 <!-- switchyard-help:end -->
 

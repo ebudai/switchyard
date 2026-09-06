@@ -12,6 +12,7 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import shlex
 import socket
 import stat
@@ -58,6 +59,8 @@ DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
 SWITCHYARD_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 SWITCHYARD_NAME = "switchyard"
 TEAM_LAUNCHER_NAME = "team-launcher"
+# SYRD-43: the program Konsole runs for a pane, so a detach never lands on a shell.
+PANE_WINDOW_NAME = "switchyard-pane-window"
 DEFAULT_LEGACY_RUNTIME_SESSION_DIR = Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-sessions")
 GENERIC_DEFAULT_STATE_DIR_NAME = "ticket-board"
 LIVE_PGU_STATE_DIR_NAME = "pgu-ticket-board"
@@ -154,6 +157,7 @@ SWITCHYARD_COMMANDS = (
     "upgrade",
     "add-role",
     "present",
+    "replace-window",
     "set-vcs-close-role",
     "set-role-runtime",
     "agy-credential",
@@ -768,8 +772,44 @@ def normalize_wayland_display(display: str, *, gui_user: str) -> str | None:
     return f"/run/user/{uid}/{name}"
 
 
+def _refusal_command(message: str) -> list[str]:
+    return ["sh", "-lc", f"printf '%s\\n' {shlex.quote(message)} >&2; exit 1"]
+
+
+def gui_privilege_drop_args(gui_user: str, *, euid: int | None = None) -> tuple[list[str], str]:
+    """How to reach the desktop identity before any GUI process starts.
+
+    A terminal emulator started by a privileged invocation is a root terminal:
+    every tab it opens is a root shell, and when the tmux client inside one
+    detaches the tab falls back to that shell. Nothing in a role presentation
+    window may run as root, so a root-invoked launch crosses to the desktop
+    account first. Returns the argv prefix and, when it cannot, why (SYRD-43).
+    """
+    effective = os.geteuid() if euid is None else euid
+    user = (gui_user or "").strip()
+    if effective != 0:
+        return [], ""
+    if not user or user == "root":
+        return [], (
+            "team-launcher: refusing to open a presentation window as root. Set "
+            f"{GUI_USER_ENV} to the desktop account, or run switchyard through that "
+            "account's sudo so SUDO_USER identifies it."
+        )
+    if uid_for_user(user) in (None, 0):
+        return [], (
+            f"team-launcher: refusing to open a presentation window as root: {user!r} is not "
+            "an unprivileged local account."
+        )
+    # sudo resets the environment, so root's variables and credentials do not
+    # cross; everything the GUI needs is named explicitly by the caller.
+    return ["sudo", "-u", user, "-H", "--"], ""
+
+
 def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, window_title: str = "") -> list[str]:
     user = (gui_user if gui_user is not None else default_gui_user()).strip()
+    privilege_drop, refusal = gui_privilege_drop_args(user)
+    if refusal:
+        return _refusal_command(refusal)
     wayland_display = None
     host_wayland_display = _env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
     if host_wayland_display:
@@ -778,16 +818,30 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
         wayland_name = _env_first(GUI_WAYLAND_ENV, LEGACY_GUI_WAYLAND_ENV) or "wayland-0"
         wayland_display = normalize_wayland_display(wayland_name, gui_user=user)
     if not wayland_display:
-        return [
-            "sh",
-            "-lc",
-            "printf '%s\\n' 'team-launcher: no host Wayland display; run from Eric desktop session' >&2; exit 1",
+        return _refusal_command(
+            "team-launcher: no host Wayland display; run from Eric desktop session"
+        )
+    if privilege_drop:
+        # Crossing from root is an environment boundary, so the environment is
+        # emptied rather than filtered. sudo's env_reset is the host's policy,
+        # not ours: any variable a site's env_keep preserves would otherwise
+        # cross into the desktop account, and so would anything -H leaves set.
+        # `env -i` discards all of it and the GUI is given exactly the variables
+        # it needs, PATH included so an emptied environment can still resolve a
+        # program (SYRD-43).
+        environment = gui_environment_args(user, wayland_display=wayland_display)
+    else:
+        # An unprivileged invocation is already the caller's own session; there
+        # is no boundary to cross and its desktop integration is its own.
+        environment = [
+            "env",
+            "QT_QPA_PLATFORM=wayland",
+            f"WAYLAND_DISPLAY={wayland_display}",
         ]
     args = [
-        "env",
-        "QT_QPA_PLATFORM=wayland",
-        f"WAYLAND_DISPLAY={wayland_display}",
-        "konsole",
+        *privilege_drop,
+        *environment,
+        gui_program_path("konsole"),
         "--separate",
     ]
     title = window_title.strip()
@@ -800,6 +854,56 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
         ]
     )
     return args
+
+
+# The complete environment a presentation window is given after crossing from
+# root. Anything not here does not reach it, including anything a host's sudoers
+# env_keep would have preserved (SYRD-43).
+GUI_ENVIRONMENT_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "XDG_RUNTIME_DIR",
+    "QT_QPA_PLATFORM",
+    "WAYLAND_DISPLAY",
+)
+
+
+def gui_program_path(program: str) -> str:
+    """An absolute program, so an emptied environment still resolves it."""
+    resolved = shutil.which(program, path=DEFAULT_PANE_BASE_PATH) or shutil.which(program)
+    return resolved or program
+
+
+def gui_environment_args(gui_user: str, *, wayland_display: str) -> list[str]:
+    """`env -i` plus exactly the variables the desktop process is allowed."""
+    values = {
+        "PATH": DEFAULT_PANE_BASE_PATH,
+        "HOME": _gui_home(gui_user),
+        "USER": gui_user,
+        "LOGNAME": gui_user,
+        "XDG_RUNTIME_DIR": _gui_runtime_dir(gui_user),
+        "QT_QPA_PLATFORM": "wayland",
+        "WAYLAND_DISPLAY": wayland_display,
+    }
+    return [
+        "env",
+        "-i",
+        *[f"{name}={values[name]}" for name in GUI_ENVIRONMENT_ALLOWLIST if values.get(name)],
+    ]
+
+
+def _gui_runtime_dir(gui_user: str) -> str:
+    uid = uid_for_user(gui_user)
+    return f"/run/user/{uid}" if uid is not None else ""
+
+
+def _gui_home(gui_user: str) -> str:
+    try:
+        return pwd.getpwnam(gui_user).pw_dir
+    except KeyError:
+        return f"/home/{gui_user}"
 
 
 def _desktop_is_kde(desktop: str) -> bool:
@@ -4626,9 +4730,159 @@ def _prepare_project_worktrees_for_launch(
     )
 
 
+@dataclass(frozen=True)
+class UnsafePresentationWindow:
+    """A presentation process running as root, which no role pane may do."""
+
+    pid: int
+    uid: int
+    user: str
+    command: str
+
+
+PRESENTATION_PROGRAM_NAMES = ("konsole", "yakuake", "xterm", "gnome-terminal", "alacritty", "kitty")
+# The process table this scan reads. A module attribute so the callers that must
+# perform it -- start, status, upgrade, replace-window -- do not each need a
+# parameter threaded through them, and so tests can point it at a real tree they
+# built rather than at a stub of the scan itself.
+PROC_ROOT = Path("/proc")
+
+
+def _proc_cmdline(proc_root: Path, pid: str) -> list[str]:
+    try:
+        raw = (proc_root / pid / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part for part in raw.decode("utf-8", "replace").split("\0") if part]
+
+
+def _proc_effective_uid(proc_root: Path, pid: str) -> int | None:
+    """The uid a process is actually running with.
+
+    The effective uid is the one that decides what a shell in that process can
+    do, and a process that started as root and kept its privileges reports it
+    here. /proc is kernel-provided, so this is not something a process can
+    claim about itself (SYRD-43).
+    """
+    try:
+        for line in (proc_root / pid / "status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Uid:"):
+                fields = line.split()
+                if len(fields) >= 3:
+                    return int(fields[2])
+    except (OSError, ValueError):
+        pass
+    try:
+        return os.stat(proc_root / pid).st_uid
+    except OSError:
+        return None
+
+
+def presentation_layout_markers(config: ProjectConfig, *, config_path: Path | None = None) -> list[str]:
+    """Argument fragments that identify a window as this project's presentation."""
+    markers = [
+        f"{config.project}-konsole-layout.json",
+        f"{config.project}-presentation-layout.json",
+        project_window_title(config),
+    ]
+    if config.layout is not None:
+        markers.append(str(config.layout))
+    if config_path is not None:
+        markers.append(str(config_path))
+    return [marker for marker in markers if marker]
+
+
+def unsafe_root_presentation_windows(
+    config: ProjectConfig,
+    *,
+    config_path: Path | None = None,
+    proc_root: Path | None = None,
+) -> list[UnsafePresentationWindow]:
+    """Terminal windows showing this project's panes that are running as root.
+
+    A root terminal is a root shell behind every tab: when the tmux client in a
+    tab detaches, the tab falls back to that shell, and anything pasted into it
+    runs as root. Such a window can predate the repair, and the tenant cannot
+    signal it, so start, status and upgrade have to say it is there rather than
+    report the project safely attached (SYRD-43).
+    """
+    proc_root = proc_root or PROC_ROOT
+    markers = presentation_layout_markers(config, config_path=config_path)
+    found: list[UnsafePresentationWindow] = []
+    try:
+        entries = sorted(path.name for path in proc_root.iterdir() if path.name.isdigit())
+    except OSError:
+        return []
+    for pid in entries:
+        uid = _proc_effective_uid(proc_root, pid)
+        if uid != 0:
+            continue
+        argv = _proc_cmdline(proc_root, pid)
+        if not argv:
+            continue
+        program = _command_name(argv[0])
+        if program not in PRESENTATION_PROGRAM_NAMES and not any(
+            _command_name(part) in PRESENTATION_PROGRAM_NAMES for part in argv
+        ):
+            continue
+        if not any(marker in part for part in argv for marker in markers):
+            continue
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            user = str(uid)
+        found.append(
+            UnsafePresentationWindow(pid=int(pid), uid=uid, user=user, command=" ".join(argv))
+        )
+    return found
+
+
+def unsafe_presentation_report(
+    config: ProjectConfig, windows: Sequence[UnsafePresentationWindow]
+) -> str:
+    """What is unsafe, and the one command that replaces it without touching workers."""
+    lines = [
+        f"switchyard: {config.project} is NOT safely attached: "
+        f"{len(windows)} presentation window(s) are running as root, so every tab in them "
+        "falls back to a root shell when its pane detaches."
+    ]
+    for window in windows:
+        lines.append(f"  pid {window.pid} ({window.user}): {window.command}")
+    lines.append(
+        f"An operator must run `sudo switchyard replace-window {config.project}`, which replaces "
+        "only those windows and leaves every worker session running."
+    )
+    return "\n".join(lines)
+
+
+def switchyard_pane_launcher_for(config: ProjectConfig) -> Path:
+    """The launcher this project's panes run; the pane window ships beside it."""
+    if config.pane_launcher is not None:
+        return config.pane_launcher.expanduser()
+    return Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME)
+
+
+def pane_window_program(script_path: Path) -> Path:
+    """The inert pane program that ships beside the launcher this pane runs."""
+    return Path(script_path).expanduser().resolve(strict=False).with_name(PANE_WINDOW_NAME)
+
+
+def inert_pane_command(program: Path, args: Sequence[str]) -> str:
+    """Wrap a pane's client so its terminal never falls back to a shell.
+
+    Konsole runs the tab's program directly; when that program is the attach
+    command, a detach returns the tab to whatever shell opened the window. That
+    shell belongs to whoever invoked switchyard, so on a privileged invocation
+    the pane becomes a root prompt. The wrapper ends inert instead (SYRD-43).
+    """
+    return _quote_command([str(program), *args])
+
+
 def failed_role_command(role: RoleConfig, reason: str) -> str:
     message = f"PGU launcher did not start {role.role}: checkout refresh failed: {reason}"
-    return _quote_command(["sh", "-lc", f"printf '%s\\n' {shlex.quote(message)}; sleep 30"])
+    # `sleep 30` used to hand the tab back to the shell that opened the window.
+    # A failed role is exactly when someone reaches for that prompt (SYRD-43).
+    return _quote_command(["sh", "-c", f"printf '%s\\n' {shlex.quote(message)}; exec sleep infinity"])
 
 
 def materialize_layout(
@@ -4664,16 +4918,19 @@ def materialize_layout(
             leaf["Command"] = failed_role_command(role, failed_roles[role.role])
             leaf["WorkingDirectory"] = str(Path.home())
         else:
-            leaf["Command"] = pane_command(
-                config.project,
-                role,
-                config_path=config_path,
-                mode=mode,
-                script_path=script_path,
-                pane_state_dir=pane_state_dir,
-                force_reload=force_reload,
-                skip_launcher_check=True,
-                run_as_user=role_run_as_user(config, role),
+            leaf["Command"] = inert_pane_command(
+                pane_window_program(script_path),
+                pane_command_args(
+                    config.project,
+                    role,
+                    config_path=config_path,
+                    mode=mode,
+                    script_path=script_path,
+                    pane_state_dir=pane_state_dir,
+                    force_reload=force_reload,
+                    skip_launcher_check=True,
+                    run_as_user=role_run_as_user(config, role),
+                ),
             )
             leaf["WorkingDirectory"] = role.workdir
         leaf["Title"] = project_window_title(config)
@@ -4695,6 +4952,15 @@ def _verify_pane_launcher_path(
     if result.returncode != 0:
         owner = f" by {config.run_as_user}" if config.run_as_user else ""
         raise SystemExit(f"team-launcher: configured pane_launcher {pane_script_path} is not readable/executable{owner}")
+    # Every pane's terminal program is the inert window beside that launcher. A
+    # release without it would fall back to a shell on detach, which is the
+    # whole defect, so refuse rather than open panes that do (SYRD-43).
+    pane_window = pane_window_program(pane_script_path)
+    if runner(["test", "-x", str(pane_window)]).returncode != 0:
+        raise SystemExit(
+            f"team-launcher: {pane_window} is missing or not executable; this release cannot open "
+            "panes that stay inert when they detach. Upgrade the shared release before starting."
+        )
     return pane_script_path
 
 
@@ -6557,7 +6823,13 @@ def launch_project(
             )
     if launch_result != 0:
         return launch_result
-    if mode == "attach-or-start" and resolved_layout_mode != LAYOUT_MODE_VIEWER:
+    # A window opened by an earlier release can still be running as root, and
+    # the tenant cannot signal it. Saying the project is attached while that is
+    # true would be the wrong report to act on (SYRD-43).
+    unsafe_windows = unsafe_root_presentation_windows(config, config_path=config_path)
+    if unsafe_windows:
+        print_func(unsafe_presentation_report(config, unsafe_windows))
+    if mode == "attach-or-start" and resolved_layout_mode != LAYOUT_MODE_VIEWER and not unsafe_windows:
         attached_visible_roles = [role for role in running_roles if not role.detached and role.role not in failed_roles]
         if attached_visible_roles:
             attached_names = ", ".join(role.role for role in attached_visible_roles)
@@ -8017,6 +8289,9 @@ class SwitchyardProjectStatus:
     config_path: Path
     viewer_session: str | None = None
     error: str = ""
+    # SYRD-43: presentation windows running as root. A project with any of these
+    # is not safely attached however many panes are up.
+    root_windows: tuple[int, ...] = ()
 
     @property
     def panes_display(self) -> str:
@@ -11689,15 +11964,17 @@ def switchyard_project_statuses(
             )
             continue
         panes_up = sum(1 for role in config.roles if _role_has_pane_process(role, commands))
+        root_windows = unsafe_root_presentation_windows(config, config_path=entry.config_path)
         statuses.append(
             SwitchyardProjectStatus(
                 name=entry.name,
                 slug=entry.slug,
-                state="running" if panes_up else "stopped",
+                state="unsafe-root-window" if root_windows else ("running" if panes_up else "stopped"),
                 panes_up=panes_up,
                 panes_total=len(config.roles),
                 config_path=entry.config_path,
                 viewer_session=viewer_session_for_project(config.project),
+                root_windows=tuple(window.pid for window in root_windows),
             )
         )
     return statuses
@@ -11711,6 +11988,7 @@ def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[
         "panes_up": status.panes_up,
         "panes_total": status.panes_total,
         "panes": status.panes_display,
+        "root_windows": list(status.root_windows),
         "viewer_session": status.viewer_session,
         "config_path": str(status.config_path),
         "error": status.error,
@@ -11781,6 +12059,17 @@ def switchyard_status_command(
             f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]:<{widths[2]}}  "
             f"{row[3]:<{widths[3]}}  {row[4]}"
         )
+    unsafe = [status for status in statuses if status.root_windows]
+    if unsafe:
+        print_func("")
+        for status in unsafe:
+            pids = ", ".join(str(pid) for pid in status.root_windows)
+            print_func(
+                f"switchyard: {status.slug} is NOT safely attached: presentation window(s) "
+                f"{pids} are running as root, so a detached pane falls back to a root shell. "
+                f"An operator must run `sudo switchyard replace-window {status.slug}`, which "
+                "leaves every worker session running."
+            )
     if runtime_statuses:
         print_func("")
         runtime_rows = [("PROJECT", "COPY", "PATH", "STATUS")]
@@ -12685,6 +12974,12 @@ def upgrade_project_command(
         runner=runner,
         print_func=print_func,
     )
+    # Upgrading the artifacts does not close a window that is already open, and
+    # the tenant cannot signal a root one. Say so here, where the operator is
+    # already at a root prompt and can act on it (SYRD-43).
+    unsafe_windows = unsafe_root_presentation_windows(config, config_path=config_path)
+    if unsafe_windows:
+        print_func(unsafe_presentation_report(config, unsafe_windows))
     return 0
 
 
@@ -13759,6 +14054,18 @@ def _build_switchyard_set_vcs_close_role_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_replace_window_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard replace-window",
+        description=(
+            "Replace a Switchyard project's root-owned presentation window with an unprivileged "
+            "one. Worker sessions keep running."
+        ),
+    )
+    parser.add_argument("project", nargs="+", help="project name or slug")
+    return parser
+
+
 def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard stop", description="Stop a Switchyard project's tmux pane sessions.")
     parser.add_argument("project", nargs="+", help="project name or slug")
@@ -13926,6 +14233,111 @@ def switchyard_present_command(
     return 0
 
 
+def replace_presentation_window_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    script_path: Path | None = None,
+    pane_state_dir: Path | None = None,
+    layout_mode: str = LAYOUT_MODE_AUTO,
+    layout_environ: dict[str, str] | None = None,
+    proc_root: Path | None = None,
+    euid_getter: Callable[[], int] = os.geteuid,
+    signaller: Callable[[int, int], None] = os.kill,
+    settle_seconds: float = 2.0,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    konsole_process_launcher: Callable[..., Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Replace an unsafe root-owned presentation window, leaving workers running.
+
+    The tenant cannot signal a root process, so this is the operator's path off
+    a window that predates the repair. It touches exactly two things: the GUI
+    processes it found, and a freshly rendered layout. Worker sessions are
+    listed before and after and are never a target -- losing a role's session
+    would lose that role's work, which is a worse outcome than the window
+    (SYRD-43).
+    """
+    windows = unsafe_root_presentation_windows(config, config_path=config_path, proc_root=proc_root)
+    workers_before = [role.role for role in _running_project_roles(config, runner=runner)]
+    if not windows:
+        print_func(
+            f"switchyard: {config.project} has no root-owned presentation window; nothing to replace."
+        )
+        return 0
+    if euid_getter() != 0:
+        print_func(
+            unsafe_presentation_report(config, windows)
+            + "\nThis command must run as root: a tenant cannot signal a root process."
+        )
+        return 1
+    print_func(unsafe_presentation_report(config, windows))
+    for window in windows:
+        try:
+            signaller(window.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError) as exc:
+            print_func(f"switchyard: could not stop presentation pid {window.pid}: {exc}")
+    deadline = time.monotonic() + max(0.0, settle_seconds)
+    while time.monotonic() < deadline:
+        if not unsafe_root_presentation_windows(config, config_path=config_path, proc_root=proc_root):
+            break
+        time.sleep(0.1)
+    remaining = unsafe_root_presentation_windows(config, config_path=config_path, proc_root=proc_root)
+    for window in remaining:
+        try:
+            signaller(window.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError) as exc:
+            print_func(f"switchyard: could not stop presentation pid {window.pid}: {exc}")
+    workers_after = [role.role for role in _running_project_roles(config, runner=runner)]
+    lost = [role for role in workers_before if role not in workers_after]
+    if lost:
+        print_func(
+            "switchyard: worker sessions that were running are no longer running: "
+            + ", ".join(lost)
+            + ". They were not a target of this command; start the project to recover them."
+        )
+    from scripts import presentation_controller
+
+    resolved_script = script_path or switchyard_pane_launcher_for(config)
+    output_path = default_layout_output_path(config, config_path=config_path)
+    if presentation_controller.presentation_enabled(config, config_path=config_path):
+        result = presentation_controller.launch_presentation(
+            config,
+            config_path=config_path,
+            layout=LAYOUT_MODE_SEPARATE,
+            runner=runner,
+            process_launcher=konsole_process_launcher,
+        )
+    else:
+        materialize_layout(
+            config,
+            config_path=config_path,
+            mode="attach-or-start",
+            script_path=resolved_script,
+            output_path=output_path,
+            pane_state_dir=pane_state_dir,
+        )
+        result = launch_konsole_window(
+            output_path,
+            project=config.project,
+            window_title=project_window_title(config),
+            gui_user=default_gui_user() or None,
+            runner=runner,
+            process_launcher=konsole_process_launcher,
+        )
+    if result != 0:
+        print_func(
+            f"switchyard: replaced the root-owned window but could not open a new one (exit {result}). "
+            f"Worker sessions are untouched; run `switchyard {config.project}` from the desktop account."
+        )
+        return result
+    print_func(
+        f"switchyard: replaced {config.project}'s presentation window as {default_gui_user()}; "
+        f"worker sessions still running: {', '.join(workers_after) or 'none'}"
+    )
+    return 0
+
+
 def switchyard_help_text() -> str:
     commands = ", ".join(SWITCHYARD_COMMANDS)
     return f"""Usage:
@@ -13940,6 +14352,7 @@ Commands:
   upgrade          update generated project artifacts and report release drift
   add-role         add an implementer or auditor role, worktree, pane, and board registration
   present          map persistent role sessions into stable display slots at runtime
+  replace-window   replace a root-owned presentation window without stopping any worker
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes
@@ -14211,6 +14624,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         entry = _resolve_switchyard_project(args.project)
         config = _load_switchyard_project_config_for_command(entry, argv)
         return switchyard_present_command(config, config_path=entry.config_path, args=args)
+    if argv[0].casefold() == "replace-window":
+        args = _build_switchyard_replace_window_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(" ".join(args.project))
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return replace_presentation_window_command(config, config_path=entry.config_path)
     if argv[0].casefold() == "set-vcs-close-role":
         args = _build_switchyard_set_vcs_close_role_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

@@ -932,7 +932,11 @@ def _launch_separate(
         args = ["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]
         if config.run_as_user and team_launcher.current_user_name() != config.run_as_user:
             args = ["sudo", "-u", config.run_as_user, "-H", *args]
-        leaf["Command"] = shlex.join(args)
+        # A detached proxy must not return the tab to the shell that opened the
+        # window; on a privileged invocation that shell is root's (SYRD-43).
+        leaf["Command"] = team_launcher.inert_pane_command(
+            team_launcher.pane_window_program(team_launcher.switchyard_pane_launcher_for(config)), args
+        )
         leaf["WorkingDirectory"] = str(Path.home())
         leaf["Title"] = f"{config.project} slot {slot}"
     output = output_path or team_launcher.default_layout_output_path(config, config_path=config_path).with_name(

@@ -75,7 +75,7 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
             team_launcher.run_switchyard_launch_first_run_auth = original_first_run_auth
 
-        assert not any("konsole" in call for call in runner.calls)
+        assert not any(any(Path(part).name == "konsole" for part in call) for call in runner.calls)
         assert len(process_launcher.calls) == 1
         assert process_launcher.calls[0]["kwargs"]["start_new_session"] is True
         pane_commands = _leaf_commands(json.loads(layout_output.read_text(encoding="utf-8")))
@@ -83,9 +83,16 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
 
     original_host_wayland = os.environ.get("HOST_WAYLAND_DISPLAY")
     original_legacy_host_wayland = os.environ.get("PGU_HOST_WAYLAND_DISPLAY")
+    original_gui_user = os.environ.get("TEAM_LAUNCHER_GUI_USER")
+    # SYRD-43: this case drives the root invocation, and a root invocation now
+    # crosses to the desktop account before opening a terminal. Name a real
+    # unprivileged account, or there is no window to compare -- refusing to open
+    # one is the new behaviour, covered in the unprivileged-presentation suite.
+    desktop_user = team_launcher.current_user_name()
     try:
         os.environ["HOST_WAYLAND_DISPLAY"] = "/run/user/1000/wayland-0"
         os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
+        os.environ["TEAM_LAUNCHER_GUI_USER"] = desktop_user
         with tempfile.TemporaryDirectory(prefix="pgu-team-launcher-entrypoint-konsole.") as tmp:
             tmp_path = Path(tmp)
             repo = tmp_path / "repo"
@@ -126,22 +133,38 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
                 layout_output=switchyard_layout,
             )
 
-        assert legacy_command == [
+        # The root invocation crosses to the desktop account first, and nothing
+        # of root's environment goes with it: sudo resets it and each variable
+        # the GUI needs is named here (SYRD-43).
+        expected_prefix = [
+            "sudo",
+            "-u",
+            desktop_user,
+            "-H",
+            "--",
             "env",
+            "-i",
+            f"PATH={team_launcher.DEFAULT_PANE_BASE_PATH}",
+            f"HOME={Path.home()}",
+            f"USER={desktop_user}",
+            f"LOGNAME={desktop_user}",
+            f"XDG_RUNTIME_DIR=/run/user/{os.getuid()}",
             "QT_QPA_PLATFORM=wayland",
             "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            "konsole",
+        ]
+        konsole_program = team_launcher.gui_program_path("konsole")
+        assert legacy_command == [
+            *expected_prefix,
+            konsole_program,
             "--separate",
             "--qwindowtitle",
             "pgu",
             "--layout",
             str(legacy_layout),
-        ]
+        ], legacy_command
         assert switchyard_command == [
-            "env",
-            "QT_QPA_PLATFORM=wayland",
-            "WAYLAND_DISPLAY=/run/user/1000/wayland-0",
-            "konsole",
+            *expected_prefix,
+            konsole_program,
             "--separate",
             "--qwindowtitle",
             "pgu",
@@ -150,8 +173,12 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         ]
         assert len(legacy_pane_commands) == 1
         assert len(switchyard_pane_commands) == 1
-        assert shlex.split(legacy_pane_commands[0])[:4] == ["sudo", "-u", "agent", "-H"]
-        assert shlex.split(switchyard_pane_commands[0])[:4] == ["sudo", "-u", "agent", "-H"]
+        # The tab's program is the inert pane window, and the role's own account
+        # is still what actually runs the pane (SYRD-43).
+        for rendered in (legacy_pane_commands[0], switchyard_pane_commands[0]):
+            argv = shlex.split(rendered)
+            assert Path(argv[0]).name == team_launcher.PANE_WINDOW_NAME, argv
+            assert argv[1:5] == ["sudo", "-u", "agent", "-H"], argv
         assert " pane attach-or-start ops " in f" {legacy_pane_commands[0]} "
         assert " pane attach-or-start ops " in f" {switchyard_pane_commands[0]} "
     finally:
@@ -161,6 +188,9 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
         os.environ.pop("PGU_HOST_WAYLAND_DISPLAY", None)
         if original_legacy_host_wayland is not None:
             os.environ["PGU_HOST_WAYLAND_DISPLAY"] = original_legacy_host_wayland
+        os.environ.pop("TEAM_LAUNCHER_GUI_USER", None)
+        if original_gui_user is not None:
+            os.environ["TEAM_LAUNCHER_GUI_USER"] = original_gui_user
 
 def test_switchyard_project_name_argv_joins_and_resumes_matching_project() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-open.") as tmp:

@@ -130,7 +130,11 @@ def test_visible_layout_command_stays_owner_wrapped_without_forcing_pane_state_d
             team_launcher.current_user_name = original_current_user_name
 
         command = json.loads(output.read_text(encoding="utf-8"))["Command"]
-        assert shlex.split(command) == team_launcher.pane_command_args(
+        # SYRD-43: the tab's program is the inert pane window; the pane command
+        # is what it runs, unchanged.
+        argv = shlex.split(command)
+        assert Path(argv[0]).name == team_launcher.PANE_WINDOW_NAME, argv
+        assert argv[1:] == team_launcher.pane_command_args(
             "porter",
             role,
             config_path=config_path,
@@ -139,7 +143,7 @@ def test_visible_layout_command_stays_owner_wrapped_without_forcing_pane_state_d
             skip_launcher_check=True,
             run_as_user="porter-agent",
         )
-        assert "--pane-state-dir" not in shlex.split(command)
+        assert "--pane-state-dir" not in argv
 
 def test_launch_project_default_layout_uses_project_scoped_switchyard_not_tmp() -> None:
     project = f"layoutsafe{os.getpid()}"

@@ -586,7 +586,7 @@ def test_launch_project_reports_visible_role_resume_fallback_to_operator() -> No
         detached_launcher = RecordingProcessLauncher()
 
         def process_launcher(args: list[str], **kwargs: object) -> object:
-            if "konsole" in args and active_record.exists() and not sidecar.exists():
+            if any(Path(part).name == "konsole" for part in args) and active_record.exists() and not sidecar.exists():
                 active_record.replace(sidecar)
                 active_record.write_text(
                     json.dumps({"target": role.target, "session_id": "fresh-session"}) + "\n",

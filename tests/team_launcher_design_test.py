@@ -387,6 +387,9 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
                 "panes_up": 1,
                 "panes_total": 1,
                 "panes": "1/1",
+                # SYRD-43: no presentation window of this project is running as
+                # root, which is part of what "running" has to mean.
+                "root_windows": [],
                 "viewer_session": "atlas-viewer",
                 "config_path": str(config_path),
                 "error": "",

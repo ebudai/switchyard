@@ -68,6 +68,10 @@ PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS = {
     "supplementary_groups": [],
     "linger": True,
     "shell": "fish",
+    # Empty means no credential sharing. A username here grants every role pane of
+    # this project the ability to act as that user's Google account in agy; see
+    # _seed_agy_credential_for_owner.
+    "agy_credential_source": "",
 }
 PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
     {
@@ -188,6 +192,8 @@ DEFAULT_RESUME_SUBCOMMAND_BY_CLI = {
     "codex": "resume",
 }
 AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
+AGY_CREDENTIAL_DIR_NAME = ".gemini/antigravity-cli"
+AGY_CREDENTIAL_TOKEN_NAME = "antigravity-oauth-token"
 CLAUDE_PROJECTS_DIR_NAME = ".claude/projects"
 CODEX_SESSIONS_DIR_NAME = ".codex/sessions"
 HERMES_HOME_DIR_NAME = ".hermes"
@@ -244,6 +250,9 @@ NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 DEFAULT_TENANT_RELEASE_DEPLOY_REF = "origin/main"
 PROJECT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
+# A credential-source user name is joined onto a home base to locate a token, so it is
+# constrained to a plain useradd-style name: no separators, no traversal.
+OWNER_USER_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy", "hermes")
 NEW_PROJECT_ROLE_CLI_DEFAULTS = {
     "designer": "claude",
@@ -1260,6 +1269,18 @@ def _artifact_capability_grants(raw: Any, *, path: Path) -> dict[str, object]:
             if not isinstance(value, str) or not value.strip():
                 raise SystemExit(f"{path} field 'capability_grants.shell' must be a non-empty JSON string")
             result[key] = value.strip()
+        elif key == "agy_credential_source":
+            if not isinstance(value, str):
+                raise SystemExit(
+                    f"{path} field 'capability_grants.agy_credential_source' must be a JSON string"
+                )
+            candidate = value.strip()
+            if candidate and not _is_valid_owner_user_name(candidate):
+                raise SystemExit(
+                    f"{path} field 'capability_grants.agy_credential_source' must be a plain Unix "
+                    f"user name, not {candidate!r}"
+                )
+            result[key] = candidate
         elif not isinstance(value, bool):
             raise SystemExit(f"{path} field 'capability_grants.{key}' must be a JSON boolean")
         else:
@@ -7408,6 +7429,10 @@ def _owner_user_verbatim(value: str) -> str:
     return owner
 
 
+def _is_valid_owner_user_name(value: str) -> bool:
+    return bool(OWNER_USER_NAME_RE.fullmatch(value))
+
+
 @dataclass(frozen=True)
 class ExistingOwnerUser:
     name: str
@@ -7873,6 +7898,7 @@ def _write_initial_switchyard_project_artifact(
     include_designer: bool = True,
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
+    agy_credential_source: str = "",
 ) -> None:
     resolved_audit_roles = tuple(audit_roles) if audit_roles is not None else (("audit",) if include_audit else ())
     role_overlap = set(implementer_roles) & set(resolved_audit_roles)
@@ -7906,6 +7932,7 @@ def _write_initial_switchyard_project_artifact(
         capability_grants={
             **PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS,
             "shell": owner_shell,
+            "agy_credential_source": agy_credential_source,
         },
     )
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9057,6 +9084,65 @@ def _ensure_owner_user_and_project_dir(
     return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled, shell_path=shell_path)
 
 
+def _seed_agy_credential_for_owner(
+    *,
+    owner_user: str,
+    source_user: str,
+    home_base: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None] = print,
+) -> None:
+    """Copy one agy OAuth token into a freshly created owner home.
+
+    Opt-in only, and only for a newly created owner: an existing owner user is never
+    modified. The copy goes through `install`, so the token's bytes never enter this
+    process and cannot reach a log or an error message.
+    """
+    if not _is_valid_owner_user_name(source_user):
+        raise SystemExit(
+            f"switchyard: agy_credential_source {source_user!r} is not a plain Unix user name"
+        )
+    if source_user == owner_user:
+        raise SystemExit(
+            f"switchyard: agy_credential_source {source_user!r} is the project owner user itself; "
+            "seeding needs a different source account"
+        )
+    source_token = home_base / source_user / AGY_CREDENTIAL_DIR_NAME / AGY_CREDENTIAL_TOKEN_NAME
+    if not source_token.is_file():
+        raise SystemExit(
+            f"switchyard: agy credential seeding was requested from {source_user!r}, but "
+            f"{source_token} does not exist; sign in to agy as {source_user} first, or clear "
+            "capability_grants.agy_credential_source"
+        )
+    target_dir = home_base / owner_user / AGY_CREDENTIAL_DIR_NAME
+    target_token = target_dir / AGY_CREDENTIAL_TOKEN_NAME
+    dir_result = runner(
+        ["install", "-d", "-m", "0700", "-o", owner_user, "-g", owner_user, str(target_dir)]
+    )
+    if dir_result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to create {target_dir} for {owner_user}")
+    copy_result = runner(
+        [
+            "install",
+            "-m",
+            "0600",
+            "-o",
+            owner_user,
+            "-g",
+            owner_user,
+            str(source_token),
+            str(target_token),
+        ]
+    )
+    if copy_result.returncode != 0:
+        raise SystemExit(f"switchyard: failed to seed agy credential into {target_token}")
+    print_func(f"switchyard: seeded agy credential for {owner_user} from {source_user}")
+    print_func(
+        f"switchyard: {owner_user} can now act as the Google account that {source_user} signed "
+        "in to agy with; every role pane of this project shares that one account"
+    )
+
+
 def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
     config_dir = config_dir or DEFAULT_CONFIG_DIR
     entries: list[SwitchyardProjectEntry] = []
@@ -9726,6 +9812,7 @@ def switchyard_new_command(
     yes: bool = False,
     desktop_policy: Path | None = None,
     allow_existing_owner_user: bool = False,
+    agy_credential_source: str | None = None,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
@@ -9779,6 +9866,16 @@ def switchyard_new_command(
         include_designer = True
         include_audit = True
         selected_audit_roles = ("audit",)
+    resolved_agy_credential_source = (agy_credential_source or "").strip()
+    if not resolved_agy_credential_source and from_artifact is not None:
+        resolved_agy_credential_source = str(
+            artifact.capability_grants.get("agy_credential_source") or ""
+        ).strip()
+    if resolved_agy_credential_source and not _is_valid_owner_user_name(resolved_agy_credential_source):
+        raise SystemExit(
+            f"switchyard: --agy-credential-source must be a plain Unix user name, not "
+            f"{resolved_agy_credential_source!r}"
+        )
     if desktop_policy is None:
         if yes:
             raise SystemExit("switchyard: --yes does not grant desktop access; provide --desktop-policy FILE (explicit headless or approved Wayland policy)")
@@ -9889,6 +9986,20 @@ def switchyard_new_command(
             print_func(f"switchyard: created user {owner_user} with shell {display_shell}; linger enabled")
     else:
         print_func(f"switchyard: using existing user {owner_user} (not modifying)")
+    if resolved_agy_credential_source:
+        if owner_result.created:
+            _seed_agy_credential_for_owner(
+                owner_user=owner_user,
+                source_user=resolved_agy_credential_source,
+                home_base=home_base,
+                runner=runner,
+                print_func=print_func,
+            )
+        else:
+            print_func(
+                f"switchyard: not seeding agy credential into existing user {owner_user}; "
+                "switchyard does not modify an existing owner user"
+            )
     if from_artifact is None:
         _write_switchyard_onboarding_files(
             project_name=resolved_project_name,
@@ -9913,6 +10024,7 @@ def switchyard_new_command(
             include_designer=include_designer,
             include_audit=include_audit,
             audit_roles=selected_audit_roles,
+            agy_credential_source=resolved_agy_credential_source,
         )
         _chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():
@@ -11130,6 +11242,14 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         help="reuse an existing owner user without the existing-user confirmation prompt",
     )
     parser.add_argument(
+        "--agy-credential-source",
+        metavar="USER",
+        help=(
+            "copy USER's agy OAuth token into a newly created owner user so the project's panes "
+            "do not need their own agy login; the project then shares that one Google account"
+        ),
+    )
+    parser.add_argument(
         "--layout",
         choices=sorted(LAYOUT_MODE_CHOICES),
         default=LAYOUT_MODE_AUTO,
@@ -11434,6 +11554,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             yes=args.yes,
             desktop_policy=args.desktop_policy,
             allow_existing_owner_user=args.allow_existing_owner_user,
+            agy_credential_source=args.agy_credential_source,
             layout_mode=args.layout,
             git_init=not args.no_git_init,
         )

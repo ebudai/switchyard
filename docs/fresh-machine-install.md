@@ -24,6 +24,17 @@ naming a CLI.
 Authentication cannot be automated and is not attempted at install time. It
 happens once per detected CLI at project creation.
 
+For `agy` there is one opt-in exception, because its sign-in cannot be completed
+by a headless owner user: `switchyard new --agy-credential-source USER` copies
+USER's existing agy OAuth token into the newly created owner's home, so the new
+project's panes start already signed in. Nothing is authenticated on your behalf
+— an existing token is reused. It applies only to an owner user switchyard just
+created, never to one that already exists, and it fails rather than continuing if
+USER has no token. Understand what it shares before using it: every role pane of
+that project can then act as the one Google account USER signed in with, and the
+refresh token it copies does not expire. The choice is recorded in the project
+artifact as `capability_grants.agy_credential_source`.
+
 ## System Packages
 
 ### apt

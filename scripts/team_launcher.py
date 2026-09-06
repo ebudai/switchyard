@@ -12920,6 +12920,31 @@ def director_control_access_commands_for(
         return []
 
 
+def role_control_accounts(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
+    """(role, account) for every role of this project that runs as its own process.
+
+    The control interface is rendered from this, and the artifacts that install it
+    are the same ones that create the accounts -- so a configured account wins over
+    the canonical name. A grant naming an account the artifact never creates matches
+    nothing, which is a control interface that silently does not work (SYRD-51).
+    """
+    from scripts.ticket_board.project_provision import NON_PROCESS_ROLES
+
+    owner = config.run_as_user or current_user_name()
+    pairs: list[tuple[str, str]] = []
+    for role in config.roles:
+        name = role.role.strip().lower()
+        if not name or name in NON_PROCESS_ROLES:
+            continue
+        if any(existing == name for existing, _account in pairs):
+            continue
+        account = role.run_as_user or role_account_name(config.project, name)
+        if not account or account == owner:
+            continue
+        pairs.append((name, account))
+    return tuple(pairs)
+
+
 def render_role_account_migration(config: ProjectConfig) -> str:
     """Operator commands that move an existing tenant onto per-role accounts.
 
@@ -12930,6 +12955,8 @@ def render_role_account_migration(config: ProjectConfig) -> str:
     """
     from scripts.ticket_board.project_provision import (
         DEFAULT_SERVICE_USER,
+        render_role_control_sudoers,
+        role_control_sudoers_install_commands,
         role_runtime_commands,
         role_tooling_staging_commands,
         roles_group_name,
@@ -12984,19 +13011,18 @@ def render_role_account_migration(config: ProjectConfig) -> str:
                 worktree="",
             )
         )
-    lines.append(
-        "# Refresh the director control interface for the current role set:"
+    # The document goes in the artifact rather than a command that regenerates it:
+    # this named `switchyard provision`, which the CLI does not have, so the setup
+    # failed here before the rule was ever installed (SYRD-51).
+    control = role_control_sudoers_install_commands(
+        config.project,
+        render_role_control_sudoers(config.project, owner, role_control_accounts(config)),
     )
-    lines.append(
-        f"switchyard provision {config.project} --render role-control-sudoers "
-        f"| sudo install -m 0440 -o root -g root /dev/stdin "
-        f"/etc/sudoers.d/49-{config.project}-role-control.staged"
-    )
-    lines.append(f"sudo visudo -c -f /etc/sudoers.d/49-{config.project}-role-control.staged")
-    lines.append(
-        f"sudo mv /etc/sudoers.d/49-{config.project}-role-control.staged "
-        f"/etc/sudoers.d/49-{config.project}-role-control"
-    )
+    if control:
+        lines.append(
+            "# Refresh the director control interface for the current role set:"
+        )
+        lines.extend(control)
     # Repair reinstalls the lifecycle bridge too, so a tenant provisioned before
     # it existed gains one, and an existing one is rewritten to the same bytes.
     from scripts.ticket_board.project_provision import tenant_control_commands
@@ -15300,6 +15326,9 @@ def add_project_role_command(
                 role,
                 add_role_owner,
                 board_service_user(updated_config),
+                # The whole role set, including the one just added: the control
+                # interface is installed as one file (SYRD-51).
+                role_accounts=role_control_accounts(updated_config),
                 worktree=pane_role.workdir,
                 owner_home=str(home_dir_for_user(add_role_owner) or Path("/home") / add_role_owner),
                 worktree_base=str(

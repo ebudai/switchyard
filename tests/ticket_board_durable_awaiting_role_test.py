@@ -110,6 +110,107 @@ def checks(svc: str, admin: str) -> None:
     sql("UPDATE ticket_board.ticket_notification_queue SET next_attempt_at=clock_timestamp()")
     assert process(listener(lambda t, m: sent.append((t, m)))) == 0 and count() == 0
 
+    # A cleared wait must not lend its queued steps to a later wait for the
+    # same role. Keep both generations persisted so only their identity can
+    # distinguish them.
+    request('director')
+    wait_a_ids = [
+        int(value)
+        for value in sql(
+            "SELECT string_agg(id::text, ',' ORDER BY id) "
+            "FROM ticket_board.ticket_notification_queue WHERE kind='awaiting_role'"
+        ).split(',')
+    ]
+    assert len(wait_a_ids) == 4
+    wait_a_id_list = ','.join(str(value) for value in wait_a_ids)
+    wait_a_generation = sql(
+        "SELECT min(payload->>'awaiting_since_at') "
+        f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_a_id_list})"
+    )
+    assert int(sql(
+        "SELECT count(DISTINCT payload->>'awaiting_since_at') "
+        f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_a_id_list})"
+    )) == 1
+    assert sql(
+        "SELECT string_agg(payload->>'step', ',' ORDER BY (payload->>'step')::int) "
+        f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_a_id_list})"
+    ) == '1,2,3,4'
+
+    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    request('director')
+    wait_b_ids = [
+        int(value)
+        for value in sql(
+            "SELECT string_agg(id::text, ',' ORDER BY id) "
+            "FROM ticket_board.ticket_notification_queue "
+            f"WHERE kind='awaiting_role' AND id NOT IN ({wait_a_id_list})"
+        ).split(',')
+    ]
+    assert len(wait_b_ids) == 4
+    wait_b_id_list = ','.join(str(value) for value in wait_b_ids)
+    wait_b_generation = sql(
+        "SELECT min(payload->>'awaiting_since_at') "
+        f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_b_id_list})"
+    )
+    assert int(sql(
+        "SELECT count(DISTINCT payload->>'awaiting_since_at') "
+        f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_b_id_list})"
+    )) == 1
+    assert wait_a_generation != wait_b_generation
+    assert sql(
+        "SELECT bool_and((payload->>'awaiting_since_at')::timestamptz = "
+        "(SELECT awaiting_since_at FROM ticket_board.ticket_notification_state WHERE ticket_id='PGU-1')) "
+        f"FROM ticket_board.ticket_notification_queue WHERE id IN ({wait_b_id_list})"
+    ) == 't'
+    sql(
+        "UPDATE ticket_board.ticket_notification_queue "
+        "SET next_attempt_at=clock_timestamp()+interval '1 day' "
+        f"WHERE id IN ({wait_b_id_list}); "
+        "UPDATE ticket_board.ticket_notification_queue "
+        "SET next_attempt_at=clock_timestamp() "
+        f"WHERE id IN ({wait_a_id_list})"
+    )
+    assert int(sql(
+        "SELECT count(*) FROM ticket_board.ticket_notification_queue q "
+        "JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=q.ticket_id "
+        "JOIN ticket_board.tickets t ON t.id=q.ticket_id "
+        f"WHERE q.id IN ({wait_a_id_list}) "
+        "AND q.payload->>'awaiting_role'=ns.awaiting_role "
+        "AND q.target_role='director' "
+        "AND t.state IN ('in_progress','inspection','audit') "
+        "AND q.next_attempt_at <= clock_timestamp() "
+        "AND q.claimed_at IS NULL AND q.dead_lettered_at IS NULL "
+        "AND (q.payload->>'expires_at')::timestamptz > clock_timestamp()"
+    )) == 4
+    before = len(sent)
+    stale_deliveries = process(listener(lambda t, m: sent.append((t, m))))
+    assert stale_deliveries == 0, f'{stale_deliveries} row(s) from cleared wait A were delivered against wait B'
+    assert len(sent) == before
+    assert int(sql(
+        "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+        f"WHERE id IN ({wait_a_id_list})"
+    )) == 0
+    assert int(sql(
+        "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+        f"WHERE id IN ({wait_b_id_list})"
+    )) == 4
+
+    sql(
+        "UPDATE ticket_board.ticket_notification_queue "
+        "SET next_attempt_at=clock_timestamp() "
+        f"WHERE id IN ({wait_b_id_list}) AND payload->>'step'='1'"
+    )
+    assert process(listener(lambda t, m: sent.append((t, m)))) == 1
+    assert len(sent) == before + 1
+    assert sent[-1][0] == ROLE_TO_TARGET['director'] and 'New handoff.' in sent[-1][1]
+    role('director', "SELECT ticket_board.clear_awaiting_role('PGU-1');")
+    sql(
+        "UPDATE ticket_board.ticket_notification_queue "
+        "SET next_attempt_at=clock_timestamp() "
+        f"WHERE id IN ({wait_b_id_list})"
+    )
+    assert process(listener(lambda t, m: sent.append((t, m)))) == 0 and count() == 0
+
     # Retarget then have the awaited role act while the listener probes the pane.
     request('ops')
     request('director')

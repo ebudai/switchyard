@@ -31,6 +31,8 @@ DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("app", "main")
 DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
 SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
+# The pinned shared install every tenant's tooling is staged from.
+SHARED_RELEASE_CURRENT = "/opt/switchyard/current"
 DEFAULT_SHARED_PYTHON = "/opt/switchyard/venv/bin/python"
 # The account the board service itself runs as.
 DEFAULT_SERVICE_USER = "boardsvc"
@@ -59,6 +61,7 @@ class ProjectBoardProvision:
     tmpfiles_name: str
     polkit_name: str
     role_control_sudoers_name: str
+    tenant_control_sudoers_name: str
     runtime_directory: str
     socket_path: str
     port: int
@@ -86,6 +89,10 @@ class ProjectBoardProvision:
     board_service_traversal: bool
     # SYRD-39: one Unix account per configured role, and the group that
     # lets exactly those accounts reach this project's board socket.
+    #: The human account allowed to drive this tenant's lifecycle without sudo.
+    #: Recorded at provisioning; empty means no control bridge is installed and
+    #: the owner or an operator starts the project as before.
+    control_user: str = ""
     role_accounts: tuple[tuple[str, str], ...] = ()
     roles_group: str = ""
     # (role, worktree path) so the rollout can transfer ownership of the
@@ -197,6 +204,7 @@ def build_plan(
     implementer_roles: Sequence[str] | None = None,
     ticket_prefix: str | None = None,
     board_service_traversal: bool = True,
+    control_user: str = "",
     include_designer: bool = True,
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
@@ -322,6 +330,7 @@ def build_plan(
         project_name=resolved_project_name,
         ticket_prefix=resolved_ticket_prefix,
         owner_user=owner_user,
+        control_user=control_user,
         owner_home=str(home),
         service_user=service_user,
         board_unit=f"{unit_prefix}.service",
@@ -330,6 +339,7 @@ def build_plan(
         tmpfiles_name=f"{unit_prefix}.conf",
         polkit_name=f"49-{unit_prefix}-deploy.rules",
         role_control_sudoers_name=f"49-{project}-role-control",
+        tenant_control_sudoers_name=f"49-{project}-tenant-control",
         runtime_directory=runtime_directory,
         socket_path=f"/run/{runtime_directory}/ticket-board.sock",
         port=resolved_port,
@@ -529,6 +539,8 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
         "ticket-board-install-pane-hooks",
         "switchyard-board-skill",
         "switchyard-publish-ref",
+        # Root-owned and reached only through this tenant's sudo grant.
+        "switchyard-tenant-control",
         # The board clients themselves. A role that cannot run these has no
         # normal board access at all: they live under the owner's home, which
         # is 0710 and which no role account may traverse (SYRD-45).
@@ -873,6 +885,13 @@ def role_account_commands(
             f"sudo install -m 0440 -o root -g root /tmp/{project}-role-control /etc/sudoers.d/49-{project}-role-control.staged",
             f"sudo visudo -c -f /etc/sudoers.d/49-{project}-role-control.staged",
             f"sudo mv /etc/sudoers.d/49-{project}-role-control.staged /etc/sudoers.d/49-{project}-role-control",
+            *tenant_control_commands(
+                project,
+                owner_user,
+                resolve_control_user(
+                    project, invoking_user=invoking_human(), owner_user=owner_user
+                ),
+            ),
         ]
     )
     return "\n".join(lines)
@@ -923,6 +942,193 @@ def role_control_sudoers(plan: ProjectBoardProvision) -> str:
         # Display and viewer sessions remain the owner's.
         lines.append(f"{director_account} ALL=({owner}) NOPASSWD: /usr/bin/tmux")
     return "\n".join(lines) + "\n"
+
+
+TENANT_CONTROL_ROOT = "/usr/local/lib/switchyard"
+TENANT_CONTROL_GRANT_NAME = "control-grant.json"
+
+
+def tenant_control_grant_path(project: str) -> str:
+    return f"{TENANT_CONTROL_ROOT}/{project}/{TENANT_CONTROL_GRANT_NAME}"
+
+
+def tenant_control_sudoers_path(project: str) -> str:
+    return f"/etc/sudoers.d/49-{project}-tenant-control"
+
+
+def resolve_control_user(
+    project: str,
+    *,
+    invoking_user: str = "",
+    owner_user: str = "",
+    root: Path | None = None,
+) -> str:
+    """Who may drive this tenant's lifecycle, decided by root and nobody else.
+
+    An installed grant wins, so re-running provisioning, an upgrade or a repair
+    reinstalls the human already recorded rather than whoever happens to be at
+    the keyboard this time -- that is what makes repair idempotent, and it also
+    means a second operator cannot quietly take the grant over by running it.
+
+    With no grant yet, the human who is provisioning is recorded. The tenant's
+    own accounts are never recorded: the owner already is the owner, and giving
+    a role account a bridge into the owner would erase the separation the role
+    UIDs exist to create.
+    """
+    base = Path(root) if root is not None else Path(TENANT_CONTROL_ROOT)
+    path = base / project / TENANT_CONTROL_GRANT_NAME
+    try:
+        info = path.stat()
+        # Only a root-owned, root-writable grant is an authority. Anything else
+        # is a file the tenant could have written to name its own controller.
+        if info.st_uid == 0 and not info.st_mode & 0o022:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            recorded = str(payload.get("authorized_user") or "").strip()
+            if recorded and payload.get("project") == project:
+                return recorded
+    except (OSError, ValueError):
+        pass
+    candidate = invoking_user.strip()
+    if not candidate or candidate == "root" or candidate == owner_user.strip():
+        return ""
+    if candidate.startswith(f"{project}-"):
+        return ""
+    return candidate
+
+
+def invoking_human(environ: dict[str, str] | None = None) -> str:
+    """The person at the keyboard, through sudo or not.
+
+    SUDO_UID is sudo's own answer rather than a string the caller supplied, and
+    resolving the name from it is what stops a provisioning run recording an
+    account that merely claims to be the operator.
+    """
+    env = os.environ if environ is None else environ
+    raw = (env.get("SUDO_UID") or "").strip()
+    if raw.isdigit() and int(raw) != 0:
+        try:
+            return pwd.getpwuid(int(raw)).pw_name
+        except KeyError:
+            return ""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        return ""
+
+
+def tenant_control_commands(
+    project: str,
+    owner_user: str,
+    control_user: str,
+) -> list[str]:
+    """Install or refresh the control bridge for one recorded human.
+
+    The contents are written here rather than fetched at run time, so a repair
+    and a fresh provision of the same tenant install the same bytes and a rerun
+    changes nothing. The sudoers file is parsed by visudo before it is moved
+    into place, so a bad render can never leave sudoers.d unreadable and lock
+    everyone out of sudo. A tenant with no recorded control user emits nothing.
+    """
+    if not control_user:
+        return []
+    grant_dir = f"{TENANT_CONTROL_ROOT}/{project}"
+    grant = tenant_control_grant_path(project)
+    sudoers = tenant_control_sudoers_path(project)
+    grant_body = tenant_control_grant_document(
+        project=project,
+        owner_user=owner_user,
+        control_user=control_user,
+    )
+    sudoers_body = tenant_control_sudoers_document(project, control_user)
+    return [
+        f"# Lifecycle control for {control_user}, the human who provisioned {project}.",
+        "# Re-runnable: both files are rewritten to exactly these bytes.",
+        f"sudo install -d -m 0755 -o root -g root {shell_quote(grant_dir)}",
+        f"printf '%s\\n' {shell_quote(grant_body)} "
+        f"| sudo install -m 0644 -o root -g root /dev/stdin {shell_quote(grant)}",
+        f"printf '%s\\n' {shell_quote(sudoers_body)} "
+        f"| sudo install -m 0440 -o root -g root /dev/stdin {shell_quote(sudoers + '.staged')}",
+        f"sudo visudo -c -f {shell_quote(sudoers + '.staged')}",
+        f"sudo mv {shell_quote(sudoers + '.staged')} {shell_quote(sudoers)}",
+    ]
+
+
+def tenant_control_helper_path(project: str) -> str:
+    return f"/usr/local/lib/switchyard/{project}/switchyard-tenant-control"
+
+
+#: The lifecycle entrypoint the bridge runs. Deliberately the shared release
+#: rather than the tenant's own deployed tree: that tree lives under the owner's
+#: home, where the owner can replace the `current` symlink or any directory
+#: above the launcher, and a program the tenant owner can swap is not a pinned
+#: entrypoint however root-owned its last component is (SYRD-50 review).
+TENANT_CONTROL_LAUNCHER = f"{SHARED_RELEASE_CURRENT}/switchyard"
+
+
+def tenant_control_grant_document(
+    *,
+    project: str,
+    owner_user: str,
+    control_user: str,
+) -> str:
+    """Everything the bridge needs, written by root and chosen by nobody else.
+
+    The bridge takes only a project and an operation from its caller; the owner
+    account, the launcher it may run and the human allowed to run it come from
+    here. Keeping them out of the caller's hands is what stops the grant being
+    aimed at another tenant, another program or another identity.
+
+    It is world-readable on purpose: the public wrapper reads it to refuse an
+    unauthorized caller locally, without a password prompt. A username is not a
+    secret, and nothing else is recorded -- there is no field here anyone could
+    replay.
+    """
+    if not control_user:
+        return ""
+    return json.dumps(
+        {
+            "project": project,
+            "owner": owner_user,
+            "authorized_user": control_user,
+            "launcher": TENANT_CONTROL_LAUNCHER,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def tenant_control_sudoers_document(project: str, control_user: str) -> str:
+    """One command, one caller, no password, no other reachable program.
+
+    A sudoers entry cannot express which arguments are acceptable, so it names a
+    program that validates its own: see switchyard-tenant-control. What this
+    file decides is only that this human may run that one program as root
+    without a password -- and nothing else, which is why it is not a general
+    sudo grant on the owner account.
+    """
+    if not control_user:
+        return ""
+    return "\n".join(
+        [
+            f"# {project}: lifecycle control for the human who provisioned it.",
+            "# One program, which validates its own arguments and drops to the owner.",
+            f"{control_user} ALL=(root) NOPASSWD: {tenant_control_helper_path(project)}",
+        ]
+    )
+
+
+def tenant_control_grant(plan: ProjectBoardProvision) -> str:
+    document = tenant_control_grant_document(
+        project=plan.project,
+        owner_user=plan.owner_user,
+        control_user=plan.control_user,
+    )
+    return f"{document}\n" if document else ""
+
+
+def tenant_control_sudoers(plan: ProjectBoardProvision) -> str:
+    document = tenant_control_sudoers_document(plan.project, plan.control_user)
+    return f"{document}\n" if document else ""
 
 
 def peer_auth_command(plan: ProjectBoardProvision) -> str:
@@ -1936,6 +2142,27 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         install_role_control_sudoers = (
             "# no role control interface: this project declares no director role"
         )
+    q_tenant_control_sudoers = shell_quote(f"/etc/sudoers.d/{plan.tenant_control_sudoers_name}")
+    if plan.control_user:
+        # After the role tooling staging, because the rule names the staged
+        # helper and should not be live before it exists. Same
+        # visudo-before-install order, and the grant lands first so the rule is
+        # never live for a moment without the data that constrains it.
+        install_tenant_control = "\n".join(
+            [
+                f"sudo install -d -m 0755 -o root -g root {shell_quote(TENANT_CONTROL_ROOT + '/' + plan.project)}",
+                f"sudo install -m 0644 -o root -g root {shell_quote(tenant_control_grant_name(plan.project))} "
+                f"{shell_quote(tenant_control_grant_path(plan.project))}",
+                f"sudo install -m 0440 -o root -g root {shell_quote(plan.tenant_control_sudoers_name)} "
+                f"{q_tenant_control_sudoers}.staged",
+                f"sudo visudo -c -f {q_tenant_control_sudoers}.staged",
+                f"sudo mv {q_tenant_control_sudoers}.staged {q_tenant_control_sudoers}",
+            ]
+        )
+    else:
+        install_tenant_control = (
+            "# no lifecycle control bridge: this project records no human controller"
+        )
     q_listener_unit = shell_quote(
         f"{plan.owner_home}/.config/systemd/user/{plan.listener_unit}"
     )
@@ -2101,6 +2328,7 @@ sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS
 sudo -u {q_owner_user} -H env XDG_RUNTIME_DIR="$owner_runtime_dir" TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_PANE_STATE_DIR="$owner_runtime_dir/{plan.runtime_directory}/pane-state" TICKET_BOARD_PANE_SESSION_DIR={q_pane_session_dir} {q_hook_installer} install --home {q_owner_home} --hook-source {q_hook_source} --bin-path {q_hook_bin} --seed-codex-hook-trust-if-new
 sudo -u {q_owner_user} -H {q_board_skill_installer} install --home {q_owner_home}
 {role_runtime_step}
+{install_tenant_control}
 sudo -u {q_owner_user} env XDG_RUNTIME_DIR="$owner_runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$owner_bus" systemctl --user enable --now {plan.listener_unit}
 curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 """
@@ -2115,8 +2343,16 @@ curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 TENANT_ARTIFACT_NAMES: tuple[str, ...] = ("plan.json",)
 
 DEFAULT_PRIVILEGED_PROVISION_ROOT = Path("/etc/switchyard/provision")
-# The pinned shared install every tenant's tooling is staged from.
-SHARED_RELEASE_CURRENT = "/opt/switchyard/current"
+
+
+def tenant_control_grant_name(project: str) -> str:
+    """The grant's name inside the provision directory.
+
+    It is a privileged artifact: root installs it, and the copy root installs
+    from lives in the root-owned mirror, because a tenant able to edit its own
+    grant would choose its own owner, launcher and controller.
+    """
+    return f"{project}-control-grant.json"
 
 
 def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
@@ -2128,6 +2364,8 @@ def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
         plan.tmpfiles_name,
         plan.polkit_name,
         plan.role_control_sudoers_name,
+        *((plan.tenant_control_sudoers_name, tenant_control_grant_name(plan.project))
+          if plan.control_user else ()),
         f"{plan.project}-database.sql",
         f"{plan.project}-workflow.sql",
         "operator-commands.sh",
@@ -2155,6 +2393,14 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
         plan.tmpfiles_name: render_tmpfiles(plan),
         plan.polkit_name: render_polkit_rule(plan),
         plan.role_control_sudoers_name: role_control_sudoers(plan),
+        **(
+            {
+                plan.tenant_control_sudoers_name: tenant_control_sudoers(plan),
+                tenant_control_grant_name(plan.project): tenant_control_grant(plan),
+            }
+            if plan.control_user
+            else {}
+        ),
         f"{plan.project}-database.sql": render_database_sql(plan),
         f"{plan.project}-workflow.sql": render_workflow_sql(plan),
         "operator-commands.sh": render_operator_commands(plan, enable_owner_linger=enable_owner_linger),
@@ -2225,7 +2471,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="print plan JSON")
     parser.add_argument(
         "--render",
-        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "role-control-sudoers", "database-sql", "workflow-sql", "commands"],
+        choices=["board-unit", "listener-unit", "tmpfiles", "polkit", "role-control-sudoers", "tenant-control-sudoers", "tenant-control-grant", "database-sql", "workflow-sql", "commands"],
         help="print one rendered artifact",
     )
     return parser
@@ -2269,6 +2515,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "tmpfiles": render_tmpfiles,
             "polkit": render_polkit_rule,
             "role-control-sudoers": role_control_sudoers,
+            "tenant-control-sudoers": tenant_control_sudoers,
+            "tenant-control-grant": tenant_control_grant,
             "database-sql": render_database_sql,
             "workflow-sql": render_workflow_sql,
             "commands": render_operator_commands,

@@ -1001,6 +1001,9 @@ def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
         "perf",
         "otto-agent",
         "boardsvc",
+        # SYRD-51: the control interface is installed whole, so the emitter takes
+        # the project's whole role set rather than rendering it from one role.
+        role_accounts=(("director", "otto-director"), ("perf", "otto-perf")),
         worktree="/home/otto-agent/otto-worktrees/perf",
     )
     assert "if ! getent passwd 'otto-perf'" in commands
@@ -1012,9 +1015,11 @@ def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
     # Its own tooling, installed as itself.
     assert "ticket-board-install-pane-hooks' install --home '/home/otto-perf'" in commands
     assert "switchyard-board-skill' install --home '/home/otto-perf'" in commands
-    # And the control interface is refreshed so the director can drive it.
-    assert "role-control-sudoers" in commands
-    assert "visudo -c" in commands
+    # And the control interface is refreshed so the director can drive it -- from
+    # the document the artifact carries, not from a command that regenerates it.
+    assert "otto-director ALL=(otto-perf) NOPASSWD: /usr/bin/tmux" in commands
+    assert "visudo -c -f /etc/sudoers.d/49-otto-role-control.staged" in commands
+    assert "switchyard provision" not in commands
 
 
 

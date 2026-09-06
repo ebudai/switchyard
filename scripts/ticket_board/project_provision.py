@@ -828,6 +828,7 @@ def role_account_commands(
     owner_user: str,
     service_user: str,
     *,
+    role_accounts: Sequence[tuple[str, str]],
     runtime_directory: str = "",
     board_current: str = "",
     worktree: str = "",
@@ -842,6 +843,11 @@ def role_account_commands(
     account, group, runtime paths, pane hooks, board skill and ownership of the
     role's worktree -- so a rerun of add-role finds a role that can actually
     write and use the board, not just an account that exists (SYRD-39).
+
+    `role_accounts` is the project's whole role set including the one being
+    added, and is required rather than defaulted: the control interface is one
+    file installed whole, so rendering it from a partial set would revoke the
+    grants of every role left out (SYRD-51).
     """
     group = roles_group_name(project)
     account = role_account_name(project, role)
@@ -878,26 +884,29 @@ def role_account_commands(
                 control_repository=control_repository,
             )
         )
+    control = role_control_sudoers_install_commands(
+        project, render_role_control_sudoers(project, owner_user, role_accounts)
+    )
+    if control:
+        lines.append("# Refresh the director control interface so it can drive the new role:")
+        lines.extend(control)
+    # The tenant control bridge is a separate grant on a separate file, and it is
+    # installed after the role control interface exactly as before (SYRD-50).
     lines.extend(
-        [
-            "# Refresh the director control interface so it can drive the new role:",
-            f"switchyard provision {project} --render role-control-sudoers > /tmp/{project}-role-control",
-            f"sudo install -m 0440 -o root -g root /tmp/{project}-role-control /etc/sudoers.d/49-{project}-role-control.staged",
-            f"sudo visudo -c -f /etc/sudoers.d/49-{project}-role-control.staged",
-            f"sudo mv /etc/sudoers.d/49-{project}-role-control.staged /etc/sudoers.d/49-{project}-role-control",
-            *tenant_control_commands(
-                project,
-                owner_user,
-                resolve_control_user(
-                    project, invoking_user=invoking_human(), owner_user=owner_user
-                ),
+        tenant_control_commands(
+            project,
+            owner_user,
+            resolve_control_user(
+                project, invoking_user=invoking_human(), owner_user=owner_user
             ),
-        ]
+        )
     )
     return "\n".join(lines)
 
 
-def role_control_sudoers(plan: ProjectBoardProvision) -> str:
+def render_role_control_sudoers(
+    project: str, owner_user: str, role_accounts: Sequence[tuple[str, str]]
+) -> str:
     """Least-privilege control paths once each role has its own tmux server.
 
     Three grants, each `tmux` only, no root and no other command (SYRD-39):
@@ -911,36 +920,41 @@ def role_control_sudoers(plan: ProjectBoardProvision) -> str:
     * the director account may run tmux as the project owner, because the
       display and viewer sessions stay in the owner's server and the isolated
       director account would otherwise be unable to reach them.
+
+    Takes the role set rather than a provisioning plan so the generated operator
+    artifacts can embed the document they install. They used to shell out to
+    `switchyard provision <project> --render role-control-sudoers`, which is not
+    a command the CLI has, so the setup failed before the rule was installed
+    (SYRD-51).
     """
-    if not plan.role_accounts:
+    if not role_accounts:
         return ""
-    owner = plan.owner_user
     director_account = next(
-        (account for role, account in plan.role_accounts if role == "director"),
+        (account for role, account in role_accounts if role == "director"),
         "",
     )
-    role_targets = ",".join(account for _role, account in plan.role_accounts)
-    publish_helper = f"/usr/local/lib/switchyard/{plan.project}/switchyard-publish-ref"
+    role_targets = ",".join(account for _role, account in role_accounts)
+    publish_helper = f"/usr/local/lib/switchyard/{project}/switchyard-publish-ref"
     lines = [
-        f"# {plan.project}: role control interface. Each entry grants one command and",
+        f"# {project}: role control interface. Each entry grants one command and",
         "# nothing else, so a holder can drive another account's tmux server or publish a",
         "# feature ref, and gains no other command and no root.",
-        f"{owner} ALL=({role_targets}) NOPASSWD: /usr/bin/tmux",
+        f"{owner_user} ALL=({role_targets}) NOPASSWD: /usr/bin/tmux",
     ]
     # Roles publish their own feature refs through the owner's git identity. The
     # helper validates the ref and refuses integration branches, so the grant
     # cannot be used to write main, and the owner's SSH key files stay
     # unreadable by every role (SYRD-39).
-    for _role, account in plan.role_accounts:
-        lines.append(f"{account} ALL=({owner}) NOPASSWD: {publish_helper}")
+    for _role, account in role_accounts:
+        lines.append(f"{account} ALL=({owner_user}) NOPASSWD: {publish_helper}")
     if director_account:
         director_targets = ",".join(
-            account for _role, account in plan.role_accounts if account != director_account
+            account for _role, account in role_accounts if account != director_account
         )
         if director_targets:
             lines.append(f"{director_account} ALL=({director_targets}) NOPASSWD: /usr/bin/tmux")
         # Display and viewer sessions remain the owner's.
-        lines.append(f"{director_account} ALL=({owner}) NOPASSWD: /usr/bin/tmux")
+        lines.append(f"{director_account} ALL=({owner_user}) NOPASSWD: /usr/bin/tmux")
     return "\n".join(lines) + "\n"
 
 
@@ -1129,6 +1143,41 @@ def tenant_control_grant(plan: ProjectBoardProvision) -> str:
 def tenant_control_sudoers(plan: ProjectBoardProvision) -> str:
     document = tenant_control_sudoers_document(plan.project, plan.control_user)
     return f"{document}\n" if document else ""
+
+
+def role_control_sudoers(plan: ProjectBoardProvision) -> str:
+    """The role control interface for a whole provisioning plan."""
+    return render_role_control_sudoers(plan.project, plan.owner_user, plan.role_accounts)
+
+
+ROLE_CONTROL_SUDOERS_HEREDOC = "SWITCHYARD_ROLE_CONTROL_SUDOERS"
+
+
+def role_control_sudoers_install_commands(project: str, document: str) -> list[str]:
+    """Install a role control interface the artifact carries with it.
+
+    The document is embedded rather than regenerated at run time: an artifact
+    that shells out to regenerate it can only be as reliable as the command it
+    names, and the one it named does not exist (SYRD-51). Staging is unchanged
+    and deliberate -- the bytes go straight to a root-owned file through
+    /dev/stdin rather than through a path an unprivileged process could replace,
+    `visudo -c` validates it before it can be read as policy, and only a valid
+    file is given the name sudo actually loads.
+
+    Returns no commands at all for an empty document: this file is installed
+    whole, so writing a partial one would revoke the grants it omits.
+    """
+    if not document.strip():
+        return []
+    target = f"/etc/sudoers.d/49-{project}-role-control"
+    marker = ROLE_CONTROL_SUDOERS_HEREDOC
+    return [
+        f"sudo install -m 0440 -o root -g root /dev/stdin {target}.staged <<'{marker}'",
+        document.rstrip("\n"),
+        marker,
+        f"sudo visudo -c -f {target}.staged",
+        f"sudo mv {target}.staged {target}",
+    ]
 
 
 def peer_auth_command(plan: ProjectBoardProvision) -> str:

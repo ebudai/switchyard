@@ -6297,7 +6297,14 @@ def report_tenant_release_upgrade(
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
-) -> None:
+) -> TenantReleaseStatus | None:
+    """Report the tenant's release, and return what was found.
+
+    The status is returned because the caller has to record a phase from the same
+    reading: the identities transaction now switches the release itself, so whether
+    a deploy is still owed is exactly `status.unchanged`, and asking twice would be
+    two readings of a tree that can move between them (SYRD-48).
+    """
     status = tenant_release_status(
         config,
         config_path=config_path,
@@ -6307,7 +6314,7 @@ def report_tenant_release_upgrade(
         runner=runner,
     )
     if status is None:
-        return
+        return None
     print_func(
         f"switchyard: {config.project} deployed board release old: "
         f"{_format_release_sha(status.current_sha)} at {_format_release_path(status.current_release)}"
@@ -6332,7 +6339,7 @@ def report_tenant_release_upgrade(
                 f"switchyard: cannot produce a safe release update for {config.project}: generated board, "
                 "canary, and listener units are incomplete"
             )
-            return
+            return status
         print_func("switchyard: matching-release deployment sequence (keep the listener stopped through migrations):")
         print_func(f"  {tenant_release_listener_command(status, config.project, 'stop')}")
         unit_install = tenant_release_unit_install_command(status, config.project)
@@ -6355,6 +6362,7 @@ def report_tenant_release_upgrade(
             "switchyard: panes must be restarted after the release update to pick up hook installer, "
             "hook binary, or pane launcher changes; this command does not restart panes"
         )
+    return status
 
 
 def sync_reload_config_to_live_sessions(
@@ -12903,22 +12911,39 @@ def render_role_account_migration(config: ProjectConfig) -> str:
         "# The accounts now exist, but the running workers still hold the shared"
     )
     lines.append(
-        "# uid. Moving them is the next phase, and it must not happen before the"
+        "# uid. Moving them is root's next phase, not yours: one transaction stops"
     )
     lines.append(
-        "# director has made its own board write: restarting the director under a"
+        "# the roles, transfers their worktrees, switches the board release,"
     )
     lines.append(
-        "# new uid while the board still authorizes the shared account leaves it"
+        "# installs the authority units, restarts and health-checks the board, and"
     )
     lines.append(
-        "# unable to make that write at all. Rerun the upgrade, which runs"
+        "# brings every role back under its own account. Rerun the upgrade, which"
     )
     lines.append(
-        "# whichever phase is next in order (SYRD-45)."
+        "# runs whichever phase is next in order (SYRD-45)."
     )
     lines.append(f"sudo switchyard upgrade {config.project}")
-    lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
+    lines.append(
+        "# That transaction deploys and restarts the board itself, so there is no"
+    )
+    lines.append(
+        "# second restart to make here, and no release left for you to deploy."
+    )
+    lines.append(
+        "# What remains is the director's own board write, which is authorized"
+    )
+    lines.append(
+        "# from the director's uid and cannot be made by root or by you:"
+    )
+    lines.append(
+        f"#     switchyard finish-upgrade {config.project}    # in the director's own session"
+    )
+    lines.append(
+        "# (SYRD-48)."
+    )
     return "\n".join(lines) + "\n"
 UPGRADE_JOURNAL_SCHEMA = "switchyard.upgrade-journal.v1"
 # The order a tenant upgrade has to happen in, and who owns each step. The
@@ -13347,6 +13372,40 @@ def _open_board_url(url: str) -> Any:
     return urllib.request.urlopen(url, timeout=5)
 
 
+def record_release_phase_from_status(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    status: "TenantReleaseStatus | None",
+    dry_run: bool = False,
+) -> bool:
+    """Record the release phase from what is deployed, and say whether it is done.
+
+    The identities transaction switches the release inside itself, so after a
+    successful cutover there is nothing left for an operator to deploy. Recording
+    `ready` then would name a deploy that must not happen: the release enforcing
+    the per-role table is already the one running (SYRD-48).
+
+    A tenant with no board root at all reports nothing and is left `ready`, which
+    is what it was before: absence of a reading is not evidence of a deploy.
+    """
+    deployed = status is not None and status.unchanged
+    record_upgrade_phase(
+        config,
+        config_path=config_path,
+        phase="release",
+        state="done" if deployed else "ready",
+        detail=(
+            f"deployed release {_format_release_sha(status.current_sha)} already matches "
+            f"{status.deploy_ref}; the identities transaction switched it"
+            if deployed
+            else ""
+        ),
+        dry_run=dry_run,
+    )
+    return deployed
+
+
 def upgrade_phase_report(
     config: ProjectConfig,
     *,
@@ -13685,6 +13744,7 @@ def upgrade_project_command(
     )
 
     final_cutover = role_account_cutover(config, runner=runner)
+    release_deployed = False
     if not final_cutover.is_complete:
         print_func(
             f"switchyard: withholding the {config.project} release deploy instruction until its "
@@ -13692,30 +13752,41 @@ def upgrade_project_command(
             "and deploying it now would reject the processes actually serving the roles."
         )
     else:
-        record_upgrade_phase(
-            config, config_path=config_path, phase="release", state="ready", dry_run=dry_run
-        )
-        report_tenant_release_upgrade(
-            release_report_config,
+        release_deployed = record_release_phase_from_status(
+            config,
             config_path=config_path,
-            source_repo=effective_source_repo,
-            commit_git_dir=commit_git_dir,
-            deploy_ref=deploy_ref,
-            runner=runner,
-            print_func=print_func,
+            status=report_tenant_release_upgrade(
+                release_report_config,
+                config_path=config_path,
+                source_repo=effective_source_repo,
+                commit_git_dir=commit_git_dir,
+                deploy_ref=deploy_ref,
+                runner=runner,
+                print_func=print_func,
+            ),
+            dry_run=dry_run,
         )
 
     if director_state in {"pending", "unknown"}:
-        when = (
-            "after that deploy"
-            if final_cutover.is_complete
-            else "once its roles are on their own accounts and the release is deployed"
+        director_action = (
+            f"the director runs `switchyard finish-upgrade {config.project}` from their own "
+            f"session ({director_reason or 'outstanding'}); root cannot make that write and "
+            "will not pretend to"
         )
-        print_func(
-            f"switchyard: {when}, the director runs `switchyard finish-upgrade {config.project}` "
-            f"from their own session ({director_reason or 'outstanding'}); root cannot make that "
-            "write and will not pretend to."
-        )
+        if release_deployed:
+            # Saying "after that deploy" here is what sent an operator looking for a
+            # deploy the transaction had already made (SYRD-48).
+            print_func(
+                f"switchyard: {config.project}'s board release is deployed and no further deploy "
+                f"is needed. The remaining step is the director's: {director_action}."
+            )
+        else:
+            when = (
+                "after that deploy"
+                if final_cutover.is_complete
+                else "once its roles are on their own accounts and the release is deployed"
+            )
+            print_func(f"switchyard: {when}, {director_action}.")
     for line in upgrade_phase_report(
         config,
         config_path=config_path,
@@ -14493,14 +14564,18 @@ def finish_upgrade_command(
             "deploy instruction is still withheld."
         )
         return 0
-    report_tenant_release_upgrade(
+    record_release_phase_from_status(
         config,
         config_path=config_path,
-        source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
-        commit_git_dir=commit_git_dir,
-        deploy_ref=deploy_ref,
-        runner=runner,
-        print_func=print_func,
+        status=report_tenant_release_upgrade(
+            config,
+            config_path=config_path,
+            source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            runner=runner,
+            print_func=print_func,
+        ),
     )
     return 0
 

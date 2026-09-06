@@ -112,6 +112,7 @@ def test_add_role_relayout_replaces_unrecognized_layout_and_starts_new_role() ->
             owner_user=current_user,
             port=18811,
             source_repo=source_repo,
+            commit_git_dir="/srv/git/review-cache.git",
             implementer_roles=("app", "main"),
         )
         (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -182,6 +183,7 @@ def test_add_role_relayout_replaces_unrecognized_layout_and_starts_new_role() ->
     assert updated_config_json["roles"][-1]["slot"] == 3
     assert updated_layout == team_launcher._new_project_layout_payload(4)
     assert updated_plan["implementer_roles"] == ["app", "main", "ops"]
+    assert updated_plan["commit_git_dir"] == "/srv/git/review-cache.git"
     assert any(call == ["sudo", "systemctl", "restart", "mefp-ticket-board.service"] for call in runner.calls)
     pane_calls = [call for call in runner.calls if call[1:5] == ["mefp", "pane", "attach-or-start", "ops"]]
     assert len(pane_calls) == 1
@@ -394,6 +396,7 @@ def test_set_vcs_close_role_updates_generated_artifacts_database_and_unit() -> N
             owner_user=current_user,
             port=18811,
             source_repo=source_repo,
+            commit_git_dir="/srv/git/review-cache.git",
             implementer_roles=("app", "main", "archivist"),
         )
         (provision_dir / "plan.json").write_text(json.dumps(plan.__dict__, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -432,6 +435,7 @@ def test_set_vcs_close_role_updates_generated_artifacts_database_and_unit() -> N
         workflow_sql = (provision_dir / "mefp-vcs-close-role.sql").read_text(encoding="utf-8")
 
     assert updated_plan["operation_allowed_roles"] == [["mark_done", ["archivist"]]]
+    assert updated_plan["commit_git_dir"] == "/srv/git/review-cache.git"
     assert updated_plan["implementer_roles"] == ["app", "main"]
     assert updated_plan["assignee_roles"] == ["unassigned", "designer", "app", "main", "archivist", "audit", "director", "user"]
     assert updated_plan["caller_roles"] == ["director", "designer", "app", "main", "archivist", "audit", "user"]

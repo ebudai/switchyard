@@ -177,7 +177,7 @@ def build_plan(
     listener_role: str = "ticket_board_listener",
     board_root: Path | None = None,
     source_repo: Path | None = None,
-    commit_git_dir: Path | None = None,
+    commit_git_dir: Path | str | None = None,
     asset_dir: Path | None = None,
     frame_dir: Path | None = None,
     implementer_roles: Sequence[str] | None = None,
@@ -1528,6 +1528,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listener-role", default="ticket_board_listener", help="database listener role")
     parser.add_argument("--board-root", type=Path, help="versioned release root; default under owner home")
     parser.add_argument("--source-repo", type=Path, help="source checkout to export into the board release root")
+    parser.add_argument(
+        "--commit-git-dir",
+        help="git repository path, or colon-separated paths, used to verify board commit hashes",
+    )
     parser.add_argument("--asset-dir", type=Path, help="durable attachment directory")
     parser.add_argument("--frame-dir", type=Path, help="frame inbox directory")
     parser.add_argument(
@@ -1589,6 +1593,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         listener_role=args.listener_role,
         board_root=args.board_root,
         source_repo=args.source_repo,
+        commit_git_dir=args.commit_git_dir,
         asset_dir=args.asset_dir,
         frame_dir=args.frame_dir,
         implementer_roles=args.implementer_roles,

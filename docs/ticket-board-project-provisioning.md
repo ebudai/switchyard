@@ -115,18 +115,23 @@ the workflow table rejects.
 
 ## Switchyard source commit verification
 
-For the `syrd` and legacy `switchyard` slugs, generated board units default
-`TICKET_BOARD_COMMIT_GIT_DIR` to `/data/git/switchyard.git`. This is an
-operator-owned, locally readable cache of the canonical GitHub repository,
-not the SYRD provisioning control repo, which has unrelated seed history.
-Other tenants keep their existing repository resolution. An explicit
-`--commit-git-dir` or commit-repository environment setting takes precedence,
-including on hosts with a different cache path.
+The `syrd` provisioning control repo has unrelated seed history and cannot
+verify Switchyard source commits. Select the GitHub fetch cache explicitly
+when provisioning it:
 
-This default does not modify installed units or fetch any commits. During the
-coordinated cutover, review both generated and installed settings, install the
-updated SYRD unit, and restart that board. The cache must fetch GitHub feature
-branches before audit submission so the server can resolve their commits.
+    switchyard new ... --commit-git-dir /path/to/switchyard-source-cache.git
+
+The standalone renderer accepts the same `--commit-git-dir` option. The value
+is persisted in `plan.json`, the board unit, and operator commands. `add-role`
+and `set-vcs-close-role` preserve it. To repair or change an existing tenant,
+use `switchyard upgrade <project> --commit-git-dir <path>`; this refreshes the
+generated plan and units and includes the same value in the printed deployment
+command. With no option, upgrade preserves the recorded selection.
+
+There is no implicit `/data` source choice for new SYRD or `switchyard` tenants.
+Legacy PGU, MEFP, and Otto compatibility mappings remain until their archive
+dependencies are retired separately. The selected cache must fetch GitHub
+feature branches before audit submission so the server can resolve their commits.
 The write client separately requires the submitted commit to be pushed to the
 caller's `origin`; run it from the real source checkout. Test that a fetched
 feature-branch commit is accepted and a nonexistent hash is rejected. Keep

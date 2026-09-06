@@ -91,7 +91,6 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
 )
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
-DEFAULT_SWITCHYARD_BARE_REPO = Path("/data/git/switchyard.git")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
 
 
@@ -436,8 +435,14 @@ def switchyard_shared_install_root() -> Path:
     return Path(os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT)).expanduser()
 
 
-def switchyard_bare_repo() -> Path:
-    return Path(os.environ.get("SWITCHYARD_BARE_REPO", DEFAULT_SWITCHYARD_BARE_REPO)).expanduser()
+def switchyard_bare_repo() -> Path | None:
+    selected = os.environ.get("SWITCHYARD_BARE_REPO", "").strip()
+    if not selected:
+        return None
+    cache = Path(selected).expanduser()
+    if not cache.is_absolute():
+        raise SystemExit("switchyard: SWITCHYARD_BARE_REPO must be an absolute source-cache path")
+    return cache
 
 
 def switchyard_shared_target(root: Path | None = None) -> Path:
@@ -4898,6 +4903,8 @@ def refresh_generated_project_runtime_artifacts(
     *,
     config_path: Path,
     dry_run: bool = False,
+    source_repo: Path | None = None,
+    commit_git_dir: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> LauncherUpgradeResult:
     provision_dir = config_path.expanduser().resolve(strict=False).parent
@@ -4911,6 +4918,16 @@ def refresh_generated_project_runtime_artifacts(
             False,
             f"switchyard: {config.project} runtime plan is incomplete and cannot be refreshed automatically: {exc}",
         )
+    replacements: dict[str, str] = {}
+    if source_repo is not None:
+        replacements["source_repo"] = str(source_repo.expanduser().resolve(strict=False))
+    if commit_git_dir is not None:
+        selected_commit_git_dir = commit_git_dir.strip()
+        if not selected_commit_git_dir:
+            raise SystemExit("switchyard: --commit-git-dir must not be empty")
+        replacements["commit_git_dir"] = selected_commit_git_dir
+    if replacements:
+        plan = replace(plan, **replacements)
     with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-runtime-artifacts.") as tmp:
         staged = Path(tmp)
         write_artifacts(plan, staged, enable_owner_linger=False)
@@ -5039,16 +5056,23 @@ def _resolve_deploy_ref_from_bare_repo(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> tuple[str, str]:
     remote_branch = _deploy_ref_remote_branch(deploy_ref)
-    ref = f"refs/heads/{remote_branch[1]}" if remote_branch is not None else deploy_ref
-    proc = runner(
-        ["git", f"--git-dir={bare_repo}", "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    refs = (
+        (f"refs/remotes/{remote_branch[0]}/{remote_branch[1]}",)
+        if remote_branch is not None
+        else (deploy_ref,)
     )
-    if proc.returncode != 0:
-        return "", _proc_failure_reason(proc, f"git rev-parse exited {proc.returncode}")
-    return str(proc.stdout or "").strip(), ""
+    errors: list[str] = []
+    for ref in refs:
+        proc = runner(
+            ["git", f"--git-dir={bare_repo}", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode == 0:
+            return str(proc.stdout or "").strip(), ""
+        errors.append(_proc_failure_reason(proc, f"git rev-parse exited {proc.returncode}"))
+    return "", "; ".join(errors)
 
 
 def tenant_release_status(
@@ -5056,6 +5080,7 @@ def tenant_release_status(
     *,
     config_path: Path | None = None,
     source_repo: Path | None = None,
+    commit_git_dir: str | None = None,
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> TenantReleaseStatus | None:
@@ -5088,13 +5113,25 @@ def tenant_release_status(
         )
         if all(path.is_file() for path in required_units):
             provisioned_system_unit = candidate
-    commit_git_dir = str(plan_data.get("commit_git_dir") or "").strip()
+    selected_commit_git_dir = (
+        commit_git_dir.strip()
+        if commit_git_dir is not None
+        else str(plan_data.get("commit_git_dir") or "").strip()
+    )
     resolved_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
     current_release, current_sha = _current_tenant_release(board_root)
     clone_source_repo: Path | None = None
     if shared_switchyard_release_for_path(resolved_source_repo) is not None:
-        clone_source_repo = switchyard_bare_repo().resolve(strict=False)
-        target_sha, resolve_error = _resolve_deploy_ref_from_bare_repo(clone_source_repo, deploy_ref, runner=runner)
+        selected_cache = switchyard_bare_repo()
+        if selected_cache is None:
+            target_sha = ""
+            resolve_error = (
+                "installed shared releases require an explicit source cache in SWITCHYARD_BARE_REPO "
+                "or an explicit --source-repo checkout"
+            )
+        else:
+            clone_source_repo = selected_cache.resolve(strict=False)
+            target_sha, resolve_error = _resolve_deploy_ref_from_bare_repo(clone_source_repo, deploy_ref, runner=runner)
     else:
         target_sha, resolve_error = _resolve_deploy_ref_readonly(resolved_source_repo, deploy_ref, runner=runner)
     return TenantReleaseStatus(
@@ -5102,7 +5139,7 @@ def tenant_release_status(
         owner_user=owner_user,
         owner_home=owner_home,
         provisioned_system_unit=provisioned_system_unit,
-        commit_git_dir=commit_git_dir,
+        commit_git_dir=selected_commit_git_dir,
         current_release=current_release,
         current_sha=current_sha,
         target_sha=target_sha,
@@ -5125,9 +5162,12 @@ def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> 
     if status.commit_git_dir:
         deploy_env.append(f"TICKET_BOARD_COMMIT_GIT_DIR={status.commit_git_dir}")
     if status.clone_source_repo is not None:
+        marker = json.dumps({"commit": status.target_sha}, separators=(",", ":"))
         script = (
             'tmpdir="$(mktemp -d)"'
-            f" && git clone {shlex.quote(str(status.clone_source_repo))} \"$tmpdir\""
+            f" && git --git-dir={shlex.quote(str(status.clone_source_repo))} archive {shlex.quote(status.target_sha)}"
+            ' | tar -x -C "$tmpdir"'
+            f" && printf '%s\\n' {shlex.quote(marker)} >\"$tmpdir/{SWITCHYARD_RELEASE_MARKER_NAME}\""
             " && env "
             + " ".join(shlex.quote(value) for value in deploy_env)
             + ' SOURCE_REPO="$tmpdir" "$tmpdir/scripts/ticket-board-service.sh" deploy-restart'
@@ -5207,6 +5247,7 @@ def report_tenant_release_upgrade(
     *,
     config_path: Path | None = None,
     source_repo: Path | None = None,
+    commit_git_dir: str | None = None,
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
@@ -5215,6 +5256,7 @@ def report_tenant_release_upgrade(
         config,
         config_path=config_path,
         source_repo=source_repo,
+        commit_git_dir=commit_git_dir,
         deploy_ref=deploy_ref,
         runner=runner,
     )
@@ -5231,7 +5273,12 @@ def report_tenant_release_upgrade(
             f"switchyard: {config.project} deployed board release new: "
             f"(unresolved {status.deploy_ref}: {status.resolve_error})"
         )
-    if status.unchanged:
+    if not status.target_sha:
+        print_func(
+            f"switchyard: cannot produce a safe release update for {config.project}: "
+            f"{status.resolve_error}"
+        )
+    elif status.unchanged:
         print_func(f"switchyard: {config.project} deployed board release unchanged; no release deploy needed")
     else:
         if status.provisioned_system_unit is None:
@@ -6829,6 +6876,7 @@ def new_project_command(
     port: int | None = None,
     database: str | None = None,
     source_repo: Path | None = None,
+    commit_git_dir: str | None = None,
     repository: Path | None = None,
     output_dir: Path | None = None,
     director_onboarding: Path | None = None,
@@ -6891,6 +6939,7 @@ def new_project_command(
         port=port,
         database=database,
         source_repo=effective_source_repo,
+        commit_git_dir=commit_git_dir,
         ticket_prefix=ticket_prefix,
         implementer_roles=implementer_roles,
         board_service_traversal=board_service_traversal,
@@ -7663,7 +7712,6 @@ def _write_initial_switchyard_project_artifact(
         project_name=project_name,
         ticket_prefix=validate_ticket_prefix(slug),
         owner_user=owner_user,
-        owner_home=home_base / owner_user,
         repository=project_dir,
         remote="origin",
         default_branch="main",
@@ -9498,6 +9546,7 @@ def switchyard_new_command(
     project_path: Path | None = None,
     from_artifact: Path | None = None,
     source_repo: Path | None = None,
+    commit_git_dir: str | None = None,
     output_dir: Path | None = None,
     port: int | None = None,
     database: str | None = None,
@@ -9624,6 +9673,7 @@ def switchyard_new_command(
         port=port,
         database=database,
         source_repo=effective_source_repo,
+        commit_git_dir=commit_git_dir,
         ticket_prefix=precheck_artifact.ticket_prefix if precheck_artifact else None,
         implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else selected_implementer_roles,
         include_designer=precheck_artifact.include_designer if precheck_artifact else include_designer,
@@ -9773,6 +9823,7 @@ def switchyard_new_command(
         from_artifact=artifact_path,
         owner_home=home_base / owner_user,
         source_repo=source_repo,
+        commit_git_dir=commit_git_dir,
         output_dir=provision_dir,
         director_onboarding=director_onboarding,
         port=port,
@@ -9877,6 +9928,7 @@ def upgrade_project_command(
     dry_run: bool = False,
     desktop_policy: Path | None = None,
     source_repo: Path | None = None,
+    commit_git_dir: str | None = None,
     deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
@@ -9900,6 +9952,8 @@ def upgrade_project_command(
         config,
         config_path=config_path,
         dry_run=dry_run,
+        source_repo=effective_source_repo if source_repo is not None else None,
+        commit_git_dir=commit_git_dir,
         runner=runner,
     )
     print_func(runtime_artifacts.message)
@@ -9917,6 +9971,7 @@ def upgrade_project_command(
         release_report_config,
         config_path=config_path,
         source_repo=effective_source_repo,
+        commit_git_dir=commit_git_dir,
         deploy_ref=deploy_ref,
         runner=runner,
         print_func=print_func,
@@ -9999,6 +10054,25 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
     }
 
 
+def _owner_home_from_plan_data(config: ProjectConfig, plan_data: dict[str, Any]) -> Path:
+    return Path(str(_loaded_plan_field(
+        plan_data,
+        "owner_home",
+        _owner_home_for_auth(config.run_as_user or current_user_name()),
+    )))
+
+
+def _commit_git_dir_from_plan_data(config: ProjectConfig, plan_data: dict[str, Any]) -> str:
+    return str(_loaded_plan_field(
+        plan_data,
+        "commit_git_dir",
+        commit_git_dir_env_for_project(
+            project=config.project,
+            owner_home=_owner_home_from_plan_data(config, plan_data),
+        ),
+    ))
+
+
 def _vcs_close_role_from_plan_data(plan_data: dict[str, Any]) -> str | None:
     for item in plan_data.get("operation_allowed_roles") or []:
         if not isinstance(item, (list, tuple)) or len(item) != 2:
@@ -10033,10 +10107,11 @@ def _project_plan_for_added_role(
         project=config.project,
         project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
-        owner_home=Path(str(_loaded_plan_field(plan_data, "owner_home", _owner_home_for_auth(config.run_as_user or current_user_name())))),
+        owner_home=_owner_home_from_plan_data(config, plan_data),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
         source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
+        commit_git_dir=_commit_git_dir_from_plan_data(config, plan_data),
         ticket_prefix=str(_loaded_plan_field(plan_data, "ticket_prefix", config.ticket_prefix)),
         board_root=(
             Path(str(plan_data["board_root"]))
@@ -10076,10 +10151,11 @@ def _project_plan_for_vcs_close_role(
         project=config.project,
         project_name=config.project_name,
         owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
-        owner_home=Path(str(_loaded_plan_field(plan_data, "owner_home", _owner_home_for_auth(config.run_as_user or current_user_name())))),
+        owner_home=_owner_home_from_plan_data(config, plan_data),
         port=_loaded_plan_field(plan_data, "port", None),
         database=_loaded_plan_field(plan_data, "database", None),
         source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
+        commit_git_dir=_commit_git_dir_from_plan_data(config, plan_data),
         ticket_prefix=str(_loaded_plan_field(plan_data, "ticket_prefix", config.ticket_prefix)),
         board_root=(
             Path(str(plan_data["board_root"]))
@@ -10792,6 +10868,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, help="new project board port; omitted means deterministic allocation")
     parser.add_argument("--database", help="new project PostgreSQL database; omitted means <project>_ticket_board")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
+    parser.add_argument(
+        "--commit-git-dir",
+        help="git repository path, or colon-separated paths, used to verify board commit hashes",
+    )
     parser.add_argument("--repository", type=Path, help="project working checkout opened by generated panes")
     parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design command")
     parser.add_argument("--new-output-dir", type=Path, help="write new-project artifacts here")
@@ -10839,6 +10919,10 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-path", type=Path, help="project working directory; prompted when omitted")
     parser.add_argument("--from", dest="from_artifact", type=Path, help="project artifact emitted by the design session")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
+    parser.add_argument(
+        "--commit-git-dir",
+        help="git repository path, or colon-separated paths, used to verify board commit hashes",
+    )
     parser.add_argument("--output-dir", type=Path, help="write provisioning artifacts here")
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
@@ -10875,6 +10959,10 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
     parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
+    parser.add_argument(
+        "--commit-git-dir",
+        help="replace and persist the git repository path(s) used to verify board commit hashes",
+    )
     parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
     return parser
 
@@ -11083,6 +11171,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             project_path=args.project_path,
             from_artifact=args.from_artifact,
             source_repo=args.source_repo,
+            commit_git_dir=args.commit_git_dir,
             output_dir=args.output_dir,
             port=args.port,
             database=args.database,
@@ -11104,6 +11193,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             config_path=entry.config_path,
             dry_run=args.dry_run,
             source_repo=args.source_repo,
+            commit_git_dir=args.commit_git_dir,
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
         )
@@ -11230,6 +11320,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             database=args.database,
             source_repo=args.source_repo,
+            commit_git_dir=args.commit_git_dir,
             repository=args.repository,
             output_dir=args.new_output_dir,
             execute=args.execute,
@@ -11259,6 +11350,7 @@ def main(argv: list[str] | None = None) -> int:
             config_path=config_path,
             dry_run=args.dry_run,
             source_repo=args.source_repo,
+            commit_git_dir=args.commit_git_dir,
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
         )

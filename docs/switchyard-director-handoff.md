@@ -8,51 +8,56 @@ be rediscovered.
 ## Canonical Repository And Review Boundary
 
 [GitHub](https://github.com/ebudai/switchyard) is the canonical Switchyard
-repository under SYRD-6. The following is the target workflow; the director
-must complete and verify the coordinated cutover before using it. Source edits
-do not disable an installed mirror job, change GitHub settings, or update a
-running board.
+repository. Actual Switchyard source clones use
+`git@github-switchyard:ebudai/switchyard.git` as `origin`; the repository-scoped
+SSH key can push named branches without sudo or polkit. The provisioned SYRD
+role worktrees retain unrelated seed history and must not be repointed.
 
 1. Clone `https://github.com/ebudai/switchyard.git` into a separate source
    checkout and work on a named feature branch. The existing SYRD seed/control
    repo has unrelated provisioning history: preserve it and its worktrees;
    never repoint them blindly to Switchyard source.
-2. Push only the intended feature branch to GitHub using the authorized
-   account's credential. Open a pull request with the ticket, exact commit,
-   behavior change, and validation. Keep contribution terms in
+2. Push only the intended feature branch to GitHub. Open a pull request with
+   the ticket, exact commit, behavior change, and validation when GitHub review
+   is available. Keep contribution terms in
    `CONTRIBUTING.md` intact. Do not force-push or publish private backup refs,
    unrelated topic branches, or all local refs.
-3. Before audit submission, ensure the board's read-only source cache has
-   fetched the feature branch. The `syrd` compatibility default is
-   `/data/git/switchyard.git`; its provisioning control repo cannot verify
-   real source commits. Explicit commit-repository settings override that
-   default, and installed units need a separately reviewed update/restart.
+3. Before audit submission, fetch the feature branch into the board's selected
+   read-only source cache. Provision SYRD with an explicit `--commit-git-dir`,
+   and preserve that value through upgrades. There is no account-specific SYRD
+   cache default; its provisioning control repo cannot verify real source commits.
    See [commit verification](ticket-board-project-provisioning.md#switchyard-source-commit-verification).
 4. Submit the exact commit to audit from the real source checkout whose
    `origin` is GitHub. The write client checks origin reachability; the server
    independently checks its configured repository. Neither check should be
    bypassed to hide a publication or cache-refresh blocker.
 5. After audit, the director checks the current GitHub main is an ancestor of
-   the reviewed PR head and merges through GitHub's protected PR workflow.
-   Record the actual merged commit and refresh the cache. Merging is separate
-   from deploying the immutable shared and board releases.
+   the reviewed branch head and merges that exact commit on GitHub. Configure
+   branch protection separately; until GitHub enforces it, the director's
+   ancestry and audit checks remain the blocking merge gate. Record the actual
+   merged commit and refresh the cache. Merging is separate from deploying the
+   immutable shared and board releases.
 
-During cutover, identify the outgoing mirror writer and record its owner,
-command, schedule, and force/refspec behavior before disabling it. Stop that
-writer before GitHub accepts new work. Disable the old **Close Mirror Pull
-Requests** workflow in GitHub before opening the first PR: deleting its file in
-that PR cannot stop the copy still active on the base branch. Review branch
-protection and credentials separately; retain independent audit and director
+No automatic outgoing mirror job was established. The former **Close Mirror
+Pull Requests** workflow and mirror-only contribution text have been removed.
+Review branch protection separately; retain independent audit and director
 merge authority. Never loosen local repository permissions or copy another
 account's private key.
 
-`/data/git/switchyard.git` remains operator-owned recovery storage and a
-one-way GitHub fetch cache. Its `origin/main` must follow GitHub for shared
-upgrades; advance local `main` only after a successful fetch and a blocking
-fast-forward ancestry check with compare-and-swap ref update. Preserve private
-local branches and bundles. Cache refresh must never push back to GitHub.
-Checkout-based board deployments likewise fetch their checkout's `origin/main`;
-verify that origin is GitHub and deploy only the reviewed merged commit.
+`/data/git/switchyard.git` remains operator-owned recovery storage only. It
+contains historical and private refs, so do not delete it or publish its refs.
+It is not an active push remote or the SYRD board verifier. Shared-release
+upgrades require an explicitly selected fetch cache in `SWITCHYARD_BARE_REPO`,
+or an explicit GitHub checkout via `--source-repo`; cache refresh must never
+push back to GitHub. Checkout-based board deployments fetch `origin/main`,
+verify that origin is GitHub, and deploy only the reviewed merged commit.
+Configure a bare cache to retain remote-tracking refs, then refresh it with:
+
+```bash
+git --git-dir="$SWITCHYARD_BARE_REPO" config remote.origin.fetch \
+  '+refs/heads/*:refs/remotes/origin/*'
+git --git-dir="$SWITCHYARD_BARE_REPO" fetch --prune origin
+```
 
 Until branch publication and verification are available, commit locally and
 write a named-branch bundle to durable storage such as
@@ -82,13 +87,11 @@ launcher machinery.
 
 ## Tenant Map
 
-- `pgu` is the ARCHIVE board at `http://127.0.0.1:8770`, prefix `PGU`: 833
-  tickets as of the final pass, 710 done, 98 cancelled, 25 non-terminal. Act
-  on PGU only when work is still PGU-owned or needs an archive pointer.
-- `syrd` is the planned LIVE Switchyard board. Its slug is `syrd`, prefix is
-  `SYRD`, port is `23326`, and socket should be
-  `/run/syrd-ticket-board/ticket-board.sock`. New Switchyard work goes there
-  after cutover.
+- `pgu` is the ARCHIVE board at `http://127.0.0.1:8770`, prefix `PGU`. Act on
+  PGU only when work is still PGU-owned or needs an archive pointer.
+- `syrd` is the live Switchyard board. Its slug is `syrd`, prefix is `SYRD`,
+  port is `23326`, and socket is
+  `/run/syrd-ticket-board/ticket-board.sock`. New Switchyard work goes there.
 - `mefp` is a live peer tenant on port `26623`.
 - `otto` is a live peer tenant on port `20740`.
 
@@ -98,30 +101,25 @@ compatibility special case, not an output of that formula.
 
 ## Current State
 
-Facts that move are stated as how to FIND them, not as values. Values here were
-true on 2026-09-02 and are marked as such.
+Facts that move are stated as how to find them, rather than as pinned values.
 
     GitHub main         git ls-remote https://github.com/ebudai/switchyard.git refs/heads/main
-    source cache main   git --git-dir=/data/git/switchyard.git rev-parse main
+    selected cache main git --git-dir="$TICKET_BOARD_COMMIT_GIT_DIR" rev-parse refs/remotes/origin/main
     pgu main            git --git-dir=/data/git/pgu.git rev-parse --short main
     shared install      readlink -f /opt/switchyard/current
     live board release  readlink -f /home/agent/pgu-ticketboard-live/current
     tenants             ls /etc/switchyard/projects/
 
-Compare GitHub main, the cache, and release markers before trusting source
-freshness. On 2026-09-02 all three deploy surfaces had drifted from main at once: `/opt/switchyard/current` pointed
-at `81dc45f81ec0`, which was 18 commits behind main at audit time; the live board
-predated the commit-verification work merged that morning (so verification was merged
-but NOT RUNNING); and the mirror was one commit behind. Drift is the normal state, not
-an incident; merging is not deploying.
+Compare GitHub main, the explicitly selected cache, and release markers before
+trusting source freshness. Drift among them is possible; merging is not deploying.
 
 The repository split is complete. `pgu.git` carries no Switchyard-named paths;
 PGU instruction and crash files still intentionally point at `/opt/switchyard` as the
 shared tool location.
 
-`syrd` is not provisioned: no registry entry, no systemd unit, nothing on port 23326.
-Do not provision it twice. Before any cutover action, verify registry, systemd units,
-board port, socket path, ticket prefix and pane environment.
+`syrd` is provisioned and live. Do not provision it twice. Before changing its
+runtime, verify the registry entry, systemd units, board port, socket path,
+ticket prefix, pane environment, and protected commit-repository override.
 
 Use neutral `TICKET_BOARD_*`, `TEAM_LAUNCHER_*`, `UPDATE_HOOK_*` and `ALLOW_MAIN_PUSH`
 names. Do not introduce `SYRD_*` vocabulary.
@@ -240,7 +238,7 @@ the shared client lacked. Check rather than assume:
 
     readlink -f /opt/switchyard/current
     readlink -f /home/agent/pgu-ticketboard-live/current
-    git --git-dir=/data/git/switchyard.git rev-parse main
+    git --git-dir="$TICKET_BOARD_COMMIT_GIT_DIR" rev-parse refs/remotes/origin/main
 
 ## Commitless Deliverables
 

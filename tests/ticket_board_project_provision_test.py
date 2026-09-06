@@ -736,7 +736,7 @@ def test_live_legacy_project_commit_repositories_are_rendered() -> None:
     assert porter_plan.commit_git_dir == "/home/porter-agent/.local/state/switchyard/projects/porter/control.git"
 
 
-def test_syrd_verifies_source_cache_and_preserves_explicit_overrides() -> None:
+def test_syrd_requires_selected_source_cache_and_preserves_explicit_overrides() -> None:
     # Do not inherit this pane's live board setting into generated-default checks.
     clean_env = {key: value for key, value in os.environ.items() if key not in (
         "TICKET_BOARD_COMMIT_GIT_DIR", "PGU_TICKET_BOARD_COMMIT_GIT_DIR",
@@ -744,9 +744,9 @@ def test_syrd_verifies_source_cache_and_preserves_explicit_overrides() -> None:
     with patch.dict(os.environ, clean_env, clear=True):
         plan = build_plan(project="syrd", owner_user="switchyard-agent")
         unit = render_board_unit(plan)
-        assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/data/git/switchyard.git\n" in unit
-        assert "/projects/syrd/control.git" not in unit
-        assert "TICKET_BOARD_COMMIT_GIT_DIR='/data/git/switchyard.git'" in render_operator_commands(plan)
+        default_repo = "/home/switchyard-agent/.local/state/switchyard/projects/syrd/control.git"
+        assert f"Environment=TICKET_BOARD_COMMIT_GIT_DIR={default_repo}\n" in unit
+        assert "TICKET_BOARD_COMMIT_GIT_DIR='/data/git/switchyard.git'" not in render_operator_commands(plan)
 
         explicit = build_plan(project="syrd", owner_user="switchyard-agent",
                               commit_git_dir=Path("/srv/git/source-cache.git"))
@@ -758,6 +758,28 @@ def test_syrd_verifies_source_cache_and_preserves_explicit_overrides() -> None:
             with patch.dict(os.environ, {key: "/srv/git/env-cache.git"}):
                 overridden = build_plan(project="syrd", owner_user="switchyard-agent")
                 assert "Environment=TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/env-cache.git\n" in render_board_unit(overridden)
+
+
+def test_project_provision_cli_persists_selected_commit_cache() -> None:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.ticket_board.project_provision",
+            "--project",
+            "syrd",
+            "--owner-user",
+            "switchyard-agent",
+            "--commit-git-dir",
+            "/srv/git/switchyard-cache.git",
+            "--json",
+        ],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    assert json.loads(proc.stdout)["commit_git_dir"] == "/srv/git/switchyard-cache.git"
 
 
 def test_custom_database_actor_roles_fail_loud_until_schema_supports_them() -> None:

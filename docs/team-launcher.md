@@ -293,12 +293,19 @@ is a clean no-op.
 checks the provisioned tenant board release. For generated projects whose pane
 launcher comes from `<project>-ticketboard-live/current`, it reports the old
 deployed release, resolves the target release ref (default `origin/main`), and
-prints the privileged `ticket-board-service.sh deploy` command an operator can
-run to advance the tenant's `current` symlink. Running it again after that
-deploy reports the release unchanged. The command deliberately does not restart
-the board service or any panes; panes must be restarted after a release update
-to pick up hook installer, hook binary, or pane launcher changes because hook
-installation runs at pane launch.
+prints the ordered listener/unit/`deploy-restart` commands an operator can run
+to advance the tenant's `current` symlink. An installed shared release has no
+implicit source repository: select a fetch cache with `SWITCHYARD_BARE_REPO`,
+or pass a GitHub checkout with `--source-repo`. A normal fetch cache resolves
+`origin/main` from `refs/remotes/origin/main`, ahead of any stale local `main`.
+Its `remote.origin.fetch` must map GitHub branches to
+`refs/remotes/origin/*`; refresh it with `git --git-dir=<cache> fetch --prune origin`.
+
+`--source-repo` and `--commit-git-dir` replace and persist those choices in
+the generated plan, units, and operator commands. With no option, upgrade
+preserves the recorded values. Running upgrade again after deployment reports
+the release unchanged. Panes still need a separate restart after a release
+update to pick up hook installer, hook binary, or pane launcher changes.
 
 Resume records are preflighted against each CLI's local transcript store before
 the launcher passes them to the CLI. Claude uses the recorded

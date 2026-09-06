@@ -442,6 +442,7 @@ class PaneActivityGate:
         wall_time: Callable[[], float] = time.time,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        self.role_targets = dict(ROLE_TO_TARGET)
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
         self.cursor_position_runner = cursor_position_runner
@@ -475,14 +476,14 @@ class PaneActivityGate:
         return self._last_trace_by_target.get(target)
 
     def missing_hook_targets(self, targets: list[str] | None = None) -> list[str]:
-        checked_targets = targets or sorted(set(ROLE_TO_TARGET.values()))
+        checked_targets = targets or sorted(set(self.role_targets.values()))
         return [target for target in checked_targets if self.state_store.read(target) is None]
 
     def _idle_hook_states_by_role(self, roles: list[str] | None = None) -> dict[str, PaneHookState]:
-        checked_roles = roles or sorted(ROLE_TO_TARGET)
+        checked_roles = roles or sorted(self.role_targets)
         idle_states: dict[str, PaneHookState] = {}
         for role in checked_roles:
-            target = ROLE_TO_TARGET.get(role)
+            target = self.role_targets.get(role)
             if target is None:
                 continue
             state = self.state_store.read(target)
@@ -492,10 +493,10 @@ class PaneActivityGate:
         return idle_states
 
     def idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
-        checked_roles = roles or sorted(ROLE_TO_TARGET)
+        checked_roles = roles or sorted(self.role_targets)
         idle_since: dict[str, str] = {}
         for role in checked_roles:
-            target = ROLE_TO_TARGET.get(role)
+            target = self.role_targets.get(role)
             if target is None:
                 continue
             if target == self.director_target and self.is_busy(target):
@@ -519,6 +520,9 @@ class PaneActivityGate:
         return target.split(":", 1)[0]
 
     def _role_for_target(self, target: str) -> str:
+        for role, configured_target in self.role_targets.items():
+            if configured_target == target:
+                return role
         session = self._tmux_session_for_target(target)
         prefix = f"{DEFAULT_PROJECT}-"
         if session.startswith(prefix):
@@ -784,6 +788,7 @@ class TicketBoardNotifyListener:
         self,
         *,
         conninfo: str,
+        project: str = DEFAULT_PROJECT,
         channel: str = CHANNEL,
         sender: Callable[[str, str], None] | None = None,
         activity_gate: Callable[[str], bool] | None = None,
@@ -803,6 +808,9 @@ class TicketBoardNotifyListener:
         logger: logging.Logger = LOGGER,
         target_exists: Callable[[str], bool | None] | None = None,
     ) -> None:
+        self.role_targets = dict(ROLE_TO_TARGET)
+        self.workflow = None
+        self.project = project
         self.conninfo = conninfo
         self.channel = channel
         self.sender = sender or DirectorctlSender()
@@ -1128,7 +1136,7 @@ SELECT ticket_board.record_notification_trace(
         if not callable(idle_since_by_role):
             return {}
         try:
-            checked_roles = roles if roles is not None else sorted(ROLE_TO_TARGET)
+            checked_roles = roles if roles is not None else sorted(self.role_targets)
             idle_since = dict(idle_since_by_role(checked_roles))
             self._record_work_observed_from_gate(checked_roles)
             return idle_since
@@ -1143,7 +1151,7 @@ SELECT ticket_board.record_notification_trace(
             return
         observed_at = datetime.now(timezone.utc).isoformat()
         for role in roles:
-            target = ROLE_TO_TARGET.get(role)
+            target = self.role_targets.get(role)
             if target is None:
                 continue
             try:
@@ -1181,7 +1189,7 @@ SELECT ticket_board.record_notification_trace(
 
     def _present_fresh_idle_since_by_role(self) -> dict[str, str]:
         idle_since_by_role = self._idle_since_by_role(
-            [role for role in sorted(ROLE_TO_TARGET) if role != "director"]
+            [role for role in sorted(self.role_targets) if role != "director"]
         )
         stale_roles = set(self._consumed_present_idle_since_by_role) - set(idle_since_by_role)
         for role in stale_roles:
@@ -1236,7 +1244,7 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 
     def process_idle_stall_nudges(self, conn: Any) -> int:
         idle_since = self._idle_since_by_role()
-        work_observed_at = self._work_observed_at_for_roles(sorted(ROLE_TO_TARGET))
+        work_observed_at = self._work_observed_at_for_roles(sorted(self.role_targets))
         if not idle_since and not work_observed_at:
             return 0
         if idle_since:
@@ -1303,6 +1311,10 @@ WHERE id = %s
         return self._decode_text(row[0]), self._decode_text(row[1]), bool(row[2]), bool(row[3]), bool(row[4])
 
     def _current_target_role(self, kind: str, state: str, assignee: str) -> str | None:
+        cfg = getattr(self, "workflow", None)
+        if cfg and kind != "escalation":
+            from .workflow_config import notification_role
+            return notification_role(cfg, state, assignee)
         if kind == "transition":
             if state == "analysis":
                 return "director"
@@ -1335,16 +1347,13 @@ WHERE id = %s
             return False
         current_state, current_assignee, manually_controlled, parked, has_unresolved_blockers = current
 
+        terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self, "workflow", None) else TERMINAL_STATES
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
-            if current_state in TERMINAL_STATES:
-                return False
-            return True
+            return current_state not in terminal_states
         if not isinstance(parsed, dict):
-            if current_state in TERMINAL_STATES:
-                return False
-            return True
+            return current_state not in terminal_states
 
         payload_ticket_id = str(parsed.get("id", ticket_id)).strip().upper()
         if payload_ticket_id and payload_ticket_id != ticket_id:
@@ -1359,16 +1368,17 @@ WHERE id = %s
             return False
 
         kind = str(parsed.get("kind") or "").strip().lower()
-        if current_state in TERMINAL_STATES:
+        terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
+        if current_state in terminal_states:
             return (
                 kind == "transition"
-                and expected_state in TERMINAL_STATES
+                and expected_state in terminal_states
                 and current_state == expected_state
             )
         if kind == "awaiting_role":
             # Wait identity, not delivery ACK or comments, controls resolution.
             # Expired windows prevent a restart from delivering a reminder burst.
-            if current_state not in {"in_progress", "inspection", "audit"}:
+            if (self.workflow and not any(stage["name"] == current_state and not stage["terminal"] and stage["kind"] != "draft" for stage in self.workflow["stages"])) or (not self.workflow and current_state not in {"in_progress", "inspection", "audit"}):
                 return False
             expected_target = "director" if parsed.get("step") == 4 else parsed.get("awaiting_role")
             if target_role != expected_target:
@@ -1410,7 +1420,7 @@ SELECT EXISTS (
             return False
 
         current_target_role = self._current_target_role(kind, current_state, current_assignee)
-        return current_target_role is None or current_target_role == target_role
+        return current_target_role == target_role if getattr(self, "workflow", None) else current_target_role is None or current_target_role == target_role
 
     def _finish_current_blocker(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> str:
         try:
@@ -1437,7 +1447,21 @@ SELECT EXISTS (
             return self._decode_text(row.get("id", ""))
         return self._decode_text(row[0])
 
+    def refresh_workflow(self, conn: Any) -> None:
+        from .workflow_config import read_configuration, validate
+        document = read_configuration(conn)
+        self.workflow = validate(document, project=self.project) if document else None
+        self.role_targets = dict(ROLE_TO_TARGET)
+        if self.workflow:
+            self.role_targets = {r["name"]: r["target"] for r in self.workflow["roles"] if r["active"] and r.get("target")}
+            gate = getattr(self.activity_gate, "__self__", None)
+            if isinstance(gate, PaneActivityGate):
+                gate.role_targets = self.role_targets.copy()
+                gate.role_runtimes = {r["name"]: ("gemini" if r["runtime"] == "agy" else r["runtime"]) for r in self.workflow["roles"] if r["active"] and r.get("runtime")}
+                gate.director_target = self.role_targets.get("director", gate.director_target)
+
     def process_due_notifications(self, conn: Any, *, max_notifications: int | None = None) -> int:
+        self.refresh_workflow(conn)
         delivered = 0
         while not self.stop_event.is_set():
             if max_notifications is not None and self.delivered_count >= max_notifications:
@@ -1456,7 +1480,7 @@ SELECT EXISTS (
                 event="listener_claim",
                 detail={"attempts": attempts, "payload": self._safe_json_payload(payload)},
             )
-            target = ROLE_TO_TARGET.get(target_role)
+            target = self.role_targets.get(target_role)
             if self.stop_event.is_set():
                 break
             if target is None:
@@ -1767,6 +1791,7 @@ SELECT EXISTS (
             self.logger.info("LISTEN %s established", self.channel)
             self._log_missing_hook_state()
             while not self.stop_event.is_set():
+                self.refresh_workflow(conn)
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)

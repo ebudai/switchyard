@@ -170,7 +170,59 @@ class TicketBoardApp:
         self._workflow_states_cache: tuple[str, ...] | None = None
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
+    def workflow_configuration(self) -> dict[str, Any] | None:
+        if not self.database_url:
+            return None
+        from .workflow_config import read_configuration
+        with self._pg_connect() as conn:
+            return read_configuration(conn)
+
+    def workflow_document(self) -> dict[str, Any]:
+        with self._pg_connect() as conn:
+            from .workflow_config import read_configuration
+            cfg = read_configuration(conn)
+            if cfg is None:
+                return {"revision": 0, "document": None}
+            row = conn.execute("SELECT revision FROM ticket_board.workflow_configuration WHERE singleton").fetchone()
+            return {"revision": row["revision"], "document": cfg}
+
+    def workflow_roles(self) -> list[str]:
+        cfg = self.workflow_configuration()
+        return [r["name"] for r in cfg["roles"] if r["active"]] if cfg else list(CALLER_ROLES)
+
+    def apply_workflow(self, document: Any, *, expected_revision: int, dry_run: bool, caller_role: str) -> dict[str, Any]:
+        from .workflow_config import validate
+        if caller_role != "director":
+            raise PermissionError("only director may configure workflow")
+        cfg = validate(document, project=self.project)
+        with self._pg_connect() as conn:
+            self._pg_set_caller_role(conn, caller_role)
+            row = conn.execute("SELECT ticket_board.apply_declared_workflow(%s::jsonb,%s) AS revision", (json.dumps(cfg), expected_revision)).fetchone()
+            result = {"revision": row["revision"], "document": cfg, "dry_run": dry_run}
+            if dry_run:
+                conn.rollback()
+            self._workflow_states_cache = None
+            return result
+
+    def set_workflow_flags(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str) -> dict[str, Any]:
+        with self._pg_connect() as conn:
+            self._pg_set_caller_role(conn, caller_role)
+            self._pg_call(conn, "SELECT ticket_board.set_declared_flags(%s,%s::jsonb)", (ticket_id,json.dumps(patch)))
+            return self._pg_get_ticket(ticket_id,conn)
+
+    def perform_workflow_action(self, ticket_id: str, action: str, payload: dict[str, Any], *, caller_role: str) -> dict[str, Any]:
+        if set(payload) - {"target", "assignee", "commit_hash", "text", "reason"}:
+            raise ValueError("unknown workflow action payload field")
+        payload = dict(payload)
+        if "commit_hash" in payload:
+            payload["commit_hash"] = self._validate_commit_hash(payload["commit_hash"])
+        with self._pg_connect() as conn:
+            self._pg_set_caller_role(conn, caller_role)
+            self._pg_call(conn, "SELECT ticket_board.perform_workflow_action(%s,%s,%s::jsonb)", (ticket_id, action, json.dumps(payload)))
+            return self._pg_get_ticket(ticket_id, conn)
+
     def snapshot(self) -> dict[str, object]:
+        self._workflow_states_cache = None
         tickets, errors = self.list_tickets()
         try:
             columns = self.workflow_columns()
@@ -178,6 +230,11 @@ class TicketBoardApp:
             errors = [*errors, {"file": "postgres", "error": str(exc)}]
             columns = [{"key": state, "label": state} for state in STATES]
         states = [column["key"] for column in columns] or list(STATES)
+        cfg = self.workflow_configuration()
+        if cfg:
+            from .workflow_config import available_transitions
+            for ticket in tickets:
+                ticket["workflow_actions"] = available_transitions(cfg, ticket)
         return {
             "project": self.project,
             "project_name": self.project_name,
@@ -186,8 +243,9 @@ class TicketBoardApp:
             "errors": errors,
             "states": states,
             "columns": columns,
-            "assignees": list(ASSIGNEES),
-            "caller_roles": list(CALLER_ROLES),
+            "assignees": [r["name"] for r in cfg["roles"] if r["active"]] if cfg else list(ASSIGNEES),
+            "caller_roles": [r["name"] for r in cfg["roles"] if r["active"] and r["name"] != "unassigned"] if cfg else list(CALLER_ROLES),
+            "workflow": cfg,
             "screenshots": self.list_screenshots(),
             "store_backend": self.store_backend,
             "store_path": "postgres",
@@ -629,6 +687,7 @@ class TicketBoardApp:
         conn.autocommit = True
         conn.execute("SET client_encoding TO 'UTF8';")
         conn.execute("SELECT set_config('ticket_board.ticket_prefix', %s, false);", (self.ticket_prefix,))
+        conn.execute("SELECT set_config('ticket_board.project', %s, false);", (self.project,))
         conn.autocommit = False
         return conn
 
@@ -658,7 +717,12 @@ FROM ticket_board.tickets t
 ORDER BY t.ticket_number;
 """
             ).fetchall()
-        return tuple(
+            from .workflow_config import read_configuration
+            workflow_signature = ()
+            if read_configuration(conn) is not None:
+                revision = conn.execute("SELECT revision FROM ticket_board.workflow_configuration WHERE singleton").fetchone()["revision"]
+                workflow_signature = (("workflow_revision", revision),)
+        return workflow_signature + tuple(
             (
                 str(row["id"]),
                 str(row["row_updated_at"]),
@@ -675,6 +739,15 @@ ORDER BY t.ticket_number;
     def _pg_select_ticket_rows(self, conn: Any, ticket_id: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE t.id = %s" if ticket_id is not None else ""
         params = (ticket_id,) if ticket_id is not None else ()
+        from .workflow_config import read_configuration
+        configured = read_configuration(conn) is not None
+        owner_sql = "ticket_board.transition_target_role(scoped.state, scoped.assignee)" if configured else """CASE
+            WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
+            WHEN scoped.state IN ('analysis', 'dat', 'director_review') THEN 'director'
+            WHEN scoped.state = 'inspection' THEN 'inspector'
+            WHEN scoped.state = 'audit' THEN 'audit'
+            ELSE NULL END"""
+        scope_sql = "EXISTS (SELECT FROM ticket_board.workflow_stages ws WHERE ws.name=scoped.state AND NOT ws.is_terminal)" if configured else "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')"
         return conn.execute(
             f"""
 WITH notification_scope AS (
@@ -682,15 +755,9 @@ WITH notification_scope AS (
         scoped.id,
         scoped.state,
         scoped.ticket_number,
-        CASE
-            WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
-            WHEN scoped.state IN ('analysis', 'dat', 'director_review') THEN 'director'
-            WHEN scoped.state = 'inspection' THEN 'inspector'
-            WHEN scoped.state = 'audit' THEN 'audit'
-            ELSE NULL
-        END AS owner_role
+        {owner_sql} AS owner_role
     FROM ticket_board.tickets scoped
-    WHERE scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')
+    WHERE {scope_sql}
 ),
 notification_candidates AS (
     SELECT
@@ -751,6 +818,7 @@ SELECT
     t.manually_controlled,
     t.commit_hash,
     t.commit_exempt,
+    COALESCE(to_jsonb(t)->'workflow_flags', '{{}}'::jsonb) AS workflow_flags,
     t.created_text,
     t.updated_text,
     active_work.owner_role AS active_work_owner_role,
@@ -821,7 +889,12 @@ ORDER BY rank;
         rows = self._pg_select_ticket_rows(conn, ticket_id=ticket_id)
         if not rows:
             raise FileNotFoundError(f"ticket not found: {ticket_id}")
-        return self._pg_row_to_ticket(rows[0])
+        ticket = self._pg_row_to_ticket(rows[0])
+        from .workflow_config import read_configuration, available_transitions
+        cfg = read_configuration(conn)
+        if cfg:
+            ticket["workflow_actions"] = available_transitions(cfg, ticket)
+        return ticket
 
     def _pg_row_to_ticket(self, row: dict[str, Any]) -> dict[str, Any]:
         comments = row["comments"]
@@ -857,6 +930,7 @@ ORDER BY rank;
             "manually_controlled": bool(row["manually_controlled"]),
             "commit_hash": str(row["commit_hash"] or ""),
             "commit_exempt": bool(row["commit_exempt"]),
+            "workflow_flags": dict(row.get("workflow_flags") or {}),
             "created": self._require_text(row["created_text"], "created"),
             "updated": self._require_text(row["updated_text"], "updated"),
             "active_work_highlight": bool(row["active_work_highlight"]),
@@ -1557,7 +1631,8 @@ SELECT EXISTS (
         return str(Path(raw).expanduser().resolve())
 
     def _validate_state(self, state: str) -> str:
-        state = LEGACY_STATE_ALIASES.get(state, state)
+        if state not in self._workflow_state_names():
+            state = LEGACY_STATE_ALIASES.get(state, state)
         if state not in self._workflow_state_names():
             raise ValueError(f"invalid state: {state}")
         return state
@@ -1577,8 +1652,10 @@ SELECT EXISTS (
         return self._workflow_states_cache
 
     def _validate_assignee(self, assignee: str) -> str:
-        assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)
-        if assignee not in ASSIGNEES:
+        cfg = self.workflow_configuration() if assignee in LEGACY_ASSIGNEE_ALIASES else None
+        if not cfg or not any(r["name"] == assignee for r in cfg["roles"]):
+            assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)
+        if assignee not in ASSIGNEES and assignee not in {r["name"] for r in (self.workflow_configuration() or {}).get("roles", [])}:
             raise ValueError(f"invalid assignee: {assignee}")
         return assignee
 

@@ -332,6 +332,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
     }
 
     function defaultAdvanceState(ticket) {
+      if (state.workflow) return null;
       const hasState = (name) => (state.states || []).includes(name);
       if (ticket.state === 'draft') {
         return 'analysis';

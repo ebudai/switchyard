@@ -25,7 +25,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       commentAuthorRoles.forEach((role) => {
         buildOption(commentWho, role, roleLabel(role));
       });
-      commentWho.value = ticketIsUserReview(ticket) ? 'user' : 'director';
+      commentWho.value = state.workflow && ticket.assignee !== 'unassigned' ? ticket.assignee : (ticketIsUserReview(ticket) ? 'user' : 'director');
       bindDetailDraftField(draftFields, commentWho, 'commentWho', commentWho.value);
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
@@ -163,7 +163,48 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const workflowActions = document.createElement('div');
       workflowActions.className = 'inline-actions';
-      const detailAdvanceState = defaultAdvanceState(ticket);
+      if (state.workflow) {
+        for (const [name, spec] of Object.entries(state.workflow.flags || {})) {
+          if (spec.kind !== 'gate') continue;
+          const label = document.createElement('label');
+          const input = document.createElement('input'); input.type = 'checkbox';
+          input.checked = ticket[name] ?? ticket.workflow_flags?.[name] ?? spec.default;
+          const updateGateEnabled = () => { input.disabled = commentWho.value !== 'director'; };
+          updateGateEnabled(); commentWho.addEventListener('change', updateGateEnabled);
+          label.append(input, document.createTextNode(name.replaceAll('_', ' ')));
+          input.addEventListener('change', async () => {
+            try {
+              await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/set_workflow_flags`, {[name]: input.checked}, commentWho.value);
+              await requestBoardReload();
+            } catch (error) { input.checked = !input.checked; setCreateStatus(error.message, true); }
+          });
+          workflowActions.appendChild(label);
+        }
+        for (const action of ticket.workflow_actions || []) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = action.label;
+          const updateEnabled = () => {
+            button.disabled = !action.actors.includes(commentWho.value) || (action.owner_scoped && ticket.assignee !== commentWho.value);
+            button.title = `Allowed: ${action.actors.join(', ')}`;
+          };
+          updateEnabled();
+          commentWho.addEventListener('change', updateEnabled);
+          button.addEventListener('click', async () => {
+            try {
+              const payload = { target: action.to };
+              if (commentText.value.trim()) payload.text = commentText.value.trim();
+              if (action.require_reason && !payload.text) throw new Error('Enter the reason in the comment box.');
+              if (commitHashInput.value.trim()) payload.commit_hash = commitHashInput.value.trim();
+              if (action.require_commit && !ticket.commit_exempt && !payload.commit_hash) throw new Error('Enter the implementation commit.');
+              await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/${encodeURIComponent(action.action)}`, payload, commentWho.value);
+              await requestBoardReload();
+            } catch (error) { setCreateStatus(error.message, true); }
+          });
+          workflowActions.appendChild(button);
+        }
+      }
+      const detailAdvanceState = state.workflow ? null : defaultAdvanceState(ticket);
       if (detailAdvanceState) {
         const advanceButton = document.createElement('button');
         advanceButton.className = 'primary';
@@ -184,7 +225,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         });
         workflowActions.appendChild(advanceButton);
       }
-      if (ticket.state !== 'done' && ticket.state !== 'cancelled') {
+      if (!state.workflow && ticket.state !== 'done' && ticket.state !== 'cancelled') {
         const cancelButton = document.createElement('button');
         cancelButton.type = 'button';
         cancelButton.textContent = 'Cancel Ticket';
@@ -249,6 +290,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
+      if (!state.workflow) {
       toggles.appendChild(toggleControl('Requires UAT', ticket.needs_user_signoff, async (checked) => {
         await updateDetailTicketForToggle({ needs_user_signoff: checked });
       }));
@@ -258,6 +300,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       toggles.appendChild(toggleControl('Needs audit', ticket.needs_audit !== false, async (checked) => {
         await updateDetailTicketForToggle({ needs_audit: checked }, 'director');
       }));
+      }
       toggles.appendChild(toggleControl('Regression', ticket.regression, async (checked) => {
         await updateDetailTicketForToggle({ regression: checked });
       }));
@@ -266,6 +309,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       }, {
         title: 'Director-only: hold or release this ticket outside automatic workflow movement.',
       }));
+      if (!state.workflow) {
       if (ticket.needs_inspection) {
         toggles.appendChild(toggleControl('Inspector signoff', ticket.inspector_signoff, async (checked) => {
           await updateDetailTicketForToggle({ inspector_signoff: checked }, 'inspector');
@@ -292,6 +336,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         title: ticket.needs_user_signoff ? '' : 'Ticket does not require UAT sign-off.',
       }));
 
+      }
       const meta = document.createElement('div');
       meta.className = 'meta';
       const titleField = document.createElement('div');
@@ -642,6 +687,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         }
       });
       commentActions.appendChild(addCommentButton);
+      if (!state.workflow) {
       if (ticket.state === 'draft') {
         const releaseButton = document.createElement('button');
         releaseButton.textContent = 'Release to Triage';
@@ -702,6 +748,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
           }
         });
         commentActions.appendChild(kickbackButton);
+      }
       }
       commentComposer.append(commentWho, commentText, commentUrgentLabel, commentActions);
       comments.appendChild(commentComposer);

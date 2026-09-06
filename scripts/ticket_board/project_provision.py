@@ -1890,6 +1890,43 @@ curl -fsS http://127.0.0.1:{plan.port}/api/board >/dev/null
 """
 
 
+# SYRD-39: which generated artifacts the tenant owns, and which root consumes.
+# Everything root reads back -- units it installs, the tmpfiles and polkit
+# fragments, the sudoers grant, the SQL it runs as postgres, the operator
+# script -- must stay root-owned wherever it lives, because a tenant that can
+# rewrite one of those chooses what root runs. The plan is the tenant's: the
+# unprivileged workflow projection writes it.
+TENANT_ARTIFACT_NAMES: tuple[str, ...] = ("plan.json",)
+
+DEFAULT_PRIVILEGED_PROVISION_ROOT = Path("/etc/switchyard/provision")
+
+
+def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
+    """Generated files root installs or executes, in the order write_artifacts emits them."""
+    return (
+        plan.board_unit,
+        plan.canary_unit,
+        plan.listener_unit,
+        plan.tmpfiles_name,
+        plan.polkit_name,
+        plan.role_control_sudoers_name,
+        f"{plan.project}-database.sql",
+        f"{plan.project}-workflow.sql",
+        "operator-commands.sh",
+    )
+
+
+def privileged_provision_dir(project: str, *, root: Path | None = None) -> Path:
+    """Root-owned mirror of the privileged artifacts, outside the tenant's tree.
+
+    The provision directory itself is handed to the tenant, so a root-owned file
+    inside it can still be unlinked and replaced by its owner. The copy root
+    actually installs from therefore lives beside the project registry under
+    /etc/switchyard, which no tenant can reach.
+    """
+    return (root or DEFAULT_PRIVILEGED_PROVISION_ROOT) / project
+
+
 def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_owner_linger: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     files = {

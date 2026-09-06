@@ -26,11 +26,15 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts.ticket_board.project_provision import (
+    DEFAULT_PRIVILEGED_PROVISION_ROOT,
     DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     DEFAULT_PG_IDENT_MAP,
     ProjectBoardProvision,
     ROLE_RE,
+    TENANT_ARTIFACT_NAMES,
     build_plan,
+    privileged_artifact_names,
+    privileged_provision_dir,
     render_add_role_sql,
     render_board_unit,
     render_canary_unit,
@@ -5205,6 +5209,7 @@ def refresh_generated_project_runtime_artifacts(
         replacements["commit_git_dir"] = selected_commit_git_dir
     if replacements:
         plan = replace(plan, **replacements)
+    mirrored: Path | None = None
     with tempfile.TemporaryDirectory(prefix=f"switchyard-{config.project}-runtime-artifacts.") as tmp:
         staged = Path(tmp)
         write_artifacts(plan, staged, enable_owner_linger=False)
@@ -5215,6 +5220,11 @@ def refresh_generated_project_runtime_artifacts(
             or (provision_dir / path.name).read_bytes() != path.read_bytes()
         )
         if not changed_names:
+            # Ownership is still repaired: a tenant handed these by an earlier
+            # release keeps them until something takes them back, and "already
+            # current" content says nothing about who owns it (SYRD-39).
+            if not dry_run:
+                secure_privileged_provision_artifacts(plan, provision_dir, print_func=print)
             return LauncherUpgradeResult(False, f"switchyard: {config.project} generated runtime artifacts are already current")
         if dry_run:
             return LauncherUpgradeResult(
@@ -5225,11 +5235,119 @@ def refresh_generated_project_runtime_artifacts(
             target = provision_dir / name
             shutil.copyfile(staged / name, target)
             target.chmod((staged / name).stat().st_mode & 0o777)
-            ensure_owner_file(config, target, runner=runner)
-    return LauncherUpgradeResult(
-        True,
-        f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed_names)}",
-    )
+            # Ownership follows what the artifact is FOR, not the fact that it
+            # sits in the tenant's directory. Handing the board unit, the
+            # sudoers grant or the SQL root runs to the tenant would let the
+            # tenant choose what root then executes (SYRD-39).
+            if name in TENANT_ARTIFACT_NAMES:
+                ensure_owner_file(config, target, runner=runner)
+        mirrored = secure_privileged_provision_artifacts(plan, provision_dir, print_func=print)
+    message = f"switchyard: refreshed {config.project} generated runtime artifacts: {', '.join(changed_names)}"
+    if mirrored is not None:
+        message += f"; root installs from {mirrored}"
+    return LauncherUpgradeResult(True, message)
+
+
+PRIVILEGED_PROVISION_ROOT_ENV = "SWITCHYARD_PRIVILEGED_PROVISION_ROOT"
+
+
+def switchyard_privileged_provision_root() -> Path:
+    """Where root keeps the copies of generated artifacts it installs from.
+
+    Overridable so tests can exercise the real root branch without writing to
+    the host's /etc (SYRD-39).
+    """
+    configured = os.environ.get(PRIVILEGED_PROVISION_ROOT_ENV, "").strip()
+    return Path(configured).expanduser() if configured else DEFAULT_PRIVILEGED_PROVISION_ROOT
+
+
+def _keep_artifact_root_owned(path: Path) -> None:
+    """Return a generated artifact root consumes to root ownership.
+
+    Called on every refresh, so a tenant that was handed one of these by an
+    earlier release -- every tenant, before this -- has it taken back rather
+    than needing a manual repair nobody would run.
+    """
+    if os.geteuid() != 0:
+        return
+    os.chown(path, 0, 0)
+    path.chmod(0o755 if path.name.endswith(".sh") else 0o644)
+
+
+def secure_privileged_provision_artifacts(
+    plan: ProjectBoardProvision,
+    provision_dir: Path,
+    *,
+    privileged_root: Path | None = None,
+    print_func: Callable[[str], None] | None = None,
+) -> Path | None:
+    """Take back every generated artifact root consumes, then mirror it.
+
+    Provisioning hands the whole project directory to the tenant with a
+    recursive chown, so this repairs ALL of them rather than only the ones a
+    refresh happened to rewrite. Returns the directory root can install from,
+    or None -- and when it is None it says why, because the fallback is
+    installing out of a directory the tenant owns (SYRD-39).
+    """
+    warn = print_func or (lambda _text: None)
+    for name in privileged_artifact_names(plan):
+        path = provision_dir / name
+        if not path.is_file():
+            continue
+        try:
+            _keep_artifact_root_owned(path)
+        except OSError as exc:
+            warn(
+                f"switchyard: could not return {path} to root ownership: {exc}. "
+                "Root must not install from it while the tenant can rewrite it."
+            )
+            return None
+    try:
+        return mirror_privileged_provision_artifacts(plan, provision_dir, privileged_root=privileged_root)
+    except OSError as exc:
+        warn(
+            f"switchyard: could not stage {plan.project} privileged artifacts under "
+            f"{privileged_provision_dir(plan.project, root=privileged_root or switchyard_privileged_provision_root())}: {exc}. "
+            "The printed install commands then read from the tenant-owned provision directory."
+        )
+        return None
+
+
+def mirror_privileged_provision_artifacts(
+    plan: ProjectBoardProvision,
+    provision_dir: Path,
+    *,
+    privileged_root: Path | None = None,
+) -> Path | None:
+    """Copy the artifacts root installs into a directory no tenant can reach.
+
+    The provision directory belongs to the tenant, so a root-owned file inside
+    it can still be unlinked and replaced by the directory's owner: ownership
+    alone does not make the install source trustworthy. Root therefore installs
+    from its own copy. Returns that directory, or None when this is not running
+    as root and cannot make one (SYRD-39).
+    """
+    if os.geteuid() != 0:
+        return None
+    target = privileged_provision_dir(plan.project, root=privileged_root or switchyard_privileged_provision_root())
+    for directory in (*reversed(target.parents), target):
+        if directory.exists():
+            continue
+        directory.mkdir(mode=0o755)
+        os.chown(directory, 0, 0)
+    os.chown(target, 0, 0)
+    target.chmod(0o755)
+    for name in privileged_artifact_names(plan):
+        source = provision_dir / name
+        if not source.is_file():
+            continue
+        staged = target / f".{name}.new"
+        shutil.copyfile(source, staged)
+        os.chown(staged, 0, 0)
+        staged.chmod(0o755 if name.endswith(".sh") else 0o644)
+        # Replace in one step so an operator never reads a half-written unit.
+        staged.replace(target / name)
+    return target
 
 
 def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:
@@ -5382,14 +5500,24 @@ def tenant_release_status(
         raise SystemExit(f"switchyard: tenant owner_home must be absolute: {owner_home}")
     provisioned_system_unit = None
     if config_path is not None:
-        candidate = (config_path.parent / f"{config.project}-ticket-board.service").resolve(strict=False)
-        required_units = (
-            candidate,
-            candidate.parent / f"{config.project}-ticket-board-canary.service",
-            candidate.parent / f"{config.project}-ticket-board-notify-listener.service",
-        )
-        if all(path.is_file() for path in required_units):
-            provisioned_system_unit = candidate
+        # Prefer root's own copy. The provision directory belongs to the tenant,
+        # so installing from it would let the tenant choose what root runs; the
+        # mirror under /etc/switchyard is written and owned by root and is the
+        # source the printed install commands must name (SYRD-39).
+        candidates = [
+            privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
+            / f"{config.project}-ticket-board.service",
+            (config_path.parent / f"{config.project}-ticket-board.service").resolve(strict=False),
+        ]
+        for candidate in candidates:
+            required_units = (
+                candidate,
+                candidate.parent / f"{config.project}-ticket-board-canary.service",
+                candidate.parent / f"{config.project}-ticket-board-notify-listener.service",
+            )
+            if all(path.is_file() for path in required_units):
+                provisioned_system_unit = candidate
+                break
     selected_commit_git_dir = (
         commit_git_dir.strip()
         if commit_git_dir is not None
@@ -5568,6 +5696,17 @@ def report_tenant_release_upgrade(
         print_func(f"  {tenant_release_listener_command(status, config.project, 'stop')}")
         unit_install = tenant_release_unit_install_command(status, config.project)
         if unit_install:
+            privileged_root = switchyard_privileged_provision_root()
+            if not status.provisioned_system_unit.is_relative_to(privileged_root):
+                # Say it rather than let it pass: the source being installed is
+                # in a directory the tenant owns, so it is only as trustworthy
+                # as the tenant. Running `switchyard upgrade` as root stages a
+                # copy root owns and this line goes away (SYRD-39).
+                print_func(
+                    f"switchyard: warning: {config.project} units are being installed from "
+                    f"{status.provisioned_system_unit.parent}, which the tenant owns. Run "
+                    f"`switchyard upgrade {config.project}` as root to stage a root-owned copy first."
+                )
             print_func(f"  {unit_install}")
         print_func(f"  {tenant_release_deploy_command(status, config.project)}")
         print_func(f"  {tenant_release_listener_command(status, config.project, 'start')}")
@@ -7427,6 +7566,15 @@ def new_project_command(
         ),
     )
     write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
+    if execute:
+        # The provision directory is handed to the tenant, so root keeps its own
+        # copy of everything it later installs or executes and installs from
+        # that instead (SYRD-39).
+        mirrored_privileged = secure_privileged_provision_artifacts(plan, artifact_dir, print_func=print_func)
+        if mirrored_privileged is not None:
+            print_func(
+                f"switchyard: root installs {plan.project} units, grants and SQL from {mirrored_privileged}"
+            )
     config_path = write_new_project_launcher_artifacts(
         plan,
         artifact_dir,

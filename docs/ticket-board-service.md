@@ -603,6 +603,31 @@ role cannot touch, then pushes from there.
 No polkit is involved in ordinary role work: it is a plain `sudo -u` grant
 between two unprivileged accounts.
 
+### Who owns a generated artifact
+
+The provisioning directory holds two kinds of file and they are owned
+differently, by what the file is *for* rather than by where it sits.
+
+`plan.json` is the tenant's. The unprivileged workflow projection writes it, so
+it is chowned to the project owner and stays that way.
+
+Everything else generated is consumed by root: the board, canary and listener
+units it installs, the tmpfiles and polkit fragments, the role-control sudoers
+grant, the SQL it runs as postgres, and `operator-commands.sh`. Those are
+returned to `root:root` on every refresh, not only when their content changed --
+provisioning hands the whole project tree to the tenant with a recursive chown,
+so a tenant that was given one by an earlier release has it taken back rather
+than needing a repair nobody would run.
+
+Ownership alone is not enough, because the provision *directory* belongs to the
+tenant and a directory's owner can unlink and replace a root-owned file inside
+it. Root therefore keeps its own copy under `/etc/switchyard/provision/<project>`
+-- root-owned, with root-owned parents, replaced one file at a time by rename so
+an operator never reads a half-written unit -- and the printed install commands
+name that copy. If it cannot be staged (running somewhere root cannot write
+`/etc`), the commands fall back to the provision directory and say plainly that
+the source is tenant-owned and what to run to fix it.
+
 ### What a deploy checks
 
 The post-restart smoke claims `director` over the socket from an account that is

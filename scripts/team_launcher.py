@@ -6687,7 +6687,7 @@ def launch_project(
         if isolation_gaps:
             handoff_path = config_path.with_name(f"{config.project}-role-accounts.sh")
             try:
-                handoff_path.write_text(render_role_account_migration(config), encoding="utf-8")
+                handoff_path.write_text(render_role_account_migration(config, config_path=config_path), encoding="utf-8")
                 handoff_path.chmod(0o755)
             except OSError:
                 pass
@@ -8414,7 +8414,7 @@ def new_project_command(
     if handoff_config is not None and role_isolation_gaps(handoff_config):
         handoff_path = config_path.with_name(f"{plan.project}-role-accounts.sh")
         try:
-            handoff_path.write_text(render_role_account_migration(handoff_config), encoding="utf-8")
+            handoff_path.write_text(render_role_account_migration(handoff_config, config_path=config_path), encoding="utf-8")
             handoff_path.chmod(0o755)
             print_func(
                 f"team-launcher: roles are not isolated yet; run {handoff_path} as an operator "
@@ -12753,7 +12753,7 @@ def switchyard_new_command(
         # next start operable (SYRD-39).
         handoff_path = config_path.with_name(f"{resolved_slug}-role-accounts.sh")
         try:
-            handoff_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            handoff_path.write_text(render_role_account_migration(config, config_path=config_path), encoding="utf-8")
             handoff_path.chmod(0o755)
         except OSError as exc:
             print_func(f"switchyard: could not write {handoff_path}: {exc}")
@@ -13066,7 +13066,50 @@ def role_control_accounts(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def render_role_account_migration(config: ProjectConfig) -> str:
+#: The principal an ACL entry names, in any of the forms setfacl accepts.
+_ACL_NAMED_USER = re.compile(r"(?:^|[\s,])(?:d:)?u:([A-Za-z0-9_][A-Za-z0-9_.-]*):")
+
+
+def named_acl_users(commands: Sequence[str]) -> list[str]:
+    """The Unix accounts a rendered set of ACL commands names."""
+    found: list[str] = []
+    for command in commands:
+        if "setfacl" not in command:
+            continue
+        for account in _ACL_NAMED_USER.findall(command):
+            if account not in found:
+                found.append(account)
+    return sorted(found)
+
+
+def account_existence_guard(accounts: Sequence[str]) -> list[str]:
+    """Refuse with the reason rather than with setfacl's diagnostic.
+
+    setfacl rejects a principal the host does not know, and its message --
+    `Option -m: Invalid argument near character 3` -- says nothing about which
+    account or why. This script creates those accounts itself, so reaching a
+    named-user grant without one means the grant was emitted too early; say so
+    instead of aborting the migration half-done on a character offset (SYRD-53).
+    """
+    from scripts.ticket_board.project_provision import shell_quote
+
+    lines: list[str] = []
+    for account in accounts:
+        quoted = shell_quote(account)
+        lines.extend(
+            [
+                f"if ! getent passwd {quoted} >/dev/null 2>&1; then",
+                f"    echo \"{account} does not exist yet; its ACL grant is out of order\" >&2",
+                "    exit 1",
+                "fi",
+            ]
+        )
+    return lines
+
+
+def render_role_account_migration(
+    config: ProjectConfig, *, config_path: Path | None = None
+) -> str:
     """Operator commands that move an existing tenant onto per-role accounts.
 
     Creating the accounts is not enough on its own: a role also has to own the
@@ -13107,8 +13150,10 @@ def render_role_account_migration(config: ProjectConfig) -> str:
     # Owning a worktree is not reaching it: the owner home above it is 0710.
     # These grant traversal and the shared git metadata, and nothing else
     # (SYRD-49).
+    # Group principals only, and the group is created above, so these are safe
+    # before any account exists. Named-user grants are not, and are emitted
+    # after the loop below (SYRD-53).
     lines.extend(role_path_access_commands(config))
-    lines.extend(director_control_access_commands_for(config))
     for role in config.roles:
         # Canonical rather than configured: this artifact is what CREATES the
         # accounts, so it has to be renderable before the configuration names
@@ -13132,6 +13177,18 @@ def render_role_account_migration(config: ProjectConfig) -> str:
                 worktree="",
             )
         )
+    # Now that the accounts exist, the grants that name one. The control role is
+    # whichever role the workflow gives the control capabilities, so this is
+    # derived from the configuration rather than from a role name (SYRD-49), and
+    # it is here rather than above because setfacl rejects a principal the host
+    # does not know yet (SYRD-53).
+    control_grants = director_control_access_commands_for(config, config_path=config_path)
+    if control_grants:
+        lines.append(
+            "# Let the control role reach its own configuration. Its account exists by now:"
+        )
+        lines.extend(account_existence_guard(named_acl_users(control_grants)))
+        lines.extend(control_grants)
     # The document goes in the artifact rather than a command that regenerates it:
     # this named `switchyard provision`, which the CLI does not have, so the setup
     # failed here before the rule was ever installed (SYRD-51).
@@ -13953,7 +14010,7 @@ def upgrade_project_command(
     if not accounts_ready:
         migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
         if not dry_run:
-            migration_path.write_text(render_role_account_migration(config), encoding="utf-8")
+            migration_path.write_text(render_role_account_migration(config, config_path=config_path), encoding="utf-8")
             migration_path.chmod(0o755)
         print_func(
             f"switchyard: {config.project}'s roles still share the project account. An operator must "

@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import os
+import pwd
 import stat as stat_module
 
 from team_launcher_test_helpers import *
 
-SEED_SOURCE_USER = "seed-user"
+# A real passwd-backed account that owns the fixture token it writes. Production
+# validation requires both, so the fixture must satisfy them rather than rely on the
+# check failing open for an unknown name.
+SEED_SOURCE_USER = team_launcher.current_user_name()
+ABSENT_SOURCE_USER = "syrd-no-such-source"
 SEED_TOKEN_TEXT = '{"auth_method":"consumer","token":{"refresh_token":"test-refresh-secret"}}\n'
 TOKEN_NAME = "antigravity-oauth-token"
 
@@ -187,7 +192,7 @@ def test_fresh_provision_seeds_agy_token_into_created_owner_home() -> None:
         for c in runner.calls
     )
     assert artifact["project"]["capability_grants"]["agy_credential_source"] == SEED_SOURCE_USER
-    assert "seeded agy credential for otto-agent from seed-user" in output
+    assert f"seeded agy credential for otto-agent from {SEED_SOURCE_USER}" in output
     # The shared-account blast radius is stated where the operator will see it.
     assert "every role pane of this project shares that one account" in output
     # The token's contents never reach stdout.
@@ -229,7 +234,7 @@ def test_missing_source_is_rejected_before_any_provisioning_mutation() -> None:
 
     assert isinstance(outcome, SystemExit)
     message = str(outcome)
-    assert "agy credential seeding was requested from 'seed-user'" in message
+    assert f"agy credential seeding was requested from {SEED_SOURCE_USER!r}" in message
     assert f"sign in to agy as {SEED_SOURCE_USER} first" in message
     assert "clear capability_grants.agy_credential_source" in message
     assert not seeded_exists
@@ -287,6 +292,35 @@ def test_source_token_not_owned_by_source_user_is_refused() -> None:
     message = str(outcome)
     assert "is owned by uid" in message
     assert "refusing to copy a token that user does not own" in message
+    assert _mutated(runner) == []
+
+
+def test_source_user_absent_from_passwd_is_refused() -> None:
+    """Fails closed: with no uid to compare against there is no owner boundary at all.
+
+    A deleted or mistyped account whose stale home survives must not be accepted on the
+    strength of the token filename.
+    """
+    try:
+        pwd.getpwnam(ABSENT_SOURCE_USER)
+        raise AssertionError(f"{ABSENT_SOURCE_USER} unexpectedly exists; pick another name")
+    except KeyError:
+        pass
+
+    with tempfile.TemporaryDirectory(prefix="pgu-agy-seed.") as tmp:
+        tmp_path = Path(tmp)
+        # A perfectly well-formed regular token, owned by whoever runs the tests.
+        _seed_source_token(tmp_path / "home", user=ABSENT_SOURCE_USER)
+        outcome, runner, _output, home_base, _project_dir = _provision(
+            tmp_path, agy_credential_source=ABSENT_SOURCE_USER
+        )
+        seeded_exists = _seeded_token_path(home_base).exists()
+
+    assert isinstance(outcome, SystemExit)
+    message = str(outcome)
+    assert f"agy_credential_source {ABSENT_SOURCE_USER!r} is not a user on this machine" in message
+    assert "only from an existing account that owns it" in message
+    assert not seeded_exists
     assert _mutated(runner) == []
 
 

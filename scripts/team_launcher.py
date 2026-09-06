@@ -9105,6 +9105,15 @@ def _open_agy_source_token(source_user: str, home_base: Path) -> int:
     root-readable file between the check and a root-run copy. The caller closes the fd.
     """
     source_token = _agy_source_token_path(source_user, home_base)
+    # Resolved before the file is touched, and never optional: without a uid to compare
+    # against there is no owner boundary at all, and a deleted or mistyped account whose
+    # stale home survives would be accepted on the strength of the filename alone.
+    expected_uid = _uid_for_user(source_user)
+    if expected_uid is None:
+        raise SystemExit(
+            f"switchyard: agy_credential_source {source_user!r} is not a user on this machine; "
+            "seeding copies a token only from an existing account that owns it"
+        )
     try:
         fd = os.open(source_token, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError as exc:
@@ -9124,10 +9133,7 @@ def _open_agy_source_token(source_user: str, home_base: Path) -> int:
             raise SystemExit(
                 f"switchyard: {source_token} is not a regular file; refusing to seed from it"
             )
-        # Skipped when the source user has no passwd entry, which happens only under a
-        # fabricated home base; a real provision resolves the uid and enforces this.
-        expected_uid = _uid_for_user(source_user)
-        if expected_uid is not None and info.st_uid != expected_uid:
+        if info.st_uid != expected_uid:
             raise SystemExit(
                 f"switchyard: {source_token} is owned by uid {info.st_uid}, not {source_user} "
                 f"(uid {expected_uid}); refusing to copy a token that user does not own"

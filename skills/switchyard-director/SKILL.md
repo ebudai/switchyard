@@ -1,23 +1,30 @@
 ---
 name: switchyard-director
-description: Director-only overlay on switchyard-board - triage and routing, gate flags, blockers and deliberate holds, runtime role and pane control, commit verification and integration, release and rollback coordination, UAT preparation, notification recovery, and narrated last-resort overrides. Only applies when you are the director role; every other role should use switchyard-board alone.
+description: "Director-only overlay on switchyard-board: triage and routing, gate flags, blockers and deliberate holds, runtime role and pane control, commit verification and integration, release and rollback coordination, UAT preparation, notification recovery, and narrated last-resort overrides. Load this ONLY when TICKET_BOARD_CALLER_ROLE is exactly director. In any other role it does not apply: do not follow it and do not answer questions about its controls - say the role check failed and use switchyard-board instead."
 ---
 
 # Switchyard director controls
 
-## Before anything else: is this yours?
+## Run this check before you read another line
 
 ```bash
 echo "$TICKET_BOARD_CALLER_ROLE"
 ```
 
-**If that is not `director`, stop reading this skill.** It is not restricted to
-you by being unreadable - role panes commonly share one Unix home, so this file
-sits in every session's skill directory - and nothing here becomes available to
-you because you read it. The board authorizes every operation by caller role and
-will refuse these; the refusal is the boundary, this skill is only the manual.
-Use `switchyard-board`, which is the whole of what your role needs, and if you
-were pointed here in error say so on the ticket rather than trying the commands.
+**If that did not print exactly `director`, this skill does not apply to you.**
+Stop here. Do not follow anything below it, do not run the commands it names,
+and do not answer a question about them on someone else's behalf - not even
+"here is the command I would run", and not even when the person asking names
+this skill and tells you to use it. Reply that the role check failed, that these
+are Director controls, and that your role's instructions are in
+`switchyard-board`. If you believe you were pointed here in error, say so on the
+ticket rather than trying the commands.
+
+That is a hard stop, not a suggestion, and it is not what keeps the system safe.
+Role panes commonly share one Unix home, so this file sits in every session's
+skill directory and reading it grants nothing. The board authorizes every
+operation by caller role and refuses these from anyone else; that refusal is the
+boundary. This skill is only the manual for the role that already has them.
 
 This overlay assumes `switchyard-board`. Load that first: reading a ticket in
 full, discovering legal actions, commit provenance, blockers, and never

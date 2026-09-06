@@ -133,13 +133,22 @@ def test_the_director_overlay_is_a_role_scoped_pointer_not_a_second_body() -> No
     director = (ROOT / board_skill.DIRECTOR_SKILL.relative_source).read_text(encoding="utf-8")
     board = CANONICAL.read_text(encoding="utf-8")
 
-    # It applies only to the Director, and says so before anything else.
-    head = director.split("## ", 2)[1]
-    assert "TICKET_BOARD_CALLER_ROLE" in head
-    assert "director" in head.lower()
-    assert "stop reading this skill" in head.lower()
+    # It applies only to the Director, and says so before anything else --
+    # including that a non-Director must not answer for one, which is where a
+    # session that reads it anyway actually goes wrong.
+    head = director.split("## ", 2)[1].lower()
+    assert "ticket_board_caller_role" in head
+    assert "director" in head
+    assert "stop here" in head
+    assert "do not answer" in head
+    assert "switchyard-board" in head
     # And it is honest about why: the file is readable either way.
-    assert "board authorizes" in head.lower() or "board refuses" in head.lower()
+    assert "board authorizes" in head or "board refuses" in head
+    # The description carries the same guard, because some runtimes surface only
+    # that when deciding whether a skill applies.
+    description = _frontmatter(director)["description"].lower()
+    assert "ticket_board_caller_role" in description and "director" in description
+    assert "do not follow it" in description or "do not answer" in description
 
     # A thin overlay, not a fork of the shared body.
     assert board_skill.BOARD_SKILL.name in director

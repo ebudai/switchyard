@@ -7564,17 +7564,58 @@ def _parse_onboarding_snapshot(text: str) -> tuple[str, str] | None:
     return match.group("commit").strip(), match.group("source").strip()
 
 
+def _onboarding_history_git_args(
+    *,
+    source_repo: Path,
+    commit_git_dir: str | None,
+    source_commit: str,
+    current_source_commit: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> list[str] | None:
+    direct_release = _read_switchyard_release_marker(source_repo)
+    shared_release = shared_switchyard_release_for_path(source_repo)
+    immutable_release = bool(
+        (direct_release is not None and direct_release.marker_commit)
+        or (shared_release is not None and shared_release.marker_commit)
+    )
+    selected = str(commit_git_dir or "").strip()
+    if not immutable_release or not selected:
+        return ["git", "-C", str(source_repo)]
+
+    required_commits = tuple(dict.fromkeys((source_commit, current_source_commit)))
+    for raw_path in selected.split(os.pathsep):
+        if not raw_path.strip():
+            continue
+        git_dir = Path(raw_path.strip()).expanduser()
+        git_args = ["git", f"--git-dir={git_dir}"]
+        for commit in required_commits:
+            proc = run_owner_correct_git(
+                [*git_args, "cat-file", "-e", f"{commit}^{{commit}}"],
+                runner=runner,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if proc.returncode != 0:
+                break
+        else:
+            return git_args
+    return None
+
+
 def _read_source_onboarding_doc_at_commit(
     *,
     source_repo: Path,
+    git_args: Sequence[str] | None = None,
     source_commit: str,
     source_name: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> str | None:
     if not source_commit or source_commit == "unknown":
         return None
+    selected_git_args = list(git_args) if git_args is not None else ["git", "-C", str(source_repo)]
     proc = run_owner_correct_git(
-        ["git", "-C", str(source_repo), "show", f"{source_commit}:docs/onboarding/{source_name}"],
+        [*selected_git_args, "show", f"{source_commit}:docs/onboarding/{source_name}"],
         runner=runner,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -7588,6 +7629,7 @@ def _read_source_onboarding_doc_at_commit(
 def _source_onboarding_commit_is_ancestor(
     *,
     source_repo: Path,
+    git_args: Sequence[str] | None = None,
     source_commit: str,
     current_source_commit: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
@@ -7599,11 +7641,10 @@ def _source_onboarding_commit_is_ancestor(
         or current_source_commit == "unknown"
     ):
         return None
+    selected_git_args = list(git_args) if git_args is not None else ["git", "-C", str(source_repo)]
     proc = run_owner_correct_git(
         [
-            "git",
-            "-C",
-            str(source_repo),
+            *selected_git_args,
             "merge-base",
             "--is-ancestor",
             source_commit,
@@ -7633,6 +7674,7 @@ def upgrade_switchyard_onboarding_docs(
     source_repo: Path,
     project_dir: Path,
     owner_user: str,
+    commit_git_dir: str | None = None,
     dry_run: bool,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     print_func: Callable[[str], None],
@@ -7700,8 +7742,19 @@ def upgrade_switchyard_onboarding_docs(
         if source_name != name:
             print_func(f"switchyard: onboarding doc {name}: skipped, provenance names {source_name}")
             continue
+        history_git_args = _onboarding_history_git_args(
+            source_repo=source_repo,
+            commit_git_dir=commit_git_dir,
+            source_commit=source_commit,
+            current_source_commit=current_source_commit,
+            runner=runner,
+        )
+        if history_git_args is None:
+            print_func(f"switchyard: onboarding doc {name}: skipped, cannot verify source commit {source_commit}")
+            continue
         old_body = _read_source_onboarding_doc_at_commit(
             source_repo=source_repo,
+            git_args=history_git_args,
             source_commit=source_commit,
             source_name=source_name,
             runner=runner,
@@ -7714,12 +7767,19 @@ def upgrade_switchyard_onboarding_docs(
             continue
         source_commit_is_ancestor = _source_onboarding_commit_is_ancestor(
             source_repo=source_repo,
+            git_args=history_git_args,
             source_commit=source_commit,
             current_source_commit=current_source_commit,
             runner=runner,
         )
         if source_commit_is_ancestor is False:
             print_func(f"switchyard: onboarding doc {name}: skipped, installed copy is newer than this checkout")
+            continue
+        if source_commit_is_ancestor is None:
+            print_func(
+                f"switchyard: onboarding doc {name}: skipped, cannot verify ancestry from "
+                f"source commit {source_commit} to release commit {current_source_commit}"
+            )
             continue
         if not dry_run:
             target_path.write_text(current_snapshot, encoding="utf-8")
@@ -10072,10 +10132,16 @@ def upgrade_project_command(
     print_func(runtime_artifacts.message)
     project_dir = _project_dir_from_generated_config_path(config_path)
     if project_dir is not None:
+        onboarding_commit_git_dir = commit_git_dir
+        if onboarding_commit_git_dir is None:
+            plan_commit_git_dir = _plan_data_from_config(config, config_path).get("commit_git_dir")
+            if isinstance(plan_commit_git_dir, str) and plan_commit_git_dir.strip():
+                onboarding_commit_git_dir = plan_commit_git_dir.strip()
         upgrade_switchyard_onboarding_docs(
             source_repo=effective_source_repo,
             project_dir=project_dir,
             owner_user=config.run_as_user or current_user_name(),
+            commit_git_dir=onboarding_commit_git_dir,
             dry_run=dry_run,
             runner=runner,
             print_func=print_func,

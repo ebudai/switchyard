@@ -44,8 +44,6 @@ UUID_RE = re.compile(
 SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 SESSION_START_FRESH_SOURCE = "startup"
-ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
-DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
 BOARD_SKILL_NAME = "switchyard-board"
 DIRECTOR_SKILL_NAME = "switchyard-director"
 DIRECTOR_ROLE = "director"
@@ -70,6 +68,8 @@ def _skill_instruction_for_role(role: str) -> str:
         return DIRECTOR_SKILL_INSTRUCTION
     return BOARD_SKILL_INSTRUCTION
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
+ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
+DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -477,6 +477,9 @@ def _is_session_start_hook_source(source: str) -> bool:
     return source.endswith(".SessionStart") or source in SESSION_START_HOOK_SOURCES
 
 
+# Phase-one compatibility bridge (SYRD-36). These serve a director whose tenant has
+# not yet been migrated: no stored onboarding and no migration marker. SYRD-40
+# removes them once every registered tenant carries the marker.
 def _display_path(path: Path, *, root: Path) -> str:
     try:
         display = path.relative_to(root)
@@ -540,6 +543,21 @@ def _director_startup_onboarding_context(root: Path, *, cwd: Path) -> str:
     return f"Your director session just started fresh. Read the onboarding packet first: {packet_display}"
 
 
+
+def _director_onboarding_migrated(environ: dict[str, str]) -> bool:
+    """Whether this tenant's document already carries the director onboarding marker.
+
+    Projected into the pane environment because the hook never reads the workflow
+    document. Its absence is what distinguishes a tenant that predates stored onboarding
+    from a director who deliberately cleared their prompt.
+    """
+    return _env_first(environ, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _with_board_skill_instruction(context: str, role: str = "") -> str:
     instruction = _skill_instruction_for_role(role)
     if instruction in context:
@@ -582,6 +600,17 @@ def _session_start_additional_context_output(
         session_start_source in {"", SESSION_START_FRESH_SOURCE}
         and not resume_session_id.strip()
     )
+    # A stored prompt is the director's own words for this role, so it wins over the
+    # packaged remit file. Both are gated on fresh_start: a prompt changed mid-session is
+    # picked up by the next fresh conversation or an explicit restart, never by
+    # interrupting or silently rewriting the one that is running.
+    onboarding_prompt = environ.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", "").strip()
+    if onboarding_prompt and fresh_start:
+        # The skill instruction is prepended by _session_start_context, which also picks
+        # the director overlay, so the role body is passed on its own.
+        return _session_start_context(
+            f"Your {role} session started.\n\n{onboarding_prompt}", role
+        )
     onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
     if onboarding and fresh_start:
         path = Path(onboarding)
@@ -591,12 +620,19 @@ def _session_start_additional_context_output(
             f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text(),
             role,
         )
-    if role == "director" and fresh_start:
+    # Phase-one bridge, gated on the migration marker rather than on the role alone.
+    # An unmigrated tenant has no stored onboarding *and* no marker, so the old packet
+    # lookup still serves its director. Once the marker is persisted, an empty prompt and
+    # path mean the director cleared it deliberately, and the generic fallback -- nothing
+    # role-specific -- is the correct answer. SYRD-40 deletes this branch outright.
+    if role == DIRECTOR_ROLE and fresh_start and not _director_onboarding_migrated(environ):
         cwd = Path.cwd()
         onboarding_root = _onboarding_project_root(environ, cwd)
         if onboarding_root is None:
             return _session_start_context("", role)
-        return _session_start_context(_director_startup_onboarding_context(onboarding_root, cwd=cwd), role)
+        return _session_start_context(
+            _director_startup_onboarding_context(onboarding_root, cwd=cwd), role
+        )
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
         # A fresh role session with nothing else to say is exactly the one that
         # would otherwise reach for the board unaided.

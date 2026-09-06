@@ -13,6 +13,17 @@ ROLE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 KINDS = {"system", "draft", "implementer", "reviewer", "support", "user"}
 PRIMITIVES = {"move", "approve", "return", "reopen"}
 RUNTIMES = {"claude", "codex", "agy", "hermes"}
+# The director is a structural role of this model, not a tenant-chosen name: a
+# document without it is rejected below. Anything needing to find the director role
+# derives it from here rather than repeating the literal.
+DIRECTOR_ROLE = "director"
+# Marker for the one-time director onboarding backfill. Once set, a director with
+# no stored prompt means the operator cleared it, not that the tenant predates the
+# feature -- which is what keeps `role-prompt clear director` durable.
+DIRECTOR_ONBOARDING_MIGRATION = "director_onboarding"
+# A role remit, not a document. Bounded so a stored prompt cannot grow the tenant
+# configuration without limit, and so it stays small enough to prepend to a session.
+ONBOARDING_PROMPT_MAX_CHARS = 16384
 CAPABILITIES = {
     "create_ticket",
     "file_bug",
@@ -84,6 +95,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "queue",
             "project",
             "remove_stages",
+            "migrations",
         },
         "unknown workflow configuration field",
     )
@@ -104,6 +116,19 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         need(
             isinstance(cfg.get(key), list) and bool(cfg[key]),
             f"{key} must be a nonempty list",
+        )
+    migrations = cfg.get("migrations")
+    if migrations is not None:
+        # Durable one-time markers. They record that a backfill has already been
+        # considered for this document, so a value an operator deliberately removed is
+        # not treated as missing and refilled on the next write.
+        need(
+            isinstance(migrations, dict)
+            and all(
+                isinstance(k, str) and bool(NAME.fullmatch(k)) and isinstance(v, bool)
+                for k, v in migrations.items()
+            ),
+            "migrations must map migration names to booleans",
         )
     flags = cfg.setdefault("flags", {})
     need(isinstance(flags, dict), "flags must be an object")
@@ -141,6 +166,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "target",
                 "slot",
                 "onboarding",
+                "onboarding_prompt",
                 "template_role",
             },
             "unknown role field",
@@ -204,6 +230,21 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 and "\n" not in role["onboarding"],
                 "onboarding must be an absolute file path",
             )
+        if role.get("onboarding_prompt") is not None:
+            # Prompt text, not a path: multiline is the point, so newlines are allowed
+            # here where `onboarding` forbids them. A cleared prompt is an absent key
+            # rather than an empty string, so that "set" and "clear" cannot be confused
+            # when reading the document back.
+            prompt = role["onboarding_prompt"]
+            need(
+                isinstance(prompt, str) and bool(prompt.strip()),
+                f"onboarding_prompt must be non-empty text: {name}",
+            )
+            need(
+                len(prompt) <= ONBOARDING_PROMPT_MAX_CHARS,
+                f"onboarding_prompt must be at most {ONBOARDING_PROMPT_MAX_CHARS} characters: {name}",
+            )
+            need("\x00" not in prompt, f"onboarding_prompt must not contain NUL: {name}")
         if role.get("template_role") is not None:
             need(
                 isinstance(role["template_role"], str)
@@ -212,7 +253,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             )
         roles[name] = role
     need(
-        all(name in roles for name in ("director", "user", "unassigned")),
+        all(name in roles for name in (DIRECTOR_ROLE, "user", "unassigned")),
         "director, user and unassigned identities are required",
     )
     need(
@@ -229,7 +270,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         and len(set(removed)) == len(removed),
         "invalid explicit stage removals",
     )
-    need(roles["director"]["active"], "director must remain active")
+    need(roles[DIRECTOR_ROLE]["active"], "director must remain active")
     stages: dict[str, Any] = {}
     for stage in cfg["stages"]:
         need(isinstance(stage, dict), "stage must be an object")

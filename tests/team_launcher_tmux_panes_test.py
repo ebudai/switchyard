@@ -754,6 +754,74 @@ def test_launch_refuses_when_isolation_or_credentials_are_incomplete() -> None:
         assert any("does not exist" in gap for gap in gaps), gaps
 
 
+
+def test_onboarding_projection_preserves_and_extends_role_accounts() -> None:
+    """SYRD-36 x SYRD-39: the two migrations compose.
+
+    Projecting the workflow document rewrites the launcher config's roles. An
+    existing role must keep the Unix account isolation gave it, and a role the
+    document INTRODUCES must be given one -- otherwise it would be projected
+    without an account, launch as the project owner, and be indistinguishable
+    from every other role on the board socket.
+    """
+    from scripts import workflow_launcher
+
+    raw = {
+        "project": "porter",
+        "run_as_user": "porter-agent",
+        "worktree_base": "/home/porter-agent/porter-worktrees",
+        "roles": [
+            {
+                "role": "director",
+                "cli": ["codex"],
+                "target": "porter-director:0.0",
+                "tmux_session": "porter-director",
+                "slot": 0,
+                "run_as_user": "porter-director",
+            }
+        ],
+    }
+    document = {
+        "roles": [
+            {"name": "director", "active": True, "runtime": "codex", "target": "porter-director:0.0", "slot": 0},
+            {"name": "perf", "active": True, "runtime": "codex", "target": "porter-perf:0.0", "slot": 1},
+        ]
+    }
+    original_validate = workflow_launcher.validate
+    workflow_launcher.validate = lambda doc, project=None: doc
+    try:
+        projected = workflow_launcher.project_roles(raw, document)
+    finally:
+        workflow_launcher.validate = original_validate
+
+    accounts = {role["role"]: role.get("run_as_user") for role in projected["roles"]}
+    assert accounts["director"] == "porter-director", accounts
+    assert accounts["perf"] == "porter-perf", accounts
+    assert len(set(accounts.values())) == len(accounts), accounts
+
+    # An unmigrated tenant is left alone: projection must not opt a project into
+    # isolation it never asked for.
+    legacy_raw = {
+        "project": "porter",
+        "run_as_user": "porter-agent",
+        "roles": [
+            {
+                "role": "director",
+                "cli": ["codex"],
+                "target": "porter-director:0.0",
+                "tmux_session": "porter-director",
+                "slot": 0,
+            }
+        ],
+    }
+    workflow_launcher.validate = lambda doc, project=None: doc
+    try:
+        legacy = workflow_launcher.project_roles(legacy_raw, document)
+    finally:
+        workflow_launcher.validate = original_validate
+    assert all(not role.get("run_as_user") for role in legacy["roles"]), legacy["roles"]
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_tmux_panes_test: ok")

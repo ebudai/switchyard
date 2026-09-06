@@ -44,6 +44,16 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
             role["workdir"] = str(Path(raw["worktree_base"]) / name)
         elif raw.get("repository"):
             role["workdir"] = raw["repository"]
+        # SYRD-36 x SYRD-39: an existing role keeps its Unix account because the
+        # template is copied, but a role the workflow document introduces has no
+        # template and would be projected without one. On a project that has
+        # opted into per-role identities that role would launch as the project
+        # owner, which the board cannot tell apart from any other role, so it is
+        # given the same account name provisioning would have given it.
+        if not role.get("run_as_user") and any(
+            str(existing.get("run_as_user") or "").strip() for existing in prior.values()
+        ):
+            role["run_as_user"] = f"{raw['project']}-{name}"
         env = role.setdefault("env", {})
         if name != spec.get("template_role", name):
             for key in [
@@ -55,6 +65,17 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
         env.pop("TICKET_BOARD_ROLE_ONBOARDING", None)
         if spec.get("onboarding"):
             env["TICKET_BOARD_ROLE_ONBOARDING"] = spec["onboarding"]
+        # Popped unconditionally so clearing a prompt actually removes it from the
+        # projected environment rather than leaving the previous one behind.
+        env.pop("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", None)
+        if spec.get("onboarding_prompt"):
+            env["TICKET_BOARD_ROLE_ONBOARDING_PROMPT"] = spec["onboarding_prompt"]
+        # Phase-one bridge (SYRD-36): the hook never reads the workflow document, so the
+        # migration marker is projected alongside the prompt. Without it the hook cannot
+        # tell a tenant that predates stored onboarding from a director who cleared theirs.
+        env.pop("TICKET_BOARD_ROLE_ONBOARDING_MIGRATED", None)
+        if cfg.get("migrations", {}).get("director_onboarding"):
+            env["TICKET_BOARD_ROLE_ONBOARDING_MIGRATED"] = "1"
         projected.append(role)
         retired.pop(name, None)
     active = {r["role"] for r in projected}

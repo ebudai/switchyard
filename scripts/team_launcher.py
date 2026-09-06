@@ -152,14 +152,18 @@ SWITCHYARD_COMMANDS = (
     "set-vcs-close-role",
     "agy-credential",
     "seed-role-credentials",
+    "role-prompt",
     "stop",
     "teardown",
     "status",
     "validate-models",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
-# and the caller's CLI skill trees -- so neither needs to escalate.
-SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset({"present", "board-skill"})
+# and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
+# writes the tenant's own configuration through the board's workflow API as the
+# invoking user, which is the point: the director sets a role's remit without root
+# and without hand-editing a generated artifact.
+SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset({"present", "board-skill", "role-prompt"})
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
     command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
 )
@@ -1696,11 +1700,21 @@ def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
     return config.session_dir
 
 
-def role_pane_state_dir(config: ProjectConfig, role: RoleConfig) -> Path:
-    """Where this role's pane hooks record busy/idle state."""
+def role_pane_state_dir(
+    config: ProjectConfig, role: RoleConfig, default: Path | None = None
+) -> Path:
+    """Where this role's pane hooks record busy/idle state.
+
+    An isolated role writes the shared aggregation path, which it can write and
+    the owner's listener can read. A role still running as the project account
+    keeps whatever the caller chose, so an explicitly supplied directory is not
+    silently replaced.
+    """
     account = role_run_as_user(config, role)
     if account and account != config.run_as_user:
         return shared_pane_state_dir(config.project)
+    if default is not None:
+        return default
     return default_pane_state_dir_for_user(config.run_as_user, project=config.project)
 
 
@@ -5714,6 +5728,18 @@ def launch_project(
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
+    if mode == "reload" and not dry_run:
+        # Reload re-projects the stored document, so an unmigrated tenant would reload
+        # into the same missing director onboarding forever. Run the one-time backfill
+        # first; it is idempotent and marked, so a migrated tenant pays nothing.
+        if migrate_declarative_director_onboarding(
+            config, config_path=config_path, print_func=print_func
+        ):
+            # The migration rewrote the projection on disk, so the config loaded before
+            # it is now stale. Every later path -- session sync, detached restarts, the
+            # viewer -- reads role env off this object, and would otherwise restart roles
+            # without the prompt that was just projected.
+            config = load_project_config(config.project, config_path)
     worktree_runner = runner
     # Owner-scoped work (worktrees, the viewer session, layout) uses this.
     # Anything that starts, probes or stops a ROLE selects that role's own
@@ -5915,7 +5941,7 @@ def launch_project(
                     config_path=config_path,
                     mode=mode,
                     script_path=pane_script_path,
-                    pane_state_dir=role_pane_state_dir(config, role),
+                    pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                     force_reload=force_reload,
                     skip_launcher_check=True,
                     allow_stale_launcher=allow_stale_launcher,
@@ -5927,7 +5953,7 @@ def launch_project(
                 role,
                 mode=mode,
                 session_dir=role_session_dir(config, role),
-                pane_state_dir=role_pane_state_dir(config, role),
+                pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                 force_reload=force_reload,
                 bin_user=role_run_as_user(config, role),
                 runner=role_process_runner_for(config, role, runner=runner),
@@ -5951,7 +5977,7 @@ def launch_project(
                         config_path=config_path,
                         mode=mode,
                         script_path=pane_script_path,
-                        pane_state_dir=role_pane_state_dir(config, role),
+                        pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                         force_reload=force_reload,
                         skip_launcher_check=True,
                         allow_stale_launcher=allow_stale_launcher,
@@ -5964,7 +5990,7 @@ def launch_project(
                     role,
                     mode=mode,
                     session_dir=role_session_dir(config, role),
-                    pane_state_dir=role_pane_state_dir(config, role),
+                    pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                     force_reload=force_reload,
                     bin_user=role_run_as_user(config, role),
                     runner=role_process_runner_for(config, role, runner=runner),
@@ -6008,7 +6034,7 @@ def launch_project(
                             config_path=config_path,
                             mode=mode,
                             script_path=pane_script_path,
-                            pane_state_dir=role_pane_state_dir(config, role),
+                            pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                             force_reload=force_reload,
                             skip_launcher_check=True,
                             allow_stale_launcher=allow_stale_launcher,
@@ -6021,7 +6047,7 @@ def launch_project(
                         role,
                         mode=mode,
                         session_dir=role_session_dir(config, role),
-                        pane_state_dir=role_pane_state_dir(config, role),
+                        pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
                         force_reload=force_reload,
                         bin_user=role_run_as_user(config, role),
                         runner=role_process_runner_for(config, role, runner=runner),
@@ -6515,7 +6541,31 @@ def _new_project_role_env(
                 "SWITCHYARD_PROJECT_DESIGN": str(design_document),
             }
         )
+    if role == "director":
+        # Generic role data, read by the hook exactly as any other role's prompt is.
+        # Seeded here because a project with no declarative workflow document has no
+        # document to carry it, and the director's remit must not depend on one: the
+        # hook no longer has a director-only branch to fall back to. A declarative
+        # project carries the same field in its document, and the projection governs it
+        # there, so this value is replaced rather than layered on top.
+        seed_root = _director_seed_project_dir(design_document, director_onboarding)
+        if seed_root is not None:
+            env.setdefault(
+                "TICKET_BOARD_ROLE_ONBOARDING_PROMPT",
+                director_onboarding_seed_text(seed_root),
+            )
     return env
+
+
+def _director_seed_project_dir(
+    design_document: Path | None, director_onboarding: Path | None
+) -> Path | None:
+    if design_document is not None:
+        return design_document.parent
+    if director_onboarding is not None:
+        parent = director_onboarding.parent
+        return parent.parent if parent.name == SWITCHYARD_PROJECT_DIR_NAME else parent
+    return None
 
 
 def write_new_project_launcher_artifacts(
@@ -7328,7 +7378,14 @@ def new_project_command(
     plan = build_plan(
         project=project,
         project_name=project_name,
-        workflow=(json.loads(workflow_config.read_text()) if workflow_config else _load_json(from_artifact).get("workflow") if from_artifact else None),
+        workflow=seed_director_onboarding(
+            json.loads(workflow_config.read_text())
+            if workflow_config
+            else _load_json(from_artifact).get("workflow")
+            if from_artifact
+            else None,
+            effective_repository,
+        )[0],
         owner_user=effective_owner,
         owner_home=owner_home,
         port=port,
@@ -7789,6 +7846,77 @@ def _resolve_project_path(raw_path: Path | str) -> Path:
 
 def _switchyard_dir(project_dir: Path) -> Path:
     return project_dir / SWITCHYARD_PROJECT_DIR_NAME
+
+
+from scripts.ticket_board.workflow_config import (  # noqa: E402
+    DIRECTOR_ONBOARDING_MIGRATION,
+    DIRECTOR_ROLE,
+)
+
+
+def director_onboarding_seed_text(project_dir: Path) -> str:
+    """The director's remit, as ordinary role data rather than a special case.
+
+    The hook used to build this at session start for the director alone, searching for
+    the onboarding packet and printing paths relative to the pane's cwd. Storing it makes
+    the director the same shape as every other role, at the cost of the paths being fixed
+    at provisioning rather than rediscovered. It is stored as prompt text rather than as
+    an `onboarding` file path because the generic path branch refuses to start when the
+    file is missing, where the director previously degraded quietly.
+    """
+    packet = project_dir / "docs" / "onboarding"
+    guide = packet / "switchyard-director-guide.md"
+    return (
+        f"Your director session just started fresh. Read the onboarding packet first: {packet}. "
+        f"Start with {guide}."
+    )
+
+
+@dataclass(frozen=True)
+class DirectorSeedResult:
+    """What the backfill changed: the marker, the prompt, or neither."""
+
+    marked: bool
+    seeded: bool
+
+    @property
+    def changed(self) -> bool:
+        return self.marked or self.seeded
+
+
+def seed_director_onboarding(document, project_dir: Path):
+    """Give the configured director stored onboarding when it has none.
+
+    Idempotent, and only ever fills a gap: a director that already carries a prompt or a
+    remit path is left untouched, as is every other role. The director is located through
+    the workflow model's own required-role constant rather than a literal, because a
+    document without that role is rejected by validation -- it is structural, not a
+    tenant-chosen name.
+
+    Returns the document and whether anything was seeded, so callers can report an
+    automatic configuration change rather than making it silently.
+    """
+    if not document:
+        return document, DirectorSeedResult(False, False)
+    migrations = document.setdefault("migrations", {})
+    if migrations.get(DIRECTOR_ONBOARDING_MIGRATION):
+        # Already considered once. A director with nothing stored now means the operator
+        # cleared it, not that this tenant predates the feature, so refilling here would
+        # make `role-prompt clear director` impossible to persist.
+        return document, DirectorSeedResult(False, False)
+    seeded = False
+    for role in document.get("roles", []):
+        if role.get("name") != DIRECTOR_ROLE:
+            continue
+        if not role.get("onboarding_prompt") and not role.get("onboarding"):
+            role["onboarding_prompt"] = director_onboarding_seed_text(project_dir)
+            seeded = True
+    # Marked whether or not anything was filled: a director that already had its own
+    # onboarding is equally "considered". Reported separately from seeding, because a
+    # tenant that needs only the marker still needs that marker persisted -- otherwise a
+    # later clear would look like a legacy gap and be refilled.
+    migrations[DIRECTOR_ONBOARDING_MIGRATION] = True
+    return document, DirectorSeedResult(True, seeded)
 
 
 def _write_switchyard_onboarding_files(
@@ -11630,7 +11758,8 @@ def switchyard_new_command(
     # Provisioning itself succeeded; the launch is deferred rather than failed,
     # and the artifacts say what to run next (SYRD-39).
     pending_isolation = role_isolation_gaps(config)
-    if pending_isolation:
+    launch_deferred = bool(pending_isolation)
+    if launch_deferred:
         # The complete handoff -- accounts, ownership, runtime, tooling AND
         # credential seeding -- is written here, not left to a later failed
         # start, so following the printed instruction once is enough to make the
@@ -11647,10 +11776,9 @@ def switchyard_new_command(
             + f"\nRun {handoff_path} as an operator (safe to re-run), then start it with "
             f"`switchyard {resolved_slug}`."
         )
-        return 0
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
-    launch_result = launch_project(
+    launch_result = 0 if launch_deferred else launch_project(
         config,
         config_path=config_path,
         mode="start",
@@ -11848,6 +11976,72 @@ def render_role_account_migration(config: ProjectConfig) -> str:
     lines.append(f"sudo switchyard seed-role-credentials {config.project}")
     lines.append(f"sudo systemctl restart {config.project}-ticket-board.service")
     return "\n".join(lines) + "\n"
+def migrate_declarative_director_onboarding(
+    config: "ProjectConfig",
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Run the shared director-onboarding migration for a declarative tenant.
+
+    Upgrade and recovery call this so an existing project is migrated by ordinary
+    maintenance rather than by a manual per-tenant step. It is a no-op for a project
+    with no workflow document, and idempotent for one already migrated.
+    """
+    if not _load_json(config_path).get("workflow"):
+        return False
+    if dry_run:
+        print_func("switchyard: would migrate the director's onboarding prompt if unset")
+        return False
+    import contextlib
+    import io as _io
+
+    from scripts import workflow_manage
+
+    captured = _io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            workflow_manage.main(
+                [
+                    "migrate-director-onboarding",
+                    "--board-url",
+                    config.board_url,
+                    "--config",
+                    str(config_path),
+                ]
+            )
+    except Exception as exc:
+        # Deliberately fatal. The hook no longer carries a legacy director source, so
+        # deploying it over an unmigrated document would leave that director with no
+        # onboarding at all. Failing here stops before the release is deployed, which is
+        # recoverable; succeeding and deploying anyway is not.
+        raise SystemExit(
+            f"switchyard: director onboarding migration failed for {config_path}: {exc}. "
+            "Resolve it before deploying, or clear the director's onboarding deliberately "
+            "with `switchyard role-prompt clear director`."
+        ) from exc
+    # Report whether the document actually changed, so callers know when their loaded
+    # configuration has gone stale. An already-migrated tenant changes nothing.
+    try:
+        report = json.loads(captured.getvalue() or "{}")
+    except json.JSONDecodeError:
+        return True
+    if report.get("reason") == "board predates the phase-one schema":
+        # Expected during rollout, and not a failure: the upgrade must still report the
+        # deployment commands, because deploying phase one is what unblocks the migration.
+        print_func(
+            "switchyard: the running board predates this release's workflow schema, so "
+            "the director onboarding migration was not attempted. Deploy the release "
+            "below, then rerun switchyard upgrade to migrate this tenant."
+        )
+        return False
+    if report.get("migrated") is False:
+        return False
+    print_func(
+        f"switchyard: migrated the director's onboarding for {config_path}"
+    )
+    return True
 
 
 def upgrade_project_command(
@@ -11928,6 +12122,12 @@ def upgrade_project_command(
         dry_run=dry_run,
         runner=runner,
         print_func=print_func,
+    )
+    # Before the release is reported/deployed, not after: the deployed hook has no
+    # legacy director source, so the document must already carry the director's
+    # onboarding by the time anyone acts on that report.
+    migrate_declarative_director_onboarding(
+        config, config_path=config_path, dry_run=dry_run, print_func=print_func
     )
     report_tenant_release_upgrade(
         release_report_config,
@@ -13134,6 +13334,7 @@ Commands:
   set-vcs-close-role
                    set which existing project role can mark tickets done
   agy-credential   show, set, or clear this host's agy credential source
+  role-prompt      show, set, or clear a role's onboarding prompt
   stop             stop a project's configured tmux pane sessions
   teardown         remove project board provisioning artifacts after a dry-run review
   status           list registered projects and pane liveness
@@ -13329,6 +13530,53 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import board_skill_cli
 
         return board_skill_cli.main(argv[1:], prog="switchyard board-skill")
+    if argv[0].casefold() == "role-prompt":
+        parser = argparse.ArgumentParser(
+            prog="switchyard role-prompt",
+            description=(
+                "Show, set, or clear the onboarding prompt a role receives when its next "
+                "conversation starts fresh. A running conversation is never interrupted or "
+                "rewritten: a changed prompt is used by the next fresh session or an "
+                "explicit role restart."
+            ),
+        )
+        parser.add_argument("action", choices=("show", "set", "clear"))
+        parser.add_argument("role")
+        parser.add_argument(
+            "--project",
+            default=os.environ.get("TICKET_BOARD_PROJECT", ""),
+            help="project name or slug; defaults to TICKET_BOARD_PROJECT in the caller's pane",
+        )
+        parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
+        parser.add_argument(
+            "--prompt-file",
+            type=Path,
+            help="read the prompt from a file, or from stdin when given as -",
+        )
+        args = parser.parse_args(argv[1:])
+        if not args.project.strip():
+            raise SystemExit(
+                "switchyard: no project selected; pass --project or run where "
+                "TICKET_BOARD_PROJECT is set"
+            )
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        from scripts import workflow_manage
+
+        forwarded = [
+            f"{args.action}-role-prompt",
+            "--role",
+            args.role,
+            "--board-url",
+            config.board_url,
+        ]
+        if args.action != "show":
+            forwarded += ["--config", str(entry.config_path)]
+        if args.prompt is not None:
+            forwarded += ["--prompt", args.prompt]
+        if args.prompt_file is not None:
+            forwarded += ["--prompt-file", str(args.prompt_file)]
+        return workflow_manage.main(forwarded)
     if argv[0].casefold() == "present":
         args = _build_switchyard_present_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

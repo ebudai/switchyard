@@ -183,14 +183,6 @@ def _write_onboarding_packet(project_dir: Path) -> None:
     (onboarding_dir / "switchyard-director-guide.md").write_text("Director guide\n", encoding="utf-8")
 
 
-def _director_onboarding_paths_from_context(context: str) -> tuple[str, str]:
-    marker = "Read the onboarding packet first: "
-    assert marker in context
-    remainder = context.split(marker, 1)[1]
-    packet_path, guide_remainder = remainder.split(". Start with ", 1)
-    return packet_path, guide_remainder.removesuffix(".")
-
-
 def _resolve_from_cwd(path_text: str, cwd: Path) -> Path:
     path = Path(path_text.rstrip("/"))
     if path.is_absolute():
@@ -903,82 +895,9 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
     assert no_ticket.stdout == ""
 
 
-def test_director_fresh_session_start_injects_onboarding_pointer_when_packet_exists() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
-        project_dir = Path(tmp) / "project"
-        project_dir.mkdir()
-        _write_onboarding_packet(project_dir)
-        proc = subprocess.run(
-            [
-                str(ROOT / "scripts" / HOOK_NAME),
-                "idle",
-                "--target",
-                "pgu-director:0.0",
-                "--source",
-                "claude.SessionStart",
-                "--state-dir",
-                str(Path(tmp) / "state"),
-                "--session-dir",
-                str(Path(tmp) / "sessions"),
-                "--record-session",
-            ],
-            input=json.dumps({"source": "startup", "session_id": "fresh-director-session"}),
-            text=True,
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-            env=_hook_env(CODEX_SESSION_ID="fresh-runtime-session"),
-        )
-
-    output = json.loads(proc.stdout)
-    context = output["hookSpecificOutput"]["additionalContext"]
-    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
-    assert "Your director session just started fresh." in context
-    assert "docs/onboarding/" in context
-    assert "docs/onboarding/switchyard-director-guide.md" in context
-    assert "Director guide" not in context
-
-
-def test_director_onboarding_pointer_resolves_project_env_from_role_worktree_cwd() -> None:
-    with tempfile.TemporaryDirectory(prefix="pgu-pane-hooks.") as tmp:
-        project_dir = Path(tmp) / "project"
-        worktree_dir = Path(tmp) / "project-worktrees" / "director"
-        project_dir.mkdir()
-        worktree_dir.mkdir(parents=True)
-        _write_onboarding_packet(project_dir)
-        proc = subprocess.run(
-            [
-                str(ROOT / "scripts" / HOOK_NAME),
-                "idle",
-                "--target",
-                "otto-director:0.0",
-                "--source",
-                "claude.SessionStart",
-                "--state-dir",
-                str(Path(tmp) / "state"),
-                "--session-dir",
-                str(Path(tmp) / "sessions"),
-                "--record-session",
-            ],
-            input=json.dumps({"source": "startup", "session_id": "fresh-director-session"}),
-            text=True,
-            cwd=worktree_dir,
-            capture_output=True,
-            check=True,
-            env=_hook_env(
-                TICKET_BOARD_PROJECT="otto",
-                SWITCHYARD_PROJECT_DESIGN=str(project_dir / "PROJECT_DESIGN.md"),
-            ),
-        )
-
-        output = json.loads(proc.stdout)
-        context = output["hookSpecificOutput"]["additionalContext"]
-        packet_path, guide_path = _director_onboarding_paths_from_context(context)
-        assert _resolve_from_cwd(packet_path, worktree_dir).is_dir()
-        assert _resolve_from_cwd(guide_path, worktree_dir).is_file()
-        assert str(project_dir / "docs" / "onboarding") in context
-        assert str(project_dir / "docs" / "onboarding" / "switchyard-director-guide.md") in context
-        assert str(worktree_dir / "docs" / "onboarding") not in context
+# The director pointer tests that asserted the removed session-start branch are gone
+# with it; the director's remit is ordinary role data now and is exercised in
+# tests/role_onboarding_prompt_test.py. The absence assertions below still hold.
 
 
 def test_director_onboarding_pointer_skips_resumed_launches() -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: linked-ticket groups keep done children visible in the board UI."""
+"""Regression test: parent links stay navigable without grouping board cards."""
 
 from __future__ import annotations
 
@@ -102,19 +102,37 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         page.get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
         analysis_column = page.locator(".column").filter(has=page.locator(".column-title", has_text="Triage"))
         analysis_column.get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
-        analysis_column.get_by_text("PGU-2", exact=True).wait_for(timeout=5000)
-        analysis_column.get_by_text("PGU-3", exact=True).wait_for(timeout=5000)
-        analysis_column.locator(".child-ticket-state").get_by_text("Done", exact=True).wait_for(timeout=5000)
+        assert analysis_column.locator(".card-id").all_text_contents() == ["PGU-1"]
+
+        implementation_column = page.locator(".column").filter(
+            has=page.locator(".column-title", has_text="Implementation")
+        )
+        implementation_column.get_by_text("PGU-2", exact=True).wait_for(timeout=5000)
+        assert implementation_column.locator(".card-id").all_text_contents() == ["PGU-2"]
+        assert page.locator(".column .child-ticket-item").count() == 0
 
         show_done = page.locator("#showDoneInput")
         show_done.check()
         page.locator("#showDoneCount").get_by_text("(1)", exact=True).wait_for(timeout=5000)
 
         done_column = page.locator(".column").filter(has=page.locator(".column-title", has_text="Done"))
-        done_column.get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
         done_column.get_by_text("PGU-3", exact=True).wait_for(timeout=5000)
-        done_column.get_by_text("done child 1", exact=True).wait_for(timeout=5000)
+        assert done_column.locator(".card-id").all_text_contents() == ["PGU-3"]
         assert done_column.locator(".empty").count() == 0
+
+        # Parent and child links remain available in the detail modal even
+        # though the board itself never nests one ticket inside another.
+        analysis_column.locator(".card", has_text="PGU-1").click()
+        modal = page.locator(".detail-modal")
+        modal.wait_for(timeout=5000)
+        modal.get_by_text("2 linked children", exact=True).wait_for(timeout=5000)
+        modal.locator(".child-ticket-item").filter(has_text="PGU-2").click()
+        assert page.locator("#detailModalTitle").inner_text() == "PGU-2 - Active child"
+        modal.get_by_text("Parent", exact=True).wait_for(timeout=5000)
+        parent_links = modal.get_by_role("button", name="PGU-1", exact=True)
+        assert parent_links.count() == 2
+        parent_links.first.click()
+        assert page.locator("#detailModalTitle").inner_text() == "PGU-1 - Parent"
     finally:
         browser.close()
 

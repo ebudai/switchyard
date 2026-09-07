@@ -32,6 +32,8 @@ from scripts.ticket_board.project_provision import (
     schema_workflow_transitions,
 )
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
@@ -391,60 +393,58 @@ SELECT ticket_board.create_ticket('Provisioning sequence probe', 'Body', 'analys
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-project-workflow.") as tmpdir:
+    with temporary_cluster(
+        prefix="ticket-board-project-workflow.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         assert_schema_additions_are_not_silent()
         assert_missing_workflow_seed_inserts_fail_loudly()
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
         dbname = "project_workflow_test"
         admin_conn = conninfo(socket_dir, port, dbname)
         service_conn = conninfo(socket_dir, port, dbname, "ticket_board_service")
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            apply_generated_provisioning_database_sequence(
-                root=root,
-                socket_dir=socket_dir,
-                port=port,
-                project="fresh",
-                database="project_workflow_fresh",
-                precreate_empty_database=False,
-            )
-            apply_generated_provisioning_database_sequence(
-                root=root,
-                socket_dir=socket_dir,
-                port=port,
-                project="retry",
-                database="project_workflow_empty_retry",
-                precreate_empty_database=True,
-            )
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            bootstrap_database_roles(admin_conn)
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            run_migrations(admin_conn)
-            plan = build_plan(project="otto", owner_user="otto-agent")
-            psql(admin_conn, render_workflow_sql(plan))
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        apply_generated_provisioning_database_sequence(
+            root=root,
+            socket_dir=socket_dir,
+            port=port,
+            project="fresh",
+            database="project_workflow_fresh",
+            precreate_empty_database=False,
+        )
+        apply_generated_provisioning_database_sequence(
+            root=root,
+            socket_dir=socket_dir,
+            port=port,
+            project="retry",
+            database="project_workflow_empty_retry",
+            precreate_empty_database=True,
+        )
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        bootstrap_database_roles(admin_conn)
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run_migrations(admin_conn)
+        plan = build_plan(project="otto", owner_user="otto-agent")
+        psql(admin_conn, render_workflow_sql(plan))
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            assert_project_workflow_matches_schema_projection(admin_conn, plan)
-            assert_tenant_projection_policy(plan)
-            assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
-            handback_transition = provisioned_transition(admin_conn, "implementer_kick_back")
-            assert handback_transition == {
-                "from_stage": "in_progress",
-                "to_stage": "analysis",
-                "action_name": "implementer_kick_back",
-                "allowed_roles": ["app", "main"],
-                "owner_scoped": True,
-                "director_override": False,
-            }, handback_transition
-            assert psql(
-                admin_conn,
-                """
+        assert_project_workflow_matches_schema_projection(admin_conn, plan)
+        assert_tenant_projection_policy(plan)
+        assert psql(admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE from_stage IN ('done', 'cancelled');") == "3"
+        handback_transition = provisioned_transition(admin_conn, "implementer_kick_back")
+        assert handback_transition == {
+            "from_stage": "in_progress",
+            "to_stage": "analysis",
+            "action_name": "implementer_kick_back",
+            "allowed_roles": ["app", "main"],
+            "owner_scoped": True,
+            "director_override": False,
+        }, handback_transition
+        assert psql(
+            admin_conn,
+            """
 SELECT count(*)
 FROM ticket_board.workflow_stages a
 CROSS JOIN ticket_board.workflow_stages b
@@ -452,35 +452,35 @@ WHERE a.name <> b.name
   AND ticket_board.workflow_transition_allowed_hardcoded(a.name, b.name)
       IS DISTINCT FROM ticket_board.workflow_transition_allowed_config(a.name, b.name);
 """,
-            ) == "0"
-            aggregate_rbac_expectations = [
-                ("user_reopen", "director", "main", "f"),
-                ("mark_done", "audit", "main", "f"),
-                ("cancel", "app", "main", "f"),
-                ("audit_kick_back", "director", "main", "f"),
-                ("user_reopen", "user", "main", "t"),
-                ("audit_kick_back", "audit", "audit", "t"),
-                ("audit_kick_back", "main", "main", "f"),
-            ]
-            for action_name, actor, assignee, expected in aggregate_rbac_expectations:
-                assert (
-                    psql(
-                        admin_conn,
-                        (
-                            "SELECT ticket_board.workflow_transition_rbac_allowed_config("
-                            f"'{action_name}', '{actor}', '{assignee}');"
-                        ),
-                    )
-                    == expected
-                ), (action_name, actor, assignee, expected)
-            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
-            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
-            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
-            assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('designer');") == "f"
-            reachable = json.loads(
+        ) == "0"
+        aggregate_rbac_expectations = [
+            ("user_reopen", "director", "main", "f"),
+            ("mark_done", "audit", "main", "f"),
+            ("cancel", "app", "main", "f"),
+            ("audit_kick_back", "director", "main", "f"),
+            ("user_reopen", "user", "main", "t"),
+            ("audit_kick_back", "audit", "audit", "t"),
+            ("audit_kick_back", "main", "main", "f"),
+        ]
+        for action_name, actor, assignee, expected in aggregate_rbac_expectations:
+            assert (
                 psql(
                     admin_conn,
-                    """
+                    (
+                        "SELECT ticket_board.workflow_transition_rbac_allowed_config("
+                            f"'{action_name}', '{actor}', '{assignee}');"
+                    ),
+                )
+                == expected
+            ), (action_name, actor, assignee, expected)
+        assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('main');") == "t"
+        assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
+        assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
+        assert psql(admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('designer');") == "f"
+        reachable = json.loads(
+            psql(
+                admin_conn,
+                """
 WITH RECURSIVE walk(stage) AS (
     VALUES ('draft'::text)
     UNION
@@ -492,13 +492,13 @@ SELECT jsonb_agg(ws.name ORDER BY ws.rank)::text
 FROM ticket_board.workflow_stages ws
 JOIN walk ON walk.stage = ws.name;
 """,
-                )
             )
-            assert reachable == [stage.name for stage in project_workflow_stages(plan)], reachable
-            terminal_from_director_review = json.loads(
-                psql(
-                    admin_conn,
-                    """
+        )
+        assert reachable == [stage.name for stage in project_workflow_stages(plan)], reachable
+        terminal_from_director_review = json.loads(
+            psql(
+                admin_conn,
+                """
 WITH RECURSIVE walk(stage) AS (
     VALUES ('director_review'::text)
     UNION
@@ -511,150 +511,150 @@ FROM ticket_board.workflow_stages ws
 JOIN walk ON walk.stage = ws.name
 WHERE ws.is_terminal;
 """,
-                )
             )
-            assert terminal_from_director_review == ["done", "cancelled"], terminal_from_director_review
+        )
+        assert terminal_from_director_review == ["done", "cancelled"], terminal_from_director_review
 
-            ticket_id = service_call(
-                service_conn,
-                "director",
-                """
+        ticket_id = service_call(
+            service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow ticket', 'Body', 'draft');
 """,
-            )
-            assert ticket_id == "OTTO-1", ticket_id
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "draft:designer"
+        )
+        assert ticket_id == "OTTO-1", ticket_id
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "draft:designer"
 
-            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{ticket_id}');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
+        service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{ticket_id}');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
 
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:main"
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "in_progress:main"
 
-            service_call(service_conn, "main", f"SELECT ticket_board.implementer_kick_back('{ticket_id}', 'Cannot proceed as specified.');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
-            assert (
-                psql(admin_conn, f"SELECT who || ':' || text FROM ticket_board.ticket_comments WHERE ticket_id = '{ticket_id}' ORDER BY position DESC LIMIT 1;")
-                == "main:Cannot proceed as specified."
-            )
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
+        service_call(service_conn, "main", f"SELECT ticket_board.implementer_kick_back('{ticket_id}', 'Cannot proceed as specified.');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
+        assert (
+            psql(admin_conn, f"SELECT who || ':' || text FROM ticket_board.ticket_comments WHERE ticket_id = '{ticket_id}' ORDER BY position DESC LIMIT 1;")
+            == "main:Cannot proceed as specified."
+        )
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'in_progress', 'main');")
 
-            service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "audit:audit"
+        service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{ticket_id}', 'abcdef1');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "audit:audit"
 
-            service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{ticket_id}', 'Audit verified.');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "director_review:director"
+        service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{ticket_id}', 'Audit verified.');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "director_review:director"
 
-            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{ticket_id}', 'abcdef1');")
-            assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "done"
+        service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{ticket_id}', 'abcdef1');")
+        assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "done"
 
-            no_audit_ticket_id = service_call(
-                service_conn,
-                "director",
-                """
+        no_audit_ticket_id = service_call(
+            service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned no-audit workflow ticket', 'Body', 'analysis', ARRAY[]::text[], '', false, false);
 """,
+        )
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{no_audit_ticket_id}', 'in_progress', 'app');")
+        service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{no_audit_ticket_id}', 'abc7591');")
+        assert (
+            psql(
+                admin_conn,
+                f"SELECT state || ':' || assignee || ':' || audit_signoff::text || ':' || needs_audit::text FROM ticket_board.tickets WHERE id = '{no_audit_ticket_id}';",
             )
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{no_audit_ticket_id}', 'in_progress', 'app');")
-            service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{no_audit_ticket_id}', 'abc7591');")
-            assert (
-                psql(
-                    admin_conn,
-                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text || ':' || needs_audit::text FROM ticket_board.tickets WHERE id = '{no_audit_ticket_id}';",
-                )
-                == "director_review:director:false:false"
-            )
-            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{no_audit_ticket_id}', 'abc7591');")
+            == "director_review:director:false:false"
+        )
+        service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{no_audit_ticket_id}', 'abc7591');")
 
-            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'analysis', 'director');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
+        service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{ticket_id}', 'analysis', 'director');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{ticket_id}';") == "analysis:director"
 
-            user_reopen_id = service_call(
-                service_conn,
-                "director",
-                """
+        user_reopen_id = service_call(
+            service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow user reopen', 'Body', 'draft');
 """,
-            )
-            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{user_reopen_id}');")
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{user_reopen_id}', 'in_progress', 'main');")
-            service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{user_reopen_id}', 'abcdef2');")
-            service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{user_reopen_id}', 'Audit verified.');")
-            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{user_reopen_id}', 'abcdef2');")
-            service_call_without_shadow_warning(service_conn, "user", f"SELECT ticket_board.user_reopen('{user_reopen_id}', 'Needs another pass.');")
-            assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{user_reopen_id}';") == "analysis"
+        )
+        service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{user_reopen_id}');")
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{user_reopen_id}', 'in_progress', 'main');")
+        service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{user_reopen_id}', 'abcdef2');")
+        service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{user_reopen_id}', 'Audit verified.');")
+        service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{user_reopen_id}', 'abcdef2');")
+        service_call_without_shadow_warning(service_conn, "user", f"SELECT ticket_board.user_reopen('{user_reopen_id}', 'Needs another pass.');")
+        assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{user_reopen_id}';") == "analysis"
 
-            audit_kickback_id = service_call(
-                service_conn,
-                "director",
-                """
+        audit_kickback_id = service_call(
+            service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow audit kickback', 'Body', 'draft');
 """,
-            )
-            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{audit_kickback_id}');")
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{audit_kickback_id}', 'in_progress', 'main');")
-            service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{audit_kickback_id}', 'abcdef3');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "audit:audit"
-            assert "role main cannot call audit_kick_back" in service_call_fails(
-                service_conn,
-                "main",
-                f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Wrong owner.', 'main');",
-            )
-            service_call_without_shadow_warning(service_conn, "audit", f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Needs another pass.', 'main');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "in_progress:main"
+        )
+        service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{audit_kickback_id}');")
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{audit_kickback_id}', 'in_progress', 'main');")
+        service_call(service_conn, "main", f"SELECT ticket_board.submit_to_audit('{audit_kickback_id}', 'abcdef3');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "audit:audit"
+        assert "role main cannot call audit_kick_back" in service_call_fails(
+            service_conn,
+            "main",
+            f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Wrong owner.', 'main');",
+        )
+        service_call_without_shadow_warning(service_conn, "audit", f"SELECT ticket_board.audit_kick_back('{audit_kickback_id}', 'Needs another pass.', 'main');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{audit_kickback_id}';") == "in_progress:main"
 
-            director_kickback_id = service_call(
-                service_conn,
-                "director",
-                """
+        director_kickback_id = service_call(
+            service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow director kickback', 'Body', 'draft');
 """,
-            )
-            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{director_kickback_id}');")
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'in_progress', 'app');")
-            service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{director_kickback_id}', 'abcdef4');")
-            service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{director_kickback_id}', 'Audit verified.');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "director_review:director"
-            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'in_progress', 'app');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "in_progress:app"
-            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'analysis', 'director');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "analysis:director"
+        )
+        service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{director_kickback_id}');")
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'in_progress', 'app');")
+        service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{director_kickback_id}', 'abcdef4');")
+        service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{director_kickback_id}', 'Audit verified.');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "director_review:director"
+        service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'in_progress', 'app');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "in_progress:app"
+        service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{director_kickback_id}', 'analysis', 'director');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{director_kickback_id}';") == "analysis:director"
 
-            cancel_id = service_call(
-                service_conn,
-                "director",
-                """
+        cancel_id = service_call(
+            service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket('Provisioned workflow cancellation', 'Body', 'draft');
 """,
-            )
-            assert cancel_id == "OTTO-6", cancel_id
-            service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{cancel_id}');")
-            service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'app');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:app"
-            cancel_error = service_call_fails(service_conn, "app", f"SELECT ticket_board.cancel('{cancel_id}', 'implementer cannot cancel');")
-            assert "role app cannot call cancel" in cancel_error, cancel_error
-            service_call(service_conn, "director", f"SELECT ticket_board.cancel('{cancel_id}', 'director cancelled.');")
-            assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
-            service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'analysis', 'director');")
-            assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "analysis:director"
+        )
+        assert cancel_id == "OTTO-6", cancel_id
+        service_call(service_conn, "designer", f"SELECT ticket_board.release_draft('{cancel_id}');")
+        service_call(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'in_progress', 'app');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "in_progress:app"
+        cancel_error = service_call_fails(service_conn, "app", f"SELECT ticket_board.cancel('{cancel_id}', 'implementer cannot cancel');")
+        assert "role app cannot call cancel" in cancel_error, cancel_error
+        service_call(service_conn, "director", f"SELECT ticket_board.cancel('{cancel_id}', 'director cancelled.');")
+        assert psql(admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "cancelled"
+        service_call_without_shadow_warning(service_conn, "director", f"SELECT ticket_board.route('{cancel_id}', 'analysis', 'director');")
+        assert psql(admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{cancel_id}';") == "analysis:director"
 
-            provisioned_signoff_cases = [
-                (False, False, "director_review", "director", False, False),
-                (False, True, "dat", "director", False, False),
-                (True, False, "audit", "audit", False, False),
-                (True, True, "audit", "audit", False, False),
-            ]
-            for needs_audit, needs_user_signoff, expected_state, expected_assignee, expected_audit_signoff, expected_user_signoff in provisioned_signoff_cases:
-                matrix_id = service_call(
-                    service_conn,
-                    "director",
-                    f"""
+        provisioned_signoff_cases = [
+            (False, False, "director_review", "director", False, False),
+            (False, True, "dat", "director", False, False),
+            (True, False, "audit", "audit", False, False),
+            (True, True, "audit", "audit", False, False),
+        ]
+        for needs_audit, needs_user_signoff, expected_state, expected_assignee, expected_audit_signoff, expected_user_signoff in provisioned_signoff_cases:
+            matrix_id = service_call(
+                service_conn,
+                "director",
+                f"""
 SELECT set_config('ticket_board.ticket_prefix', 'OTTO', false);
 SELECT ticket_board.create_ticket(
     'Provisioned audit UAT matrix',
@@ -666,13 +666,13 @@ SELECT ticket_board.create_ticket(
     {'true' if needs_audit else 'false'}
 );
 """,
-                )
-                service_call(service_conn, "director", f"SELECT ticket_board.route('{matrix_id}', 'in_progress', 'app');")
-                service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{matrix_id}', 'a759{matrix_id.split('-')[-1].zfill(3)}');")
-                matrix_status = json.loads(
-                    psql(
-                        admin_conn,
-                        f"""
+            )
+            service_call(service_conn, "director", f"SELECT ticket_board.route('{matrix_id}', 'in_progress', 'app');")
+            service_call(service_conn, "app", f"SELECT ticket_board.submit_to_audit('{matrix_id}', 'a759{matrix_id.split('-')[-1].zfill(3)}');")
+            matrix_status = json.loads(
+                psql(
+                    admin_conn,
+                    f"""
 SELECT jsonb_build_object(
     'state', state,
     'assignee', assignee,
@@ -684,209 +684,209 @@ SELECT jsonb_build_object(
 FROM ticket_board.tickets
 WHERE id = '{matrix_id}';
 """,
+                )
+            )
+            assert matrix_status == {
+                "state": expected_state,
+                "assignee": expected_assignee,
+                "audit_signoff": expected_audit_signoff,
+                "needs_audit": needs_audit,
+                "needs_user_signoff": needs_user_signoff,
+                "user_signoff": expected_user_signoff,
+            }, matrix_status
+            if needs_audit:
+                service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{matrix_id}', 'Audit verified.');")
+                after_audit_signoff = json.loads(
+                    psql(
+                        admin_conn,
+                        f"""
+SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
+FROM ticket_board.tickets
+WHERE id = '{matrix_id}';
+""",
                     )
                 )
-                assert matrix_status == {
-                    "state": expected_state,
-                    "assignee": expected_assignee,
-                    "audit_signoff": expected_audit_signoff,
-                    "needs_audit": needs_audit,
-                    "needs_user_signoff": needs_user_signoff,
-                    "user_signoff": expected_user_signoff,
-                }, matrix_status
-                if needs_audit:
-                    service_call(service_conn, "audit", f"SELECT ticket_board.audit_sign_off('{matrix_id}', 'Audit verified.');")
-                    after_audit_signoff = json.loads(
-                        psql(
-                            admin_conn,
-                            f"""
+                assert after_audit_signoff == {
+                    "state": "dat" if needs_user_signoff else "director_review",
+                    "assignee": "director",
+                    "audit_signoff": True,
+                    "user_signoff": False,
+                }, after_audit_signoff
+            if needs_user_signoff:
+                service_call(service_conn, "director", f"SELECT ticket_board.director_dat_sign_off('{matrix_id}', 'DAT accepted.');")
+                uat_status = json.loads(
+                    psql(
+                        admin_conn,
+                        f"""
 SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
 FROM ticket_board.tickets
 WHERE id = '{matrix_id}';
 """,
-                        )
                     )
-                    assert after_audit_signoff == {
-                        "state": "dat" if needs_user_signoff else "director_review",
-                        "assignee": "director",
-                        "audit_signoff": True,
-                        "user_signoff": False,
-                    }, after_audit_signoff
-                if needs_user_signoff:
-                    service_call(service_conn, "director", f"SELECT ticket_board.director_dat_sign_off('{matrix_id}', 'DAT accepted.');")
-                    uat_status = json.loads(
-                        psql(
-                            admin_conn,
-                            f"""
+                )
+                assert uat_status == {
+                    "state": "user_review",
+                    "assignee": "user",
+                    "audit_signoff": needs_audit,
+                    "user_signoff": False,
+                }, uat_status
+                service_call(service_conn, "user", f"SELECT ticket_board.user_sign_off('{matrix_id}', 'UAT accepted.');")
+                user_signed_status = json.loads(
+                    psql(
+                        admin_conn,
+                        f"""
 SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
 FROM ticket_board.tickets
 WHERE id = '{matrix_id}';
 """,
-                        )
                     )
-                    assert uat_status == {
-                        "state": "user_review",
-                        "assignee": "user",
-                        "audit_signoff": needs_audit,
-                        "user_signoff": False,
-                    }, uat_status
-                    service_call(service_conn, "user", f"SELECT ticket_board.user_sign_off('{matrix_id}', 'UAT accepted.');")
-                    user_signed_status = json.loads(
-                        psql(
-                            admin_conn,
-                            f"""
-SELECT jsonb_build_object('state', state, 'assignee', assignee, 'audit_signoff', audit_signoff, 'user_signoff', user_signoff)::text
-FROM ticket_board.tickets
-WHERE id = '{matrix_id}';
-""",
-                        )
-                    )
-                    assert user_signed_status == {
-                        "state": "director_review",
-                        "assignee": "director",
-                        "audit_signoff": needs_audit,
-                        "user_signoff": True,
-                    }, user_signed_status
-                service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{matrix_id}', 'a759{matrix_id.split('-')[-1].zfill(3)}');")
+                )
+                assert user_signed_status == {
+                    "state": "director_review",
+                    "assignee": "director",
+                    "audit_signoff": needs_audit,
+                    "user_signoff": True,
+                }, user_signed_status
+            service_call(service_conn, "director", f"SELECT ticket_board.mark_done('{matrix_id}', 'a759{matrix_id.split('-')[-1].zfill(3)}');")
 
-            noaudit_dbname = "project_workflow_noaudit"
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", noaudit_dbname])
-            noaudit_admin_conn = conninfo(socket_dir, port, noaudit_dbname)
-            noaudit_service_conn = conninfo(socket_dir, port, noaudit_dbname, "ticket_board_service")
-            psql(noaudit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            run_migrations(noaudit_admin_conn)
-            noaudit_plan = build_plan(
-                project="noaudit",
-                owner_user="noaudit-agent",
-                database=noaudit_dbname,
-                include_designer=False,
-                include_audit=False,
-                implementer_roles=("app",),
-            )
-            psql(noaudit_admin_conn, render_workflow_sql(noaudit_plan))
-            psql(noaudit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        noaudit_dbname = "project_workflow_noaudit"
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", noaudit_dbname])
+        noaudit_admin_conn = conninfo(socket_dir, port, noaudit_dbname)
+        noaudit_service_conn = conninfo(socket_dir, port, noaudit_dbname, "ticket_board_service")
+        psql(noaudit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run_migrations(noaudit_admin_conn)
+        noaudit_plan = build_plan(
+            project="noaudit",
+            owner_user="noaudit-agent",
+            database=noaudit_dbname,
+            include_designer=False,
+            include_audit=False,
+            implementer_roles=("app",),
+        )
+        psql(noaudit_admin_conn, render_workflow_sql(noaudit_plan))
+        psql(noaudit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            assert_project_workflow_matches_schema_projection(noaudit_admin_conn, noaudit_plan)
-            assert_tenant_projection_policy(noaudit_plan)
-            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_stages WHERE name = 'audit';") == "0"
-            assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE 'audit' = ANY(allowed_roles);") == "0"
-            noaudit_handback_transition = provisioned_transition(noaudit_admin_conn, "implementer_kick_back")
-            assert noaudit_handback_transition == {
-                "from_stage": "in_progress",
-                "to_stage": "analysis",
-                "action_name": "implementer_kick_back",
-                "allowed_roles": ["app"],
-                "owner_scoped": True,
-                "director_override": False,
-            }, noaudit_handback_transition
-            assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
-            assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('audit');") == "f"
+        assert_project_workflow_matches_schema_projection(noaudit_admin_conn, noaudit_plan)
+        assert_tenant_projection_policy(noaudit_plan)
+        assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_stages WHERE name = 'audit';") == "0"
+        assert psql(noaudit_admin_conn, "SELECT count(*) FROM ticket_board.workflow_transitions WHERE 'audit' = ANY(allowed_roles);") == "0"
+        noaudit_handback_transition = provisioned_transition(noaudit_admin_conn, "implementer_kick_back")
+        assert noaudit_handback_transition == {
+            "from_stage": "in_progress",
+            "to_stage": "analysis",
+            "action_name": "implementer_kick_back",
+            "allowed_roles": ["app"],
+            "owner_scoped": True,
+            "director_override": False,
+        }, noaudit_handback_transition
+        assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
+        assert psql(noaudit_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('audit');") == "f"
 
-            noaudit_ticket_id = service_call(
-                noaudit_service_conn,
-                "director",
-                """
+        noaudit_ticket_id = service_call(
+            noaudit_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'NOAUDIT', false);
 SELECT ticket_board.create_ticket('Audit-less workflow ticket', 'Body', 'analysis');
 """,
-            )
-            assert noaudit_ticket_id == "NOAUDIT-1", noaudit_ticket_id
-            assert (
-                psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
-                == "analysis:unassigned"
-            )
+        )
+        assert noaudit_ticket_id == "NOAUDIT-1", noaudit_ticket_id
+        assert (
+            psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
+            == "analysis:unassigned"
+        )
 
-            service_call(noaudit_service_conn, "director", f"SELECT ticket_board.route('{noaudit_ticket_id}', 'in_progress', 'app');")
-            assert (
-                psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
-                == "in_progress:app"
-            )
+        service_call(noaudit_service_conn, "director", f"SELECT ticket_board.route('{noaudit_ticket_id}', 'in_progress', 'app');")
+        assert (
+            psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
+            == "in_progress:app"
+        )
 
-            service_call(noaudit_service_conn, "app", f"SELECT ticket_board.implementer_kick_back('{noaudit_ticket_id}', 'Auditless hand-back.');")
-            assert (
-                psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
-                == "analysis:director"
+        service_call(noaudit_service_conn, "app", f"SELECT ticket_board.implementer_kick_back('{noaudit_ticket_id}', 'Auditless hand-back.');")
+        assert (
+            psql(noaudit_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';")
+            == "analysis:director"
+        )
+        assert (
+            psql(
+                noaudit_admin_conn,
+                f"SELECT who || ':' || text FROM ticket_board.ticket_comments WHERE ticket_id = '{noaudit_ticket_id}' ORDER BY position DESC LIMIT 1;",
             )
-            assert (
-                psql(
-                    noaudit_admin_conn,
-                    f"SELECT who || ':' || text FROM ticket_board.ticket_comments WHERE ticket_id = '{noaudit_ticket_id}' ORDER BY position DESC LIMIT 1;",
-                )
-                == "app:Auditless hand-back."
-            )
-            service_call(noaudit_service_conn, "director", f"SELECT ticket_board.route('{noaudit_ticket_id}', 'in_progress', 'app');")
+            == "app:Auditless hand-back."
+        )
+        service_call(noaudit_service_conn, "director", f"SELECT ticket_board.route('{noaudit_ticket_id}', 'in_progress', 'app');")
 
-            service_call(noaudit_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{noaudit_ticket_id}', '123abcd');")
-            assert (
-                psql(
-                    noaudit_admin_conn,
-                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';",
-                )
-                == "director_review:director:false"
+        service_call(noaudit_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{noaudit_ticket_id}', '123abcd');")
+        assert (
+            psql(
+                noaudit_admin_conn,
+                f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';",
             )
+            == "director_review:director:false"
+        )
 
-            service_call(noaudit_service_conn, "director", f"SELECT ticket_board.mark_done('{noaudit_ticket_id}', '123abcd');")
-            assert psql(noaudit_admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';") == "done"
+        service_call(noaudit_service_conn, "director", f"SELECT ticket_board.mark_done('{noaudit_ticket_id}', '123abcd');")
+        assert psql(noaudit_admin_conn, f"SELECT state FROM ticket_board.tickets WHERE id = '{noaudit_ticket_id}';") == "done"
 
-            multi_audit_dbname = "project_workflow_multi_audit"
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", multi_audit_dbname])
-            multi_audit_admin_conn = conninfo(socket_dir, port, multi_audit_dbname)
-            multi_audit_service_conn = conninfo(socket_dir, port, multi_audit_dbname, "ticket_board_service")
-            psql(multi_audit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            run_migrations(multi_audit_admin_conn)
-            multi_audit_plan = build_plan(
-                project="review",
-                owner_user="review-agent",
-                database=multi_audit_dbname,
-                include_designer=False,
-                implementer_roles=("main",),
-                audit_roles=("audit_gemini", "audit_gpt"),
+        multi_audit_dbname = "project_workflow_multi_audit"
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", multi_audit_dbname])
+        multi_audit_admin_conn = conninfo(socket_dir, port, multi_audit_dbname)
+        multi_audit_service_conn = conninfo(socket_dir, port, multi_audit_dbname, "ticket_board_service")
+        psql(multi_audit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run_migrations(multi_audit_admin_conn)
+        multi_audit_plan = build_plan(
+            project="review",
+            owner_user="review-agent",
+            database=multi_audit_dbname,
+            include_designer=False,
+            implementer_roles=("main",),
+            audit_roles=("audit_gemini", "audit_gpt"),
+        )
+        psql(multi_audit_admin_conn, render_workflow_sql(multi_audit_plan))
+        psql(multi_audit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+
+        assert_project_workflow_matches_schema_projection(multi_audit_admin_conn, multi_audit_plan)
+        assert_tenant_projection_policy(multi_audit_plan)
+        assert (
+            psql(
+                multi_audit_admin_conn,
+                "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'audit';",
             )
-            psql(multi_audit_admin_conn, render_workflow_sql(multi_audit_plan))
-            psql(multi_audit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-
-            assert_project_workflow_matches_schema_projection(multi_audit_admin_conn, multi_audit_plan)
-            assert_tenant_projection_policy(multi_audit_plan)
-            assert (
-                psql(
-                    multi_audit_admin_conn,
-                    "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'audit';",
-                )
-                == "{audit_gemini,audit_gpt}"
-            )
-            assert (
-                psql(
-                    multi_audit_admin_conn,
-                    """
+            == "{audit_gemini,audit_gpt}"
+        )
+        assert (
+            psql(
+                multi_audit_admin_conn,
+                """
 SELECT allowed_roles::text
 FROM ticket_board.workflow_transitions
 WHERE from_stage = 'audit' AND to_stage = 'director_review' AND action_name = 'audit_sign_off';
 """,
-                )
-                == "{audit_gemini,audit_gpt}"
             )
+            == "{audit_gemini,audit_gpt}"
+        )
 
-            multi_audit_ticket_id = service_call(
-                multi_audit_service_conn,
-                "director",
-                """
+        multi_audit_ticket_id = service_call(
+            multi_audit_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'REV', false);
 SELECT ticket_board.create_ticket('Partitioned audit workflow ticket', 'Body', 'analysis');
 """,
-            )
-            service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{multi_audit_ticket_id}', 'in_progress', 'main');")
-            psql(multi_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
-            service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{multi_audit_ticket_id}', 'abc8120');")
-            multi_audit_state = psql(
-                multi_audit_admin_conn,
-                f"SELECT state || ':' || coalesce(assignee, '') FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
-            )
-            assert multi_audit_state == "audit:audit_gemini", multi_audit_state
+        )
+        service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{multi_audit_ticket_id}', 'in_progress', 'main');")
+        psql(multi_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
+        service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{multi_audit_ticket_id}', 'abc8120');")
+        multi_audit_state = psql(
+            multi_audit_admin_conn,
+            f"SELECT state || ':' || coalesce(assignee, '') FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
+        )
+        assert multi_audit_state == "audit:audit_gemini", multi_audit_state
 
-            audit_assignment_queue = json.loads(
-                psql(
-                    multi_audit_admin_conn,
-                    f"""
+        audit_assignment_queue = json.loads(
+            psql(
+                multi_audit_admin_conn,
+                f"""
 SELECT jsonb_agg(jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -896,365 +896,363 @@ SELECT jsonb_agg(jsonb_build_object(
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = '{multi_audit_ticket_id}';
 """,
-                )
             )
-            assert audit_assignment_queue == [
-                {
-                    "target_role": "audit_gemini",
-                    "kind": "transition",
-                    "new_state": "audit",
-                    "assignee": "audit_gemini",
-                }
-            ], audit_assignment_queue
-            assert (
-                psql(
-                    multi_audit_admin_conn,
-                    f"SELECT ticket_board.transition_target_role('audit', assignee) FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
-                )
-                == "audit_gemini"
+        )
+        assert audit_assignment_queue == [
+            {
+                "target_role": "audit_gemini",
+                "kind": "transition",
+                "new_state": "audit",
+                "assignee": "audit_gemini",
+            }
+        ], audit_assignment_queue
+        assert (
+            psql(
+                multi_audit_admin_conn,
+                f"SELECT ticket_board.transition_target_role('audit', assignee) FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
             )
-            assert "role audit_gpt cannot call audit_sign_off" in service_call_fails(
-                multi_audit_service_conn,
-                "audit_gpt",
-                f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Wrong partition.');",
+            == "audit_gemini"
+        )
+        assert "role audit_gpt cannot call audit_sign_off" in service_call_fails(
+            multi_audit_service_conn,
+            "audit_gpt",
+            f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Wrong partition.');",
+        )
+        service_call(multi_audit_service_conn, "audit_gemini", f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Audit verified.');")
+        assert (
+            psql(
+                multi_audit_admin_conn,
+                f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
             )
-            service_call(multi_audit_service_conn, "audit_gemini", f"SELECT ticket_board.audit_sign_off('{multi_audit_ticket_id}', 'Audit verified.');")
-            assert (
-                psql(
-                    multi_audit_admin_conn,
-                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{multi_audit_ticket_id}';",
-                )
-                == "director_review:director:true"
-            )
-            service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.mark_done('{multi_audit_ticket_id}', 'abc8120');")
+            == "director_review:director:true"
+        )
+        service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.mark_done('{multi_audit_ticket_id}', 'abc8120');")
 
-            second_multi_audit_ticket_id = service_call(
-                multi_audit_service_conn,
-                "director",
-                """
+        second_multi_audit_ticket_id = service_call(
+            multi_audit_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'REV', false);
 SELECT ticket_board.create_ticket('Second partitioned audit workflow ticket', 'Body', 'analysis');
 """,
+        )
+        service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{second_multi_audit_ticket_id}', 'in_progress', 'main');")
+        service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_multi_audit_ticket_id}', 'abc8121');")
+        assert (
+            psql(
+                multi_audit_admin_conn,
+                f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
             )
-            service_call(multi_audit_service_conn, "director", f"SELECT ticket_board.route('{second_multi_audit_ticket_id}', 'in_progress', 'main');")
-            service_call(multi_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_multi_audit_ticket_id}', 'abc8121');")
-            assert (
-                psql(
-                    multi_audit_admin_conn,
-                    f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
-                )
-                == "audit:audit_gpt"
+            == "audit:audit_gpt"
+        )
+        service_call(multi_audit_service_conn, "audit_gpt", f"SELECT ticket_board.audit_sign_off('{second_multi_audit_ticket_id}', 'Audit verified.');")
+        assert (
+            psql(
+                multi_audit_admin_conn,
+                f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
             )
-            service_call(multi_audit_service_conn, "audit_gpt", f"SELECT ticket_board.audit_sign_off('{second_multi_audit_ticket_id}', 'Audit verified.');")
-            assert (
-                psql(
-                    multi_audit_admin_conn,
-                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_multi_audit_ticket_id}';",
-                )
-                == "director_review:director:true"
-            )
+            == "director_review:director:true"
+        )
 
-            incremental_audit_dbname = "project_workflow_incremental_audit"
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", incremental_audit_dbname])
-            incremental_audit_admin_conn = conninfo(socket_dir, port, incremental_audit_dbname)
-            incremental_audit_service_conn = conninfo(socket_dir, port, incremental_audit_dbname, "ticket_board_service")
-            psql(incremental_audit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            run_migrations(incremental_audit_admin_conn)
-            initial_incremental_plan = build_plan(
-                project="reviewinc",
-                owner_user="review-agent",
-                database=incremental_audit_dbname,
-                include_designer=False,
-                implementer_roles=("main",),
-                audit_roles=("audit_gemini",),
-            )
-            psql(incremental_audit_admin_conn, render_workflow_sql(initial_incremental_plan))
-            psql(incremental_audit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            expanded_incremental_plan = build_plan(
-                project="reviewinc",
-                owner_user="review-agent",
-                database=incremental_audit_dbname,
-                include_designer=False,
-                implementer_roles=("main",),
-                audit_roles=("audit_gemini", "audit_gpt"),
-            )
-            psql(incremental_audit_admin_conn, render_add_role_sql(expanded_incremental_plan, "audit_gpt"))
+        incremental_audit_dbname = "project_workflow_incremental_audit"
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", incremental_audit_dbname])
+        incremental_audit_admin_conn = conninfo(socket_dir, port, incremental_audit_dbname)
+        incremental_audit_service_conn = conninfo(socket_dir, port, incremental_audit_dbname, "ticket_board_service")
+        psql(incremental_audit_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run_migrations(incremental_audit_admin_conn)
+        initial_incremental_plan = build_plan(
+            project="reviewinc",
+            owner_user="review-agent",
+            database=incremental_audit_dbname,
+            include_designer=False,
+            implementer_roles=("main",),
+            audit_roles=("audit_gemini",),
+        )
+        psql(incremental_audit_admin_conn, render_workflow_sql(initial_incremental_plan))
+        psql(incremental_audit_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        expanded_incremental_plan = build_plan(
+            project="reviewinc",
+            owner_user="review-agent",
+            database=incremental_audit_dbname,
+            include_designer=False,
+            implementer_roles=("main",),
+            audit_roles=("audit_gemini", "audit_gpt"),
+        )
+        psql(incremental_audit_admin_conn, render_add_role_sql(expanded_incremental_plan, "audit_gpt"))
 
-            assert_project_workflow_matches_schema_projection(incremental_audit_admin_conn, expanded_incremental_plan)
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'audit';",
-                )
-                == "{audit_gemini,audit_gpt}"
+        assert_project_workflow_matches_schema_projection(incremental_audit_admin_conn, expanded_incremental_plan)
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'audit';",
             )
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    """
+            == "{audit_gemini,audit_gpt}"
+        )
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                """
 SELECT allowed_roles::text
 FROM ticket_board.workflow_transitions
 WHERE from_stage = 'audit' AND to_stage = 'director_review' AND action_name = 'audit_sign_off';
 """,
-                )
-                == "{audit_gemini,audit_gpt}"
             )
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    """
+            == "{audit_gemini,audit_gpt}"
+        )
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                """
 SELECT count(*)
 FROM ticket_board.ticket_notification_queue
 WHERE target_role NOT IN ('main', 'audit_gemini', 'audit_gpt', 'director');
 """,
-                )
-                == "0"
             )
+            == "0"
+        )
 
-            incremental_ticket_id = service_call(
-                incremental_audit_service_conn,
-                "director",
-                """
+        incremental_ticket_id = service_call(
+            incremental_audit_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'RIA', false);
 SELECT ticket_board.create_ticket('Incremental auditor workflow ticket', 'Body', 'analysis');
 """,
+        )
+        service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.route('{incremental_ticket_id}', 'in_progress', 'main');")
+        psql(incremental_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
+        service_call(incremental_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{incremental_ticket_id}', 'abc8320');")
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{incremental_ticket_id}';",
             )
-            service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.route('{incremental_ticket_id}', 'in_progress', 'main');")
-            psql(incremental_audit_admin_conn, "DELETE FROM ticket_board.ticket_notification_queue;")
-            service_call(incremental_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{incremental_ticket_id}', 'abc8320');")
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{incremental_ticket_id}';",
-                )
-                == "audit:audit_gemini"
-            )
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    f"""
+            == "audit:audit_gemini"
+        )
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                f"""
 SELECT jsonb_agg(jsonb_build_object('target_role', target_role, 'kind', kind, 'assignee', payload->>'assignee') ORDER BY id)::text
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = '{incremental_ticket_id}';
 """,
-                )
-                == '[{"kind": "transition", "assignee": "audit_gemini", "target_role": "audit_gemini"}]'
             )
-            assert "role audit_gpt cannot call audit_sign_off" in service_call_fails(
-                incremental_audit_service_conn,
-                "audit_gpt",
-                f"SELECT ticket_board.audit_sign_off('{incremental_ticket_id}', 'Wrong partition.');",
+            == '[{"kind": "transition", "assignee": "audit_gemini", "target_role": "audit_gemini"}]'
+        )
+        assert "role audit_gpt cannot call audit_sign_off" in service_call_fails(
+            incremental_audit_service_conn,
+            "audit_gpt",
+            f"SELECT ticket_board.audit_sign_off('{incremental_ticket_id}', 'Wrong partition.');",
+        )
+        service_call(
+            incremental_audit_service_conn,
+            "audit_gemini",
+            f"SELECT ticket_board.audit_sign_off('{incremental_ticket_id}', 'Audit verified.');",
+        )
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{incremental_ticket_id}';",
             )
-            service_call(
-                incremental_audit_service_conn,
-                "audit_gemini",
-                f"SELECT ticket_board.audit_sign_off('{incremental_ticket_id}', 'Audit verified.');",
-            )
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{incremental_ticket_id}';",
-                )
-                == "director_review:director:true"
-            )
-            service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.mark_done('{incremental_ticket_id}', 'abc8320');")
+            == "director_review:director:true"
+        )
+        service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.mark_done('{incremental_ticket_id}', 'abc8320');")
 
-            second_incremental_ticket_id = service_call(
-                incremental_audit_service_conn,
-                "director",
-                """
+        second_incremental_ticket_id = service_call(
+            incremental_audit_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'RIA', false);
 SELECT ticket_board.create_ticket('Second incremental auditor workflow ticket', 'Body', 'analysis');
 """,
+        )
+        service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.route('{second_incremental_ticket_id}', 'in_progress', 'main');")
+        service_call(incremental_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_incremental_ticket_id}', 'abc8321');")
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{second_incremental_ticket_id}';",
             )
-            service_call(incremental_audit_service_conn, "director", f"SELECT ticket_board.route('{second_incremental_ticket_id}', 'in_progress', 'main');")
-            service_call(incremental_audit_service_conn, "main", f"SELECT ticket_board.submit_to_audit('{second_incremental_ticket_id}', 'abc8321');")
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{second_incremental_ticket_id}';",
-                )
-                == "audit:audit_gpt"
+            == "audit:audit_gpt"
+        )
+        service_call(
+            incremental_audit_service_conn,
+            "audit_gpt",
+            f"SELECT ticket_board.audit_sign_off('{second_incremental_ticket_id}', 'Audit verified.');",
+        )
+        assert (
+            psql(
+                incremental_audit_admin_conn,
+                f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_incremental_ticket_id}';",
             )
-            service_call(
-                incremental_audit_service_conn,
-                "audit_gpt",
-                f"SELECT ticket_board.audit_sign_off('{second_incremental_ticket_id}', 'Audit verified.');",
-            )
-            assert (
-                psql(
-                    incremental_audit_admin_conn,
-                    f"SELECT state || ':' || assignee || ':' || audit_signoff::text FROM ticket_board.tickets WHERE id = '{second_incremental_ticket_id}';",
-                )
-                == "director_review:director:true"
-            )
+            == "director_review:director:true"
+        )
 
-            post_vcs_dbname = "project_workflow_post_vcs"
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", post_vcs_dbname])
-            post_vcs_admin_conn = conninfo(socket_dir, port, post_vcs_dbname)
-            post_vcs_service_conn = conninfo(socket_dir, port, post_vcs_dbname, "ticket_board_service")
-            psql(post_vcs_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            run_migrations(post_vcs_admin_conn)
-            post_vcs_plan = build_plan(
-                project="ship",
-                owner_user="ship-agent",
-                database=post_vcs_dbname,
-                include_designer=False,
-                include_audit=False,
-                implementer_roles=("ops", "archivist"),
-            )
-            psql(post_vcs_admin_conn, render_workflow_sql(post_vcs_plan))
-            psql(post_vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            post_vcs_ticket_id = service_call(
-                post_vcs_service_conn,
-                "director",
-                """
+        post_vcs_dbname = "project_workflow_post_vcs"
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", post_vcs_dbname])
+        post_vcs_admin_conn = conninfo(socket_dir, port, post_vcs_dbname)
+        post_vcs_service_conn = conninfo(socket_dir, port, post_vcs_dbname, "ticket_board_service")
+        psql(post_vcs_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run_migrations(post_vcs_admin_conn)
+        post_vcs_plan = build_plan(
+            project="ship",
+            owner_user="ship-agent",
+            database=post_vcs_dbname,
+            include_designer=False,
+            include_audit=False,
+            implementer_roles=("ops", "archivist"),
+        )
+        psql(post_vcs_admin_conn, render_workflow_sql(post_vcs_plan))
+        psql(post_vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        post_vcs_ticket_id = service_call(
+            post_vcs_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'SHIP', false);
 SELECT ticket_board.create_ticket('Post-provision VCS close ticket', 'Body', 'analysis');
 """,
-            )
-            service_call(post_vcs_service_conn, "director", f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'in_progress', 'ops');")
-            service_call(post_vcs_service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{post_vcs_ticket_id}', 'abc8210');")
-            assert (
-                psql(post_vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{post_vcs_ticket_id}';")
-                == "director_review:director"
-            )
-            post_vcs_plan = build_plan(
-                project="ship",
-                owner_user="ship-agent",
-                database=post_vcs_dbname,
-                include_designer=False,
-                include_audit=False,
-                implementer_roles=("ops", "archivist"),
-                vcs_close_role="archivist",
-            )
-            psql(post_vcs_admin_conn, render_vcs_close_role_sql(post_vcs_plan))
-            assert (
-                psql(
-                    post_vcs_admin_conn,
-                    "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'in_progress';",
-                )
-                == "{ops}"
-            )
-            assert psql(post_vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('archivist');") == "f"
-            assert "assignee archivist is not an owner of stage in_progress" in service_call_fails(
-                post_vcs_service_conn,
-                "director",
-                f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'in_progress', 'archivist');",
-            )
-            assert (
-                psql(
-                    post_vcs_admin_conn,
-                    """
-SELECT allowed_roles::text
-FROM ticket_board.workflow_transitions
-WHERE from_stage = 'vcs' AND to_stage = 'done' AND action_name = 'mark_done';
-""",
-                )
-                == "{archivist}"
-            )
-            assert (
-                psql(
-                    post_vcs_admin_conn,
-                    """
-SELECT count(*)
-FROM ticket_board.workflow_transitions
-WHERE from_stage = 'director_review' AND to_stage = 'done' AND action_name = 'mark_done';
-""",
-                )
-                == "0"
-            )
-            assert "role director cannot call mark_done" in service_call_fails(
-                post_vcs_service_conn,
-                "director",
-                f"SELECT ticket_board.mark_done('{post_vcs_ticket_id}', 'abc8210');",
-            )
-            service_call(post_vcs_service_conn, "director", f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'vcs', 'archivist');")
-            service_call(post_vcs_service_conn, "archivist", f"SELECT ticket_board.mark_done('{post_vcs_ticket_id}', 'abc8210');")
-            assert (
-                psql(post_vcs_admin_conn, f"SELECT state || ':' || assignee || ':' || commit_hash FROM ticket_board.tickets WHERE id = '{post_vcs_ticket_id}';")
-                == "done:archivist:abc8210"
-            )
-
-            vcs_dbname = "project_workflow_vcs"
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", vcs_dbname])
-            vcs_admin_conn = conninfo(socket_dir, port, vcs_dbname)
-            vcs_service_conn = conninfo(socket_dir, port, vcs_dbname, "ticket_board_service")
-            psql(vcs_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            run_migrations(vcs_admin_conn)
-            vcs_plan = build_plan(
-                project="ship",
-                owner_user="ship-agent",
-                database=vcs_dbname,
-                include_designer=False,
-                include_audit=False,
-                implementer_roles=("app", "main"),
-                vcs_close_role="ops",
-            )
-            psql(vcs_admin_conn, render_workflow_sql(vcs_plan))
-            psql(vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            assert psql(vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
-            assert psql(vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
-            assert psql(
-                vcs_admin_conn,
+        )
+        service_call(post_vcs_service_conn, "director", f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'in_progress', 'ops');")
+        service_call(post_vcs_service_conn, "ops", f"SELECT ticket_board.submit_to_audit('{post_vcs_ticket_id}', 'abc8210');")
+        assert (
+            psql(post_vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{post_vcs_ticket_id}';")
+            == "director_review:director"
+        )
+        post_vcs_plan = build_plan(
+            project="ship",
+            owner_user="ship-agent",
+            database=post_vcs_dbname,
+            include_designer=False,
+            include_audit=False,
+            implementer_roles=("ops", "archivist"),
+            vcs_close_role="archivist",
+        )
+        psql(post_vcs_admin_conn, render_vcs_close_role_sql(post_vcs_plan))
+        assert (
+            psql(
+                post_vcs_admin_conn,
                 "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'in_progress';",
-            ) == "{main,app}"
-            assert psql(
-                vcs_admin_conn,
-                "SELECT owner_roles::text || ':' || rank::text FROM ticket_board.workflow_stages WHERE name = 'vcs';",
-            ) == "{ops}:4"
-            assert psql(
-                vcs_admin_conn,
+            )
+            == "{ops}"
+        )
+        assert psql(post_vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('archivist');") == "f"
+        assert "assignee archivist is not an owner of stage in_progress" in service_call_fails(
+            post_vcs_service_conn,
+            "director",
+            f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'in_progress', 'archivist');",
+        )
+        assert (
+            psql(
+                post_vcs_admin_conn,
                 """
 SELECT allowed_roles::text
 FROM ticket_board.workflow_transitions
 WHERE from_stage = 'vcs' AND to_stage = 'done' AND action_name = 'mark_done';
 """,
-            ) == "{ops}"
-            assert psql(
-                vcs_admin_conn,
+            )
+            == "{archivist}"
+        )
+        assert (
+            psql(
+                post_vcs_admin_conn,
                 """
 SELECT count(*)
 FROM ticket_board.workflow_transitions
 WHERE from_stage = 'director_review' AND to_stage = 'done' AND action_name = 'mark_done';
 """,
-            ) == "0"
-            vcs_ticket_id = service_call(
-                vcs_service_conn,
-                "director",
-                """
+            )
+            == "0"
+        )
+        assert "role director cannot call mark_done" in service_call_fails(
+            post_vcs_service_conn,
+            "director",
+            f"SELECT ticket_board.mark_done('{post_vcs_ticket_id}', 'abc8210');",
+        )
+        service_call(post_vcs_service_conn, "director", f"SELECT ticket_board.route('{post_vcs_ticket_id}', 'vcs', 'archivist');")
+        service_call(post_vcs_service_conn, "archivist", f"SELECT ticket_board.mark_done('{post_vcs_ticket_id}', 'abc8210');")
+        assert (
+            psql(post_vcs_admin_conn, f"SELECT state || ':' || assignee || ':' || commit_hash FROM ticket_board.tickets WHERE id = '{post_vcs_ticket_id}';")
+            == "done:archivist:abc8210"
+        )
+
+        vcs_dbname = "project_workflow_vcs"
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", vcs_dbname])
+        vcs_admin_conn = conninfo(socket_dir, port, vcs_dbname)
+        vcs_service_conn = conninfo(socket_dir, port, vcs_dbname, "ticket_board_service")
+        psql(vcs_admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run_migrations(vcs_admin_conn)
+        vcs_plan = build_plan(
+            project="ship",
+            owner_user="ship-agent",
+            database=vcs_dbname,
+            include_designer=False,
+            include_audit=False,
+            implementer_roles=("app", "main"),
+            vcs_close_role="ops",
+        )
+        psql(vcs_admin_conn, render_workflow_sql(vcs_plan))
+        psql(vcs_admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        assert psql(vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('ops');") == "f"
+        assert psql(vcs_admin_conn, "SELECT ticket_board.ticket_is_implementer_assignee('app');") == "t"
+        assert psql(
+            vcs_admin_conn,
+            "SELECT owner_roles::text FROM ticket_board.workflow_stages WHERE name = 'in_progress';",
+        ) == "{main,app}"
+        assert psql(
+            vcs_admin_conn,
+            "SELECT owner_roles::text || ':' || rank::text FROM ticket_board.workflow_stages WHERE name = 'vcs';",
+        ) == "{ops}:4"
+        assert psql(
+            vcs_admin_conn,
+            """
+SELECT allowed_roles::text
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'vcs' AND to_stage = 'done' AND action_name = 'mark_done';
+""",
+        ) == "{ops}"
+        assert psql(
+            vcs_admin_conn,
+            """
+SELECT count(*)
+FROM ticket_board.workflow_transitions
+WHERE from_stage = 'director_review' AND to_stage = 'done' AND action_name = 'mark_done';
+""",
+        ) == "0"
+        vcs_ticket_id = service_call(
+            vcs_service_conn,
+            "director",
+            """
 SELECT set_config('ticket_board.ticket_prefix', 'SHIP', false);
 SELECT ticket_board.create_ticket('Provisioned VCS close ticket', 'Body', 'analysis');
 """,
-            )
-            assert "assignee ops is not an owner of stage in_progress" in service_call_fails(
-                vcs_service_conn,
-                "director",
-                f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'ops');",
-            )
-            service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'app');")
-            service_call(vcs_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{vcs_ticket_id}', 'abc7690');")
-            assert (
-                psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
-                == "director_review:director"
-            )
-            assert "role director cannot call mark_done" in service_call_fails(
-                vcs_service_conn,
-                "director",
-                f"SELECT ticket_board.mark_done('{vcs_ticket_id}', 'abc7690');",
-            )
-            service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'vcs', 'ops');")
-            assert (
-                psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
-                == "vcs:ops"
-            )
-            service_call(vcs_service_conn, "ops", f"SELECT ticket_board.mark_done('{vcs_ticket_id}', 'abc7690');")
-            assert (
-                psql(vcs_admin_conn, f"SELECT state || ':' || assignee || ':' || commit_hash FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
-                == "done:ops:abc7690"
-            )
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        )
+        assert "assignee ops is not an owner of stage in_progress" in service_call_fails(
+            vcs_service_conn,
+            "director",
+            f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'ops');",
+        )
+        service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'in_progress', 'app');")
+        service_call(vcs_service_conn, "app", f"SELECT ticket_board.submit_to_audit('{vcs_ticket_id}', 'abc7690');")
+        assert (
+            psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
+            == "director_review:director"
+        )
+        assert "role director cannot call mark_done" in service_call_fails(
+            vcs_service_conn,
+            "director",
+            f"SELECT ticket_board.mark_done('{vcs_ticket_id}', 'abc7690');",
+        )
+        service_call(vcs_service_conn, "director", f"SELECT ticket_board.route('{vcs_ticket_id}', 'vcs', 'ops');")
+        assert (
+            psql(vcs_admin_conn, f"SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
+            == "vcs:ops"
+        )
+        service_call(vcs_service_conn, "ops", f"SELECT ticket_board.mark_done('{vcs_ticket_id}', 'abc7690');")
+        assert (
+            psql(vcs_admin_conn, f"SELECT state || ':' || assignee || ':' || commit_hash FROM ticket_board.tickets WHERE id = '{vcs_ticket_id}';")
+            == "done:ops:abc7690"
+        )
 
     print("ticket_board_project_workflow_provision_test: ok")
     return 0

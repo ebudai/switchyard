@@ -44,6 +44,8 @@ from scripts.ticket_board.server import (
 )
 from scripts.ticket_board.write_client import TicketBoardWriteClient, TicketBoardWriteError
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
@@ -2104,90 +2106,82 @@ import subprocess
 from pathlib import Path
 
 import tests.ticket_board_write_api_test as t
+from tests.temporary_cluster import temporary_cluster
 
 commit_hash = t.main_commit()
-with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-env-rbac.") as tmpdir:
-    root = Path(tmpdir)
-    data_dir = root / "pgdata"
-    socket_dir = root / "socket"
+# This cluster lives in a subprocess the parent may be killed out from under, so
+# it is the one that most needs its life tied to the process running it (SYRD-56).
+with temporary_cluster(prefix="ticket-board-write-api-env-rbac.") as cluster:
+    root = cluster.root
+    data_dir = cluster.data_dir
+    socket_dir = cluster.socket_dir
+    port = cluster.port
     frames = root / "frames"
     assets = root / "assets"
-    socket_dir.mkdir()
     frames.mkdir()
     assets.mkdir()
-    port = t.free_port()
     dbname = "pgu_write_api_env_rbac_test"
     admin_conn = t.conninfo(socket_dir, port, dbname)
-    t.run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
+    t.run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+    t.psql(admin_conn, t.SCHEMA_PATH.read_text(encoding="utf-8"))
+    t.create_roles(admin_conn)
+    t.psql(admin_conn, t.RBAC_PATH.read_text(encoding="utf-8"))
+    t.seed_fixtures(lambda ticket_id, **kwargs: t.seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)
+    assert "ops" in t.OPERATION_ALLOWED_ROLES["route"]
+    assert "ops" in t.OPERATION_ALLOWED_ROLES["mark_done"]
+    assert "ops" in t.OPERATION_ALLOWED_ROLES["force_move"]
+    app = t.TicketBoardApp(
+        frames,
+        assets,
+        database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
+    )
+    server = t.TicketBoardServer(
+        ("127.0.0.1", 0),
+        app,
+        director_notifier=t.QuietNotifier(),
+        report_token=t.TEST_REPORT_TOKEN,
+    )
+    t.TEST_WRITE_TOKEN = server.write_token
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     try:
-        t.run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-        t.run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-        t.psql(admin_conn, t.SCHEMA_PATH.read_text(encoding="utf-8"))
-        t.create_roles(admin_conn)
-        t.psql(admin_conn, t.RBAC_PATH.read_text(encoding="utf-8"))
-        t.seed_fixtures(lambda ticket_id, **kwargs: t.seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)
-        assert "ops" in t.OPERATION_ALLOWED_ROLES["route"]
-        assert "ops" in t.OPERATION_ALLOWED_ROLES["mark_done"]
-        assert "ops" in t.OPERATION_ALLOWED_ROLES["force_move"]
-        app = t.TicketBoardApp(
-            frames,
-            assets,
-            database_url=t.conninfo(socket_dir, port, dbname, t.SERVICE_ROLE),
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        before_route = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-100';")
+        route_denied = t.post_json(
+            base_url,
+            "/api/tickets/PGU-100/actions/route",
+            {"state": "in_progress", "assignee": "ops"},
+            caller="ops",
+            expect=400,
         )
-        server = t.TicketBoardServer(
-            ("127.0.0.1", 0),
-            app,
-            director_notifier=t.QuietNotifier(),
-            report_token=t.TEST_REPORT_TOKEN,
+        assert "role ops cannot call route" in str(route_denied), route_denied
+        assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-100';") == before_route
+
+        before_done = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-106';")
+        mark_done_denied = t.post_json(
+            base_url,
+            "/api/tickets/PGU-106/actions/mark_done",
+            {"commit_hash": commit_hash},
+            caller="ops",
+            expect=400,
         )
-        t.TEST_WRITE_TOKEN = server.write_token
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            base_url = f"http://127.0.0.1:{server.server_port}"
-            before_route = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-100';")
-            route_denied = t.post_json(
-                base_url,
-                "/api/tickets/PGU-100/actions/route",
-                {"state": "in_progress", "assignee": "ops"},
-                caller="ops",
-                expect=400,
-            )
-            assert "role ops cannot call route" in str(route_denied), route_denied
-            assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-100';") == before_route
+        assert "role ops cannot call mark_done" in str(mark_done_denied), mark_done_denied
+        assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-106';") == before_done
 
-            before_done = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-106';")
-            mark_done_denied = t.post_json(
-                base_url,
-                "/api/tickets/PGU-106/actions/mark_done",
-                {"commit_hash": commit_hash},
-                caller="ops",
-                expect=400,
-            )
-            assert "role ops cannot call mark_done" in str(mark_done_denied), mark_done_denied
-            assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-106';") == before_done
-
-            before_force_move = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-129';")
-            force_move_denied = t.post_json(
-                base_url,
-                "/api/tickets/PGU-129/actions/force_move",
-                {"state": "in_progress", "assignee": "ops"},
-                caller="ops",
-                expect=400,
-            )
-            assert "role ops cannot call force_move" in str(force_move_denied), force_move_denied
-            assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-129';") == before_force_move
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
+        before_force_move = t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-129';")
+        force_move_denied = t.post_json(
+            base_url,
+            "/api/tickets/PGU-129/actions/force_move",
+            {"state": "in_progress", "assignee": "ops"},
+            caller="ops",
+            expect=400,
+        )
+        assert "role ops cannot call force_move" in str(force_move_denied), force_move_denied
+        assert t.psql(admin_conn, "SELECT state || ':' || assignee FROM ticket_board.tickets WHERE id = 'PGU-129';") == before_force_move
     finally:
-        subprocess.run(
-            ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 """
     env = {
         **os.environ,
@@ -2198,71 +2192,62 @@ with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-env-rbac.") as t
 
 
 def exercise_postgres_backend(commit_hash: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-write-api-postgres.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
+    with temporary_cluster(
+        prefix="ticket-board-write-api-postgres.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         frames = root / "frames"
         assets = root / "assets"
-        socket_dir.mkdir()
         frames.mkdir()
         assets.mkdir()
-        port = free_port()
         dbname = "pgu_write_api_test"
         admin_conn = conninfo(socket_dir, port, dbname)
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            assert psql(
-                admin_conn,
-                """
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert psql(
+            admin_conn,
+            """
 SELECT column_default
 FROM information_schema.columns
 WHERE table_schema = 'ticket_board'
   AND table_name = 'tickets'
   AND column_name = 'regression';
 """,
-            ) == "false"
-            create_roles(admin_conn)
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            seed_fixtures(lambda ticket_id, **kwargs: seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)
-            app = TicketBoardApp(
-                frames,
-                assets,
-                database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
+        ) == "false"
+        create_roles(admin_conn)
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        seed_fixtures(lambda ticket_id, **kwargs: seed_postgres_ticket(admin_conn, ticket_id, **kwargs), commit_hash)
+        app = TicketBoardApp(
+            frames,
+            assets,
+            database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
+        )
+        server = TicketBoardServer(
+            ("127.0.0.1", 0),
+            app,
+            director_notifier=QuietNotifier(),
+            report_token=TEST_REPORT_TOKEN,
+        )
+        global TEST_WRITE_TOKEN
+        TEST_WRITE_TOKEN = server.write_token
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            exercise_write_api(
+                f"http://127.0.0.1:{server.server_port}",
+                commit_hash,
+                frames=frames,
+                assets=assets,
+                admin_conn=admin_conn,
             )
-            server = TicketBoardServer(
-                ("127.0.0.1", 0),
-                app,
-                director_notifier=QuietNotifier(),
-                report_token=TEST_REPORT_TOKEN,
-            )
-            global TEST_WRITE_TOKEN
-            TEST_WRITE_TOKEN = server.write_token
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                exercise_write_api(
-                    f"http://127.0.0.1:{server.server_port}",
-                    commit_hash,
-                    frames=frames,
-                    assets=assets,
-                    admin_conn=admin_conn,
-                )
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=2)
-            exercise_real_write_client_file_bug_payload(app, root / "ticket-board.sock")
         finally:
-            subprocess.run(
-                ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        exercise_real_write_client_file_bug_payload(app, root / "ticket-board.sock")
 
 
 def main() -> int:

@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -63,26 +65,24 @@ def ticket_source(ticket_id: str, state: str, assignee: str) -> str:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-awaiting-idle-turn-end.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-awaiting-idle-turn-end.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_awaiting_idle_turn_end_test"
         admin_conn = f"host={socket_dir} port={port} dbname={dbname} user=postgres"
         listener_conn = f"host={socket_dir} port={port} dbname={dbname} user=ticket_board_listener"
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            psql(admin_conn, "CREATE ROLE ticket_board_listener LOGIN; CREATE ROLE ticket_board_service;")
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            psql(
-                admin_conn,
-                f"""
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        psql(admin_conn, "CREATE ROLE ticket_board_listener LOGIN; CREATE ROLE ticket_board_service;")
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        psql(
+            admin_conn,
+            f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
@@ -98,11 +98,11 @@ SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
 WHERE ticket_id = 'PGU-9161';
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            active_wait_precondition = json.loads(
-                psql(
-                    admin_conn,
-                    """
+        )
+        active_wait_precondition = json.loads(
+            psql(
+                admin_conn,
+                """
 SELECT jsonb_build_object(
     'state_rows', count(*)::int,
     'owner_role', max(ticket_board.transition_target_role(t.state, t.assignee)),
@@ -117,18 +117,18 @@ FROM ticket_board.tickets t
 JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
 WHERE t.id = 'PGU-9161';
 """,
-                )
             )
-            assert active_wait_precondition == {
-                "state_rows": 1,
-                "owner_role": "ops",
-                "awaiting_role": "director",
-                "awaiting_active": True,
-            }, active_wait_precondition
+        )
+        assert active_wait_precondition == {
+            "state_rows": 1,
+            "owner_role": "ops",
+            "awaiting_role": "director",
+            "awaiting_active": True,
+        }, active_wait_precondition
 
-            active_wait_returned = psql(
-                listener_conn,
-                """
+        active_wait_returned = psql(
+            listener_conn,
+            """
 WITH params AS (
     SELECT clock_timestamp() AS now_at
 )
@@ -138,12 +138,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 )
 FROM params;
 """,
-            )
-            assert active_wait_returned == "0", active_wait_returned
-            active_wait_rows = json.loads(
-                psql(
-                    admin_conn,
-                    """
+        )
+        assert active_wait_returned == "0", active_wait_returned
+        active_wait_rows = json.loads(
+            psql(
+                admin_conn,
+                """
 SELECT jsonb_build_object(
     'queue_count', (
         SELECT count(*)::int
@@ -158,23 +158,23 @@ SELECT jsonb_build_object(
     )
 )::text;
 """,
-                )
             )
-            assert active_wait_rows == {"queue_count": 0, "trace_count": 0}, active_wait_rows
+        )
+        assert active_wait_rows == {"queue_count": 0, "trace_count": 0}, active_wait_rows
 
-            psql(
-                admin_conn,
-                """
+        psql(
+            admin_conn,
+            """
 UPDATE ticket_board.ticket_notification_state
 SET awaiting_role = '',
     awaiting_since_at = NULL
 WHERE ticket_id = 'PGU-9161';
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            empty_wait_returned = psql(
-                listener_conn,
-                """
+        )
+        empty_wait_returned = psql(
+            listener_conn,
+            """
 WITH params AS (
     SELECT clock_timestamp() AS now_at
 )
@@ -184,12 +184,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 )
 FROM params;
 """,
-            )
-            assert empty_wait_returned == "1", empty_wait_returned
-            empty_wait_row = json.loads(
-                psql(
-                    admin_conn,
-                    """
+        )
+        assert empty_wait_returned == "1", empty_wait_returned
+        empty_wait_row = json.loads(
+            psql(
+                admin_conn,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -200,15 +200,13 @@ WHERE ticket_id = 'PGU-9161'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert empty_wait_row == {
-                "target_role": "ops",
-                "kind": "idle_reminder",
-                "message": "PGU-9161 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-            }, empty_wait_row
-        finally:
-            run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], capture=False)
+        )
+        assert empty_wait_row == {
+            "target_role": "ops",
+            "kind": "idle_reminder",
+            "message": "PGU-9161 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+        }, empty_wait_row
 
     print("ticket_board_awaiting_role_idle_turn_end_test: ok")
     return 0

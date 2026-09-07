@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:
 
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
     if capture:
@@ -85,26 +87,24 @@ CREATE ROLE main LOGIN;
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-reconcile.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-reconcile.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_reconcile_test"
         admin_conninfo = f"host={socket_dir} port={port} dbname={dbname} user=postgres"
         listener_conninfo = f"host={socket_dir} port={port} dbname={dbname} user=ticket_board_listener"
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
-            create_pane_roles(admin_conninfo)
-            psql(admin_conninfo, RBAC_PATH.read_text(encoding="utf-8"))
-            psql(
-                admin_conninfo,
-                f"""
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+        create_pane_roles(admin_conninfo)
+        psql(admin_conninfo, RBAC_PATH.read_text(encoding="utf-8"))
+        psql(
+            admin_conninfo,
+            f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
@@ -129,10 +129,10 @@ SET last_activity_at = clock_timestamp() - interval '1 hour',
     nudge_count = 3
 WHERE ticket_id IN ('PGU-206', 'PGU-207');
 """,
-            )
-            nudged = psql(
-                listener_conninfo,
-                """
+        )
+        nudged = psql(
+            listener_conninfo,
+            """
 SELECT ticket_board.notify_idle_stall_nudges(
     jsonb_build_object(
         'ops', (clock_timestamp() - interval '1 hour')::text,
@@ -144,11 +144,11 @@ SELECT ticket_board.notify_idle_stall_nudges(
     2
 );
 """,
-            )
-            assert nudged == "2", nudged
-            psql(
-                admin_conninfo,
-                """
+        )
+        assert nudged == "2", nudged
+        psql(
+            admin_conninfo,
+            """
 UPDATE ticket_board.ticket_notification_queue
 SET next_attempt_at = CASE ticket_id
     WHEN 'PGU-206' THEN clock_timestamp() - interval '10 seconds'
@@ -157,49 +157,49 @@ SET next_attempt_at = CASE ticket_id
 END
 WHERE ticket_id IN ('PGU-206', 'PGU-207');
 """,
-            )
-            before = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
-            )
-            assert before == "1", before
+        )
+        before = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
+        )
+        assert before == "1", before
 
-            sent: list[tuple[str, str]] = []
-            with psycopg.connect(admin_conninfo, autocommit=False) as lock_conn:
-                lock_conn.execute(
-                    """
+        sent: list[tuple[str, str]] = []
+        with psycopg.connect(admin_conninfo, autocommit=False) as lock_conn:
+            lock_conn.execute(
+                """
 SELECT id
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-206'
 FOR UPDATE
 """
-                )
-                listener = TicketBoardNotifyListener(
-                    conninfo=listener_conninfo,
-                    sender=lambda target, message: sent.append((target, message)),
-                    activity_gate=lambda _target: False,
-                    poll_seconds=0,
-                    target_exists=lambda _target: True,
-                )
-                delivered = listener.listen_once(max_notifications=1)
-                lock_conn.rollback()
-
-            assert delivered == 1
-            assert sent == [
-                (
-                    "pgu-director:0.0",
-                    "PRIORITY PGU-207 -- Durable reconcile appears stuck for app; check/reassign",
-                )
-            ]
-            after = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
             )
-            assert after == "0", after
+            listener = TicketBoardNotifyListener(
+                conninfo=listener_conninfo,
+                sender=lambda target, message: sent.append((target, message)),
+                activity_gate=lambda _target: False,
+                poll_seconds=0,
+                target_exists=lambda _target: True,
+            )
+            delivered = listener.listen_once(max_notifications=1)
+            lock_conn.rollback()
 
-            psql(
-                admin_conninfo,
-                f"""
+        assert delivered == 1
+        assert sent == [
+            (
+                "pgu-director:0.0",
+                "PRIORITY PGU-207 -- Durable reconcile appears stuck for app; check/reassign",
+            )
+        ]
+        after = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-207';",
+        )
+        assert after == "0", after
+
+        psql(
+            admin_conninfo,
+            f"""
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, commit_hash,
@@ -216,11 +216,11 @@ SET audit_signoff = true,
     state = 'director_review'
 WHERE id = 'PGU-229';
 """,
-            )
-            final_review_row = json.loads(
-                psql(
-                    listener_conninfo,
-                    """
+        )
+        final_review_row = json.loads(
+            psql(
+                listener_conninfo,
+                """
 SELECT jsonb_build_object(
     'id', id,
     'kind', kind,
@@ -232,33 +232,33 @@ SELECT jsonb_build_object(
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-229';
 """,
-                )
             )
-            assert isinstance(final_review_row["id"], int) and final_review_row["id"] > 0, final_review_row
-            assert {key: value for key, value in final_review_row.items() if key != "id"} == {
-                "kind": "transition",
-                "target_role": "director",
-                "payload_state": "director_review",
-                "payload_assignee": "director",
-                "attempts": 0,
-            }, final_review_row
+        )
+        assert isinstance(final_review_row["id"], int) and final_review_row["id"] > 0, final_review_row
+        assert {key: value for key, value in final_review_row.items() if key != "id"} == {
+            "kind": "transition",
+            "target_role": "director",
+            "payload_state": "director_review",
+            "payload_assignee": "director",
+            "attempts": 0,
+        }, final_review_row
 
-            busy = [True]
-            sent.clear()
-            final_review_listener = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                activity_gate=lambda _target: busy[0],
-                poll_seconds=0,
-                target_exists=lambda _target: True,
-            )
-            busy_delivery = final_review_listener.listen_once(max_notifications=1)
-            assert busy_delivery == 0, busy_delivery
-            assert sent == []
-            busy_row = json.loads(
-                psql(
-                    listener_conninfo,
-                    """
+        busy = [True]
+        sent.clear()
+        final_review_listener = TicketBoardNotifyListener(
+            conninfo=listener_conninfo,
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=lambda _target: busy[0],
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        )
+        busy_delivery = final_review_listener.listen_once(max_notifications=1)
+        assert busy_delivery == 0, busy_delivery
+        assert sent == []
+        busy_row = json.loads(
+            psql(
+                listener_conninfo,
+                """
 SELECT jsonb_build_object(
     'attempts', attempts,
     'claimed_at', claimed_at,
@@ -268,18 +268,18 @@ SELECT jsonb_build_object(
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-229';
 """,
-                )
             )
-            assert busy_row == {
-                "attempts": 1,
-                "claimed_at": None,
-                "last_error": "pane busy",
-                "queued": True,
-            }, busy_row
+        )
+        assert busy_row == {
+            "attempts": 1,
+            "claimed_at": None,
+            "last_error": "pane busy",
+            "queued": True,
+        }, busy_row
 
-            psql(
-                admin_conninfo,
-                """
+        psql(
+            admin_conninfo,
+            """
 UPDATE ticket_board.tickets
 SET manually_controlled = true
 WHERE id = 'PGU-229';
@@ -287,20 +287,20 @@ UPDATE ticket_board.ticket_notification_queue
 SET next_attempt_at = clock_timestamp() - interval '1 second'
 WHERE ticket_id = 'PGU-229';
 """,
-            )
-            busy[0] = False
-            final_review_delivery = final_review_listener.listen_once(max_notifications=1)
-            assert final_review_delivery == 1, final_review_delivery
-            assert sent == [("pgu-director:0.0", "PGU-229 -- Durable final review ready for your review")]
-            final_review_queue = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-229';",
-            )
-            assert final_review_queue == "0", final_review_queue
+        )
+        busy[0] = False
+        final_review_delivery = final_review_listener.listen_once(max_notifications=1)
+        assert final_review_delivery == 1, final_review_delivery
+        assert sent == [("pgu-director:0.0", "PGU-229 -- Durable final review ready for your review")]
+        final_review_queue = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-229';",
+        )
+        assert final_review_queue == "0", final_review_queue
 
-            psql(
-                admin_conninfo,
-                """
+        psql(
+            admin_conninfo,
+            """
 UPDATE ticket_board.tickets
 SET state = 'done'
 WHERE id = 'PGU-229';
@@ -322,26 +322,26 @@ SELECT ticket_board.enqueue_notification(
     'test-stale-final-review-state'
 );
 """,
-            )
-            sent.clear()
-            stale_state_delivery = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                activity_gate=lambda _target: False,
-                poll_seconds=0,
-                target_exists=lambda _target: True,
-            ).listen_once(max_notifications=1)
-            assert stale_state_delivery == 0, stale_state_delivery
-            assert sent == []
-            stale_state_queue = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-229';",
-            )
-            assert stale_state_queue == "0", stale_state_queue
+        )
+        sent.clear()
+        stale_state_delivery = TicketBoardNotifyListener(
+            conninfo=listener_conninfo,
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=lambda _target: False,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        ).listen_once(max_notifications=1)
+        assert stale_state_delivery == 0, stale_state_delivery
+        assert sent == []
+        stale_state_queue = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-229';",
+        )
+        assert stale_state_queue == "0", stale_state_queue
 
-            psql(
-                admin_conninfo,
-                f"""
+        psql(
+            admin_conninfo,
+            f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation,
     created_text, updated_text, source_json
@@ -368,26 +368,26 @@ SELECT ticket_board.enqueue_notification(
     'test-stale-final-review-recipient'
 );
 """,
-            )
-            sent.clear()
-            stale_recipient_delivery = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                activity_gate=lambda _target: False,
-                poll_seconds=0,
-                target_exists=lambda _target: True,
-            ).listen_once(max_notifications=1)
-            assert stale_recipient_delivery == 0, stale_recipient_delivery
-            assert sent == []
-            stale_recipient_queue = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-230';",
-            )
-            assert stale_recipient_queue == "0", stale_recipient_queue
+        )
+        sent.clear()
+        stale_recipient_delivery = TicketBoardNotifyListener(
+            conninfo=listener_conninfo,
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=lambda _target: False,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        ).listen_once(max_notifications=1)
+        assert stale_recipient_delivery == 0, stale_recipient_delivery
+        assert sent == []
+        stale_recipient_queue = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-230';",
+        )
+        assert stale_recipient_queue == "0", stale_recipient_queue
 
-            psql(
-                admin_conninfo,
-                f"""
+        psql(
+            admin_conninfo,
+            f"""
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
@@ -427,26 +427,26 @@ COMMIT;
 DELETE FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-226' AND kind = 'transition';
 """,
-            )
-            sent.clear()
-            cancelled_drop = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                activity_gate=lambda _target: False,
-                poll_seconds=0,
-                target_exists=lambda _target: True,
-            ).listen_once(max_notifications=1)
-            assert cancelled_drop == 0, cancelled_drop
-            assert sent == []
-            cancelled_queue = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-226';",
-            )
-            assert cancelled_queue == "0", cancelled_queue
+        )
+        sent.clear()
+        cancelled_drop = TicketBoardNotifyListener(
+            conninfo=listener_conninfo,
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=lambda _target: False,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        ).listen_once(max_notifications=1)
+        assert cancelled_drop == 0, cancelled_drop
+        assert sent == []
+        cancelled_queue = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-226';",
+        )
+        assert cancelled_queue == "0", cancelled_queue
 
-            psql(
-                admin_conninfo,
-                f"""
+        psql(
+            admin_conninfo,
+            f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
@@ -474,26 +474,26 @@ UPDATE ticket_board.tickets SET state = 'audit', commit_hash = 'abcdef1' WHERE i
 DELETE FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-227' AND kind = 'transition';
 """,
-            )
-            sent.clear()
-            picked_up_drop = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                activity_gate=lambda _target: False,
-                poll_seconds=0,
-                target_exists=lambda _target: True,
-            ).listen_once(max_notifications=1)
-            assert picked_up_drop == 0, picked_up_drop
-            assert sent == []
-            picked_up_queue = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-227';",
-            )
-            assert picked_up_queue == "0", picked_up_queue
+        )
+        sent.clear()
+        picked_up_drop = TicketBoardNotifyListener(
+            conninfo=listener_conninfo,
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=lambda _target: False,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        ).listen_once(max_notifications=1)
+        assert picked_up_drop == 0, picked_up_drop
+        assert sent == []
+        picked_up_queue = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-227';",
+        )
+        assert picked_up_queue == "0", picked_up_queue
 
-            psql(
-                admin_conninfo,
-                f"""
+        psql(
+            admin_conninfo,
+            f"""
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
@@ -513,11 +513,11 @@ SET last_activity_at = clock_timestamp() - interval '1 hour',
 WHERE ticket_id = 'PGU-228';
 SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
 """,
-            )
-            escalation_row = json.loads(
-                psql(
-                    listener_conninfo,
-                    """
+        )
+        escalation_row = json.loads(
+            psql(
+                listener_conninfo,
+                """
 SELECT jsonb_build_object(
     'kind', kind,
     'target_role', target_role,
@@ -528,45 +528,43 @@ FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-228'
   AND kind = 'escalation';
 """,
-                )
             )
-            assert escalation_row == {
-                "kind": "escalation",
-                "target_role": "director",
-                "message": "PRIORITY PGU-228 -- Still stuck escalation appears stuck for audit; check/reassign",
-                "payload_kind": "escalation",
-            }, escalation_row
-            psql(
-                admin_conninfo,
-                """
+        )
+        assert escalation_row == {
+            "kind": "escalation",
+            "target_role": "director",
+            "message": "PRIORITY PGU-228 -- Still stuck escalation appears stuck for audit; check/reassign",
+            "payload_kind": "escalation",
+        }, escalation_row
+        psql(
+            admin_conninfo,
+            """
 DELETE FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-228'
   AND kind = 'transition';
 """,
-            )
+        )
 
-            sent.clear()
-            escalation_delivered = TicketBoardNotifyListener(
-                conninfo=listener_conninfo,
-                sender=lambda target, message: sent.append((target, message)),
-                activity_gate=lambda _target: False,
-                poll_seconds=0,
-                target_exists=lambda _target: True,
-            ).listen_once(max_notifications=1)
-            assert escalation_delivered == 1, escalation_delivered
-            assert sent == [
-                (
-                    "pgu-director:0.0",
-                    "PRIORITY PGU-228 -- Still stuck escalation appears stuck for audit; check/reassign",
-                )
-            ]
-            escalation_queue = psql(
-                listener_conninfo,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-228';",
+        sent.clear()
+        escalation_delivered = TicketBoardNotifyListener(
+            conninfo=listener_conninfo,
+            sender=lambda target, message: sent.append((target, message)),
+            activity_gate=lambda _target: False,
+            poll_seconds=0,
+            target_exists=lambda _target: True,
+        ).listen_once(max_notifications=1)
+        assert escalation_delivered == 1, escalation_delivered
+        assert sent == [
+            (
+                "pgu-director:0.0",
+                "PRIORITY PGU-228 -- Still stuck escalation appears stuck for audit; check/reassign",
             )
-            assert escalation_queue == "0", escalation_queue
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
+        ]
+        escalation_queue = psql(
+            listener_conninfo,
+            "SELECT count(*) FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-228';",
+        )
+        assert escalation_queue == "0", escalation_queue
 
     print("ticket_board_notify_reconcile_postgres_test: ok")
     return 0

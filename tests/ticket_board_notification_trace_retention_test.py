@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -47,54 +49,53 @@ def psql(conninfo: str, sql: str) -> str:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-trace-retention.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-trace-retention.",
+        initdb_args=(),
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_trace_retention_test"
         conninfo = f"host={socket_dir} port={port} dbname={dbname}"
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
-            psql(conninfo, "CREATE ROLE ticket_board_service;")
-            psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
-            psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
+        psql(conninfo, "CREATE ROLE ticket_board_service;")
+        psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
+        psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
 
-            indexdef = psql(
-                conninfo,
-                """
+        indexdef = psql(
+            conninfo,
+            """
 SELECT indexdef
 FROM pg_indexes
 WHERE schemaname = 'ticket_board'
   AND tablename = 'notification_trace'
   AND indexname = 'notification_trace_send_lookup_idx';
 """,
-            )
-            assert "ticket_id" in indexdef
-            assert "target_role" in indexdef
-            assert "ticket_state_at_event" in indexdef
-            assert "WHERE ((kind = 'transition'::text) AND (event = 'send'::text))" in indexdef
+        )
+        assert "ticket_id" in indexdef
+        assert "target_role" in indexdef
+        assert "ticket_state_at_event" in indexdef
+        assert "WHERE ((kind = 'transition'::text) AND (event = 'send'::text))" in indexdef
 
-            source = json.dumps(
-                {
-                    "id": "PGU-31801",
-                    "title": "Trace retention",
-                    "body": "",
-                    "state": "in_progress",
-                    "assignee": "ops",
-                    "comments": [],
-                    "created": "2026-07-12T00:00:00+00:00",
-                    "updated": "2026-07-12T00:00:00+00:00",
-                },
-                sort_keys=True,
-            ).replace("'", "''")
-            psql(
-                conninfo,
-                f"""
+        source = json.dumps(
+            {
+                "id": "PGU-31801",
+                "title": "Trace retention",
+                "body": "",
+                "state": "in_progress",
+                "assignee": "ops",
+                "comments": [],
+                "created": "2026-07-12T00:00:00+00:00",
+                "updated": "2026-07-12T00:00:00+00:00",
+            },
+            sort_keys=True,
+        ).replace("'", "''")
+        psql(
+            conninfo,
+            f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
@@ -115,25 +116,25 @@ VALUES
     (clock_timestamp() - interval '2 hours', 'PGU-31801', 'ops', 'transition', 'send_failed'),
     (clock_timestamp(), 'PGU-31801', 'ops', 'transition', 'gate_defer');
 """,
-            )
+        )
 
-            deleted = psql(conninfo, "SELECT ticket_board.prune_notification_trace(clock_timestamp(), interval '1 hour');")
-            assert deleted == "4", deleted
-            remaining = json.loads(
-                psql(
-                    conninfo,
-                    """
+        deleted = psql(conninfo, "SELECT ticket_board.prune_notification_trace(clock_timestamp(), interval '1 hour');")
+        assert deleted == "4", deleted
+        remaining = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_agg(event ORDER BY event)::text
 FROM ticket_board.notification_trace
 WHERE ticket_id = 'PGU-31801';
 """,
-                )
             )
-            assert remaining == ["ack", "drop", "enqueue", "gate_defer", "send", "send_failed"], remaining
+        )
+        assert remaining == ["ack", "drop", "enqueue", "gate_defer", "send", "send_failed"], remaining
 
-            explain_active_work = psql(
-                conninfo,
-                """
+        explain_active_work = psql(
+            conninfo,
+            """
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
 SELECT max(trace.ts) AS last_sent_at
@@ -144,13 +145,13 @@ WHERE trace.ticket_id = 'PGU-31801'
   AND trace.event = 'send'
   AND trace.ticket_state_at_event = 'in_progress';
 """,
-            )
-            assert "notification_trace_send_lookup_idx" in explain_active_work, explain_active_work
-            assert "Index Only Scan" in explain_active_work, explain_active_work
+        )
+        assert "notification_trace_send_lookup_idx" in explain_active_work, explain_active_work
+        assert "Index Only Scan" in explain_active_work, explain_active_work
 
-            explain_signature = psql(
-                conninfo,
-                """
+        explain_signature = psql(
+            conninfo,
+            """
 SET enable_seqscan = off;
 EXPLAIN (COSTS OFF)
 SELECT max(nt.id)::text
@@ -159,11 +160,9 @@ WHERE nt.ticket_id = 'PGU-31801'
   AND nt.kind = 'transition'
   AND nt.event = 'send';
 """,
-            )
-            assert "notification_trace_send_lookup_idx" in explain_signature, explain_signature
-            assert "Index Only Scan" in explain_signature, explain_signature
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        )
+        assert "notification_trace_send_lookup_idx" in explain_signature, explain_signature
+        assert "Index Only Scan" in explain_signature, explain_signature
 
     print("ticket_board_notification_trace_retention_test: ok")
     return 0

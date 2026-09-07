@@ -24,6 +24,8 @@ except ModuleNotFoundError:
 
 from scripts.ticket_board.app import TicketBoardApp
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
@@ -106,71 +108,67 @@ def create_roles(conn: str) -> None:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-unresolved-blockers-api.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
+    with temporary_cluster(
+        prefix="ticket-board-unresolved-blockers-api.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         frames = root / "frames"
         assets = root / "assets"
-        socket_dir.mkdir()
         frames.mkdir()
         assets.mkdir()
-        port = free_port()
         dbname = "pgu_unresolved_blockers_test"
         admin_conn = conninfo(socket_dir, port, dbname)
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            create_roles(admin_conn)
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        create_roles(admin_conn)
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            insert_ticket(admin_conn, "PGU-1", "Resolved blocker")
-            insert_ticket(admin_conn, "PGU-2", "Unresolved blocker")
-            insert_ticket(admin_conn, "PGU-3", "Blocked ticket")
-            psql(
-                admin_conn,
-                """
+        insert_ticket(admin_conn, "PGU-1", "Resolved blocker")
+        insert_ticket(admin_conn, "PGU-2", "Unresolved blocker")
+        insert_ticket(admin_conn, "PGU-3", "Blocked ticket")
+        psql(
+            admin_conn,
+            """
 INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position, resolved)
 VALUES ('PGU-3', 'PGU-1', 0, false);
 """,
-            )
+        )
 
-            app = TicketBoardApp(
-                frames,
-                assets,
-                database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
-            )
-            unresolved = app.get_ticket("PGU-3")
-            assert unresolved["blocked_by"] == ["PGU-1"], unresolved
-            assert unresolved["blockers"] == [{"id": "PGU-1", "resolved": False}], unresolved
+        app = TicketBoardApp(
+            frames,
+            assets,
+            database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
+        )
+        unresolved = app.get_ticket("PGU-3")
+        assert unresolved["blocked_by"] == ["PGU-1"], unresolved
+        assert unresolved["blockers"] == [{"id": "PGU-1", "resolved": False}], unresolved
 
-            psql(admin_conn, "UPDATE ticket_board.ticket_blockers SET resolved = true WHERE ticket_id = 'PGU-3';")
-            resolved_only = app.get_ticket("PGU-3")
-            assert resolved_only["blocked_by"] == [], resolved_only
-            assert resolved_only["blockers"] == [{"id": "PGU-1", "resolved": True}], resolved_only
+        psql(admin_conn, "UPDATE ticket_board.ticket_blockers SET resolved = true WHERE ticket_id = 'PGU-3';")
+        resolved_only = app.get_ticket("PGU-3")
+        assert resolved_only["blocked_by"] == [], resolved_only
+        assert resolved_only["blockers"] == [{"id": "PGU-1", "resolved": True}], resolved_only
 
-            psql(
-                admin_conn,
-                """
+        psql(
+            admin_conn,
+            """
 INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position, resolved)
 VALUES ('PGU-3', 'PGU-2', 1, false);
 """,
-            )
-            mixed = app.get_ticket("PGU-3")
-            assert mixed["blocked_by"] == ["PGU-2"], mixed
-            assert mixed["blockers"] == [
-                {"id": "PGU-1", "resolved": True},
-                {"id": "PGU-2", "resolved": False},
-            ], mixed
+        )
+        mixed = app.get_ticket("PGU-3")
+        assert mixed["blocked_by"] == ["PGU-2"], mixed
+        assert mixed["blockers"] == [
+            {"id": "PGU-1", "resolved": True},
+            {"id": "PGU-2", "resolved": False},
+        ], mixed
 
-            source = json.loads(psql(admin_conn, "SELECT ticket_board.build_ticket_source_json('PGU-3')::text;"))
-            assert source["blocked_by"] == ["PGU-2"], source
-            assert source["blockers"] == mixed["blockers"], source
-        finally:
-            run(["pg_ctl", "-D", str(data_dir), "-w", "stop"], capture=False)
+        source = json.loads(psql(admin_conn, "SELECT ticket_board.build_ticket_source_json('PGU-3')::text;"))
+        assert source["blocked_by"] == ["PGU-2"], source
+        assert source["blockers"] == mixed["blockers"], source
 
     print("ticket_board_unresolved_blockers_api_test: ok")
     return 0

@@ -27,6 +27,8 @@ from scripts.ticket_board.notify_listener import (
     TicketBoardNotifyListener,
 )
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 def run(args: list[str], *, capture: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     if capture:
@@ -56,25 +58,24 @@ def _as_text(value: object) -> str:
 
 
 def _main_body() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-idle-turn-end.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-idle-turn-end.",
+        initdb_args=(),
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_idle_turn_end_test"
         conninfo = f"host={socket_dir} port={port} dbname={dbname}"
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
-            psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
-            psql(conninfo, "CREATE ROLE ticket_board_service;")
-            psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
-            psql(
-                conninfo,
-                """
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname])
+        psql(conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
+        psql(conninfo, "CREATE ROLE ticket_board_service;")
+        psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+        psql(
+            conninfo,
+            """
 GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;
 GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
@@ -133,11 +134,11 @@ INSERT INTO ticket_board.notification_trace (
 
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
+        )
 
-            first_wave_returned = psql(
-                conninfo,
-                """
+        first_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -154,12 +155,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert first_wave_returned == "3", first_wave_returned
-            first_wave_rows = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert first_wave_returned == "3", first_wave_returned
+        first_wave_rows = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_object_agg(ticket_id, row_json ORDER BY ticket_id)::text
 FROM (
     SELECT
@@ -186,49 +187,49 @@ FROM (
     WHERE t.id IN ('PGU-3541', 'PGU-3543', 'PGU-3544', 'PGU-3545', 'PGU-3546')
 ) s;
 """,
-                )
             )
-            assert first_wave_rows == {
-                "PGU-3541": {
-                    "queued": None,
-                    "message": None,
-                },
-                "PGU-3543": {
-                    "queued": {"idle_reminder:audit": 1},
-                    "message": "PGU-3543 is waiting in your audit queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-                },
-                "PGU-3544": {
-                    "queued": {"idle_reminder:ops": 1},
-                    "message": "PGU-3544 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-                },
-                "PGU-3545": {
-                    "queued": {"idle_reminder:inspector": 1},
-                    "message": "PGU-3545 is waiting in your inspection queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-                },
-                "PGU-3546": {
-                    "queued": None,
-                    "message": None,
-                },
-            }, first_wave_rows
-            for ticket_id in ("PGU-3543", "PGU-3544", "PGU-3545"):
-                assert "<" not in first_wave_rows[ticket_id]["message"], first_wave_rows
-                assert "User" not in first_wave_rows[ticket_id]["message"], first_wave_rows
-            first_wave_counts = json.loads(
-                psql(
-                    conninfo,
-                    """
+        )
+        assert first_wave_rows == {
+            "PGU-3541": {
+                "queued": None,
+                "message": None,
+            },
+            "PGU-3543": {
+                "queued": {"idle_reminder:audit": 1},
+                "message": "PGU-3543 is waiting in your audit queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+            },
+            "PGU-3544": {
+                "queued": {"idle_reminder:ops": 1},
+                "message": "PGU-3544 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+            },
+            "PGU-3545": {
+                "queued": {"idle_reminder:inspector": 1},
+                "message": "PGU-3545 is waiting in your inspection queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+            },
+            "PGU-3546": {
+                "queued": None,
+                "message": None,
+            },
+        }, first_wave_rows
+        for ticket_id in ("PGU-3543", "PGU-3544", "PGU-3545"):
+            assert "<" not in first_wave_rows[ticket_id]["message"], first_wave_rows
+            assert "User" not in first_wave_rows[ticket_id]["message"], first_wave_rows
+        first_wave_counts = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_object_agg(ticket_id, idle_reminder_count ORDER BY ticket_id)::text
 FROM ticket_board.ticket_notification_state
 WHERE ticket_id IN ('PGU-3543', 'PGU-3544', 'PGU-3545');
 """,
-                )
             )
-            assert first_wave_counts == {"PGU-3543": 0, "PGU-3544": 0, "PGU-3545": 0}, first_wave_counts
+        )
+        assert first_wave_counts == {"PGU-3543": 0, "PGU-3544": 0, "PGU-3545": 0}, first_wave_counts
 
-            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            analysis_wave_returned = psql(
-                conninfo,
-                """
+        psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+        analysis_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -240,12 +241,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert analysis_wave_returned == "1", analysis_wave_returned
-            analysis_wave_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert analysis_wave_returned == "1", analysis_wave_returned
+        analysis_wave_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'notification_id', id,
     'target_role', target_role,
@@ -257,38 +258,38 @@ WHERE ticket_id = 'PGU-3542'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert analysis_wave_row == {
-                "notification_id": analysis_wave_row["notification_id"],
-                "target_role": "director",
-                "message": "PGU-3542 is waiting in your analysis queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.",
-                "state": "analysis",
-            }, analysis_wave_row
-            assert "<" not in analysis_wave_row["message"], analysis_wave_row
-            assert "Do NOT do nothing" not in analysis_wave_row["message"], analysis_wave_row
-            analysis_reminder_count_before_ack = psql(
-                conninfo,
-                "SELECT idle_reminder_count::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-3542';",
-            ).strip()
-            assert analysis_reminder_count_before_ack == "0", analysis_reminder_count_before_ack
-            psql(
-                conninfo,
-                f"""
+        )
+        assert analysis_wave_row == {
+            "notification_id": analysis_wave_row["notification_id"],
+            "target_role": "director",
+            "message": "PGU-3542 is waiting in your analysis queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.",
+            "state": "analysis",
+        }, analysis_wave_row
+        assert "<" not in analysis_wave_row["message"], analysis_wave_row
+        assert "Do NOT do nothing" not in analysis_wave_row["message"], analysis_wave_row
+        analysis_reminder_count_before_ack = psql(
+            conninfo,
+            "SELECT idle_reminder_count::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-3542';",
+        ).strip()
+        assert analysis_reminder_count_before_ack == "0", analysis_reminder_count_before_ack
+        psql(
+            conninfo,
+            f"""
 SET ROLE ticket_board_listener;
 SELECT ticket_board.ack_notification({analysis_wave_row['notification_id']});
 RESET ROLE;
 """,
-            )
-            analysis_reminder_count_after_ack = psql(
-                conninfo,
-                "SELECT idle_reminder_count::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-3542';",
-            ).strip()
-            assert analysis_reminder_count_after_ack == "1", analysis_reminder_count_after_ack
+        )
+        analysis_reminder_count_after_ack = psql(
+            conninfo,
+            "SELECT idle_reminder_count::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-3542';",
+        ).strip()
+        assert analysis_reminder_count_after_ack == "1", analysis_reminder_count_after_ack
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.ticket_notification_queue (
     ticket_id, kind, target_role, message, payload, dedupe_key
@@ -301,10 +302,10 @@ INSERT INTO ticket_board.ticket_notification_queue (
     'pending-primary:PGU-3542:director'
 );
 """,
-            )
-            deferred_wave_returned = psql(
-                conninfo,
-                """
+        )
+        deferred_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -316,12 +317,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert deferred_wave_returned == "0", deferred_wave_returned
-            deferred_wave_counts = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert deferred_wave_returned == "0", deferred_wave_returned
+        deferred_wave_counts = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_object_agg(kind || ':' || target_role, count ORDER BY kind || ':' || target_role)::text
 FROM (
     SELECT kind, target_role, count(*)::int AS count
@@ -330,14 +331,14 @@ FROM (
     GROUP BY kind, target_role
 ) counts;
 """,
-                )
             )
-            assert deferred_wave_counts == {"transition:director": 1}, deferred_wave_counts
+        )
+        assert deferred_wave_counts == {"transition:director": 1}, deferred_wave_counts
 
-            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            delivered_primary_wave_returned = psql(
-                conninfo,
-                """
+        psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+        delivered_primary_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -349,12 +350,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert delivered_primary_wave_returned == "1", delivered_primary_wave_returned
-            delivered_primary_wave_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert delivered_primary_wave_returned == "1", delivered_primary_wave_returned
+        delivered_primary_wave_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -366,18 +367,18 @@ WHERE ticket_id = 'PGU-3542'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert delivered_primary_wave_row == {
-                "target_role": "director",
-                "kind": "idle_reminder",
-                "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell User directly what is wrong. Do NOT do nothing.",
-                "state": "analysis",
-            }, delivered_primary_wave_row
+        )
+        assert delivered_primary_wave_row == {
+            "target_role": "director",
+            "kind": "idle_reminder",
+            "message": "PGU-3542 is still in analysis and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell User directly what is wrong. Do NOT do nothing.",
+            "state": "analysis",
+        }, delivered_primary_wave_row
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 DELETE FROM ticket_board.ticket_notification_queue;
 UPDATE ticket_board.tickets
 SET state = 'in_progress',
@@ -386,10 +387,10 @@ SET state = 'in_progress',
 WHERE id = 'PGU-3542';
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            advanced_wave_returned = psql(
-                conninfo,
-                """
+        )
+        advanced_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -401,12 +402,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert advanced_wave_returned == "1", advanced_wave_returned
-            advanced_wave_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert advanced_wave_returned == "1", advanced_wave_returned
+        advanced_wave_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -418,20 +419,20 @@ WHERE ticket_id = 'PGU-3542'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                ),
-            )
-            assert advanced_wave_row == {
-                "target_role": "main",
-                "kind": "idle_reminder",
-                "message": "PGU-3542 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-                "state": "in_progress",
-            }, advanced_wave_row
-            assert "<" not in advanced_wave_row["message"], advanced_wave_row
-            assert "User" not in advanced_wave_row["message"], advanced_wave_row
+            ),
+        )
+        assert advanced_wave_row == {
+            "target_role": "main",
+            "kind": "idle_reminder",
+            "message": "PGU-3542 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+            "state": "in_progress",
+        }, advanced_wave_row
+        assert "<" not in advanced_wave_row["message"], advanced_wave_row
+        assert "User" not in advanced_wave_row["message"], advanced_wave_row
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 DELETE FROM ticket_board.ticket_notification_queue;
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
@@ -446,10 +447,10 @@ SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
 WHERE ticket_id = 'PGU-3547';
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            director_review_returned = psql(
-                conninfo,
-                """
+        )
+        director_review_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -461,12 +462,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert director_review_returned == "1", director_review_returned
-            director_review_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert director_review_returned == "1", director_review_returned
+        director_review_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'message', message,
@@ -477,44 +478,44 @@ WHERE ticket_id = 'PGU-3547'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert director_review_row == {
-                "target_role": "director",
-                "message": "PGU-3547 is waiting in your director_review queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.",
-                "state": "director_review",
-            }, director_review_row
-            assert "<" not in director_review_row["message"], director_review_row
-            assert "Do NOT do nothing" not in director_review_row["message"], director_review_row
+        )
+        assert director_review_row == {
+            "target_role": "director",
+            "message": "PGU-3547 is waiting in your director_review queue. Advance it or hand it off. If you cannot move it forward, tell User what is wrong.",
+            "state": "director_review",
+        }, director_review_row
+        assert "<" not in director_review_row["message"], director_review_row
+        assert "Do NOT do nothing" not in director_review_row["message"], director_review_row
 
-            director_review_notification_id = psql(
-                conninfo,
-                """
+        director_review_notification_id = psql(
+            conninfo,
+            """
 SELECT id::text
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-3547'
 ORDER BY id DESC
 LIMIT 1;
 """,
-            ).strip()
-            psql(
-                conninfo,
-                f"""
+        ).strip()
+        psql(
+            conninfo,
+            f"""
 SET ROLE ticket_board_listener;
 SELECT ticket_board.ack_notification({director_review_notification_id});
 RESET ROLE;
 """,
-            )
-            director_review_count_after_first_ack = psql(
-                conninfo,
-                "SELECT idle_reminder_count::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-3547';",
-            ).strip()
-            assert director_review_count_after_first_ack == "1", director_review_count_after_first_ack
-            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+        )
+        director_review_count_after_first_ack = psql(
+            conninfo,
+            "SELECT idle_reminder_count::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-3547';",
+        ).strip()
+        assert director_review_count_after_first_ack == "1", director_review_count_after_first_ack
+        psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
 
-            second_director_review_returned = psql(
-                conninfo,
-                """
+        second_director_review_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -526,12 +527,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert second_director_review_returned == "1", second_director_review_returned
-            second_director_review_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert second_director_review_returned == "1", second_director_review_returned
+        second_director_review_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -542,18 +543,18 @@ WHERE ticket_id = 'PGU-3547'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert second_director_review_row == {
-                "target_role": "director",
-                "kind": "idle_reminder",
-                "message": "PGU-3547 is still in director_review and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell User directly what is wrong. Do NOT do nothing.",
-            }, second_director_review_row
+        )
+        assert second_director_review_row == {
+            "target_role": "director",
+            "kind": "idle_reminder",
+            "message": "PGU-3547 is still in director_review and you haven't advanced it. Advance it now (do the work or hand it off). If you genuinely CANNOT move it forward, tell User directly what is wrong. Do NOT do nothing.",
+        }, second_director_review_row
 
-            psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
-            repeated_first_wave_returned = psql(
-                conninfo,
-                """
+        psql(conninfo, "DELETE FROM ticket_board.ticket_notification_queue;")
+        repeated_first_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('app', (clock_timestamp() - interval '5 seconds')::text),
@@ -561,12 +562,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 )::text;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert repeated_first_wave_returned == "1", repeated_first_wave_returned
-            repeated_first_wave_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert repeated_first_wave_returned == "1", repeated_first_wave_returned
+        repeated_first_wave_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'notification_id', id,
     'target_role', target_role,
@@ -578,25 +579,25 @@ WHERE ticket_id = 'PGU-3661'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert repeated_first_wave_row == {
-                "notification_id": repeated_first_wave_row["notification_id"],
-                "target_role": "app",
-                "kind": "idle_reminder",
-                "message": "PGU-3661 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-            }, repeated_first_wave_row
-            psql(
-                conninfo,
-                f"""
+        )
+        assert repeated_first_wave_row == {
+            "notification_id": repeated_first_wave_row["notification_id"],
+            "target_role": "app",
+            "kind": "idle_reminder",
+            "message": "PGU-3661 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+        }, repeated_first_wave_row
+        psql(
+            conninfo,
+            f"""
 SET ROLE ticket_board_listener;
 SELECT ticket_board.ack_notification({repeated_first_wave_row['notification_id']});
 RESET ROLE;
 """,
-            )
-            repeated_wave_returned = psql(
-                conninfo,
-                """
+        )
+        repeated_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('app', (clock_timestamp() - interval '4 seconds')::text),
@@ -604,12 +605,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 )::text;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert repeated_wave_returned == "1", repeated_wave_returned
-            repeated_wave_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert repeated_wave_returned == "1", repeated_wave_returned
+        repeated_wave_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'queued', (
         SELECT jsonb_object_agg(kind || ':' || target_role, count ORDER BY kind || ':' || target_role)
@@ -643,20 +644,20 @@ SELECT jsonb_build_object(
     )
 )::text;
 """,
-                )
             )
-            assert repeated_wave_row == {
-                "queued": {
-                    "escalation:director": 1,
-                },
-                "latest_target_role": "director",
-                "latest_kind": "escalation",
-                "latest_message": "app was reminded about PGU-3661 (in in_progress) and still hasn't advanced it -- may be stuck.",
-            }, repeated_wave_row
+        )
+        assert repeated_wave_row == {
+            "queued": {
+                "escalation:director": 1,
+            },
+            "latest_target_role": "director",
+            "latest_kind": "escalation",
+            "latest_message": "app was reminded about PGU-3661 (in in_progress) and still hasn't advanced it -- may be stuck.",
+        }, repeated_wave_row
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 UPDATE ticket_board.tickets
 SET manually_controlled = true;
 DELETE FROM ticket_board.ticket_notification_queue;
@@ -674,10 +675,10 @@ WHERE ticket_id = 'PGU-8841';
 SELECT ticket_board.append_ticket_comment('PGU-8841', 'ops', 'Done, but blocked on director import.');
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            reported_blocker_wave_returned = psql(
-                conninfo,
-                """
+        )
+        reported_blocker_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -689,12 +690,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert reported_blocker_wave_returned == "0", reported_blocker_wave_returned
-            reported_blocker_rows = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert reported_blocker_wave_returned == "0", reported_blocker_wave_returned
+        reported_blocker_rows = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'reported_queue_count', (
         SELECT count(*)::int
@@ -703,15 +704,15 @@ SELECT jsonb_build_object(
     )
 )::text;
 """,
-                )
             )
-            assert reported_blocker_rows == {
-                "reported_queue_count": 0,
-            }, reported_blocker_rows
+        )
+        assert reported_blocker_rows == {
+            "reported_queue_count": 0,
+        }, reported_blocker_rows
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 UPDATE ticket_board.tickets
 SET manually_controlled = true;
 DELETE FROM ticket_board.ticket_notification_queue;
@@ -729,10 +730,10 @@ WHERE ticket_id = 'PGU-8842';
 SELECT ticket_board.append_ticket_comment('PGU-8842', 'director', 'Imported the branch; submit when ready.');
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            director_comment_wave_returned = psql(
-                conninfo,
-                """
+        )
+        director_comment_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -744,12 +745,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert director_comment_wave_returned == "1", director_comment_wave_returned
-            director_comment_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert director_comment_wave_returned == "1", director_comment_wave_returned
+        director_comment_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -760,17 +761,17 @@ WHERE ticket_id = 'PGU-8842'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert director_comment_row == {
-                "target_role": "ops",
-                "kind": "idle_reminder",
-                "message": "PGU-8842 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-            }, director_comment_row
+        )
+        assert director_comment_row == {
+            "target_role": "ops",
+            "kind": "idle_reminder",
+            "message": "PGU-8842 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+        }, director_comment_row
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 UPDATE ticket_board.tickets
 SET manually_controlled = true;
 DELETE FROM ticket_board.ticket_notification_queue;
@@ -799,10 +800,10 @@ INSERT INTO ticket_board.ticket_comments (
 );
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            old_comment_wave_returned = psql(
-                conninfo,
-                """
+        )
+        old_comment_wave_returned = psql(
+            conninfo,
+            """
 SET ROLE ticket_board_listener;
 WITH params AS (
     SELECT clock_timestamp() AS now_at
@@ -814,12 +815,12 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
 FROM params;
 RESET ROLE;
 """,
-            ).splitlines()[-2]
-            assert old_comment_wave_returned == "1", old_comment_wave_returned
-            old_comment_row = json.loads(
-                psql(
-                    conninfo,
-                    """
+        ).splitlines()[-2]
+        assert old_comment_wave_returned == "1", old_comment_wave_returned
+        old_comment_row = json.loads(
+            psql(
+                conninfo,
+                """
 SELECT jsonb_build_object(
     'target_role', target_role,
     'kind', kind,
@@ -830,17 +831,17 @@ WHERE ticket_id = 'PGU-8843'
 ORDER BY id DESC
 LIMIT 1;
 """,
-                )
             )
-            assert old_comment_row == {
-                "target_role": "ops",
-                "kind": "idle_reminder",
-                "message": "PGU-8843 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
-            }, old_comment_row
+        )
+        assert old_comment_row == {
+            "target_role": "ops",
+            "kind": "idle_reminder",
+            "message": "PGU-8843 is waiting in your in_progress queue. Advance it or hand it off. If you cannot move it forward, tell the director what is wrong.",
+        }, old_comment_row
 
-            psql(
-                conninfo,
-                """
+        psql(
+            conninfo,
+            """
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
 ) VALUES (
@@ -868,33 +869,33 @@ INSERT INTO ticket_board.notification_trace (
 );
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            listener_conninfo = f"host={socket_dir} port={port} dbname={dbname} user=ticket_board_listener"
+        )
+        listener_conninfo = f"host={socket_dir} port={port} dbname={dbname} user=ticket_board_listener"
 
-            def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(args, 0, stdout="0 23 24\n")
+        def cursor_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 0, stdout="0 23 24\n")
 
-            def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                return subprocess.CompletedProcess(args, 0, stdout="Working (7s · esc to interrupt)\n")
+        def capture_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(args, 0, stdout="Working (7s · esc to interrupt)\n")
 
-            state_store = PaneHookStateStore(root / "pane-state")
-            state_store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=time.time() - 60 * 60)
-            gate = PaneActivityGate(
-                state_store=state_store,
-                cursor_position_runner=cursor_runner,
-                capture_pane_runner=capture_runner,
-            )
-            listener = TicketBoardNotifyListener(
-                conninfo="",
-                activity_gate=gate.is_working,
-                sender=lambda _target, _message: None,
-                present_idle_freshness_seconds=900,
-            )
-            with psycopg.connect(listener_conninfo, autocommit=True) as listener_conn:
-                first_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
-                assert first_present_idle == 1, first_present_idle
-                first_escalation_id = listener_conn.execute(
-                    """
+        state_store = PaneHookStateStore(root / "pane-state")
+        state_store.write("pgu-ops:0.0", "idle", source="codex.SessionStart", now=time.time() - 60 * 60)
+        gate = PaneActivityGate(
+            state_store=state_store,
+            cursor_position_runner=cursor_runner,
+            capture_pane_runner=capture_runner,
+        )
+        listener = TicketBoardNotifyListener(
+            conninfo="",
+            activity_gate=gate.is_working,
+            sender=lambda _target, _message: None,
+            present_idle_freshness_seconds=900,
+        )
+        with psycopg.connect(listener_conninfo, autocommit=True) as listener_conn:
+            first_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
+            assert first_present_idle == 1, first_present_idle
+            first_escalation_id = listener_conn.execute(
+                """
 SELECT id
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-9001'
@@ -903,30 +904,30 @@ WHERE ticket_id = 'PGU-9001'
 ORDER BY id DESC
 LIMIT 1
 """
-                ).fetchone()[0]
-                listener_conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (first_escalation_id,))
+            ).fetchone()[0]
+            listener_conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (first_escalation_id,))
 
-                second_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
-                assert second_present_idle == 0, second_present_idle
-                repeated_escalation_count = listener_conn.execute(
-                    """
+            second_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
+            assert second_present_idle == 0, second_present_idle
+            repeated_escalation_count = listener_conn.execute(
+                """
 SELECT count(*)::int
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-9001'
 """
-                ).fetchone()[0]
-                assert repeated_escalation_count == 0, repeated_escalation_count
+            ).fetchone()[0]
+            assert repeated_escalation_count == 0, repeated_escalation_count
 
-            # SYRD-32 cross-layer contract: suppressing a reminder because its
-            # owner started working must not spend that owner's reminder round.
-            # ack_notification bumps idle_reminder_count, which the generator
-            # reads as "already reminded" and answers with an escalation to the
-            # director; discard_notification must not.
-            # Fixture writes need the owning connection; the listener role holds
-            # only SELECT plus the gated notification functions.
-            psql(
-                conninfo,
-                """
+        # SYRD-32 cross-layer contract: suppressing a reminder because its
+        # owner started working must not spend that owner's reminder round.
+        # ack_notification bumps idle_reminder_count, which the generator
+        # reads as "already reminded" and answers with an escalation to the
+        # director; discard_notification must not.
+        # Fixture writes need the owning connection; the listener role holds
+        # only SELECT plus the gated notification functions.
+        psql(
+            conninfo,
+            """
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, audit_signoff, created_text, updated_text, source_json
 ) VALUES (
@@ -945,75 +946,73 @@ WHERE ticket_id = 'PGU-9032';
 
 DELETE FROM ticket_board.ticket_notification_queue;
 """,
-            )
-            with psycopg.connect(listener_conninfo, autocommit=True) as stale_conn:
-                def inspector_wave(minutes_ago: int) -> tuple[int, str, str]:
-                    stale_conn.execute(
-                        """
+        )
+        with psycopg.connect(listener_conninfo, autocommit=True) as stale_conn:
+            def inspector_wave(minutes_ago: int) -> tuple[int, str, str]:
+                stale_conn.execute(
+                    """
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('inspector', (clock_timestamp() - make_interval(mins => %s))::text),
     clock_timestamp()
 )
 """,
-                        (minutes_ago,),
-                    )
-                    row = stale_conn.execute(
-                        """
+                    (minutes_ago,),
+                )
+                row = stale_conn.execute(
+                    """
 SELECT id, kind, target_role
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-9032'
 ORDER BY id DESC
 LIMIT 1
 """
-                    ).fetchone()
-                    assert row is not None, "no reminder was queued"
-                    # This connection returns text columns unconverted, the same
-                    # reason notify_listener carries _decode_text.
-                    return int(row[0]), _as_text(row[1]), _as_text(row[2])
+                ).fetchone()
+                assert row is not None, "no reminder was queued"
+                # This connection returns text columns unconverted, the same
+                # reason notify_listener carries _decode_text.
+                return int(row[0]), _as_text(row[1]), _as_text(row[2])
 
-                def reminder_count() -> int:
-                    return stale_conn.execute(
-                        "SELECT idle_reminder_count FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-9032'"
-                    ).fetchone()[0]
+            def reminder_count() -> int:
+                return stale_conn.execute(
+                    "SELECT idle_reminder_count FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-9032'"
+                ).fetchone()[0]
 
-                first_id, first_kind, first_target = inspector_wave(9)
-                assert (first_kind, first_target) == ("idle_reminder", "inspector"), (first_kind, first_target)
-                assert reminder_count() == 0, reminder_count()
+            first_id, first_kind, first_target = inspector_wave(9)
+            assert (first_kind, first_target) == ("idle_reminder", "inspector"), (first_kind, first_target)
+            assert reminder_count() == 0, reminder_count()
 
-                # The Inspector resumed work before delivery, so the listener
-                # suppresses the pane nudge and discards the queue row.
-                stale_conn.execute(
-                    "SELECT ticket_board.discard_notification(%s::bigint, %s::text)",
-                    (first_id, "stale_reminder_work_observed"),
-                )
-                assert reminder_count() == 0, reminder_count()
-                assert stale_conn.execute(
-                    "SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-9032'"
-                ).fetchone()[0] == 0
-                assert stale_conn.execute(
-                    """
+            # The Inspector resumed work before delivery, so the listener
+            # suppresses the pane nudge and discards the queue row.
+            stale_conn.execute(
+                "SELECT ticket_board.discard_notification(%s::bigint, %s::text)",
+                (first_id, "stale_reminder_work_observed"),
+            )
+            assert reminder_count() == 0, reminder_count()
+            assert stale_conn.execute(
+                "SELECT count(*)::int FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-9032'"
+            ).fetchone()[0] == 0
+            assert stale_conn.execute(
+                """
 SELECT count(*)::int
 FROM ticket_board.notification_trace
 WHERE ticket_id = 'PGU-9032' AND event = 'discard' AND busy_reason = 'stale_reminder_work_observed'
 """
-                ).fetchone()[0] == 1
+            ).fetchone()[0] == 1
 
-                # The next wave must still be the Inspector's own first
-                # reminder, not an escalation telling the director the
-                # Inspector was reminded and ignored it.
-                second_id, second_kind, second_target = inspector_wave(8)
-                assert (second_kind, second_target) == ("idle_reminder", "inspector"), (second_kind, second_target)
-                assert reminder_count() == 0, reminder_count()
+            # The next wave must still be the Inspector's own first
+            # reminder, not an escalation telling the director the
+            # Inspector was reminded and ignored it.
+            second_id, second_kind, second_target = inspector_wave(8)
+            assert (second_kind, second_target) == ("idle_reminder", "inspector"), (second_kind, second_target)
+            assert reminder_count() == 0, reminder_count()
 
-                # A genuinely delivered reminder still spends the round and
-                # escalates on the following wave, so the ladder is intact and
-                # the discard path is the only difference.
-                stale_conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (second_id,))
-                assert reminder_count() == 1, reminder_count()
-                _third_id, third_kind, third_target = inspector_wave(7)
-                assert (third_kind, third_target) == ("escalation", "director"), (third_kind, third_target)
-        finally:
-            run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], capture=False)
+            # A genuinely delivered reminder still spends the round and
+            # escalates on the following wave, so the ladder is intact and
+            # the discard path is the only difference.
+            stale_conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (second_id,))
+            assert reminder_count() == 1, reminder_count()
+            _third_id, third_kind, third_target = inspector_wave(7)
+            assert (third_kind, third_target) == ("escalation", "director"), (third_kind, third_target)
 
     print("ticket_board_idle_turn_end_nudges_test: ok")
     return 0

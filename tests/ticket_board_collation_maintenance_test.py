@@ -14,6 +14,8 @@ SCRIPT = ROOT / "scripts" / "ticket-board-refresh-collation-version"
 
 from standalone_test_runner import run_module_tests
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 def run(args: list[str], *, input_text: str | None = None, capture: bool = True) -> subprocess.CompletedProcess[str]:
     if capture:
@@ -76,62 +78,53 @@ def test_default_mode_is_dry_run() -> None:
 
 
 def test_execute_handles_database_without_ticket_board_schema() -> None:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-collation.") as tmp:
-        root = Path(tmp)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-collation.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", "maintenance_no_schema"])
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", "board_with_schema"])
-            psql(
-                socket_dir,
-                port,
-                "board_with_schema",
-                """
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", "maintenance_no_schema"])
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", "board_with_schema"])
+        psql(
+            socket_dir,
+            port,
+            "board_with_schema",
+            """
 CREATE SCHEMA ticket_board;
 CREATE TABLE ticket_board.tickets (id text PRIMARY KEY);
 INSERT INTO ticket_board.tickets (id) VALUES ('TEST-1'), ('TEST-2');
 """,
-            )
+        )
 
-            result = subprocess.run(
-                [
-                    str(SCRIPT),
-                    "--host",
-                    str(socket_dir),
-                    "--port",
-                    str(port),
-                    "--user",
-                    "postgres",
-                    "--database",
-                    "maintenance_no_schema",
-                    "--database",
-                    "board_with_schema",
-                    "--execute",
-                    "--expected-ticket-count",
-                    "2",
-                ],
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            assert result.returncode == 0, result.stderr + result.stdout
-            assert "relation \"ticket_board.tickets\" does not exist" not in result.stderr
-            assert "board_with_schema ticket count preserved at 2" in result.stderr
-            assert psql(socket_dir, port, "board_with_schema", "SELECT count(*) FROM ticket_board.tickets;") == "2"
-        finally:
-            subprocess.run(
-                ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+        result = subprocess.run(
+            [
+                str(SCRIPT),
+                "--host",
+                str(socket_dir),
+                "--port",
+                str(port),
+                "--user",
+                "postgres",
+                "--database",
+                "maintenance_no_schema",
+                "--database",
+                "board_with_schema",
+                "--execute",
+                "--expected-ticket-count",
+                "2",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "relation \"ticket_board.tickets\" does not exist" not in result.stderr
+        assert "board_with_schema ticket count preserved at 2" in result.stderr
+        assert psql(socket_dir, port, "board_with_schema", "SELECT count(*) FROM ticket_board.tickets;") == "2"
 
 
 def main() -> int:

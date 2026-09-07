@@ -43,6 +43,7 @@ class Cluster:
     socket_dir: Path
     port: int
     pid: int
+    log_path: Path
 
     def conninfo(self, dbname: str, user: str = "postgres") -> str:
         return f"host={self.socket_dir} port={self.port} dbname={dbname} user={user}"
@@ -84,10 +85,29 @@ def _running(pid: int) -> bool:
     return True
 
 
-def _await_ready(cluster_socket: Path, port: int, child: subprocess.Popen[bytes], deadline: float) -> None:
+def _log_tail(log_path: Path, lines: int = 20) -> str:
+    """What the postmaster said. `pg_ctl -w start` used to print this itself."""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        return f"(no postgres log: {exc})"
+    if not text:
+        return "(the postgres log is empty)"
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def _await_ready(
+    cluster_socket: Path,
+    port: int,
+    child: subprocess.Popen[bytes],
+    deadline: float,
+    log_path: Path,
+) -> None:
     while time.monotonic() < deadline:
         if child.poll() is not None:
-            raise AssertionError(f"postgres exited during startup with {child.returncode}")
+            raise AssertionError(
+                f"postgres exited during startup with {child.returncode}:\n{_log_tail(log_path)}"
+            )
         ready = subprocess.run(
             ["pg_isready", "-h", str(cluster_socket), "-p", str(port)],
             stdout=subprocess.DEVNULL,
@@ -96,14 +116,22 @@ def _await_ready(cluster_socket: Path, port: int, child: subprocess.Popen[bytes]
         if ready.returncode == 0:
             return
         time.sleep(0.1)
-    raise AssertionError("postgres did not become ready")
+    raise AssertionError(f"postgres did not become ready:\n{_log_tail(log_path)}")
 
 
-def _shut_down(child: subprocess.Popen[bytes]) -> None:
-    """Fast shutdown, then immediate, then the kernel. Never leaves it running."""
+# What `pg_ctl -m <mode> stop` sends the postmaster, which is what a fixture is
+# choosing when it names a mode: fast rolls back open transactions and exits,
+# immediate skips the shutdown checkpoint. Kept as a knob because a fixture that
+# deliberately leaves a connection open asks for the second one.
+SHUTDOWN_SIGNALS = {"fast": signal.SIGINT, "immediate": signal.SIGQUIT}
+
+
+def _shut_down(child: subprocess.Popen[bytes], *, shutdown: str = "fast") -> None:
+    """The named shutdown, then immediate, then the kernel. Never leaves it running."""
     if child.poll() is not None:
         return
-    for sig, wait in ((signal.SIGINT, SHUTDOWN_TIMEOUT_SECONDS), (signal.SIGQUIT, 5.0), (signal.SIGKILL, 5.0)):
+    first = SHUTDOWN_SIGNALS.get(shutdown, signal.SIGINT)
+    for sig, wait in ((first, SHUTDOWN_TIMEOUT_SECONDS), (signal.SIGQUIT, 5.0), (signal.SIGKILL, 5.0)):
         try:
             child.send_signal(sig)
         except ProcessLookupError:
@@ -151,7 +179,12 @@ def sweep_stale_trees(prefix: str, *, base: Path | None = None, age: float = STA
 
 
 @contextmanager
-def temporary_cluster(*, prefix: str, initdb_args: tuple[str, ...] = ("--username=postgres",)):
+def temporary_cluster(
+    *,
+    prefix: str,
+    initdb_args: tuple[str, ...] = ("--username=postgres",),
+    shutdown: str = "fast",
+):
     """Run a throwaway cluster for the body, and leave nothing behind.
 
     Cleanup runs on success, on an assertion failure, and on SIGINT or SIGTERM --
@@ -170,27 +203,35 @@ def temporary_cluster(*, prefix: str, initdb_args: tuple[str, ...] = ("--usernam
         capture_output=True,
         text=True,
     )
-    child = subprocess.Popen(
-        [
-            "postgres",
-            "-D",
-            str(data_dir),
-            "-k",
-            str(socket_dir),
-            "-p",
-            str(port),
-            "-h",
-            "",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        preexec_fn=_die_with_parent,  # noqa: PLW1509 - the point of this module
-    )
+    # Kept rather than discarded: `pg_ctl -w start` reported a refusal to start on
+    # its own, and a fixture that cannot say why its cluster died is worse than
+    # one that leaks (SYRD-56).
+    log_path = root / "postgres.log"
+    log_handle = log_path.open("wb")
+    try:
+        child = subprocess.Popen(
+            [
+                "postgres",
+                "-D",
+                str(data_dir),
+                "-k",
+                str(socket_dir),
+                "-p",
+                str(port),
+                "-h",
+                "",
+            ],
+            stdout=log_handle,
+            stderr=log_handle,
+            preexec_fn=_die_with_parent,  # noqa: PLW1509 - the point of this module
+        )
+    finally:
+        log_handle.close()
 
     previous: dict[int, object] = {}
 
     def _interrupted(signum, frame):  # pragma: no cover - exercised by subprocess
-        _shut_down(child)
+        _shut_down(child, shutdown=shutdown)
         shutil.rmtree(root, ignore_errors=True)
         handler = previous.get(signum)
         signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
@@ -204,14 +245,21 @@ def temporary_cluster(*, prefix: str, initdb_args: tuple[str, ...] = ("--usernam
             previous.pop(signum, None)
 
     try:
-        _await_ready(socket_dir, port, child, time.monotonic() + STARTUP_TIMEOUT_SECONDS)
+        _await_ready(
+            socket_dir, port, child, time.monotonic() + STARTUP_TIMEOUT_SECONDS, log_path
+        )
         yield Cluster(
-            root=root, data_dir=data_dir, socket_dir=socket_dir, port=port, pid=child.pid
+            root=root,
+            data_dir=data_dir,
+            socket_dir=socket_dir,
+            port=port,
+            pid=child.pid,
+            log_path=log_path,
         )
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
-        _shut_down(child)
+        _shut_down(child, shutdown=shutdown)
         shutil.rmtree(root, ignore_errors=True)
 
 

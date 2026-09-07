@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -1720,83 +1722,79 @@ SELECT ticket_board.record_notification_trace(
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-rbac.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-rbac.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_rbac_test"
         admin_conn = conninfo(socket_dir, port, dbname)
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
 
-            create_pane_roles(admin_conn, exclude={"inspector"})
-            missing_inspector_before = psql(admin_conn, "SELECT to_regrole('inspector') IS NULL;")
-            assert missing_inspector_before == "t", missing_inspector_before
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        create_pane_roles(admin_conn, exclude={"inspector"})
+        missing_inspector_before = psql(admin_conn, "SELECT to_regrole('inspector') IS NULL;")
+        assert missing_inspector_before == "t", missing_inspector_before
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
 
-            role_rows = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        role_rows = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_object_agg(rolname, jsonb_build_object('can_login', rolcanlogin, 'password_is_null', rolpassword IS NULL))::text
 FROM pg_authid
 WHERE rolname = ANY({ROLE_SQL_ARRAY});
 """,
-                )
             )
-            assert sorted(role_rows) == sorted(EXPECTED_ROLES), role_rows
-            for role in PANE_ROLES:
-                assert role_rows[role] == {"can_login": True, "password_is_null": role == "inspector"}, (role, role_rows[role])
-            assert role_rows["ticket_board_service"] == {"can_login": True, "password_is_null": True}, role_rows
-            assert role_rows["ticket_board_listener"] == {"can_login": True, "password_is_null": True}, role_rows
+        )
+        assert sorted(role_rows) == sorted(EXPECTED_ROLES), role_rows
+        for role in PANE_ROLES:
+            assert role_rows[role] == {"can_login": True, "password_is_null": role == "inspector"}, (role, role_rows[role])
+        assert role_rows["ticket_board_service"] == {"can_login": True, "password_is_null": True}, role_rows
+        assert role_rows["ticket_board_listener"] == {"can_login": True, "password_is_null": True}, role_rows
 
-            schema_usage = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        schema_usage = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_object_agg(role_name, has_schema_privilege(role_name, 'ticket_board', 'USAGE'))::text
 FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
 """,
-                )
             )
-            assert all(schema_usage.values()), schema_usage
+        )
+        assert all(schema_usage.values()), schema_usage
 
-            select_privileges = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        select_privileges = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_object_agg(role_name, has_table_privilege(role_name, 'ticket_board.tickets', 'SELECT'))::text
 FROM unnest({ROLE_SQL_ARRAY}) AS role_name;
 """,
-                )
             )
-            assert all(select_privileges.values()), select_privileges
+        )
+        assert all(select_privileges.values()), select_privileges
 
-            assert_function_grants(admin_conn)
+        assert_function_grants(admin_conn)
 
-            role_conn = {role: conninfo(socket_dir, port, dbname, role) for role in EXPECTED_ROLES}
-            insert_ticket(admin_conn, "PGU-1", title="Direct DML fixture")
-            assert_direct_dml_denied(admin_conn, role_conn)
-            for role in PANE_ROLES:
-                assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body');")
-                assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body', 'backlog');")
+        role_conn = {role: conninfo(socket_dir, port, dbname, role) for role in EXPECTED_ROLES}
+        insert_ticket(admin_conn, "PGU-1", title="Direct DML fixture")
+        assert_direct_dml_denied(admin_conn, role_conn)
+        for role in PANE_ROLES:
+            assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body');")
+            assert_permission_denied(role_conn[role], "SELECT ticket_board.create_ticket('Nope', 'Body', 'backlog');")
 
-            service_conn = role_conn["ticket_board_service"]
-            listener_conn = role_conn["ticket_board_listener"]
-            assert_service_can_execute_every_write_function(admin_conn, service_conn)
-            assert_audit_direct_file_bug_grant(admin_conn, role_conn)
-            assert_structural_rules_still_apply(admin_conn, service_conn)
-            assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn, service_conn)
-            assert_listener_can_execute_reconcile_functions(admin_conn, listener_conn, service_conn)
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
+        service_conn = role_conn["ticket_board_service"]
+        listener_conn = role_conn["ticket_board_listener"]
+        assert_service_can_execute_every_write_function(admin_conn, service_conn)
+        assert_audit_direct_file_bug_grant(admin_conn, role_conn)
+        assert_structural_rules_still_apply(admin_conn, service_conn)
+        assert_deferred_cancel_resurrect_clears_park_and_notifies(admin_conn, service_conn)
+        assert_listener_can_execute_reconcile_functions(admin_conn, listener_conn, service_conn)
 
     print("ticket_board_rbac_test: ok")
     return 0

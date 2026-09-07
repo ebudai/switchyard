@@ -22,6 +22,8 @@ from scripts.ticket_board import frontend_script_core  # noqa: E402
 from scripts.ticket_board.app import STATES, TicketBoardApp  # noqa: E402
 from scripts.ticket_board.project_provision import schema_workflow_stages  # noqa: E402
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 
@@ -511,58 +513,54 @@ FROM ticket_board.workflow_transitions;
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-workflow-config.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-workflow-config.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_workflow_config_test"
         admin_conn = conninfo(socket_dir, port, dbname)
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            stages, transitions = load_workflow_config(admin_conn)
-            db_transition_whitelist = transition_whitelist_from_db(admin_conn)
-            transition_actions = {str(transition["action_name"]) for transition in transitions}
-            db_action_roles = action_roles_from_db(admin_conn)
-            db_action_ownership = action_ownership_from_db(admin_conn)
-            app_columns = TicketBoardApp(database_url=admin_conn).workflow_columns()
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        stages, transitions = load_workflow_config(admin_conn)
+        db_transition_whitelist = transition_whitelist_from_db(admin_conn)
+        transition_actions = {str(transition["action_name"]) for transition in transitions}
+        db_action_roles = action_roles_from_db(admin_conn)
+        db_action_ownership = action_ownership_from_db(admin_conn)
+        app_columns = TicketBoardApp(database_url=admin_conn).workflow_columns()
 
-            assert tuple(stage["name"] for stage in stages) == STATES
-            assert_frontend_columns_are_dynamic()
-            assert_frontend_default_state_labels_match_schema()
-            assert_default_state_label_guard_fails_on_label_divergence_and_missing_stage()
-            assert_default_state_label_generator_tracks_schema_seed()
-            assert compile_columns(stages) == app_columns
-            assert compile_state_rank(stages) == state_rank_values_from_db(admin_conn, stages)
-            transition_target_assignees = transition_target_assignees_by_state(stages)
-            assert compile_transition_target_role_values(
-                stages,
-                transition_target_assignees,
-            ) == transition_target_role_values_from_db(admin_conn, stages, transition_target_assignees)
-            assert compile_transition_whitelist(stages, transitions, db_transition_whitelist) == normalize_sql_body(
-                "\n".join(
-                    f"            (OLD.state = '{from_stage}' AND NEW.state IN ({', '.join(repr(to_stage) for to_stage in to_stages)}))"
+        assert tuple(stage["name"] for stage in stages) == STATES
+        assert_frontend_columns_are_dynamic()
+        assert_frontend_default_state_labels_match_schema()
+        assert_default_state_label_guard_fails_on_label_divergence_and_missing_stage()
+        assert_default_state_label_generator_tracks_schema_seed()
+        assert compile_columns(stages) == app_columns
+        assert compile_state_rank(stages) == state_rank_values_from_db(admin_conn, stages)
+        transition_target_assignees = transition_target_assignees_by_state(stages)
+        assert compile_transition_target_role_values(
+            stages,
+            transition_target_assignees,
+        ) == transition_target_role_values_from_db(admin_conn, stages, transition_target_assignees)
+        assert compile_transition_whitelist(stages, transitions, db_transition_whitelist) == normalize_sql_body(
+            "\n".join(
+                f"            (OLD.state = '{from_stage}' AND NEW.state IN ({', '.join(repr(to_stage) for to_stage in to_stages)}))"
                     f"{' OR' if index < len(db_transition_whitelist) - 1 else ''}"
-                    for index, (from_stage, to_stages) in enumerate(db_transition_whitelist)
-                )
+                for index, (from_stage, to_stages) in enumerate(db_transition_whitelist)
             )
-            assert compile_action_roles(transitions) == {
-                action: roles for action, roles in compile_action_roles(transitions).items()
-            }
-            assert not {
-                action: roles for action, roles in db_action_roles.items() if action in transition_actions
-            }, "workflow transition RBAC must not be backed by hardcoded require_actor after Phase 4b"
-            assert_no_unmodeled_owner_checks(transitions, db_action_ownership)
+        )
+        assert compile_action_roles(transitions) == {
+            action: roles for action, roles in compile_action_roles(transitions).items()
+        }
+        assert not {
+            action: roles for action, roles in db_action_roles.items() if action in transition_actions
+        }, "workflow transition RBAC must not be backed by hardcoded require_actor after Phase 4b"
+        assert_no_unmodeled_owner_checks(transitions, db_action_ownership)
 
-            terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
-            assert terminal_states == {"done", "cancelled"}
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)
+        terminal_states = {stage["name"] for stage in stages if stage["is_terminal"]}
+        assert terminal_states == {"done", "cancelled"}
     return 0
 
 

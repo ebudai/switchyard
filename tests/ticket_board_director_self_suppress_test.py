@@ -28,6 +28,8 @@ from scripts.ticket_board.app import TicketBoardApp
 from scripts.ticket_board.server import LocalRoleAuthority, TicketBoardEventHub, TicketBoardUnixServer
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
@@ -162,147 +164,20 @@ def clear_notifications(conn: str, ticket_id: str) -> None:
 
 
 def assert_director_write_client_self_suppresses_notifications() -> None:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-director-self-suppress.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "postgres"
+    with temporary_cluster(
+        prefix="ticket-board-director-self-suppress.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         board_socket = root / "board.sock"
         frames = root / "frames"
         assets = root / "assets"
-        socket_dir.mkdir()
         frames.mkdir()
         assets.mkdir()
-        port = free_port()
         dbname = "pgu_director_self_suppress_test"
         admin_conn = conninfo(socket_dir, port, dbname)
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            create_roles(admin_conn)
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).stdout.strip()
-
-            app = TicketBoardApp(
-                frames,
-                assets,
-                commit_git_dir=ROOT,
-                database_url=conninfo(socket_dir, port, dbname, SERVICE_ROLE),
-            )
-            events = TicketBoardEventHub(app)
-            notifier = RecordingNotifier()
-            server = TicketBoardUnixServer(
-                board_socket,
-                app,
-                events=events,
-                director_notifier=notifier,
-                role_authority=local_role_authority_as("director"),
-            )
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                client = TicketBoardWriteClient(socket_path=str(board_socket), caller_role="director")
-
-                created = client.create_ticket(
-                    title="Director self-create analysis",
-                    body="Created through the Unix socket write client.",
-                )["ticket"]
-                created_id = str(created["id"])
-                assert created["state"] == "analysis", created
-                assert notifier.created == [], notifier.created
-                assert queued_notifications(admin_conn, created_id) == [], queued_notifications(admin_conn, created_id)
-
-                seed_postgres_ticket(
-                    admin_conn,
-                    "PGU-35001",
-                    title="Director self-route to analysis",
-                    state="in_progress",
-                    assignee="ops",
-                    implementation="Ready.",
-                )
-                clear_notifications(admin_conn, "PGU-35001")
-                routed_to_director = client.route("PGU-35001", state="analysis", assignee="unassigned")["ticket"]
-                assert routed_to_director["state"] == "analysis", routed_to_director
-                assert routed_to_director["assignee"] == "director", routed_to_director
-                assert queued_notifications(admin_conn, "PGU-35001") == [], queued_notifications(admin_conn, "PGU-35001")
-
-                seed_postgres_ticket(
-                    admin_conn,
-                    "PGU-35002",
-                    title="Director route still notifies app",
-                    state="analysis",
-                    assignee="unassigned",
-                )
-                clear_notifications(admin_conn, "PGU-35002")
-                routed_to_app = client.route("PGU-35002", state="in_progress", assignee="app")["ticket"]
-                assert routed_to_app["state"] == "in_progress", routed_to_app
-                assert routed_to_app["assignee"] == "app", routed_to_app
-                assert queued_notifications(admin_conn, "PGU-35002") == [
-                    {
-                        "target_role": "app",
-                        "message": "New ticket for you: PGU-35002 -- Director route still notifies app",
-                        "old_state": "analysis",
-                        "new_state": "in_progress",
-                    }
-                ], queued_notifications(admin_conn, "PGU-35002")
-
-                seed_postgres_ticket(
-                    admin_conn,
-                    "PGU-40501",
-                    title="Director cancel should notify active ops",
-                    state="in_progress",
-                    assignee="ops",
-                    implementation="Ready.",
-                )
-                clear_notifications(admin_conn, "PGU-40501")
-                cancelled_ops = client.cancel("PGU-40501", reason="Split into follow-up tickets.")["ticket"]
-                assert cancelled_ops["state"] == "cancelled", cancelled_ops
-                assert queued_notifications(admin_conn, "PGU-40501") == [
-                    {
-                        "target_role": "ops",
-                        "message": "PGU-40501 -- Director cancel should notify active ops cancelled",
-                        "old_state": "in_progress",
-                        "new_state": "cancelled",
-                    }
-                ], queued_notifications(admin_conn, "PGU-40501")
-
-                seed_postgres_ticket(
-                    admin_conn,
-                    "PGU-40502",
-                    title="Director cancel analysis self-suppresses",
-                    state="analysis",
-                    assignee="unassigned",
-                )
-                clear_notifications(admin_conn, "PGU-40502")
-                cancelled_director = client.cancel("PGU-40502", reason="No longer needed.")["ticket"]
-                assert cancelled_director["state"] == "cancelled", cancelled_director
-                assert queued_notifications(admin_conn, "PGU-40502") == [], queued_notifications(admin_conn, "PGU-40502")
-
-                seed_postgres_ticket(
-                    admin_conn,
-                    "PGU-40503",
-                    title="Director done self-suppresses",
-                    state="director_review",
-                    assignee="director",
-                    implementation="Ready.",
-                )
-                clear_notifications(admin_conn, "PGU-40503")
-                done_director = client.mark_done("PGU-40503", commit_hash=commit_hash)["ticket"]
-                assert done_director["state"] == "done", done_director
-                assert queued_notifications(admin_conn, "PGU-40503") == [], queued_notifications(admin_conn, "PGU-40503")
-            finally:
-                server.shutdown()
-                server.server_close()
-                events.close()
-                thread.join(timeout=2)
-        finally:
-            subprocess.run(
-                ["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
 
 
 def local_role_authority_as(role: str) -> LocalRoleAuthority:

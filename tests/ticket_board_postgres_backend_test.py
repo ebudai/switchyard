@@ -27,6 +27,8 @@ except ModuleNotFoundError:
 
 from scripts.ticket_board.app import TicketBoardApp
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 RBAC_PATH = ROOT / "scripts" / "ticket_board" / "rbac.sql"
@@ -161,93 +163,91 @@ def make_app(root: Path, socket_dir: Path, port: int, dbname: str, role: str) ->
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-postgres-backend.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
+    with temporary_cluster(
+        prefix="ticket-board-postgres-backend.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         frames = root / "frames"
         assets = root / "assets"
-        socket_dir.mkdir()
         frames.mkdir()
         assets.mkdir()
-        port = free_port()
         dbname = "pgu_backend_test"
         admin_conn = conninfo(socket_dir, port, dbname)
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            assert psql(
-                admin_conn,
-                """
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert psql(
+            admin_conn,
+            """
 SELECT column_default
 FROM information_schema.columns
 WHERE table_schema = 'ticket_board'
   AND table_name = 'tickets'
   AND column_name = 'regression';
 """,
-            ) == "false"
-            create_roles(admin_conn)
-            psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
-            commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).stdout.strip()
-            alternate_commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD^"]).stdout.strip()
+        ) == "false"
+        create_roles(admin_conn)
+        psql(admin_conn, RBAC_PATH.read_text(encoding="utf-8"))
+        commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).stdout.strip()
+        alternate_commit_hash = run(["git", "-C", str(ROOT), "rev-parse", "HEAD^"]).stdout.strip()
 
-            service_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
-            service_conn = conninfo(socket_dir, port, dbname, SERVICE_ROLE)
-            assert service_app.workflow_columns() == EXPECTED_COLUMNS
-            initial_snapshot = service_app.snapshot()
-            assert initial_snapshot["columns"] == EXPECTED_COLUMNS, initial_snapshot["columns"]
+        service_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
+        service_conn = conninfo(socket_dir, port, dbname, SERVICE_ROLE)
+        assert service_app.workflow_columns() == EXPECTED_COLUMNS
+        initial_snapshot = service_app.snapshot()
+        assert initial_snapshot["columns"] == EXPECTED_COLUMNS, initial_snapshot["columns"]
 
-            before_signature = service_app.store_signature()
-            created = service_app.create_ticket(
-                title="Postgres create",
-                body="Created through TicketBoardApp.",
-                screenshot=None,
-                assignee="unassigned",
-                needs_user_signoff=False,
-            )
-            assert created["id"] == "PGU-1", created
-            assert created["state"] == "analysis", created
-            assert created["assignee"] == "unassigned", created
-            assert created["regression"] is False, created
-            assert service_app.verify_created_ticket_persisted(created, before_signature) != before_signature
-            assert not (root / f"json-unused-{SERVICE_ROLE}").exists(), "postgres backend should not create a JSON store directory"
-            assert "permission denied" in psql_error(
-                service_conn,
-                "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
-            )
-            created_with_implementation = service_app.create_ticket(
-                title="Postgres create with implementation",
-                body="Created with spec text up front.",
-                screenshot=None,
-                assignee="unassigned",
-                needs_user_signoff=False,
-                implementation="Use the ticket body and this implementation note.",
-            )
-            assert created_with_implementation["implementation"] == "Use the ticket body and this implementation note.", created_with_implementation
-            created_regression = service_app.create_ticket(
-                title="Postgres create regression",
-                body="Tracks a regression.",
-                screenshot=None,
-                assignee="unassigned",
-                needs_user_signoff=False,
-                regression=True,
-            )
-            assert created_regression["regression"] is True, created_regression
-            created_needs_uat = service_app.create_ticket(
-                title="Postgres create requires UAT",
-                body="Created with UAT requirement up front.",
-                screenshot=None,
-                assignee="unassigned",
-                needs_user_signoff=True,
-            )
-            assert created_needs_uat["needs_user_signoff"] is True, created_needs_uat
-            needs_uat_db_state = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        before_signature = service_app.store_signature()
+        created = service_app.create_ticket(
+            title="Postgres create",
+            body="Created through TicketBoardApp.",
+            screenshot=None,
+            assignee="unassigned",
+            needs_user_signoff=False,
+        )
+        assert created["id"] == "PGU-1", created
+        assert created["state"] == "analysis", created
+        assert created["assignee"] == "unassigned", created
+        assert created["regression"] is False, created
+        assert service_app.verify_created_ticket_persisted(created, before_signature) != before_signature
+        assert not (root / f"json-unused-{SERVICE_ROLE}").exists(), "postgres backend should not create a JSON store directory"
+        assert "permission denied" in psql_error(
+            service_conn,
+            "UPDATE ticket_board.tickets SET title = title WHERE id = 'PGU-1';",
+        )
+        created_with_implementation = service_app.create_ticket(
+            title="Postgres create with implementation",
+            body="Created with spec text up front.",
+            screenshot=None,
+            assignee="unassigned",
+            needs_user_signoff=False,
+            implementation="Use the ticket body and this implementation note.",
+        )
+        assert created_with_implementation["implementation"] == "Use the ticket body and this implementation note.", created_with_implementation
+        created_regression = service_app.create_ticket(
+            title="Postgres create regression",
+            body="Tracks a regression.",
+            screenshot=None,
+            assignee="unassigned",
+            needs_user_signoff=False,
+            regression=True,
+        )
+        assert created_regression["regression"] is True, created_regression
+        created_needs_uat = service_app.create_ticket(
+            title="Postgres create requires UAT",
+            body="Created with UAT requirement up front.",
+            screenshot=None,
+            assignee="unassigned",
+            needs_user_signoff=True,
+        )
+        assert created_needs_uat["needs_user_signoff"] is True, created_needs_uat
+        needs_uat_db_state = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_build_object(
     'needs_user_signoff', needs_user_signoff,
     'source_needs_user_signoff', source_json->'needs_user_signoff'
@@ -255,13 +255,13 @@ SELECT jsonb_build_object(
 FROM ticket_board.tickets
 WHERE id = '{created_needs_uat["id"]}';
 """,
-                )
             )
-            assert needs_uat_db_state == {"needs_user_signoff": True, "source_needs_user_signoff": True}, needs_uat_db_state
-            regression_db_state = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        )
+        assert needs_uat_db_state == {"needs_user_signoff": True, "source_needs_user_signoff": True}, needs_uat_db_state
+        regression_db_state = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_build_object(
     'regression', regression,
     'source_regression', source_json->'regression'
@@ -269,23 +269,23 @@ SELECT jsonb_build_object(
 FROM ticket_board.tickets
 WHERE id = '{created_regression["id"]}';
 """,
-                )
             )
-            assert regression_db_state == {"regression": True, "source_regression": True}, regression_db_state
-            backlog_created = service_app.create_ticket(
-                title="Postgres backlog create",
-                body="Deferred future work.",
-                screenshot=None,
-                assignee="unassigned",
-                needs_user_signoff=False,
-                state="backlog",
-            )
-            assert backlog_created["state"] == "backlog", backlog_created
-            assert backlog_created["assignee"] == "unassigned", backlog_created
-            backlog_state = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        )
+        assert regression_db_state == {"regression": True, "source_regression": True}, regression_db_state
+        backlog_created = service_app.create_ticket(
+            title="Postgres backlog create",
+            body="Deferred future work.",
+            screenshot=None,
+            assignee="unassigned",
+            needs_user_signoff=False,
+            state="backlog",
+        )
+        assert backlog_created["state"] == "backlog", backlog_created
+        assert backlog_created["assignee"] == "unassigned", backlog_created
+        backlog_state = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_build_object(
     'state', t.state,
     'assignee', t.assignee,
@@ -296,18 +296,18 @@ SELECT jsonb_build_object(
 FROM ticket_board.tickets t
 WHERE t.id = '{backlog_created["id"]}';
 """,
-                )
             )
-            assert backlog_state == {
-                "state": "backlog",
-                "assignee": "unassigned",
-                "parked": True,
-                "queue_count": 0,
-                "trace_count": 0,
-            }, backlog_state
-            psql(
-                admin_conn,
-                f"""
+        )
+        assert backlog_state == {
+            "state": "backlog",
+            "assignee": "unassigned",
+            "parked": True,
+            "queue_count": 0,
+            "trace_count": 0,
+        }, backlog_state
+        psql(
+            admin_conn,
+            f"""
 UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '1 hour',
     last_activity_at = clock_timestamp() - interval '1 hour',
@@ -316,11 +316,11 @@ SET entered_current_state_at = clock_timestamp() - interval '1 hour',
 WHERE ticket_id = '{backlog_created["id"]}';
 SELECT ticket_board.notify_due_nudges(clock_timestamp(), interval '5 minutes', 3);
 """,
-            )
-            backlog_nudge_state = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        )
+        backlog_nudge_state = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_build_object(
     'queue_count', (SELECT count(*) FROM ticket_board.ticket_notification_queue q WHERE q.ticket_id = t.id),
     'last_nudged', ns.last_nudged_at IS NOT NULL,
@@ -330,82 +330,82 @@ FROM ticket_board.tickets t
 JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
 WHERE t.id = '{backlog_created["id"]}';
 """,
+            )
+        )
+        assert backlog_nudge_state == {"queue_count": 0, "last_nudged": False, "nudge_count": 0}, backlog_nudge_state
+        for disallowed_state in ("in_progress", "inspection", "audit", "director_review", "done", "cancelled"):
+            try:
+                service_app.create_ticket(
+                    title=f"Bad {disallowed_state}",
+                    body="Must reject pipeline state create.",
+                    screenshot=None,
+                    assignee="ops",
+                    needs_user_signoff=False,
+                    state=disallowed_state,
                 )
-            )
-            assert backlog_nudge_state == {"queue_count": 0, "last_nudged": False, "nudge_count": 0}, backlog_nudge_state
-            for disallowed_state in ("in_progress", "inspection", "audit", "director_review", "done", "cancelled"):
-                try:
-                    service_app.create_ticket(
-                        title=f"Bad {disallowed_state}",
-                        body="Must reject pipeline state create.",
-                        screenshot=None,
-                        assignee="ops",
-                        needs_user_signoff=False,
-                        state=disallowed_state,
-                    )
-                except ValueError as exc:
-                    assert "invalid create state" in str(exc), exc
-                else:
-                    raise AssertionError(f"create unexpectedly accepted {disallowed_state}")
+            except ValueError as exc:
+                assert "invalid create state" in str(exc), exc
+            else:
+                raise AssertionError(f"create unexpectedly accepted {disallowed_state}")
 
-            create_attachment = frames / "create-frame-ref.png"
-            Image.new("RGB", (2, 2), (120, 40, 80)).save(create_attachment)
-            created_with_attachment = service_app.create_ticket(
-                title="Postgres create with attachment",
-                body="Created with a pasted image path.",
-                screenshot=str(create_attachment),
-                assignee="unassigned",
-                needs_user_signoff=False,
-            )
-            created_attachment_path = Path(created_with_attachment["screenshots"][0])
-            assert created_attachment_path != create_attachment.resolve(), created_with_attachment
-            assert assets.resolve() in created_attachment_path.parents, created_with_attachment
-            assert created_with_attachment["screenshot"] == str(created_attachment_path), created_with_attachment
-            assert created_with_attachment["screenshots_info"][0]["available"] is True, created_with_attachment
-            create_attachment.unlink()
-            persisted_created_attachment = service_app.get_ticket(created_with_attachment["id"])
-            assert persisted_created_attachment["screenshots"] == [str(created_attachment_path)], persisted_created_attachment
-            assert persisted_created_attachment["screenshots_info"][0]["available"] is True, persisted_created_attachment
-            assert created_attachment_path.is_file(), created_attachment_path
+        create_attachment = frames / "create-frame-ref.png"
+        Image.new("RGB", (2, 2), (120, 40, 80)).save(create_attachment)
+        created_with_attachment = service_app.create_ticket(
+            title="Postgres create with attachment",
+            body="Created with a pasted image path.",
+            screenshot=str(create_attachment),
+            assignee="unassigned",
+            needs_user_signoff=False,
+        )
+        created_attachment_path = Path(created_with_attachment["screenshots"][0])
+        assert created_attachment_path != create_attachment.resolve(), created_with_attachment
+        assert assets.resolve() in created_attachment_path.parents, created_with_attachment
+        assert created_with_attachment["screenshot"] == str(created_attachment_path), created_with_attachment
+        assert created_with_attachment["screenshots_info"][0]["available"] is True, created_with_attachment
+        create_attachment.unlink()
+        persisted_created_attachment = service_app.get_ticket(created_with_attachment["id"])
+        assert persisted_created_attachment["screenshots"] == [str(created_attachment_path)], persisted_created_attachment
+        assert persisted_created_attachment["screenshots_info"][0]["available"] is True, persisted_created_attachment
+        assert created_attachment_path.is_file(), created_attachment_path
 
-            filed = service_app.create_ticket_record(
-                title="Filed from implementation",
-                body="Linked to source.",
-                screenshot=None,
-                screenshots=None,
-                assignee="unassigned",
-                state="analysis",
-                blocked_by=[],
-                implementation="",
-                audit_prompt="",
-                audit_signoff=False,
-                needs_user_signoff=False,
-                user_signoff=False,
-                comments=[],
-                parent_id="PGU-1",
-            )
-            assert filed["parent_id"] == "PGU-1", filed
-            assert "source_ticket_id ticket not found" in psql_error(
-                service_conn,
-                "SELECT ticket_board.file_bug('missing', 'body', 'PGU-99999');",
-            )
+        filed = service_app.create_ticket_record(
+            title="Filed from implementation",
+            body="Linked to source.",
+            screenshot=None,
+            screenshots=None,
+            assignee="unassigned",
+            state="analysis",
+            blocked_by=[],
+            implementation="",
+            audit_prompt="",
+            audit_signoff=False,
+            needs_user_signoff=False,
+            user_signoff=False,
+            comments=[],
+            parent_id="PGU-1",
+        )
+        assert filed["parent_id"] == "PGU-1", filed
+        assert "source_ticket_id ticket not found" in psql_error(
+            service_conn,
+            "SELECT ticket_board.file_bug('missing', 'body', 'PGU-99999');",
+        )
 
-            blocked = service_app.create_ticket(
-                title="Blocked child",
-                body="Needs PGU-1 first.",
-                screenshot=None,
-                assignee="unassigned",
-                needs_user_signoff=False,
-                blocked_by=["PGU-1"],
-                blocked_reason="Waiting for PGU-1.",
-            )
-            assert blocked["blocked_by"] == ["PGU-1"], blocked
-            assert blocked["blockers"] == [{"id": "PGU-1", "resolved": False}], blocked
-            assert blocked["blocked_reason"] == "Waiting for PGU-1.", blocked
-            blocked_create_state = json.loads(
-                psql(
-                    admin_conn,
-                    f"""
+        blocked = service_app.create_ticket(
+            title="Blocked child",
+            body="Needs PGU-1 first.",
+            screenshot=None,
+            assignee="unassigned",
+            needs_user_signoff=False,
+            blocked_by=["PGU-1"],
+            blocked_reason="Waiting for PGU-1.",
+        )
+        assert blocked["blocked_by"] == ["PGU-1"], blocked
+        assert blocked["blockers"] == [{"id": "PGU-1", "resolved": False}], blocked
+        assert blocked["blocked_reason"] == "Waiting for PGU-1.", blocked
+        blocked_create_state = json.loads(
+            psql(
+                admin_conn,
+                f"""
 SELECT jsonb_build_object(
     'blocked_by', (SELECT jsonb_agg(blocker_ticket_id ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
     'blockers', (SELECT jsonb_agg(jsonb_build_object('id', blocker_ticket_id, 'resolved', resolved) ORDER BY position) FROM ticket_board.ticket_blockers WHERE ticket_id = t.id),
@@ -416,89 +416,89 @@ SELECT jsonb_build_object(
 FROM ticket_board.tickets t
 WHERE t.id = '{blocked["id"]}';
 """,
-                )
             )
-            assert blocked_create_state == {
-                "blocked_by": ["PGU-1"],
-                "blockers": [{"id": "PGU-1", "resolved": False}],
-                "blocked_reason": "Waiting for PGU-1.",
-                "queue_count": 0,
-                "trace_count": 0,
-            }, blocked_create_state
-            assert "blocker ticket not found: PGU-99999" in psql_error(
-                service_conn,
-                """
+        )
+        assert blocked_create_state == {
+            "blocked_by": ["PGU-1"],
+            "blockers": [{"id": "PGU-1", "resolved": False}],
+            "blocked_reason": "Waiting for PGU-1.",
+            "queue_count": 0,
+            "trace_count": 0,
+        }, blocked_create_state
+        assert "blocker ticket not found: PGU-99999" in psql_error(
+            service_conn,
+            """
 SELECT set_config('ticket_board.caller_role', 'director', false);
 SELECT ticket_board.create_ticket('Missing blocker', 'Body', 'analysis', ARRAY['PGU-99999'], 'Missing dependency.');
 """,
-            )
-            next_ticket_id = psql(admin_conn, "SELECT 'PGU-' || (max(ticket_number) + 1)::text FROM ticket_board.tickets;")
-            assert "invalid blocker ticket id" in psql_error(
-                service_conn,
-                f"""
+        )
+        next_ticket_id = psql(admin_conn, "SELECT 'PGU-' || (max(ticket_number) + 1)::text FROM ticket_board.tickets;")
+        assert "invalid blocker ticket id" in psql_error(
+            service_conn,
+            f"""
 SELECT set_config('ticket_board.caller_role', 'director', false);
 SELECT ticket_board.create_ticket('Self blocked', 'Body', 'analysis', ARRAY['{next_ticket_id}'], 'Self dependency.');
 """,
-            )
-            cycle_ticket_id = psql(admin_conn, "SELECT 'PGU-' || (max(ticket_number) + 1)::text FROM ticket_board.tickets;")
-            psql(
-                admin_conn,
-                f"INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position) VALUES ('PGU-1', '{cycle_ticket_id}', 0);",
-            )
-            assert "blocked_by cycle detected" in psql_error(
-                service_conn,
-                """
+        )
+        cycle_ticket_id = psql(admin_conn, "SELECT 'PGU-' || (max(ticket_number) + 1)::text FROM ticket_board.tickets;")
+        psql(
+            admin_conn,
+            f"INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position) VALUES ('PGU-1', '{cycle_ticket_id}', 0);",
+        )
+        assert "blocked_by cycle detected" in psql_error(
+            service_conn,
+            """
 SELECT set_config('ticket_board.caller_role', 'director', false);
 SELECT ticket_board.create_ticket('Cycle blocked', 'Body', 'analysis', ARRAY['PGU-1'], 'Cycle dependency.');
 """,
-            )
-            psql(admin_conn, f"DELETE FROM ticket_board.ticket_blockers WHERE ticket_id = 'PGU-1' AND blocker_ticket_id = '{cycle_ticket_id}';")
+        )
+        psql(admin_conn, f"DELETE FROM ticket_board.ticket_blockers WHERE ticket_id = 'PGU-1' AND blocker_ticket_id = '{cycle_ticket_id}';")
 
-            service_app.update_ticket(blocked["id"], {"comment": {"who": "director", "text": "Tracking note."}})
-            cancelled = service_app.update_ticket(
-                blocked["id"],
-                {
-                    "state": "cancelled",
-                    "comment": {"who": "director", "text": "Covered by PGU-1."},
-                },
-            )
-            assert cancelled["state"] == "cancelled", cancelled
-            assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
+        service_app.update_ticket(blocked["id"], {"comment": {"who": "director", "text": "Tracking note."}})
+        cancelled = service_app.update_ticket(
+            blocked["id"],
+            {
+                "state": "cancelled",
+                "comment": {"who": "director", "text": "Covered by PGU-1."},
+            },
+        )
+        assert cancelled["state"] == "cancelled", cancelled
+        assert cancelled["comments"][-1]["text"] == "Covered by PGU-1.", cancelled
 
-            insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="backlog", assignee="ops", implementation="")
-            in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"}, caller_role="ops")
-            assert in_progress["state"] == "in_progress", in_progress
-            assert in_progress["implementation"] == "", in_progress
-            submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": commit_hash}, caller_role="ops")
-            assert submitted["state"] == "audit", submitted
-            assert submitted["commit_hash"] == commit_hash, submitted
-            try:
-                service_app.update_ticket("PGU-100", {"commit_hash": "123abcd"}, caller_role="ops")
-                raise AssertionError("expected generic commit_hash edit to be rejected")
-            except ValueError as exc:
-                assert "commit_hash must be written with submit_to_audit or mark_done" in str(exc), exc
-            assert psql(admin_conn, "SELECT commit_hash FROM ticket_board.tickets WHERE id = 'PGU-100';") == commit_hash
-            insert_ticket(admin_conn, "PGU-101", title="Direct final signoff forbidden", state="in_progress", assignee="app")
-            try:
-                service_app.update_ticket(
-                    "PGU-101",
-                    {"state": "director_review", "commit_hash": "123abcd"},
-                    caller_role="app",
-                )
-                raise AssertionError("expected direct final signoff to be rejected for pgu workflow")
-            except ValueError as exc:
-                assert "postgres function API only accepts commit_hash when submitting to audit or marking done" in str(exc), exc
-            assert psql(admin_conn, "SELECT state || ':' || coalesce(commit_hash, '') FROM ticket_board.tickets WHERE id = 'PGU-101';") == "in_progress:"
-            edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
-            assert edited["implementation"] == "Edited through function API.", edited
-            regression_edited = service_app.update_ticket("PGU-100", {"regression": True})
-            assert regression_edited["regression"] is True, regression_edited
-            regression_cleared = service_app.update_ticket("PGU-100", {"regression": False})
-            assert regression_cleared["regression"] is False, regression_cleared
-            regression_round_trip = json.loads(
-                psql(
-                    admin_conn,
-                    """
+        insert_ticket(admin_conn, "PGU-100", title="Ops implementation", state="backlog", assignee="ops", implementation="")
+        in_progress = service_app.update_ticket("PGU-100", {"state": "in_progress"}, caller_role="ops")
+        assert in_progress["state"] == "in_progress", in_progress
+        assert in_progress["implementation"] == "", in_progress
+        submitted = service_app.update_ticket("PGU-100", {"state": "audit", "commit_hash": commit_hash}, caller_role="ops")
+        assert submitted["state"] == "audit", submitted
+        assert submitted["commit_hash"] == commit_hash, submitted
+        try:
+            service_app.update_ticket("PGU-100", {"commit_hash": "123abcd"}, caller_role="ops")
+            raise AssertionError("expected generic commit_hash edit to be rejected")
+        except ValueError as exc:
+            assert "commit_hash must be written with submit_to_audit or mark_done" in str(exc), exc
+        assert psql(admin_conn, "SELECT commit_hash FROM ticket_board.tickets WHERE id = 'PGU-100';") == commit_hash
+        insert_ticket(admin_conn, "PGU-101", title="Direct final signoff forbidden", state="in_progress", assignee="app")
+        try:
+            service_app.update_ticket(
+                "PGU-101",
+                {"state": "director_review", "commit_hash": "123abcd"},
+                caller_role="app",
+            )
+            raise AssertionError("expected direct final signoff to be rejected for pgu workflow")
+        except ValueError as exc:
+            assert "postgres function API only accepts commit_hash when submitting to audit or marking done" in str(exc), exc
+        assert psql(admin_conn, "SELECT state || ':' || coalesce(commit_hash, '') FROM ticket_board.tickets WHERE id = 'PGU-101';") == "in_progress:"
+        edited = service_app.update_ticket("PGU-100", {"implementation": "Edited through function API."})
+        assert edited["implementation"] == "Edited through function API.", edited
+        regression_edited = service_app.update_ticket("PGU-100", {"regression": True})
+        assert regression_edited["regression"] is True, regression_edited
+        regression_cleared = service_app.update_ticket("PGU-100", {"regression": False})
+        assert regression_cleared["regression"] is False, regression_cleared
+        regression_round_trip = json.loads(
+            psql(
+                admin_conn,
+                """
 SELECT jsonb_build_object(
     'regression', regression,
     'source_regression', source_json->'regression'
@@ -506,116 +506,116 @@ SELECT jsonb_build_object(
 FROM ticket_board.tickets
 WHERE id = 'PGU-100';
 """,
-                )
             )
-            assert regression_round_trip == {"regression": False, "source_regression": False}, regression_round_trip
+        )
+        assert regression_round_trip == {"regression": False, "source_regression": False}, regression_round_trip
 
-            frame_attachment = frames / "frame-ref.png"
-            Image.new("RGB", (2, 2), (80, 120, 160)).save(frame_attachment)
-            attached = service_app.update_ticket("PGU-100", {"screenshots": [str(frame_attachment)]})
-            stored_path = Path(attached["screenshots"][0])
-            assert stored_path != frame_attachment.resolve(), attached
-            assert assets.resolve() in stored_path.parents, attached
-            assert attached["screenshots_info"][0]["available"] is True, attached
-            frame_attachment.unlink()
-            persisted_attachment = service_app.get_ticket("PGU-100")
-            assert persisted_attachment["screenshots"] == [str(stored_path)], persisted_attachment
-            assert persisted_attachment["screenshots_info"][0]["available"] is True, persisted_attachment
-            assert stored_path.is_file(), stored_path
+        frame_attachment = frames / "frame-ref.png"
+        Image.new("RGB", (2, 2), (80, 120, 160)).save(frame_attachment)
+        attached = service_app.update_ticket("PGU-100", {"screenshots": [str(frame_attachment)]})
+        stored_path = Path(attached["screenshots"][0])
+        assert stored_path != frame_attachment.resolve(), attached
+        assert assets.resolve() in stored_path.parents, attached
+        assert attached["screenshots_info"][0]["available"] is True, attached
+        frame_attachment.unlink()
+        persisted_attachment = service_app.get_ticket("PGU-100")
+        assert persisted_attachment["screenshots"] == [str(stored_path)], persisted_attachment
+        assert persisted_attachment["screenshots_info"][0]["available"] is True, persisted_attachment
+        assert stored_path.is_file(), stored_path
 
-            audit_ready = service_app.update_ticket(
-                "PGU-100",
-                {"audit_signoff": True, "comment": {"who": "audit", "text": "Audit verified."}},
-                caller_role="audit",
-            )
-            assert audit_ready["state"] == "director_review", audit_ready
-            assert audit_ready["comments"][-1]["text"] == "Audit verified.", audit_ready
-            done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": commit_hash}, caller_role="director")
-            assert done["state"] == "done", done
-            corrected_done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": alternate_commit_hash}, caller_role="director")
-            assert corrected_done["commit_hash"] == alternate_commit_hash, corrected_done
+        audit_ready = service_app.update_ticket(
+            "PGU-100",
+            {"audit_signoff": True, "comment": {"who": "audit", "text": "Audit verified."}},
+            caller_role="audit",
+        )
+        assert audit_ready["state"] == "director_review", audit_ready
+        assert audit_ready["comments"][-1]["text"] == "Audit verified.", audit_ready
+        done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": commit_hash}, caller_role="director")
+        assert done["state"] == "done", done
+        corrected_done = service_app.update_ticket("PGU-100", {"state": "done", "commit_hash": alternate_commit_hash}, caller_role="director")
+        assert corrected_done["commit_hash"] == alternate_commit_hash, corrected_done
 
-            insert_ticket(admin_conn, "PGU-200", title="Audit kickback", state="audit", assignee="audit")
-            kicked = service_app.update_ticket(
-                "PGU-200",
-                {"state": "analysis", "comment": {"who": "audit", "text": "Needs another pass."}},
-                caller_role="audit",
-            )
-            assert kicked["state"] == "in_progress", kicked
-            assert kicked["assignee"] == "ops", kicked
-            assert kicked["comments"][-1]["text"] == "Needs another pass.", kicked
+        insert_ticket(admin_conn, "PGU-200", title="Audit kickback", state="audit", assignee="audit")
+        kicked = service_app.update_ticket(
+            "PGU-200",
+            {"state": "analysis", "comment": {"who": "audit", "text": "Needs another pass."}},
+            caller_role="audit",
+        )
+        assert kicked["state"] == "in_progress", kicked
+        assert kicked["assignee"] == "ops", kicked
+        assert kicked["comments"][-1]["text"] == "Needs another pass.", kicked
 
-            insert_ticket(
-                admin_conn,
-                "PGU-300",
-                title="User review",
-                state="user_review",
-                assignee="user",
-                audit_signoff=True,
-                needs_user_signoff=True,
-            )
-            eric_signed = service_app.update_ticket(
-                "PGU-300",
-                {"user_signoff": True, "comment": {"who": "user", "text": "User approves."}},
-                caller_role="user",
-            )
-            assert eric_signed["state"] == "director_review", eric_signed
-            assert eric_signed["user_signoff"] is True, eric_signed
-            assert eric_signed["comments"][-1]["text"] == "User approves.", eric_signed
+        insert_ticket(
+            admin_conn,
+            "PGU-300",
+            title="User review",
+            state="user_review",
+            assignee="user",
+            audit_signoff=True,
+            needs_user_signoff=True,
+        )
+        eric_signed = service_app.update_ticket(
+            "PGU-300",
+            {"user_signoff": True, "comment": {"who": "user", "text": "User approves."}},
+            caller_role="user",
+        )
+        assert eric_signed["state"] == "director_review", eric_signed
+        assert eric_signed["user_signoff"] is True, eric_signed
+        assert eric_signed["comments"][-1]["text"] == "User approves.", eric_signed
 
-            insert_ticket(
-                admin_conn,
-                "PGU-301",
-                title="User reopen",
-                state="user_review",
-                assignee="user",
-                audit_signoff=True,
-                needs_user_signoff=True,
-            )
-            user_reopened = service_app.update_ticket(
-                "PGU-301",
-                {"state": "analysis", "comment": {"who": "user", "text": "Needs design revision."}},
-                caller_role="user",
-            )
-            assert user_reopened["state"] == "analysis", user_reopened
-            assert user_reopened["comments"][-1]["text"] == "Needs design revision.", user_reopened
+        insert_ticket(
+            admin_conn,
+            "PGU-301",
+            title="User reopen",
+            state="user_review",
+            assignee="user",
+            audit_signoff=True,
+            needs_user_signoff=True,
+        )
+        user_reopened = service_app.update_ticket(
+            "PGU-301",
+            {"state": "analysis", "comment": {"who": "user", "text": "Needs design revision."}},
+            caller_role="user",
+        )
+        assert user_reopened["state"] == "analysis", user_reopened
+        assert user_reopened["comments"][-1]["text"] == "Needs design revision.", user_reopened
 
-            deferred = service_app.update_ticket("PGU-1", {"state": "backlog"}, caller_role="director")
-            assert deferred["state"] == "backlog", deferred
+        deferred = service_app.update_ticket("PGU-1", {"state": "backlog"}, caller_role="director")
+        assert deferred["state"] == "backlog", deferred
 
-            insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="director", implementation="")
-            insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="director", implementation="")
-            insert_ticket(admin_conn, "PGU-403", title="Old audit ping", state="audit", assignee="audit")
-            insert_ticket(admin_conn, "PGU-404", title="Active audit ping", state="audit", assignee="audit")
-            insert_ticket(admin_conn, "PGU-407", title="Old perf implementation ping", state="in_progress", assignee="perf")
-            insert_ticket(admin_conn, "PGU-408", title="Active main implementation ping", state="in_progress", assignee="main")
-            insert_ticket(admin_conn, "PGU-409", title="Old app implementation ping", state="in_progress", assignee="app")
-            insert_ticket(admin_conn, "PGU-410", title="Active research implementation ping", state="in_progress", assignee="research")
-            insert_ticket(admin_conn, "PGU-411", title="Unassigned backlog ping", state="backlog", assignee="unassigned")
-            insert_ticket(admin_conn, "PGU-412", title="Queued-only ops implementation ping", state="in_progress", assignee="ops")
-            insert_ticket(admin_conn, "PGU-413", title="Nudged-only ops implementation ping", state="in_progress", assignee="ops")
-            insert_ticket(admin_conn, "PGU-414", title="Active inspection ping", state="inspection", assignee="inspector")
-            insert_ticket(
-                admin_conn,
-                "PGU-405",
-                title="Old director review ping",
-                state="director_review",
-                assignee="director",
-                audit_signoff=True,
-                commit_hash="abcdef2",
-            )
-            insert_ticket(
-                admin_conn,
-                "PGU-406",
-                title="Active director review ping",
-                state="director_review",
-                assignee="director",
-                audit_signoff=True,
-                commit_hash="abcdef3",
-            )
-            psql(
-                admin_conn,
-                """
+        insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="director", implementation="")
+        insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="director", implementation="")
+        insert_ticket(admin_conn, "PGU-403", title="Old audit ping", state="audit", assignee="audit")
+        insert_ticket(admin_conn, "PGU-404", title="Active audit ping", state="audit", assignee="audit")
+        insert_ticket(admin_conn, "PGU-407", title="Old perf implementation ping", state="in_progress", assignee="perf")
+        insert_ticket(admin_conn, "PGU-408", title="Active main implementation ping", state="in_progress", assignee="main")
+        insert_ticket(admin_conn, "PGU-409", title="Old app implementation ping", state="in_progress", assignee="app")
+        insert_ticket(admin_conn, "PGU-410", title="Active research implementation ping", state="in_progress", assignee="research")
+        insert_ticket(admin_conn, "PGU-411", title="Unassigned backlog ping", state="backlog", assignee="unassigned")
+        insert_ticket(admin_conn, "PGU-412", title="Queued-only ops implementation ping", state="in_progress", assignee="ops")
+        insert_ticket(admin_conn, "PGU-413", title="Nudged-only ops implementation ping", state="in_progress", assignee="ops")
+        insert_ticket(admin_conn, "PGU-414", title="Active inspection ping", state="inspection", assignee="inspector")
+        insert_ticket(
+            admin_conn,
+            "PGU-405",
+            title="Old director review ping",
+            state="director_review",
+            assignee="director",
+            audit_signoff=True,
+            commit_hash="abcdef2",
+        )
+        insert_ticket(
+            admin_conn,
+            "PGU-406",
+            title="Active director review ping",
+            state="director_review",
+            assignee="director",
+            audit_signoff=True,
+            commit_hash="abcdef3",
+        )
+        psql(
+            admin_conn,
+            """
 UPDATE ticket_board.ticket_notification_state
 SET last_transition_notified_at = clock_timestamp(),
     last_nudged_at = NULL
@@ -697,79 +697,77 @@ INSERT INTO ticket_board.notification_trace (
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle');
 """,
-            )
+        )
 
-            tickets, errors = service_app.list_tickets()
-            assert errors == [], errors
-            assert {"PGU-1", "PGU-2", "PGU-3", "PGU-100", "PGU-200", "PGU-300", "PGU-301"}.issubset(
-                {ticket["id"] for ticket in tickets}
-            ), tickets
-            tickets_by_id = {ticket["id"]: ticket for ticket in tickets}
-            assert tickets_by_id["PGU-402"]["active_work_highlight"] is True, tickets_by_id["PGU-402"]
-            assert tickets_by_id["PGU-402"]["active_work_owner_role"] == "director", tickets_by_id["PGU-402"]
-            assert tickets_by_id["PGU-402"]["active_work_notified_at"], tickets_by_id["PGU-402"]
-            assert tickets_by_id["PGU-401"]["active_work_highlight"] is False, tickets_by_id["PGU-401"]
-            assert tickets_by_id["PGU-404"]["active_work_highlight"] is True, tickets_by_id["PGU-404"]
-            assert tickets_by_id["PGU-404"]["active_work_owner_role"] == "audit", tickets_by_id["PGU-404"]
-            assert tickets_by_id["PGU-403"]["active_work_highlight"] is False, tickets_by_id["PGU-403"]
-            assert tickets_by_id["PGU-408"]["active_work_highlight"] is True, tickets_by_id["PGU-408"]
-            assert tickets_by_id["PGU-408"]["active_work_owner_role"] == "main", tickets_by_id["PGU-408"]
-            assert tickets_by_id["PGU-408"]["active_work_notified_at"], tickets_by_id["PGU-408"]
-            assert tickets_by_id["PGU-407"]["active_work_highlight"] is False, tickets_by_id["PGU-407"]
-            assert tickets_by_id["PGU-410"]["active_work_highlight"] is True, tickets_by_id["PGU-410"]
-            assert tickets_by_id["PGU-410"]["active_work_owner_role"] == "research", tickets_by_id["PGU-410"]
-            assert tickets_by_id["PGU-409"]["active_work_highlight"] is False, tickets_by_id["PGU-409"]
-            assert tickets_by_id["PGU-411"]["active_work_highlight"] is False, tickets_by_id["PGU-411"]
-            assert tickets_by_id["PGU-411"]["active_work_owner_role"] == "", tickets_by_id["PGU-411"]
-            assert tickets_by_id["PGU-412"]["active_work_highlight"] is False, tickets_by_id["PGU-412"]
-            assert tickets_by_id["PGU-413"]["active_work_highlight"] is False, tickets_by_id["PGU-413"]
-            assert tickets_by_id["PGU-406"]["active_work_highlight"] is True, tickets_by_id["PGU-406"]
-            assert tickets_by_id["PGU-406"]["active_work_owner_role"] == "director", tickets_by_id["PGU-406"]
-            assert tickets_by_id["PGU-414"]["active_work_highlight"] is True, tickets_by_id["PGU-414"]
-            assert tickets_by_id["PGU-414"]["active_work_owner_role"] == "inspector", tickets_by_id["PGU-414"]
-            assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]
-            assert tickets_by_id["PGU-1"]["active_work_highlight"] is False, tickets_by_id["PGU-1"]
+        tickets, errors = service_app.list_tickets()
+        assert errors == [], errors
+        assert {"PGU-1", "PGU-2", "PGU-3", "PGU-100", "PGU-200", "PGU-300", "PGU-301"}.issubset(
+            {ticket["id"] for ticket in tickets}
+        ), tickets
+        tickets_by_id = {ticket["id"]: ticket for ticket in tickets}
+        assert tickets_by_id["PGU-402"]["active_work_highlight"] is True, tickets_by_id["PGU-402"]
+        assert tickets_by_id["PGU-402"]["active_work_owner_role"] == "director", tickets_by_id["PGU-402"]
+        assert tickets_by_id["PGU-402"]["active_work_notified_at"], tickets_by_id["PGU-402"]
+        assert tickets_by_id["PGU-401"]["active_work_highlight"] is False, tickets_by_id["PGU-401"]
+        assert tickets_by_id["PGU-404"]["active_work_highlight"] is True, tickets_by_id["PGU-404"]
+        assert tickets_by_id["PGU-404"]["active_work_owner_role"] == "audit", tickets_by_id["PGU-404"]
+        assert tickets_by_id["PGU-403"]["active_work_highlight"] is False, tickets_by_id["PGU-403"]
+        assert tickets_by_id["PGU-408"]["active_work_highlight"] is True, tickets_by_id["PGU-408"]
+        assert tickets_by_id["PGU-408"]["active_work_owner_role"] == "main", tickets_by_id["PGU-408"]
+        assert tickets_by_id["PGU-408"]["active_work_notified_at"], tickets_by_id["PGU-408"]
+        assert tickets_by_id["PGU-407"]["active_work_highlight"] is False, tickets_by_id["PGU-407"]
+        assert tickets_by_id["PGU-410"]["active_work_highlight"] is True, tickets_by_id["PGU-410"]
+        assert tickets_by_id["PGU-410"]["active_work_owner_role"] == "research", tickets_by_id["PGU-410"]
+        assert tickets_by_id["PGU-409"]["active_work_highlight"] is False, tickets_by_id["PGU-409"]
+        assert tickets_by_id["PGU-411"]["active_work_highlight"] is False, tickets_by_id["PGU-411"]
+        assert tickets_by_id["PGU-411"]["active_work_owner_role"] == "", tickets_by_id["PGU-411"]
+        assert tickets_by_id["PGU-412"]["active_work_highlight"] is False, tickets_by_id["PGU-412"]
+        assert tickets_by_id["PGU-413"]["active_work_highlight"] is False, tickets_by_id["PGU-413"]
+        assert tickets_by_id["PGU-406"]["active_work_highlight"] is True, tickets_by_id["PGU-406"]
+        assert tickets_by_id["PGU-406"]["active_work_owner_role"] == "director", tickets_by_id["PGU-406"]
+        assert tickets_by_id["PGU-414"]["active_work_highlight"] is True, tickets_by_id["PGU-414"]
+        assert tickets_by_id["PGU-414"]["active_work_owner_role"] == "inspector", tickets_by_id["PGU-414"]
+        assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]
+        assert tickets_by_id["PGU-1"]["active_work_highlight"] is False, tickets_by_id["PGU-1"]
 
-            insert_ticket(admin_conn, "PGU-415", title="Prompt refresh analysis ping", state="analysis", assignee="director", implementation="")
-            before_send_signature = service_app.store_signature()
-            before_send = service_app.get_ticket("PGU-415")
-            assert before_send["active_work_highlight"] is False, before_send
-            psql(
-                admin_conn,
-                """
+        insert_ticket(admin_conn, "PGU-415", title="Prompt refresh analysis ping", state="analysis", assignee="director", implementation="")
+        before_send_signature = service_app.store_signature()
+        before_send = service_app.get_ticket("PGU-415")
+        assert before_send["active_work_highlight"] is False, before_send
+        psql(
+            admin_conn,
+            """
 INSERT INTO ticket_board.notification_trace (
     ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
 ) VALUES (
     clock_timestamp(), 'PGU-415', 'director', 'transition', 'send', 'analysis', 'director', 'idle', 'idle'
 );
 """,
-            )
-            after_send_signature = service_app.store_signature()
-            assert after_send_signature != before_send_signature
-            after_send = service_app.get_ticket("PGU-415")
-            assert after_send["active_work_highlight"] is True, after_send
-            assert after_send["active_work_owner_role"] == "director", after_send
+        )
+        after_send_signature = service_app.store_signature()
+        assert after_send_signature != before_send_signature
+        after_send = service_app.get_ticket("PGU-415")
+        assert after_send["active_work_highlight"] is True, after_send
+        assert after_send["active_work_owner_role"] == "director", after_send
 
-            old_prefix = os.environ.get("TICKET_BOARD_TICKET_PREFIX")
-            try:
-                os.environ["TICKET_BOARD_TICKET_PREFIX"] = "OTTO"
-                otto_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
-                otto_created = otto_app.create_ticket(
-                    title="Project-prefixed create",
-                    body="Created through a non-PGU project prefix.",
-                    screenshot=None,
-                    assignee="unassigned",
-                    needs_user_signoff=False,
-                )
-            finally:
-                if old_prefix is None:
-                    os.environ.pop("TICKET_BOARD_TICKET_PREFIX", None)
-                else:
-                    os.environ["TICKET_BOARD_TICKET_PREFIX"] = old_prefix
-            assert otto_created["id"].startswith("OTTO-"), otto_created
-            assert psql(admin_conn, f"SELECT id FROM ticket_board.tickets WHERE id = '{otto_created['id']}';") == otto_created["id"]
+        old_prefix = os.environ.get("TICKET_BOARD_TICKET_PREFIX")
+        try:
+            os.environ["TICKET_BOARD_TICKET_PREFIX"] = "OTTO"
+            otto_app = make_app(root, socket_dir, port, dbname, SERVICE_ROLE)
+            otto_created = otto_app.create_ticket(
+                title="Project-prefixed create",
+                body="Created through a non-PGU project prefix.",
+                screenshot=None,
+                assignee="unassigned",
+                needs_user_signoff=False,
+            )
         finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if old_prefix is None:
+                os.environ.pop("TICKET_BOARD_TICKET_PREFIX", None)
+            else:
+                os.environ["TICKET_BOARD_TICKET_PREFIX"] = old_prefix
+        assert otto_created["id"].startswith("OTTO-"), otto_created
+        assert psql(admin_conn, f"SELECT id FROM ticket_board.tickets WHERE id = '{otto_created['id']}';") == otto_created["id"]
 
     print("ticket_board_postgres_backend_test: ok")
     return 0

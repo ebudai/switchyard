@@ -29,6 +29,8 @@ from tests.ticket_board_workflow_config_equivalence_test import (  # noqa: E402
     run,
 )
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 def load_stages(conn: str) -> list[str]:
     return json.loads(
@@ -569,34 +571,30 @@ def assert_owner_scope_extraction_catches_operator_drift(conn: str, operator: st
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-workflow-matrix.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-workflow-matrix.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_workflow_matrix_test"
         admin_conn = conninfo(socket_dir, port, dbname)
 
-        run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale", "--username=postgres"])
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
-            checked = assert_matrix_matches(admin_conn)
-            assert checked == len(load_stages(admin_conn)) * len(load_stages(admin_conn)) * len(CALLER_ROLES) * 2
-            assert_shadow_logs_drift(admin_conn)
-            assert_rbac_shadow_logs_drift(admin_conn)
-            assert_owner_scope_extraction_catches_named_assignee_drift(admin_conn)
-            assert_owner_scope_extraction_catches_inline_subquery_drift(admin_conn)
-            assert_owner_scope_extraction_catches_aliased_subquery_drift(admin_conn)
-            assert_owner_scope_extraction_catches_operator_drift(admin_conn, "!=")
-            assert_owner_scope_extraction_catches_operator_drift(admin_conn, "IS DISTINCT FROM")
-            assert_owner_scope_extraction_catches_operator_drift(admin_conn, "=")
-            assert_config_authoritative_controls_runtime_rbac(admin_conn)
-            assert_config_authoritative_blocks_runtime_transition(admin_conn)
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False, capture_output=True)
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(admin_conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        checked = assert_matrix_matches(admin_conn)
+        assert checked == len(load_stages(admin_conn)) * len(load_stages(admin_conn)) * len(CALLER_ROLES) * 2
+        assert_shadow_logs_drift(admin_conn)
+        assert_rbac_shadow_logs_drift(admin_conn)
+        assert_owner_scope_extraction_catches_named_assignee_drift(admin_conn)
+        assert_owner_scope_extraction_catches_inline_subquery_drift(admin_conn)
+        assert_owner_scope_extraction_catches_aliased_subquery_drift(admin_conn)
+        assert_owner_scope_extraction_catches_operator_drift(admin_conn, "!=")
+        assert_owner_scope_extraction_catches_operator_drift(admin_conn, "IS DISTINCT FROM")
+        assert_owner_scope_extraction_catches_operator_drift(admin_conn, "=")
+        assert_config_authoritative_controls_runtime_rbac(admin_conn)
+        assert_config_authoritative_blocks_runtime_transition(admin_conn)
 
     print(f"ticket_board_workflow_transition_matrix_test: ok ({checked} triples)")
     return 0

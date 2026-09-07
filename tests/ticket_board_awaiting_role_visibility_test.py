@@ -29,6 +29,8 @@ SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
 from scripts.ticket_board.app import TicketBoardApp
 from scripts.ticket_board.read_client import director_payload, needs_director
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -152,16 +154,18 @@ def main() -> int:
         print(f"ticket_board_awaiting_role_visibility_test: skipped - {reason}")
         return 0
 
-    with tempfile.TemporaryDirectory(prefix="ticket-board-awaiting-role.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
+    with temporary_cluster(
+        prefix="ticket-board-awaiting-role.",
+        initdb_args=(),
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         frames = root / "frames"
         assets = root / "assets"
         frames.mkdir()
         assets.mkdir()
-        port = free_port()
         dbname = "pgu_awaiting_role_test"
         # The board writes as ticket_board_service and the schema enforces it
         # (require_actor rejects any other database role), so the app under test
@@ -169,31 +173,21 @@ def main() -> int:
         admin_conninfo = f"host={socket_dir} port={port} dbname={dbname}"
         conninfo = f"{admin_conninfo} user=ticket_board_service"
 
-        subprocess.run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"], check=True, capture_output=True, text=True)
-        try:
-            subprocess.run(
-                ["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname], check=True, capture_output=True, text=True)
-            psql(admin_conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
-            psql(admin_conninfo, "CREATE ROLE ticket_board_service LOGIN;")
-            psql(admin_conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
-            psql(
-                admin_conninfo,
-                """
+        subprocess.run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname], check=True, capture_output=True, text=True)
+        psql(admin_conninfo, "CREATE ROLE ticket_board_listener LOGIN;")
+        psql(admin_conninfo, "CREATE ROLE ticket_board_service LOGIN;")
+        psql(admin_conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+        psql(
+            admin_conninfo,
+            """
 GRANT USAGE ON SCHEMA ticket_board TO ticket_board_service;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_service;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ticket_board TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_awaiting_role(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.clear_awaiting_role(text) TO ticket_board_service;
 """,
-            )
-            run_checks(conninfo, admin_conninfo, ROOT, frames, assets)
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
+        )
+        run_checks(conninfo, admin_conninfo, ROOT, frames, assets)
 
     print("ticket_board_awaiting_role_visibility_test: ok")
     return 0

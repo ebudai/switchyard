@@ -21,6 +21,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -174,40 +176,32 @@ def main() -> int:
         print(f"ticket_board_awaiting_role_survives_comment_test: skipped - {reason}")
         return 0
 
-    with tempfile.TemporaryDirectory(prefix="ticket-board-awaiting-comment.") as tmp:
-        root = Path(tmp)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-awaiting-comment.",
+        initdb_args=(),
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_awaiting_comment_test"
         admin = f"host={socket_dir} port={port} dbname={dbname}"
         svc = f"{admin} user=ticket_board_service"
 
-        subprocess.run(["initdb", "-D", str(data_dir), "-A", "trust", "--no-locale"], check=True, capture_output=True)
-        try:
-            subprocess.run(
-                ["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname], check=True, capture_output=True)
-            psql(admin, "CREATE ROLE ticket_board_listener LOGIN;")
-            psql(admin, "CREATE ROLE ticket_board_service LOGIN;")
-            psql(admin, SCHEMA_PATH.read_text(encoding="utf-8"))
-            psql(
-                admin,
-                """
+        subprocess.run(["createdb", "-h", str(socket_dir), "-p", str(port), dbname], check=True, capture_output=True)
+        psql(admin, "CREATE ROLE ticket_board_listener LOGIN;")
+        psql(admin, "CREATE ROLE ticket_board_service LOGIN;")
+        psql(admin, SCHEMA_PATH.read_text(encoding="utf-8"))
+        psql(
+            admin,
+            """
 GRANT USAGE ON SCHEMA ticket_board TO ticket_board_service;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_service;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ticket_board TO ticket_board_service;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board TO ticket_board_service;
 """,
-            )
-            run_checks(svc, admin)
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
+        )
+        run_checks(svc, admin)
 
     print("ticket_board_awaiting_role_survives_comment_test: ok")
     return 0

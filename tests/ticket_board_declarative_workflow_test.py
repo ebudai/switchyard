@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 import ticket_board_write_api_test as t
 from scripts.ticket_board.workflow_config import validate
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 def rejected(fn, reason=""):
     try:
@@ -28,38 +30,16 @@ def rejected(fn, reason=""):
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="workflow-db-") as tmp:
-        root = Path(tmp)
-        data = root / "data"
-        sock = root / "socket"
-        sock.mkdir()
-        port = t.free_port()
+    with temporary_cluster(
+        prefix="workflow-db-",
+        shutdown="immediate",
+    ) as cluster:
+        root = cluster.root
+        data = cluster.data_dir
+        sock = cluster.socket_dir
+        port = cluster.port
         db = "workflow_test"
         admin = t.conninfo(sock, port, db)
-        t.run(
-            [
-                "initdb",
-                "-D",
-                str(data),
-                "-A",
-                "trust",
-                "--no-locale",
-                "--username=postgres",
-            ]
-        )
-        t.run(
-            [
-                "pg_ctl",
-                "-D",
-                str(data),
-                "-o",
-                f"-k {sock} -p {port} -h ''",
-                "-l",
-                str(root / "postgres.log"),
-                "-w",
-                "start",
-            ]
-        )
         try:
             t.run(["createdb", "-h", str(sock), "-p", str(port), "-U", "postgres", db])
             schema = t.SCHEMA_PATH.read_text()
@@ -849,7 +829,6 @@ def main():
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            t.run(["pg_ctl", "-D", str(data), "-m", "immediate", "-w", "stop"])
     return 0
 
 

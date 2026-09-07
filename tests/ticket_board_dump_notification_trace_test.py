@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from temporary_cluster import temporary_cluster  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "scripts" / "ticket_board" / "schema.sql"
@@ -55,35 +57,22 @@ def ticket_source(ticket_id: str, title: str, state: str, assignee: str) -> str:
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="ticket-board-trace-dump.") as tmpdir:
-        root = Path(tmpdir)
-        data_dir = root / "pgdata"
-        socket_dir = root / "socket"
-        socket_dir.mkdir()
-        port = free_port()
+    with temporary_cluster(
+        prefix="ticket-board-trace-dump.",
+    ) as cluster:
+        root = cluster.root
+        data_dir = cluster.data_dir
+        socket_dir = cluster.socket_dir
+        port = cluster.port
         dbname = "pgu_trace_dump_test"
         conninfo = f"host={socket_dir} port={port} dbname={dbname} user=postgres"
 
-        run(
-            [
-                "initdb",
-                "-D",
-                str(data_dir),
-                "-A",
-                "trust",
-                "--no-locale",
-                "--encoding=SQL_ASCII",
-                "--username=postgres",
-            ]
-        )
-        try:
-            run(["pg_ctl", "-D", str(data_dir), "-o", f"-k {socket_dir} -p {port} -h ''", "-w", "start"], capture=False)
-            run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
-            psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
-            assert psql(conninfo, "SHOW client_encoding;") == "SQL_ASCII"
-            psql(
-                conninfo,
-                f"""
+        run(["createdb", "-h", str(socket_dir), "-p", str(port), "-U", "postgres", dbname])
+        psql(conninfo, SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert psql(conninfo, "SHOW client_encoding;") == "SQL_ASCII"
+        psql(
+            conninfo,
+            f"""
 INSERT INTO ticket_board.tickets (
     id, title, body, state, assignee, implementation, created_text, updated_text, source_json
 ) VALUES (
@@ -103,21 +92,19 @@ SELECT ticket_board.record_notification_trace(
     '{{"nested": {{"message": "hello"}}, "items": ["one", "two"]}}'::jsonb
 );
 """,
-            )
-            json_proc = run(["python3", str(DUMP_PATH), "--database", conninfo, "--ticket-id", "PGU-970", "--json"])
-            dumped = json.loads(json_proc.stdout)
-            assert dumped[0]["ticket_id"] == "PGU-970", dumped
-            assert dumped[0]["event"] == "enqueue", dumped
-            assert dumped[0]["ticket_state_at_event"] == "in_progress", dumped
-            assert dumped[0]["detail"]["nested"]["message"] == "hello", dumped
+        )
+        json_proc = run(["python3", str(DUMP_PATH), "--database", conninfo, "--ticket-id", "PGU-970", "--json"])
+        dumped = json.loads(json_proc.stdout)
+        assert dumped[0]["ticket_id"] == "PGU-970", dumped
+        assert dumped[0]["event"] == "enqueue", dumped
+        assert dumped[0]["ticket_state_at_event"] == "in_progress", dumped
+        assert dumped[0]["detail"]["nested"]["message"] == "hello", dumped
 
-            text_proc = run(["python3", str(DUMP_PATH), "--database", conninfo, "--ticket-id", "PGU-970"])
-            assert "ticket=PGU-970" in text_proc.stdout, text_proc.stdout
-            assert "event=enqueue" in text_proc.stdout, text_proc.stdout
-            assert "ticket_state=in_progress" in text_proc.stdout, text_proc.stdout
-            assert "b'" not in text_proc.stdout, text_proc.stdout
-        finally:
-            subprocess.run(["pg_ctl", "-D", str(data_dir), "-m", "fast", "-w", "stop"], check=False)
+        text_proc = run(["python3", str(DUMP_PATH), "--database", conninfo, "--ticket-id", "PGU-970"])
+        assert "ticket=PGU-970" in text_proc.stdout, text_proc.stdout
+        assert "event=enqueue" in text_proc.stdout, text_proc.stdout
+        assert "ticket_state=in_progress" in text_proc.stdout, text_proc.stdout
+        assert "b'" not in text_proc.stdout, text_proc.stdout
 
     print("ticket_board_dump_notification_trace_test: ok")
     return 0

@@ -441,8 +441,11 @@ tree, because the installer's default source tree is the tree it ships in, and a
 staged wrapper that resolved to a directory holding no skills would have nothing
 to install. And the release marker, because a skill installed from a tree that
 cannot name its commit is unprovenanced, and `verify` rejects it -- so the
-bundle would install and then fail its own check. The marker copy is guarded: a
-deployment made from a plain checkout has none.
+bundle would install and then fail its own check. The marker copy is guarded,
+because a deployment made from a plain checkout has none -- and the guard's
+other branch removes any marker already staged, so a source that names no
+commit cannot leave the previous release's commit behind to stamp the next
+install with a release that does not contain it.
 
 Install the hook writer and persistent CLI hook config entries with:
 

@@ -206,6 +206,30 @@ def staged_bundle_runs_for_a_fresh_role_home() -> None:
         verified = _run_staged(home, "verify", "--home", str(home))
         assert verified.returncode == 0, (verified.returncode, verified.stdout, verified.stderr)
 
+        # Provenance cannot outlive the release it came from. Stage again from
+        # a source that names no commit, and the previous marker must go rather
+        # than stamp the next install with a release that does not contain it.
+        assert (STAGING / RELEASE_MARKER_NAME).is_file()
+        markerless = root / "markerless"
+        shutil.copytree(release, markerless)
+        (markerless / RELEASE_MARKER_NAME).unlink()
+        _apply(
+            role_tooling_staging_commands(PROJECT, str(markerless)),
+            binaries=root / "bin",
+        )
+        assert not (STAGING / RELEASE_MARKER_NAME).exists(), "a stale release marker survived"
+        stale_home = root / "stale-home"
+        stale_home.mkdir()
+        os.chown(stale_home, ROLE_UID, ROLE_UID)
+        restaged = _run_staged(stale_home, "install", "--home", str(stale_home))
+        assert restaged.returncode == 0, (restaged.returncode, restaged.stderr)
+        for projected in stale_home.rglob("SKILL.md"):
+            assert "0" * 40 not in projected.read_text(encoding="utf-8"), projected
+
+        # And the marked source restores it, so the branch is not one-way.
+        _apply(role_tooling_staging_commands(PROJECT, str(release)), binaries=root / "bin")
+        assert (STAGING / RELEASE_MARKER_NAME).is_file()
+
         # The defect: remove the companion module and the same run must fail.
         (STAGING / "board_skill_cli.py").unlink()
         broken = _run_staged(home, "install", "--home", str(home))
@@ -219,13 +243,55 @@ def _private_staging_root() -> None:
     subprocess.run(["mount", "-t", "tmpfs", "tmpfs", "/usr/local/lib"], check=True)
 
 
+def namespace_command(child: list[str], *, euid: int) -> list[str]:
+    """The child, always inside a mount namespace of its own.
+
+    Root gets a private mount namespace too. Without one, mounting a tmpfs over
+    /usr/local/lib happens in the runner's own namespace and is never undone,
+    which hides this host's staging tree from every process that follows
+    (SYRD-60).
+    """
+    if euid == 0:
+        return ["unshare", "--mount", *child]
+    return ["unshare", "--user", "--map-auto", "--map-root-user", "--mount", *child]
+
+
+def test_the_namespace_is_entered_whoever_runs_this() -> None:
+    child = ["python3", "x", "--namespace-child"]
+    as_root = namespace_command(child, euid=0)
+    assert as_root[:2] == ["unshare", "--mount"], as_root
+    assert as_root[2:] == child, as_root
+    as_user = namespace_command(child, euid=1000)
+    assert as_user[0] == "unshare" and "--mount" in as_user, as_user
+    assert "--user" in as_user and "--map-root-user" in as_user, as_user
+    assert as_user[-len(child) :] == child, as_user
+    # Neither path can reach the mount without the namespace in front of it.
+    for command in (as_root, as_user):
+        assert command.index("--mount") < command.index("--namespace-child"), command
+
+
+def host_staging_listing() -> list[str]:
+    """What this host has under the staging root, as the parent process sees it."""
+    root = Path("/usr/local/lib")
+    if not root.is_dir():
+        return []
+    return sorted(str(path) for path in root.iterdir())
+
+
 def main() -> int:
     test_the_renderer_stages_every_module_its_entry_points_import()
     test_both_generated_paths_stage_the_bundle()
-    command = [sys.executable, str(Path(__file__).resolve()), "--namespace-child"]
-    if os.geteuid() != 0:
-        command = ["unshare", "--user", "--map-auto", "--map-root-user", "--mount", *command]
+    test_the_namespace_is_entered_whoever_runs_this()
+    before = host_staging_listing()
+    command = namespace_command(
+        [sys.executable, str(Path(__file__).resolve()), "--namespace-child"],
+        euid=os.geteuid(),
+    )
     subprocess.run(command, check=True)
+    # The boundary, proved from outside it: nothing the child mounted or wrote
+    # is visible here, and this host's staging root is exactly as it was.
+    assert host_staging_listing() == before, host_staging_listing()
+    assert not (STAGING).exists(), f"{STAGING} escaped the namespace"
     print("board_skill_staged_bundle_test: ok")
     return 0
 

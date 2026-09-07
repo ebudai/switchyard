@@ -769,11 +769,18 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     # `verify` rejects it -- the bundle installs and then cannot be checked
     # (SYRD-60). Guarded: a deployment made from a plain checkout has no marker.
     marker_source = f"{release_root}/{RELEASE_MARKER_NAME}"
+    marker_staged = f"{staging}/{RELEASE_MARKER_NAME}"
     commands.append(f"if [ -f {shell_quote(marker_source)} ]; then")
     commands.append(
         f"    sudo install -m 0644 -o root -g root {shell_quote(marker_source)} "
-        f"{shell_quote(f'{staging}/{RELEASE_MARKER_NAME}')}"
+        f"{shell_quote(marker_staged)}"
     )
+    commands.append("else")
+    # Staging a source that names no commit must not leave the last one's
+    # marker behind: every skill installed afterwards would be stamped with a
+    # release that does not contain it, which is precisely the false provenance
+    # the marker exists to prevent (SYRD-60).
+    commands.append(f"    sudo rm -f {shell_quote(marker_staged)}")
     commands.append("fi")
     return commands
 

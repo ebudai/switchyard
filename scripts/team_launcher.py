@@ -13399,28 +13399,45 @@ def remove_untrusted_role_account_migration(
     simply survive a successful upgrade -- which is the whole finding, still
     sitting there afterwards.
 
-    Nothing here reads it, parses it or runs it. It is one unlink of a fixed
-    name through a descriptor on its directory, so neither the name nor the
-    directory can be swapped for a symlink under it, and a stale copy that
-    happens to be a symlink is removed as the link it is rather than followed
-    (SYRD-62).
+    This is root deleting a file inside a tree the tenant controls, so the path
+    is walked component by component with `O_NOFOLLOW` on every one of them,
+    from the filesystem root. `O_NOFOLLOW` on the directory alone refuses only
+    its own last component: an ancestor several levels up -- `.switchyard`, say
+    -- can be replaced with a symlink, and the kernel follows it, so root
+    unlinks `<project>-role-accounts.sh` in whatever tree it points at. Any
+    ancestor that is a symlink, or that cannot be opened safely, is a refusal
+    and nothing is unlinked.
+
+    Nothing here reads the file, parses it or runs it. Existence is asked and
+    the unlink is made through the same descriptor, so there is no window
+    between the two, and a stale copy that is itself a symlink is removed as the
+    link rather than followed (SYRD-62).
     """
     name = role_account_migration_name(config.project)
     stale = config_path.with_name(name)
-    if not (stale.is_symlink() or stale.exists()):
-        return []
+    provision_dir = config_path.parent
+    if not provision_dir.is_absolute():
+        return [f"refusing to remove {stale}: {provision_dir} is not an absolute path"]
+    relative = Path(str(provision_dir).lstrip("/")) / name
+    directory, problem = _walk_no_follow(Path(provision_dir.anchor or "/"), relative)
+    if directory < 0:
+        if problem == "missing":
+            # Nothing there to take away.
+            return []
+        return [f"refusing to remove {stale}: {problem}"]
     try:
-        directory = os.open(
-            config_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        )
-    except OSError as exc:
-        return [f"could not open {config_path.parent} to remove {name}: {exc}"]
-    try:
-        os.unlink(name, dir_fd=directory)
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        return [f"could not remove the tenant-writable {stale}: {exc}"]
+        try:
+            os.lstat(name, dir_fd=directory)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            return [f"could not check the tenant-writable {stale}: {exc}"]
+        try:
+            os.unlink(name, dir_fd=directory)
+        except FileNotFoundError:
+            return []
+        except OSError as exc:
+            return [f"could not remove the tenant-writable {stale}: {exc}"]
     finally:
         os.close(directory)
     print_func(

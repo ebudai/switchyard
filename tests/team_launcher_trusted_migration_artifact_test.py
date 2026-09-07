@@ -428,6 +428,76 @@ def test_the_legacy_copy_is_removed_as_a_link_never_followed() -> None:
         assert elsewhere.read_text(encoding="utf-8") == "not root's to remove\n"
 
 
+def _victim_tree(tmp: Path) -> tuple[Path, Path]:
+    """A tree outside the tenant's, holding a file at the very same name.
+
+    Whatever root is asked to unlink, it must not be this one.
+    """
+    victim = tmp / "victim-parent"
+    (victim / "provision").mkdir(parents=True)
+    target = victim / "provision" / role_account_migration_name(PROJECT)
+    target.write_text("not the tenant's to have removed\n", encoding="utf-8")
+    return victim, target
+
+
+def test_an_ancestor_symlink_cannot_redirect_the_removal() -> None:
+    """`O_NOFOLLOW` on the directory refuses only its own last component.
+
+    An ancestor several levels up -- `.switchyard` here -- can be replaced with a
+    symlink, and the kernel follows it, so root unlinks the script in whatever
+    tree it points at. This is root deleting inside a tree the tenant controls,
+    so every component is walked and any symlink among them is a refusal.
+    """
+    with tempfile.TemporaryDirectory(prefix="trusted-ancestor.") as raw:
+        tmp = Path(raw)
+        config_path, _selected, _previous, _sha = _partial_state(tmp)
+        config = team_launcher.load_project_config(PROJECT, config_path)
+        victim, target = _victim_tree(tmp)
+
+        tenant = tmp / "tenant"
+        tenant.mkdir()
+        (tenant / ".switchyard").symlink_to(victim)
+        redirected = tenant / ".switchyard" / "provision" / f"{PROJECT}.json"
+        assert redirected.parent.is_dir(), "the symlink resolves, which is the danger"
+
+        problems = team_launcher.remove_untrusted_role_account_migration(
+            config, config_path=redirected, print_func=lambda _line: None
+        )
+        assert problems, "an ancestor symlink must be refused"
+        assert ".switchyard" in problems[0] and "symlink" in problems[0], problems
+        assert target.is_file(), "root unlinked a file outside the tenant tree"
+        assert target.read_text(encoding="utf-8") == "not the tenant's to have removed\n"
+
+
+def test_an_upgrade_whose_removal_is_refused_blocks_and_stops() -> None:
+    """A refusal is not a shrug: the phase records it and nothing later runs."""
+    with tempfile.TemporaryDirectory(prefix="trusted-ancestor-upgrade.") as raw:
+        tmp = Path(raw)
+        config_path, selected, _previous, sha = _partial_state(tmp)
+        _victim, target = _victim_tree(tmp)
+        # The tenant's own provisioning directory, reached through a symlinked
+        # ancestor: everything else about the upgrade is unchanged.
+        tenant = tmp / "tenant"
+        tenant.mkdir()
+        (tenant / ".switchyard").symlink_to(tmp)
+        redirected = tenant / ".switchyard" / config_path.name
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant_state:
+            result, output = _upgrade(
+                redirected,
+                exists=ROLE_ACCOUNTS,
+                runner=_staging_runner(
+                    tenant_state.runner(), staging_root=config_path.parent / "tooling"
+                ),
+                source_repo=selected,
+                deploy_ref=sha,
+            )
+        assert result == 1, output
+        assert "refusing to remove" in output and "symlink" in output, output
+        assert "its control role can write" in output, output
+        assert tenant_state.stops == [], tenant_state.stops
+        assert target.is_file()
+
+
 def test_a_stale_bundle_stops_the_upgrade_before_any_role_moves() -> None:
     """The roles would come back on one release's hooks against another's board."""
     with tempfile.TemporaryDirectory(prefix="trusted-stale.") as raw:

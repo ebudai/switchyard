@@ -314,7 +314,12 @@ def test_a_handoff_with_nothing_recorded_still_refuses_to_guess() -> None:
             )
         # The upgrade itself still reports every phase, as it does whenever it
         # stops at one root does not own; what must not happen is a deploy.
-        assert result == 0, output
+        # It exits nonzero because the identities transaction rolled back: this
+        # case asserted 0 when it was written, which recorded the behaviour
+        # SYRD-64 is about rather than anything SYRD-61 was testing. What this
+        # case is for -- no deploy, a real rollback, a refusal that names both
+        # ways to supply a cache -- is unchanged below (SYRD-64).
+        assert result != 0, output
         assert deploys == [], deploys
         assert "rolling porter back" in output, output
         phase = _identities_phase(config_path)

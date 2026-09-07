@@ -14754,6 +14754,30 @@ def upgrade_project_command(
                 config = load_project_config(config.project, config_path)
                 release_report_config = config
                 cutover = role_account_cutover(config, runner=runner)
+            if cutover_result != 0:
+                # The transaction has already said why it stopped and what the
+                # rollback brought back, so the only thing left is to stop here
+                # and say so. Everything after this point -- the director phase,
+                # the release, the "the remaining step is the director's" line --
+                # describes an upgrade still moving forward. Reporting those
+                # after a rolled-back identities phase is what let a retry read
+                # as progress, and left the failure detectable only by an
+                # unrelated assertion about the board build much later
+                # (SYRD-64).
+                print_func(
+                    f"switchyard: stopping: {config.project}'s identities phase did not complete, "
+                    "so no later phase ran and none is being reported. What the transaction said "
+                    "above -- what it refused to start, or what the rollback brought back -- is "
+                    "the state this tenant is in."
+                )
+                for line in upgrade_phase_report(
+                    config,
+                    config_path=config_path,
+                    cutover=cutover,
+                    journal=read_upgrade_journal(config, config_path=config_path, trusted=True),
+                ):
+                    print_func(line)
+                return cutover_result
         else:
             record_upgrade_phase(
                 config, config_path=config_path, phase="identities", state="done", dry_run=dry_run

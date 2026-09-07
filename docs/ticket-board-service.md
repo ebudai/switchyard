@@ -426,6 +426,27 @@ scripts/ticket-board-write dismiss-notification <notification-id> --reason "pane
 scripts/ticket-board-write dismiss-notification --ticket-id PGU-772 --target-role perf --kind transition --reason "pane was detached"
 ```
 
+The staged role bundle is self-contained. A role account cannot traverse the
+owner's home, so the executables it needs are staged root-owned under
+`/usr/local/lib/switchyard/<project>` -- and each of them puts that directory on
+`sys.path` and imports from it. Whatever they import has to be there too: the
+first rollout to stage `switchyard-board-skill` without its `board_skill_cli`
+sibling installed cleanly and then died with `ModuleNotFoundError` the first
+time a role ran it. Those modules are now discovered from the entry points'
+own imports rather than listed, so the next one to grow a sibling import is
+staged with it.
+
+Two other things travel with them, for the same reason. The canonical `skills/`
+tree, because the installer's default source tree is the tree it ships in, and a
+staged wrapper that resolved to a directory holding no skills would have nothing
+to install. And the release marker, because a skill installed from a tree that
+cannot name its commit is unprovenanced, and `verify` rejects it -- so the
+bundle would install and then fail its own check. The marker copy is guarded,
+because a deployment made from a plain checkout has none -- and the guard's
+other branch removes any marker already staged, so a source that names no
+commit cannot leave the previous release's commit behind to stamp the next
+install with a release that does not contain it.
+
 Install the hook writer and persistent CLI hook config entries with:
 
 ```bash

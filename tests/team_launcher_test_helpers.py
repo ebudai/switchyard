@@ -42,6 +42,15 @@ LOCAL_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# Called for its effect on this process, before any suite reaches tmux: every
+# pane these suites create otherwise asks the live tenant's user manager for a
+# transient scope (SYRD-55).
+from tmux_bus_isolation import isolate_tmux_bus
+
+isolate_tmux_bus()
 
 from ticket_board_pane_env import (
     TICKET_BOARD_PANE_ENV_KEYS,

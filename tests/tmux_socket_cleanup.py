@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmux_bus_isolation import isolate_tmux_bus
+
+# An isolated socket is not isolation: without this the panes on that socket
+# still create transient scopes in the live tenant's user manager (SYRD-55).
+isolate_tmux_bus()
 
 
 def tmux_args(server: str, args: list[str]) -> list[str]:

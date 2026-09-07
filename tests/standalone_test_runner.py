@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tmux_bus_isolation import isolate_tmux_bus
+
+# Applied on import, not per test: a pane is created by whatever a test spawns,
+# and only the environment this process passes down can stop it reaching the
+# tenant's user manager. Harmless where nothing opens a bus (SYRD-55).
+isolate_tmux_bus()
 
 
 def module_test_functions(

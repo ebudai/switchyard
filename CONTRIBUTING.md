@@ -6,6 +6,9 @@ repository. Open pull requests there for development and review.
 Describe the problem, the resulting behavior, and relevant validation in your
 pull request. Changes require review before a maintainer merges them.
 
+Run the tests with `scripts/ticket-board-test-suite`; see [docs/testing.md](docs/testing.md)
+for what that protects and how to run a single module.
+
 Contributions are accepted only on terms that preserve the project owner's
 ability to maintain, distribute, relicense, and offer alternate licenses for
 Switchyard.

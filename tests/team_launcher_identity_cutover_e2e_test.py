@@ -27,6 +27,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tests"))
+
+# Every pane this suite opens would otherwise ask the live tenant's systemd
+# user manager for a transient scope, however private its tmux socket is
+# (SYRD-55).
+from tmux_bus_isolation import isolate_tmux_bus
+
+isolate_tmux_bus()
 
 from scripts import team_launcher
 from scripts.ticket_board.server import (

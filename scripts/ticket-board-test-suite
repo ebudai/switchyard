@@ -98,6 +98,8 @@ LIVE_PANE_ENV_KEYS = {
     "TICKET_BOARD_TICKET_PREFIX",
 }
 SANITIZED_ENV_KEYS = LIVE_BOARD_ENV_KEYS | LIVE_PANE_ENV_KEYS
+sys.path.insert(0, str(ROOT / "tests"))
+from tmux_bus_isolation import isolated_bus_environment  # noqa: E402
 SWITCHYARD_SHARED_INSTALL_ENV = "SWITCHYARD_SHARED_INSTALL_ROOT"
 TEST_XDG_CURRENT_DESKTOP = "GNOME"
 TEST_SWITCHYARD_SHARED_INSTALL_ROOT = (
@@ -290,7 +292,11 @@ def sanitized_environment(environ: dict[str, str] | None = None) -> dict[str, st
     clean[SWITCHYARD_SHARED_INSTALL_ENV] = str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
     clean["XDG_CURRENT_DESKTOP"] = TEST_XDG_CURRENT_DESKTOP
     clean["KDE_FULL_SESSION"] = ""
-    return clean
+    # Every suite, Python and shell alike, runs with no route to a user bus, so
+    # a broad run cannot ask the live tenant's systemd manager for a transient
+    # scope per tmux pane. Here rather than in each caller, because the callers
+    # are what forgot (SYRD-55).
+    return isolated_bus_environment(clean)
 
 
 def run_one_suite(

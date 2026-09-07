@@ -373,12 +373,29 @@ seconds into a running sweep, delivered with decision reason `hook_idle`, and
 two director escalations behind it while the same work continued.
 
 The gate therefore also reads the pane's own process tree, through `#{pane_pid}`
-and `/proc`. Both signals are differential, so nothing is named: the turn is
-working if its descendants changed shape or used more than a resting runtime's
-worth of CPU between two samples a fraction of a second apart. A pane with no
-descendants at all is idle, which is what keeps a genuinely idle pane reachable,
-and an unreadable pane pid or process table makes the probe decline rather than
-guess. The trace reason is `pane_child_work`, and it is work evidence like any
+and `/proc`. Nothing is named: a turn is working if a process appeared under the
+pane, or if its descendants used more than a resting runtime's worth of CPU
+between two samples a fraction of a second apart.
+
+Movement is not the only evidence, because a turn blocked on a fetch or a lock
+has an unchanging pid set and no CPU at all. So a process the gate *watched
+appear* also counts as work while it sits there, for a bounded window. Two
+things keep that from silencing a pane. Only processes seen to arrive are held:
+a helper that was already there the first time the gate looked is a runtime's
+own furniture and is never held, however long it lives. And the hold expires --
+a wait longer than any turn plausibly waits stops counting, so a tree that
+simply stopped being work cannot suppress a reminder for ever. A tree that
+shrinks is a turn finishing rather than movement, and is not work.
+
+The consequence worth stating: a gate that has never seen a pane before cannot
+distinguish a waiting subprocess from a resting helper, and calls it idle. That
+is the side the second requirement forces, and it costs nothing in the steady
+state, where the listener probes every pane every poll cycle and therefore
+watches the tree change.
+
+A pane with no descendants at all is idle, which is what keeps a genuinely idle
+pane reachable, and an unreadable pane pid or process table makes the probe
+decline rather than guess. The trace reason is `pane_child_work`, and it is work evidence like any
 other: a self-addressed reminder observed against it is voided rather than
 retried, and the stall generator is told work was seen, which is what stops the
 escalation counter advancing against a role that never stopped working.

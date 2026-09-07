@@ -68,22 +68,38 @@ class ProcessTree:
         self.runtime_cpu = 500
         self.child_cpu = 100
         self.children: list[int] = []
+        #: A waiting child uses no CPU at all between samples.
+        self.burning = True
 
     def working(self) -> None:
         """A turn with verification running: shells that keep using CPU."""
         self.children = [4300, 4301, 4302, 4303, 4304]
+        self.burning = True
+
+    def waiting(self, *, children: list[int] | None = None) -> None:
+        """A turn blocked on a subprocess: the same pids, and no CPU at all.
+
+        The boundary the first cut missed. A sleeping child has an unchanging
+        pid set and a zero CPU delta, which is indistinguishable from an idle
+        pane to anything that only looks at movement.
+        """
+        self.children = [4300] if children is None else list(children)
+        self.burning = False
 
     def finished(self) -> None:
         """The turn is over: the runtime is at a prompt with nothing under it."""
         self.children = []
+        self.burning = True
 
     def read(self) -> tuple[tuple[int, int, int], ...]:
-        # Each read advances the running children's CPU, and only theirs, the
-        # way a sweep does between two samples a fraction of a second apart.
+        # A working child advances its CPU on every read, the way a sweep does
+        # between two samples a fraction of a second apart. A waiting one never
+        # does.
         rows = [(PANE_PID, 1, 0), (4200, PANE_PID, self.runtime_cpu)]
-        for pid in self.children:
+        if self.burning:
             self.child_cpu += 3
-            rows.append((pid, 4200, self.child_cpu))
+        for pid in self.children:
+            rows.append((pid, 4200, self.child_cpu + pid))
         return tuple(rows)
 
 
@@ -181,6 +197,104 @@ def test_the_turn_ending_releases_one_reminder_dated_from_the_work() -> None:
 
             reported = datetime.fromisoformat(eligible[role]).timestamp()
             assert reported == hook_idle_at + 300.0, (role, reported - hook_idle_at)
+
+
+def test_a_subprocess_wait_is_work_although_it_uses_no_cpu() -> None:
+    """The boundary: a stable sleeping child, zero CPU delta, unchanged screen.
+
+    Director review reproduced this against the first cut with rows held
+    identical across both samples, and got pre_send_busy=False and hook_idle.
+    Movement is not the only evidence a turn is still running: a turn blocked on
+    a fetch or a lock has a child it started and is not idle.
+    """
+    with TemporaryStateDir() as state_dir:
+        probe = PaneActivityGate(state_store=PaneHookStateStore(state_dir))
+        role = roles_under_test(probe)[0]
+        target = probe.role_targets[role]
+        tree = ProcessTree()
+        tree.finished()
+        clock = [1_800_000_000.0]
+        gate = build_gate(state_dir, target, tree)
+        gate.wall_time = lambda: clock[0]
+        gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
+
+        # The pane is genuinely idle first, so the gate watches what follows arrive.
+        assert gate.pre_send_busy(target) is False
+        assert gate.idle_since_by_role([role]) == {role: "2027-01-15T08:00:00+00:00"}
+
+        # The turn starts a subprocess and then waits on it. Same pids from here
+        # on, and not one CPU tick between them.
+        tree.waiting()
+        assert gate.pre_send_busy(target) is True, gate.last_trace(target)
+        trace = gate.last_trace(target)
+        assert trace is not None and trace.reason == "pane_child_work", trace
+        assert gate.idle_since_by_role([role]) == {}, "a waiting turn was called idle"
+
+        # It keeps waiting. Nothing moves, and it is still not idle.
+        for elapsed in (1.0, 60.0, 600.0, 890.0):
+            clock[0] = 1_800_000_000.0 + elapsed
+            assert gate.pre_send_busy(target) is True, elapsed
+            assert gate.idle_since_by_role([role]) == {}, elapsed
+
+        # Past the hold the pane is reachable again: a wait this long is not a
+        # turn any more, and a pane must not be silenced for ever.
+        clock[0] = 1_800_000_000.0 + gate.child_work_hold_seconds + 1.0
+        assert gate.pre_send_busy(target) is False, gate.last_trace(target)
+        eligible = gate.idle_since_by_role([role])
+        assert list(eligible) == [role], eligible
+
+
+def test_a_runtime_s_persistent_helper_is_never_work() -> None:
+    """A helper that was already there is furniture, not a turn.
+
+    Holding on it would silence that pane's reminders for as long as its
+    runtime lives, which is the other half of the requirement.
+    """
+    with TemporaryStateDir() as state_dir:
+        probe = PaneActivityGate(state_store=PaneHookStateStore(state_dir))
+        role = roles_under_test(probe)[0]
+        target = probe.role_targets[role]
+        tree = ProcessTree()
+        # Present before the gate ever looks, and never moving or using CPU.
+        tree.waiting(children=[4900])
+        clock = [1_800_000_000.0]
+        gate = build_gate(state_dir, target, tree)
+        gate.wall_time = lambda: clock[0]
+        gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
+
+        for elapsed in (0.0, 1.0, 60.0, 3600.0):
+            clock[0] = 1_800_000_000.0 + elapsed
+            assert gate.pre_send_busy(target) is False, (elapsed, gate.last_trace(target))
+            assert gate.idle_since_by_role([role]) == {
+                role: "2027-01-15T08:00:00+00:00"
+            }, elapsed
+
+
+def test_a_wait_that_starts_working_again_restarts_its_own_window() -> None:
+    """Live work refreshes the wait, so a long quiet stretch is not cumulative."""
+    with TemporaryStateDir() as state_dir:
+        probe = PaneActivityGate(state_store=PaneHookStateStore(state_dir))
+        role = roles_under_test(probe)[0]
+        target = probe.role_targets[role]
+        tree = ProcessTree()
+        tree.finished()
+        clock = [1_800_000_000.0]
+        gate = build_gate(state_dir, target, tree)
+        gate.wall_time = lambda: clock[0]
+        gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
+        assert gate.pre_send_busy(target) is False
+
+        tree.waiting()
+        assert gate.pre_send_busy(target) is True
+        clock[0] += gate.child_work_hold_seconds - 1.0
+        assert gate.pre_send_busy(target) is True
+
+        # The subprocess wakes up and does something. The window restarts.
+        tree.working()
+        assert gate.pre_send_busy(target) is True
+        tree.waiting(children=[4300, 4301, 4302, 4303, 4304])
+        clock[0] += 2.0
+        assert gate.pre_send_busy(target) is True, gate.last_trace(target)
 
 
 def test_a_pane_with_no_descendants_is_reachable() -> None:

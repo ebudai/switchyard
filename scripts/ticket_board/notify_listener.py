@@ -103,6 +103,11 @@ DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS = 0.6
 #: as idle. A resting runtime with a helper subprocess ticks a little; a test,
 #: build or mutation sweep does not stay under this.
 DEFAULT_CHILD_WORK_CPU_TICKS = 2
+#: How long a subprocess the gate watched appear may sit there using no CPU at
+#: all and still count as the turn waiting on it. Long enough for a wait on a
+#: network fetch or a lock; bounded so that a tree which simply stopped being
+#: work does not hold a reminder for ever.
+DEFAULT_CHILD_WORK_HOLD_SECONDS = 900.0
 MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -208,6 +213,25 @@ class ChildWorkSample:
     observed: bool
     pids: frozenset[int] = frozenset()
     cpu_ticks: int = 0
+
+
+@dataclass(frozen=True)
+class ChildWorkMemory:
+    """The last tree seen under a pane, and whether it arrived while watching.
+
+    Only a tree the gate watched appear is held as a wait. One that was already
+    there the first time it looked is a runtime's own furniture -- an MCP
+    server, a language server -- and holding on that would silence a pane's
+    reminders for as long as its runtime lives (SYRD-58).
+    """
+
+    #: Everything under the pane at the last sample.
+    pids: frozenset[int]
+    #: The subset this gate actually watched appear, minus any that have since
+    #: exited. Only these are held as a wait.
+    arrived: frozenset[int]
+    #: When that set was last seen to move or use CPU.
+    since: float
 
 
 def read_process_table(proc_root: Path = Path("/proc")) -> tuple[tuple[int, int, int], ...]:
@@ -560,6 +584,7 @@ class PaneActivityGate:
         process_table_reader: Callable[[], Sequence[tuple[int, int, int]]] = read_process_table,
         child_work_sample_delay_seconds: float = DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS,
         child_work_cpu_ticks: int = DEFAULT_CHILD_WORK_CPU_TICKS,
+        child_work_hold_seconds: float = DEFAULT_CHILD_WORK_HOLD_SECONDS,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         director_composer_home_x: int = DEFAULT_DIRECTOR_COMPOSER_HOME_X,
@@ -584,6 +609,8 @@ class PaneActivityGate:
         self.process_table_reader = process_table_reader
         self.child_work_sample_delay_seconds = max(0.0, child_work_sample_delay_seconds)
         self.child_work_cpu_ticks = max(0, child_work_cpu_ticks)
+        self.child_work_hold_seconds = max(0.0, child_work_hold_seconds)
+        self._child_work_memory_by_target: dict[str, ChildWorkMemory] = {}
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
         self.working_timer_sample_delay_seconds = max(0.0, working_timer_sample_delay_seconds)
@@ -894,16 +921,31 @@ class PaneActivityGate:
         first = self._child_work_sample(pane_pid)
         if not first.observed:
             return None
-        if not first.pids:
-            return None
         if self.child_work_sample_delay_seconds > 0:
             self.sleeper(self.child_work_sample_delay_seconds)
         second = self._child_work_sample(pane_pid)
         if not second.observed:
             return None
-        if second.pids != first.pids:
+        now = self.wall_time()
+        remembered = self._child_work_memory_by_target.get(target)
+        known = remembered.pids if remembered is not None else first.pids
+        # Only arrivals are movement. A tree that shrinks is a turn finishing,
+        # and treating that as work would make every turn end busy.
+        appeared = second.pids - known
+        advanced = second.cpu_ticks - first.cpu_ticks > self.child_work_cpu_ticks
+        arrived = ((remembered.arrived if remembered is not None else frozenset()) | appeared) & second.pids
+        working = bool(appeared) or advanced
+        since = now if working else (remembered.since if remembered is not None else now)
+        self._child_work_memory_by_target[target] = ChildWorkMemory(second.pids, arrived, since)
+        if working:
             return ActivityTrace(True, "pane_child_work")
-        if second.cpu_ticks - first.cpu_ticks > self.child_work_cpu_ticks:
+        if arrived and now - since < self.child_work_hold_seconds:
+            # The subprocess-wait case: a child this turn started, sitting on a
+            # fetch or a lock, using no CPU and printing nothing. Still work.
+            #
+            # `arrived` is what keeps this off a runtime's own furniture: a
+            # helper that was already there the first time the gate looked was
+            # never watched to appear, so it is never held.
             return ActivityTrace(True, "pane_child_work")
         return None
 

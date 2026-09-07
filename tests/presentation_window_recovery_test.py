@@ -814,6 +814,26 @@ def _load_display_bridge():
     return module
 
 
+#: Terminal types the fixture will try, in order, rather than inheriting one.
+#: A tmux client started under `TERM=dumb` exits immediately with "open
+#: terminal failed: terminal does not support clear", and a fixture that then
+#: types at an orphaned pty exercises neither the escape nor the lock: its
+#: control case fails, and -- worse -- a locked case asserting only "no window
+#: appeared" would pass while proving nothing (SYRD-65 review).
+CLIENT_TERMS = ("xterm-256color", "xterm", "screen", "vt100", "ansi")
+CLIENT_ATTACH_TIMEOUT = 10.0
+
+
+def real_tmux_unavailable() -> str:
+    """Why a real-tmux test cannot run here, or empty when it can."""
+    return "" if shutil.which("tmux") else "tmux is not installed on this host"
+
+
+def _skip(test: str, reason: str) -> None:
+    """Say so. A silent return is indistinguishable from a passing test."""
+    print(f"SKIPPED {test}: {reason}")
+
+
 class _RealTmux:
     """A tmux server of this test's own, with a display slot and a bystander."""
 
@@ -846,16 +866,59 @@ class _RealTmux:
         # lock has to take that away too rather than only the first.
         self("set-option", "-g", "prefix2", "C-a")
 
+    def client_ttys(self) -> list[str]:
+        return self("list-clients", "-t", f"={SLOTS[0]}", "-F", "#{client_tty}", check=False).split()
+
     def attach(self) -> None:
-        master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
-        proc = subprocess.Popen(
-            ["tmux", "attach", "-t", f"={SLOTS[0]}"],
-            stdin=slave, stdout=slave, stderr=slave, env=self.env, start_new_session=True,
+        """Attach a client, and do not return until tmux agrees one is there.
+
+        The terminal type is chosen rather than inherited, and the attach is
+        verified: everything these tests assert is about what a live client can
+        and cannot do, so a client that never arrived has to be a failure here
+        rather than a quiet pass later.
+        """
+        failures: list[str] = []
+        for term in CLIENT_TERMS:
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+            env = {**self.env, "TERM": term}
+            proc = subprocess.Popen(
+                ["tmux", "attach", "-t", f"={SLOTS[0]}"],
+                stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
+            )
+            os.close(slave)
+            deadline = time.monotonic() + CLIENT_ATTACH_TIMEOUT
+            while time.monotonic() < deadline:
+                if self.client_ttys():
+                    self.clients.append((proc, master))
+                    return
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+            failures.append(f"TERM={term}: {self._client_failure(proc, master)}")
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            os.close(master)
+        raise AssertionError(
+            "no tmux client ever attached to the display slot, so nothing below would "
+            "have been exercised: " + "; ".join(failures)
         )
-        os.close(slave)
-        self.clients.append((proc, master))
-        time.sleep(1.0)
+
+    @staticmethod
+    def _client_failure(proc: subprocess.Popen[bytes], master: int) -> str:
+        """What tmux said on the way out, so the reason is in the failure."""
+        os.set_blocking(master, False)
+        try:
+            said = os.read(master, 4096).decode("utf-8", "replace").strip()
+        except OSError:
+            said = ""
+        status = proc.poll()
+        exited = f"exited {status}" if status is not None else "never attached"
+        return f"{exited} ({said})" if said else exited
 
     def type(self, data: bytes) -> None:
         os.write(self.clients[-1][1], data)
@@ -885,8 +948,8 @@ HOSTILE_KEYS = (
 
 def test_an_unlocked_display_client_can_drive_the_owners_tmux_server() -> None:
     """The hole, demonstrated: this is what the grant would otherwise hand over."""
-    if shutil.which("tmux") is None:
-        return
+    if reason := real_tmux_unavailable():
+        return _skip("an unlocked display client can drive the owner's tmux server", reason)
     with tempfile.TemporaryDirectory(prefix="syrd65-unlocked.") as tmp:
         server = _RealTmux(Path(tmp))
         try:
@@ -903,8 +966,8 @@ def test_an_unlocked_display_client_can_drive_the_owners_tmux_server() -> None:
 
 def test_a_locked_display_client_cannot_reach_tmux_at_all() -> None:
     """Normal pane input still gets through; tmux control commands do not."""
-    if shutil.which("tmux") is None:
-        return
+    if reason := real_tmux_unavailable():
+        return _skip("a locked display client cannot reach tmux at all", reason)
     with tempfile.TemporaryDirectory(prefix="syrd65-locked.") as tmp:
         server = _RealTmux(Path(tmp))
         try:
@@ -947,8 +1010,8 @@ def test_the_bridge_locks_the_transport_itself_rather_than_trusting_the_slot() -
     assert argv.count(f"={SLOTS[0]}:") == len(bridge.LOCK_OPTIONS), argv
     for option, value in bridge.LOCK_OPTIONS:
         assert [option, value] == argv[argv.index(option): argv.index(option) + 2], (option, argv)
-    if shutil.which("tmux") is None:
-        return
+    if reason := real_tmux_unavailable():
+        return _skip("the bridge locks the transport itself", reason)
     # And those exact arguments really do lock a live server.
     with tempfile.TemporaryDirectory(prefix="syrd65-bridge-lock.") as tmp:
         server = _RealTmux(Path(tmp))

@@ -189,13 +189,36 @@ class RealDesktopWindow:
         self.calls.append({"args": args, "kwargs": kwargs})
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        # A chosen terminal type, not an inherited one: a client started under
+        # `TERM=dumb` exits at once with "open terminal failed", and a window
+        # that is only a Popen object is not the thing under test (SYRD-65).
+        env = {**self.env, "TERM": "xterm-256color"}
         proc = subprocess.Popen(
             ["tmux", "attach", "-t", f"={self.session}"],
-            stdin=slave, stdout=slave, stderr=slave, env=self.env, start_new_session=True,
+            stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
         )
         os.close(slave)
         self.clients.append((proc, master))
-        return proc
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            listed = subprocess.run(
+                ["tmux", "list-clients", "-t", f"={self.session}", "-F", "#{client_tty}"],
+                env=env, capture_output=True, text=True,
+            )
+            if listed.returncode == 0 and listed.stdout.split():
+                return proc
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        os.set_blocking(master, False)
+        try:
+            said = os.read(master, 4096).decode("utf-8", "replace").strip()
+        except OSError:
+            said = ""
+        raise AssertionError(
+            f"no client ever attached to {self.session}"
+            + (f": {said}" if said else f" (tmux attach exited {proc.poll()})")
+        )
 
     def close(self) -> None:
         for proc, master in self.clients:
@@ -851,6 +874,10 @@ def test_isolated_tmux_clients_preserve_visible_sizes_and_a_single_status_bar() 
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+        # Chosen, not inherited: these tests attach real clients, and one
+        # started under `TERM=dumb` exits with "open terminal failed" before it
+        # can be the client the test is about (SYRD-65).
+        tmux_env["TERM"] = "xterm-256color"
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(tmux_env)
@@ -991,6 +1018,10 @@ def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> Non
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+        # Chosen, not inherited: these tests attach real clients, and one
+        # started under `TERM=dumb` exits with "open terminal failed" before it
+        # can be the client the test is about (SYRD-65).
+        tmux_env["TERM"] = "xterm-256color"
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(tmux_env)
@@ -1086,6 +1117,10 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+        # Chosen, not inherited: these tests attach real clients, and one
+        # started under `TERM=dumb` exits with "open terminal failed" before it
+        # can be the client the test is about (SYRD-65).
+        tmux_env["TERM"] = "xterm-256color"
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(tmux_env)

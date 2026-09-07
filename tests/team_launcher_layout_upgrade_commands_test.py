@@ -704,7 +704,12 @@ def test_shared_release_requires_explicit_source_cache_instead_of_data_default()
                 )
             rendered = stdout.getvalue()
 
-        assert "require an explicit source cache in SWITCHYARD_BARE_REPO" in rendered
+        # SYRD-61 added `--commit-git-dir` as a second way to name the cache,
+        # because an environment variable cannot survive the `sudo` handoff the
+        # accounts phase ends with. Neither was given here, so the refusal
+        # stands and it names both.
+        assert "require an explicit source cache in --commit-git-dir" in rendered
+        assert "SWITCHYARD_BARE_REPO" in rendered
         assert "matching-release deployment sequence" not in rendered
         assert "/data/git/switchyard.git" not in rendered
     finally:

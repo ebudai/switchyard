@@ -318,6 +318,30 @@ an interrupted upgrade resumes rather than repeats and a partial state is
 visible rather than inferred. Every phase is idempotent; rerunning is the
 supported way to continue.
 
+**The release stays pinned across the handoff.** The accounts phase ends by
+asking an operator to run a generated script, and that script hands the upgrade
+back with `sudo switchyard upgrade <project>` -- no arguments, and `sudo`
+scrubs the environment. A `--source-repo`, `--commit-git-dir` or `--deploy-ref`
+given to the outer command is therefore recorded, when root runs it, in
+`upgrade-source.json` beside root's own journal, and every later phase that was
+given nothing reads it back. An explicit argument always wins; the record only
+supplies what an invocation did not carry. The generated script names the
+recorded selection in its own text so an operator can read what the rerun will
+deploy before running it, and the refusal an unresolvable release produces names
+both ways to supply a cache. Nothing but root writes that record: a file there
+that is group- or world-writable, or that belongs to somebody else, is refused
+rather than trusted, because it decides which tree root deploys.
+
+**A rollback reports what came back, not what it stopped.** A transaction that
+fails before the workers are restarted never asks them to come back, so it does
+not say they failed to; and once the rollback has restarted them, the roles are
+probed again -- through the configuration the rollback restored, which names the
+project account again -- and the count that ends up in the journal is that
+probe's. A session that is still coming up is given a moment rather than
+recorded dead. The listener is revalidated at the same point: the units go back
+before the workers do, so one that was restored and then lost while the sessions
+returned is started again and reported if it stays down.
+
 **A wedged user manager stops the upgrade before it starts.** Everything the
 launcher does to the listener goes through the owner's `systemd --user`, and a
 manager that is spinning answers nothing -- so an unbounded call inside the
@@ -681,11 +705,21 @@ launcher comes from `<project>-ticketboard-live/current`, it reports the old
 deployed release, resolves the target release ref (default `origin/main`), and
 prints the ordered listener/unit/`deploy-restart` commands an operator can run
 to advance the tenant's `current` symlink. An installed shared release has no
-implicit source repository: select a fetch cache with `SWITCHYARD_BARE_REPO`,
-or pass a GitHub checkout with `--source-repo`. A normal fetch cache resolves
-`origin/main` from `refs/remotes/origin/main`, ahead of any stale local `main`.
-Its `remote.origin.fetch` must map GitHub branches to
-`refs/remotes/origin/*`; refresh it with `git --git-dir=<cache> fetch --prune origin`.
+implicit source repository: name a fetch cache with `--commit-git-dir`, or with
+`SWITCHYARD_BARE_REPO`, or pass a GitHub checkout with `--source-repo`. The
+first `--commit-git-dir` entry that resolves the deploy ref is the one used;
+the environment variable is tried after them. Prefer the argument: the accounts
+phase hands the upgrade back through `sudo`, which scrubs the environment, so a
+selection that lives only in a variable does not reach the phases that follow
+it. A normal fetch cache resolves `origin/main` from `refs/remotes/origin/main`,
+ahead of any stale local `main`. Its `remote.origin.fetch` must map GitHub
+branches to `refs/remotes/origin/*`; refresh it with
+`git --git-dir=<cache> fetch --prune origin`.
+
+Only the argument, or root's own record of one, chooses the tree a shared
+release is archived and deployed from. The plan's `commit_git_dir` is a
+tenant-writable document and stays what it has always been: the list of
+repositories a commit hash is verified against.
 
 `--source-repo` and `--commit-git-dir` replace and persist those choices in
 the generated plan, units, and operator commands. With no option, upgrade

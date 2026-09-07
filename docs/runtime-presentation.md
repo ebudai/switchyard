@@ -107,6 +107,31 @@ wrong:
   to a display session of that project. It can name no worker session, no other
   tenant, and no command to run inside one.
 
+Choosing which session is attached is only half of that last one. **An attached
+tmux client inherits the session's key tables**, so exact-name selection
+constrains the initial attach and nothing the client does afterwards. With the
+owner's default prefix still live, a desktop user handed a display slot could
+press `prefix c` for a shell in the owner's account, `prefix :` for the tmux
+command prompt, or `prefix s` / `prefix )` to reach any other session on that
+server — another project's included, where two share an owner.
+
+So the transport is locked before the attach, with three session options and
+all three are needed:
+
+| option | value | what it closes |
+| --- | --- | --- |
+| `prefix` | `None` | the prefix table, and with it every default binding |
+| `prefix2` | `None` | the secondary prefix, which would otherwise still reach it |
+| `key-table` | `switchyard-display` | the root table, which is consulted with no prefix at all — an owner whose `tmux.conf` carries any `bind -n` would keep exactly that binding live. The named table is never given any bindings, so every lookup in it misses. |
+
+What is left is a client whose keys all fall through to the pane — the proxy
+attached to the worker — so ordinary typing still reaches the role while no
+keystroke reaches tmux. `switchyard-display-attach` applies the lock itself,
+as the owner, before it attaches, and refuses if it cannot: the guarantee is
+the bridge's own and does not depend on whatever configured the slot, so a
+session left by an earlier release is locked too. Every slot is also locked as
+it is configured, because a client can attach the moment a session exists.
+
 The identity cutover stops only the worker sessions. The slots are long-lived
 and are re-pointed in place, so the window the tenant was looking at is never
 taken down, on either the success or the rollback path; if it is gone anyway,

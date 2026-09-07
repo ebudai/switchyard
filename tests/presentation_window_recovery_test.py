@@ -18,12 +18,19 @@ desktop identity that made `sudo` the only route back.
 
 from __future__ import annotations
 
+import fcntl
+import importlib.machinery
 import json
+import pty
 import shlex
+import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -790,6 +797,183 @@ def test_the_display_bridge_refuses_everything_but_one_slot_of_one_project() -> 
     )
     assert result.returncode != 0
     assert "no control grant is installed" in result.stderr, result.stderr
+
+
+def _load_display_bridge():
+    """The bridge, imported as a module: it ships without a .py suffix."""
+    import importlib.util
+
+    path = ROOT / "scripts" / "switchyard-display-attach"
+    spec = importlib.util.spec_from_loader(
+        "switchyard_display_attach", importlib.machinery.SourceFileLoader(
+            "switchyard_display_attach", str(path)
+        )
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _RealTmux:
+    """A tmux server of this test's own, with a display slot and a bystander."""
+
+    def __init__(self, tmp: Path) -> None:
+        self.dir = tmp / "tmux"
+        self.dir.mkdir(mode=0o700, exist_ok=True)
+        self.env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        self.env["TMUX_TMPDIR"] = str(self.dir)
+        self.typed = tmp / "typed"
+        self.clients: list[tuple[subprocess.Popen[bytes], int]] = []
+
+    def __call__(self, *args: str, check: bool = True) -> str:
+        result = subprocess.run(
+            ["tmux", *args], env=self.env, capture_output=True, text=True
+        )
+        if check and result.returncode != 0:
+            raise AssertionError(f"tmux {args}: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+    def build(self) -> None:
+        # The slot's pane records what reaches it, which is how "the key went to
+        # the worker" is told apart from "tmux acted on the key".
+        self("new-session", "-d", "-s", SLOTS[0], "sh", "-c", f"cat > {self.typed}")
+        # Something else on the same server: another project sharing this owner.
+        self("new-session", "-d", "-s", "other-tenant-secret", "sleep", "300")
+        # A root-table binding, the kind an owner's own tmux.conf may carry.
+        self("bind-key", "-n", "C-x", "new-window")
+        # And a secondary prefix, which tmux leaves unset by default: an owner
+        # who configures one keeps a second way into the prefix table, so the
+        # lock has to take that away too rather than only the first.
+        self("set-option", "-g", "prefix2", "C-a")
+
+    def attach(self) -> None:
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        proc = subprocess.Popen(
+            ["tmux", "attach", "-t", f"={SLOTS[0]}"],
+            stdin=slave, stdout=slave, stderr=slave, env=self.env, start_new_session=True,
+        )
+        os.close(slave)
+        self.clients.append((proc, master))
+        time.sleep(1.0)
+
+    def type(self, data: bytes) -> None:
+        os.write(self.clients[-1][1], data)
+        time.sleep(0.5)
+
+    def close(self) -> None:
+        for proc, master in self.clients:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            os.close(master)
+        subprocess.run(["tmux", "kill-server"], env=self.env, capture_output=True)
+
+
+#: Everything a tmux client can normally do to the server behind it.
+HOSTILE_KEYS = (
+    b"\x02c",        # prefix c -- a new window, which is a shell as the owner
+    b"\x02:",        # prefix : -- the tmux command prompt, which runs anything
+    b"\x02snew\r",   # prefix s -- the session chooser
+    b"\x02)",        # prefix ) -- the next session on this server
+    b"\x01c",        # the same, through a secondary prefix the owner configured
+    b"\x18",         # a root-table binding, reachable with no prefix at all
+)
+
+
+def test_an_unlocked_display_client_can_drive_the_owners_tmux_server() -> None:
+    """The hole, demonstrated: this is what the grant would otherwise hand over."""
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd65-unlocked.") as tmp:
+        server = _RealTmux(Path(tmp))
+        try:
+            server.build()
+            server.attach()
+            for keys in HOSTILE_KEYS:
+                server.type(keys)
+            windows = server("list-windows", "-t", f"={SLOTS[0]}", "-F", "#{window_index}").split()
+        finally:
+            server.close()
+        # Left unlocked, the keys reach tmux and it acts on them.
+        assert len(windows) > 1, windows
+
+
+def test_a_locked_display_client_cannot_reach_tmux_at_all() -> None:
+    """Normal pane input still gets through; tmux control commands do not."""
+    if shutil.which("tmux") is None:
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd65-locked.") as tmp:
+        server = _RealTmux(Path(tmp))
+        try:
+            server.build()
+            for argv in presentation.display_lock_commands(SLOTS[0]):
+                server(*argv[1:])
+            server.attach()
+            for keys in HOSTILE_KEYS:
+                server.type(keys)
+            # The terminal is in canonical mode, so the pane sees whole lines:
+            # this both delivers ordinary input and flushes what came before.
+            server.type(b"hello\r")
+            windows = server("list-windows", "-t", f"={SLOTS[0]}", "-F", "#{window_index}").split()
+            sessions = sorted(server("list-sessions", "-F", "#{session_name}").split())
+        finally:
+            server.close()
+        # No window, so no shell in the owner's account.
+        assert windows == ["0"], windows
+        # No new session, and the bystander was never switched to.
+        assert sessions == sorted([SLOTS[0], "other-tenant-secret"]), sessions
+        # And every one of those keys went to the pane instead, which is what
+        # "the client is input-only" means: the worker still receives what the
+        # person types, and tmux receives nothing to act on.
+        typed = server.typed.read_bytes()
+        for keys in HOSTILE_KEYS:
+            assert keys.rstrip(b"\r") in typed, (keys, typed)
+        assert b"hello" in typed, typed
+
+
+def test_the_bridge_locks_the_transport_itself_rather_than_trusting_the_slot() -> None:
+    """A slot made by an older release is still locked before anyone attaches."""
+    bridge = _load_display_bridge()
+    assert bridge.LOCK_OPTIONS == presentation.display_lock_options(), (
+        bridge.LOCK_OPTIONS, presentation.display_lock_options()
+    )
+    argv = bridge.lock_argv(SLOTS[0])
+    assert argv[0] == "tmux"
+    # A session target -- the trailing colon is what makes exact-name selection
+    # apply to set-option at all.
+    assert argv.count(f"={SLOTS[0]}:") == len(bridge.LOCK_OPTIONS), argv
+    for option, value in bridge.LOCK_OPTIONS:
+        assert [option, value] == argv[argv.index(option): argv.index(option) + 2], (option, argv)
+    if shutil.which("tmux") is None:
+        return
+    # And those exact arguments really do lock a live server.
+    with tempfile.TemporaryDirectory(prefix="syrd65-bridge-lock.") as tmp:
+        server = _RealTmux(Path(tmp))
+        try:
+            server.build()
+            server(*argv[1:])
+            server.attach()
+            for keys in HOSTILE_KEYS:
+                server.type(keys)
+            windows = server("list-windows", "-t", f"={SLOTS[0]}", "-F", "#{window_index}").split()
+        finally:
+            server.close()
+        assert windows == ["0"], windows
+
+
+def test_every_display_slot_is_locked_as_it_is_configured() -> None:
+    """Not only the ones the bridge attaches: a slot is locked from birth."""
+    with tempfile.TemporaryDirectory(prefix="syrd65-lock-on-configure.") as tmp:
+        config, config_path = _presentation_config(Path(tmp))
+        world = TmuxWorld({f"{PROJECT}-{role}" for role in ROLES})
+        presentation.reconnect_display_slots(config, config_path=config_path, runner=world)
+        for session in SLOTS:
+            assert world.options[(f"={session}:", "prefix")] == "None", session
+            assert world.options[(f"={session}:", "prefix2")] == "None", session
+            assert world.options[(f"={session}:", "key-table")] == presentation.DISPLAY_KEY_TABLE
 
 
 def test_a_cutover_that_succeeds_but_loses_the_window_is_not_a_success() -> None:

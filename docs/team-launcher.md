@@ -252,6 +252,17 @@ of six tabs does not ask for a password six times as it opens, and so the
 alternative — a blanket sudo grant on the owner account — is not needed
 (SYRD-65).
 
+Choosing the session is not enough on its own. An attached tmux client inherits
+that session's key tables, so a client on the owner's server could reach a
+shell in the owner's account with `prefix c`, the tmux command prompt with
+`prefix :`, or any other session — another project's, where two share an owner
+— with `prefix s`. Before it attaches, the bridge removes both prefixes from
+the display session and points it at a key table that has no bindings, which
+also takes away any `bind -n` the owner's own `tmux.conf` carries. Every key
+then falls through to the pane, so what a person types still reaches the role
+and nothing they type reaches tmux. A lock that cannot be applied is a refusal,
+not an attach. See [runtime presentation](runtime-presentation.md).
+
 **Who gets recorded.** The human running `switchyard new`, taken from `SUDO_UID`
 where present. The tenant's own accounts are never recorded: the owner already
 is the owner, and giving a role account a bridge into the owner would erase the

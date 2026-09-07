@@ -21,6 +21,19 @@ switchyard-tenant-control:
 * WHERE. The project, its owner and the grant all come from root-owned data.
 * HOW. The environment is rebuilt rather than inherited, minus TMUX, so an
   attach from inside another tmux client cannot nest by accident.
+* WHAT THE CLIENT MAY THEN DO. Choosing the session is not the whole of it.
+  An attached tmux client inherits that session's key tables, so with the
+  owner's default prefix live this grant would hand a desktop user prefix-c
+  for a shell in the owner's account, prefix-colon for a tmux command prompt,
+  and prefix-s to reach every other session on that server -- another
+  project's included, where two share an owner. So the transport is locked
+  before the attach: both prefixes are removed and the session is pointed at a
+  key table with no bindings in it, which also takes away any `bind -n` the
+  owner's own tmux.conf may carry. Every key then falls through to the pane,
+  which is the proxy attached to the worker, so ordinary typing still reaches
+  the role and no keystroke reaches tmux. The lock is applied here rather than
+  trusted from whatever configured the slot: this program is the boundary, and
+  a session made by an older release would otherwise still be open.
 
 It attaches to an existing session and never creates one: a slot that is not
 there is a presentation that has not been bootstrapped, and quietly creating an
@@ -34,11 +47,17 @@ import os
 import pwd
 import re
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import NoReturn
 
 PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
+#: A key table that is never given any bindings, so every lookup in it misses
+#: and the key is passed to the pane instead of being acted on by tmux.
+DISPLAY_KEY_TABLE = "switchyard-display"
+#: What makes an attached client input-only. Kept beside the attach it guards.
+LOCK_OPTIONS = (("prefix", "None"), ("prefix2", "None"), ("key-table", DISPLAY_KEY_TABLE))
 GRANT_ROOT = Path("/usr/local/lib/switchyard")
 GRANT_NAME = "control-grant.json"
 PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -93,6 +112,23 @@ def session_name(project: str, slot: int) -> str:
     return f"{project}-display-{slot}"
 
 
+def lock_argv(session: str) -> list[str]:
+    """One tmux invocation that removes every way this client could act.
+
+    Also proves the session is already there: set-option refuses a session that
+    does not exist, and attaching to a slot that was never bootstrapped should
+    say so rather than sit on a blank terminal.
+    """
+    argv = ["tmux"]
+    for index, (option, value) in enumerate(LOCK_OPTIONS):
+        if index:
+            argv.append(";")
+        # The trailing colon makes this a session target, which is what
+        # exact-name selection needs in order to apply at all.
+        argv.extend(["set-option", "-t", f"={session}:", option, value])
+    return argv
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         fail("usage: switchyard-display-attach <project> <slot>")
@@ -138,7 +174,8 @@ def main(argv: list[str]) -> int:
     }
     # Exact-name selection: a prefix match could reach a longer session name in
     # the same server, which is another role's.
-    command = [TMUX, "attach", "-t", f"={session_name(project, slot)}"]
+    session = session_name(project, slot)
+    command = [TMUX, "attach", "-t", f"={session}"]
 
     os.setgroups([])
     os.initgroups(owner, owner_entry.pw_gid)
@@ -146,6 +183,17 @@ def main(argv: list[str]) -> int:
     os.setuid(owner_entry.pw_uid)
     if os.geteuid() != owner_entry.pw_uid or os.getuid() != owner_entry.pw_uid:
         fail("could not drop to the owner account")
+
+    # Locked as the owner, before any client exists. A lock that cannot be
+    # applied is a refusal: attaching anyway would hand over the owner's whole
+    # tmux server, which is the thing this program exists not to do.
+    lock = lock_argv(session)
+    result = subprocess.run(
+        [TMUX, *lock[1:]], env=environ, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+    )
+    if result.returncode != 0:
+        reason = (result.stderr or "").strip() or f"tmux exited {result.returncode}"
+        fail(f"cannot secure display slot {slot} of {project}: {reason}")
     os.execve(command[0], command, environ)
 
 

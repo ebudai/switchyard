@@ -34,6 +34,11 @@ VIEWER_OBSERVER_CLIENT_FLAGS = "ignore-size"
 #: under this; one that never appears must not be reported as a success.
 WINDOW_ATTACH_TIMEOUT_SECONDS = 10.0
 WINDOW_ATTACH_POLL_SECONDS = 0.25
+#: The key table a display slot's clients are put in: one that has no bindings,
+#: so every key falls through to the pane instead of reaching tmux. Naming a
+#: table that was never created is deliberate and sufficient -- a lookup that
+#: finds nothing is what makes the client incapable of a tmux command.
+DISPLAY_KEY_TABLE = "switchyard-display"
 
 
 def display_session_name(project: str, slot: int) -> str:
@@ -440,6 +445,36 @@ def _worker_has_independent_client(
     )
 
 
+def display_lock_options() -> tuple[tuple[str, str], ...]:
+    """The session options that make an attached display client input-only.
+
+    Attaching a client to a session hands it that session's key tables, and
+    exact-target selection constrains only which session is attached: it says
+    nothing about what the client may then do. With the tenant owner's default
+    prefix still live, a desktop user given a display slot can press prefix-c
+    for a shell in the owner's account, prefix-colon for a tmux command prompt,
+    or prefix-s to switch to any other session on that server -- including
+    another project's, when two share an owner (SYRD-65 review).
+
+    Three options close it, and all three are needed. Both prefixes go, so the
+    prefix table is unreachable. The key table goes too, because the root table
+    is still consulted without a prefix and an owner whose tmux.conf carries
+    any `bind -n` would keep exactly one of those bindings live; pointing the
+    session at a table with no bindings in it leaves nothing to find. What is
+    left is a client whose keys all fall through to the pane, which is the
+    proxy attached to the worker -- so ordinary typing still reaches the role.
+    """
+    return (("prefix", "None"), ("prefix2", "None"), ("key-table", DISPLAY_KEY_TABLE))
+
+
+def display_lock_commands(session: str) -> tuple[list[str], ...]:
+    """`tmux` argv that locks one display session's transport."""
+    return tuple(
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), option, value]
+        for option, value in display_lock_options()
+    )
+
+
 def _session_client_ttys(
     session: str,
     *,
@@ -707,6 +742,10 @@ def _configure_display_session(
         raise RuntimeError(f"tmux could not update display slot {slot} (exit {proc.returncode})")
     label = role_name or "hidden"
     commands = (
+        # Before anything else about the slot: a client may attach the moment
+        # the session exists, and it must never be one that can drive the
+        # owner's tmux server (SYRD-65 review).
+        *display_lock_commands(session),
         ["tmux", "set-window-option", "-t", _exact_tmux_target(f"{session}:0"), "remain-on-exit", "on"],
         # The slot is a frame around a worker that draws its own status line.
         # Leaving this one on stacks two status bars in every presentation

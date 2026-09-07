@@ -364,6 +364,34 @@ role should not report `foreign_runtime_*` merely because its hook source is
 failed or otherwise inconclusive probe still treats the pane as busy and records
 a specific trace reason instead of collapsing the decision into `hook_idle`.
 
+A turn-end hook is not the end of the turn's work. It says the runtime finished
+its own turn; it says nothing about the shells that turn started, and a long
+test, build or mutation sweep prints nothing for minutes -- so the hook reads
+idle, the visible region does not change, and every screen-based probe agrees
+the role is free. SYRD-57's trace caught exactly that: a reminder minted eleven
+seconds into a running sweep, delivered with decision reason `hook_idle`, and
+two director escalations behind it while the same work continued.
+
+The gate therefore also reads the pane's own process tree, through `#{pane_pid}`
+and `/proc`. Both signals are differential, so nothing is named: the turn is
+working if its descendants changed shape or used more than a resting runtime's
+worth of CPU between two samples a fraction of a second apart. A pane with no
+descendants at all is idle, which is what keeps a genuinely idle pane reachable,
+and an unreadable pane pid or process table makes the probe decline rather than
+guess. The trace reason is `pane_child_work`, and it is work evidence like any
+other: a self-addressed reminder observed against it is voided rather than
+retried, and the stall generator is told work was seen, which is what stops the
+escalation counter advancing against a role that never stopped working.
+
+Two consequences follow from that. A reminder is minted against the same gate it
+is sent against -- generation used the weaker one and delivery the stronger one,
+so a reminder could be minted for a role the pre-send gate then held, and the
+stall counter behind it advanced anyway. And the clock a reminder is measured
+against starts at the last work actually observed rather than at the hook
+timestamp, when work was seen against that same hook state; a pane in which
+nothing was observed keeps its hook timestamp, so a listener restart does not
+make a genuinely idle pane wait.
+
 If a queued notification targets a tmux pane that no longer exists, the listener
 does not keep retrying it as a busy pane and does not silently drop it. The row
 stays in `ticket_board.ticket_notification_queue` with `dead_lettered_at` set

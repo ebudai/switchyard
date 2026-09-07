@@ -14,6 +14,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,16 @@ DIRECTOR_ROLE = "director"
 # at their own size, so its clients never contribute to slot geometry.  tmux
 # still sizes a slot from such a client when it is that slot's only one.
 VIEWER_OBSERVER_CLIENT_FLAGS = "ignore-size"
+#: How long a freshly launched window is given to attach before we call the
+#: launch unproven. A desktop terminal that is going to appear does so in well
+#: under this; one that never appears must not be reported as a success.
+WINDOW_ATTACH_TIMEOUT_SECONDS = 10.0
+WINDOW_ATTACH_POLL_SECONDS = 0.25
+#: The key table a display slot's clients are put in: one that has no bindings,
+#: so every key falls through to the pane instead of reaching tmux. Naming a
+#: table that was never created is deliberate and sufficient -- a lookup that
+#: finds nothing is what makes the client incapable of a tmux command.
+DISPLAY_KEY_TABLE = "switchyard-display"
 
 
 def display_session_name(project: str, slot: int) -> str:
@@ -434,6 +445,176 @@ def _worker_has_independent_client(
     )
 
 
+def display_lock_options() -> tuple[tuple[str, str], ...]:
+    """The session options that make an attached display client input-only.
+
+    Attaching a client to a session hands it that session's key tables, and
+    exact-target selection constrains only which session is attached: it says
+    nothing about what the client may then do. With the tenant owner's default
+    prefix still live, a desktop user given a display slot can press prefix-c
+    for a shell in the owner's account, prefix-colon for a tmux command prompt,
+    or prefix-s to switch to any other session on that server -- including
+    another project's, when two share an owner (SYRD-65 review).
+
+    Three options close it, and all three are needed. Both prefixes go, so the
+    prefix table is unreachable. The key table goes too, because the root table
+    is still consulted without a prefix and an owner whose tmux.conf carries
+    any `bind -n` would keep exactly one of those bindings live; pointing the
+    session at a table with no bindings in it leaves nothing to find. What is
+    left is a client whose keys all fall through to the pane, which is the
+    proxy attached to the worker -- so ordinary typing still reaches the role.
+    """
+    return (("prefix", "None"), ("prefix2", "None"), ("key-table", DISPLAY_KEY_TABLE))
+
+
+def display_lock_commands(session: str) -> tuple[list[str], ...]:
+    """`tmux` argv that locks one display session's transport."""
+    return tuple(
+        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), option, value]
+        for option, value in display_lock_options()
+    )
+
+
+def _session_client_ttys(
+    session: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> set[str]:
+    """Terminals attached to one session, whoever they belong to."""
+    proc = runner(
+        [
+            "tmux", "list-clients", "-t", _exact_tmux_target(session),
+            "-F", "#{client_tty}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return set()
+    return {line.strip() for line in str(getattr(proc, "stdout", "") or "").splitlines() if line.strip()}
+
+
+def external_presentation_clients(
+    config: team_launcher.ProjectConfig,
+    slot_count: int,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> set[str]:
+    """Terminals displaying this presentation that presentation does not own.
+
+    Every display slot normally has a client, and in the viewer topology that
+    client is a viewer pane -- which is another terminal presentation created
+    for itself. Counting those is what let a bootstrap that opened no window at
+    all leave six sessions reporting ``session_attached=1`` and report success:
+    the clients were real, and every one of them was headless. What proves a
+    human can see the project is a client from outside that set: the tab of a
+    desktop terminal (SYRD-65).
+    """
+    own = _presentation_client_ttys(config, slot_count, runner=runner)
+    sessions = [display_session_name(config.project, slot) for slot in range(slot_count)]
+    sessions.append(team_launcher.viewer_session_for_project(config.project))
+    outside: set[str] = set()
+    for session in sessions:
+        outside |= {tty for tty in _session_client_ttys(session, runner=runner) if tty not in own}
+    return outside
+
+
+def presentation_window_attached(
+    config: team_launcher.ProjectConfig,
+    *,
+    config_path: Path,
+    state_path: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> bool:
+    """Whether a terminal window is displaying this project's slots."""
+    state_path = state_path or presentation_state_path(config, config_path=config_path)
+    owner_runner = _tmux_runner(config, runner)
+    slot_count = _slot_count(config, config_path, state_path)
+    return bool(external_presentation_clients(config, slot_count, runner=owner_runner))
+
+
+def await_presentation_window(
+    config: team_launcher.ProjectConfig,
+    slot_count: int,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    timeout: float = WINDOW_ATTACH_TIMEOUT_SECONDS,
+    poll: float = WINDOW_ATTACH_POLL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> set[str]:
+    """Wait, briefly, for a window to attach; return the terminals that did.
+
+    A desktop terminal is started detached and reaches its tmux client a moment
+    later, so the question cannot be asked once and immediately. It also cannot
+    be waited on forever: a window that is never going to appear has to become
+    an answer rather than a hang.
+    """
+    deadline = monotonic() + timeout
+    while True:
+        found = external_presentation_clients(config, slot_count, runner=runner)
+        if found or monotonic() >= deadline:
+            return found
+        sleep(poll)
+
+
+def unmapped_presentation_message(
+    config: team_launcher.ProjectConfig,
+    *,
+    layout: str,
+    control_user: str = "",
+) -> str:
+    """Why a launch that reported no error still put nothing on a screen.
+
+    Names the one command that does work from where the human actually is. A
+    tenant or role account has no desktop session of its own, so a launch made
+    from one can create every client in the topology and still be invisible.
+    """
+    desktop = (control_user or "").strip()
+    who = f"{desktop}'s desktop session" if desktop else "the desktop session that owns the screen"
+    lines = [
+        f"switchyard: {config.project}'s presentation is not on any screen: its display slots "
+        "have only presentation's own clients, so nothing here is a window a person can see.",
+    ]
+    if layout == team_launcher.LAYOUT_MODE_VIEWER:
+        lines.append(
+            "switchyard: the viewer layout builds the nested sessions but opens no window of its "
+            "own; a terminal has to attach to it."
+        )
+    else:
+        lines.append(
+            "switchyard: the window was launched and never attached; a tenant or role account has "
+            "no desktop session, so its terminal has nowhere to appear."
+        )
+    lines.append(
+        f"switchyard: run `switchyard {config.project}` from an ordinary terminal in {who}, or "
+        f"through that account's lifecycle control bridge, which carries the desktop identity."
+    )
+    return "\n".join(lines)
+
+
+def _detach_headless_presentation(
+    config: team_launcher.ProjectConfig,
+    slot_count: int,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    """Take down the clients that were standing in for a window there is not.
+
+    Left in place they are worse than nothing: `present list` reads them as
+    connected, so the next person to look sees a healthy presentation and the
+    real state -- slots nobody is displaying -- stays hidden.
+    """
+    viewer = team_launcher.viewer_session_for_project(config.project)
+    if _session_exists(viewer, runner=runner):
+        runner(
+            ["tmux", "kill-session", "-t", _exact_tmux_target(viewer)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def _proxy_client_flags(observer: bool) -> str:
     # A display slot is the worker's only client in the ordinary presentation
     # topology, so it must keep sizing that worker: otherwise the worker stops
@@ -561,6 +742,10 @@ def _configure_display_session(
         raise RuntimeError(f"tmux could not update display slot {slot} (exit {proc.returncode})")
     label = role_name or "hidden"
     commands = (
+        # Before anything else about the slot: a client may attach the moment
+        # the session exists, and it must never be one that can drive the
+        # owner's tmux server (SYRD-65 review).
+        *display_lock_commands(session),
         ["tmux", "set-window-option", "-t", _exact_tmux_target(f"{session}:0"), "remain-on-exit", "on"],
         # The slot is a frame around a worker that draws its own status line.
         # Leaving this one on stacks two status bars in every presentation
@@ -847,6 +1032,10 @@ def presentation_report(
         for role in config.roles
         if role.role not in visible_names
     ]
+    # Per-slot `client_state` answers "is this slot proxying its worker", which
+    # a report can answer yes to for every slot while the whole presentation is
+    # invisible. The window is a separate fact and is reported as one (SYRD-65).
+    external = sorted(external_presentation_clients(config, state["slot_count"], runner=owner_runner))
     return {
         "schema": PRESENTATION_SCHEMA,
         "project": config.project,
@@ -856,6 +1045,8 @@ def presentation_report(
         "state_path": str(state_path),
         "slots": slots,
         "hidden_roles": hidden_roles,
+        "window_attached": bool(external),
+        "external_clients": external,
     }
 
 
@@ -916,6 +1107,38 @@ def _launch_viewer(
                 raise SystemExit(f"switchyard: could not label viewer slot {slot}")
 
 
+def display_attach_args(
+    config: team_launcher.ProjectConfig,
+    slot: int,
+    *,
+    gui_user: str,
+) -> list[str]:
+    """What one presentation tab runs to display one slot.
+
+    Within one account there is no boundary and the tab attaches directly. When
+    the window belongs to a desktop user and the sessions belong to the tenant
+    owner, it goes through the per-project display bridge: one root-owned
+    program, one NOPASSWD grant, and a slot number as its only input. The
+    alternative that shipped was `sudo -u <owner> tmux attach` in every tab,
+    which asks a human for their password six times as a window opens, and the
+    only way to avoid that without this bridge is a blanket sudo grant on the
+    owner account (SYRD-65).
+    """
+    session = display_session_name(config.project, slot)
+    direct = ["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]
+    owner = (config.run_as_user or "").strip()
+    desktop = (gui_user or team_launcher.current_user_name()).strip()
+    if not owner or owner == desktop:
+        return direct
+    return [
+        os.environ.get("SWITCHYARD_SUDO_BIN", "sudo"),
+        "-n",
+        team_launcher.display_attach_helper_path(config.project),
+        config.project,
+        str(slot),
+    ]
+
+
 def _launch_separate(
     config: team_launcher.ProjectConfig,
     state: Mapping[str, Any],
@@ -925,30 +1148,41 @@ def _launch_separate(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     process_launcher: Callable[..., Any] | None,
 ) -> None:
+    # The account that owns the sessions does not necessarily own a screen.
+    # Naming it as the GUI user is what sent a launch at the owner's own
+    # runtime directory, where there is no compositor listening (SYRD-65).
+    gui_user = team_launcher.presentation_gui_user(config)
     layout = team_launcher._new_project_layout_payload(state["slot_count"])
     leaves = team_launcher._layout_leaves(layout)
     for slot, leaf in enumerate(leaves):
-        session = display_session_name(config.project, slot)
-        args = ["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]
-        if config.run_as_user and team_launcher.current_user_name() != config.run_as_user:
-            args = ["sudo", "-u", config.run_as_user, "-H", *args]
-        # A detached proxy must not return the tab to the shell that opened the
-        # window; on a privileged invocation that shell is root's (SYRD-43).
         leaf["Command"] = team_launcher.inert_pane_command(
-            team_launcher.pane_window_program(team_launcher.switchyard_pane_launcher_for(config)), args
+            team_launcher.pane_window_program(team_launcher.switchyard_pane_launcher_for(config)),
+            display_attach_args(config, slot, gui_user=gui_user),
         )
-        leaf["WorkingDirectory"] = str(Path.home())
+        # The desktop account's own directory, not this process's. Under a
+        # privileged invocation `Path.home()` is root's, and the tab recorded
+        # `WorkingDirectory=/root` -- a directory the desktop user cannot even
+        # enter (SYRD-65).
+        leaf["WorkingDirectory"] = team_launcher._gui_home(gui_user) if gui_user else str(Path.home())
         leaf["Title"] = f"{config.project} slot {slot}"
-    output = output_path or team_launcher.default_layout_output_path(config, config_path=config_path).with_name(
-        f"{config.project}-presentation-layout.json"
+    output = output_path or team_launcher.desktop_presentation_layout_path(
+        config, config_path=config_path, gui_user=gui_user
     )
-    team_launcher._write_private_json_atomic(output, layout)
-    team_launcher.ensure_owner_file(config, output, runner=runner)
+    refusal = team_launcher.write_desktop_layout(
+        output, layout, gui_user=gui_user or team_launcher.current_user_name(), runner=runner
+    )
+    if refusal:
+        raise SystemExit(
+            f"switchyard: refusing to open {config.project}'s presentation window: {refusal}. "
+            f"A terminal handed a layout it cannot read aborts before anything appears; run "
+            f"`sudo switchyard {config.project}` from {gui_user or 'the desktop account'}'s own "
+            "session, which can."
+        )
     result = team_launcher.launch_konsole_window(
         output,
         project=config.project,
         window_title=team_launcher.project_window_title(config),
-        gui_user=config.run_as_user or None,
+        gui_user=gui_user or None,
         runner=runner,
         process_launcher=process_launcher,
     )
@@ -1067,6 +1301,11 @@ def presentation_action(
     environ: Mapping[str, str] = os.environ,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     process_launcher: Callable[..., Any] | None = None,
+    window_timeout: float = WINDOW_ATTACH_TIMEOUT_SECONDS,
+    window_poll: float = WINDOW_ATTACH_POLL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    proc_root: Path | None = None,
 ) -> dict[str, Any]:
     _validate_role_namespace(config)
     actor = _require_director(config, environ)
@@ -1161,6 +1400,36 @@ def presentation_action(
             _launch_separate(config, state, config_path=config_path, runner=runner, process_launcher=process_launcher)
         else:
             raise SystemExit("switchyard: bootstrap layout must be viewer or separate")
+        # Bootstrap is documented as creating a presentation window, and it is
+        # what an operator reaches for when the tenant has gone blank. Returning
+        # zero because the nested sessions came up is the answer that sent a
+        # recovered-looking project back to a user who could still see nothing;
+        # so the window is proved, and an unproved one is a failure with the
+        # command that does work (SYRD-65).
+        attached = await_presentation_window(
+            config, state["slot_count"], runner=owner_runner, timeout=window_timeout,
+            poll=window_poll, monotonic=monotonic, sleep=sleep,
+        )
+        # For the layout that opens a terminal, the terminal itself has to still
+        # be there: it is the only evidence that does not go through tmux, and
+        # the one that failed here aborted on a layout file it could not read,
+        # which no client count would have shown (SYRD-65).
+        windowed = layout != team_launcher.LAYOUT_MODE_SEPARATE or bool(
+            team_launcher.presentation_window_processes(
+                config, config_path=config_path, proc_root=proc_root
+            )
+        )
+        if not attached or not windowed:
+            _detach_headless_presentation(config, state["slot_count"], runner=owner_runner)
+            raise SystemExit(
+                unmapped_presentation_message(
+                    config,
+                    layout=layout,
+                    control_user=team_launcher.resolve_control_user(
+                        config.project, owner_user=config.run_as_user or ""
+                    ),
+                )
+            )
         return state
     if action == "recover":
         # Recovery is a new worker launch entry. Reuse the launcher's desktop
@@ -1199,6 +1468,11 @@ def print_presentation_report(report: Mapping[str, Any], *, json_output: bool, p
         print_func(json.dumps(report, indent=2, sort_keys=True))
         return
     print_func(f"{report['project']} presentation revision {report['revision']} ({report['active_layout']})")
+    external = report.get("external_clients") or []
+    if report.get("window_attached"):
+        print_func(f"  window: displayed by {', '.join(external)}")
+    else:
+        print_func("  window: NOT displayed by any terminal; the slots below have only headless clients")
     for item in report["slots"]:
         role = item["desired_role"] or "hidden"
         worker = item["worker"]

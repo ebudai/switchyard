@@ -49,6 +49,7 @@ from scripts.ticket_board.project_provision import (
     role_tooling_staging_dir,
     staged_role_tooling_problems,
     untrusted_root_executable_reasons,
+    display_attach_helper_path,
     invoking_human,
     resolve_control_user,
     sql_identifier,
@@ -161,6 +162,12 @@ GUI_WAYLAND_ENV = "TEAM_LAUNCHER_WAYLAND_DISPLAY"
 LEGACY_GUI_WAYLAND_ENV = "PGU_TEAM_LAUNCHER_WAYLAND_DISPLAY"
 HOST_WAYLAND_ENV = "HOST_WAYLAND_DISPLAY"
 LEGACY_HOST_WAYLAND_ENV = "PGU_HOST_WAYLAND_DISPLAY"
+#: The human the passwordless lifecycle bridge resolved from the kernel before
+#: it dropped to the owner. The bridge rebuilds the environment, so SUDO_USER
+#: does not survive it and the desktop identity would otherwise be lost --
+#: which is what made a bridged launch open its window against the owner's own
+#: runtime directory, where no compositor is listening (SYRD-65).
+TENANT_CONTROL_CALLER_ENV = "SWITCHYARD_TENANT_CONTROL_CALLER"
 LAYOUT_MODE_AUTO = "auto"
 LAYOUT_MODE_SEPARATE = "separate"
 LAYOUT_MODE_VIEWER = "viewer"
@@ -782,7 +789,35 @@ def default_gui_user() -> str:
     sudo_user = _env_first("SUDO_USER")
     if sudo_user:
         return sudo_user
+    # The bridge's own answer to the same question. It is not a name the caller
+    # supplied: the bridge resolves it from SUDO_UID, which the kernel sets,
+    # and it names the human whose desktop asked for this project. Trusting it
+    # here is what makes a passwordless `switchyard <project>` open a window on
+    # that desktop instead of on the owner account's empty session, which is
+    # the gap that left recovery available only through sudo (SYRD-65).
+    bridged = _env_first(TENANT_CONTROL_CALLER_ENV)
+    if bridged:
+        return bridged
     return current_user_name()
+
+
+def presentation_gui_user(config: "ProjectConfig") -> str:
+    """The desktop account a presentation window for this project belongs to.
+
+    The owner account owns the sessions; it does not necessarily own a screen.
+    When a desktop identity is known -- configured, through sudo, or carried by
+    the control bridge -- the window belongs to that person's session, and the
+    owner is the fallback for a tenant driven from its own desktop (SYRD-65).
+    """
+    for name in (GUI_USER_ENV, LEGACY_GUI_USER_ENV, "SUDO_USER", TENANT_CONTROL_CALLER_ENV):
+        candidate = os.environ.get(name, "").strip()
+        # Never root. A presentation window opened as root is a root shell
+        # behind every tab, and `sudo -u root` from an already-privileged
+        # invocation is not a crossing at all (SYRD-43). An environment that
+        # names root is answering a different question than this one.
+        if candidate and candidate != "root":
+            return candidate
+    return config.run_as_user or current_user_name()
 
 
 def normalize_wayland_display(display: str, *, gui_user: str) -> str | None:
@@ -970,7 +1005,13 @@ def detected_invoking_desktop(
         return desktop
     if str(env.get("KDE_FULL_SESSION", "")).strip().casefold() in {"1", "true"}:
         return "KDE"
-    user = str(env.get("SUDO_USER") or env.get("USER") or "").strip()
+    # Whose desktop the window is for, not which account is executing. Through
+    # the control bridge USER is the tenant owner, which has no graphical
+    # session, so asking about it answered "no desktop" and chose the viewer
+    # layout -- the one layout that opens no window at all (SYRD-65).
+    user = str(
+        env.get("SUDO_USER") or env.get(TENANT_CONTROL_CALLER_ENV) or env.get("USER") or ""
+    ).strip()
     if not user:
         return ""
     try:
@@ -4836,6 +4877,30 @@ def unsafe_root_presentation_windows(
     signal it, so start, status and upgrade have to say it is there rather than
     report the project safely attached (SYRD-43).
     """
+    return [
+        window
+        for window in presentation_window_processes(
+            config, config_path=config_path, proc_root=proc_root
+        )
+        if window.uid == 0
+    ]
+
+
+def presentation_window_processes(
+    config: ProjectConfig,
+    *,
+    config_path: Path | None = None,
+    proc_root: Path | None = None,
+) -> list[UnsafePresentationWindow]:
+    """Terminal windows showing this project's panes, whoever owns them.
+
+    A window is a process, and it is the only evidence of one that does not go
+    through tmux. Attached clients say a session has a terminal; they do not
+    say a terminal is on a screen, and a terminal that aborted on a layout file
+    it could not read leaves clients behind for a moment and no window at all
+    (SYRD-65). The root subset of this is what `status` refuses to call
+    attached (SYRD-43).
+    """
     proc_root = proc_root or PROC_ROOT
     markers = presentation_layout_markers(config, config_path=config_path)
     found: list[UnsafePresentationWindow] = []
@@ -4845,7 +4910,7 @@ def unsafe_root_presentation_windows(
         return []
     for pid in entries:
         uid = _proc_effective_uid(proc_root, pid)
-        if uid != 0:
+        if uid is None:
             continue
         argv = _proc_cmdline(proc_root, pid)
         if not argv:
@@ -5046,6 +5111,79 @@ def ensure_owner_file(
     if result.returncode != 0:
         reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
         raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
+
+
+def desktop_presentation_layout_path(
+    config: ProjectConfig, *, config_path: Path, gui_user: str
+) -> Path:
+    """Where a presentation window's layout file goes so its terminal can read it.
+
+    Konsole is handed this path and reads it as the desktop account. The
+    tenant's own state directory is 0700 and its files 0600, both owned by the
+    project owner, so a window correctly dropped to the desktop user cannot
+    open it at all and the terminal aborts before anything appears (SYRD-65).
+    When the desktop account is the owner there is no boundary and the tenant's
+    own location is right; otherwise it belongs under that person's state
+    directory, still 0700 over 0600 -- protected, and owned by the reader.
+    """
+    tenant = default_layout_output_path(config, config_path=config_path).with_name(
+        f"{config.project}-presentation-layout.json"
+    )
+    user = (gui_user or "").strip()
+    if not user or user == config.run_as_user or (not config.run_as_user and user == current_user_name()):
+        return tenant
+    return (
+        Path(_gui_home(user))
+        / ".local" / "state" / "switchyard" / "projects" / config.project
+        / f"{config.project}-presentation-layout.json"
+    )
+
+
+def write_desktop_layout(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    gui_user: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str:
+    """Write the layout and hand it to the desktop account; say why if it cannot.
+
+    A refusal is returned rather than raised so the caller can say what a human
+    should do instead. Launching a terminal at a file it cannot read is the
+    failure this exists to prevent, and it fails as an abort with an empty log.
+    """
+    uid = uid_for_user(gui_user) if gui_user else None
+    if uid is None:
+        return f"{gui_user or 'the desktop account'} is not a local account"
+    crossing = uid != os.getuid()
+    if crossing and os.geteuid() != 0:
+        return (
+            f"this invocation cannot give {gui_user} a readable layout: it is running as "
+            f"{current_user_name()}, and only root can write into another account's state directory"
+        )
+    created = [parent for parent in reversed(path.parents) if not parent.exists()]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_private_json_atomic(path, payload)
+    except OSError as exc:
+        return f"cannot write the presentation layout {path}: {exc}"
+    if not crossing:
+        return ""
+    try:
+        gid = pwd.getpwnam(gui_user).pw_gid
+    except KeyError:
+        gid = -1
+    try:
+        # Every directory this call had to create, not just the last one: a
+        # root-owned directory inside somebody's home is one they cannot
+        # remove and did not ask for.
+        for target in (*created, path):
+            os.chown(target, uid, gid)
+        path.parent.chmod(0o700)
+        path.chmod(0o600)
+    except OSError as exc:
+        return f"cannot give {gui_user} the presentation layout {path}: {exc}"
+    return ""
 
 
 def ensure_layout_output_owner(
@@ -15514,6 +15652,32 @@ def reconnect_presentation(
     return []
 
 
+def presentation_is_attached(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """Whether a terminal outside presentation is actually displaying it.
+
+    Every slot reporting a connected client is not the same thing: in the
+    viewer topology those clients are presentation's own panes, so six of them
+    can exist with no window on any screen at all. This asks the question the
+    tenant cares about -- is somebody looking at it -- and a project with no
+    presentation configured is not claimed to be attached (SYRD-65).
+    """
+    from scripts import presentation_controller
+
+    if not presentation_controller.presentation_enabled(config, config_path=config_path):
+        return False
+    try:
+        return presentation_controller.presentation_window_attached(
+            config, config_path=config_path, runner=runner
+        )
+    except Exception:  # noqa: BLE001 - an unreadable presentation is not an attachment
+        return False
+
+
 def _start_role_sessions_without_a_window(
     config: ProjectConfig,
     *,
@@ -15577,7 +15741,13 @@ def cutover_role_identities_command(
             cfg, config_path=config_path, runner=runner
         )
     )
-    stop = stopper or (lambda cfg: stop_project(cfg, runner=runner, print_func=print_func))
+    # Workers only. The display slots and the window showing them are not part
+    # of what this transaction changes: the roles change accounts, the slots do
+    # not, and they are re-pointed in place afterwards. Calling the whole-project
+    # stop here killed the viewer and all six slots, and neither the restart nor
+    # the rollback opens a window, so a rolled-back tenant came back with every
+    # slot connected to a viewer that no terminal displayed (SYRD-65).
+    stop = stopper or (lambda cfg: stop_role_sessions(cfg, runner=runner, print_func=print_func))
 
     identities = read_pending_identities(config)
     if not identities or not _role_accounts_ready(config):
@@ -15622,6 +15792,13 @@ def cutover_role_identities_command(
         return 0
 
     previous_config = config_path.read_bytes()
+    # What the tenant could see before anything was stopped. A cutover that
+    # ends -- either way -- with nobody able to see the project is not the
+    # state it started in, and saying so is the only way an operator learns it
+    # from the transaction rather than from the user (SYRD-65).
+    presentation_was_visible = presentation_is_attached(
+        config, config_path=config_path, runner=runner
+    )
     previous_ownership = _worktree_ownership(config)
     previous_units = capture_installed_units(config, config_path=config_path)
     previous_listener_state = capture_listener_state(config, runner=runner, config_path=config_path)
@@ -15740,6 +15917,18 @@ def cutover_role_identities_command(
         if not (ownership_failures or authority_problems or start_result or identity_gaps or missing_workers or write_failures)
         else []
     )
+    if (
+        presentation_was_visible
+        and not (
+            ownership_failures or authority_problems or start_result or identity_gaps
+            or missing_workers or write_failures or presentation_problems
+        )
+        and not presentation_is_attached(config, config_path=config_path, runner=runner)
+    ):
+        presentation_problems = [
+            "the presentation window that was visible before the cutover is gone; the slots are "
+            "connected but no terminal is displaying them"
+        ]
     listener_problems = (
         start_owner_listener(config, runner=runner, config_path=config_path)
         if not (
@@ -15789,10 +15978,27 @@ def cutover_role_identities_command(
         rollback_result = start(config)
         # A rollback that leaves the slots blank is not a rollback. Its failures
         # belong in the same record as the ones that caused it (SYRD-45).
+        presentation_rollback = reconnect_presentation(
+            config, config_path=config_path, runner=runner
+        )
         restored.extend(
             f"the presentation did not reconnect during the rollback: {problem}"
-            for problem in reconnect_presentation(config, config_path=config_path, runner=runner)
+            for problem in presentation_rollback
         )
+        # Re-pointed is not visible. A rollback the user cannot see is the
+        # failure this ticket exists for, so it is recorded here beside the
+        # reasons that caused the rollback rather than left for them to
+        # discover on a blank desktop (SYRD-65).
+        if (
+            presentation_was_visible
+            and not presentation_rollback
+            and not presentation_is_attached(config, config_path=config_path, runner=runner)
+        ):
+            restored.append(
+                f"the presentation window {config.project} had before the cutover is not back; "
+                f"the slots are re-pointed but no terminal is displaying them. Run "
+                f"`switchyard {config.project}` from the desktop session that had the window"
+            )
         # Revalidated here rather than only where it was put back: the units are
         # restored before the workers are, and a listener that died in between
         # is a listener this tenant does not have. Asked of the owner's own
@@ -16657,6 +16863,30 @@ def stop_project(
         print_func=print_func,
     )
     exit_code = exit_code or presentation_stop
+    # Always, not short-circuited on an earlier failure: a viewer that would not
+    # close is no reason to leave every worker running.
+    workers_stopped = stop_role_sessions(config, runner=runner, print_func=print_func)
+    return exit_code or workers_stopped
+
+
+def stop_role_sessions(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Stop the workers and nothing else, leaving the presentation standing.
+
+    A display slot is a frame around a worker, not the worker: its pane keeps
+    running after the session it proxies goes away, says so, and is re-pointed
+    when the worker comes back. So a transaction that only needs the workers
+    quiescent must stop only the workers. Taking the whole presentation down
+    with them destroys the window the tenant was actually looking at, and
+    nothing in the restart path opens a replacement -- re-pointing slots that
+    no terminal displays leaves every session attached to a viewer nobody can
+    see (SYRD-65).
+    """
+    exit_code = 0
     for role in config.roles:
         role_runner = role_process_runner_for(config, role, runner=runner)
         exists = role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
@@ -17227,7 +17457,13 @@ def _build_switchyard_present_parser() -> argparse.ArgumentParser:
     restore_parser = actions.add_parser("restore", help="restore a configured presentation layout")
     restore_parser.add_argument("--layout", default="default")
     bootstrap_parser = actions.add_parser("bootstrap", help="create stable slots and a presentation window")
-    bootstrap_parser.add_argument("--layout", choices=(LAYOUT_MODE_VIEWER, LAYOUT_MODE_SEPARATE), default=LAYOUT_MODE_VIEWER)
+    # The native window, not the nested tmux viewer. The viewer builds sessions
+    # and opens nothing, so bootstrapping into it reported a recovery that
+    # nobody could see; the separate layout is one terminal, laid out by the
+    # terminal itself, with the project's slots in its tabs (SYRD-65).
+    bootstrap_parser.add_argument(
+        "--layout", choices=(LAYOUT_MODE_SEPARATE, LAYOUT_MODE_VIEWER), default=LAYOUT_MODE_SEPARATE
+    )
     recover_parser = actions.add_parser("recover", help="make one bounded start/resume attempt for a role")
     recover_parser.add_argument("role")
     return parser

@@ -98,6 +98,10 @@ class PresentationRunner:
             return subprocess.CompletedProcess(args, 0)
         if command == "kill-session":
             self.sessions.discard(session)
+            # A session's clients and panes go with it, so a topology rebuilt
+            # by killing and recreating a session starts with neither.
+            self.pane_ttys.pop(session, None)
+            self.session_clients.pop(session, None)
             return subprocess.CompletedProcess(args, 0)
         if command == "respawn-pane":
             if target == self.fail_next_respawn_target:
@@ -137,6 +141,126 @@ class PresentationRunner:
             self.proxy_roles[session] = args[-1]
             return subprocess.CompletedProcess(args, 0)
         return subprocess.CompletedProcess(args, 0)
+
+
+class DesktopWindow:
+    """A window launcher that also does what the window it starts would do.
+
+    A terminal emulator is only evidence of a presentation when its tab reaches
+    the session and becomes a client. Modelling the launch without the attach
+    is precisely the mistake in production this covers, so the two are modelled
+    together.
+    """
+
+    def __init__(self, runner: "PresentationRunner", *sessions: str) -> None:
+        self.runner = runner
+        self.sessions = sessions
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, args: list[str], **kwargs: object) -> object:
+        self.calls.append({"args": args, "kwargs": kwargs})
+        for index, session in enumerate(self.sessions):
+            self.runner.session_clients.setdefault(session, []).append(f"/dev/pts/desktop{index}")
+
+        class Process:
+            pid = 424242
+
+            def poll(_self: object) -> int | None:
+                return None
+
+        return Process()
+
+
+class RealDesktopWindow:
+    """A launcher that opens an actual tmux client, the way a terminal tab does.
+
+    Used where the test drives a real tmux server: the launch has to end in a
+    client on a terminal, because that is the only thing that distinguishes a
+    presentation somebody can see from one that merely exists.
+    """
+
+    def __init__(self, session: str, *, env: dict[str, str]) -> None:
+        self.session = session
+        self.env = env
+        self.calls: list[dict[str, object]] = []
+        self.clients: list[tuple[subprocess.Popen[bytes], int]] = []
+
+    def __call__(self, args: list[str], **kwargs: object) -> object:
+        self.calls.append({"args": args, "kwargs": kwargs})
+        master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        # A chosen terminal type, not an inherited one: a client started under
+        # `TERM=dumb` exits at once with "open terminal failed", and a window
+        # that is only a Popen object is not the thing under test (SYRD-65).
+        env = {**self.env, "TERM": "xterm-256color"}
+        proc = subprocess.Popen(
+            ["tmux", "attach", "-t", f"={self.session}"],
+            stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
+        )
+        os.close(slave)
+        self.clients.append((proc, master))
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            listed = subprocess.run(
+                ["tmux", "list-clients", "-t", f"={self.session}", "-F", "#{client_tty}"],
+                env=env, capture_output=True, text=True,
+            )
+            if listed.returncode == 0 and listed.stdout.split():
+                return proc
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        os.set_blocking(master, False)
+        try:
+            said = os.read(master, 4096).decode("utf-8", "replace").strip()
+        except OSError:
+            said = ""
+        raise AssertionError(
+            f"no client ever attached to {self.session}"
+            + (f": {said}" if said else f" (tmux attach exited {proc.poll()})")
+        )
+
+    def close(self) -> None:
+        for proc, master in self.clients:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            os.close(master)
+        self.clients.clear()
+
+
+def _separate_window(runner: "PresentationRunner", slots: int = 2, project: str = "porter") -> DesktopWindow:
+    """One tab per slot, each attached to that slot's display session."""
+    return DesktopWindow(runner, *(f"{project}-display-{slot}" for slot in range(slots)))
+
+
+def _running_window_proc(root: Path, project: str = "porter") -> Path:
+    """A /proc holding the terminal the native launch is supposed to leave running."""
+    proc_root = root / "proc"
+    entry = proc_root / "4242"
+    entry.mkdir(parents=True, exist_ok=True)
+    argv = ["konsole", "--separate", "--layout", f"/x/{project}-presentation-layout.json"]
+    (entry / "cmdline").write_bytes(("\0".join(argv) + "\0").encode("utf-8"))
+    uid = os.getuid()
+    (entry / "status").write_text(
+        f"Name:\tkonsole\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n", encoding="utf-8"
+    )
+    return proc_root
+
+
+def _native_bootstrap(
+    config: Any, *, config_path: Path, state_path: Path, runner: "PresentationRunner", root: Path,
+    slots: int = 2,
+) -> dict[str, Any]:
+    """Bootstrap the way the CLI does now: one native window, and prove it."""
+    return presentation.presentation_action(
+        config, config_path=config_path, state_path=state_path, action="bootstrap",
+        layout="separate", environ=DIRECTOR_ENV, runner=runner,
+        process_launcher=_separate_window(runner, slots),
+        proc_root=_running_window_proc(root),
+    )
 
 
 DIRECTOR_ENV = {"TICKET_BOARD_CALLER_ROLE": "director", "TICKET_BOARD_PROJECT": "porter"}
@@ -200,13 +324,14 @@ def test_runtime_mapping_preserves_worker_identity_and_restores_defaults() -> No
             )
             resume_records[record] = record.read_bytes()
 
-        first = presentation.presentation_action(
-            config, config_path=config_path, state_path=state_path, action="bootstrap",
-            layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+        first = _native_bootstrap(
+            config, config_path=config_path, state_path=state_path, runner=runner, root=root,
         )
         assert first["slots"] == {"0": "director", "1": "app"}
+        # The native window's slots. The viewer is a separate arrangement and
+        # arrives with the viewer launch below, not with this one (SYRD-65).
         stable_sessions = {"porter-display-0", "porter-display-1", "porter-viewer"}
-        assert stable_sessions <= runner.sessions
+        assert {"porter-display-0", "porter-display-1"} <= runner.sessions
 
         swapped = presentation.presentation_action(
             config, config_path=config_path, state_path=state_path, action="swap",
@@ -216,6 +341,7 @@ def test_runtime_mapping_preserves_worker_identity_and_restores_defaults() -> No
         presentation.launch_presentation(
             config, config_path=config_path, state_path=state_path, layout="viewer", runner=runner,
         )
+        assert stable_sessions <= runner.sessions
         relaunched = json.loads(state_path.read_text(encoding="utf-8"))
         assert relaunched["slots"] == {"0": "app", "1": "director"}
         assert relaunched["revision"] == 2
@@ -273,9 +399,8 @@ def test_restore_uses_current_projected_roles_when_config_default_is_stale() -> 
         config = load_project_config("porter", config_path)
         state_path = root / "presentation.json"
         runner = PresentationRunner()
-        presentation.presentation_action(
-            config, config_path=config_path, state_path=state_path, action="bootstrap",
-            layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+        _native_bootstrap(
+            config, config_path=config_path, state_path=state_path, runner=runner, root=root,
         )
         raw = json.loads(config_path.read_text(encoding="utf-8"))
         raw["roles"][1].update(
@@ -323,9 +448,8 @@ def test_existing_state_grows_safely_when_role_projection_adds_a_visible_slot() 
         config = load_project_config("porter", config_path)
         state_path = root / "presentation.json"
         runner = PresentationRunner()
-        presentation.presentation_action(
-            config, config_path=config_path, state_path=state_path, action="bootstrap",
-            layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+        _native_bootstrap(
+            config, config_path=config_path, state_path=state_path, runner=runner, root=root,
         )
         raw = json.loads(config_path.read_text(encoding="utf-8"))
         (root / "main").mkdir()
@@ -529,9 +653,8 @@ def test_failed_proxy_update_rolls_back_mapping_and_revision() -> None:
         config = load_project_config("porter", config_path)
         state_path = root / "presentation.json"
         runner = PresentationRunner()
-        presentation.presentation_action(
-            config, config_path=config_path, state_path=state_path, action="bootstrap",
-            layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+        _native_bootstrap(
+            config, config_path=config_path, state_path=state_path, runner=runner, root=root,
         )
         before = state_path.read_bytes()
         runner.fail_next_respawn_target = "=porter-display-1:0.0"
@@ -547,6 +670,12 @@ def test_failed_proxy_update_rolls_back_mapping_and_revision() -> None:
         assert state_path.read_bytes() == before
         assert runner.proxy_roles["porter-display-0"] == "director"
         assert runner.proxy_roles["porter-display-1"] == "app"
+        # Focus moves a pane of the viewer, so the viewer has to be the
+        # arrangement in play for its failure to be injectable at all.
+        presentation.launch_presentation(
+            config, config_path=config_path, state_path=state_path, layout="viewer", runner=runner,
+        )
+        before = state_path.read_bytes()
         runner.fail_next_select_target = "=porter-viewer:0.1"
         try:
             presentation.presentation_action(
@@ -621,10 +750,11 @@ def test_separate_bootstrap_attaches_konsole_leaves_to_stable_slots() -> None:
         config_path = _write_presentation_config(root)
         config = load_project_config("porter", config_path)
         runner = PresentationRunner()
-        process_launcher = RecordingProcessLauncher()
+        process_launcher = _separate_window(runner)
         presentation.presentation_action(
             config, config_path=config_path, state_path=root / "presentation.json", action="bootstrap",
             layout="separate", environ=DIRECTOR_ENV, runner=runner, process_launcher=process_launcher,
+            proc_root=_running_window_proc(root),
         )
         assert len(process_launcher.calls) == 1
         layout_path = root / ".switchyard" / "porter" / "porter-presentation-layout.json"
@@ -658,9 +788,10 @@ def test_presentation_frames_drop_their_status_bar_and_yield_worker_geometry() -
         state_path = root / "presentation.json"
         runner = PresentationRunner()
 
-        presentation.presentation_action(
-            config, config_path=config_path, state_path=state_path, action="bootstrap",
-            layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+        # The viewer arrangement itself, which is built rather than bootstrapped:
+        # it opens no window, so `bootstrap` will not claim one for it (SYRD-65).
+        presentation.launch_presentation(
+            config, config_path=config_path, state_path=state_path, layout="viewer", runner=runner,
         )
         # Both presentation frames are chrome around a worker that draws its own
         # status line, so neither adds a second bar.
@@ -743,6 +874,10 @@ def test_isolated_tmux_clients_preserve_visible_sizes_and_a_single_status_bar() 
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+        # Chosen, not inherited: these tests attach real clients, and one
+        # started under `TERM=dumb` exits with "open terminal failed" before it
+        # can be the client the test is about (SYRD-65).
+        tmux_env["TERM"] = "xterm-256color"
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(tmux_env)
@@ -883,6 +1018,10 @@ def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> Non
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+        # Chosen, not inherited: these tests attach real clients, and one
+        # started under `TERM=dumb` exits with "open terminal failed" before it
+        # can be the client the test is about (SYRD-65).
+        tmux_env["TERM"] = "xterm-256color"
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(tmux_env)
@@ -978,6 +1117,10 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
         tmux_env.pop("TMUX", None)
         tmux_env.pop("TMUX_PANE", None)
         tmux_env["TMUX_TMPDIR"] = str(tmux_tmp)
+        # Chosen, not inherited: these tests attach real clients, and one
+        # started under `TERM=dumb` exits with "open terminal failed" before it
+        # can be the client the test is about (SYRD-65).
+        tmux_env["TERM"] = "xterm-256color"
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(tmux_env)
@@ -986,6 +1129,7 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
                 call_env.update(supplied_env)
             return subprocess.run(args, env=call_env, **kwargs)
 
+        window = RealDesktopWindow("porter-viewer", env=tmux_env)
         try:
             for role in config.roles:
                 runner([
@@ -1004,10 +1148,13 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
             ).stdout
             assert "draft-preserved-42" in capture_before
 
-            presentation.presentation_action(
-                config, config_path=config_path, state_path=state_path, action="bootstrap",
-                layout="viewer", environ=DIRECTOR_ENV, runner=runner,
+            presentation.launch_presentation(
+                config, config_path=config_path, state_path=state_path, layout="viewer", runner=runner,
             )
+            # A real terminal displaying it, so the topology under test is one
+            # somebody can see rather than six headless clients.
+            window([])
+            assert len(window.clients) == 1
             presentation.presentation_action(
                 config, config_path=config_path, state_path=state_path, action="swap",
                 slot=0, other_slot=1, environ=DIRECTOR_ENV, runner=runner,
@@ -1056,6 +1203,7 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
             assert "app disconnected" in recovery_surface
             assert "switchyard present porter recover app" in recovery_surface
         finally:
+            window.close()
             runner(["tmux", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

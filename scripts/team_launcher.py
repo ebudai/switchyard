@@ -6181,6 +6181,30 @@ def _resolve_deploy_ref_from_bare_repo(
     return "", "; ".join(errors)
 
 
+def explicit_source_caches(commit_git_dir: str | None) -> tuple[Path, ...]:
+    """The source caches an operator named, in the order they named them.
+
+    An installed shared release carries no history of its own, so the commit to
+    deploy has to come out of a repository somebody chose. Until now the only
+    way to choose one was `SWITCHYARD_BARE_REPO`, and an environment variable
+    cannot survive the operator handoff: the accounts phase hands the upgrade
+    back through `sudo`, which scrubs it. `--commit-git-dir` is the same
+    selection carried as an argument -- it is already the pinned list of
+    repositories this tenant verifies commits against -- so a pinned release
+    stays pinned across the handoff (SYRD-61).
+
+    Only absolute paths: a cache resolved against whatever directory root
+    happened to be in is exactly the ambient guessing this replaces.
+    """
+    return tuple(
+        candidate
+        for item in (commit_git_dir or "").split(os.pathsep)
+        if item.strip()
+        for candidate in (Path(item.strip()).expanduser(),)
+        if candidate.is_absolute()
+    )
+
+
 def tenant_release_status(
     config: ProjectConfig,
     *,
@@ -6238,16 +6262,32 @@ def tenant_release_status(
     current_release, current_sha = _current_tenant_release(board_root)
     clone_source_repo: Path | None = None
     if shared_switchyard_release_for_path(resolved_source_repo) is not None:
-        selected_cache = switchyard_bare_repo()
-        if selected_cache is None:
-            target_sha = ""
-            resolve_error = (
-                "installed shared releases require an explicit source cache in SWITCHYARD_BARE_REPO "
-                "or an explicit --source-repo checkout"
-            )
+        # The argument, never the tenant's plan. The plan's commit_git_dir is a
+        # tenant-writable document and it stays what it has always been -- the
+        # list of repositories a commit hash is verified against. Choosing which
+        # tree root archives and deploys is a different decision, and only an
+        # explicit argument or root's own record of one makes it (SYRD-61).
+        caches = list(explicit_source_caches(commit_git_dir))
+        environment_cache = switchyard_bare_repo()
+        if environment_cache is not None:
+            caches.append(environment_cache)
+        target_sha = ""
+        resolve_error = (
+            "installed shared releases require an explicit source cache in --commit-git-dir "
+            "or SWITCHYARD_BARE_REPO, or an explicit --source-repo checkout"
+        )
+        failures: list[str] = []
+        for cache in caches:
+            candidate = cache.resolve(strict=False)
+            target_sha, cache_error = _resolve_deploy_ref_from_bare_repo(candidate, deploy_ref, runner=runner)
+            if target_sha:
+                clone_source_repo = candidate
+                resolve_error = ""
+                break
+            failures.append(f"{candidate}: {cache_error}")
         else:
-            clone_source_repo = selected_cache.resolve(strict=False)
-            target_sha, resolve_error = _resolve_deploy_ref_from_bare_repo(clone_source_repo, deploy_ref, runner=runner)
+            if failures:
+                resolve_error = "; ".join(failures)
     else:
         target_sha, resolve_error = _resolve_deploy_ref_readonly(resolved_source_repo, deploy_ref, runner=runner)
     return TenantReleaseStatus(
@@ -6306,9 +6346,11 @@ def tenant_release_listener_command(status: TenantReleaseStatus, project: str, a
     operation = f"systemctl --user {action} {shlex.quote(listener_unit)}"
     if action == "start":
         operation = f"systemctl --user daemon-reload && {operation}"
+    # Exported: `start` reloads first, and a prefix would leave the start
+    # itself without a bus to talk to (SYRD-61).
     script = (
         'runtime="/run/user/$(id -u)"; '
-        'XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" '
+        'export XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"; '
         + operation
     )
     command = _owner_command_env_args(
@@ -13108,7 +13150,10 @@ def account_existence_guard(accounts: Sequence[str]) -> list[str]:
 
 
 def render_role_account_migration(
-    config: ProjectConfig, *, config_path: Path | None = None
+    config: ProjectConfig,
+    *,
+    config_path: Path | None = None,
+    resume_source: Mapping[str, str] | None = None,
 ) -> str:
     """Operator commands that move an existing tenant onto per-role accounts.
 
@@ -13239,6 +13284,34 @@ def render_role_account_migration(
     lines.append(
         "# runs whichever phase is next in order (SYRD-45)."
     )
+    # What that rerun will deploy, named here so an operator can see it before
+    # running it. The selection itself does not travel in this file: `sudo`
+    # scrubs the environment and this script is written into a directory the
+    # tenant owns, so the arguments would be the tenant's to change. Root reads
+    # it back from its own record instead (SYRD-61).
+    pinned = dict(resume_source or {})
+    if any(pinned.get(key) for key in ("source_repo", "commit_git_dir", "deploy_ref")):
+        lines.append(
+            "# It deploys the release this upgrade was pinned to, which root recorded where"
+        )
+        lines.append(
+            "# only root can write it, so sudo's scrubbed environment cannot lose it:"
+        )
+        for label, key in (
+            ("source ", "source_repo"),
+            ("cache  ", "commit_git_dir"),
+            ("ref    ", "deploy_ref"),
+        ):
+            if pinned.get(key):
+                lines.append(f"#     {label} {pinned[key]}")
+    else:
+        lines.append(
+            "# No pinned release was recorded for this upgrade. If it cannot resolve the"
+        )
+        lines.append(
+            "# release to deploy, rerun it with --source-repo, --commit-git-dir and"
+        )
+        lines.append("# --deploy-ref, which it will then record for any later phase.")
     lines.append(f"sudo switchyard upgrade {config.project}")
     lines.append(
         "# That transaction deploys and restarts the board itself, so there is no"
@@ -13457,6 +13530,43 @@ def running_role_identities(
     return serving
 
 
+# A session that has just been asked to start is not a session that has
+# failed. The transaction reports on six of them at once, so a single probe
+# taken the instant the launcher returns can miss the slowest and call it dead.
+ROLE_RECOVERY_PROBE_ATTEMPTS = 6
+ROLE_RECOVERY_PROBE_DELAY_SECONDS = 0.5
+
+
+def settled_role_identities(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    expected: Sequence[str] = (),
+    attempts: int | None = None,
+    delay: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, str]:
+    """Which account serves each role, once the ones expected back have settled.
+
+    Returns as soon as every expected role answers, so a healthy cutover waits
+    for nothing; only a genuinely missing session costs the wait. Reporting a
+    role dead because the probe was taken a moment too early is what put "every
+    role did not come back" in a journal that six live sessions disagreed with
+    (SYRD-61).
+    """
+    # Read at call time, so a test can shorten the wait without reaching into
+    # a default bound when the module was imported.
+    rounds = ROLE_RECOVERY_PROBE_ATTEMPTS if attempts is None else attempts
+    pause = ROLE_RECOVERY_PROBE_DELAY_SECONDS if delay is None else delay
+    serving = running_role_identities(config, runner=runner)
+    for _attempt in range(max(0, rounds - 1)):
+        if all(role in serving for role in expected):
+            break
+        sleep(pause)
+        serving = running_role_identities(config, runner=runner)
+    return serving
+
+
 def role_process_identity_gaps(
     config: ProjectConfig,
     *,
@@ -13561,6 +13671,179 @@ def read_upgrade_journal(
     if trusted:
         return _read_journal_file(privileged_upgrade_journal_path(config), config.project)
     return _read_journal_file(upgrade_journal_path(config, config_path=config_path), config.project)
+
+
+UPGRADE_SOURCE_SCHEMA = "switchyard.upgrade-source.v1"
+
+
+def privileged_upgrade_source_path(config: ProjectConfig) -> Path:
+    """Root's record of the source selection this upgrade was pinned to.
+
+    It lives beside root's phase journal, in the directory only root writes,
+    because it decides what code the identities transaction deploys. The tenant
+    gets no copy: a tenant that could name the release would be choosing the
+    board that authorizes it (SYRD-61).
+    """
+    return privileged_provision_dir(
+        config.project, root=switchyard_privileged_provision_root()
+    ) / "upgrade-source.json"
+
+
+def _write_privileged_json(path: Path, payload: Mapping[str, Any]) -> str:
+    """Write root's own copy of a record, atomically. Returns a problem or ""."""
+    try:
+        for directory in (*reversed(path.parent.parents), path.parent):
+            if not directory.exists():
+                directory.mkdir(mode=0o755)
+        staged = path.with_name(f".{path.name}.new")
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(descriptor, (json.dumps(dict(payload), indent=2, sort_keys=True) + "\n").encode("utf-8"))
+            os.fchmod(descriptor, 0o644)
+            try:
+                os.fchown(descriptor, 0, 0)
+            except OSError:
+                # Belt-and-braces where it cannot be set; the directory this
+                # lives in is root's already.
+                pass
+        finally:
+            os.close(descriptor)
+        staged.replace(path)
+    except OSError as exc:
+        return str(exc)
+    return ""
+
+
+def resolved_source_selection(source_repo: Path | None) -> str:
+    """The tree an operator pinned, named so it cannot be moved out from under them.
+
+    `/opt/switchyard/current` is a symlink, and installing the next shared
+    release moves it. Recording that name would pin nothing: between the
+    accounts phase and the rerun it asks for, `current` can come to mean a
+    different tree, and every phase after the move would regenerate artifacts
+    from it while the record still called the selection pinned. What is recorded
+    is the release the operator was actually looking at (SYRD-61).
+    """
+    if source_repo is None:
+        return ""
+    return str(source_repo.expanduser().resolve(strict=False))
+
+
+def record_upgrade_source(
+    config: ProjectConfig,
+    *,
+    source_repo: Path | None,
+    commit_git_dir: str | None,
+    deploy_ref: str,
+    dry_run: bool = False,
+) -> list[str]:
+    """Persist the release an operator pinned, and prove it reads back exactly.
+
+    Returns the reasons it could not be made durable, which are refusals rather
+    than warnings: an upgrade that accepts a pin it cannot keep goes on to
+    advertise a continuation the next phase has to guess the release for, which
+    is this incident (SYRD-61).
+    """
+    if dry_run or os.geteuid() != 0:
+        # Root's record, and root's phases read it. An unprivileged upgrade
+        # regenerates the tenant's own artifacts and reports; it runs none of
+        # the phases that would resolve a release, and the continuation it
+        # writes says outright that no release was recorded rather than
+        # implying one. So this is not a failure to record -- there was nothing
+        # this process could record (SYRD-61).
+        return []
+    intended = {
+        "source_repo": resolved_source_selection(source_repo),
+        "commit_git_dir": (commit_git_dir or "").strip(),
+        "deploy_ref": deploy_ref,
+    }
+    path = privileged_upgrade_source_path(config)
+    problem = _write_privileged_json(
+        path,
+        {
+            "schema": UPGRADE_SOURCE_SCHEMA,
+            "project": config.project,
+            "at": datetime.now(timezone.utc).isoformat(),
+            **intended,
+        },
+    )
+    if problem:
+        return [f"could not record the pinned release at {path}: {problem}"]
+    # Read back through the same validation every later phase uses, so a record
+    # that lands but would be refused is caught here rather than there.
+    if read_upgrade_source(config) != intended:
+        return [f"the pinned release at {path} did not read back as it was written"]
+    return []
+
+
+def read_upgrade_source(config: ProjectConfig) -> dict[str, str]:
+    """The pinned release, or nothing at all if it is not a record root wrote.
+
+    Anything group- or world-writable is refused outright, and so is a file
+    belonging to somebody other than root -- reading one back would let whoever
+    wrote it choose the tree root deploys. Its own reader counts as well, so
+    this is testable without a root-owned sandbox; on a host only root can
+    write this directory, so that is root (SYRD-61).
+    """
+    path = privileged_upgrade_source_path(config)
+    try:
+        info = path.stat()
+        if info.st_mode & 0o022 or info.st_uid not in (0, os.getuid()):
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if str(payload.get("schema") or "") != UPGRADE_SOURCE_SCHEMA:
+        return {}
+    if str(payload.get("project") or "") != config.project:
+        return {}
+    return {
+        key: str(payload.get(key) or "").strip()
+        for key in ("source_repo", "commit_git_dir", "deploy_ref")
+    }
+
+
+def resolve_pinned_upgrade_source(
+    config: ProjectConfig,
+    *,
+    source_repo: Path | None,
+    commit_git_dir: str | None,
+    deploy_ref: str | None,
+) -> tuple[Path | None, str | None, str, str]:
+    """Fill an unpinned invocation in from root's record of what was pinned.
+
+    An explicit argument always wins; the record only supplies what this
+    invocation did not carry. That is what crosses the operator handoff: the
+    accounts phase ends by asking an operator to rerun the upgrade through
+    `sudo`, which scrubs the environment and passes no arguments of its own, so
+    a selection that lived in either was gone by the time the identities
+    transaction needed it and the release could not be resolved (SYRD-61).
+    """
+    recorded = read_upgrade_source(config)
+    if not recorded:
+        return source_repo, commit_git_dir, deploy_ref or DEFAULT_TENANT_RELEASE_DEPLOY_REF, ""
+    used: list[str] = []
+    if source_repo is None and recorded["source_repo"]:
+        source_repo = Path(recorded["source_repo"])
+        used.append(f"source {source_repo}")
+    if commit_git_dir is None and recorded["commit_git_dir"]:
+        commit_git_dir = recorded["commit_git_dir"]
+        used.append(f"commit cache {commit_git_dir}")
+    # `None` is the ref nobody asked about. `--deploy-ref origin/main` is an
+    # operator saying to go back to the branch, and it has to be able to say
+    # that: a default-valued argument that reads as omission would hand them the
+    # commit they are trying to leave (SYRD-61).
+    if deploy_ref is None and recorded["deploy_ref"]:
+        deploy_ref = recorded["deploy_ref"]
+        used.append(f"deploy ref {deploy_ref}")
+    return (
+        source_repo,
+        commit_git_dir,
+        deploy_ref or DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+        "; ".join(used),
+    )
 
 
 def record_upgrade_phase(
@@ -13898,7 +14181,9 @@ def upgrade_project_command(
     desktop_policy: Path | None = None,
     source_repo: Path | None = None,
     commit_git_dir: str | None = None,
-    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    # `None` means the caller said nothing about the ref, which is not the same
+    # as asking for the default one (SYRD-61).
+    deploy_ref: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -13912,6 +14197,58 @@ def upgrade_project_command(
     own -- creating the accounts, and the director's own board write -- are
     reported rather than attempted (SYRD-45).
     """
+    # Before the source is used for anything, because everything the later
+    # phases deploy is decided by it. An operator who pinned a release on the
+    # outer command gets the same release in every phase that follows, whether
+    # the next one is reached by this process or by the rerun the accounts phase
+    # asks for; an operator who pinned nothing here is filled in from what was
+    # pinned last time (SYRD-61).
+    pinned_explicitly = (
+        source_repo is not None or commit_git_dir is not None or deploy_ref is not None
+    )
+    # Read back first, then record what this invocation actually ends up using.
+    # Doing it the other way round would let an operator who pins one of the
+    # three erase the other two, and the phase after theirs would then be the
+    # one guessing.
+    source_repo, commit_git_dir, deploy_ref, recovered = resolve_pinned_upgrade_source(
+        config, source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref
+    )
+    if recovered:
+        print_func(
+            f"switchyard: {config.project} keeps the release this upgrade was pinned to: {recovered}"
+        )
+    if pinned_explicitly and not dry_run and os.geteuid() != 0:
+        print_func(
+            f"switchyard: this upgrade is not root, so {config.project}'s pinned release is not "
+            "recorded. The generated continuation will say so, and the privileged rerun has to "
+            "carry --source-repo, --commit-git-dir and --deploy-ref itself."
+        )
+    if pinned_explicitly:
+        durability = record_upgrade_source(
+            config,
+            source_repo=source_repo,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            dry_run=dry_run,
+        )
+        if durability:
+            # Before any phase, so nothing is regenerated, no phase is recorded
+            # as safely resumable, and above all no continuation is advertised:
+            # a handoff that cannot carry the pin is the incident this ticket is
+            # about, and accepting the pin anyway would schedule it (SYRD-61).
+            for problem in durability:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: refusing to upgrade {config.project} with a release it cannot keep. "
+                "Its accounts phase hands the upgrade back through sudo, which carries neither "
+                "arguments nor environment, so a pin that is not durable is one the next phase "
+                "would have to guess at. Nothing was changed."
+            )
+            return 1
+    # Resolved, so every phase after this one works on the tree the operator was
+    # looking at rather than on whatever a moved symlink comes to mean.
+    if source_repo is not None:
+        source_repo = Path(resolved_source_selection(source_repo))
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
 
     # Before anything else, because everything else depends on it. The identities
@@ -14037,7 +14374,12 @@ def upgrade_project_command(
     if not accounts_ready:
         migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
         if not dry_run:
-            migration_path.write_text(render_role_account_migration(config, config_path=config_path), encoding="utf-8")
+            migration_path.write_text(
+                render_role_account_migration(
+                    config, config_path=config_path, resume_source=read_upgrade_source(config)
+                ),
+                encoding="utf-8",
+            )
             migration_path.chmod(0o755)
         print_func(
             f"switchyard: {config.project}'s roles still share the project account. An operator must "
@@ -14227,9 +14569,16 @@ def _owner_user_systemctl(
         operation = f"{operation} {shlex.quote(unit)}"
     if action in {"start", "restart"}:
         operation = f"systemctl --user daemon-reload && {operation}"
+    # Exported rather than prefixed. A prefix binds to one command, and every
+    # action that needs a reload is two: `... systemctl --user daemon-reload &&
+    # systemctl --user restart <unit>` ran the restart with no XDG_RUNTIME_DIR
+    # and no bus address at all, so it could not reach the manager it had just
+    # reloaded and exited 1. That is the "could not start the notify listener"
+    # a rollback reported while the same unit started immediately by hand with
+    # the owner's runtime directory set (SYRD-61).
     script = (
         'runtime="/run/user/$(id -u)"; '
-        'XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" '
+        'export XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"; '
         + operation
     )
     return _owner_command_env_args(owner, home, ["sh", "-c", script])
@@ -14356,13 +14705,12 @@ def repair_owner_user_manager(
         return [f"{unit} was restarted but {owner}'s user manager still does not answer ({detail})"]
     print_func(f"switchyard: {owner}'s user manager is answering again ({detail})")
     # The manager took its own units down with it, so the listener is started
-    # again and its state read back rather than assumed.
+    # again and its state read back rather than assumed -- which starting it now
+    # does itself, so all this caller adds is where in the recovery it happened
+    # (SYRD-61).
     problems = start_owner_listener(config, runner=runner, config_path=config_path)
     if problems:
-        return problems
-    listener_state = capture_listener_state(config, runner=runner, config_path=config_path)
-    if listener_state != "active":
-        return [f"{_listener_user_unit(config)} is {listener_state} after the user manager restart"]
+        return [f"{problem} after the user manager restart" for problem in problems]
     print_func(f"switchyard: {_listener_user_unit(config)} is active again")
     return []
 
@@ -14442,15 +14790,27 @@ def start_owner_listener(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config_path: Path | None = None,
 ) -> list[str]:
+    """Start the owner's listener through the owner's own manager, and prove it ran.
+
+    A zero exit from `restart` says the request was accepted, not that the unit
+    is up: a listener that starts and immediately fails leaves the tenant with
+    no notifications and an upgrade that believed it restored one. The state is
+    read back from the same manager (SYRD-61).
+    """
+    unit = _listener_user_unit(config)
     result = _run_owner_user_systemctl(
-        config, "restart", _listener_user_unit(config), runner=runner, config_path=config_path
+        config, "restart", unit, runner=runner, config_path=config_path
     )
     if result.returncode == OWNER_USER_MANAGER_TIMED_OUT:
-        return [
-            f"could not start {_listener_user_unit(config)}: the owner's user manager is not answering"
-        ]
+        return [f"could not start {unit}: the owner's user manager is not answering"]
     if result.returncode != 0:
-        return [f"could not start {_listener_user_unit(config)} (exit {result.returncode})"]
+        detail = (str(getattr(result, "stderr", "") or "").strip() or "no output")[:200]
+        return [f"could not start {unit} (exit {result.returncode}): {detail}"]
+    state = capture_listener_state(config, runner=runner, config_path=config_path)
+    if state == MANAGER_WEDGED:
+        return [f"{unit} cannot be confirmed running: the owner's user manager is not answering"]
+    if state != "active":
+        return [f"{unit} was started but is {state}"]
     return []
 
 
@@ -14868,14 +15228,25 @@ def cutover_role_identities_command(
             authority_problems = install_board_authority(
                 config, runner=runner, config_path=config_path, print_func=print_func
             )
-    start_result = 0 if ownership_failures or authority_problems else start(config)
+    # Nothing is asked to come back when an earlier step already failed: the
+    # release did not resolve, or a tree did not change hands, and the workers
+    # are deliberately still stopped. Probing them here and reporting each one
+    # "did not come back" describes a restart that was never attempted, and it
+    # is the sentence an operator reads after the rollback has already brought
+    # all six back (SYRD-61).
+    start_attempted = not (ownership_failures or authority_problems)
+    start_result = start(config) if start_attempted else 0
     identity_gaps = (
         role_process_identity_gaps(config, runner=runner, proc_root=proc_root)
-        if not (ownership_failures or authority_problems)
+        if start_attempted
         else []
     )
-    restarted = sorted(running_role_identities(config, runner=runner))
-    missing_workers = [role for role in before if role not in restarted]
+    restarted = (
+        sorted(settled_role_identities(config, runner=runner, expected=before))
+        if start_attempted
+        else []
+    )
+    missing_workers = [role for role in before if role not in restarted] if start_attempted else []
     write_failures = (
         verify_role_board_writes(
             config, runner=runner, config_path=config_path, tooling_dir=tooling_dir
@@ -14943,9 +15314,38 @@ def cutover_role_identities_command(
             f"the presentation did not reconnect during the rollback: {problem}"
             for problem in reconnect_presentation(config, config_path=config_path, runner=runner)
         )
+        # Revalidated here rather than only where it was put back: the units are
+        # restored before the workers are, and a listener that died in between
+        # is a listener this tenant does not have. Asked of the owner's own
+        # manager, through the owner's runtime directory (SYRD-61).
+        if previous_listener_state == "active":
+            if capture_listener_state(config, runner=runner, config_path=config_path) != "active":
+                restored.extend(
+                    f"the notification listener did not come back: {problem}"
+                    for problem in start_owner_listener(
+                        config, runner=runner, config_path=config_path
+                    )
+                )
+        # What actually came back, read after the restart and through the
+        # configuration the rollback restored -- which names the project account
+        # again, so the probe has to be the restored one and not the one the
+        # transaction was using when it failed (SYRD-61).
+        recovered = settled_role_identities(config, runner=runner, expected=before)
+        came_back = [role for role in before if role in recovered]
+        still_down = [role for role in before if role not in recovered]
+        accounts_serving = sorted({recovered[role] for role in came_back})
+        if not before:
+            recovery = "no role session was running before this transaction"
+        else:
+            recovery = f"after the rollback {len(came_back)} of {len(before)} role session(s) are live"
+            if accounts_serving:
+                recovery += f" as {', '.join(accounts_serving)}"
+            if still_down:
+                recovery += f"; {', '.join(still_down)} did not come back"
+        print_func(f"switchyard: {recovery}")
         record_upgrade_phase(
             config, config_path=config_path, phase="identities", state="rolled back",
-            detail="; ".join(reasons + restored),
+            detail="; ".join(reasons + restored + [recovery]),
         )
         if restored:
             print_func(
@@ -14981,7 +15381,7 @@ def finish_upgrade_command(
     dry_run: bool = False,
     source_repo: Path | None = None,
     commit_git_dir: str | None = None,
-    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    deploy_ref: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -14997,6 +15397,15 @@ def finish_upgrade_command(
             "root. Run it from the director's own session."
         )
         return 1
+    # The director's phase is another handoff: it runs later, from a different
+    # session, with none of the outer command's arguments. It reports the same
+    # release the privileged phases were pinned to rather than resolving one of
+    # its own (SYRD-61).
+    source_repo, commit_git_dir, deploy_ref, pinned = resolve_pinned_upgrade_source(
+        config, source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref
+    )
+    if pinned:
+        print_func(f"switchyard: reporting the release {config.project} was pinned to: {pinned}")
     # Bound to the configured account, not to anything the caller says about
     # itself. The board decides the same question from the peer uid; this is so
     # the wrong account gets an answer instead of a rejected write (SYRD-49).
@@ -16058,7 +16467,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
-    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy during upgrade (default: origin/main)")
+    parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy during upgrade (default: the pinned release, else origin/main)")
     parser.add_argument("--cli", dest="add_role_cli", default="codex", help="CLI runtime for `add-role` (default: codex)")
     parser.add_argument("--audit", dest="add_role_audit", action="store_true", help="add the role as an auditor instead of an implementer")
     parser.add_argument("--detached", action="store_true", help="configure `add-role` as headless instead of visible")
@@ -16134,7 +16543,7 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard upgrade", description="Upgrade safe generated artifacts for a Switchyard project.")
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
-    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
+    parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy (default: the pinned release, else origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     parser.add_argument(
         "--commit-git-dir",
@@ -16167,7 +16576,7 @@ def _build_switchyard_finish_upgrade_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing")
-    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
+    parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy (default: the pinned release, else origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     parser.add_argument("--commit-git-dir", help="git repository path(s) used to verify board commit hashes")
     return parser

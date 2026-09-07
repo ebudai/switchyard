@@ -47,9 +47,11 @@ account's private key.
 `/data/git/switchyard.git` remains operator-owned recovery storage only. It
 contains historical and private refs, so do not delete it or publish its refs.
 It is not an active push remote or the SYRD board verifier. Shared-release
-upgrades require an explicitly selected fetch cache in `SWITCHYARD_BARE_REPO`,
-or an explicit GitHub checkout via `--source-repo`; cache refresh must never
-push back to GitHub. Checkout-based board deployments fetch `origin/main`,
+upgrades require an explicitly selected fetch cache -- `--commit-git-dir` on
+the upgrade itself, or `SWITCHYARD_BARE_REPO` -- or an explicit GitHub checkout
+via `--source-repo`; cache refresh must never push back to GitHub. Use the
+argument for anything that will be resumed: `sudo` scrubs the environment
+between the phases of an upgrade. Checkout-based board deployments fetch `origin/main`,
 verify that origin is GitHub, and deploy only the reviewed merged commit.
 Configure a bare cache to retain remote-tracking refs, then refresh it with:
 

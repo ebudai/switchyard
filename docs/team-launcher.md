@@ -304,6 +304,25 @@ not own. The order exists because the failure modes do.
 | `release` | operator | deploy the board release that enforces the per-role table |
 | `director` | director | `switchyard finish-upgrade <project>`, the one board write only the director may make |
 
+**The reviewed unit goes in before the release deploy, and the restart comes
+after it.** `deploy-restart` compares the release's own production unit with the
+one installed and refuses when they differ, because a daemon-reload is
+deliberately outside the board's deploy grant -- and the identity transaction
+exists to change that unit: it adds `SupplementaryGroups=<project>-roles`, the
+strict runtime directory mode and the per-role identity table. With the old unit
+still installed, the migration is indistinguishable from operator drift, the
+deploy classifies it `sensitive unit drift: SupplementaryGroups` and refuses, and
+the whole transaction rolls back. Installing the file and reloading systemd
+restarts nothing, so the invariant that used to put the binary first still
+holds: the old board is never restarted under a unit its release cannot serve,
+because the restart arrives with the new binary. The transaction installs the
+same three units the printed operator sequence does -- board, canary and
+listener -- because the deploy starts the canary through systemd, and it
+restarts the board itself only when the deploy did not, so a deploy's own smoke
+check, build-id verification and post-deploy runtime check are not thrown away
+for a weaker one. A failure at any point restores the previously installed units
+along with the release pointer, the configuration and the worktrees.
+
 The order is forced by what each phase leaves true. The identities transaction
 ends with every role proved able to write **as its own account**, against the
 board that is running at that moment. Only then is it safe to deploy the release

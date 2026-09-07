@@ -397,6 +397,9 @@ def end_to_end(owner: str) -> None:
         team_launcher.SYSTEMD_UNIT_DIR = units
         for unit in (
             "porter-ticket-board.service",
+            # The canary is installed by the same step: the release deploy
+            # starts it through systemd (SYRD-63).
+            "porter-ticket-board-canary.service",
             "porter-ticket-board-notify-listener.service",
         ):
             (staged / unit).write_text(

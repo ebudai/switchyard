@@ -14872,6 +14872,10 @@ def _listener_user_unit(config: ProjectConfig) -> str:
     return f"{config.project}-ticket-board-notify-listener.service"
 
 
+def _canary_system_unit(config: ProjectConfig) -> str:
+    return f"{config.project}-ticket-board-canary.service"
+
+
 def _tenant_owner_home(config: ProjectConfig, config_path: Path | None) -> Path:
     """The owner home this tenant actually records, not merely the passwd one."""
     owner = config.run_as_user or current_user_name()
@@ -15062,17 +15066,14 @@ def capture_installed_units(
 ) -> dict[str, bytes | None]:
     """What is installed now, so the transaction can put it back exactly.
 
-    Two managers, two paths: the board is a system unit and the listener is the
-    owner's user unit (SYRD-45).
+    Two managers, two paths: the board and its canary are system units and the
+    listener is the owner's user unit (SYRD-45). Read from the same list the
+    transaction installs from, so anything it puts in is something the rollback
+    can take back out -- the canary was installed by nothing here and restored
+    by nothing here, which is only safe while nothing installs it (SYRD-63).
     """
     captured: dict[str, bytes | None] = {}
-    for unit, path in (
-        (_board_system_unit(config), _installed_unit_path(_board_system_unit(config))),
-        (
-            _listener_user_unit(config),
-            _owner_user_unit_path(config, _listener_user_unit(config), config_path=config_path),
-        ),
-    ):
+    for unit, path, _ownership in authority_unit_installs(config, config_path=config_path):
         try:
             captured[unit] = path.read_bytes()
         except OSError:
@@ -15177,14 +15178,20 @@ def deploy_release_in_transaction(
     deploy_ref: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     print_func: Callable[[str], None] = print,
-) -> list[str]:
+) -> tuple[list[str], bool]:
     """Switch the board to the release that enforces the per-role table.
 
     The binary is part of the same change as the units, the workers and the
     authority table: an old board does not group-own its runtime directory for
-    the roles group, so installing strict units against it can leave the role
+    the roles group, so restarting it against strict units can leave the role
     accounts unable to reach the socket at all. Switching it here means the
     rollback can put it back (SYRD-45).
+
+    Returns its problems and whether it restarted the board. `deploy-restart`
+    does restart it, having smoke-checked the service, verified the live build
+    id and checked the post-deploy runtime; a deploy with nothing to do restarts
+    nothing, and the caller still has to make the installed authority the one
+    being served (SYRD-63).
     """
     status = tenant_release_status(
         config,
@@ -15197,22 +15204,22 @@ def deploy_release_in_transaction(
     if status is None:
         # Not every project serves its board from a tenant release; there is
         # nothing to switch, and nothing to roll back either.
-        return []
+        return [], False
     if not status.target_sha:
-        return [f"the release to deploy could not be resolved: {status.resolve_error}"]
+        return [f"the release to deploy could not be resolved: {status.resolve_error}"], False
     if status.unchanged:
-        return []
+        return [], False
     command = tenant_release_deploy_command(status, config.project)
     if not command:
-        return ["no deploy command could be built for this release"]
+        return ["no deploy command could be built for this release"], False
     result = runner(["sh", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode != 0:
         return [
             f"deploying {status.target_sha} failed (exit {result.returncode}): "
             f"{(str(result.stderr).strip() or 'no output')[:400]}"
-        ]
+        ], False
     print_func(f"switchyard: {config.project} board release deployed: {status.target_sha}")
-    return []
+    return [], True
 
 
 def restore_release_pointer(
@@ -15237,33 +15244,39 @@ def restore_release_pointer(
     return []
 
 
-def install_board_authority(
+def install_board_authority_files(
     config: ProjectConfig,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config_path: Path | None = None,
     print_func: Callable[[str], None] = print,
 ) -> list[str]:
-    """Install the staged units, reload, restart and health-check the board.
+    """Install the staged units and reload systemd. Nothing is restarted here.
 
-    Regenerating a unit under the privileged provision root changes nothing
-    about what the board is serving. The transaction has to install it, reload
-    systemd and restart the services, or the workers move and the authority does
-    not (SYRD-45). Returns what went wrong, empty when the board is serving the
-    installed authority.
+    This has to happen before the release deploy, not after it. `deploy-restart`
+    compares the release's own production unit with the one installed and
+    refuses when they differ, because a daemon-reload is deliberately outside
+    the board's deploy grant -- and the whole point of this transaction is that
+    the new unit differs: it carries `SupplementaryGroups`, the strict runtime
+    directory mode and the per-role identity table. With the old unit still
+    installed, the migration this transaction *is* is indistinguishable from
+    operator drift, and the deploy correctly refuses (SYRD-63).
+
+    Installing the file and reloading changes nothing about what is running, so
+    the invariant behind the old ordering still holds: the old board is never
+    restarted under a unit its release cannot serve. The restart happens with
+    the new binary, inside the deploy or in `activate_board_authority` after it.
+
+    The same three units the printed operator sequence installs, including the
+    canary -- the deploy starts that one through systemd, so a transaction that
+    left it uninstalled or stale was relying on provisioning having got there
+    first (SYRD-63).
     """
     problems: list[str] = []
     staged_dir = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
-    board_unit = _board_system_unit(config)
-    listener_unit = _listener_user_unit(config)
     owner = config.run_as_user or current_user_name()
-    for unit, destination, ownership in (
-        (board_unit, _installed_unit_path(board_unit), ["-o", "root", "-g", "root"]),
-        (
-            listener_unit,
-            _owner_user_unit_path(config, listener_unit, config_path=config_path),
-            ["-o", owner, "-g", owner],
-        ),
+    for unit, destination, ownership in authority_unit_installs(
+        config, config_path=config_path
     ):
         staged = staged_dir / unit
         if not staged.is_file():
@@ -15279,11 +15292,57 @@ def install_board_authority(
     if problems:
         return problems
     if runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
-        problems.append("systemctl daemon-reload failed")
-        return problems
-    result = runner(["systemctl", "restart", board_unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        return [f"could not restart {board_unit} (exit {result.returncode})"]
+        return ["systemctl daemon-reload failed"]
+    print_func(
+        f"switchyard: installed {config.project}'s generated units and reloaded systemd; "
+        f"{owner}'s listener stays stopped until the roles have verified"
+    )
+    return []
+
+
+def authority_unit_installs(
+    config: ProjectConfig, *, config_path: Path | None = None
+) -> tuple[tuple[str, Path, list[str]], ...]:
+    """Every generated unit this tenant installs, with where and as whom.
+
+    One list, so what the identity transaction installs and what the printed
+    operator sequence installs cannot drift apart -- the transaction installed
+    two of the three, and the deploy it now runs starts the third (SYRD-63).
+    """
+    owner = config.run_as_user or current_user_name()
+    listener = _listener_user_unit(config)
+    return (
+        (_board_system_unit(config), _installed_unit_path(_board_system_unit(config)), ["-o", "root", "-g", "root"]),
+        (_canary_system_unit(config), _installed_unit_path(_canary_system_unit(config)), ["-o", "root", "-g", "root"]),
+        (
+            listener,
+            _owner_user_unit_path(config, listener, config_path=config_path),
+            ["-o", owner, "-g", owner],
+        ),
+    )
+
+
+def activate_board_authority(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    restart: bool,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Make the installed authority the one the board is actually serving.
+
+    `restart` is false when the release deploy has just restarted the board
+    itself, under the unit installed above and the binary it deployed: it
+    smoke-checked the service, verified the live build id and checked the
+    post-deploy runtime, and restarting again would throw all of that away for a
+    weaker check. The state is still read back either way -- installing a unit
+    is not the same fact as the board serving it (SYRD-63).
+    """
+    board_unit = _board_system_unit(config)
+    if restart:
+        result = runner(["systemctl", "restart", board_unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if result.returncode != 0:
+            return [f"could not restart {board_unit} (exit {result.returncode})"]
     health = runner(
         ["systemctl", "is-active", board_unit],
         stdout=subprocess.PIPE,
@@ -15291,14 +15350,34 @@ def install_board_authority(
         text=True,
     )
     if health.returncode != 0 or str(health.stdout).strip() not in {"active", ""}:
-        problems.append(
+        return [
             f"{board_unit} is not active after the restart "
             f"({str(health.stdout).strip() or health.returncode})"
-        )
+        ]
+    return []
+
+
+def install_board_authority(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    config_path: Path | None = None,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Install the staged units, reload, restart and health-check the board.
+
+    The whole operation, for callers with no release deploy between the two
+    halves. The identity transaction has one, and uses the halves (SYRD-63).
+    """
+    problems = install_board_authority_files(
+        config, runner=runner, config_path=config_path, print_func=print_func
+    )
+    if problems:
+        return problems
     # The listener stays stopped through the release and schema migration; it is
     # started again only once the workers, their writes and the presentation
     # have all verified (SYRD-45).
-    return problems
+    return activate_board_authority(config, runner=runner, restart=True, print_func=print_func)
 
 
 def restore_installed_units(
@@ -15317,12 +15396,11 @@ def restore_installed_units(
     problems: list[str] = []
     board_unit = _board_system_unit(config)
     listener_unit = _listener_user_unit(config)
+    destinations = {
+        unit: path for unit, path, _ownership in authority_unit_installs(config, config_path=config_path)
+    }
     for unit, body in captured.items():
-        path = (
-            _installed_unit_path(unit)
-            if unit == board_unit
-            else _owner_user_unit_path(config, unit, config_path=config_path)
-        )
+        path = destinations.get(unit) or _owner_user_unit_path(config, unit, config_path=config_path)
         try:
             if body is None:
                 if path.exists():
@@ -15576,11 +15654,23 @@ def cutover_role_identities_command(
         authority_problems = stop_owner_listener(
             config, runner=runner, config_path=config_path
         )
-        # The binary before the units: an old board does not group-own its
-        # runtime directory for the roles group, so strict units in front of it
-        # can leave the role accounts unable to reach the socket at all.
+        # The unit file and the reload before the deploy, the restart after it.
+        # `deploy-restart` compares the release's own production unit with what
+        # is installed and refuses when they differ, because daemon-reload is
+        # deliberately outside the board's deploy grant -- and this transaction
+        # exists to change that unit, so with the old one still installed the
+        # migration is indistinguishable from operator drift and the deploy
+        # correctly refuses. Installing the file and reloading restarts nothing,
+        # so the invariant that put the binary first still holds: the old board
+        # is never restarted under a unit its release cannot serve, because the
+        # restart comes with the new binary (SYRD-63).
+        board_restarted = False
         if not authority_problems:
-            authority_problems = deploy_release_in_transaction(
+            authority_problems = install_board_authority_files(
+                config, runner=runner, config_path=config_path, print_func=print_func
+            )
+        if not authority_problems:
+            authority_problems, board_restarted = deploy_release_in_transaction(
                 config,
                 config_path=config_path,
                 source_repo=source_repo or _repo_root(),
@@ -15590,8 +15680,8 @@ def cutover_role_identities_command(
                 print_func=print_func,
             )
         if not authority_problems:
-            authority_problems = install_board_authority(
-                config, runner=runner, config_path=config_path, print_func=print_func
+            authority_problems = activate_board_authority(
+                config, runner=runner, restart=not board_restarted, print_func=print_func
             )
     # Nothing is asked to come back when an earlier step already failed: the
     # release did not resolve, or a tree did not change hands, and the workers

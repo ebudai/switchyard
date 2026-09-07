@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -61,10 +62,17 @@ class _Environment:
 
 
 def _installed_release(tmp: Path, sha: str) -> Path:
-    """An installed shared release: a marker, no history, nothing to resolve from."""
+    """An installed shared release: a marker, no history, nothing to resolve from.
+
+    It carries the tooling a release carries, because the upgrade stages this
+    tenant's role tooling from whatever release it selected and verifies the
+    result before moving any role (SYRD-62).
+    """
     shared_root = tmp / "opt" / "switchyard"
     release = shared_root / "releases" / sha
     release.mkdir(parents=True)
+    for tree in ("scripts", "skills"):
+        shutil.copytree(ROOT / tree, release / tree, symlinks=True)
     (release / ".switchyard-release.json").write_text(
         json.dumps({"commit": sha}) + "\n", encoding="utf-8"
     )
@@ -88,6 +96,9 @@ def _pinned_tenant(tmp: Path) -> tuple[Path, Path, Path, str, Path]:
     release = _installed_release(tmp, sha)
     board_root = _deployed_release(tmp, PROJECT, "1" * 40)
     config_path, _ = _declarative_tenant(tmp, board_root=board_root)
+    # Staged from this release, so its provenance marker is the one the upgrade
+    # expects to find already there.
+    _stage_role_tooling(tmp, PROJECT, release_root=release.resolve())
     return config_path, release, cache, sha, board_root
 
 
@@ -149,7 +160,12 @@ def _run_upgrade(config_path: Path, *, exists, runner, repo_root: Path, **select
         team_launcher.migrate_declarative_director_onboarding = lambda config, **kwargs: True
         config = team_launcher.load_project_config(PROJECT, config_path)
         result = team_launcher.upgrade_project_command(
-            config, config_path=config_path, runner=runner, print_func=printed.append, **selection
+            config,
+            config_path=config_path,
+            tooling_root=config_path.parent / "tooling",
+            runner=runner,
+            print_func=printed.append,
+            **selection,
         )
     finally:
         team_launcher.os.geteuid = original_euid
@@ -167,7 +183,8 @@ def _handoff_arguments(config_path: Path) -> dict[str, object]:
     artifact and handed to the parser `switchyard upgrade` actually uses, so
     whatever that line does or does not carry is what this drives.
     """
-    script = (config_path.with_name(f"{PROJECT}-role-accounts.sh")).read_text(encoding="utf-8")
+    config = team_launcher.load_project_config(PROJECT, config_path)
+    script = team_launcher.trusted_role_account_migration_path(config).read_text(encoding="utf-8")
     lines = [
         line for line in script.splitlines()
         if line.startswith("sudo switchyard upgrade ")
@@ -222,7 +239,10 @@ def test_the_pinned_release_survives_the_operator_handoff() -> None:
 
         # The operator runs the generated script. Its continuation names the
         # release this upgrade was pinned to, so the operator can read it.
-        script = config_path.with_name(f"{PROJECT}-role-accounts.sh").read_text(encoding="utf-8")
+        config = team_launcher.load_project_config(PROJECT, config_path)
+        script = team_launcher.trusted_role_account_migration_path(config).read_text(
+            encoding="utf-8"
+        )
         assert _resolved(release) in script, script[-2000:]
         assert str(cache) in script, script[-2000:]
         assert sha in script, script[-2000:]
@@ -461,6 +481,8 @@ def test_a_release_symlink_that_moves_does_not_move_the_pinned_release() -> None
 
 def _no_handoff_was_advertised(config_path: Path) -> None:
     """Nothing to run, and no phase recorded as somewhere to resume from."""
+    config = team_launcher.load_project_config(PROJECT, config_path)
+    assert not team_launcher.trusted_role_account_migration_path(config).exists()
     assert not config_path.with_name(f"{PROJECT}-role-accounts.sh").exists()
     assert not config_path.with_name(f"{PROJECT}-upgrade.json").exists()
 
@@ -553,9 +575,13 @@ def test_an_unprivileged_upgrade_says_the_pin_was_not_recorded() -> None:
         assert result == 0, output
         assert "is not root, so porter's pinned release is not recorded" in output, output
         assert team_launcher.read_upgrade_source(config) == {}
-        # And the continuation it wrote does not pretend otherwise.
-        script = config_path.with_name(f"{PROJECT}-role-accounts.sh").read_text(encoding="utf-8")
-        assert "No pinned release was recorded for this upgrade" in script, script[-1500:]
+        # It wrote no continuation either, in root's directory or the tenant's:
+        # publishing one is root's, and an unprivileged run that wrote a script
+        # into the tenant's own directory is what made a root-run file editable
+        # by a role account (SYRD-62).
+        assert not team_launcher.trusted_role_account_migration_path(config).exists()
+        assert not config_path.with_name(f"{PROJECT}-role-accounts.sh").exists()
+        assert "publishes the role-account migration where only root can write it" in output, output
 
 
 def _systemctl_probe(tmp: Path) -> tuple[Path, Path]:
@@ -670,6 +696,7 @@ def _rolls_back(config_path: Path, *, runner, launcher=None):
         result = team_launcher.cutover_role_identities_command(
             team_launcher.load_project_config(PROJECT, config_path),
             config_path=config_path,
+            tooling_dir=config_path.parent / "tooling" / PROJECT,
             runner=runner,
             launcher=launcher,
             print_func=printed.append,

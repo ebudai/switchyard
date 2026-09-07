@@ -44,6 +44,11 @@ from scripts.ticket_board.project_provision import (
     render_board_unit,
     render_canary_unit,
     render_vcs_close_role_sql,
+    role_account_migration_name,
+    role_tooling_staging_commands,
+    role_tooling_staging_dir,
+    staged_role_tooling_problems,
+    untrusted_root_executable_reasons,
     invoking_human,
     resolve_control_user,
     sql_identifier,
@@ -6727,12 +6732,24 @@ def launch_project(
         # rather than starting roles that cannot write their own trees.
         isolation_gaps = role_isolation_gaps(config)
         if isolation_gaps:
-            handoff_path = config_path.with_name(f"{config.project}-role-accounts.sh")
-            try:
-                handoff_path.write_text(render_role_account_migration(config, config_path=config_path), encoding="utf-8")
-                handoff_path.chmod(0o755)
-            except OSError:
-                pass
+            # This runs as the tenant, so it writes no migration script: one
+            # written here would live in the directory the control role can
+            # rewrite, which is what made the last one a root-run file a role
+            # account could edit. It names root's published copy if there is a
+            # trustworthy one, and otherwise names the command that publishes it
+            # (SYRD-62).
+            handoff_path, handoff_problems = role_account_migration_instruction(
+                config, runner=runner
+            )
+            next_step = (
+                f"An operator must run {handoff_path} (safe to re-run) and then relaunch."
+                if handoff_path is not None
+                else (
+                    f"An operator must run `sudo switchyard upgrade {config.project}` first, which "
+                    "publishes the role-account migration where only root can write it: "
+                    + "; ".join(handoff_problems)
+                )
+            )
             # Refuse rather than warn. A partially migrated project that starts
             # anyway runs roles under the wrong uid or without credentials, and
             # the board then either denies them or -- worse, before this was
@@ -6741,7 +6758,7 @@ def launch_project(
                 "team-launcher: refusing to launch " + config.project
                 + "; its roles are not isolated yet, so they cannot be told apart:\n  "
                 + "\n  ".join(isolation_gaps)
-                + f"\nAn operator must run {handoff_path} (safe to re-run) and then relaunch."
+                + "\n" + next_step
             )
             return 1
     materialize_layout(
@@ -8454,16 +8471,19 @@ def new_project_command(
     except SystemExit:
         handoff_config = None
     if handoff_config is not None and role_isolation_gaps(handoff_config):
-        handoff_path = config_path.with_name(f"{plan.project}-role-accounts.sh")
-        try:
-            handoff_path.write_text(render_role_account_migration(handoff_config, config_path=config_path), encoding="utf-8")
-            handoff_path.chmod(0o755)
+        handoff_path, handoff_problems = publish_role_account_migration(
+            handoff_config, config_path=config_path, print_func=print_func
+        )
+        if handoff_path is not None:
             print_func(
                 f"team-launcher: roles are not isolated yet; run {handoff_path} as an operator "
                 "(safe to re-run) before starting them"
             )
-        except OSError as exc:
-            print_func(f"team-launcher: could not write {handoff_path}: {exc}")
+        else:
+            print_func(
+                "team-launcher: roles are not isolated yet, and the migration script was not "
+                "published where root can run it: " + "; ".join(handoff_problems)
+            )
     if not execute:
         print_func(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
         print_func(f"team-launcher: launcher config {config_path}")
@@ -12793,17 +12813,21 @@ def switchyard_new_command(
         # credential seeding -- is written here, not left to a later failed
         # start, so following the printed instruction once is enough to make the
         # next start operable (SYRD-39).
-        handoff_path = config_path.with_name(f"{resolved_slug}-role-accounts.sh")
-        try:
-            handoff_path.write_text(render_role_account_migration(config, config_path=config_path), encoding="utf-8")
-            handoff_path.chmod(0o755)
-        except OSError as exc:
-            print_func(f"switchyard: could not write {handoff_path}: {exc}")
+        handoff_path, handoff_problems = publish_role_account_migration(
+            config, config_path=config_path, euid_getter=euid_getter, print_func=print_func
+        )
+        next_step = (
+            f"Run {handoff_path} as an operator (safe to re-run), then start it with "
+            f"`switchyard {resolved_slug}`."
+            if handoff_path is not None
+            else (
+                "Its role-account migration was not published where root can run it, so there is "
+                "nothing to hand you yet: " + "; ".join(handoff_problems)
+            )
+        )
         print_func(
             f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
-            "were not started:\n  " + "\n  ".join(pending_isolation)
-            + f"\nRun {handoff_path} as an operator (safe to re-run), then start it with "
-            f"`switchyard {resolved_slug}`."
+            "were not started:\n  " + "\n  ".join(pending_isolation) + "\n" + next_step
         )
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
@@ -13332,6 +13356,182 @@ def render_role_account_migration(
         "# (SYRD-48)."
     )
     return "\n".join(lines) + "\n"
+def trusted_role_account_migration_path(config: ProjectConfig) -> Path:
+    """Where root publishes the migration script, and where an operator runs it.
+
+    Not beside the launcher configuration. That directory belongs to the tenant
+    and the control role is granted `rwX` on it recursively, with a default
+    entry so replacements keep the grant -- so the root-owned script an operator
+    was told to run as root carried a named `rwx` entry for a role account, in a
+    directory that role could empty and refill. The two cannot share a
+    directory: the projection has to be writable by the control role and a
+    root-run script must not be (SYRD-62).
+    """
+    return privileged_provision_dir(
+        config.project, root=switchyard_privileged_provision_root()
+    ) / role_account_migration_name(config.project)
+
+
+def _privileged_artifact_boundary() -> Path | None:
+    """How far up a published artifact's path root has to answer for.
+
+    On a host, all the way to the filesystem root: `/etc` and `/etc/switchyard`
+    are root's and are checked like everything else. `None` says so. When the
+    privileged root has been redirected -- which only a test does -- everything
+    above the redirection belongs to whoever set that up, so the walk stops
+    there and the check still covers every directory this code created
+    (SYRD-62).
+    """
+    configured = switchyard_privileged_provision_root()
+    if configured == DEFAULT_PRIVILEGED_PROVISION_ROOT:
+        return None
+    return configured
+
+
+def publish_role_account_migration(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    resume_source: Mapping[str, str] | None = None,
+    # Looked up when called rather than bound here, so a caller that was handed
+    # its own answer about being root passes it and everyone else asks the
+    # process itself at the time.
+    euid_getter: Callable[[], int] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> tuple[Path | None, list[str]]:
+    """Publish the migration script somewhere only root could have written it.
+
+    Returns the path an operator may run, or `None` and the reasons it is not
+    one. The tenant's old copy is removed rather than left behind: a second file
+    of the same name, executable and writable by the control role, is the thing
+    this exists to stop somebody running (SYRD-62).
+    """
+    if (os.geteuid() if euid_getter is None else euid_getter()) != 0:
+        return None, [
+            f"only root can publish {config.project}'s role-account migration; run "
+            f"`switchyard upgrade {config.project}` as root"
+        ]
+    name = role_account_migration_name(config.project)
+    body = render_role_account_migration(
+        config, config_path=config_path, resume_source=resume_source
+    ).encode("utf-8")
+    target = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
+    path = target / name
+    try:
+        for directory in (*reversed(target.parents), target):
+            if not directory.exists():
+                directory.mkdir(mode=0o755)
+        target.chmod(0o755)
+        staged = target / f".{name}.new"
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, body)
+            os.fchmod(descriptor, 0o755)
+            try:
+                os.chown(target, 0, 0)
+                os.fchown(descriptor, 0, 0)
+            except OSError:
+                # Attempted, not relied on: what decides whether an operator is
+                # sent here is the check below, which reads the ownership and
+                # the access control entries back off the published file.
+                pass
+        finally:
+            os.close(descriptor)
+        staged.replace(path)
+    except OSError as exc:
+        return None, [f"could not publish {path}: {exc}"]
+    # The tenant copy is not a second way to run this. Removing it also takes
+    # away the one that already carries the grant on hosts provisioned before
+    # this moved.
+    stale = config_path.with_name(name)
+    if stale.is_symlink() or stale.exists():
+        try:
+            stale.unlink()
+        except OSError as exc:
+            print_func(
+                f"switchyard: could not remove the old tenant copy {stale}: {exc}. It is not the "
+                f"file to run; {path} is."
+            )
+    reasons = untrusted_root_executable_reasons(
+        path, boundary=_privileged_artifact_boundary(), runner=runner
+    )
+    if reasons:
+        return None, reasons
+    return path, []
+
+
+def role_account_migration_instruction(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[Path | None, list[str]]:
+    """The published script an unprivileged caller may point an operator at.
+
+    Naming one is a decision about what root will execute, so it is checked
+    rather than assumed present: this caller cannot write the trusted copy and
+    must not send anybody to an untrusted one (SYRD-62).
+    """
+    path = trusted_role_account_migration_path(config)
+    if not path.exists():
+        return None, [
+            f"{path} has not been published yet; run `switchyard upgrade {config.project}` as root"
+        ]
+    reasons = untrusted_root_executable_reasons(
+        path, boundary=_privileged_artifact_boundary(), runner=runner
+    )
+    if reasons:
+        return None, reasons
+    return path, []
+
+
+def refresh_staged_role_tooling(
+    config: ProjectConfig,
+    *,
+    release_root: Path,
+    staging_root: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Restage the root-owned per-role tooling from the selected release.
+
+    Staging used to happen only inside the account-creation script, so a tenant
+    whose accounts already existed skipped it: the roles kept the previous
+    release's hooks and board clients while the board moved on under them, and
+    the provenance marker named a release the staged files did not come from.
+    It is part of the artifacts phase now, which runs on every upgrade including
+    a resumed one, and it stages from the exact selected release rather than
+    from the `current` symlink (SYRD-62).
+
+    The same renderer the operator script uses, so what an upgrade installs and
+    what that script installs cannot drift apart.
+    """
+    script = "set -eu\n" + "\n".join(
+        role_tooling_staging_commands(config.project, str(release_root), staging_root=staging_root)
+    )
+    result = runner(["sh", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if getattr(result, "returncode", 1) != 0:
+        detail = (str(getattr(result, "stderr", "") or "").strip() or "no output")[:400]
+        return [
+            f"could not stage {config.project}'s role tooling from {release_root} "
+            f"(exit {result.returncode}): {detail}"
+        ]
+    problems = staged_role_tooling_problems(
+        config.project, str(release_root), staging_root=_staged_tooling_dir(config, staging_root)
+    )
+    if problems:
+        return problems
+    print_func(
+        f"switchyard: staged {config.project} role tooling in "
+        f"{_staged_tooling_dir(config, staging_root)} from {release_root}"
+    )
+    return []
+
+
+def _staged_tooling_dir(config: ProjectConfig, staging_root: Path | None) -> Path:
+    return Path(role_tooling_staging_dir(config.project, root=staging_root))
+
+
 UPGRADE_JOURNAL_SCHEMA = "switchyard.upgrade-journal.v1"
 # The order a tenant upgrade has to happen in, and who owns each step. The
 # rollout that produced this ticket ran them interleaved: the configuration was
@@ -14184,6 +14384,9 @@ def upgrade_project_command(
     # `None` means the caller said nothing about the ref, which is not the same
     # as asking for the default one (SYRD-61).
     deploy_ref: str | None = None,
+    # Where this tenant's root-owned role tooling is staged. Only a test names
+    # it; on a host it is /usr/local/lib/switchyard (SYRD-62).
+    tooling_root: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -14364,6 +14567,36 @@ def upgrade_project_command(
     repair_repository_policy_hooks(
         config_path, source_repo=effective_source_repo, dry_run=dry_run, print_func=print_func,
     )
+    # Part of the artifacts phase, so it happens on every upgrade including a
+    # resumed one. It used to happen only inside the account-creation script,
+    # which an upgrade skips once the accounts exist -- leaving the roles on the
+    # previous release's hooks and board clients while the board moved on
+    # (SYRD-62).
+    if dry_run:
+        print_func(
+            f"switchyard: would stage {config.project} role tooling in "
+            f"{_staged_tooling_dir(config, tooling_root)} from {effective_source_repo}"
+        )
+    elif os.geteuid() == 0:
+        staging_problems = refresh_staged_role_tooling(
+            config,
+            release_root=effective_source_repo,
+            staging_root=tooling_root,
+            runner=runner,
+            print_func=print_func,
+        )
+        if staging_problems:
+            for problem in staging_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any later phase: {config.project}'s roles would come "
+                "back on tooling this release did not stage."
+            )
+            record_upgrade_phase(
+                config, config_path=config_path, phase="artifacts", state="blocked",
+                detail="; ".join(staging_problems),
+            )
+            return 1
     if not dry_run:
         # Preparation needs the accounts before the active configuration names
         # them, and it must not read that list from the tenant (SYRD-45).
@@ -14372,18 +14605,53 @@ def upgrade_project_command(
 
     accounts_ready = _role_accounts_ready(config)
     if not accounts_ready:
-        migration_path = config_path.with_name(f"{config.project}-role-accounts.sh")
-        if not dry_run:
-            migration_path.write_text(
-                render_role_account_migration(
-                    config, config_path=config_path, resume_source=read_upgrade_source(config)
-                ),
-                encoding="utf-8",
+        migration_path: Path | None = None
+        migration_problems: list[str] = []
+        if dry_run:
+            migration_path = trusted_role_account_migration_path(config)
+        elif os.geteuid() == 0:
+            migration_path, migration_problems = publish_role_account_migration(
+                config,
+                config_path=config_path,
+                resume_source=read_upgrade_source(config),
+                runner=runner,
+                print_func=print_func,
             )
-            migration_path.chmod(0o755)
+            if migration_path is None:
+                # Naming it is telling an operator to run it as root, so root
+                # publishing one it cannot vouch for stops here rather than
+                # handing it over (SYRD-62).
+                for problem in migration_problems:
+                    print_func(f"switchyard: {problem}")
+                print_func(
+                    f"switchyard: {config.project}'s roles still share the project account, and its "
+                    "role-account migration is not an artifact root can vouch for, so it is not "
+                    "being handed to an operator to run."
+                )
+                record_upgrade_phase(
+                    config, config_path=config_path, phase="accounts", state="blocked",
+                    detail="; ".join(migration_problems),
+                )
+                return 1
+        else:
+            # Unprivileged: this run regenerates the tenant's own artifacts and
+            # reports. Publishing root's copy is root's, so it names the one
+            # that is already published or the command that publishes it, and
+            # writes nothing itself (SYRD-62).
+            migration_path, migration_problems = role_account_migration_instruction(
+                config, runner=runner
+            )
+        if migration_path is not None:
+            next_step = f"run {migration_path} (safe to re-run)"
+        else:
+            next_step = (
+                f"run `sudo switchyard upgrade {config.project}`, which publishes the role-account "
+                "migration where only root can write it"
+                + (f": {'; '.join(migration_problems)}" if migration_problems else "")
+            )
         print_func(
             f"switchyard: {config.project}'s roles still share the project account. An operator must "
-            f"run {migration_path} (safe to re-run), then rerun `switchyard upgrade {config.project}`, "
+            f"{next_step}, then rerun `switchyard upgrade {config.project}`, "
             "which runs whichever phase is next in order."
         )
         record_upgrade_phase(
@@ -14406,6 +14674,7 @@ def upgrade_project_command(
                 source_repo=effective_source_repo if source_repo is not None else None,
                 commit_git_dir=commit_git_dir,
                 deploy_ref=deploy_ref,
+                tooling_dir=_staged_tooling_dir(config, tooling_root),
                 print_func=print_func,
             )
             if not dry_run:
@@ -15140,6 +15409,29 @@ def cutover_role_identities_command(
         print_func(
             f"switchyard: {config.project}'s per-role accounts do not all exist yet; run the "
             "role-account artifact first."
+        )
+        return 1
+
+    # Before anything is stopped. This transaction restarts every role against
+    # the staged bundle, so the companion modules, the canonical skills and the
+    # release the marker names all have to be this release's first. Checked here
+    # rather than only in the upgrade because `switchyard cutover-roles` reaches
+    # this transaction on its own (SYRD-62).
+    tooling_problems = staged_role_tooling_problems(
+        config.project,
+        str((source_repo or _repo_root()).expanduser().resolve(strict=False)),
+        staging_root=tooling_dir or Path(role_tooling_staging_dir(config.project)),
+    )
+    if tooling_problems:
+        for problem in tooling_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: refusing to move {config.project} onto per-role identities: its roles "
+            "would restart against a staged bundle that is not this release's. Nothing was stopped."
+        )
+        record_upgrade_phase(
+            config, config_path=config_path, phase="identities", state="blocked",
+            detail="; ".join(tooling_problems), dry_run=dry_run,
         )
         return 1
 

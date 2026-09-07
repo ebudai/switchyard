@@ -1632,8 +1632,11 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
         source_repo.mkdir()
         project_repo.mkdir()
         printed: list[str] = []
+        # SYRD-62: the handoff is published where only root can have written it,
+        # so provisioning is driven as the root it is on a host.
+        privileged_root = tmp_path / "etc-switchyard"
 
-        with redirect_stdout(StringIO()):
+        with _provisioning_as_root(privileged_root), redirect_stdout(StringIO()):
             assert (
                 new_project_command(
                     "porter",
@@ -1650,10 +1653,16 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
                 == 0
             )
 
-        handoff = output_dir / "porter-role-accounts.sh"
-        assert handoff.is_file(), sorted(path.name for path in output_dir.iterdir())
+        handoff = privileged_root / "porter" / "porter-role-accounts.sh"
+        assert handoff.is_file(), printed
         body = handoff.read_text(encoding="utf-8")
         assert any(str(handoff) in line for line in printed), printed
+        # And not a second, writable copy in the directory the tenant owns: the
+        # file an operator runs as root must not be one a role can rewrite
+        # (SYRD-62).
+        assert not (output_dir / "porter-role-accounts.sh").exists(), sorted(
+            path.name for path in output_dir.iterdir()
+        )
 
     # Accounts, homes, tooling and seeding are all in the one artifact, and the
     # worktree handover is not: SYRD-45 moves that inside the cutover, after the
@@ -1705,6 +1714,13 @@ def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:
             tmp_path = Path(tmp)
             source_repo = tmp_path / "source-repo"
             source_repo.mkdir()
+            # SYRD-62: the handoff it prints is root's published copy, so
+            # root's directory goes in the sandbox. The command is already told
+            # it is root through its own euid_getter, which is what publishing
+            # asks -- faking the process's would send its unrelated chowns at
+            # the real filesystem.
+            privileged_root = tmp_path / "etc-switchyard"
+            os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(privileged_root)
             with redirect_stdout(StringIO()):
                 assert (
                     switchyard_new_command(
@@ -1731,6 +1747,7 @@ def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:
                 )
     finally:
         team_launcher.report_launch_session_records = original_report
+        os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
 
     assert any("were not started" in line for line in printed), printed
     assert any("porter-role-accounts.sh" in line for line in printed), printed

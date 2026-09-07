@@ -377,21 +377,26 @@ and `/proc`. Nothing is named: a turn is working if a process appeared under the
 pane, or if its descendants used more than a resting runtime's worth of CPU
 between two samples a fraction of a second apart.
 
-Movement is not the only evidence, because a turn blocked on a fetch or a lock
-has an unchanging pid set and no CPU at all. So a process the gate *watched
-appear* also counts as work while it sits there, for a bounded window. Two
-things keep that from silencing a pane. Only processes seen to arrive are held:
-a helper that was already there the first time the gate looked is a runtime's
-own furniture and is never held, however long it lives. And the hold expires --
-a wait longer than any turn plausibly waits stops counting, so a tree that
-simply stopped being work cannot suppress a reminder for ever. A tree that
-shrinks is a turn finishing rather than movement, and is not work.
+Movement is not the only evidence, because a turn blocked on a fetch, a lock or
+a long build has an unchanging pid set and no CPU at all. Two further signals
+cover that, and neither has a duration at which it stops counting -- a wait does
+not stop being a wait because it is long.
 
-The consequence worth stating: a gate that has never seen a pane before cannot
-distinguish a waiting subprocess from a resting helper, and calls it idle. That
-is the side the second requirement forces, and it costs nothing in the steady
-state, where the listener probes every pane every poll cycle and therefore
-watches the tree change.
+The first is session ancestry, and it needs no history. A tool that starts a
+shell gives it a session of its own; the pane shell, the runtimes and the
+helpers a runtime keeps all stay in the pane's session. Measured on this host: a
+pane shell and the CLI under it share one session id, while a shell that CLI
+started for a verification run is its own session leader. A descendant in a
+session of its own is therefore work, on the first observation, which is what
+fails closed when the listener restarts in the middle of a turn's work.
+
+The second is arrival. A process the gate watched appear is work until it
+leaves. That covers a same-session child, and two things keep it off a
+runtime's furniture: only processes seen to arrive count, so a helper already
+present the first time the gate looked never does; and a new turn beginning
+supersedes the previous turn's arrivals, because the evidence belonged to the
+turn that started it. A tree that shrinks is a turn finishing rather than
+movement, and is not work.
 
 A pane with no descendants at all is idle, which is what keeps a genuinely idle
 pane reachable, and an unreadable pane pid or process table makes the probe

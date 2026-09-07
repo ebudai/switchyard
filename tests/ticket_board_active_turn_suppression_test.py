@@ -51,6 +51,9 @@ from ticket_board_notify_listener_test import (
 
 #: The pane's own shell. Its descendants are what a turn runs.
 PANE_PID = 4100
+#: The pane shell is a session leader; the runtime under it shares that session.
+PANE_SESSION = PANE_PID
+RUNTIME_PID = 4200
 #: A quiet screen: the sweep prints nothing for minutes.
 QUIET_PANE = "the last thing this turn printed\n"
 #: One turn-end source per runtime, so no case depends on which CLI a role runs.
@@ -70,6 +73,9 @@ class ProcessTree:
         self.children: list[int] = []
         #: A waiting child uses no CPU at all between samples.
         self.burning = True
+        #: Children that are session leaders of their own, the way a shell a
+        #: tool started is. Empty unless a case says otherwise.
+        self.detached: set[int] = set()
 
     def working(self) -> None:
         """A turn with verification running: shells that keep using CPU."""
@@ -91,15 +97,21 @@ class ProcessTree:
         self.children = []
         self.burning = True
 
-    def read(self) -> tuple[tuple[int, int, int], ...]:
+    def read(self) -> tuple[tuple[int, int, int, int], ...]:
         # A working child advances its CPU on every read, the way a sweep does
         # between two samples a fraction of a second apart. A waiting one never
-        # does.
-        rows = [(PANE_PID, 1, 0), (4200, PANE_PID, self.runtime_cpu)]
+        # does. The pane shell and the runtime share the pane's session; a child
+        # is in the pane's session unless the case says otherwise, so no case
+        # passes by accident on the session signal alone.
+        rows = [
+            (PANE_PID, 1, 0, PANE_SESSION),
+            (RUNTIME_PID, PANE_PID, self.runtime_cpu, PANE_SESSION),
+        ]
         if self.burning:
             self.child_cpu += 3
         for pid in self.children:
-            rows.append((pid, 4200, self.child_cpu + pid))
+            session = pid if pid in self.detached else PANE_SESSION
+            rows.append((pid, RUNTIME_PID, self.child_cpu + pid, session))
         return tuple(rows)
 
 
@@ -124,26 +136,32 @@ def roles_under_test(gate: PaneActivityGate) -> list[str]:
 
 
 def test_the_process_tree_sample_is_the_pane_s_descendants() -> None:
-    table = ((10, 1, 0), (20, 10, 7), (30, 20, 11), (40, 1, 99))
+    # (pid, ppid, cpu ticks, session). 30 is a session leader of its own.
+    table = ((10, 1, 0, 10), (20, 10, 7, 10), (30, 20, 11, 30), (40, 1, 99, 40))
     sample = descendant_work_sample(10, table)
     assert sample.observed
     assert sample.pids == frozenset({20, 30}), sample.pids
     assert sample.cpu_ticks == 18, sample.cpu_ticks
+    assert sample.detached == frozenset({30}), sample.detached
     # A pane with nothing under it is genuinely idle, not unobservable.
     empty = descendant_work_sample(40, table)
     assert empty.observed and empty.pids == frozenset(), empty
+    assert empty.detached == frozenset(), empty
 
 
 def test_the_real_process_table_parses() -> None:
     """The parser runs against this host's own /proc, not a fixture of it."""
     table = read_process_table()
     assert table, "no processes were readable"
-    pids = {pid for pid, _ppid, _cpu in table}
     import os
 
-    assert os.getpid() in pids, "this process is missing from its own table"
-    for _pid, _ppid, cpu_ticks in table:
-        assert cpu_ticks >= 0
+    by_pid = {pid: (ppid, cpu_ticks, session) for pid, ppid, cpu_ticks, session in table}
+    assert os.getpid() in by_pid, "this process is missing from its own table"
+    # The session column is the one the cold case depends on, so it is read from
+    # the kernel here rather than only from a fixture.
+    assert by_pid[os.getpid()][2] == os.getsid(0), by_pid[os.getpid()]
+    for _pid, (_ppid, cpu_ticks, session) in by_pid.items():
+        assert cpu_ticks >= 0 and session >= 0
 
 
 def test_a_running_turn_is_busy_for_every_configured_role() -> None:
@@ -230,15 +248,17 @@ def test_a_subprocess_wait_is_work_although_it_uses_no_cpu() -> None:
         assert trace is not None and trace.reason == "pane_child_work", trace
         assert gate.idle_since_by_role([role]) == {}, "a waiting turn was called idle"
 
-        # It keeps waiting. Nothing moves, and it is still not idle.
-        for elapsed in (1.0, 60.0, 600.0, 890.0):
+        # It keeps waiting. Nothing moves, and it is still not idle -- at any
+        # length. A build, a network wait, a lock wait or a long job has no
+        # duration at which it stops being work, so there is no expiry here.
+        for elapsed in (1.0, 60.0, 600.0, 890.0, 901.0, 3_600.0, 6 * 3_600.0):
             clock[0] = 1_800_000_000.0 + elapsed
             assert gate.pre_send_busy(target) is True, elapsed
             assert gate.idle_since_by_role([role]) == {}, elapsed
 
-        # Past the hold the pane is reachable again: a wait this long is not a
-        # turn any more, and a pane must not be silenced for ever.
-        clock[0] = 1_800_000_000.0 + gate.child_work_hold_seconds + 1.0
+        # It ends by leaving, which is the only way it ends.
+        tree.finished()
+        clock[0] = 1_800_000_000.0 + 6 * 3_600.0 + 1.0
         assert gate.pre_send_busy(target) is False, gate.last_trace(target)
         eligible = gate.idle_since_by_role([role])
         assert list(eligible) == [role], eligible
@@ -270,8 +290,79 @@ def test_a_runtime_s_persistent_helper_is_never_work() -> None:
             }, elapsed
 
 
-def test_a_wait_that_starts_working_again_restarts_its_own_window() -> None:
-    """Live work refreshes the wait, so a long quiet stretch is not cumulative."""
+def test_a_cold_gate_sees_a_detached_verification_shell() -> None:
+    """The listener restart case, with no history at all to draw on.
+
+    A tool that starts a shell gives it a session of its own; the pane shell,
+    the runtime and the helpers a runtime keeps stay in the pane's session.
+    Verified against this host: a pane shell and the CLI under it share one
+    session id, while a shell that CLI started for a verification run is its own
+    session leader. So a gate that has never seen this pane still reads it as
+    working, which is what fails closed across a restart.
+    """
+    with TemporaryStateDir() as state_dir:
+        probe = PaneActivityGate(state_store=PaneHookStateStore(state_dir))
+        role = roles_under_test(probe)[0]
+        target = probe.role_targets[role]
+        tree = ProcessTree()
+        # Already running before this gate exists, waiting, using no CPU.
+        tree.waiting(children=[4300, 4301])
+        tree.detached = {4300, 4301}
+        clock = [1_800_000_000.0]
+        gate = build_gate(state_dir, target, tree)
+        gate.wall_time = lambda: clock[0]
+        gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
+
+        # The very first observation, and every one after it, at any length.
+        for elapsed in (0.0, 1.0, 900.0, 901.0, 6 * 3_600.0):
+            clock[0] = 1_800_000_000.0 + elapsed
+            assert gate.pre_send_busy(target) is True, (elapsed, gate.last_trace(target))
+            trace = gate.last_trace(target)
+            assert trace is not None and trace.reason == "pane_child_work", trace
+            assert gate.idle_since_by_role([role]) == {}, elapsed
+
+        # And a fresh gate, as after a restart, reads it the same way.
+        restarted = build_gate(state_dir, target, tree)
+        restarted.wall_time = lambda: clock[0]
+        assert restarted.pre_send_busy(target) is True, restarted.last_trace(target)
+        assert restarted.idle_since_by_role([role]) == {}
+
+        # When the shells leave, both gates agree the pane is reachable.
+        tree.finished()
+        assert restarted.pre_send_busy(target) is False, restarted.last_trace(target)
+        assert list(restarted.idle_since_by_role([role])) == [role]
+
+
+def test_a_cold_gate_leaves_a_runtime_s_own_helpers_alone() -> None:
+    """The other half of the restart case: furniture is in the pane's session."""
+    with TemporaryStateDir() as state_dir:
+        probe = PaneActivityGate(state_store=PaneHookStateStore(state_dir))
+        role = roles_under_test(probe)[0]
+        target = probe.role_targets[role]
+        tree = ProcessTree()
+        # A persistent helper: present before the gate looked, no CPU, and in
+        # the pane's own session the way a runtime's helpers are.
+        tree.waiting(children=[4900])
+        clock = [1_800_000_000.0]
+        gate = build_gate(state_dir, target, tree)
+        gate.wall_time = lambda: clock[0]
+        gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
+
+        for elapsed in (0.0, 1.0, 900.0, 6 * 3_600.0):
+            clock[0] = 1_800_000_000.0 + elapsed
+            assert gate.pre_send_busy(target) is False, (elapsed, gate.last_trace(target))
+            assert gate.idle_since_by_role([role]) == {
+                role: "2027-01-15T08:00:00+00:00"
+            }, elapsed
+
+
+def test_a_new_turn_supersedes_the_previous_turn_s_arrivals() -> None:
+    """Stronger completion evidence than a clock: the role started another turn.
+
+    Arrivals are the evidence of the turn that started them. A later turn
+    beginning is what supersedes them, so a same-session child that outlived its
+    turn cannot hold the pane for ever without any process leaving.
+    """
     with TemporaryStateDir() as state_dir:
         probe = PaneActivityGate(state_store=PaneHookStateStore(state_dir))
         role = roles_under_test(probe)[0]
@@ -284,17 +375,17 @@ def test_a_wait_that_starts_working_again_restarts_its_own_window() -> None:
         gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
         assert gate.pre_send_busy(target) is False
 
-        tree.waiting()
-        assert gate.pre_send_busy(target) is True
-        clock[0] += gate.child_work_hold_seconds - 1.0
+        tree.waiting(children=[4300])
         assert gate.pre_send_busy(target) is True
 
-        # The subprocess wakes up and does something. The window restarts.
-        tree.working()
-        assert gate.pre_send_busy(target) is True
-        tree.waiting(children=[4300, 4301, 4302, 4303, 4304])
-        clock[0] += 2.0
+        # A new turn starts and ends. Its own children were never observed.
+        clock[0] += 10.0
+        gate.state_store.write(target, "busy", source="codex.UserPromptSubmit", now=clock[0])
         assert gate.pre_send_busy(target) is True, gate.last_trace(target)
+        clock[0] += 10.0
+        gate.state_store.write(target, "idle", source="codex.Stop", now=clock[0])
+        assert gate.pre_send_busy(target) is False, gate.last_trace(target)
+        assert list(gate.idle_since_by_role([role])) == [role]
 
 
 def test_a_pane_with_no_descendants_is_reachable() -> None:

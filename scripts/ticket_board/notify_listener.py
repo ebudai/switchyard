@@ -103,11 +103,6 @@ DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS = 0.6
 #: as idle. A resting runtime with a helper subprocess ticks a little; a test,
 #: build or mutation sweep does not stay under this.
 DEFAULT_CHILD_WORK_CPU_TICKS = 2
-#: How long a subprocess the gate watched appear may sit there using no CPU at
-#: all and still count as the turn waiting on it. Long enough for a wait on a
-#: network fetch or a lock; bounded so that a tree which simply stopped being
-#: work does not hold a reminder for ever.
-DEFAULT_CHILD_WORK_HOLD_SECONDS = 900.0
 MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -213,36 +208,40 @@ class ChildWorkSample:
     observed: bool
     pids: frozenset[int] = frozenset()
     cpu_ticks: int = 0
+    #: Descendants in a session of their own rather than the pane's. A tool that
+    #: starts a shell puts it in a new session; a runtime and the helpers it
+    #: keeps stay in the pane's. Verified on this host: the pane shell and the
+    #: CLI under it share one session id, while a shell the CLI started for a
+    #: verification run is its own session leader (SYRD-58).
+    detached: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
 class ChildWorkMemory:
-    """The last tree seen under a pane, and whether it arrived while watching.
+    """The last tree seen under a pane, and which of it this turn started.
 
-    Only a tree the gate watched appear is held as a wait. One that was already
-    there the first time it looked is a runtime's own furniture -- an MCP
-    server, a language server -- and holding on that would silence a pane's
-    reminders for as long as its runtime lives (SYRD-58).
+    A tree that was already there the first time the gate looked is a runtime's
+    own furniture -- an MCP server, a language server -- and treating that as
+    work would silence a pane's reminders for as long as its runtime lives
+    (SYRD-58).
     """
 
     #: Everything under the pane at the last sample.
     pids: frozenset[int]
-    #: The subset this gate actually watched appear, minus any that have since
-    #: exited. Only these are held as a wait.
+    #: The subset this gate watched appear during the current turn, minus any
+    #: that have since exited. Work until it leaves.
     arrived: frozenset[int]
-    #: When that set was last seen to move or use CPU.
-    since: float
 
 
-def read_process_table(proc_root: Path = Path("/proc")) -> tuple[tuple[int, int, int], ...]:
-    """(pid, ppid, cpu ticks) for every process this account can see.
+def read_process_table(proc_root: Path = Path("/proc")) -> tuple[tuple[int, int, int, int], ...]:
+    """(pid, ppid, cpu ticks, session) for every process this account can see.
 
     Read from /proc rather than by running ps: the gate runs on every delivery
     decision, and a fork per decision is a cost the listener does not need.
     The comm field can contain spaces and parentheses, so the split is on its
     closing parenthesis rather than on whitespace.
     """
-    rows: list[tuple[int, int, int]] = []
+    rows: list[tuple[int, int, int, int]] = []
     try:
         entries = list(proc_root.iterdir())
     except OSError:
@@ -262,14 +261,21 @@ def read_process_table(proc_root: Path = Path("/proc")) -> tuple[tuple[int, int,
         if len(fields) < 13:
             continue
         try:
-            rows.append((int(entry.name), int(fields[1]), int(fields[11]) + int(fields[12])))
+            rows.append(
+                (
+                    int(entry.name),
+                    int(fields[1]),
+                    int(fields[11]) + int(fields[12]),
+                    int(fields[3]),
+                )
+            )
         except ValueError:
             continue
     return tuple(rows)
 
 
 def descendant_work_sample(
-    pane_pid: int, table: Sequence[tuple[int, int, int]]
+    pane_pid: int, table: Sequence[tuple[int, int, int, int]]
 ) -> ChildWorkSample:
     """Every process under a pane, and the CPU they have used between them.
 
@@ -279,9 +285,11 @@ def descendant_work_sample(
     """
     children: dict[int, list[int]] = {}
     cpu_by_pid: dict[int, int] = {}
-    for pid, ppid, cpu_ticks in table:
+    session_by_pid: dict[int, int] = {}
+    for pid, ppid, cpu_ticks, session in table:
         children.setdefault(ppid, []).append(pid)
         cpu_by_pid[pid] = cpu_ticks
+        session_by_pid[pid] = session
     seen: set[int] = set()
     frontier = list(children.get(pane_pid, ()))
     while frontier:
@@ -290,7 +298,18 @@ def descendant_work_sample(
             continue
         seen.add(pid)
         frontier.extend(children.get(pid, ()))
-    return ChildWorkSample(True, frozenset(seen), sum(cpu_by_pid.get(pid, 0) for pid in seen))
+    pane_session = session_by_pid.get(pane_pid)
+    detached = (
+        frozenset(pid for pid in seen if session_by_pid.get(pid, pane_session) != pane_session)
+        if pane_session is not None
+        else frozenset()
+    )
+    return ChildWorkSample(
+        True,
+        frozenset(seen),
+        sum(cpu_by_pid.get(pid, 0) for pid in seen),
+        detached,
+    )
 
 
 def pane_content_digest(pane_text: str) -> str:
@@ -584,7 +603,6 @@ class PaneActivityGate:
         process_table_reader: Callable[[], Sequence[tuple[int, int, int]]] = read_process_table,
         child_work_sample_delay_seconds: float = DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS,
         child_work_cpu_ticks: int = DEFAULT_CHILD_WORK_CPU_TICKS,
-        child_work_hold_seconds: float = DEFAULT_CHILD_WORK_HOLD_SECONDS,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         director_composer_home_x: int = DEFAULT_DIRECTOR_COMPOSER_HOME_X,
@@ -609,7 +627,6 @@ class PaneActivityGate:
         self.process_table_reader = process_table_reader
         self.child_work_sample_delay_seconds = max(0.0, child_work_sample_delay_seconds)
         self.child_work_cpu_ticks = max(0, child_work_cpu_ticks)
-        self.child_work_hold_seconds = max(0.0, child_work_hold_seconds)
         self._child_work_memory_by_target: dict[str, ChildWorkMemory] = {}
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
@@ -926,26 +943,28 @@ class PaneActivityGate:
         second = self._child_work_sample(pane_pid)
         if not second.observed:
             return None
-        now = self.wall_time()
         remembered = self._child_work_memory_by_target.get(target)
         known = remembered.pids if remembered is not None else first.pids
         # Only arrivals are movement. A tree that shrinks is a turn finishing,
         # and treating that as work would make every turn end busy.
         appeared = second.pids - known
         advanced = second.cpu_ticks - first.cpu_ticks > self.child_work_cpu_ticks
-        arrived = ((remembered.arrived if remembered is not None else frozenset()) | appeared) & second.pids
-        working = bool(appeared) or advanced
-        since = now if working else (remembered.since if remembered is not None else now)
-        self._child_work_memory_by_target[target] = ChildWorkMemory(second.pids, arrived, since)
-        if working:
+        arrived = (
+            (remembered.arrived if remembered is not None else frozenset()) | appeared
+        ) & second.pids
+        self._child_work_memory_by_target[target] = ChildWorkMemory(second.pids, arrived)
+        if second.detached:
+            # A descendant in a session of its own. A tool that starts a shell
+            # gives it a new session; the runtime and the helpers it keeps stay
+            # in the pane's. This needs no history, so it is the signal that
+            # survives a listener restart in the middle of a turn's work.
             return ActivityTrace(True, "pane_child_work")
-        if arrived and now - since < self.child_work_hold_seconds:
-            # The subprocess-wait case: a child this turn started, sitting on a
-            # fetch or a lock, using no CPU and printing nothing. Still work.
-            #
-            # `arrived` is what keeps this off a runtime's own furniture: a
-            # helper that was already there the first time the gate looked was
-            # never watched to appear, so it is never held.
+        if appeared or advanced:
+            return ActivityTrace(True, "pane_child_work")
+        if arrived:
+            # A child this turn started, sitting on a fetch, a lock or a long
+            # build, using no CPU and printing nothing. It is work until it
+            # leaves: a wait has no length at which it stops being a wait.
             return ActivityTrace(True, "pane_child_work")
         return None
 
@@ -1046,6 +1065,12 @@ class PaneActivityGate:
         current = (state.state, state.updated_at)
         self._last_hook_state_by_target[target] = current
         self._observed_state_ts_by_target[target] = state.updated_at
+        if state.state != "idle" and (previous is None or previous[0] == "idle"):
+            # A new turn is starting. The arrivals the gate remembers belong to
+            # the turn before it, and this turn's own children will be observed
+            # as they appear -- so the older evidence is superseded rather than
+            # carried forward for ever (SYRD-58).
+            self._child_work_memory_by_target.pop(target, None)
         if state.state != "idle":
             if target == self.director_target:
                 self._reset_director_startup_hold()
@@ -1075,6 +1100,12 @@ class PaneActivityGate:
         current = (state.state, state.updated_at)
         self._last_hook_state_by_target[target] = current
         self._observed_state_ts_by_target[target] = state.updated_at
+        if state.state != "idle" and (previous is None or previous[0] == "idle"):
+            # A new turn is starting. The arrivals the gate remembers belong to
+            # the turn before it, and this turn's own children will be observed
+            # as they appear -- so the older evidence is superseded rather than
+            # carried forward for ever (SYRD-58).
+            self._child_work_memory_by_target.pop(target, None)
         if state.state != "idle":
             if target == self.director_target:
                 self._reset_director_startup_hold()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import grp
 import json
 import logging
 import mimetypes
@@ -42,6 +43,8 @@ LEGACY_CALLER_ROLE_HEADER = "X-PGU-Caller-Role"
 LEGACY_WRITE_TOKEN_HEADER = "X-PGU-Write-Token"
 SO_PEERCRED_FORMAT = "3i"
 PANE_SOCKET_MODE = 0o666
+GROUP_SOCKET_MODE = 0o660
+GROUP_RUNTIME_DIRECTORY_MODE = 0o750
 IMAGE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 THUMBNAIL_MAX_SIZE = 512
 THUMBNAIL_QUALITY = 80
@@ -1389,6 +1392,20 @@ class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStre
     allow_reuse_address = True
 
 
+def configured_socket_group(environ: Mapping[str, str] | None = None) -> tuple[str, int] | None:
+    """Resolve the optional tenant socket group, failing closed when configured."""
+    source = os.environ if environ is None else environ
+    group_name = str(source.get("TICKET_BOARD_SOCKET_GROUP") or "").strip()
+    if not group_name:
+        return None
+    try:
+        return group_name, grp.getgrnam(group_name).gr_gid
+    except KeyError as exc:
+        raise RuntimeError(
+            f"TICKET_BOARD_SOCKET_GROUP={group_name!r} does not resolve to a local group"
+        ) from exc
+
+
 class TicketBoardUnixServer(ThreadingUnixHTTPServer):
     def __init__(
         self,
@@ -1399,6 +1416,7 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         director_notifier: DirectorNotifier,
         caller_registry: CallerRegistry | None = None,
     ) -> None:
+        configured_group = configured_socket_group()
         self.socket_path = socket_path
         self.app = app
         self.events = events
@@ -1407,12 +1425,45 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         self.build_id = board_build_id()
         self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if configured_group is not None:
+            # Do not expose a newly bound socket while its final ownership is
+            # still being applied. systemd creates this directory for the
+            # service owner; that owner can safely close it during setup.
+            try:
+                socket_path.parent.chmod(0o700)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"could not secure socket runtime directory {socket_path.parent}: {exc}"
+                ) from exc
         try:
             socket_path.unlink()
         except FileNotFoundError:
             pass
-        super().__init__(str(socket_path), TicketBoardHandler)
-        socket_path.chmod(PANE_SOCKET_MODE)
+        if configured_group is None:
+            super().__init__(str(socket_path), TicketBoardHandler)
+            socket_path.chmod(PANE_SOCKET_MODE)
+            return
+
+        group_name, gid = configured_group
+        previous_umask = os.umask(0o177)
+        try:
+            super().__init__(str(socket_path), TicketBoardHandler)
+        finally:
+            os.umask(previous_umask)
+        try:
+            os.chown(socket_path, -1, gid)
+            socket_path.chmod(GROUP_SOCKET_MODE)
+            os.chown(socket_path.parent, -1, gid)
+            socket_path.parent.chmod(GROUP_RUNTIME_DIRECTORY_MODE)
+        except OSError as exc:
+            super().server_close()
+            try:
+                socket_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise RuntimeError(
+                f"could not grant socket access to TICKET_BOARD_SOCKET_GROUP={group_name!r}: {exc}"
+            ) from exc
 
     def server_close(self) -> None:
         super().server_close()

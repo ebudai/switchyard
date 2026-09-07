@@ -92,6 +92,19 @@ exit 98
 EOF
     chmod +x "$mockdir/systemd-run"
 
+    cat >"$mockdir/mv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+target="${!#}"
+if [[ -n "${TICKET_BOARD_FAIL_ACTIVATE_ONCE:-}" && -f "$TICKET_BOARD_FAIL_ACTIVATE_ONCE" && "$target" == "${TICKET_BOARD_TEST_CURRENT_LINK:-}" ]]; then
+    rm -f "$TICKET_BOARD_FAIL_ACTIVATE_ONCE"
+    echo "injected atomic current-link rename failure" >&2
+    exit 99
+fi
+exec /usr/bin/mv "$@"
+EOF
+    chmod +x "$mockdir/mv"
+
     cat >"$mockdir/python3" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -137,6 +150,8 @@ run_service() {
     TICKET_BOARD_SYSTEM_UNIT_HASH_RECORD="$HASH_RECORD" \
     TICKET_BOARD_HEALTH_GATE_CANARY_ENV="$deploy_root/canary.env" \
     TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID="${TICKET_BOARD_HEALTH_GATE_LIVE_BUILD_ID:-}" \
+    TICKET_BOARD_FAIL_ACTIVATE_ONCE="${TICKET_BOARD_FAIL_ACTIVATE_ONCE:-}" \
+    TICKET_BOARD_TEST_CURRENT_LINK="$deploy_root/current" \
     TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY="$skip_socket_verify" \
     TICKET_BOARD_SKIP_MIGRATIONS=1 \
     BOARD_CANARY_PORT=19001 \
@@ -167,6 +182,9 @@ old_current="$(readlink -f "$DEPLOY_ROOT/current")"
 commit_new_release "$SOURCE_REPO"
 
 : >"$LOGFILE"
+printf 'root-owned legacy canary state\n' >"$DEPLOY_ROOT/canary.env"
+chmod 0444 "$DEPLOY_ROOT/canary.env"
+legacy_canary_inode="$(stat -c %i "$DEPLOY_ROOT/canary.env")"
 touch "$FAIL_CANARY_FILE"
 if run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy-restart >"$TMPDIR_T/canary-fail.out" 2>"$TMPDIR_T/canary-fail.err"; then
     echo "FAIL: deploy-restart should fail when the pre-flight canary fails" >&2
@@ -193,6 +211,14 @@ grep -q '^BOARD_CANARY_RELEASE_DIR=' "$DEPLOY_ROOT/canary.env" || {
     cat "$DEPLOY_ROOT/canary.env" >&2 || true
     exit 1
 }
+[[ "$(stat -c %a "$DEPLOY_ROOT/canary.env")" == "644" ]] || {
+    echo "FAIL: atomic canary state replacement did not normalize its mode" >&2
+    exit 1
+}
+[[ "$(stat -c %i "$DEPLOY_ROOT/canary.env")" != "$legacy_canary_inode" ]] || {
+    echo "FAIL: canary state was rewritten in place instead of atomically replaced" >&2
+    exit 1
+}
 grep -q '^BOARD_CANARY_ASSET_DIR="/tmp/' "$DEPLOY_ROOT/canary.env" || {
     echo "FAIL: canary environment did not use an explicit temporary assets directory" >&2
     cat "$DEPLOY_ROOT/canary.env" >&2
@@ -210,6 +236,9 @@ if grep -q 'systemctl:restart pgu-ticket-board.service' "$LOGFILE"; then
 fi
 
 : >"$LOGFILE"
+printf 'root-owned legacy unit hash\n' >"$HASH_RECORD"
+chmod 0444 "$HASH_RECORD"
+legacy_hash_inode="$(stat -c %i "$HASH_RECORD")"
 run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy-restart >/dev/null
 new_current="$(readlink -f "$DEPLOY_ROOT/current")"
 [[ "$new_current" != "$old_current" ]] || {
@@ -226,6 +255,55 @@ grep -q "build-id:http://127.0.0.1:8770/api/board:$(basename "$new_current")" "$
     cat "$LOGFILE" >&2
     exit 1
 }
+[[ "$(<"$HASH_RECORD")" == "$(sha256sum "$SYSTEM_UNIT_PATH" | awk '{print $1}')" ]] || {
+    echo "FAIL: atomic system-unit hash replacement did not record the installed unit" >&2
+    exit 1
+}
+[[ "$(stat -c %a "$HASH_RECORD")" == "644" ]] || {
+    echo "FAIL: atomic system-unit hash replacement did not normalize its mode" >&2
+    exit 1
+}
+[[ "$(stat -c %i "$HASH_RECORD")" != "$legacy_hash_inode" ]] || {
+    echo "FAIL: system-unit hash was rewritten in place instead of atomically replaced" >&2
+    exit 1
+}
+
+printf '#!/usr/bin/env python3\nprint("activation-interrupted board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
+git -C "$SOURCE_REPO" add scripts/ticket-board.py
+git -C "$SOURCE_REPO" commit -m "activation interrupted release" >/dev/null
+: >"$LOGFILE"
+FAIL_ACTIVATE_ONCE="$TMPDIR_T/fail-activate-once"
+touch "$FAIL_ACTIVATE_ONCE"
+rollback_link_target="$(readlink "$DEPLOY_ROOT/current")"
+rollback_link_inode="$(stat -c %i "$DEPLOY_ROOT/current")"
+export TICKET_BOARD_FAIL_ACTIVATE_ONCE="$FAIL_ACTIVATE_ONCE"
+if run_service "$SOURCE_REPO" "$DEPLOY_ROOT" deploy-restart >"$TMPDIR_T/activate-fail.out" 2>"$TMPDIR_T/activate-fail.err"; then
+    echo "FAIL: deploy-restart should fail when atomic current activation fails" >&2
+    exit 1
+fi
+unset TICKET_BOARD_FAIL_ACTIVATE_ONCE
+grep -q 'injected atomic current-link rename failure' "$TMPDIR_T/activate-fail.err" || {
+    echo "FAIL: activation failure did not reach the atomic rename boundary" >&2
+    cat "$TMPDIR_T/activate-fail.err" >&2
+    exit 1
+}
+[[ "$(readlink -f "$DEPLOY_ROOT/current")" == "$new_current" ]] || {
+    echo "FAIL: interrupted activation lost the previous rollback point" >&2
+    exit 1
+}
+[[ "$(readlink "$DEPLOY_ROOT/current")" == "$rollback_link_target" && "$(stat -c %i "$DEPLOY_ROOT/current")" == "$rollback_link_inode" ]] || {
+    echo "FAIL: interrupted activation replaced the previous rollback symlink" >&2
+    exit 1
+}
+if find "$DEPLOY_ROOT" -maxdepth 1 -name '.current-link.*' -print -quit | grep -q .; then
+    echo "FAIL: interrupted activation left temporary current-link state" >&2
+    exit 1
+fi
+if grep -q 'systemctl:restart pgu-ticket-board.service' "$LOGFILE"; then
+    echo "FAIL: interrupted activation restarted the live service" >&2
+    cat "$LOGFILE" >&2
+    exit 1
+fi
 
 printf '#!/usr/bin/env python3\nprint("stale-process board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
 git -C "$SOURCE_REPO" add scripts/ticket-board.py

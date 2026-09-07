@@ -112,6 +112,19 @@ log() {
     printf '[ticket-board-service] %s\n' "$*" >&2
 }
 
+atomic_replace_file() {
+    local target="$1"
+    local mode="$2"
+    local parent tmp_path
+    parent="$(dirname "$target")"
+    mkdir -p "$parent"
+    tmp_path="$(mktemp "$parent/.${target##*/}.XXXXXX")"
+    if ! cat >"$tmp_path" || ! chmod "$mode" "$tmp_path" || ! mv -fT "$tmp_path" "$target"; then
+        rm -f "$tmp_path"
+        return 1
+    fi
+}
+
 require_tenant_paths() {
     [[ -n "$BOARD_ROOT" ]] || die "BOARD_ROOT is required (or set TICKET_BOARD_OWNER_HOME so the tenant release root can be derived); refusing to select another tenant's home"
     [[ "$BOARD_ROOT" == /* ]] || die "BOARD_ROOT must be an absolute tenant path: $BOARD_ROOT"
@@ -280,8 +293,7 @@ system_unit_hash() {
 record_system_unit_hash() {
     local current_hash
     current_hash="$(system_unit_hash)" || return 0
-    mkdir -p "$(dirname "$SYSTEM_UNIT_HASH_RECORD")"
-    printf '%s\n' "$current_hash" >"$SYSTEM_UNIT_HASH_RECORD"
+    printf '%s\n' "$current_hash" | atomic_replace_file "$SYSTEM_UNIT_HASH_RECORD" 0644
 }
 
 system_unit_needs_daemon_reload() {
@@ -410,7 +422,18 @@ deploy_export_release() {
 
 activate_release() {
     local release_dir="$1"
-    ln -sfn "$release_dir" "$BOARD_CURRENT_LINK"
+    local link_parent tmp_dir tmp_link
+    link_parent="$(dirname "$BOARD_CURRENT_LINK")"
+    mkdir -p "$link_parent"
+    tmp_dir="$(mktemp -d "$link_parent/.current-link.XXXXXX")"
+    tmp_link="$tmp_dir/current"
+    ln -s "$release_dir" "$tmp_link"
+    if ! mv -Tf "$tmp_link" "$BOARD_CURRENT_LINK"; then
+        rm -f "$tmp_link"
+        rmdir "$tmp_dir"
+        return 1
+    fi
+    rmdir "$tmp_dir"
 }
 
 verify_current_release_sha() {
@@ -693,9 +716,6 @@ write_canary_env_file() {
     local frame_dir="$4"
     local canary_log="$5"
     local asset_dir="$6"
-    local tmp_path
-    mkdir -p "$(dirname "$BOARD_CANARY_ENV_FILE")"
-    tmp_path="$(mktemp "$(dirname "$BOARD_CANARY_ENV_FILE")/.canary-env.XXXXXX")"
     {
         printf 'BOARD_CANARY_RELEASE_DIR=%s\n' "$(systemd_env_value "$release_dir")"
         printf 'BOARD_CANARY_HOST=%s\n' "$(systemd_env_value "$BOARD_HOST")"
@@ -705,9 +725,7 @@ write_canary_env_file() {
         printf 'BOARD_CANARY_ASSET_DIR=%s\n' "$(systemd_env_value "$asset_dir")"
         printf 'BOARD_CANARY_LOG=%s\n' "$(systemd_env_value "$canary_log")"
         printf 'BOARD_CANARY_DATABASE_URL=%s\n' "$(systemd_env_value "$BOARD_DATABASE_URL")"
-    } >"$tmp_path"
-    chmod 0644 "$tmp_path"
-    mv "$tmp_path" "$BOARD_CANARY_ENV_FILE"
+    } | atomic_replace_file "$BOARD_CANARY_ENV_FILE" 0644
 }
 
 start_canary_systemd() {

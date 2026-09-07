@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import psycopg
 from psycopg import sql
@@ -95,6 +95,14 @@ DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
 DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 1.2
 DEFAULT_STALE_CODEX_BUSY_HOOK_SECONDS = 120.0
+#: How far apart the two process-tree samples are taken. Long enough that a
+#: running child advances the CPU clock by more than its resolution, short
+#: enough to sit inside a delivery decision.
+DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS = 0.6
+#: CPU the pane's descendants may use across that window while still counting
+#: as idle. A resting runtime with a helper subprocess ticks a little; a test,
+#: build or mutation sweep does not stay under this.
+DEFAULT_CHILD_WORK_CPU_TICKS = 2
 MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -132,6 +140,9 @@ WORK_EVIDENCE_REASONS = frozenset(
         "human_composing",
         "foreign_runtime_pane_content_changed",
         "foreign_runtime_working_timer",
+        # A turn whose verification is still running is work, whether or not
+        # anything reaches the screen (SYRD-58).
+        "pane_child_work",
     }
 )
 
@@ -188,6 +199,117 @@ class WorkingProbe:
     captured: bool
     observable: bool
     digest: str = ""
+
+
+@dataclass(frozen=True)
+class ChildWorkSample:
+    """What the pane's process tree looked like at one instant."""
+
+    observed: bool
+    pids: frozenset[int] = frozenset()
+    cpu_ticks: int = 0
+    #: Descendants in a session of their own rather than the pane's. A tool that
+    #: starts a shell puts it in a new session; a runtime and the helpers it
+    #: keeps stay in the pane's. Verified on this host: the pane shell and the
+    #: CLI under it share one session id, while a shell the CLI started for a
+    #: verification run is its own session leader (SYRD-58).
+    detached: frozenset[int] = frozenset()
+
+
+@dataclass(frozen=True)
+class ChildWorkMemory:
+    """The last tree seen under a pane, and which of it this turn started.
+
+    A tree that was already there the first time the gate looked is a runtime's
+    own furniture -- an MCP server, a language server -- and treating that as
+    work would silence a pane's reminders for as long as its runtime lives
+    (SYRD-58).
+    """
+
+    #: Everything under the pane at the last sample.
+    pids: frozenset[int]
+    #: The subset this gate watched appear during the current turn, minus any
+    #: that have since exited. Work until it leaves.
+    arrived: frozenset[int]
+
+
+def read_process_table(proc_root: Path = Path("/proc")) -> tuple[tuple[int, int, int, int], ...]:
+    """(pid, ppid, cpu ticks, session) for every process this account can see.
+
+    Read from /proc rather than by running ps: the gate runs on every delivery
+    decision, and a fork per decision is a cost the listener does not need.
+    The comm field can contain spaces and parentheses, so the split is on its
+    closing parenthesis rather than on whitespace.
+    """
+    rows: list[tuple[int, int, int, int]] = []
+    try:
+        entries = list(proc_root.iterdir())
+    except OSError:
+        return ()
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # A process that exited between the listing and the read.
+            continue
+        close = stat.rfind(")")
+        if close < 0:
+            continue
+        fields = stat[close + 2 :].split()
+        if len(fields) < 13:
+            continue
+        try:
+            rows.append(
+                (
+                    int(entry.name),
+                    int(fields[1]),
+                    int(fields[11]) + int(fields[12]),
+                    int(fields[3]),
+                )
+            )
+        except ValueError:
+            continue
+    return tuple(rows)
+
+
+def descendant_work_sample(
+    pane_pid: int, table: Sequence[tuple[int, int, int, int]]
+) -> ChildWorkSample:
+    """Every process under a pane, and the CPU they have used between them.
+
+    Descendants rather than a named set of programs: what a turn runs is the
+    tenant's business, and a rule that named commands would be a list to keep
+    in step with every runtime and every tool (SYRD-58).
+    """
+    children: dict[int, list[int]] = {}
+    cpu_by_pid: dict[int, int] = {}
+    session_by_pid: dict[int, int] = {}
+    for pid, ppid, cpu_ticks, session in table:
+        children.setdefault(ppid, []).append(pid)
+        cpu_by_pid[pid] = cpu_ticks
+        session_by_pid[pid] = session
+    seen: set[int] = set()
+    frontier = list(children.get(pane_pid, ()))
+    while frontier:
+        pid = frontier.pop()
+        if pid in seen or pid == pane_pid:
+            continue
+        seen.add(pid)
+        frontier.extend(children.get(pid, ()))
+    pane_session = session_by_pid.get(pane_pid)
+    detached = (
+        frozenset(pid for pid in seen if session_by_pid.get(pid, pane_session) != pane_session)
+        if pane_session is not None
+        else frozenset()
+    )
+    return ChildWorkSample(
+        True,
+        frozenset(seen),
+        sum(cpu_by_pid.get(pid, 0) for pid in seen),
+        detached,
+    )
 
 
 def pane_content_digest(pane_text: str) -> str:
@@ -477,6 +599,10 @@ class PaneActivityGate:
         client_activity_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         cursor_position_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         capture_pane_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        pane_pid_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        process_table_reader: Callable[[], Sequence[tuple[int, int, int]]] = read_process_table,
+        child_work_sample_delay_seconds: float = DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS,
+        child_work_cpu_ticks: int = DEFAULT_CHILD_WORK_CPU_TICKS,
         director_composing_timeout_seconds: float = DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS,
         director_startup_hold_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
         director_composer_home_x: int = DEFAULT_DIRECTOR_COMPOSER_HOME_X,
@@ -493,6 +619,15 @@ class PaneActivityGate:
         self.director_target = director_target
         self.cursor_position_runner = cursor_position_runner
         self.capture_pane_runner = capture_pane_runner
+        # The same kind of `display-message -p` call as the cursor probe, so a
+        # caller that supplied one runner has supplied both. A runner that does
+        # not understand this format returns something unparseable, the pane pid
+        # is unknown, and the probe simply declines to answer (SYRD-58).
+        self.pane_pid_runner = pane_pid_runner or cursor_position_runner
+        self.process_table_reader = process_table_reader
+        self.child_work_sample_delay_seconds = max(0.0, child_work_sample_delay_seconds)
+        self.child_work_cpu_ticks = max(0, child_work_cpu_ticks)
+        self._child_work_memory_by_target: dict[str, ChildWorkMemory] = {}
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
         self.working_timer_sample_delay_seconds = max(0.0, working_timer_sample_delay_seconds)
@@ -513,9 +648,21 @@ class PaneActivityGate:
         self._director_startup_hold_state_ts: float | None = None
         self._director_startup_hold_started_at: float | None = None
         self._director_startup_released_state_ts: float | None = None
+        #: Work last actually observed in each pane, as (the hook state it was
+        #: observed against, when it was observed). A turn-end hook dates the
+        #: runtime's own turn, not the shells that turn started, so evidence
+        #: gathered against that same hook state is what the idle clock is
+        #: reset to. Evidence against an older state is superseded by the new
+        #: one and does not count (SYRD-58).
+        self._work_evidence_by_target: dict[str, tuple[float, float]] = {}
+        self._observed_state_ts_by_target: dict[str, float] = {}
 
     def _record_trace(self, target: str, trace: ActivityTrace) -> bool:
         self._last_trace_by_target[target] = trace
+        if trace.busy and trace.reason in WORK_EVIDENCE_REASONS:
+            state_ts = self._observed_state_ts_by_target.get(target)
+            if state_ts is not None:
+                self._work_evidence_by_target[target] = (state_ts, self.wall_time())
         return trace.busy
 
     def last_trace(self, target: str) -> ActivityTrace | None:
@@ -538,6 +685,35 @@ class PaneActivityGate:
             idle_states[role] = state
         return idle_states
 
+    def eligibility_busy(self, target: str) -> bool:
+        """The gate a reminder is minted against, at the strength it is sent against.
+
+        Generation used the weaker gate and delivery the stronger one, so a
+        reminder could be minted for a role the pre-send gate then held -- and
+        the stall counter behind it advanced against a role that had never
+        stopped working (SYRD-58).
+        """
+        return self.pre_send_busy(target)
+
+    def _confirmed_idle_since(self, target: str, state: PaneHookState) -> float:
+        """When this pane's whole turn actually went quiet.
+
+        A hook timestamp dates the runtime's own turn, not the shells that turn
+        started. If work was observed after the hook wrote idle, the turn was
+        still running then, so the clock a reminder is measured against starts
+        at that observation instead. A pane in which nothing was ever observed
+        keeps its hook timestamp, so a genuinely idle pane is not made to wait
+        by a listener restart (SYRD-58).
+        """
+        evidence = self._work_evidence_by_target.get(target)
+        if evidence is None or evidence[0] < state.updated_at:
+            return state.updated_at
+        return max(state.updated_at, evidence[1])
+
+    def _forget_confirmed_idle(self, target: str) -> None:
+        """A pane that is working has no idle clock to keep."""
+        return None
+
     def idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
         checked_roles = roles or sorted(self.role_targets)
         idle_since: dict[str, str] = {}
@@ -545,14 +721,16 @@ class PaneActivityGate:
             target = self.role_targets.get(role)
             if target is None:
                 continue
-            if target == self.director_target and self.is_busy(target):
-                continue
-            if target != self.director_target and self.is_busy(target):
+            if self.eligibility_busy(target):
+                self._forget_confirmed_idle(target)
                 continue
             state = self.state_store.read(target)
             if state is None or state.state != "idle":
+                self._forget_confirmed_idle(target)
                 continue
-            idle_since[role] = datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
+            idle_since[role] = datetime.fromtimestamp(
+                self._confirmed_idle_since(target, state), timezone.utc
+            ).isoformat()
         return idle_since
 
     def turn_end_idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
@@ -566,9 +744,14 @@ class PaneActivityGate:
             # the live gate before minting a reminder, exactly as
             # idle_since_by_role already does for the stall generator, so
             # generation and delivery agree about who is working (SYRD-32).
-            if target is not None and self.is_busy(target):
+            if target is not None and self.eligibility_busy(target):
+                self._forget_confirmed_idle(target)
                 continue
-            turn_end_idle_since[role] = datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat()
+            if target is None:
+                continue
+            turn_end_idle_since[role] = datetime.fromtimestamp(
+                self._confirmed_idle_since(target, state), timezone.utc
+            ).isoformat()
         return turn_end_idle_since
 
     def _tmux_session_for_target(self, target: str) -> str:
@@ -705,8 +888,88 @@ class PaneActivityGate:
         self._reset_director_startup_hold(clear_released=False)
         return None
 
-    def _trusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+    def _pane_pid(self, target: str) -> int | None:
+        try:
+            proc = self.pane_pid_runner(
+                ["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        raw = str(getattr(proc, "stdout", "") or "").strip()
+        try:
+            pane_pid = int(raw)
+        except ValueError:
+            return None
+        return pane_pid if pane_pid > 0 else None
+
+    def _child_work_sample(self, pane_pid: int) -> ChildWorkSample:
+        try:
+            table = self.process_table_reader()
+        except OSError:
+            return ChildWorkSample(False)
+        if not table:
+            return ChildWorkSample(False)
+        return descendant_work_sample(pane_pid, table)
+
+    def child_work_trace(self, target: str) -> ActivityTrace | None:
+        """Work still running under the pane, whether or not it reaches the screen.
+
+        A turn-end hook says the runtime finished its own turn. It says nothing
+        about the shells that turn started, and a long test, build or mutation
+        sweep prints nothing for minutes -- so the hook reads idle, the visible
+        region does not change, and every existing probe agrees the role is
+        free. SYRD-57's trace caught exactly that: a reminder minted eleven
+        seconds into a sweep that was still running, and two director
+        escalations behind it.
+
+        Both signals are differential, so nothing has to be named: the turn is
+        working if its process tree changed shape or if its descendants used
+        more than a resting runtime's worth of CPU between the two samples. A
+        pane with no descendants at all is idle, which is what keeps a genuinely
+        idle pane reachable (SYRD-58).
+        """
+        pane_pid = self._pane_pid(target)
+        if pane_pid is None:
+            return None
+        first = self._child_work_sample(pane_pid)
+        if not first.observed:
+            return None
+        if self.child_work_sample_delay_seconds > 0:
+            self.sleeper(self.child_work_sample_delay_seconds)
+        second = self._child_work_sample(pane_pid)
+        if not second.observed:
+            return None
+        remembered = self._child_work_memory_by_target.get(target)
+        known = remembered.pids if remembered is not None else first.pids
+        # Only arrivals are movement. A tree that shrinks is a turn finishing,
+        # and treating that as work would make every turn end busy.
+        appeared = second.pids - known
+        advanced = second.cpu_ticks - first.cpu_ticks > self.child_work_cpu_ticks
+        arrived = (
+            (remembered.arrived if remembered is not None else frozenset()) | appeared
+        ) & second.pids
+        self._child_work_memory_by_target[target] = ChildWorkMemory(second.pids, arrived)
+        if second.detached:
+            # A descendant in a session of its own. A tool that starts a shell
+            # gives it a new session; the runtime and the helpers it keeps stay
+            # in the pane's. This needs no history, so it is the signal that
+            # survives a listener restart in the middle of a turn's work.
+            return ActivityTrace(True, "pane_child_work")
+        if appeared or advanced:
+            return ActivityTrace(True, "pane_child_work")
+        if arrived:
+            # A child this turn started, sitting on a fetch, a lock or a long
+            # build, using no CPU and printing nothing. It is work until it
+            # leaves: a wait has no length at which it stops being a wait.
+            return ActivityTrace(True, "pane_child_work")
         return None
+
+    def _trusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
+        return self.child_work_trace(target)
 
     def _idle_cursor_trace(self, target: str, state: PaneHookState, *, check_trusted_working: bool = False) -> ActivityTrace:
         cursor_composing = self._target_cursor_state(target)
@@ -719,12 +982,19 @@ class PaneActivityGate:
         if cursor_composing:
             return ActivityTrace(True, "human_composing")
         untrusted_idle_trace = self._untrusted_idle_source_trace(target, state)
-        if untrusted_idle_trace is not None:
+        if untrusted_idle_trace is not None and untrusted_idle_trace.busy:
             return untrusted_idle_trace
+        # Every route to an idle verdict passes the trusted probe, not just the
+        # one that reaches the bottom of this function. A stale trusted hook
+        # returns its own not-busy trace here, and returning that directly is
+        # how a turn with its verification still running was called idle
+        # (SYRD-58).
         if check_trusted_working:
             trusted_idle_trace = self._trusted_idle_source_trace(target, state)
             if trusted_idle_trace is not None:
                 return trusted_idle_trace
+        if untrusted_idle_trace is not None:
+            return untrusted_idle_trace
         return ActivityTrace(False, "hook_idle")
 
     def _untrusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
@@ -794,6 +1064,13 @@ class PaneActivityGate:
         previous = self._last_hook_state_by_target.get(target)
         current = (state.state, state.updated_at)
         self._last_hook_state_by_target[target] = current
+        self._observed_state_ts_by_target[target] = state.updated_at
+        if state.state != "idle" and (previous is None or previous[0] == "idle"):
+            # A new turn is starting. The arrivals the gate remembers belong to
+            # the turn before it, and this turn's own children will be observed
+            # as they appear -- so the older evidence is superseded rather than
+            # carried forward for ever (SYRD-58).
+            self._child_work_memory_by_target.pop(target, None)
         if state.state != "idle":
             if target == self.director_target:
                 self._reset_director_startup_hold()
@@ -822,6 +1099,13 @@ class PaneActivityGate:
         previous = self._last_hook_state_by_target.get(target)
         current = (state.state, state.updated_at)
         self._last_hook_state_by_target[target] = current
+        self._observed_state_ts_by_target[target] = state.updated_at
+        if state.state != "idle" and (previous is None or previous[0] == "idle"):
+            # A new turn is starting. The arrivals the gate remembers belong to
+            # the turn before it, and this turn's own children will be observed
+            # as they appear -- so the older evidence is superseded rather than
+            # carried forward for ever (SYRD-58).
+            self._child_work_memory_by_target.pop(target, None)
         if state.state != "idle":
             if target == self.director_target:
                 self._reset_director_startup_hold()

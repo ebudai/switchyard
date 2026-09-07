@@ -364,6 +364,56 @@ role should not report `foreign_runtime_*` merely because its hook source is
 failed or otherwise inconclusive probe still treats the pane as busy and records
 a specific trace reason instead of collapsing the decision into `hook_idle`.
 
+A turn-end hook is not the end of the turn's work. It says the runtime finished
+its own turn; it says nothing about the shells that turn started, and a long
+test, build or mutation sweep prints nothing for minutes -- so the hook reads
+idle, the visible region does not change, and every screen-based probe agrees
+the role is free. SYRD-57's trace caught exactly that: a reminder minted eleven
+seconds into a running sweep, delivered with decision reason `hook_idle`, and
+two director escalations behind it while the same work continued.
+
+The gate therefore also reads the pane's own process tree, through `#{pane_pid}`
+and `/proc`. Nothing is named: a turn is working if a process appeared under the
+pane, or if its descendants used more than a resting runtime's worth of CPU
+between two samples a fraction of a second apart.
+
+Movement is not the only evidence, because a turn blocked on a fetch, a lock or
+a long build has an unchanging pid set and no CPU at all. Two further signals
+cover that, and neither has a duration at which it stops counting -- a wait does
+not stop being a wait because it is long.
+
+The first is session ancestry, and it needs no history. A tool that starts a
+shell gives it a session of its own; the pane shell, the runtimes and the
+helpers a runtime keeps all stay in the pane's session. Measured on this host: a
+pane shell and the CLI under it share one session id, while a shell that CLI
+started for a verification run is its own session leader. A descendant in a
+session of its own is therefore work, on the first observation, which is what
+fails closed when the listener restarts in the middle of a turn's work.
+
+The second is arrival. A process the gate watched appear is work until it
+leaves. That covers a same-session child, and two things keep it off a
+runtime's furniture: only processes seen to arrive count, so a helper already
+present the first time the gate looked never does; and a new turn beginning
+supersedes the previous turn's arrivals, because the evidence belonged to the
+turn that started it. A tree that shrinks is a turn finishing rather than
+movement, and is not work.
+
+A pane with no descendants at all is idle, which is what keeps a genuinely idle
+pane reachable, and an unreadable pane pid or process table makes the probe
+decline rather than guess. The trace reason is `pane_child_work`, and it is work evidence like any
+other: a self-addressed reminder observed against it is voided rather than
+retried, and the stall generator is told work was seen, which is what stops the
+escalation counter advancing against a role that never stopped working.
+
+Two consequences follow from that. A reminder is minted against the same gate it
+is sent against -- generation used the weaker one and delivery the stronger one,
+so a reminder could be minted for a role the pre-send gate then held, and the
+stall counter behind it advanced anyway. And the clock a reminder is measured
+against starts at the last work actually observed rather than at the hook
+timestamp, when work was seen against that same hook state; a pane in which
+nothing was observed keeps its hook timestamp, so a listener restart does not
+make a genuinely idle pane wait.
+
 If a queued notification targets a tmux pane that no longer exists, the listener
 does not keep retrying it as a busy pane and does not silently drop it. The row
 stays in `ticket_board.ticket_notification_queue` with `dead_lettered_at` set

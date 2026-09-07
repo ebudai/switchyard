@@ -350,6 +350,8 @@ def test_a_resumed_upgrade_restages_the_tooling_and_reaches_the_transaction() ->
     with tempfile.TemporaryDirectory(prefix="trusted-resume.") as raw:
         tmp = Path(raw)
         config_path, selected, previous, sha = _partial_state(tmp)
+        unsafe = config_path.with_name(role_account_migration_name(PROJECT))
+        assert unsafe.exists(), "the fixture starts from the live shape"
         staging = config_path.parent / "tooling" / PROJECT
         # The state this starts from: the previous release's bundle.
         assert staged_role_tooling_problems(PROJECT, str(previous), staging_root=staging) == []
@@ -368,6 +370,10 @@ def test_a_resumed_upgrade_restages_the_tooling_and_reaches_the_transaction() ->
                 deploy_ref=sha,
             )
         assert result == 0, output
+        # The known role-writable root-run path does not survive a successful
+        # resume. Nothing published one here -- every account exists, so there
+        # is no operator step left -- and it is gone all the same (SYRD-62).
+        assert not unsafe.exists(), sorted(p.name for p in config_path.parent.iterdir())
         # Restaged from the selected release, without the account script.
         assert staged_role_tooling_problems(PROJECT, str(selected), staging_root=staging) == []
         assert (staging / ".switchyard-release.json").read_text(encoding="utf-8").strip().endswith("}")
@@ -375,6 +381,51 @@ def test_a_resumed_upgrade_restages_the_tooling_and_reaches_the_transaction() ->
         config = team_launcher.load_project_config(PROJECT, config_path)
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
         assert journal["phases"]["identities"]["state"] == "done", journal
+
+
+def test_a_legacy_copy_that_cannot_be_removed_stops_the_upgrade() -> None:
+    """Reporting success with it still there is what let it survive."""
+    with tempfile.TemporaryDirectory(prefix="trusted-legacy.") as raw:
+        tmp = Path(raw)
+        config_path, selected, _previous, sha = _partial_state(tmp)
+        unsafe = config_path.with_name(role_account_migration_name(PROJECT))
+        # A name that cannot be unlinked: a directory sits at it.
+        unsafe.unlink()
+        unsafe.mkdir()
+        (unsafe / "keep").write_text("", encoding="utf-8")
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            result, output = _upgrade(
+                config_path,
+                exists=ROLE_ACCOUNTS,
+                runner=_staging_runner(tenant.runner(), staging_root=config_path.parent / "tooling"),
+                source_repo=selected,
+                deploy_ref=sha,
+            )
+        assert result == 1, output
+        assert "could not remove the tenant-writable" in output, output
+        assert "its control role can write" in output, output
+        assert tenant.stops == [], tenant.stops
+        config = team_launcher.load_project_config(PROJECT, config_path)
+        journal = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+        assert journal["phases"]["artifacts"]["state"] == "blocked", journal
+
+
+def test_the_legacy_copy_is_removed_as_a_link_never_followed() -> None:
+    """A stale copy replaced by a symlink must not make root unlink its target."""
+    with tempfile.TemporaryDirectory(prefix="trusted-legacy-link.") as raw:
+        tmp = Path(raw)
+        config_path, _selected, _previous, _sha = _partial_state(tmp)
+        elsewhere = tmp / "somebody-elses-file"
+        elsewhere.write_text("not root's to remove\n", encoding="utf-8")
+        unsafe = config_path.with_name(role_account_migration_name(PROJECT))
+        unsafe.unlink()
+        unsafe.symlink_to(elsewhere)
+        config = team_launcher.load_project_config(PROJECT, config_path)
+        assert team_launcher.remove_untrusted_role_account_migration(
+            config, config_path=config_path, print_func=lambda _line: None
+        ) == []
+        assert not unsafe.exists() and not unsafe.is_symlink()
+        assert elsewhere.read_text(encoding="utf-8") == "not root's to remove\n"
 
 
 def test_a_stale_bundle_stops_the_upgrade_before_any_role_moves() -> None:

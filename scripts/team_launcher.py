@@ -13388,6 +13388,48 @@ def _privileged_artifact_boundary() -> Path | None:
     return configured
 
 
+def remove_untrusted_role_account_migration(
+    config: ProjectConfig, *, config_path: Path, print_func: Callable[[str], None] = print
+) -> list[str]:
+    """Take the tenant-side copy of the root-run migration script away.
+
+    On every upgrade, not only when an operator step remains. The resume this
+    came from has every account already, so the branch that publishes the
+    trusted copy is skipped and a file at the known role-writable path would
+    simply survive a successful upgrade -- which is the whole finding, still
+    sitting there afterwards.
+
+    Nothing here reads it, parses it or runs it. It is one unlink of a fixed
+    name through a descriptor on its directory, so neither the name nor the
+    directory can be swapped for a symlink under it, and a stale copy that
+    happens to be a symlink is removed as the link it is rather than followed
+    (SYRD-62).
+    """
+    name = role_account_migration_name(config.project)
+    stale = config_path.with_name(name)
+    if not (stale.is_symlink() or stale.exists()):
+        return []
+    try:
+        directory = os.open(
+            config_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        )
+    except OSError as exc:
+        return [f"could not open {config_path.parent} to remove {name}: {exc}"]
+    try:
+        os.unlink(name, dir_fd=directory)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        return [f"could not remove the tenant-writable {stale}: {exc}"]
+    finally:
+        os.close(directory)
+    print_func(
+        f"switchyard: removed {stale}. The migration an operator runs as root is published where "
+        "only root can write it, and a copy in this directory is one the control role can rewrite."
+    )
+    return []
+
+
 def publish_role_account_migration(
     config: ProjectConfig,
     *,
@@ -13441,18 +13483,13 @@ def publish_role_account_migration(
         staged.replace(path)
     except OSError as exc:
         return None, [f"could not publish {path}: {exc}"]
-    # The tenant copy is not a second way to run this. Removing it also takes
-    # away the one that already carries the grant on hosts provisioned before
-    # this moved.
-    stale = config_path.with_name(name)
-    if stale.is_symlink() or stale.exists():
-        try:
-            stale.unlink()
-        except OSError as exc:
-            print_func(
-                f"switchyard: could not remove the old tenant copy {stale}: {exc}. It is not the "
-                f"file to run; {path} is."
-            )
+    # The tenant copy is not a second way to run this. The artifacts phase has
+    # already taken it away on any upgrade; this is the same removal for the
+    # callers that reach publishing without one.
+    for problem in remove_untrusted_role_account_migration(
+        config, config_path=config_path, print_func=print_func
+    ):
+        print_func(f"switchyard: {problem}. It is not the file to run; {path} is.")
     reasons = untrusted_root_executable_reasons(
         path, boundary=_privileged_artifact_boundary(), runner=runner
     )
@@ -14578,6 +14615,25 @@ def upgrade_project_command(
             f"{_staged_tooling_dir(config, tooling_root)} from {effective_source_repo}"
         )
     elif os.geteuid() == 0:
+        legacy_problems = remove_untrusted_role_account_migration(
+            config, config_path=config_path, print_func=print_func
+        )
+        if legacy_problems:
+            # A resume that leaves it behind is not a successful resume: the
+            # path this ticket is about would still be there afterwards, still
+            # writable by the control role, still named by every older
+            # instruction an operator has (SYRD-62).
+            for problem in legacy_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any later phase: {config.project} still has a "
+                "role-account migration in a directory its control role can write."
+            )
+            record_upgrade_phase(
+                config, config_path=config_path, phase="artifacts", state="blocked",
+                detail="; ".join(legacy_problems),
+            )
+            return 1
         staging_problems = refresh_staged_role_tooling(
             config,
             release_root=effective_source_repo,

@@ -499,6 +499,17 @@ root into `/etc/switchyard/provision/<project>/`, which no tenant can reach. The
 tenant-side copy is removed rather than left beside it: a second file of the
 same name, executable and writable by a role, is the one somebody would run.
 
+That removal is part of the artifacts phase, so it happens on every upgrade and
+not only on one that still has an operator step left. A resume whose accounts
+all exist never publishes anything -- there is nothing left for an operator to
+run -- and a tenant-side copy left from before would otherwise survive it
+untouched, which is the whole finding still sitting there afterwards. It is one
+unlink of a fixed name through a descriptor on its directory: nothing reads it,
+parses it or runs it, neither the name nor the directory can be swapped for a
+symlink underneath, and a stale copy that is itself a symlink is removed as the
+link rather than followed to somebody else's file. An upgrade that cannot remove
+it stops rather than reporting success with it still there.
+
 Nothing names that script without the whole path to it being checked first --
 the file and every directory above it, up to the filesystem root: owner, mode,
 and the POSIX access control entries, which `ls -l` shows only as a trailing

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import grp
@@ -15,8 +16,10 @@ from pathlib import Path, PurePosixPath
 from typing import Mapping, Sequence
 
 try:
+    from .board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
     from .commit_repos import commit_git_dir_env_for_project
 except ImportError:  # pragma: no cover - supports direct script execution
+    from board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
     from commit_repos import commit_git_dir_env_for_project
 
 
@@ -630,6 +633,80 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
     return "\n".join(lines)
 
 
+#: The executables a role account reaches through the shared staging directory.
+#: One list, so what is installed and what is scanned for dependencies cannot
+#: drift apart.
+ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
+    "ticket-board-pane-idle-hook",
+    "ticket-board-install-pane-hooks",
+    "switchyard-board-skill",
+    "switchyard-publish-ref",
+    # Root-owned and reached only through this tenant's sudo grant.
+    "switchyard-tenant-control",
+    # The board clients themselves. A role that cannot run these has no
+    # normal board access at all: they live under the owner's home, which
+    # is 0710 and which no role account may traverse (SYRD-45).
+    "ticket-board-write",
+    "ticket-board-read",
+    "directorctl",
+)
+
+
+def _script_sibling_modules(source_root: Path) -> dict[str, Path]:
+    return {path.stem: path for path in source_root.glob("*.py")}
+
+
+def _imported_names(path: Path) -> set[str]:
+    """Top-level module names a Python source file imports, or nothing.
+
+    A file that does not parse as Python -- `directorctl` is a shell script
+    with Python embedded in it -- contributes no dependency here rather than
+    stopping the render.
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, ValueError):
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def entry_point_module_dependencies(
+    entry_points: Sequence[str] = ROLE_STAGED_EXECUTABLES,
+    *,
+    source_root: Path | None = None,
+) -> tuple[str, ...]:
+    """Sibling modules the staged executables import, transitively.
+
+    Each of these entry points puts its own directory on `sys.path` and imports
+    from there, so a module it imports has to be staged beside it or the staged
+    copy is not runnable at all. `switchyard-board-skill` imports
+    `board_skill_cli`, which was never staged: the wrapper installed fine and
+    then died with `ModuleNotFoundError` the first time a role account ran it
+    (SYRD-60).
+
+    Discovered rather than listed, so the next entry point that grows a sibling
+    import is staged with it instead of failing the same way. The `ticket_board`
+    package is staged separately as a whole tree.
+    """
+    root = source_root if source_root is not None else Path(__file__).resolve().parents[1]
+    modules = _script_sibling_modules(root)
+    needed: set[str] = set()
+    frontier = [root / name for name in entry_points]
+    while frontier:
+        path = frontier.pop()
+        for imported in _imported_names(path):
+            if imported in modules and imported not in needed:
+                needed.add(imported)
+                frontier.append(modules[imported])
+    return tuple(sorted(needed))
+
+
 def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     """Copy the executables roles need out of the owner's home.
 
@@ -645,23 +722,19 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     """
     staging = f"/usr/local/lib/switchyard/{project}"
     commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
-    for name in (
-        "ticket-board-pane-idle-hook",
-        "ticket-board-install-pane-hooks",
-        "switchyard-board-skill",
-        "switchyard-publish-ref",
-        # Root-owned and reached only through this tenant's sudo grant.
-        "switchyard-tenant-control",
-        # The board clients themselves. A role that cannot run these has no
-        # normal board access at all: they live under the owner's home, which
-        # is 0710 and which no role account may traverse (SYRD-45).
-        "ticket-board-write",
-        "ticket-board-read",
-        "directorctl",
-    ):
+    for name in ROLE_STAGED_EXECUTABLES:
         commands.append(
             f"sudo install -m 0755 -o root -g root "
             f"{shell_quote(f'{release_root}/scripts/{name}')} {shell_quote(f'{staging}/{name}')}"
+        )
+    # The modules those executables import from their own directory. Not
+    # executable, but every bit as required: without them the staged copy is a
+    # wrapper around an import that fails (SYRD-60).
+    for module in entry_point_module_dependencies():
+        commands.append(
+            f"sudo install -m 0644 -o root -g root "
+            f"{shell_quote(f'{release_root}/scripts/{module}.py')} "
+            f"{shell_quote(f'{staging}/{module}.py')}"
         )
     # The clients import the ticket_board package from their own directory, so
     # the package is staged beside them. Public code, root-owned, world
@@ -679,6 +752,29 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     commands.append(
         f"sudo chmod -R a+rX {shell_quote(f'{staging}/ticket_board')}"
     )
+    # The canonical skill bodies the installer projects. Without them the staged
+    # wrapper resolves its default tree root to a directory that holds no
+    # skills, so `install` has nothing to install: the bundle has to be
+    # self-contained, not a pointer back at a checkout no role can reach
+    # (SYRD-60).
+    commands.append(f"sudo rm -rf {shell_quote(f'{staging}/{SKILLS_DIR_NAME}')}")
+    commands.append(
+        f"sudo cp -a {shell_quote(f'{release_root}/{SKILLS_DIR_NAME}')} "
+        f"{shell_quote(f'{staging}/{SKILLS_DIR_NAME}')}"
+    )
+    commands.append(f"sudo chown -R root:root {shell_quote(f'{staging}/{SKILLS_DIR_NAME}')}")
+    commands.append(f"sudo chmod -R a+rX {shell_quote(f'{staging}/{SKILLS_DIR_NAME}')}")
+    # The release marker, so a skill installed from the staged tree can name the
+    # commit it came from. Without it every projected copy is unprovenanced and
+    # `verify` rejects it -- the bundle installs and then cannot be checked
+    # (SYRD-60). Guarded: a deployment made from a plain checkout has no marker.
+    marker_source = f"{release_root}/{RELEASE_MARKER_NAME}"
+    commands.append(f"if [ -f {shell_quote(marker_source)} ]; then")
+    commands.append(
+        f"    sudo install -m 0644 -o root -g root {shell_quote(marker_source)} "
+        f"{shell_quote(f'{staging}/{RELEASE_MARKER_NAME}')}"
+    )
+    commands.append("fi")
     return commands
 
 

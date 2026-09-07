@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ticket_board.board_skill import (  # noqa: E402
+    SKILLS_DIR_NAME,
     CanonicalSkill,
     default_source,
     install_command,
@@ -25,7 +26,18 @@ from ticket_board.board_skill import (  # noqa: E402
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    """The tree this script ships in, wherever it was staged.
+
+    In a checkout that is the repository root, one level above `scripts/`. In a
+    role's staging directory the module sits beside the skills themselves, and
+    resolving one level up would name a directory holding no skills at all --
+    which is an install with nothing to install (SYRD-60).
+    """
+    here = Path(__file__).resolve().parent
+    for candidate in (here, *here.parents):
+        if (candidate / SKILLS_DIR_NAME).is_dir():
+            return candidate
+    return here.parents[0] if here.parents else here
 
 
 def _stderr(message: str) -> None:

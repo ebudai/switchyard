@@ -11,7 +11,24 @@ def default_state_labels(stages: tuple[WorkflowStageSeed, ...] | None = None) ->
     return {stage.name: stage.display_label for stage in (stages if stages is not None else schema_workflow_stages())}
 
 
+def default_terminal_states(stages: tuple[WorkflowStageSeed, ...] | None = None) -> list[str]:
+    """Which states end a ticket's life, read from the workflow schema.
+
+    The board's own workflow document is the authority at runtime; this is the
+    fallback for a board that has not sent one yet. Either way the names come
+    from a workflow definition rather than from this project's vocabulary, so a
+    tenant whose terminal stage is called something else still gets the same
+    behaviour.
+    """
+    return sorted(
+        stage.name
+        for stage in (stages if stages is not None else schema_workflow_stages())
+        if stage.is_terminal
+    )
+
+
 DEFAULT_STATE_LABELS_JSON = json.dumps(default_state_labels(), sort_keys=True)
+DEFAULT_TERMINAL_STATES_JSON = json.dumps(default_terminal_states(), sort_keys=True)
 
 SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-9]*-\\d+)\\b/ig;
     const BOARD_STORAGE_NAMESPACE = `ticket-board:${encodeURIComponent(BOARD_IDENTITY.project)}:${encodeURIComponent(BOARD_IDENTITY.ticketPrefix)}`;
@@ -281,6 +298,23 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
     }
 
     const DEFAULT_STATE_LABELS = """ + DEFAULT_STATE_LABELS_JSON + """;
+    const DEFAULT_TERMINAL_STATES = """ + DEFAULT_TERMINAL_STATES_JSON + """;
+
+    function terminalStateNames() {
+      const stages = state.workflow && Array.isArray(state.workflow.stages) ? state.workflow.stages : [];
+      const configured = stages
+        .filter((stage) => stage && stage.terminal)
+        .map((stage) => String(stage.name || '').trim())
+        .filter(Boolean);
+      // The board's own workflow document decides. DEFAULT_TERMINAL_STATES is
+      // the schema's answer, used only until one arrives, so nothing here
+      // depends on a state happening to be called 'done'.
+      return new Set(configured.length ? configured : DEFAULT_TERMINAL_STATES);
+    }
+
+    function isTerminalTicketState(stateName) {
+      return terminalStateNames().has(String(stateName || '').trim());
+    }
 
     function normalizeBoardColumns(columns, states) {
       const source = Array.isArray(columns) && columns.length
@@ -1540,8 +1574,79 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       return collected;
     }
 
-    function isTopLevelBoardTicket(ticket) {
-      return rootTicketForBoard(ticket).id === ticket.id;
+    function visibleColumnKeys() {
+      return new Set(visibleColumns().map((column) => column.key));
+    }
+
+    function hostTicketForBoard(ticket, visibleKeys) {
+      // The nearest ancestor that is actually on the board and can carry this
+      // ticket inside its card: it has to be non-terminal, and its column has
+      // to be showing. A terminal ancestor never hosts even when its column IS
+      // showing, because otherwise turning Show Done on would pull open work
+      // out of the column where it is actionable and bury it in Done.
+      const keys = visibleKeys || visibleColumnKeys();
+      let current = ticket;
+      const seen = new Set([ticket.id]);
+      while (true) {
+        const parent = parentTicketFor(current);
+        if (!parent || seen.has(parent.id)) {
+          return null;
+        }
+        seen.add(parent.id);
+        if (!isTerminalTicketState(parent.state) && keys.has(parent.state)) {
+          return parent;
+        }
+        current = parent;
+      }
+    }
+
+    function isBoardCardTicket(ticket, visibleKeys) {
+      // A ticket gets its own card exactly when nothing is hosting it. Walking
+      // to the ROOT instead -- which is what this used to do -- hid every open
+      // descendant of a completed root, because that root is not rendered while
+      // Show Done is off and so nothing carried its children either (SYRD-59).
+      return !hostTicketForBoard(ticket, visibleKeys);
+    }
+
+    function cardAncestorForBoard(ticket, visibleKeys) {
+      // Deliberately no "is this column showing" test on the ancestor. A
+      // hostless ticket in a hidden column can never be the nearest card
+      // ancestor of a hosted descendant: that descendant's host is a
+      // non-terminal ancestor in a visible column, and if such a ticket sat
+      // above the hidden one it would be hosting the hidden one too, so the
+      // hidden one would not be hostless. Adding the test changes nothing, and
+      // an unreachable branch is worse than none.
+      const keys = visibleKeys || visibleColumnKeys();
+      let current = ticket;
+      const seen = new Set([ticket.id]);
+      while (true) {
+        const parent = parentTicketFor(current);
+        if (!parent || seen.has(parent.id)) {
+          return null;
+        }
+        seen.add(parent.id);
+        if (isBoardCardTicket(parent, keys)) {
+          return parent;
+        }
+        current = parent;
+      }
+    }
+
+    function hostedChildTicketsForBoard(ticket, visibleKeys) {
+      // The descendants this card is actually responsible for: the ones whose
+      // nearest ancestor WITH A CARD is this one. Filtering on the immediate
+      // host instead would drop a third generation entirely, because its host
+      // is the second generation, which has no card of its own. A descendant
+      // that has its own card is left to that card, so nothing is rendered in
+      // two places.
+      const keys = visibleKeys || visibleColumnKeys();
+      return childTicketsForBoard(ticket).filter((child) => {
+        if (isBoardCardTicket(child, keys)) {
+          return false;
+        }
+        const owner = cardAncestorForBoard(child, keys);
+        return Boolean(owner) && owner.id === ticket.id;
+      });
     }
 
     function doneTicketsForBoard() {
@@ -1568,22 +1673,20 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       if (columnKey === 'done') {
         return doneTicketsForBoard().length;
       }
-      return state.tickets
-        .filter((ticket) => (
-          ticket.state === columnKey
-          && isTopLevelBoardTicket(ticket)
-        ))
-        .length;
+      // The cards this column actually renders, so the number over a column is
+      // the number of cards under it.
+      return columnTickets(columnKey).length;
     }
 
     function columnTickets(columnKey) {
       if (columnKey === 'done') {
         return doneRootTicketsForBoard();
       }
+      const visibleKeys = visibleColumnKeys();
       return state.tickets
         .filter((ticket) => (
           ticket.state === columnKey
-          && isTopLevelBoardTicket(ticket)
+          && isBoardCardTicket(ticket, visibleKeys)
         ))
         .sort(compareTicketsWithActiveWorkFirst);
     }
@@ -1700,7 +1803,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
     }
 
     function renderCard(ticket) {
-      const childTickets = childTicketsForBoard(ticket);
+      const childTickets = hostedChildTicketsForBoard(ticket);
       const doneChildren = childTickets.filter((child) => child.state === 'done');
       const card = document.createElement('article');
       card.className = 'card';

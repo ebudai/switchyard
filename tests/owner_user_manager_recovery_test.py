@@ -95,6 +95,8 @@ def _upgrade(config_path: Path, host: _Host, *, as_root: bool, dry_run: bool = F
             config,
             config_path=config_path,
             dry_run=dry_run,
+            # The tenant fixture stages a real bundle here (SYRD-62).
+            tooling_root=config_path.parent / "tooling",
             runner=host,
             print_func=printed.append,
         )

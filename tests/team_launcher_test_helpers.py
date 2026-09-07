@@ -449,6 +449,94 @@ def _write_launcher_config(
 
 PANEL_CLOCKWISE_SLOT_ORDER = (0, 2, 3, 5, 4, 1)
 
+class _provisioning_as_root:
+    """Drive provisioning as the root it is on a host, in a sandbox.
+
+    The role-account handoff is published where only root can have written it,
+    so a case about that handoff has to run as root and has to have root's
+    directory redirected somewhere a test may write (SYRD-62).
+    """
+
+    def __init__(self, privileged_root: Path):
+        self.privileged_root = privileged_root
+
+    def __enter__(self) -> Path:
+        self._euid = team_launcher.os.geteuid
+        self._saved = os.environ.get("SWITCHYARD_PRIVILEGED_PROVISION_ROOT")
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(self.privileged_root)
+        team_launcher.os.geteuid = lambda: 0
+        return self.privileged_root
+
+    def __exit__(self, *_exc) -> bool:
+        team_launcher.os.geteuid = self._euid
+        if self._saved is None:
+            os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
+        else:
+            os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = self._saved
+        return False
+
+
+def _staging_sudo_shim(tmp: Path) -> Path:
+    """A `sudo` that runs the command and drops what only root could do.
+
+    The rendered staging lines install as `root:root`. A test process is not
+    root, so the ownership flags are dropped and `chown` is a no-op; the
+    verification asks for the staging identity's own uid rather than a literal
+    zero, which is the same identity on a host and this one here (SYRD-62).
+    """
+    binaries = tmp / "sudo-shim"
+    binaries.mkdir(exist_ok=True)
+    shim = binaries / "sudo"
+    shim.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "argv = sys.argv[1:]\n"
+        "kept = []\n"
+        "index = 0\n"
+        "while index < len(argv):\n"
+        "    if argv[index] in ('-o', '-g') and index + 1 < len(argv) and argv[index + 1] == 'root':\n"
+        "        index += 2\n"
+        "        continue\n"
+        "    kept.append(argv[index])\n"
+        "    index += 1\n"
+        "if not kept or kept[0] == 'chown':\n"
+        "    raise SystemExit(0)\n"
+        "os.execvp(kept[0], kept)\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    return binaries
+
+
+def _stage_role_tooling(
+    tmp: Path, project: str, *, release_root: Path | None = None, name: str = "tooling"
+) -> Path:
+    """Really stage a tenant's role tooling into a sandbox. Returns its root.
+
+    An upgrade verifies the staged bundle before it moves any role, so a suite
+    that drives one needs a real bundle rather than a claim of one. These are
+    the rendered staging commands themselves, so what this fixture contains is
+    what the renderer installs (SYRD-62).
+    """
+    from scripts.ticket_board.project_provision import role_tooling_staging_commands
+
+    staging_root = tmp / name
+    staging_root.mkdir(parents=True, exist_ok=True)
+    binaries = _staging_sudo_shim(tmp)
+    commands = role_tooling_staging_commands(
+        project, str(release_root or ROOT), staging_root=staging_root
+    )
+    environment = dict(os.environ)
+    environment["PATH"] = f"{binaries}:{environment.get('PATH', '')}"
+    subprocess.run(
+        ["bash", "-c", "\n".join(["set -euo pipefail", *commands])],
+        check=True,
+        env=environment,
+        capture_output=True,
+    )
+    return staging_root
+
+
 def _pgu_project_root() -> Path:
     return Path("/home/agent/Projects/pgu")
 

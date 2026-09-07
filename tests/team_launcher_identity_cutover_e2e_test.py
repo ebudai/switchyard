@@ -356,17 +356,36 @@ def end_to_end(owner: str) -> None:
         # The public per-project tooling directory the preparation artifact
         # creates: the clients plus the package they import, root-owned and
         # readable by accounts that cannot traverse the owner's home.
-        staging = tmp_path / "staging"
-        staging.mkdir()
-        for name in ("ticket-board-write", "ticket-board-read", "directorctl"):
-            shutil.copy2(ROOT / "scripts" / name, staging / name)
-            (staging / name).chmod(0o755)
-        shutil.copytree(ROOT / "scripts" / "ticket_board", staging / "ticket_board")
-        for path in staging.rglob("*"):
-            path.chmod(0o755 if path.is_dir() else 0o644)
-        for name in ("ticket-board-write", "ticket-board-read", "directorctl"):
-            (staging / name).chmod(0o755)
-        staging.chmod(0o755)
+        # Staged by the renderer itself rather than by a hand-picked list, so
+        # what this exercises is what a host gets -- and the transaction now
+        # verifies the bundle before it moves any role, which a partial fixture
+        # would fail (SYRD-62).
+        from scripts.ticket_board.project_provision import role_tooling_staging_commands
+
+        staging_root = tmp_path / "tooling"
+        staging_root.mkdir()
+        binaries = tmp_path / "sudo-shim"
+        binaries.mkdir()
+        (binaries / "sudo").write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+        (binaries / "sudo").chmod(0o755)
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                "\n".join(
+                    [
+                        "set -euo pipefail",
+                        *role_tooling_staging_commands(
+                            "porter", str(ROOT), staging_root=staging_root
+                        ),
+                    ]
+                ),
+            ],
+            check=True,
+            env={**os.environ, "PATH": f"{binaries}:{os.environ.get('PATH', '')}"},
+            capture_output=True,
+        )
+        staging = staging_root / "porter"
 
         config_path, mapping = _tenant(tmp_path, accounts, owner)
         # What the artifacts phase leaves staged for the transaction to install,

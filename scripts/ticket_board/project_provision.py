@@ -10,10 +10,12 @@ import grp
 import os
 import pwd
 import re
+import stat
+import subprocess
 import sys
 from dataclasses import MISSING, asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 try:
     from .board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
@@ -707,7 +709,97 @@ def entry_point_module_dependencies(
     return tuple(sorted(needed))
 
 
-def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
+def role_tooling_staging_dir(project: str, *, root: Path | str | None = None) -> str:
+    """Where a role account reaches this tenant's root-owned tooling."""
+    return f"{root if root is not None else TENANT_CONTROL_ROOT}/{project}"
+
+
+def _release_marker_commit(root: Path) -> tuple[str, str]:
+    """The commit a release names, and why it names none. One of the two is empty."""
+    marker = root / RELEASE_MARKER_NAME
+    if not marker.is_file():
+        return "", f"{marker} does not exist"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return "", f"{marker} could not be read: {exc}"
+    commit = str(payload.get("commit") or "").strip()
+    return commit, "" if commit else f"{marker} names no commit"
+
+
+def staged_role_tooling_problems(
+    project: str,
+    release_root: str,
+    *,
+    staging_root: Path | None = None,
+    expect_uid: int | None = None,
+) -> list[str]:
+    """Whether the staged bundle is the one this release would install.
+
+    Staging happened only inside the account-creation script, so a tenant whose
+    accounts already existed skipped it and kept the previous release's hooks
+    and board clients while its board moved on. The roles then load code from
+    one release and talk to a board from another, and the provenance marker
+    names a release the staged files did not come from -- so the bundle is
+    checked against the selected release before the identity transaction, not
+    assumed from having run the script once (SYRD-62).
+    """
+    staging = Path(staging_root) if staging_root is not None else Path(role_tooling_staging_dir(project))
+    source = Path(release_root)
+    # Whoever is entitled to stage this. On a host that is root, because this
+    # runs from the privileged phases; naming the reader's own uid rather than a
+    # literal 0 is what makes it checkable without a root-owned sandbox, and it
+    # is the same identity either way (SYRD-62).
+    owner_uid = os.getuid() if expect_uid is None else expect_uid
+    problems: list[str] = []
+
+    def _owned(path: Path, what: str, *, executable: bool) -> None:
+        try:
+            info = path.lstat()
+        except OSError:
+            problems.append(f"{what} is not staged at {path}")
+            return
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            problems.append(f"{path} is not a regular file")
+            return
+        if info.st_uid != owner_uid:
+            problems.append(f"{path} is owned by uid {info.st_uid} rather than by uid {owner_uid}")
+        if info.st_mode & 0o022:
+            problems.append(f"{path} is group- or world-writable")
+        if executable and not info.st_mode & 0o111:
+            problems.append(f"{path} is not executable")
+
+    for name in ROLE_STAGED_EXECUTABLES:
+        _owned(staging / name, name, executable=True)
+    # Derived from the release being staged, not from whatever this process
+    # happens to be running out of: a newer release may import a module the
+    # running one does not (SYRD-62).
+    for module in entry_point_module_dependencies(source_root=source / "scripts"):
+        _owned(staging / f"{module}.py", f"the companion module {module}", executable=False)
+    for tree, what in ((staging / "ticket_board", "the ticket_board package"),
+                       (staging / SKILLS_DIR_NAME, f"the canonical {SKILLS_DIR_NAME} tree")):
+        if not tree.is_dir():
+            problems.append(f"{what} is not staged at {tree}")
+        elif not any(tree.iterdir()):
+            problems.append(f"{tree} is empty")
+    source_commit, source_reason = _release_marker_commit(source)
+    staged_commit, staged_reason = _release_marker_commit(staging)
+    if source_commit and staged_commit != source_commit:
+        problems.append(
+            f"the staged bundle names release {staged_commit or staged_reason or 'nothing'} "
+            f"and this one is {source_commit}"
+        )
+    elif not source_commit and staged_commit:
+        problems.append(
+            f"the staged bundle names release {staged_commit}, which this source does not "
+            f"({source_reason})"
+        )
+    return problems
+
+
+def role_tooling_staging_commands(
+    project: str, release_root: str, *, staging_root: Path | str | None = None
+) -> list[str]:
     """Copy the executables roles need out of the owner's home.
 
     Roles are not in the owner's group and the owner's home is not traversable
@@ -720,7 +812,7 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     clients would give the roles the version that predates the repair
     (SYRD-45).
     """
-    staging = f"/usr/local/lib/switchyard/{project}"
+    staging = role_tooling_staging_dir(project, root=staging_root)
     commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
     for name in ROLE_STAGED_EXECUTABLES:
         commands.append(
@@ -783,6 +875,131 @@ def role_tooling_staging_commands(project: str, release_root: str) -> list[str]:
     commands.append(f"    sudo rm -f {shell_quote(marker_staged)}")
     commands.append("fi")
     return commands
+
+
+ROLE_ACCOUNT_MIGRATION_SUFFIX = "-role-accounts.sh"
+
+
+def role_account_migration_name(project: str) -> str:
+    """The operator script that moves a tenant onto per-role accounts."""
+    return f"{project}{ROLE_ACCOUNT_MIGRATION_SUFFIX}"
+
+
+def acl_write_grants(
+    path: Path, *, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+) -> tuple[list[str], str]:
+    """Access control entries that let somebody other than root write this.
+
+    Mode bits are not the whole story and `ls -l` shows only a trailing `+`:
+    the grant behind this was `user:<control role>:rwx` on a file whose mode
+    said `root:root`. Returns the offending entries and, separately, why the
+    list could not be read -- which is itself a refusal, because a permission
+    that cannot be checked has not been checked (SYRD-62).
+    """
+    try:
+        proc = runner(
+            ["getfacl", "-p", "--omit-header", "--absolute-names", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        return [], str(exc)
+    if getattr(proc, "returncode", 1) != 0:
+        return [], (str(getattr(proc, "stderr", "") or "").strip() or "getfacl failed")
+    grants: list[str] = []
+    for line in str(getattr(proc, "stdout", "") or "").splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        fields = entry.split(":")
+        default = fields[0] == "default"
+        if default:
+            fields = fields[1:]
+        if len(fields) < 3:
+            continue
+        kind, qualifier, perms = fields[0], fields[1], fields[2]
+        if kind == "mask" or "w" not in perms:
+            continue
+        # The base entries are the mode bits, and those are checked directly.
+        # A default entry is different: it decides what a file created here
+        # later will carry, so `default:other::rw-` is a standing grant even
+        # though nothing writable exists yet.
+        named = bool(qualifier) and kind in {"user", "group"}
+        inherited_world = default and kind == "other"
+        if not (named or inherited_world):
+            continue
+        grants.append(f"{'default:' if default else ''}{kind}:{qualifier}:{perms}")
+    return grants, ""
+
+
+def untrusted_root_executable_reasons(
+    path: Path,
+    *,
+    boundary: Path | None = None,
+    owner_uid: int | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> list[str]:
+    """Why root must not execute this file. Empty means every step of it is root's.
+
+    A root-run script is only as trustworthy as the whole path to it. The file's
+    own mode says nothing while the directory holding it belongs to somebody
+    else, who can unlink it and put their own script at the same name -- which
+    is exactly the shape this found: a `root:root` script in a tenant-owned
+    directory, both carrying a named `rwx` entry for the control role.
+
+    So the file, every directory above it up to `boundary` (the filesystem root
+    unless a caller narrows it), the absence of any symlink along the way, and
+    the access control entries of each are all checked (SYRD-62).
+
+    `owner_uid` is the identity entitled to have written all of it. It defaults
+    to this process's own real uid, which is root wherever this decides whether
+    root may execute something -- naming it rather than a literal zero is what
+    lets the security cases be exercised as a namespace root instead of only on
+    a host.
+    """
+    candidate = Path(path)
+    if not candidate.is_absolute() or ".." in candidate.parts:
+        return [f"{path} is not an absolute path in normal form"]
+    expected_uid = os.getuid() if owner_uid is None else owner_uid
+    reasons: list[str] = []
+    real = Path(os.path.realpath(candidate))
+    if real != candidate:
+        reasons.append(f"{candidate} is reached through a symlink and resolves to {real}")
+    stop = Path(boundary) if boundary is not None else Path(candidate.anchor or "/")
+    chain: list[Path] = []
+    for entry in (candidate, *candidate.parents):
+        chain.append(entry)
+        if entry == stop:
+            break
+    else:
+        reasons.append(f"{candidate} is not under {stop}")
+    for entry in chain:
+        try:
+            info = entry.lstat()
+        except OSError as exc:
+            reasons.append(f"{entry} cannot be inspected: {exc}")
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            reasons.append(f"{entry} is a symlink")
+            continue
+        if entry == candidate and not stat.S_ISREG(info.st_mode):
+            reasons.append(f"{entry} is not a regular file")
+        if entry != candidate and not stat.S_ISDIR(info.st_mode):
+            reasons.append(f"{entry} is not a directory")
+        if info.st_uid != expected_uid:
+            reasons.append(
+                f"{entry} is owned by uid {info.st_uid} rather than by uid {expected_uid}"
+            )
+        if info.st_mode & 0o022:
+            reasons.append(
+                f"{entry} is group- or world-writable (mode {stat.S_IMODE(info.st_mode):04o})"
+            )
+        grants, unreadable = acl_write_grants(entry, runner=runner)
+        if unreadable:
+            reasons.append(f"{entry} access control list could not be read: {unreadable}")
+        reasons.extend(f"{entry} grants write through {grant}" for grant in grants)
+    return reasons
 
 
 class PathContainmentError(ValueError):

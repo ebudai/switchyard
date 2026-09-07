@@ -198,6 +198,9 @@ def _declarative_tenant(
 ) -> tuple[Path, Path]:
     _privileged_root(tmp)
     _stage_units(project)
+    # The upgrade stages and verifies this tenant's role tooling before it moves
+    # any role, so the sandbox holds a real bundle (SYRD-62).
+    _stage_role_tooling(tmp, project)
     config_path = _write_six_visible_role_config(tmp, project=project)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     # A real account: the privileged paths chown generated files to the project
@@ -305,6 +308,7 @@ def _upgrade(
             dry_run=dry_run,
             source_repo=source_repo,
             deploy_ref=deploy_ref,
+            tooling_root=config_path.parent / "tooling",
             runner=runner or FakeRunner(),
             print_func=printed.append,
         )
@@ -551,7 +555,11 @@ def test_the_cutover_happens_only_once_every_account_exists() -> None:
             role.get("run_as_user")
             for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
         )
-        assert (config_path.with_name("porter-role-accounts.sh")).is_file()
+        # Published where only root could have written it, and nowhere the
+        # control role can rewrite (SYRD-62).
+        config = team_launcher.load_project_config("porter", config_path)
+        assert team_launcher.trusted_role_account_migration_path(config).is_file()
+        assert not config_path.with_name("porter-role-accounts.sh").exists()
 
         # Once they exist, the same command stops the workers, moves the
         # configuration, restarts them and checks the uid each role's process is
@@ -593,6 +601,7 @@ def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
             result = team_launcher.cutover_role_identities_command(
                 team_launcher.load_project_config("porter", config_path),
                 config_path=config_path,
+                tooling_dir=config_path.parent / "tooling" / "porter",
                 runner=tenant.runner(),
                 print_func=lambda _text: None,
             )
@@ -622,6 +631,7 @@ def test_the_listener_is_stopped_before_the_release_and_its_state_restored() -> 
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config("porter", config_path),
                     config_path=config_path,
+                    tooling_dir=config_path.parent / "tooling" / "porter",
                     runner=tenant.runner(),
                     launcher=lambda config, **kwargs: 1,
                     stopper=lambda config, **kwargs: (tenant.stops.append("x") or setattr(tenant, "live", False) or 0),
@@ -659,6 +669,7 @@ def test_a_presentation_that_will_not_reconnect_rolls_back_in_place() -> None:
                     result = team_launcher.cutover_role_identities_command(
                         team_launcher.load_project_config("porter", config_path),
                         config_path=config_path,
+                        tooling_dir=config_path.parent / "tooling" / "porter",
                         runner=tenant.runner(),
                         print_func=printed.append,
                     )
@@ -695,6 +706,7 @@ def test_a_listener_that_will_not_start_rolls_the_whole_thing_back() -> None:
             result = team_launcher.cutover_role_identities_command(
                 team_launcher.load_project_config("porter", config_path),
                 config_path=config_path,
+                tooling_dir=config_path.parent / "tooling" / "porter",
                 runner=refuses_to_start,
                 print_func=printed.append,
             )
@@ -723,6 +735,7 @@ def test_a_listener_that_will_not_stop_blocks_the_release() -> None:
             result = team_launcher.cutover_role_identities_command(
                 team_launcher.load_project_config("porter", config_path),
                 config_path=config_path,
+                tooling_dir=config_path.parent / "tooling" / "porter",
                 runner=stuck,
                 print_func=printed.append,
             )
@@ -755,6 +768,7 @@ def test_a_stop_that_leaves_workers_running_changes_nothing() -> None:
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config("porter", config_path),
                     config_path=config_path,
+                    tooling_dir=config_path.parent / "tooling" / "porter",
                     runner=watching,
                     # The stop reports success and leaves everything running,
                     # which is the case that matters: the sessions stay live.
@@ -1220,7 +1234,10 @@ def test_the_upgrade_writes_that_artifact_when_the_accounts_are_missing() -> Non
     with tempfile.TemporaryDirectory(prefix="role-account-artifact-written.") as tmp:
         config_path, _ = _declarative_tenant(Path(tmp))
         _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
-        written = config_path.with_name("porter-role-accounts.sh").read_text(encoding="utf-8")
+        config = team_launcher.load_project_config("porter", config_path)
+        written = team_launcher.trusted_role_account_migration_path(config).read_text(
+            encoding="utf-8"
+        )
         assert "porter-role-accounts.sh" in output, output
         assert "systemctl restart" not in written, written
         assert "switchyard finish-upgrade porter" in written, written

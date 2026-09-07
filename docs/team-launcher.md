@@ -486,12 +486,69 @@ account is missing rather than leaving setfacl to say nothing useful. The
 control role is still resolved from the workflow's capabilities, so the grant
 follows whichever role holds them rather than a literal name.
 
+**The script an operator runs as root lives where only root can write it.**
+The control-role grant above is `setfacl -R -m u:<control role>:rwX` over the
+tenant's provisioning directory, with a default entry so the atomic replacement
+each projection makes keeps it -- and that grant has to include write on the
+directory, because writing a new file and renaming it into place is how those
+projections are written. A directory somebody can write is a directory they can
+empty: a `root:root` script inside it can be unlinked and replaced with theirs.
+So the two do not share a directory. The projection stays where the control role
+can update it unprivileged, and `<project>-role-accounts.sh` is published by
+root into `/etc/switchyard/provision/<project>/`, which no tenant can reach. The
+tenant-side copy is removed rather than left beside it: a second file of the
+same name, executable and writable by a role, is the one somebody would run.
+
+That removal is part of the artifacts phase, so it happens on every upgrade and
+not only on one that still has an operator step left. A resume whose accounts
+all exist never publishes anything -- there is nothing left for an operator to
+run -- and a tenant-side copy left from before would otherwise survive it
+untouched, which is the whole finding still sitting there afterwards.
+
+That removal is root deleting a file inside a tree the tenant controls, so the
+path is walked component by component with `O_NOFOLLOW` on every one of them,
+from the filesystem root, through the same descriptor walk the generated
+artifacts are written by. `O_NOFOLLOW` on the directory alone is not enough: it
+refuses only that directory's own last component, so an ancestor several levels
+up -- `.switchyard`, say -- can be replaced with a symlink, the kernel follows
+it, and root unlinks `<project>-role-accounts.sh` in whatever tree it points at.
+Any ancestor that is a symlink, or that cannot be opened safely, is a refusal and
+nothing is unlinked. Nothing reads the file, parses it or runs it; existence is
+asked and the unlink made through the same descriptor, so there is no window
+between them, and a stale copy that is itself a symlink is removed as the link
+rather than followed. An upgrade that cannot remove it records the phase blocked
+and stops rather than reporting success with it still there.
+
+Nothing names that script without the whole path to it being checked first --
+the file and every directory above it, up to the filesystem root: owner, mode,
+and the POSIX access control entries, which `ls -l` shows only as a trailing
+`+`. A named user or group entry that grants write, a default entry that would
+give one to the next file written there, a writable or foreign-owned ancestor, a
+symlink anywhere along the way, or an access control list that cannot be read at
+all are each a refusal. Root that publishes a script it cannot vouch for stops
+before handing it to anybody. An unprivileged run publishes nothing at all: it
+names root's published copy if there is one, and otherwise names the command
+that publishes it.
+
 **Role accounts can reach the board clients.** They cannot traverse the owner's
 0710 home, so `ticket-board-write`, `ticket-board-read`, `directorctl` and the
 `ticket_board` package they import are staged root-owned under
 `/usr/local/lib/switchyard/<project>`, from the pinned shared release rather
 than from the board being replaced, and each role's PATH points there. Without
 that a role has no board access at all, however correct the authority is.
+
+That staging is part of the artifacts phase, so it happens on every upgrade,
+including a resumed one whose accounts already exist. It used to happen only
+inside the account-creation script, which such an upgrade skips entirely -- so
+the roles kept the previous release's hooks and board clients while the board
+moved on under them, and the provenance marker named a release the staged files
+had not come from. It stages from the exact selected release rather than from
+the `current` symlink, and the identity transaction verifies the result before
+it stops anything: every staged executable, every companion module the selected
+release's entry points import, the `ticket_board` package, the canonical skills
+tree, and a `.switchyard-release.json` that names this release and not another.
+`switchyard cutover-roles` reaches that transaction on its own, so the check is
+in the transaction rather than only in the phase that usually precedes it.
 
 **Sessions are found under either identity.** A tenant part-way onto per-role
 accounts names accounts that do not exist, so every probe through them fails and

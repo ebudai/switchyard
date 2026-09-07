@@ -176,6 +176,10 @@ def _stage_units(project: str) -> None:
     staged.mkdir(parents=True, exist_ok=True)
     for unit in (
         f"{project}-ticket-board.service",
+        # The canary too: the deploy starts it through systemd, and the
+        # transaction installs the same three units the printed operator
+        # sequence does (SYRD-63).
+        f"{project}-ticket-board-canary.service",
         f"{project}-ticket-board-notify-listener.service",
     ):
         (staged / unit).write_text(f"[Service]\n# generated {unit}\n", encoding="utf-8")

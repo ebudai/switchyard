@@ -20,10 +20,12 @@ in place. If a worker exits, the proxy remains as a recovery surface. The
 project viewer and separate Konsole layout attach to display sessions rather
 than worker sessions.
 
-Bootstrap the persistent slots and the preferred client arrangement once:
+Bootstrap the persistent slots and the window that shows them once. The default
+is the terminal's own layout; the viewer is the tmux fallback and opens no
+window, so bootstrapping into it is refused (see below):
 
 ```text
-switchyard present <project> bootstrap --layout viewer
+switchyard present <project> bootstrap
 switchyard present <project> bootstrap --layout separate
 ```
 
@@ -49,6 +51,66 @@ project owner's tmux server.
 All presentation worker, display-slot, and viewer targets use tmux exact-name
 selection. A missing session therefore cannot prefix-match, attach to, relabel,
 respawn, or stop a longer session name owned by another role.
+
+## A window is not a client
+
+The three layers each have clients, and only one of them is somebody looking at
+the project. A viewer pane is itself a terminal, so it is a client of the slot
+it observes; six of them can exist, every slot can report `session_attached=1`,
+and `list` can report every worker and client connected, with nothing on any
+screen at all. That is the state a rolled-back identity cutover and a
+`bootstrap` from a tenant account both produced.
+
+So the presentation distinguishes them. A **presentation window** is a client
+attached to the viewer or to a display slot whose terminal is not one of
+presentation's own panes: the tab of a desktop terminal. `list` reports it as
+its own line, separately from the per-slot client state.
+
+`bootstrap` opens that window and will not report success without one. It
+defaults to the terminal's own layout — `--layout separate` — which is one
+window of six tabs arranged two rows by three by the terminal itself, with its
+native split and focus controls. The `viewer` layout is the tmux fallback for
+hosts with no such terminal: it nests the slots inside another tmux session,
+draws a second status row, and opens no window at all, so `bootstrap
+--layout viewer` is refused rather than reporting a presentation nobody can
+see.
+
+For the native layout the proof is both halves: a client from outside
+presentation, and the terminal process still running. A terminal handed a
+layout file it cannot read aborts — status -6, empty log — after its tabs have
+briefly existed, so client counts alone would call that a success. If the
+window cannot be proved, `bootstrap` fails, takes down anything headless it
+just built, and names the command that does work from where the caller is —
+`switchyard <project>`, from an ordinary terminal in the desktop session that
+owns the screen, or through that account's lifecycle control bridge, which
+carries the desktop identity across.
+
+Three things have to be true for that window to open at all, and each was
+wrong:
+
+- **The layout file must be readable by the account the terminal runs as.** The
+  window is correctly dropped to the desktop user, while the generated layout
+  was 0600 under the tenant's 0700 state directory. It is now written under the
+  desktop account's own state directory, still 0600 in a 0700 directory, owned
+  by the account that reads it. An invocation that cannot do that refuses
+  instead of opening a terminal that will abort.
+- **The tab's working directory must be one that account can enter.** It was
+  the launching process's own home, which under `sudo` is `/root`.
+- **Each tab must reach its display session without a password.** The sessions
+  belong to the tenant owner and the window to a person, so something crosses
+  that line once per tab. `sudo -u <owner> tmux attach` asks for a password in
+  each of six tabs as the window opens, and the way to avoid that is a blanket
+  grant on the owner account. Instead each tab runs
+  `/usr/local/lib/switchyard/<project>/switchyard-display-attach <project>
+  <slot>`: root-owned, reached through one `NOPASSWD` entry naming only that
+  program, taking a slot number as its only input, and attaching by exact name
+  to a display session of that project. It can name no worker session, no other
+  tenant, and no command to run inside one.
+
+The identity cutover stops only the worker sessions. The slots are long-lived
+and are re-pointed in place, so the window the tenant was looking at is never
+taken down, on either the success or the rollback path; if it is gone anyway,
+the transaction says so instead of reporting a presentation that reconnected.
 
 ## Client sizing and status bars
 

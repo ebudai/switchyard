@@ -35,6 +35,7 @@ from scripts.ticket_board.project_provision import (  # noqa: E402
     tenant_control_grant,
     TENANT_CONTROL_LAUNCHER,
     tenant_control_grant_name,
+    display_attach_helper_path,
     tenant_control_helper_path,
     tenant_control_sudoers,
 )
@@ -89,10 +90,16 @@ def test_the_grant_records_only_a_username_and_no_credential() -> None:
         assert forbidden not in serialized, forbidden
 
 
-def test_the_sudo_grant_names_one_program_and_one_caller() -> None:
+def test_the_sudo_grant_names_named_programs_and_one_caller() -> None:
     rendered = tenant_control_sudoers(_plan())
     body = [line for line in rendered.splitlines() if line and not line.startswith("#")]
-    assert body == [f"{HUMAN} ALL=(root) NOPASSWD: {tenant_control_helper_path(PROJECT)}"]
+    # Two programs, each named in full, each validating its own arguments: the
+    # lifecycle verbs, and one tab of the presentation window reaching one
+    # display slot without a password prompt per tab (SYRD-65).
+    assert body == [
+        f"{HUMAN} ALL=(root) NOPASSWD: {tenant_control_helper_path(PROJECT)}",
+        f"{HUMAN} ALL=(root) NOPASSWD: {display_attach_helper_path(PROJECT)}",
+    ]
     # No shell, no editor, no wildcard, and no grant on the owner account
     # itself -- any of which would be a general foothold rather than a verb.
     for forbidden in ("ALL:", "*", "/bin/sh", "/bin/bash", "sudoedit", f"({OWNER})"):

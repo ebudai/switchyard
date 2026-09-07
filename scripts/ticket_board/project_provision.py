@@ -645,6 +645,10 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     "switchyard-publish-ref",
     # Root-owned and reached only through this tenant's sudo grant.
     "switchyard-tenant-control",
+    # The one-slot display bridge a presentation window's tabs run, so a
+    # desktop terminal can show the owner's display sessions without six
+    # password prompts and without a broad sudo grant (SYRD-65).
+    "switchyard-display-attach",
     # The board clients themselves. A role that cannot run these has no
     # normal board access at all: they live under the owner's home, which
     # is 0710 and which no role account may traverse (SYRD-45).
@@ -1502,6 +1506,11 @@ def tenant_control_helper_path(project: str) -> str:
     return f"/usr/local/lib/switchyard/{project}/switchyard-tenant-control"
 
 
+def display_attach_helper_path(project: str) -> str:
+    """The program one presentation tab runs to reach one display session."""
+    return f"/usr/local/lib/switchyard/{project}/switchyard-display-attach"
+
+
 #: The lifecycle entrypoint the bridge runs. Deliberately the shared release
 #: rather than the tenant's own deployed tree: that tree lives under the owner's
 #: home, where the owner can replace the `current` symlink or any directory
@@ -1558,6 +1567,11 @@ def tenant_control_sudoers_document(project: str, control_user: str) -> str:
             f"# {project}: lifecycle control for the human who provisioned it.",
             "# One program, which validates its own arguments and drops to the owner.",
             f"{control_user} ALL=(root) NOPASSWD: {tenant_control_helper_path(project)}",
+            "# And one tab of the presentation window, per display slot. The alternative",
+            "# is a password prompt in each of six tabs as the window opens, or a blanket",
+            "# grant on the owner account -- this program takes a slot number and can only",
+            "# ever attach to a display session of this project (SYRD-65).",
+            f"{control_user} ALL=(root) NOPASSWD: {display_attach_helper_path(project)}",
         ]
     )
 

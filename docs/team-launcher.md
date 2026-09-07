@@ -188,7 +188,7 @@ provision directory:
 | path | mode | what it says |
 | --- | --- | --- |
 | `/usr/local/lib/switchyard/<project>/control-grant.json` | `0644 root:root` | the project, its owner, the one human who may control it, and the pinned launcher (`/opt/switchyard/current/switchyard`) |
-| `/etc/sudoers.d/49-<project>-tenant-control` | `0440 root:root` | that human may run `/usr/local/lib/switchyard/<project>/switchyard-tenant-control` as root, `NOPASSWD`, and nothing else |
+| `/etc/sudoers.d/49-<project>-tenant-control` | `0440 root:root` | that human may run `/usr/local/lib/switchyard/<project>/switchyard-tenant-control` and `.../switchyard-display-attach` as root, `NOPASSWD`, and nothing else |
 
 The grant is world-readable on purpose: the public wrapper reads it to refuse an
 unauthorized caller locally, without a password prompt. A username is not a
@@ -228,10 +228,29 @@ path, no shell fragment, no environment override, no role identity:
   `PATH`, `PYTHONPATH` or `SWITCHYARD_*` chooses what the owner executes. It
   drops supplementary groups, `setgid`/`setuid`s to the owner, verifies the drop,
   and `execve`s the pinned launcher.
+* **Whose screen.** One thing is carried across deliberately:
+  `SWITCHYARD_TENANT_CONTROL_CALLER`, the caller's own name, resolved here from
+  `SUDO_UID` rather than copied from anything they wrote. The owner account owns
+  the project's files and sessions but has no graphical session, so a launcher
+  that knows only which account is executing resolves the desktop user to the
+  owner, aims the window at the owner's runtime directory where no compositor is
+  listening, and opens nothing. The launcher uses this name for the GUI user and
+  for the desktop it looks up when choosing a layout, which is what stops
+  `sudo switchyard <project>` being the only route to a visible window.
 
 It never runs anything as a role account and never touches the board, so the
 distinct role UIDs and the board's peer-credential checks mean exactly what they
 did before. An unauthorized local user is refused outright, with no prompt.
+
+`switchyard-display-attach <project> <slot>` is the same shape for the one
+other thing that crosses this line: a tab of that person's presentation window
+reaching one of the tenant's display sessions. It takes a slot number and
+nothing else, builds the session name from the pinned project, checks the same
+root-owned grant against the same kernel-resolved caller, and `exec`s
+`tmux attach` by exact name after dropping to the owner. It exists so a window
+of six tabs does not ask for a password six times as it opens, and so the
+alternative — a blanket sudo grant on the owner account — is not needed
+(SYRD-65).
 
 **Who gets recorded.** The human running `switchyard new`, taken from `SUDO_UID`
 where present. The tenant's own accounts are never recorded: the owner already
@@ -262,8 +281,9 @@ behind every pane, and anything typed or pasted into a detached tab ran as root.
 Two things prevent it, and both have to hold.
 
 A root invocation crosses to the desktop account before any GUI process starts.
-The account comes from `TEAM_LAUNCHER_GUI_USER`, else `SUDO_USER`, else the
-invoking user. The environment is **emptied** at that transition rather than
+The account comes from `TEAM_LAUNCHER_GUI_USER`, else `SUDO_USER`, else
+`SWITCHYARD_TENANT_CONTROL_CALLER` (the human the control bridge resolved from
+the kernel), else the invoking user. The environment is **emptied** at that transition rather than
 filtered: `sudo`'s `env_reset` is the host's policy and not this project's, so a
 site whose sudoers keeps variables would carry them across, and `-H` leaves more
 set. The command is `env -i` plus exactly `PATH`, `HOME`, `USER`, `LOGNAME`,

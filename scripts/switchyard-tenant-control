@@ -25,6 +25,12 @@ root-owned data rather than by its caller:
   replace is not pinned, however root-owned its last component happens to be.
 * HOW. The environment is rebuilt rather than inherited, because a caller who
   chooses PATH, PYTHONPATH or SWITCHYARD_* chooses what the owner executes.
+  One thing is deliberately carried across: the caller's own name, resolved
+  from SUDO_UID here rather than copied from anything they wrote. The owner
+  account owns the project's files and sessions but has no graphical session,
+  so a launcher that only knows who is executing opens its window against an
+  empty runtime directory and nothing appears. Passing the human through is
+  what lets this bridge do the whole job the `sudo` route did (SYRD-65).
 
 It never runs anything as a role account and never touches the board, so role
 UIDs and the board's peer-credential checks mean exactly what they did before.

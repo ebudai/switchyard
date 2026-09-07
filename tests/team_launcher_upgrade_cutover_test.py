@@ -109,6 +109,12 @@ class _RunningTenant:
             self.live = False
             return 0
 
+        # The transaction stops the workers and leaves the presentation alone,
+        # so it is the worker-only stop that has to be intercepted here; the
+        # whole-project stop is kept patched so a test that reached it would
+        # be visible rather than silently opening a window (SYRD-65).
+        self._stop_workers = team_launcher.stop_role_sessions
+        team_launcher.stop_role_sessions = _stop
         team_launcher.launch_project = _launch
         team_launcher.stop_project = _stop
         return self
@@ -119,6 +125,7 @@ class _RunningTenant:
         team_launcher.stop_project = self._stop
         team_launcher.local_account_exists = self._exists
         team_launcher._start_role_sessions_without_a_window = self._start_sessions
+        team_launcher.stop_role_sessions = self._stop_workers
         return False
 
 

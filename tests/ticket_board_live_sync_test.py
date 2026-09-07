@@ -223,11 +223,12 @@ def main() -> int:  # noqa: C901 - one integration scenario, read top to bottom
                 app,
                 events=hub,
                 director_notifier=t.QuietNotifier(),
-                # The socket resolves the caller from the kernel-supplied uid
-                # against the board's own account table, so the fixture states
-                # that this account is the Director rather than the client
-                # claiming it (SYRD-39).
-                role_authority=t.local_role_authority_as("director"),
+                # Match the live a542ed35 Unix-socket contract. The client
+                # registers its role on the socket connection and the registry
+                # binds it to the kernel-supplied peer pid for that connection.
+                # Do not import the later per-role account authority table into
+                # this compatibility release.
+                caller_registry=t.CallerRegistry(),
             )
             threads = [
                 threading.Thread(target=server.serve_forever, daemon=True),

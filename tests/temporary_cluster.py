@@ -55,7 +55,7 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _die_with_parent() -> None:
+def die_with_parent() -> None:
     """Ask the kernel to signal this child when its parent dies.
 
     Set in the child between fork and exec. The parent pid is re-read afterwards
@@ -67,6 +67,49 @@ def _die_with_parent() -> None:
         os._exit(127)
     if os.getppid() == 1:
         os._exit(127)
+
+
+# The old private name, kept because this module's own call site reads better
+# with it and other tests may have picked it up.
+_die_with_parent = die_with_parent
+
+
+#: The pid a helper must outlive, told to it rather than sampled by it. A child
+#: orphaned before its first instruction runs -- which is what a launcher exiting
+#: during cluster creation produces -- has no way to look up who started it: by
+#: then `getppid()` already answers with the subreaper that adopted it (SYRD-57).
+PARENT_PID_ENV = "TEMPORARY_CLUSTER_PARENT_PID"
+
+
+def expected_parent_pid() -> int:
+    """The pid this process must outlive: what it was told, else what it can see."""
+    told = os.environ.get(PARENT_PID_ENV, "").strip()
+    if told.isdigit() and int(told) > 0:
+        return int(told)
+    return os.getppid()
+
+
+def spawn_tied(argv: list[str], **kwargs: object) -> subprocess.Popen:
+    """Start a helper process the kernel takes down when this process dies.
+
+    Tying the cluster to the process that starts it is not enough when that
+    process is itself a helper: kill the runner and the helper is adopted by
+    init, still holding a cluster that is perfectly happy where it is. One was
+    found asleep 33 minutes after the worktree it came from had been deleted
+    (SYRD-57). Every test that spawns a cluster-owning helper goes through here.
+
+    Two protections, because the kernel's own is not enough on its own. The
+    parent-death signal covers a runner that is killed. The recorded pid covers a
+    runner that exits while the child is still starting up: by the time such a
+    child runs its first instruction it has already been adopted, and asking who
+    its parent is answers with the adopter. So it is told here instead, before
+    the exec, by the only process that still knows.
+    """
+    kwargs.setdefault("preexec_fn", die_with_parent)
+    environment = dict(kwargs.get("env") or os.environ)  # type: ignore[arg-type]
+    environment[PARENT_PID_ENV] = str(os.getpid())
+    kwargs["env"] = environment
+    return subprocess.Popen(argv, **kwargs)  # type: ignore[arg-type]
 
 
 def _running(pid: int) -> bool:
@@ -234,7 +277,13 @@ def temporary_cluster(
         _shut_down(child, shutdown=shutdown)
         shutil.rmtree(root, ignore_errors=True)
         handler = previous.get(signum)
-        signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+        if handler is None or handler is signal.SIG_IGN:
+            # A process that inherited SIG_IGN would otherwise absorb the very
+            # signal it was told to die from, having tidied up first: cleanup
+            # ran, and it kept running. That is what the stale helper did, and
+            # why it needed SIGKILL (SYRD-57).
+            handler = signal.SIG_DFL
+        signal.signal(signum, handler)
         os.kill(os.getpid(), signum)
 
     for signum in (signal.SIGINT, signal.SIGTERM):
@@ -263,14 +312,63 @@ def temporary_cluster(
         shutil.rmtree(root, ignore_errors=True)
 
 
-def _sleep_forever_with_a_cluster() -> int:  # pragma: no cover - run as a subprocess
+ORPHAN_POLL_SECONDS = 0.2
+
+
+def _wait_while_parented(started_by: int) -> None:  # pragma: no cover - subprocess
+    """Wait to be killed, but not past the death of whoever started us.
+
+    The signals and PR_SET_PDEATHSIG are the fast paths. This is the one that
+    depends on nothing being delivered or honoured: a helper whose own parent is
+    gone has nobody left to answer to, so it leaves.
+
+    The test is against the pid that started us, not against pid 1. A host with a
+    subreaper -- a desktop user manager, for one -- adopts an orphan itself, so
+    waiting to be reparented to init waits forever. The helper found stale on this
+    host had been adopted exactly that way (SYRD-57).
+
+    ``started_by`` is read at process entry and passed in, never sampled here: a
+    launcher that exits while the cluster is still being created would otherwise
+    be gone by the time this is reached, and the pid sampled would be the
+    adopter's -- which never changes again, so the helper would wait forever for
+    a parent that is already gone.
+    """
+    while os.getppid() == started_by:
+        time.sleep(ORPHAN_POLL_SECONDS)
+
+
+def _sleep_forever_with_a_cluster(started_by: int) -> int:  # pragma: no cover
     """Helper entry point: start a cluster, announce it, and wait to be killed."""
     with temporary_cluster(prefix="temporary-cluster-selftest.") as cluster:
         print(f"{cluster.pid} {cluster.root} {cluster.port}", flush=True)
-        while True:
-            time.sleep(3600)
+        _wait_while_parented(started_by)
+    return 0
+
+
+def _run_a_helper(started_by: int) -> int:  # pragma: no cover - run as a subprocess
+    """Outer-runner entry point: start the helper the way a test must, and report.
+
+    Prints `<helper pid> <postgres pid> <root>` so a test can kill this process
+    and then ask the kernel about both of the ones it left behind.
+    """
+    helper = spawn_tied(
+        [sys.executable, str(Path(__file__).resolve())],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    announced = helper.stdout.readline().split()
+    print(f"{helper.pid} {announced[0]} {announced[1]}", flush=True)
+    _wait_while_parented(started_by)
     return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(_sleep_forever_with_a_cluster())
+    # Whoever started us said so in the environment. Reading it here rather than
+    # sampling `getppid()` is the whole point: creating a cluster takes a second
+    # or more, and a launcher that exits inside that window is gone before this
+    # process runs its first instruction (SYRD-57).
+    STARTED_BY = expected_parent_pid()
+    if "--run-a-helper" in sys.argv[1:]:
+        raise SystemExit(_run_a_helper(STARTED_BY))
+    raise SystemExit(_sleep_forever_with_a_cluster(STARTED_BY))

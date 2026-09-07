@@ -3,6 +3,12 @@
 
 Rules:
 - tests/ tmux invocations must use an explicit -L socket for isolation.
+- a tests/ module that invokes tmux must also isolate the user bus, or every
+  pane it opens asks the live tenant's systemd manager for a transient scope
+  however private its socket is. `bus_isolation_violations` is that rule; it is
+  asserted repository-wide from tmux_user_bus_isolation_test rather than folded
+  into `lint_tmux_sources`, whose own aggregate is red on main for unrelated
+  reasons (SYRD-55).
 - tests/ and scripts/ must never invoke the tmux server-shutdown command.
 - scripts/ may use a project's default tmux socket; the -L test-isolation rule
   does not apply there.
@@ -31,6 +37,13 @@ TESTS_DIR = ROOT / "tests"
 SCRIPTS_DIR = ROOT / "scripts"
 SUBPROCESS_TMUX_CALLS = frozenset({"call", "check_call", "check_output", "Popen", "run"})
 FORBIDDEN_TMUX_COMMAND = "kill-server"
+#: The module that puts a process on a bus reaching no user manager.
+BUS_ISOLATION_MODULE = "tmux_bus_isolation"
+BUS_ISOLATION_CALL = "isolate_tmux_bus"
+#: Modules that apply it on import, so importing one of them is enough.
+BUS_ISOLATING_MODULES = frozenset(
+    {BUS_ISOLATION_MODULE, "standalone_test_runner", "team_launcher_test_helpers", "tmux_socket_cleanup"}
+)
 
 
 @dataclass(frozen=True)
@@ -191,6 +204,63 @@ def tmux_argv_builder_violations(source: str, path: Path) -> list[TmuxLintViolat
     return violations
 
 
+def _imported_module_names(tree: ast.AST) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module.split(".")[0])
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def _invokes_tmux(tree: ast.AST) -> bool:
+    """Whether this module actually runs tmux, rather than naming it."""
+    parents = _parent_map(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args and _subprocess_call_name(node.func):
+            shape = _tmux_argv_shape(node.args[0])
+            if shape is not None and shape.starts_with_tmux:
+                return True
+        if isinstance(node, (ast.List, ast.Tuple, ast.BinOp)) and _is_tmux_argv_builder(node, parents):
+            shape = _tmux_argv_shape(node)
+            if shape is not None and shape.starts_with_tmux:
+                return True
+    imported = _imported_module_names(tree)
+    return bool(imported & {"tmux_socket_cleanup"}) or "run_isolated_tmux" in imported
+
+
+def _isolates_the_user_bus(tree: ast.AST) -> bool:
+    if _imported_module_names(tree) & BUS_ISOLATING_MODULES:
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            called = getattr(func, "id", None) or getattr(func, "attr", None)
+            if called == BUS_ISOLATION_CALL:
+                return True
+    return False
+
+
+def bus_isolation_violations(source: str, path: Path) -> list[TmuxLintViolation]:
+    """A module that starts tmux panes must not be able to reach a user bus."""
+    tree = ast.parse(source, filename=str(path))
+    if not _invokes_tmux(tree) or _isolates_the_user_bus(tree):
+        return []
+    return [
+        TmuxLintViolation(
+            path=path,
+            line=1,
+            detail=(
+                f"invokes tmux without isolating the user bus; import {BUS_ISOLATION_MODULE} "
+                f"and call {BUS_ISOLATION_CALL}(), or import a module that does"
+            ),
+        )
+    ]
+
+
 def forbidden_server_shutdown_violations(source: str, path: Path) -> list[TmuxLintViolation]:
     tree = ast.parse(source, filename=str(path))
     violations: list[TmuxLintViolation] = []
@@ -284,6 +354,37 @@ def test_tmux_argv_builder_with_socket_is_allowed() -> None:
 def test_assertion_tmux_literals_are_not_builder_violations() -> None:
     source = "def test_calls():\n    assert runner.calls[0] == ['tmux', 'has-session', '-t', 'pgu-ops']\n"
     assert tmux_argv_builder_violations(source, Path("good_test.py")) == []
+
+
+def test_tmux_without_bus_isolation_is_reported() -> None:
+    source = "import subprocess\nsubprocess.run(['tmux', '-L', 's', 'new-session', '-d'])\n"
+    violations = bus_isolation_violations(source, Path("bad_test.py"))
+    assert len(violations) == 1
+    assert "isolating the user bus" in violations[0].detail
+
+
+def test_tmux_with_direct_bus_isolation_is_allowed() -> None:
+    source = (
+        "import subprocess\n"
+        "from tmux_bus_isolation import isolate_tmux_bus\n"
+        "isolate_tmux_bus()\n"
+        "subprocess.run(['tmux', '-L', 's', 'new-session', '-d'])\n"
+    )
+    assert bus_isolation_violations(source, Path("good_test.py")) == []
+
+
+def test_tmux_through_an_isolating_helper_is_allowed() -> None:
+    source = (
+        "from team_launcher_test_helpers import *\n"
+        "import subprocess\n"
+        "subprocess.run(['tmux', '-L', 's', 'new-session', '-d'])\n"
+    )
+    assert bus_isolation_violations(source, Path("good_test.py")) == []
+
+
+def test_a_module_that_only_names_tmux_needs_no_isolation() -> None:
+    source = "def test_calls():\n    assert runner.calls[0] == ['tmux', 'has-session', '-t', 'x']\n"
+    assert bus_isolation_violations(source, Path("good_test.py")) == []
 
 
 def test_forbidden_server_shutdown_is_reported() -> None:

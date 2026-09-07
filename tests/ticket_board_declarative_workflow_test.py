@@ -13,6 +13,13 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
+
+# Every pane this suite opens would otherwise ask the live tenant's systemd
+# user manager for a transient scope, however private its tmux socket is
+# (SYRD-55).
+from tmux_bus_isolation import isolate_tmux_bus
+
+isolate_tmux_bus()
 import ticket_board_write_api_test as t
 from scripts.ticket_board.workflow_config import validate
 

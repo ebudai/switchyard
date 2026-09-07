@@ -7,6 +7,9 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# This suite starts a real tmux server, and every pane it opens would otherwise
+# ask the live tenant's systemd user manager for a transient scope (SYRD-55).
+eval "$(python3 "$REPO_ROOT/tests/tmux_bus_isolation.py" --export)"
 TMPDIR_T="$(mktemp -d)"
 PATH_ORIGINAL="$PATH"
 TMUX_REAL="$(command -v tmux)"

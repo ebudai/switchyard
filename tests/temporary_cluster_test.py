@@ -13,9 +13,11 @@ whether the postmaster is still there.
 from __future__ import annotations
 
 import ast
+import contextlib
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,9 +46,22 @@ def _await_gone(pid: int, *, timeout: float = 20.0) -> bool:
     return False
 
 
+def _await_absent(path: Path, *, timeout: float = 20.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def _start_helper() -> tuple[subprocess.Popen[str], int, Path]:
-    """Run a cluster in another process and wait until it says where it is."""
-    child = subprocess.Popen(
+    """Run a cluster in another process and wait until it says where it is.
+
+    Through the shared spawner: a helper started any other way outlives this
+    runner and takes its cluster with it (SYRD-57).
+    """
+    child = tc.spawn_tied(
         [sys.executable, str(HELPER)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -291,6 +306,171 @@ def test_the_named_shutdown_is_the_signal_the_cluster_gets() -> None:
     child = subprocess.Popen(["sleep", "60"])
     tc._shut_down(child, shutdown="nonsense")
     assert child.returncode == -signal.SIGINT, child.returncode
+
+
+# --- the helper itself, not just its cluster ---------------------------------
+
+
+def test_killing_the_outer_runner_takes_the_helper_and_its_cluster() -> None:
+    """The gap SYRD-54 and SYRD-56 left: a helper adopted by init keeps its cluster.
+
+    The runner here is a separate process that starts the helper exactly as a
+    test does. SIGKILL leaves it no chance to clean up, so what happens next is
+    the kernel's doing and nothing else's.
+    """
+    runner = subprocess.Popen(
+        [sys.executable, str(HELPER), "--run-a-helper"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(ROOT / "tests"),
+    )
+    line = runner.stdout.readline().split()
+    assert len(line) == 3, (line, runner.poll(), runner.stderr.read() if runner.poll() else "")
+    helper_pid, postmaster, root = int(line[0]), int(line[1]), Path(line[2])
+    try:
+        assert tc._running(helper_pid) and tc._running(postmaster)
+
+        runner.kill()
+        runner.wait(timeout=20)
+
+        assert _await_gone(helper_pid), f"helper {helper_pid} outlived the runner"
+        assert _await_gone(postmaster), f"postmaster {postmaster} outlived the runner"
+        # The helper had time to leave through its own cleanup, so the tree goes
+        # with it rather than waiting for the next run's sweep.
+        assert _await_absent(root), root
+    finally:
+        for pid in (postmaster, helper_pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_helper_that_inherited_an_ignored_sigterm_still_dies() -> None:
+    """The stale helper absorbed the signal it was told to die from.
+
+    A process started with SIGTERM ignored passes that on to its children. The
+    cleanup handler installed itself over the inherited disposition, tidied up
+    on SIGTERM, restored the ignore and re-raised -- so the signal did nothing
+    and the helper stayed asleep. SIGKILL was the only thing left.
+    """
+    child = tc.spawn_tied(
+        [sys.executable, str(HELPER)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        cwd=str(ROOT / "tests"),
+        preexec_fn=lambda: (
+            tc.die_with_parent(),
+            signal.signal(signal.SIGTERM, signal.SIG_IGN),
+        ),
+    )
+    line = child.stdout.readline().split()
+    assert len(line) == 3, (line, child.poll())
+    postmaster, root = int(line[0]), Path(line[1])
+    try:
+        child.terminate()
+        child.wait(timeout=30)
+        assert _await_gone(postmaster), postmaster
+        assert not root.exists(), root
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(child.pid, signal.SIGKILL)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+# The launcher goes through the shared spawner, so the identity it passes is the
+# one the real path passes -- and then takes both signal protections away: its own
+# preexec_fn replaces the parent-death signal with nothing and ignores SIGTERM. It
+# exits without waiting for readiness, so the helper is orphaned while its cluster
+# is still being created.
+ORPHANING_LAUNCHER = """
+import os, signal, subprocess, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import temporary_cluster as tc
+
+log = open(sys.argv[2], "w")
+child = tc.spawn_tied(
+    [sys.executable, sys.argv[1]],
+    stdout=log,
+    stderr=subprocess.DEVNULL,
+    text=True,
+    preexec_fn=lambda: signal.signal(signal.SIGTERM, signal.SIG_IGN),
+)
+print(child.pid, flush=True)
+"""
+
+
+def test_an_orphaned_helper_leaves_even_if_no_signal_reaches_it() -> None:
+    """The last line of defence: no parent, no reason to be running.
+
+    The launcher exits before the helper is ready, so the orphaning lands in the
+    middle of cluster creation rather than wherever the scheduler happens to put
+    it -- and it is started with the parent-death signal and SIGTERM both taken
+    away, so nothing but the helper's own check can end it.
+    """
+    with tempfile.TemporaryDirectory(prefix="orphaned-helper.") as tmp:
+        announced = Path(tmp) / "announced.txt"
+        launcher = subprocess.Popen(
+            [sys.executable, "-c", ORPHANING_LAUNCHER, str(HELPER), str(announced)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(ROOT / "tests"),
+        )
+        first = launcher.stdout.readline().split()
+        assert len(first) == 1, (first, launcher.stderr.read())
+        helper_pid = int(first[0])
+        launcher.wait(timeout=20)
+        # Proved, not assumed: the launcher is gone before the cluster is up.
+        assert launcher.returncode == 0, launcher.stderr.read()
+        assert not announced.read_text(encoding="utf-8").strip(), "the helper was ready too soon"
+
+        deadline = time.monotonic() + 60.0
+        line: list[str] = []
+        while time.monotonic() < deadline and len(line) != 3:
+            line = announced.read_text(encoding="utf-8").split()
+            time.sleep(0.05)
+        assert len(line) == 3, f"the orphaned helper never announced its cluster: {line}"
+        postmaster, root = int(line[0]), Path(line[1])
+
+        try:
+            assert _await_gone(helper_pid, timeout=30), f"orphaned helper {helper_pid} stayed"
+            assert _await_gone(postmaster, timeout=30), postmaster
+            assert _await_absent(root), root
+        finally:
+            for pid in (postmaster, helper_pid):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+            shutil.rmtree(root, ignore_errors=True)
+
+
+REPORT_PDEATHSIG = """
+import ctypes
+buf = ctypes.c_int(0)
+# PR_GET_PDEATHSIG is 2; it writes the signal number the kernel will send.
+ctypes.CDLL("libc.so.6", use_errno=True).prctl(2, ctypes.byref(buf), 0, 0, 0)
+print(buf.value, flush=True)
+"""
+
+
+def test_the_shared_spawner_arms_the_parent_death_signal() -> None:
+    """Pinned on its own, because the orphan check would otherwise cover for it.
+
+    Both protections end a helper whose runner has died, so removing either one
+    leaves the other passing. This asks the kernel directly what it will send.
+    """
+    tied = tc.spawn_tied(
+        [sys.executable, "-c", REPORT_PDEATHSIG], stdout=subprocess.PIPE, text=True
+    )
+    armed, _ = tied.communicate(timeout=20)
+    assert int(armed.strip()) == int(signal.SIGTERM), armed
+
+    untied = subprocess.Popen(
+        [sys.executable, "-c", REPORT_PDEATHSIG], stdout=subprocess.PIPE, text=True
+    )
+    default, _ = untied.communicate(timeout=20)
+    assert int(default.strip()) == 0, f"a plain Popen should arm nothing, got {default}"
 
 
 def main() -> int:

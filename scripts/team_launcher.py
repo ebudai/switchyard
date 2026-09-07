@@ -13714,6 +13714,21 @@ def _write_privileged_json(path: Path, payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def resolved_source_selection(source_repo: Path | None) -> str:
+    """The tree an operator pinned, named so it cannot be moved out from under them.
+
+    `/opt/switchyard/current` is a symlink, and installing the next shared
+    release moves it. Recording that name would pin nothing: between the
+    accounts phase and the rerun it asks for, `current` can come to mean a
+    different tree, and every phase after the move would regenerate artifacts
+    from it while the record still called the selection pinned. What is recorded
+    is the release the operator was actually looking at (SYRD-61).
+    """
+    if source_repo is None:
+        return ""
+    return str(source_repo.expanduser().resolve(strict=False))
+
+
 def record_upgrade_source(
     config: ProjectConfig,
     *,
@@ -13721,26 +13736,44 @@ def record_upgrade_source(
     commit_git_dir: str | None,
     deploy_ref: str,
     dry_run: bool = False,
-) -> None:
-    """Persist the release an operator pinned, so the resumed phases keep it."""
+) -> list[str]:
+    """Persist the release an operator pinned, and prove it reads back exactly.
+
+    Returns the reasons it could not be made durable, which are refusals rather
+    than warnings: an upgrade that accepts a pin it cannot keep goes on to
+    advertise a continuation the next phase has to guess the release for, which
+    is this incident (SYRD-61).
+    """
     if dry_run or os.geteuid() != 0:
-        return
+        # Root's record, and root's phases read it. An unprivileged upgrade
+        # regenerates the tenant's own artifacts and reports; it runs none of
+        # the phases that would resolve a release, and the continuation it
+        # writes says outright that no release was recorded rather than
+        # implying one. So this is not a failure to record -- there was nothing
+        # this process could record (SYRD-61).
+        return []
+    intended = {
+        "source_repo": resolved_source_selection(source_repo),
+        "commit_git_dir": (commit_git_dir or "").strip(),
+        "deploy_ref": deploy_ref,
+    }
+    path = privileged_upgrade_source_path(config)
     problem = _write_privileged_json(
-        privileged_upgrade_source_path(config),
+        path,
         {
             "schema": UPGRADE_SOURCE_SCHEMA,
             "project": config.project,
-            "source_repo": str(source_repo) if source_repo is not None else "",
-            "commit_git_dir": (commit_git_dir or "").strip(),
-            "deploy_ref": deploy_ref,
             "at": datetime.now(timezone.utc).isoformat(),
+            **intended,
         },
     )
     if problem:
-        print(
-            f"switchyard: could not record the pinned release for {config.project}: {problem}",
-            file=sys.stderr,
-        )
+        return [f"could not record the pinned release at {path}: {problem}"]
+    # Read back through the same validation every later phase uses, so a record
+    # that lands but would be refused is caught here rather than there.
+    if read_upgrade_source(config) != intended:
+        return [f"the pinned release at {path} did not read back as it was written"]
+    return []
 
 
 def read_upgrade_source(config: ProjectConfig) -> dict[str, str]:
@@ -13777,7 +13810,7 @@ def resolve_pinned_upgrade_source(
     *,
     source_repo: Path | None,
     commit_git_dir: str | None,
-    deploy_ref: str,
+    deploy_ref: str | None,
 ) -> tuple[Path | None, str | None, str, str]:
     """Fill an unpinned invocation in from root's record of what was pinned.
 
@@ -13790,7 +13823,7 @@ def resolve_pinned_upgrade_source(
     """
     recorded = read_upgrade_source(config)
     if not recorded:
-        return source_repo, commit_git_dir, deploy_ref, ""
+        return source_repo, commit_git_dir, deploy_ref or DEFAULT_TENANT_RELEASE_DEPLOY_REF, ""
     used: list[str] = []
     if source_repo is None and recorded["source_repo"]:
         source_repo = Path(recorded["source_repo"])
@@ -13798,10 +13831,19 @@ def resolve_pinned_upgrade_source(
     if commit_git_dir is None and recorded["commit_git_dir"]:
         commit_git_dir = recorded["commit_git_dir"]
         used.append(f"commit cache {commit_git_dir}")
-    if deploy_ref == DEFAULT_TENANT_RELEASE_DEPLOY_REF and recorded["deploy_ref"]:
+    # `None` is the ref nobody asked about. `--deploy-ref origin/main` is an
+    # operator saying to go back to the branch, and it has to be able to say
+    # that: a default-valued argument that reads as omission would hand them the
+    # commit they are trying to leave (SYRD-61).
+    if deploy_ref is None and recorded["deploy_ref"]:
         deploy_ref = recorded["deploy_ref"]
         used.append(f"deploy ref {deploy_ref}")
-    return source_repo, commit_git_dir, deploy_ref, "; ".join(used)
+    return (
+        source_repo,
+        commit_git_dir,
+        deploy_ref or DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+        "; ".join(used),
+    )
 
 
 def record_upgrade_phase(
@@ -14139,7 +14181,9 @@ def upgrade_project_command(
     desktop_policy: Path | None = None,
     source_repo: Path | None = None,
     commit_git_dir: str | None = None,
-    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    # `None` means the caller said nothing about the ref, which is not the same
+    # as asking for the default one (SYRD-61).
+    deploy_ref: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -14160,9 +14204,7 @@ def upgrade_project_command(
     # asks for; an operator who pinned nothing here is filled in from what was
     # pinned last time (SYRD-61).
     pinned_explicitly = (
-        source_repo is not None
-        or commit_git_dir is not None
-        or deploy_ref != DEFAULT_TENANT_RELEASE_DEPLOY_REF
+        source_repo is not None or commit_git_dir is not None or deploy_ref is not None
     )
     # Read back first, then record what this invocation actually ends up using.
     # Doing it the other way round would let an operator who pins one of the
@@ -14175,14 +14217,38 @@ def upgrade_project_command(
         print_func(
             f"switchyard: {config.project} keeps the release this upgrade was pinned to: {recovered}"
         )
+    if pinned_explicitly and not dry_run and os.geteuid() != 0:
+        print_func(
+            f"switchyard: this upgrade is not root, so {config.project}'s pinned release is not "
+            "recorded. The generated continuation will say so, and the privileged rerun has to "
+            "carry --source-repo, --commit-git-dir and --deploy-ref itself."
+        )
     if pinned_explicitly:
-        record_upgrade_source(
+        durability = record_upgrade_source(
             config,
             source_repo=source_repo,
             commit_git_dir=commit_git_dir,
             deploy_ref=deploy_ref,
             dry_run=dry_run,
         )
+        if durability:
+            # Before any phase, so nothing is regenerated, no phase is recorded
+            # as safely resumable, and above all no continuation is advertised:
+            # a handoff that cannot carry the pin is the incident this ticket is
+            # about, and accepting the pin anyway would schedule it (SYRD-61).
+            for problem in durability:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: refusing to upgrade {config.project} with a release it cannot keep. "
+                "Its accounts phase hands the upgrade back through sudo, which carries neither "
+                "arguments nor environment, so a pin that is not durable is one the next phase "
+                "would have to guess at. Nothing was changed."
+            )
+            return 1
+    # Resolved, so every phase after this one works on the tree the operator was
+    # looking at rather than on whatever a moved symlink comes to mean.
+    if source_repo is not None:
+        source_repo = Path(resolved_source_selection(source_repo))
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
 
     # Before anything else, because everything else depends on it. The identities
@@ -15315,7 +15381,7 @@ def finish_upgrade_command(
     dry_run: bool = False,
     source_repo: Path | None = None,
     commit_git_dir: str | None = None,
-    deploy_ref: str = DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    deploy_ref: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -16401,7 +16467,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--execute", action="store_true", help="execute new-project provisioning after precheck")
     parser.add_argument("--runtime-user", help="local user whose lingering /run/user/<uid> runtime should be provisioned")
     parser.add_argument("--launcher-repo", type=Path, help="launcher checkout to update or verify (default: this script's repo)")
-    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy during upgrade (default: origin/main)")
+    parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy during upgrade (default: the pinned release, else origin/main)")
     parser.add_argument("--cli", dest="add_role_cli", default="codex", help="CLI runtime for `add-role` (default: codex)")
     parser.add_argument("--audit", dest="add_role_audit", action="store_true", help="add the role as an auditor instead of an implementer")
     parser.add_argument("--detached", action="store_true", help="configure `add-role` as headless instead of visible")
@@ -16477,7 +16543,7 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard upgrade", description="Upgrade safe generated artifacts for a Switchyard project.")
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
-    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
+    parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy (default: the pinned release, else origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     parser.add_argument(
         "--commit-git-dir",
@@ -16510,7 +16576,7 @@ def _build_switchyard_finish_upgrade_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing")
-    parser.add_argument("--deploy-ref", default=DEFAULT_TENANT_RELEASE_DEPLOY_REF, help="board release ref to deploy (default: origin/main)")
+    parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy (default: the pinned release, else origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")
     parser.add_argument("--commit-git-dir", help="git repository path(s) used to verify board commit hashes")
     return parser

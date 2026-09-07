@@ -277,7 +277,9 @@ def _upgrade(
     runner: FakeRunner | None = None,
     board=None,
     source_repo: Path | None = None,
-    deploy_ref: str = team_launcher.DEFAULT_TENANT_RELEASE_DEPLOY_REF,
+    # None is "said nothing about the ref", which is what these cases mean and
+    # what the CLI now passes when the option is absent (SYRD-61).
+    deploy_ref: str | None = None,
 ):
     """Run the privileged upgrade with the host facts stated explicitly."""
     printed: list[str] = []

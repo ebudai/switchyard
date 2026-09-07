@@ -29,6 +29,7 @@ from team_launcher_upgrade_cutover_test import (
     _board_with_marker,
     _declarative_tenant,
     _deployed_release,
+    _live_runner,
     _upgrade,
 )
 
@@ -71,6 +72,11 @@ def _installed_release(tmp: Path, sha: str) -> Path:
     current.symlink_to(release)
     os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(shared_root)
     return current
+
+
+def _resolved(path: Path) -> str:
+    """What the record holds: the tree, not the name that points at it."""
+    return str(path.resolve())
 
 
 def _pinned_tenant(tmp: Path) -> tuple[Path, Path, Path, str, Path]:
@@ -217,7 +223,7 @@ def test_the_pinned_release_survives_the_operator_handoff() -> None:
         # The operator runs the generated script. Its continuation names the
         # release this upgrade was pinned to, so the operator can read it.
         script = config_path.with_name(f"{PROJECT}-role-accounts.sh").read_text(encoding="utf-8")
-        assert str(release) in script, script[-2000:]
+        assert _resolved(release) in script, script[-2000:]
         assert str(cache) in script, script[-2000:]
         assert sha in script, script[-2000:]
 
@@ -332,7 +338,13 @@ def test_a_record_the_tenant_could_have_written_is_not_a_pinned_release() -> Non
 
 
 def test_an_explicit_selection_still_wins_over_the_record() -> None:
-    """The record fills gaps; it never overrides an operator who said otherwise."""
+    """The record fills gaps; it never overrides an operator who said otherwise.
+
+    Including an operator who says `--deploy-ref origin/main`. That is a
+    deliberate reset back to the branch, and it has to be distinguishable from
+    saying nothing at all -- a default-valued argument that reads as omission
+    hands them back the very commit they are trying to leave.
+    """
     with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-override.") as raw:
         tmp = Path(raw)
         config_path, release, cache, sha, _board_root = _pinned_tenant(tmp)
@@ -340,37 +352,68 @@ def test_an_explicit_selection_still_wins_over_the_record() -> None:
         original_euid = team_launcher.os.geteuid
         try:
             team_launcher.os.geteuid = lambda: 0
-            team_launcher.record_upgrade_source(
+            assert not team_launcher.record_upgrade_source(
                 config, source_repo=release, commit_git_dir=str(cache), deploy_ref=sha
             )
         finally:
             team_launcher.os.geteuid = original_euid
+
         elsewhere = tmp / "another-checkout"
         chosen_repo, chosen_cache, chosen_ref, used = team_launcher.resolve_pinned_upgrade_source(
-            config, source_repo=elsewhere, commit_git_dir=None, deploy_ref="origin/main"
+            config, source_repo=elsewhere, commit_git_dir=None, deploy_ref=None
         )
         assert chosen_repo == elsewhere
         assert chosen_cache == str(cache)
         assert chosen_ref == sha
         assert "source" not in used, used
-        # And with nothing said, all three come back.
+
+        # Said nothing: all three come back.
+        chosen_repo, chosen_cache, chosen_ref, used = team_launcher.resolve_pinned_upgrade_source(
+            config, source_repo=None, commit_git_dir=None, deploy_ref=None
+        )
+        assert (str(chosen_repo), chosen_cache, chosen_ref) == (_resolved(release), str(cache), sha)
+        assert "source" in used and "commit cache" in used and "deploy ref" in used, used
+
+        # Said "go back to the branch": that wins, and the source and cache are
+        # still filled in from the record.
         chosen_repo, chosen_cache, chosen_ref, used = team_launcher.resolve_pinned_upgrade_source(
             config,
             source_repo=None,
             commit_git_dir=None,
             deploy_ref=team_launcher.DEFAULT_TENANT_RELEASE_DEPLOY_REF,
         )
-        assert (chosen_repo, chosen_cache, chosen_ref) == (release, str(cache), sha)
-        assert "source" in used and "commit cache" in used and "deploy ref" in used, used
+        assert chosen_ref == team_launcher.DEFAULT_TENANT_RELEASE_DEPLOY_REF, chosen_ref
+        assert str(chosen_repo) == _resolved(release), chosen_repo
+        assert "deploy ref" not in used, used
 
 
-def test_pinning_one_of_the_three_does_not_erase_the_other_two() -> None:
-    """Otherwise the phase after this one is the one left guessing."""
-    with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-partial.") as raw:
+def test_the_parser_tells_an_omitted_ref_from_a_default_valued_one() -> None:
+    """The distinction has to survive parsing, or resolution never sees it."""
+    for parser in (
+        team_launcher._build_switchyard_upgrade_parser(),
+        team_launcher._build_switchyard_finish_upgrade_parser(),
+    ):
+        assert parser.parse_args([PROJECT]).deploy_ref is None
+        explicit = parser.parse_args(
+            [PROJECT, "--deploy-ref", team_launcher.DEFAULT_TENANT_RELEASE_DEPLOY_REF]
+        )
+        assert explicit.deploy_ref == team_launcher.DEFAULT_TENANT_RELEASE_DEPLOY_REF
+
+
+def test_a_release_symlink_that_moves_does_not_move_the_pinned_release() -> None:
+    """`/opt/switchyard/current` is a name, and installing a release moves it.
+
+    Between the accounts phase and the rerun it asks for, `current` can come to
+    mean a different tree. A record holding the name would pin nothing: the
+    resumed phase would regenerate artifacts from the newer release while still
+    calling the selection pinned.
+    """
+    with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-moved.") as raw:
         tmp = Path(raw)
         config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
+        original_tree = release.resolve()
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
-            _run_upgrade(
+            result, output = _run_upgrade(
                 config_path,
                 exists=set(),
                 repo_root=release,
@@ -381,27 +424,138 @@ def test_pinning_one_of_the_three_does_not_erase_the_other_two() -> None:
                 commit_git_dir=str(cache),
                 deploy_ref=sha,
             )
+        assert result == 0, output
+
+        # A newer shared release is installed, and `current` follows it.
+        newer_sha = "b" * 40
+        newer = original_tree.parent / newer_sha
+        newer.mkdir()
+        (newer / ".switchyard-release.json").write_text(
+            json.dumps({"commit": newer_sha}) + "\n", encoding="utf-8"
+        )
+        release.unlink()
+        release.symlink_to(newer)
+        assert release.resolve() == newer
+
         _scrub()
-        # A later operator asks for a different commit, and says nothing about
-        # where it lives.
-        later = _run_git(
-            ["git", f"--git-dir={cache}", "rev-parse", "--verify", "refs/heads/main^{commit}"]
-        ).stdout.strip()
+        deploys: list[str] = []
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
-            _run_upgrade(
+            result, output = _run_upgrade(
+                config_path,
+                exists=ROLE_ACCOUNTS,
+                repo_root=release,
+                runner=_pinned_runner(
+                    tenant.runner(), board_root=board_root, sha=sha, seen=[], deploys=deploys
+                ),
+                **_handoff_arguments(config_path),
+            )
+        assert result == 0, output
+        # The release the operator was looking at, not the one `current` means now.
+        assert str(original_tree) in output, output
+        assert newer_sha not in output, output
+        assert deploys and sha in deploys[-1], deploys
+        assert newer_sha not in deploys[-1], deploys[-1]
+        config = team_launcher.load_project_config(PROJECT, config_path)
+        assert team_launcher.read_upgrade_source(config)["source_repo"] == str(original_tree)
+
+
+def _no_handoff_was_advertised(config_path: Path) -> None:
+    """Nothing to run, and no phase recorded as somewhere to resume from."""
+    assert not config_path.with_name(f"{PROJECT}-role-accounts.sh").exists()
+    assert not config_path.with_name(f"{PROJECT}-upgrade.json").exists()
+
+
+def test_a_pin_that_cannot_be_recorded_refuses_before_advertising_a_handoff() -> None:
+    """Accepting it would schedule this incident for the next phase."""
+    with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-unwritable.") as raw:
+        tmp = Path(raw)
+        config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
+        _no_handoff_was_advertised(config_path)
+        # Root's own directory cannot be created: something else is in its way.
+        blocked = tmp / "blocked-privileged-root"
+        blocked.write_text("not a directory\n", encoding="utf-8")
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(blocked)
+
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            result, output = _run_upgrade(
                 config_path,
                 exists=set(),
                 repo_root=release,
                 runner=_pinned_runner(
                     tenant.runner(), board_root=board_root, sha=sha, seen=[], deploys=[]
                 ),
-                deploy_ref=later,
+                source_repo=release,
+                commit_git_dir=str(cache),
+                deploy_ref=sha,
             )
-        config = team_launcher.load_project_config(PROJECT, config_path)
-        recorded = team_launcher.read_upgrade_source(config)
-        assert recorded["deploy_ref"] == later, recorded
-        assert recorded["source_repo"] == str(release), recorded
-        assert recorded["commit_git_dir"] == str(cache), recorded
+        assert result == 1, output
+        assert "could not record the pinned release" in output, output
+        assert "refusing to upgrade" in output, output
+        assert "Nothing was changed" in output, output
+        _no_handoff_was_advertised(config_path)
+
+
+def test_a_record_that_does_not_read_back_refuses_the_same_way() -> None:
+    """A write that returned success is not a record; being able to read it is."""
+    with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-unreadable.") as raw:
+        tmp = Path(raw)
+        config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
+        original_write = team_launcher._write_privileged_json
+        try:
+            # A filesystem that accepts the write and does not keep it.
+            team_launcher._write_privileged_json = lambda _path, _payload: ""
+            with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+                result, output = _run_upgrade(
+                    config_path,
+                    exists=set(),
+                    repo_root=release,
+                    runner=_pinned_runner(
+                        tenant.runner(), board_root=board_root, sha=sha, seen=[], deploys=[]
+                    ),
+                    source_repo=release,
+                    commit_git_dir=str(cache),
+                    deploy_ref=sha,
+                )
+        finally:
+            team_launcher._write_privileged_json = original_write
+        assert result == 1, output
+        assert "did not read back as it was written" in output, output
+        _no_handoff_was_advertised(config_path)
+
+
+def test_an_unprivileged_upgrade_says_the_pin_was_not_recorded() -> None:
+    """It runs no phase that resolves a release, and it promises none."""
+    with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-unprivileged.") as raw:
+        tmp = Path(raw)
+        config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
+        printed: list[str] = []
+        original_repo_root = team_launcher._repo_root
+        original_opener = team_launcher._open_board_url
+        try:
+            team_launcher._repo_root = lambda: release
+            team_launcher._open_board_url = _board_with_marker(False)
+            config = team_launcher.load_project_config(PROJECT, config_path)
+            result = team_launcher.upgrade_project_command(
+                config,
+                config_path=config_path,
+                source_repo=release,
+                commit_git_dir=str(cache),
+                deploy_ref=sha,
+                runner=_pinned_runner(
+                    _live_runner(config_path), board_root=board_root, sha=sha, seen=[], deploys=[]
+                ),
+                print_func=printed.append,
+            )
+        finally:
+            team_launcher._repo_root = original_repo_root
+            team_launcher._open_board_url = original_opener
+        output = "\n".join(printed)
+        assert result == 0, output
+        assert "is not root, so porter's pinned release is not recorded" in output, output
+        assert team_launcher.read_upgrade_source(config) == {}
+        # And the continuation it wrote does not pretend otherwise.
+        script = config_path.with_name(f"{PROJECT}-role-accounts.sh").read_text(encoding="utf-8")
+        assert "No pinned release was recorded for this upgrade" in script, script[-1500:]
 
 
 def _systemctl_probe(tmp: Path) -> tuple[Path, Path]:

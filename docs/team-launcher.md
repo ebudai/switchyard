@@ -324,13 +324,35 @@ back with `sudo switchyard upgrade <project>` -- no arguments, and `sudo`
 scrubs the environment. A `--source-repo`, `--commit-git-dir` or `--deploy-ref`
 given to the outer command is therefore recorded, when root runs it, in
 `upgrade-source.json` beside root's own journal, and every later phase that was
-given nothing reads it back. An explicit argument always wins; the record only
-supplies what an invocation did not carry. The generated script names the
-recorded selection in its own text so an operator can read what the rerun will
-deploy before running it, and the refusal an unresolvable release produces names
-both ways to supply a cache. Nothing but root writes that record: a file there
-that is group- or world-writable, or that belongs to somebody else, is refused
-rather than trusted, because it decides which tree root deploys.
+given nothing reads it back. The generated script names the recorded selection
+in its own text so an operator can read what the rerun will deploy before
+running it, and the refusal an unresolvable release produces names both ways to
+supply a cache. Nothing but root writes that record: a file there that is group-
+or world-writable, or that belongs to somebody else, is refused rather than
+trusted, because it decides which tree root deploys.
+
+The path recorded is the resolved one. `/opt/switchyard/current` is a symlink
+that installing the next shared release moves, so recording that name would pin
+nothing: between the accounts phase and the rerun it asks for, `current` can
+come to mean a different tree, and the resumed phase would regenerate artifacts
+from it while still calling the selection pinned. What is recorded, and what
+every later phase works on, is the release the operator was actually looking at.
+
+A pin that cannot be made durable is refused, not warned about. When root cannot
+write the record, or writes one that does not read back exactly as written, the
+upgrade stops before any phase: nothing is regenerated, no phase is journaled,
+and no continuation is produced -- because a handoff that cannot carry the pin is
+the incident this exists to prevent. An unprivileged upgrade cannot write root's
+record at all; it says so, and the continuation it writes states plainly that no
+release was recorded and names the three options the privileged rerun must
+carry itself.
+
+An explicit argument always wins, and `--deploy-ref origin/main` counts as one.
+Omitting the option and asking for the default branch are different requests, so
+the option defaults to nothing rather than to `origin/main`: omitting it takes
+the recorded ref, and naming the branch is a deliberate reset back to it. The
+record still supplies the source and cache in both cases, and a partial re-pin
+merges rather than erasing what it did not mention.
 
 **A rollback reports what came back, not what it stopped.** A transaction that
 fails before the workers are restarted never asks them to come back, so it does
@@ -702,7 +724,8 @@ is a clean no-op.
 `switchyard upgrade <project>` updates safe generated project artifacts and
 checks the provisioned tenant board release. For generated projects whose pane
 launcher comes from `<project>-ticketboard-live/current`, it reports the old
-deployed release, resolves the target release ref (default `origin/main`), and
+deployed release, resolves the target release ref (the pinned one, else
+`origin/main`), and
 prints the ordered listener/unit/`deploy-restart` commands an operator can run
 to advance the tenant's `current` symlink. An installed shared release has no
 implicit source repository: name a fetch cache with `--commit-git-dir`, or with

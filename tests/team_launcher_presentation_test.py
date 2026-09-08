@@ -1010,7 +1010,11 @@ def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> Non
         codex.chmod(0o755)
         for role in raw["roles"]:
             if role["role"] == "app":
-                role["env"] = {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+                # Absolute so an installed per-user Codex wrapper cannot shadow
+                # this deliberately inert worker when the launcher adds its
+                # managed PATH entries.
+                role["cli"] = [str(codex)]
+                role["live_commands"] = ["sleep"]
         config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         config = load_project_config("porter", config_path)
         state_path = root / "presentation.json"

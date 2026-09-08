@@ -125,13 +125,8 @@ def provisioning_ownership(owner):
                     replacement.write_bytes((output / "plan.json").read_bytes())
                     replacement.replace(output / "plan.json")
                     (output / "workflow.json").write_text(policy.read_text())
-                    # SYRD-39 x SYRD-36: the tenant, not root, runs role-prompt
-                    # and workflow apply. Root installs the board unit, so the
-                    # tenant cannot write it -- and must not have to. The whole
-                    # projection has to pass the same writability preflight the
-                    # apply path runs before it touches the board, and the
-                    # role-account table has to be updated by that same
-                    # unprivileged write.
+                    # The tenant, not root, runs workflow projection. The unit
+                    # is unchanged because roles are PostgreSQL/process data.
                     document = json.loads(policy.read_text())
                     assert not os.access(unit, os.W_OK), unit
                     files = projection_files(config, document)
@@ -139,17 +134,12 @@ def provisioning_ownership(owner):
                     assert_projection_writable(files)
                     apply_files(files)
                     written = json.loads((output / "plan.json").read_text())
-                    accounts = {role: account for role, account in written["role_accounts"]}
-                    assert accounts["inspector"] == "cerulean-inspector", accounts
-                    assert len(set(accounts.values())) == len(accounts), accounts
+                    assert written["role_accounts"] == []
                     assert (
                         json.loads(config.read_text())["roles"]
                         == project_roles(json.loads(config.read_text()), document)["roles"]
                     )
-                    # The roles the still-unrefreshed unit cannot resolve are
-                    # named, so the operator step is stated rather than found
-                    # later as a role that silently cannot write.
-                    assert "inspector" in board_unit_role_account_gap(written, output)
+                    assert board_unit_role_account_gap(written, output) == []
                 except BaseException:
                     import traceback
 
@@ -292,56 +282,32 @@ def main():
                 assert roles["inspector"]["workdir"] == str(
                     root / "worktrees/inspector"
                 )
-                # SYRD-39: inspector is introduced from the designer TEMPLATE.
-                # Deep-copying that template carried the designer's Unix account
-                # over, so on an isolated tenant the board -- which resolves
-                # authority from the peer uid -- would have read every inspector
-                # write as the designer, and the inspector could not have acted
-                # as itself at all. Identity is never inherited.
+                # Legacy account fields are migration input and never survive
+                # projection, whether the role is existing or templated.
                 isolated_raw = copy.deepcopy(raw)
                 isolated_raw["roles"][0]["run_as_user"] = "cerulean-designer"
                 isolated = project_roles(isolated_raw, document)
-                accounts = {
-                    r["role"]: r.get("run_as_user") for r in isolated["roles"]
-                }
-                assert accounts["inspector"] == "cerulean-inspector", accounts
-                assert "cerulean-designer" not in accounts.values(), accounts
-                assert all(accounts.values()), accounts
-                assert len(set(accounts.values())) == len(accounts), accounts
+                assert all("run_as_user" not in role for role in isolated["roles"])
                 assert project_roles(isolated, document) == isolated
-                # Two roles on one account is refused rather than written: the
-                # board refuses both roles when a uid backs two, so writing it
-                # would take the colliding roles off the board entirely.
+                # Even colliding legacy account fields are erased; logical role
+                # identity is no longer inferred from either account.
                 collided = copy.deepcopy(isolated_raw)
                 collided["roles"].append(
                     {"role": "main", "run_as_user": "cerulean-inspector"}
                 )
-                rejects(lambda: project_roles(collided, document))
-                # The declarative addition must also reach the table the board
-                # resolves uids through and the trees the rollout hands out.
+                assert all("run_as_user" not in role for role in project_roles(collided, document)["roles"])
                 iso_dir = root / "isolated-provision"
                 shutil.copytree(output, iso_dir)
                 iso_plan_path = iso_dir / "plan.json"
                 iso_plan = json.loads(iso_plan_path.read_text())
-                # A plan generated before the role was declared has no row for it.
-                iso_plan["role_accounts"] = [
-                    entry
-                    for entry in iso_plan["role_accounts"]
-                    if entry[0] != "inspector"
-                ]
-                iso_plan["role_worktrees"] = [
-                    [role, str(root / "worktrees" / role)]
-                    for role, _account in iso_plan["role_accounts"]
-                ]
+                iso_plan["role_accounts"] = [["designer", "cerulean-designer"]]
                 iso_plan_path.write_text(json.dumps(iso_plan))
                 iso_config = iso_dir / "cerulean.json"
                 iso_config.write_text(json.dumps(isolated_raw))
                 (iso_dir / "layout.json").write_text("{}")
                 iso_files = projection_files(iso_config, document)
                 refreshed = json.loads(iso_files[iso_plan_path])
-                assert ["inspector", "cerulean-inspector"] in [
-                    list(entry) for entry in refreshed["role_accounts"]
-                ], refreshed["role_accounts"]
+                assert refreshed["role_accounts"] == []
                 assert ["inspector", str(root / "worktrees/inspector")] in [
                     list(entry) for entry in refreshed["role_worktrees"]
                 ], refreshed["role_worktrees"]
@@ -355,15 +321,8 @@ def main():
                 unit_path = iso_dir / iso_plan["board_unit"]
                 assert unit_path.exists()
                 assert unit_path not in iso_files, sorted(f.name for f in iso_files)
-                assert "inspector=cerulean-inspector" not in unit_path.read_text()
-                # ops is declared by the document too and was never in the
-                # CLI-derived table the unit was generated from, so both roles
-                # are waiting on the same operator refresh.
-                assert sorted(
-                    workflow_launcher.board_unit_role_account_gap(refreshed, iso_dir)
-                ) == ["inspector", "ops"], workflow_launcher.board_unit_role_account_gap(
-                    refreshed, iso_dir
-                )
+                assert "TICKET_BOARD_ROLE_ACCOUNTS" not in unit_path.read_text()
+                assert workflow_launcher.board_unit_role_account_gap(refreshed, iso_dir) == []
             foreign = copy.deepcopy(document)
             next(r for r in foreign["roles"] if r["name"] == "main")[
                 "target"

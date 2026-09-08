@@ -202,9 +202,10 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             f"invalid runtime/target: {name}",
         )
         if target is not None and project is not None:
+            target_session = target.split(":", 1)[0]
             need(
-                target == f"{project}-{name}:0.0",
-                f"runtime target must belong to selected project/role: {project}/{name}",
+                target_session.startswith(f"{project}-"),
+                f"runtime target must belong to selected project: {project}",
             )
         slot = role.get("slot")
         need(

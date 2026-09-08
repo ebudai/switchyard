@@ -1055,13 +1055,27 @@ def _write_matching_codex_hook_trust(owner_home: Path) -> None:
     config_path.write_text("\n".join(lines), encoding="utf-8")
 
 def run_team_launcher_tests(module_globals: dict[str, object], *, first: tuple[str, ...] = ()) -> None:
+    from scripts import presentation_controller
+
     live_session_snapshot = snapshot_paths(LIVE_PANE_SESSION_PATHS)
     live_pane_state_snapshot = snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)
     live_pane_state_anomalies = pane_state_record_anomalies(LIVE_PANE_STATE_PATHS)
     live_session_fingerprint = _live_session_record_fingerprint()
+    original_authority_probe = team_launcher.process_authority_board_compatibility
+    original_runtime_config = presentation_controller.runtime_assignment_config
     try:
+        # These launcher suites replace systemd, PostgreSQL, the board socket,
+        # and tmux with runners. Model the matching new-board half of that
+        # fixture; the real compatibility refusal is covered separately by the
+        # SYRD-69 process-authority suite.
+        team_launcher.process_authority_board_compatibility = lambda _config: (
+            True, "simulated process-authority board"
+        )
+        presentation_controller.runtime_assignment_config = lambda config: config
         run_module_tests(module_globals, first=first)
     finally:
+        team_launcher.process_authority_board_compatibility = original_authority_probe
+        presentation_controller.runtime_assignment_config = original_runtime_config
         changed = [
             *snapshot_diff(live_session_snapshot, snapshot_paths(LIVE_PANE_SESSION_PATHS)),
             *snapshot_file_set_diff(live_pane_state_snapshot, snapshot_paths_file_set(LIVE_PANE_STATE_PATHS)),

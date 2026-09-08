@@ -365,10 +365,8 @@ class RoleConfig:
     fresh_session_per_ticket: bool
     live_commands: list[str]
     env: dict[str, str]
-    # SYRD-39: the Unix account this role runs as. One account per role is
-    # what makes SO_PEERCRED's uid an authoritative role identity on the
-    # board socket. Empty falls back to the project account, which is the
-    # pre-migration arrangement and cannot separate roles.
+    # Read only for upgrade compatibility. SYRD-69 runs every role as the
+    # project account; authority is the registered live process, not this UID.
     run_as_user: str = ""
     unset_env: tuple[str, ...] = ()
 
@@ -393,6 +391,7 @@ class ProjectConfig:
     worktree_branch: str
     roles: list[RoleConfig]
     desktop_access: dict[str, Any] | None = None
+    role_state_isolation: bool = False
 
 
 @dataclass(frozen=True)
@@ -1837,13 +1836,15 @@ def role_account_name(project: str, role: str) -> str:
 
 
 def role_run_as_user(config: ProjectConfig, role: RoleConfig) -> str:
-    """The account a role's session runs as.
+    """The project identity after repatriation, or the legacy owner before it.
 
-    Per-role accounts are what give each role its own tmux server and make the
-    board's uid-to-role mapping authoritative. A role without one falls back to
-    the project account, which still works but cannot be told apart from the
-    other roles on the board socket (SYRD-39).
+    Reading an old config as though migration had already succeeded can strand
+    its resumable state.  The atomic ``role_state_isolation`` flip is therefore
+    the compatibility boundary: only fresh/repatriated configs ignore the
+    historical role binding.
     """
+    if config.role_state_isolation:
+        return config.run_as_user or current_user_name()
     return role.run_as_user or config.run_as_user
 
 
@@ -1853,13 +1854,7 @@ def role_process_runner_for(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    """A runner that acts as the account owning this role's tmux server.
-
-    With one Unix account per role there is no shared tmux server, so probing,
-    stopping, reloading or recovering a role has to address that role's own
-    server. Using the project owner's runner for this reports roles stopped
-    while their sessions are still alive (SYRD-39).
-    """
+    """A runner for the project account's shared tmux server."""
     account = role_run_as_user(config, role)
     if account and current_user_name() != account:
         return _owner_process_runner(owner_user=account, runner=runner)
@@ -1867,12 +1862,11 @@ def role_process_runner_for(
 
 
 def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
-    """Where this role's CLI keeps its resumable session records.
-
-    A role account cannot write the project owner's state directory, so a role
-    with its own account gets its own path. Roles still sharing the project
-    account keep the project-wide directory (SYRD-39).
-    """
+    """The role-private resumable store under the project account."""
+    # Each logical role retains an independent resumable store even though all
+    # role processes now share the project account.
+    if config.role_state_isolation:
+        return config.session_dir / "roles" / role.role
     account = role_run_as_user(config, role)
     if account and account != config.run_as_user:
         return account_session_dir(account, project=config.project)
@@ -1882,15 +1876,9 @@ def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
 def role_pane_state_dir(
     config: ProjectConfig, role: RoleConfig, default: Path | None = None
 ) -> Path:
-    """Where this role's pane hooks record busy/idle state.
-
-    An isolated role writes the shared aggregation path, which it can write and
-    the owner's listener can read. A role still running as the project account
-    keeps whatever the caller chose, so an explicitly supplied directory is not
-    silently replaced.
-    """
+    """Where pane hooks aggregate state across the active identity model."""
     account = role_run_as_user(config, role)
-    if account and account != config.run_as_user:
+    if not config.role_state_isolation and account and account != config.run_as_user:
         return shared_pane_state_dir(config.project)
     if default is not None:
         return default
@@ -1907,6 +1895,8 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
         "TICKET_BOARD_CALLER_ROLE": role.role,
         "TICKET_BOARD_CALLER_ROLE_MAP": json.dumps(session_role_map, sort_keys=True, separators=(",", ":")),
     }
+    if config.role_state_isolation:
+        env["TICKET_BOARD_PROCESS_AUTHORITY"] = "1"
     if config.run_as_user:
         # directorctl needs the owner's name to reach the display and viewer
         # sessions, which stay in the owner's tmux server (SYRD-39).
@@ -1931,6 +1921,47 @@ def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> l
         )
         for role in roles
     ]
+
+
+def process_authority_board_compatibility(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[bool, str]:
+    """Prove the running board understands shared-account process authority.
+
+    This check happens before launch mutates layouts, worktrees, state files, or
+    tmux.  It is the mixed-version boundary: a config repatriated by the new
+    launcher must not start against an older board that would either reject the
+    shared uid or authorize it with the retired uid map (SYRD-69).
+    """
+    if not config.role_state_isolation:
+        return True, "legacy account authority"
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/runtime-assignments")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        if response.status != 200:
+            return False, f"runtime assignment probe returned HTTP {response.status}: {body}"
+        payload = json.loads(body)
+        if not isinstance(payload, dict) or payload.get("project") != config.project:
+            return False, "runtime assignment probe returned another project's identity"
+        if payload.get("authority_mode") != "process":
+            return False, "running board still uses legacy uid authority"
+        if not isinstance(payload.get("assignments"), dict):
+            return False, "runtime assignment probe omitted its assignments object"
+    except Exception as exc:  # noqa: BLE001 - refusal must preserve the exact boundary failure
+        return False, str(exc)
+    return True, "process authority ready"
 
 
 def load_project_config(project: str, config_path: Path | None = None) -> ProjectConfig:
@@ -2042,6 +2073,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         worktree_branch=worktree_branch,
         roles=roles,
         desktop_access=config.get("desktop_access"),
+        role_state_isolation=bool(config.get("role_state_isolation", False)),
     )
     boundary_error = _control_repository_boundary_error(parsed_config, require_existing_user=False)
     if boundary_error is not None:
@@ -2823,7 +2855,13 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
         )
     if not _uses_agy_conversation_resume(role):
         return True, ""
-    if agy_conversation_store_exists(session_id):
+    session_home = _home_from_session_dir(session_dir)
+    agy_root = (
+        session_home / AGY_CREDENTIAL_DIR_NAME
+        if session_home != Path.home()
+        else AGY_CONVERSATION_ROOT
+    )
+    if agy_conversation_store_exists(session_id, root=agy_root):
         return True, ""
     return (
         False,
@@ -2877,6 +2915,7 @@ def cli_command_for_role(
     if staged_project and bin_user:
         pane_path_dirs.insert(0, f"/usr/local/lib/switchyard/{staged_project}")
     configured_directorctl = env.get("TICKET_BOARD_DIRECTORCTL", "").strip()
+    runtime_registrar = "ticket-board-register-runtime"
     if configured_directorctl:
         directorctl_path = Path(configured_directorctl).expanduser()
         if not directorctl_path.is_absolute():
@@ -2885,8 +2924,25 @@ def cli_command_for_role(
                 f"{configured_directorctl}"
             )
         pane_path_dirs.insert(0, str(directorctl_path.parent))
+        runtime_registrar = str(directorctl_path.parent / "ticket-board-register-runtime")
     env["PATH"] = _prepend_paths(env.get("PATH") or default_pane_base_path(bin_user), pane_path_dirs)
-    return ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env), *command]
+    env_prefix = ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env)]
+    socket_path = str(role.env.get("TICKET_BOARD_SOCKET") or "").strip()
+    if socket_path and str(role.env.get("TICKET_BOARD_PROCESS_AUTHORITY") or "") == "1":
+        runtime = _command_name(role.cli[0])
+        return [
+            *env_prefix,
+            runtime_registrar,
+            "--socket", socket_path,
+            "--role", role.role,
+            "--runtime", runtime,
+            "--target", role.target,
+            "--worktree", role.workdir,
+            "--session-dir", str(session_dir.expanduser()),
+            "--",
+            *command,
+        ]
+    return [*env_prefix, *command]
 
 
 def tmux_new_session_args(
@@ -6771,6 +6827,14 @@ def launch_project(
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
+    if not dry_run and config.role_state_isolation:
+        compatible, reason = process_authority_board_compatibility(config)
+        if not compatible:
+            print_func(
+                f"team-launcher: refusing to launch {config.project} before changing local state: "
+                f"its running board does not provide project-account process authority ({reason})"
+            )
+            return 1
     if mode == "reload" and not dry_run:
         # Reload re-projects the stored document, so an unmigrated tenant would reload
         # into the same missing director onboarding forever. Run the one-time backfill
@@ -6870,33 +6934,12 @@ def launch_project(
         # rather than starting roles that cannot write their own trees.
         isolation_gaps = role_isolation_gaps(config)
         if isolation_gaps:
-            # This runs as the tenant, so it writes no migration script: one
-            # written here would live in the directory the control role can
-            # rewrite, which is what made the last one a root-run file a role
-            # account could edit. It names root's published copy if there is a
-            # trustworthy one, and otherwise names the command that publishes it
-            # (SYRD-62).
-            handoff_path, handoff_problems = role_account_migration_instruction(
-                config, runner=runner
-            )
-            next_step = (
-                f"An operator must run {handoff_path} (safe to re-run) and then relaunch."
-                if handoff_path is not None
-                else (
-                    f"An operator must run `sudo switchyard upgrade {config.project}` first, which "
-                    "publishes the role-account migration where only root can write it: "
-                    + "; ".join(handoff_problems)
-                )
-            )
-            # Refuse rather than warn. A partially migrated project that starts
-            # anyway runs roles under the wrong uid or without credentials, and
-            # the board then either denies them or -- worse, before this was
-            # closed -- cannot tell them apart at all (SYRD-39).
             print_func(
                 "team-launcher: refusing to launch " + config.project
-                + "; its roles are not isolated yet, so they cannot be told apart:\n  "
+                + "; its resumable state is not ready for project-account runtime:\n  "
                 + "\n  ".join(isolation_gaps)
-                + "\n" + next_step
+                + f"\nRun `sudo switchyard upgrade {config.project}` after every live role is at a "
+                "resumable checkpoint. The migration leaves dedicated accounts intact."
             )
             return 1
     materialize_layout(
@@ -7510,9 +7553,6 @@ def _new_project_launcher_config_payload(
             ),
             "live_commands": [cli],
             "role": role,
-            # One Unix account per role: this is what the board resolves a
-            # peer's uid against, and it gives each role its own tmux server.
-            "run_as_user": role_account_name(plan.project, role),
             "target": f"{plan.project}-{role}:0.0",
             "tmux_session": f"{plan.project}-{role}",
             "workdir": str(worktree_base / role),
@@ -7537,6 +7577,7 @@ def _new_project_launcher_config_payload(
         "board_url": f"http://127.0.0.1:{plan.port}",
         "board_socket": plan.socket_path,
         "session_dir": _new_project_session_dir(plan.project, plan.owner_user),
+        "role_state_isolation": True,
         "pane_launcher": str(switchyard_shared_pane_launcher()),
         "presentation": {
             "slot_count": min(len(role_defs), MAX_VISIBLE_PANES_PER_WINDOW),
@@ -11360,7 +11401,7 @@ def _role_credential_target(
     the per-role HERMES_HOME the launcher already points it at, so its target is
     resolved per role rather than assumed to mirror the owner's layout.
     """
-    account = account or role_run_as_user(config, role)
+    account = account or role.run_as_user or role_run_as_user(config, role)
     if role_home is None or home_base is not None:
         role_home = (
             home_base / account
@@ -11392,7 +11433,7 @@ def role_credential_manifest(config: ProjectConfig) -> list[str]:
     owner_home = home_dir_for_user(owner_user)
     lines: list[str] = []
     for role in config.roles:
-        account = role_run_as_user(config, role)
+        account = role.run_as_user or role_run_as_user(config, role)
         cli_name = _command_name(role.cli[0]) if role.cli else ""
         if not account or account == config.run_as_user:
             continue
@@ -13026,79 +13067,24 @@ def provision_runtime_command(user_name: str | None, config: ProjectConfig | Non
 
 
 def role_isolation_gaps(config: ProjectConfig) -> list[str]:
-    """What still stops each role running under its own Unix identity.
+    """Compatibility shim for callers from the dedicated-account rollout.
 
-    Checks the things that actually have to be true, not just whether the
-    accounts exist: a tenant that applied an account-only rollout still has
-    owner-owned worktrees, so it must keep being repaired until every gap is
-    closed. Fresh projects hit this too, because their worktrees are created
-    after the operator artifact has already run (SYRD-39).
+    Process registration is the launch gate now. Legacy account fields remain
+    readable solely so their resumable state can be repatriated safely.
     """
-    # Isolation is opt-in per project: a config where no role declares its own
-    # account is an unmigrated tenant, which keeps working as before. Once ANY
-    # role opts in, the whole project must be complete, because a partial
-    # migration is the dangerous state -- some roles isolated, some sharing.
-    if not any(
-        role_run_as_user(config, role) not in ("", config.run_as_user) for role in config.roles
-    ):
-        return []
-    gaps: list[str] = []
-    for role in config.roles:
-        account = role_run_as_user(config, role)
-        if not account or account == config.run_as_user:
-            gaps.append(f"{role.role}: no Unix account of its own")
-            continue
-        if not local_account_exists(account):
-            gaps.append(f"{role.role}: account {account} does not exist")
-            continue
-        workdir = Path(role.workdir)
-        if not workdir.exists():
-            continue
-        try:
-            owner_uid = workdir.stat().st_uid
-            account_uid = pwd.getpwnam(account).pw_uid
-        except (OSError, KeyError):
-            continue
-        if owner_uid != account_uid:
-            gaps.append(f"{role.role}: worktree {workdir} is not owned by {account}")
-    # A role that starts without its CLI credentials fails at the provider
-    # instead of at launch, so the manifest is part of the gate rather than a
-    # separate check nobody runs (SYRD-39).
-    gaps.extend(role_credential_manifest(config))
-    return gaps
+    legacy = [
+        f"{role.role}: resumable state from {role.run_as_user} has not been repatriated"
+        for role in config.roles
+        if role.run_as_user and role.run_as_user != (config.run_as_user or current_user_name())
+    ]
+    if legacy:
+        return legacy
+    return []
 
 
 def upgrade_role_accounts_in_config(config_path: Path, *, dry_run: bool = False) -> tuple[bool, str]:
-    """Give every role in an existing config its own Unix account.
-
-    A tenant provisioned before per-role identities has no run_as_user on its
-    roles, so every role would keep launching as the shared project owner and
-    the board could not tell them apart. Upgrade fills it in from the same
-    naming provisioning uses (SYRD-39).
-    """
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return False, f"team-launcher: cannot read {config_path} to add role accounts: {exc}"
-    project = str(payload.get("project") or "").strip()
-    roles = payload.get("roles")
-    if not project or not isinstance(roles, list):
-        return False, "team-launcher: config has no project roles to give Unix accounts"
-    added: list[str] = []
-    for role in roles:
-        if not isinstance(role, dict):
-            continue
-        name = str(role.get("role") or "").strip()
-        if not name or str(role.get("run_as_user") or "").strip():
-            continue
-        role["run_as_user"] = role_account_name(project, name)
-        added.append(name)
-    if not added:
-        return False, "team-launcher: every role already has its own Unix account"
-    if dry_run:
-        return True, "team-launcher: would give " + ", ".join(sorted(added)) + " their own Unix accounts"
-    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return True, "team-launcher: gave " + ", ".join(sorted(added)) + " their own Unix accounts"
+    """Retired compatibility entry point; account expansion is forbidden."""
+    return False, "team-launcher: per-role Unix account creation is retired (SYRD-69)"
 
 
 # What makes a role the tenant's control role is what the workflow lets it do,
@@ -13741,9 +13727,9 @@ UPGRADE_JOURNAL_SCHEMA = "switchyard.upgrade-journal.v1"
 # account, on a board that recognises it (SYRD-45).
 UPGRADE_PHASES: tuple[tuple[str, str, str], ...] = (
     ("artifacts", "root", "regenerate generated artifacts that are safe while the current roles run"),
-    ("accounts", "operator", "create the per-role Unix accounts, homes, tooling and credentials"),
-    ("identities", "root", "one transaction: stop the roles, move their trees, install and restart the board authority, restart each role under its own account and prove it can write"),
-    ("release", "operator", "deploy the board release that enforces the per-role table"),
+    ("accounts", "operator", "repatriate legacy resumable state without deleting accounts"),
+    ("identities", "root", "verify worktrees and role-local state belong to the project account"),
+    ("release", "operator", "deploy the board release that enforces process-bound authority"),
     ("director", "director", "migrate the declarative director onboarding through the director's own board authority"),
 )
 UPGRADE_PHASE_OWNERS = {name: owner for name, owner, _detail in UPGRADE_PHASES}
@@ -14013,7 +13999,7 @@ def role_account_cutover(
         if role.run_as_user and role.run_as_user != owner
     )
     if not declared:
-        return RoleAccountCutover("legacy", (), (), (), ())
+        return RoleAccountCutover("complete", (), (), (), ())
     missing = tuple(account for _role, account in declared if not local_account_exists(account))
     gaps = role_isolation_gaps(config)
     unowned = tuple(gap for gap in gaps if "is not owned by" in gap)
@@ -14565,6 +14551,209 @@ def revert_incomplete_role_account_cutover(
     )
 
 
+def _copy_tree_without_overwrite(
+    source: Path, target: Path, *, owner: tuple[int, int] | None = None
+) -> None:
+    """Merge durable session data while never replacing owner-side state."""
+    if source.is_file():
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            if owner is not None:
+                os.chown(target, *owner)
+        return
+    if not source.is_dir():
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    if owner is not None:
+        os.chown(target, *owner)
+    for path in source.rglob("*"):
+        relative = path.relative_to(source)
+        destination = target / relative
+        if path.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            if owner is not None:
+                os.chown(destination, *owner)
+        elif path.is_file() and not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            if owner is not None:
+                os.chown(destination, *owner)
+
+
+def _assign_tree_owner(path: Path, owner: tuple[int, int] | None) -> None:
+    if owner is None or not path.exists():
+        return
+    os.chown(path, *owner)
+    if path.is_dir():
+        for child in path.rglob("*"):
+            os.chown(child, *owner)
+
+
+def repatriate_role_runtime_state(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[bool, list[str]]:
+    """Move resumable role state back to the project account, fail closed.
+
+    Dedicated accounts are deliberately left intact. Their bindings disappear
+    from the launcher configuration only after every live pane is stopped and
+    every recorded session that existed before the copy passes the normal
+    provider resume preflight from its new role-local path.
+    """
+    owner = config.run_as_user or current_user_name()
+    legacy_roles = [
+        role for role in config.roles
+        if role.run_as_user and role.run_as_user != owner
+    ]
+    if not legacy_roles and config.role_state_isolation:
+        return False, []
+    problems: list[str] = []
+    migration_roles = config.roles if not config.role_state_isolation else legacy_roles
+    for role in migration_roles:
+        account = role.run_as_user or owner
+        role_runner = _owner_process_runner(owner_user=account, runner=runner)
+        probe = role_runner(
+            tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if probe.returncode == 0:
+            problems.append(
+                f"{role.role}: {role.tmux_session} is still live as {account}; "
+                "stop it at a resumable checkpoint before repatriation"
+            )
+    if problems:
+        return False, problems
+    if dry_run:
+        return bool(legacy_roles or not config.role_state_isolation), []
+
+    owner_home = home_dir_for_user(owner) or Path("/home") / owner
+    try:
+        owner_record = pwd.getpwnam(owner)
+        owner_ids: tuple[int, int] | None = (owner_record.pw_uid, owner_record.pw_gid)
+    except KeyError:
+        owner_ids = None
+    for role in config.roles:
+        target_session_dir = config.session_dir / "roles" / role.role
+        sources = [config.session_dir]
+        if role.run_as_user and role.run_as_user != owner:
+            sources.insert(0, account_session_dir(role.run_as_user, project=config.project))
+        before: list[tuple[Path, str]] = []
+        for source_dir in sources:
+            record = _session_record_for_role(role, source_dir)
+            if record is not None:
+                before.append((source_dir, str(record.get("session_id") or "")))
+                for suffix in ("", ".superseded", ".resume_timeout"):
+                    source = source_dir / f"{session_file_name(role.target)}{suffix}"
+                    destination = target_session_dir / source.name
+                    if source.is_file() and not destination.exists():
+                        try:
+                            copied_payload = json.loads(source.read_text(encoding="utf-8"))
+                        except (OSError, json.JSONDecodeError):
+                            problems.append(f"{role.role}: cannot read session record {source}")
+                            continue
+                        payload_data = copied_payload.get("payload") if isinstance(copied_payload, dict) else None
+                        transcript = (
+                            str(payload_data.get("transcript_path") or "")
+                            if isinstance(payload_data, dict) else ""
+                        )
+                        if transcript:
+                            source_home = _home_from_session_dir(source_dir)
+                            try:
+                                relative = Path(transcript).relative_to(source_home)
+                            except ValueError:
+                                pass
+                            else:
+                                payload_data["transcript_path"] = str(owner_home / relative)
+                        _write_private_json_atomic(destination, copied_payload)
+                        if owner_ids is not None:
+                            os.chown(destination, *owner_ids)
+
+        if role.run_as_user and role.run_as_user != owner:
+            source_home = home_dir_for_user(role.run_as_user) or Path("/home") / role.run_as_user
+            cli = _command_name(role.cli[0]) if role.cli else ""
+            if cli == "claude":
+                _copy_tree_without_overwrite(
+                    _claude_project_dir_for_workdir(role.workdir, home=source_home),
+                    _claude_project_dir_for_workdir(role.workdir, home=owner_home),
+                    owner=owner_ids,
+                )
+            elif cli == "codex":
+                _copy_tree_without_overwrite(
+                    source_home / CODEX_SESSIONS_DIR_NAME,
+                    owner_home / CODEX_SESSIONS_DIR_NAME,
+                    owner=owner_ids,
+                )
+            elif cli == "agy":
+                for state_name in ("conversations", "brain"):
+                    _copy_tree_without_overwrite(
+                        source_home / AGY_CREDENTIAL_DIR_NAME / state_name,
+                        owner_home / AGY_CREDENTIAL_DIR_NAME / state_name,
+                        owner=owner_ids,
+                    )
+            elif cli == "hermes":
+                legacy_session_dir = account_session_dir(
+                    role.run_as_user, project=config.project
+                )
+                source_hermes_home = hermes_home_for_role(
+                    role, session_dir=legacy_session_dir
+                )
+                target_hermes_home = hermes_home_for_role(
+                    role, session_dir=target_session_dir
+                )
+                for state_name in HERMES_PRIVATE_HOME_ENTRIES:
+                    _copy_tree_without_overwrite(
+                        source_hermes_home / state_name,
+                        target_hermes_home / state_name,
+                        owner=owner_ids,
+                    )
+        if before:
+            migrated_id = session_id_for_role(role, target_session_dir)
+            expected_id = before[0][1]
+            if not migrated_id or migrated_id != expected_id:
+                problems.append(f"{role.role}: recorded session {expected_id} did not copy exactly")
+                continue
+            ok, reason = _resume_preflight_allows_attempt(
+                role, migrated_id, session_dir=target_session_dir
+            )
+            if not ok:
+                problems.append(f"{role.role}: copied session {migrated_id} is not resumable: {reason}")
+        _assign_tree_owner(target_session_dir, owner_ids)
+    if problems:
+        return False, problems
+
+    previous_worktree_owners: list[tuple[Path, int, int]] = []
+    for role in legacy_roles:
+        worktree = Path(role.workdir)
+        if not worktree.exists():
+            continue
+        info = worktree.stat()
+        previous_worktree_owners.append((worktree, info.st_uid, info.st_gid))
+        if not _chown_tree(str(worktree), f"{owner}:{owner}", runner=runner):
+            problems.append(f"{role.role}: could not return worktree {worktree} to {owner}")
+            break
+    if problems:
+        for worktree, uid, gid in previous_worktree_owners:
+            _chown_tree(str(worktree), f"{uid}:{gid}", runner=runner)
+        return False, problems
+
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    for section in (payload.get("roles", []), payload.get("retired_workflow_roles", {}).values()):
+        for role in section:
+            if isinstance(role, dict):
+                role.pop("run_as_user", None)
+    payload["role_state_isolation"] = True
+    try:
+        _write_json_atomic(config_path, payload, owner_user=owner)
+    except OSError as exc:
+        for worktree, uid, gid in previous_worktree_owners:
+            _chown_tree(str(worktree), f"{uid}:{gid}", runner=runner)
+        return False, [f"configuration publish failed after state copy: {exc}"]
+    return True, []
+
+
 def upgrade_project_command(
     config: ProjectConfig,
     *,
@@ -14675,6 +14864,32 @@ def upgrade_project_command(
     if desktop_policy is not None or config.desktop_access is not None:
         config = configure_project_desktop(config, config_path=config_path, policy_path=desktop_policy,
             dry_run=dry_run, helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
+
+    repatriated, repatriation_problems = repatriate_role_runtime_state(
+        config, config_path=config_path, dry_run=dry_run, runner=runner
+    )
+    if repatriation_problems:
+        print_func(
+            f"switchyard: refusing {config.project}'s project-account migration:\n  "
+            + "\n  ".join(repatriation_problems)
+        )
+        print_func(
+            "switchyard: no account, worktree, installed unit, or release was changed; "
+            "resume after every named role is safely checkpointed"
+        )
+        return 1
+    if repatriated:
+        if dry_run:
+            print_func(
+                f"switchyard: would repatriate {config.project}'s resumable role state and "
+                "remove dedicated-account bindings"
+            )
+        else:
+            print_func(
+                f"switchyard: repatriated {config.project}'s resumable role state to "
+                f"{config.run_as_user or current_user_name()}; dedicated accounts were left intact"
+            )
+            config = load_project_config(config.project, config_path)
 
     # Detect the partial state before doing anything else, so every later phase
     # reads a configuration that matches the host.
@@ -14935,8 +15150,8 @@ def upgrade_project_command(
     if not final_cutover.is_complete:
         print_func(
             f"switchyard: withholding the {config.project} release deploy instruction until its "
-            "roles are running under their own accounts: the release enforces the per-role table, "
-            "and deploying it now would reject the processes actually serving the roles."
+            "legacy role state is repatriated to the project account: the release enforces "
+            "process-bound authority and must not strand a resumable pane."
         )
     else:
         release_deployed = record_release_phase_from_status(
@@ -14988,13 +15203,8 @@ def upgrade_project_command(
 
 
 def _role_accounts_ready(config: ProjectConfig) -> bool:
-    """Whether every role's own Unix account exists on this host."""
-    owner = config.run_as_user or current_user_name()
-    accounts = [
-        role.run_as_user or role_account_name(config.project, role.role) for role in config.roles
-    ]
-    candidates = [account for account in accounts if account and account != owner]
-    return bool(candidates) and all(local_account_exists(account) for account in candidates)
+    """Compatibility predicate: SYRD-69 requires only the project account."""
+    return True
 
 
 def _worktree_ownership(config: ProjectConfig) -> dict[str, tuple[int, int]]:
@@ -16393,7 +16603,6 @@ def _add_role_payload(
         "cli": [cli],
         "live_commands": [cli],
         "role": role_name,
-        "run_as_user": role_account_name(config.project, role_name),
         "target": f"{config.project}-{role_name}:0.0",
         "tmux_session": f"{config.project}-{role_name}",
         "yolo": True,
@@ -17620,7 +17829,7 @@ Commands:
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
-  cutover-roles    stop, restart and verify every role under its own Unix account
+  cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
   present          map persistent role sessions into stable display slots at runtime
   replace-window   replace a root-owned presentation window without stopping any worker
@@ -17946,11 +18155,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         )
     if argv[0].casefold() == "cutover-roles":
         args = _build_switchyard_cutover_roles_parser().parse_args(argv[1:])
-        entry = _resolve_switchyard_project(args.project)
-        config = _load_switchyard_project_config_for_command(entry, argv)
-        return cutover_role_identities_command(
-            config, config_path=entry.config_path, dry_run=args.dry_run
+        print(
+            f"switchyard: cutover-roles is retired for {args.project}; run `switchyard upgrade "
+            f"{args.project}` to repatriate resumable state without creating or deleting accounts"
         )
+        return 1
     if argv[0].casefold() == "finish-upgrade":
         args = _build_switchyard_finish_upgrade_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

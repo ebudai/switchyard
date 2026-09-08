@@ -80,12 +80,10 @@ compute_settle_delay_ms() {
     printf '%d' $((base_ms + extra_ms))
 }
 
-# SYRD-39: each role runs as its own Unix account, so each role's tmux session
-# lives in that account's own tmux server. Reaching another role's pane goes
-# through the generated role-control interface -- sudo -u <role account> tmux,
-# installed as /etc/sudoers.d/49-<project>-role-control -- rather than assuming
-# a shared server. Targets naming this account's own session, and any target
-# whose account cannot be resolved, run tmux directly as before.
+# Dedicated role accounts are a legacy compatibility path. SYRD-69 projects
+# keep every worker in the project account's tmux server and select logical
+# authority from PostgreSQL process assignments, so their Director operations
+# must never sudo into a leftover role account.
 tmux_account_for_target() {
     # Which account's tmux server holds this target's session. Role sessions
     # live in that role's account; display and viewer sessions stay in the
@@ -97,6 +95,7 @@ tmux_account_for_target() {
     local owner="${SWITCHYARD_PROJECT_OWNER:-}"
     local role
 
+    [ "${TICKET_BOARD_PROCESS_AUTHORITY:-}" != "1" ] || return 1
     [ -n "$project" ] || return 1
     case "$session" in
         "$project"-*) role="${session#"$project"-}" ;;
@@ -112,6 +111,57 @@ tmux_account_for_target() {
             ;;
     esac
     printf '%s-%s' "$project" "$role"
+}
+
+runtime_target_for_role() {
+    local role="$1"
+    local board_url="${TICKET_BOARD_URL:-${PGU_TICKET_BOARD_URL:-$DEFAULT_TICKET_BOARD_URL}}"
+    python3 - "$board_url" "$PROJECT_SLUG" "$role" <<'PY'
+import json
+import sys
+from urllib import parse, request
+
+board_url, project, role = sys.argv[1:]
+url = board_url.rstrip('/') + '/api/runtime-assignments/' + parse.quote(role, safe='')
+try:
+    with request.urlopen(url, timeout=2) as response:
+        payload = json.load(response)
+except Exception as exc:
+    raise SystemExit(f"error: cannot resolve runtime assignment for {role}: {exc}")
+if not isinstance(payload, dict) or payload.get('project') != project:
+    raise SystemExit(f"error: runtime assignment for {role} belongs to another project")
+if payload.get('authority_mode') != 'process':
+    raise SystemExit(f"error: runtime assignment for {role} came from a legacy uid board")
+assignment = payload.get('assignment')
+target = assignment.get('actual_target') if isinstance(assignment, dict) else None
+if not isinstance(target, str) or not target.startswith(project + '-') or ':' not in target:
+    raise SystemExit(f"error: runtime assignment for {role} has an invalid target")
+print(target)
+PY
+}
+
+resolve_runtime_target() {
+    local requested="$1"
+    local role=""
+    if [[ "$requested" != *:* ]]; then
+        role="$requested"
+        if [ "${TICKET_BOARD_PROCESS_AUTHORITY:-}" != "1" ]; then
+            printf '%s-%s:0.0' "$PROJECT_SLUG" "$role"
+            return 0
+        fi
+    elif [ "${TICKET_BOARD_PROCESS_AUTHORITY:-}" = "1" ] \
+        && [[ "$requested" == "$PROJECT_SLUG"-*:0.0 ]]; then
+        role="${requested#"$PROJECT_SLUG"-}"
+        role="${role%:0.0}"
+    else
+        printf '%s' "$requested"
+        return 0
+    fi
+    if ! [[ "$role" =~ ^[a-z][a-z0-9_-]{0,63}$ ]]; then
+        echo "error: invalid logical role: $role" >&2
+        return 1
+    fi
+    runtime_target_for_role "$role"
 }
 
 role_tmux() {
@@ -259,21 +309,21 @@ usage() {
 directorctl - tmux send helper for ticket-board workflows
 
 Usage:
-  directorctl send <tmux-target> <message...>
-  directorctl send-file <tmux-target> <path>
+  directorctl send <role-or-tmux-target> <message...>
+  directorctl send-file <role-or-tmux-target> <path>
   directorctl ticket-create [options]
   directorctl callback <message...>
-  directorctl capture <tmux-target> [lines]
+  directorctl capture <role-or-tmux-target> [lines]
   directorctl status
   directorctl --help
 
 Commands:
-  send         Send a one-line message to a tmux target and submit it.
+  send         Send a one-line message to a role's assigned target and submit it.
   send-file    Send the contents of a file to a tmux target and submit it.
   ticket-create
                Create a ticket through the board HTTP action API.
   callback     Send a message to the configured director target and submit it.
-  capture      Print the last non-empty lines from a tmux target pane.
+  capture      Print the last non-empty lines from a role's assigned target pane.
   status       Print whether the expected tmux sessions exist.
 
 All send/callback commands send payload and Enter separately, wait for the
@@ -303,8 +353,8 @@ Environment:
 
 Examples:
   directorctl callback 'backlog complete: packet 36.55'
-  directorctl send pgu-audit:0.0 'please audit packet 36.55'
-  directorctl send-file pgu-main:0.0 docs/implementation_plan.md
+  directorctl send audit 'please audit packet 36.55'
+  directorctl send-file main docs/implementation_plan.md
   directorctl ticket-create --assignee app --title 'Fix board assignee enum' --body 'Allow director as assignee' --comment-who director --comment-text 'Speced + routed to app.'
   directorctl status
   DIRECTORCTL_EXTRA_SESSIONS='project-notify' directorctl status
@@ -484,7 +534,8 @@ cmd_send() {
         echo "usage: directorctl send <tmux-target> <message...>" >&2
         exit 1
     fi
-    local target="$1"
+    local target
+    target="$(resolve_runtime_target "$1")"
     shift
     local message="$*"
     send_payload "$target" "$message"
@@ -496,7 +547,8 @@ cmd_send_file() {
         echo "usage: directorctl send-file <tmux-target> <path>" >&2
         exit 1
     fi
-    local target="$1"
+    local target
+    target="$(resolve_runtime_target "$1")"
     local path="$2"
     if [ ! -f "$path" ]; then
         echo "error: file not found: $path" >&2
@@ -518,7 +570,9 @@ cmd_callback() {
         exit 1
     fi
     local message="$*"
-    send_payload "$DEFAULT_DIRECTOR_TARGET" "$message"
+    local target
+    target="$(resolve_runtime_target director)"
+    send_payload "$target" "$message"
 }
 
 cmd_ticket_create() {
@@ -707,7 +761,8 @@ cmd_capture() {
         echo "usage: directorctl capture <tmux-target> [lines]" >&2
         exit 1
     fi
-    local target="$1"
+    local target
+    target="$(resolve_runtime_target "$1")"
     local lines="${2:-$DEFAULT_CAPTURE_LINES}"
     if ! [[ "$lines" =~ ^[0-9]+$ ]]; then
         echo "error: capture lines must be a non-negative integer" >&2

@@ -495,11 +495,9 @@ def main(argv=None):
         raise RuntimeError(
             f'board revision {result["revision"]} applied; local projection pending. Preserve {journal} and rerun apply with the same document: {exc}'
         ) from exc
-    # A role the document added now has a Unix account in the plan, but only an
-    # operator can rewrite and install the board unit that carries the table the
-    # board resolves uids through. Until that happens the role is configured on
-    # the board and unrecognised on the socket, so say which roles and what to
-    # run rather than leaving it to be discovered as a role that cannot write.
+    # Kept as a compatibility report field for old journals. Project-account
+    # runtimes return no pending roles: applying PostgreSQL workflow data is the
+    # complete unprivileged role-definition operation (SYRD-69).
     pending_roles = _pending_board_unit_roles(args.config)
     if pending_roles:
         print(

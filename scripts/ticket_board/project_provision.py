@@ -486,8 +486,10 @@ def build_plan(
         caller_roles=caller_roles,
         operation_allowed_roles=operation_allowed_roles,
         board_service_traversal=board_service_traversal,
-        role_accounts=role_account_table(project, caller_roles),
-        roles_group=roles_group_name(project),
+        role_accounts=(),
+        # The owner and service share only this project's socket. Logical roles
+        # are PostgreSQL/process data and do not become Unix users or groups.
+        roles_group=owner_user,
     )
 
 
@@ -643,6 +645,7 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     "ticket-board-install-pane-hooks",
     "switchyard-board-skill",
     "switchyard-publish-ref",
+    "ticket-board-register-runtime",
     # Root-owned and reached only through this tenant's sudo grant.
     "switchyard-tenant-control",
     # The one-slot display bridge a presentation window's tabs run, so a
@@ -2020,13 +2023,14 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
         if operation_allowed_roles
         else ""
     )
-    # The tenant reaches the board socket through its own group rather than the
-    # socket being world-writable, so the service joins that group and the
-    # server chgrps the socket to it at bind (SYRD-39).
-    # The board joins the project's roles group so it can hand the socket to
-    # that group, and carries the authoritative role->account table. Role
-    # authority is the peer's uid resolved through this table (SYRD-39).
-    tenant_group_line = f"SupplementaryGroups={plan.roles_group}\n" if plan.roles_group else ""
+    # The service's primary group is the project account's group. That makes
+    # the 0750 runtime directory and 0660 socket reachable by this project but
+    # not by another project's account. Role authority is process-bound data,
+    # so the unit carries no role-account table (SYRD-69).
+    tenant_group_line = (
+        f"Group={plan.roles_group}\nSupplementaryGroups={plan.roles_group}\n"
+        if plan.roles_group else ""
+    )
     socket_group_env_line = (
         f"Environment=TICKET_BOARD_SOCKET_GROUP={plan.roles_group}\n" if plan.roles_group else ""
     )
@@ -2054,6 +2058,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=HOME={plan.owner_home}
 Environment=TICKET_BOARD_DIRECTORCTL={plan.board_current}/scripts/directorctl
 Environment=TICKET_BOARD_PROJECT={plan.project}
+Environment=TICKET_BOARD_PROCESS_AUTHORITY=1
 {systemd_environment("TICKET_BOARD_PROJECT_NAME", plan.project_name)}
 Environment=TICKET_BOARD_TICKET_PREFIX={plan.ticket_prefix}
 Environment=TICKET_BOARD_COMMIT_GIT_DIR={plan.commit_git_dir}
@@ -2113,6 +2118,7 @@ Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=TICKET_BOARD_PROJECT={plan.project}
+Environment=TICKET_BOARD_PROCESS_AUTHORITY=1
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}

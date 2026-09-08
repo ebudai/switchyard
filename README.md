@@ -59,7 +59,7 @@ Commands:
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
-  cutover-roles    stop, restart and verify every role under its own Unix account
+  cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
   present          map persistent role sessions into stable display slots at runtime
   replace-window   replace a root-owned presentation window without stopping any worker

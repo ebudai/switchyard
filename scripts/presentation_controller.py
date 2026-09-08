@@ -1,8 +1,9 @@
 """Runtime presentation slots for persistent Switchyard role sessions.
 
-RoleConfig remains the authoritative worker registry.  This module persists only
-which role a stable display slot should present and changes proxy panes without
-restarting or modifying worker sessions.
+The launcher projection supplies the desired role list. For project-account
+runtimes, PostgreSQL's live assignment supplies the actual worker target. This
+module persists only which role a stable display slot should present and changes
+proxy panes without restarting or modifying worker sessions.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from scripts import team_launcher
 
@@ -39,6 +42,70 @@ WINDOW_ATTACH_POLL_SECONDS = 0.25
 #: table that was never created is deliberate and sufficient -- a lookup that
 #: finds nothing is what makes the client incapable of a tmux command.
 DISPLAY_KEY_TABLE = "switchyard-display"
+
+
+def runtime_assignment_config(
+    config: team_launcher.ProjectConfig,
+    *,
+    opener: Callable[[str], Any] | None = None,
+) -> team_launcher.ProjectConfig:
+    """Resolve every shared-account worker from the board's current assignment.
+
+    The launcher projection remains the desired role list, but it is not live
+    routing evidence.  A replacement pane may use a recovery target, so display
+    attachment must consume the same atomic row as notifications and write
+    authority instead of reconstructing a conventional tmux name (SYRD-69).
+    """
+    if not config.role_state_isolation:
+        return config
+    url = f"{config.board_url.rstrip('/')}/api/runtime-assignments"
+    open_url = opener or (lambda target: urllib_request.urlopen(target, timeout=3))
+    try:
+        with open_url(url) as response:
+            payload = json.load(response)
+    except (OSError, ValueError, urllib_error.URLError) as exc:
+        raise SystemExit(
+            f"switchyard: cannot resolve {config.project} runtime assignments from {url}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("project") != config.project:
+        raise SystemExit("switchyard: runtime assignment response belongs to another project")
+    if payload.get("authority_mode") != "process":
+        raise SystemExit("switchyard: running board still uses legacy uid authority")
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, dict):
+        raise SystemExit("switchyard: runtime assignment response has no assignments object")
+    resolved: list[team_launcher.RoleConfig] = []
+    missing: list[str] = []
+    for role in config.roles:
+        assignment = assignments.get(role.role)
+        if not isinstance(assignment, dict):
+            if role.detached:
+                resolved.append(role)
+            else:
+                missing.append(role.role)
+            continue
+        target = str(assignment.get("actual_target") or "").strip()
+        runtime = str(assignment.get("runtime") or "").strip()
+        if not target.split(":", 1)[0].startswith(f"{config.project}-"):
+            raise SystemExit(
+                f"switchyard: refusing foreign runtime assignment for {role.role}: {target!r}"
+            )
+        if not role.cli or team_launcher._command_name(role.cli[0]) != runtime:
+            raise SystemExit(
+                f"switchyard: runtime assignment for {role.role} is {runtime!r}, "
+                "which differs from the launcher projection"
+            )
+        resolved.append(
+            team_launcher.replace(
+                role, target=target, tmux_session=target.split(":", 1)[0]
+            )
+        )
+    if missing:
+        raise SystemExit(
+            "switchyard: no live runtime assignment for configured role(s): "
+            + ", ".join(sorted(missing))
+        )
+    return team_launcher.replace(config, roles=resolved)
 
 
 def display_session_name(project: str, slot: int) -> str:
@@ -228,11 +295,13 @@ def validate_presentation_document(
 
 def _validate_role_namespace(config: team_launcher.ProjectConfig) -> None:
     for role in config.roles:
-        expected_session = f"{config.project}-{role.role}"
-        expected_target = f"{expected_session}:0.0"
-        if role.tmux_session != expected_session or role.target != expected_target:
+        target_session = role.target.split(":", 1)[0]
+        if (
+            not role.tmux_session.startswith(f"{config.project}-")
+            or role.tmux_session != target_session
+        ):
             raise SystemExit(
-                f"switchyard: refusing foreign presentation target for {role.role}: expected {expected_target}, "
+                f"switchyard: refusing foreign presentation target for {role.role}: "
                 f"configured {role.target}"
             )
 
@@ -983,6 +1052,7 @@ def reconnect_role_slots(
     into the gap between kill and start attaches the proxy to nothing, which
     parks it again for the same reason.
     """
+    config = runtime_assignment_config(config)
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
     owner_runner = _tmux_runner(config, runner)
@@ -1009,6 +1079,7 @@ def presentation_report(
     state_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> dict[str, Any]:
+    config = runtime_assignment_config(config)
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
     owner_runner = _tmux_runner(config, runner)
@@ -1223,6 +1294,7 @@ def launch_presentation(
     process_launcher: Callable[..., Any] | None = None,
 ) -> int:
     """Restore saved slots during ordinary project launch without changing workers."""
+    config = runtime_assignment_config(config)
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
     owner_runner = _tmux_runner(config, runner)
@@ -1307,6 +1379,7 @@ def presentation_action(
     sleep: Callable[[float], None] = time.sleep,
     proc_root: Path | None = None,
 ) -> dict[str, Any]:
+    config = runtime_assignment_config(config)
     _validate_role_namespace(config)
     actor = _require_director(config, environ)
     owner_runner = _tmux_runner(config, runner)

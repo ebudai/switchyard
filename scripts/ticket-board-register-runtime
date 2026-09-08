@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Register this pane's runtime routing, then replace ourselves with its CLI."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+from ticket_board.write_client import UnixHTTPConnection
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--socket", required=True)
+    parser.add_argument("--role", required=True)
+    parser.add_argument("--runtime", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--worktree", required=True)
+    parser.add_argument("--session-dir", required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    command = list(args.command)
+    if command[:1] == ["--"]:
+        command.pop(0)
+    if not command:
+        parser.error("a runtime command is required after --")
+    payload = json.dumps(
+        {
+            "role": args.role,
+            "runtime": args.runtime,
+            "target": args.target,
+            "worktree": os.path.abspath(args.worktree),
+            "session_dir": os.path.abspath(os.path.expanduser(args.session_dir)),
+        }
+    ).encode("utf-8")
+    connection = UnixHTTPConnection(args.socket, timeout=10)
+    try:
+        connection.request(
+            "POST",
+            "/api/register-caller",
+            body=payload,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(payload))},
+        )
+        response = connection.getresponse()
+        body = response.read().decode("utf-8", "replace")
+        if response.status != 200:
+            print(f"switchyard: runtime registration refused: {body}", file=sys.stderr)
+            return 1
+    finally:
+        connection.close()
+    os.execvpe(command[0], command, os.environ)
+    return 127
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

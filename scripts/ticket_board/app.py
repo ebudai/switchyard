@@ -190,6 +190,81 @@ class TicketBoardApp:
         cfg = self.workflow_configuration()
         return [r["name"] for r in cfg["roles"] if r["active"]] if cfg else list(CALLER_ROLES)
 
+    def runtime_assignment_for_process(self, pid: int, start_time: int, uid: int) -> dict[str, Any] | None:
+        """Resolve authority from the exact live process recorded by the launcher."""
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                """
+SELECT a.role, a.runtime, a.actual_target, a.worktree, a.session_dir,
+       a.process_pid, a.process_start_time, a.process_uid, a.generation
+FROM ticket_board.role_runtime_assignments AS a
+JOIN ticket_board.workflow_roles AS r ON r.name = a.role
+WHERE a.process_pid = %s AND a.process_start_time = %s AND a.process_uid = %s
+  AND (r.definition->>'active')::boolean
+  AND r.definition->>'runtime' = a.runtime
+  AND r.definition->>'target' = a.actual_target
+""",
+                (pid, start_time, uid),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def runtime_assignment(self, role: str) -> dict[str, Any] | None:
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM ticket_board.role_runtime_assignments WHERE role = %s",
+                (role.strip().lower(),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def register_runtime_assignment(
+        self,
+        *,
+        role: str,
+        runtime: str,
+        target: str,
+        worktree: str,
+        session_dir: str,
+        process_pid: int,
+        process_start_time: int,
+        process_uid: int,
+        expected_generation: int,
+    ) -> dict[str, Any]:
+        """Atomically publish routing data and the process that may wield it."""
+        if not target.split(":", 1)[0].startswith(f"{self.project}-"):
+            raise ValueError("runtime target belongs to another project")
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                """
+SELECT * FROM ticket_board.register_role_runtime(
+    %s::text, %s::text, %s::text, %s::text, %s::text,
+    %s::bigint, %s::bigint, %s::bigint, %s::bigint
+)
+""",
+                (
+                    role, runtime, target, worktree, session_dir, process_pid,
+                    process_start_time, process_uid, expected_generation,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("runtime registration returned no row")
+            return dict(row)
+
+    def runtime_targets(self) -> dict[str, dict[str, Any]]:
+        """Current routing rows used by delivery and presentation consumers."""
+        with self._pg_connect() as conn:
+            rows = conn.execute(
+                """
+SELECT a.role, a.runtime, a.actual_target, a.worktree, a.session_dir,
+       a.process_pid, a.process_start_time, a.process_uid, a.generation
+FROM ticket_board.role_runtime_assignments AS a
+JOIN ticket_board.workflow_roles AS r ON r.name=a.role
+WHERE (r.definition->>'active')::boolean
+  AND r.definition->>'runtime'=a.runtime
+  AND r.definition->>'target'=a.actual_target
+"""
+            ).fetchall()
+            return {str(row["role"]): dict(row) for row in rows}
+
     def apply_workflow(self, document: Any, *, expected_revision: int, dry_run: bool, caller_role: str) -> dict[str, Any]:
         from .workflow_config import validate
         if caller_role != "director":

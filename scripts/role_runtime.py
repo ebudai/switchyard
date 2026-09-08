@@ -371,7 +371,7 @@ def _default_start(
     return team_launcher.ensure_visible_role_session_for_viewer(
         role,
         mode="attach-or-start",
-        session_dir=config.session_dir,
+        session_dir=team_launcher.role_session_dir(config, role),
         pane_state_dir=pane_state_dir,
         bin_user=config.run_as_user,
         runner=runner,
@@ -415,7 +415,9 @@ def _restart_worker(
             raise RuntimeError(f"could not stop {role.tmux_session} (exit {kill.returncode})")
         if on_stopped is not None:
             on_stopped()
-    team_launcher.clear_session_record_for_role(role, config.session_dir)
+    team_launcher.clear_session_record_for_role(
+        role, team_launcher.role_session_dir(config, role)
+    )
     team_launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
     if not was_live:
         return False
@@ -503,7 +505,9 @@ def _rollback(
             # the whole point of the rollback.
             config = team_launcher.load_project_config(journal.project, config_path)
             role = team_launcher._role_by_name(config, journal.role)
-            team_launcher.clear_session_record_for_role(role, config.session_dir)
+            team_launcher.clear_session_record_for_role(
+                role, team_launcher.role_session_dir(config, role)
+            )
             _start_and_prove(
                 role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start
             )

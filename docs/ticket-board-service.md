@@ -495,11 +495,50 @@ agent/tool output is delivered to the director, and a still-busy composer waits
 only for the bounded retry count before delivering with a warning so
 pane-to-director escalations cannot starve forever.
 
-## Local write authority
+## Local write authority (SYRD-69)
 
-A board write over the tenant Unix socket carries a caller role. That role is
-**the peer's Unix account**, resolved by the board; it is never the role name a
-caller supplies.
+A project has one persistent Unix identity. `SO_PEERCRED` establishes only the
+project boundary; it does not identify a logical role. The role comes from the
+PostgreSQL `role_runtime_assignments` row whose process PID, `/proc` start time,
+and UID match the tmux pane ancestor of the socket peer. Caller-role headers are
+ignored. A sibling process under the same project account has no assignment and
+cannot inherit a registered pane's authority.
+
+The pane launch wrapper registers runtime, actual target, worktree, session
+directory, and process identity in one database statement before it execs the
+agent CLI. PID start time closes PID-reuse inheritance. A live assignment may
+not be replaced; after its pane dies, a restarted or temporary worker can
+atomically publish its actual target. Notification delivery reads that target
+instead of reconstructing `<project>-<role>:0.0`, and holds queued work while an
+active role has no registered runtime.
+
+The same read-only assignment API drives presentation attachment and logical
+Director addressing (`directorctl send app ...`, `directorctl capture app`).
+The launcher probes that API and its advertised `process` authority mode before
+it changes a layout, worktree, state file, or tmux session. A new launcher paired
+with an old board therefore refuses before mutation; a legacy launcher/unit
+continues through the retained uid-authority path until repatriation is complete.
+
+Every successful generation is appended to
+`role_runtime_assignment_history` in the same transaction. Workflow targets
+may use a recovery session name, but remain constrained to the project's tmux
+namespace; changing runtime or target immediately invalidates the old process
+row until the replacement launch gate publishes the matching assignment.
+
+Fresh provisioning creates only the project account. It does not create a Unix
+user or sudo/tmux grant per role, and the board unit contains no
+`TICKET_BOARD_ROLE_ACCOUNTS`. The board socket remains `0660` inside a `0750`
+runtime directory and is shared with the project account's group.
+
+Each role has its own worktree and session path beneath the project account's
+state root. Upgrade repatriates legacy role records and provider conversation
+stores without overwriting owner-side data, verifies the normal resume
+preflight, and only then atomically removes `run_as_user` bindings. It refuses
+while any dedicated-account pane is live and never deletes the old accounts,
+so an interrupted or uncertain migration remains recoverable.
+
+The sections below describe the superseded dedicated-account rollout and are
+retained only as historical operator context.
 
 ### Why the uid, and nothing else
 

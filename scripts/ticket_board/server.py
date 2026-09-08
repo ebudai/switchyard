@@ -32,6 +32,7 @@ from .app import CALLER_ROLES as APP_CALLER_ROLES
 from .app import TicketBoardApp, iso_now, project_slug
 from .frontend import render_html
 from .runtime_paths import directorctl_path
+from .peer_identity import SessionIdentity, session_identity, session_is_live
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
@@ -255,6 +256,54 @@ class RoleAccount:
 
 class CallerIdentityError(PermissionError):
     """The peer's Unix identity does not entitle it to the role it used."""
+
+
+class ProcessRoleAuthority:
+    """Resolve a shared project account to its registered live pane process.
+
+    The shared uid is only the tenant boundary. Role authority comes from the
+    `(pid, start_time, uid)` row PostgreSQL recorded atomically with that role's
+    runtime and target. A sibling process under the project account therefore
+    has no role merely because it can name one in a request.
+    """
+
+    def __init__(
+        self,
+        app: TicketBoardApp,
+        project_account: str,
+        *,
+        resolve_uid: Callable[[str], int | None] | None = None,
+        resolve_session: Callable[[int], SessionIdentity | None] = session_identity,
+        session_live: Callable[[SessionIdentity], bool] = session_is_live,
+    ) -> None:
+        self.app = app
+        self.project_account = project_account.strip()
+        resolver = resolve_uid or LocalRoleAuthority._default_resolve_uid
+        self.project_uid = resolver(self.project_account) if self.project_account else None
+        self.resolve_session = resolve_session
+        self.session_live = session_live
+        if self.project_uid is None:
+            raise RuntimeError(f"project account {self.project_account!r} does not exist")
+
+    def session_for_peer(self, credentials: PeerCredentials) -> SessionIdentity:
+        if credentials.uid != self.project_uid:
+            raise CallerIdentityError("local board writes must come from this project's account")
+        identity = self.resolve_session(credentials.pid)
+        if identity is None or not self.session_live(identity):
+            raise CallerIdentityError("local board writes must come from a live launcher pane")
+        return identity
+
+    def role_for_peer(self, credentials: PeerCredentials) -> str:
+        identity = self.session_for_peer(credentials)
+        assignment = self.app.runtime_assignment_for_process(
+            identity.pid, identity.start_time, credentials.uid
+        )
+        if assignment is None:
+            raise CallerIdentityError("this live pane has no PostgreSQL role assignment")
+        return str(assignment["role"])
+
+    def role_for_uid(self, uid: int) -> str:
+        raise CallerIdentityError("a shared project uid does not identify a role")
 
 
 class LocalRoleAuthority:
@@ -840,9 +889,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
     def caller_role(self) -> str:
         if self.role_authority is not None:
             credentials = self.require_allowed_peer()
-            # The kernel supplied this uid; the caller could not choose it, and
-            # the uid-to-role table belongs to the board, not to the roles. The
-            # header below is never consulted on this path.
+            # New boards bind the kernel-observed pane process to PostgreSQL;
+            # LocalRoleAuthority remains only for an explicit legacy test or
+            # compatibility caller. Headers are never consulted on this path.
+            if hasattr(self.role_authority, "role_for_peer"):
+                return self.role_authority.role_for_peer(credentials)
             return self.role_authority.role_for_uid(credentials.uid)
         # Keep the legacy name while clients transition. A server-side alias only
         # protects old clients on a new board; clients must dual-send to support
@@ -872,19 +923,49 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise PermissionError(f"missing or invalid {REPORT_TOKEN_HEADER}")
 
     def handle_register_caller(self, payload: dict[str, object]) -> None:
-        """Report the role this peer's Unix account holds.
+        """Register a launcher pane once, or report its existing assignment.
 
-        Kept for clients that still announce a role, but it no longer grants
-        anything: the role is resolved from the peer's uid either way. A
-        supplied role that disagrees with the account's role is refused and
-        logged with the real peer uid and pid, so a forged claim is visible
-        rather than merely ineffective (SYRD-39).
+        The server derives the pane PID/start time and project UID. The payload
+        supplies routing data that PostgreSQL validates against the active
+        workflow; subsequent writes resolve only from the stored process key.
         """
         if self.role_authority is None:
             raise ValueError("caller registration is only available on the local Unix socket")
         credentials = self.require_allowed_peer()
-        derived = self.role_authority.role_for_uid(credentials.uid)
         claimed = str(payload.get("role", "")).strip().lower()
+        if hasattr(self.role_authority, "session_for_peer"):
+            authority = self.role_authority
+            session = authority.session_for_peer(credentials)
+            existing = self.app.runtime_assignment_for_process(
+                session.pid, session.start_time, credentials.uid
+            )
+            if existing is None:
+                required = {"role", "runtime", "target", "worktree", "session_dir"}
+                if not required <= set(payload):
+                    raise CallerIdentityError(
+                        "pane is not registered; the launcher must publish its runtime assignment"
+                    )
+                previous = self.app.runtime_assignment(claimed)
+                if previous is not None:
+                    old = SessionIdentity(
+                        int(previous["process_pid"]), int(previous["process_start_time"])
+                    )
+                    if authority.session_live(old) and old != session:
+                        raise CallerIdentityError(f"role {claimed} is held by a live pane")
+                existing = self.app.register_runtime_assignment(
+                    role=claimed,
+                    runtime=str(payload["runtime"]),
+                    target=str(payload["target"]),
+                    worktree=str(payload["worktree"]),
+                    session_dir=str(payload["session_dir"]),
+                    process_pid=session.pid,
+                    process_start_time=session.start_time,
+                    process_uid=credentials.uid,
+                    expected_generation=int(previous["generation"]) if previous else 0,
+                )
+            derived = str(existing["role"])
+        else:
+            derived = self.role_authority.role_for_uid(credentials.uid)
         if claimed and claimed != derived:
             LOGGER.warning(
                 "Refused role claim %r from peer pid=%s uid=%s: that account is %s",
@@ -894,7 +975,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 derived,
             )
             raise CallerIdentityError(
-                f"this account is registered as {derived}, not {claimed}"
+                f"this pane is registered as {derived}, not {claimed}"
             )
         self.send_json({"role": derived, "uid": credentials.uid, "pid": credentials.pid})
 
@@ -1388,6 +1469,35 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/workflow":
             self.send_json(self.app.workflow_document())
             return
+        if parsed.path == "/api/runtime-assignments":
+            self.send_json({
+                "project": getattr(self.app, "project", "pgu"),
+                "authority_mode": (
+                    "process"
+                    if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"
+                    else "legacy_uid"
+                ),
+                "assignments": self.app.runtime_targets(),
+            })
+            return
+        if parsed.path.startswith("/api/runtime-assignments/"):
+            role = urllib.parse.unquote(
+                parsed.path.removeprefix("/api/runtime-assignments/").strip("/")
+            ).strip().lower()
+            assignment = self.app.runtime_targets().get(role) if role else None
+            if assignment is None:
+                self.send_text("runtime assignment not found", HTTPStatus.NOT_FOUND)
+            else:
+                self.send_json({
+                    "project": getattr(self.app, "project", "pgu"),
+                    "authority_mode": (
+                        "process"
+                        if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"
+                        else "legacy_uid"
+                    ),
+                    "assignment": assignment,
+                })
+            return
         if parsed.path == "/api/client-config":
             self.send_json({
                 "build_id": self.server.build_id,
@@ -1587,7 +1697,11 @@ class TicketBoardUnixServer(ThreadingUnixHTTPServer):
         self.app = app
         self.events = events
         self.director_notifier = director_notifier
-        self.role_authority = role_authority or LocalRoleAuthority.from_environ()
+        self.role_authority = role_authority or (
+            ProcessRoleAuthority(app, os.environ.get("TICKET_BOARD_TENANT_USER", ""))
+            if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1"
+            else LocalRoleAuthority.from_environ()
+        )
         self.build_id = board_build_id()
         self.write_token = ""
         socket_path.parent.mkdir(parents=True, exist_ok=True)

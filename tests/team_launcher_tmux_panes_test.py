@@ -540,13 +540,8 @@ def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_
     assert "no recorded session id for ops; starting fresh session" in stderr.getvalue()
 
 
-def test_presentation_reaches_each_role_through_its_own_account() -> None:
-    """SYRD-39: with one account per role there is no shared tmux server.
-
-    Director presentation must reach a role's session through the generated
-    role-control interface (sudo -u <role account> tmux) and must not assume
-    ambient access. Display and viewer sessions stay with the project owner.
-    """
+def test_presentation_reaches_every_role_through_the_project_account() -> None:
+    """SYRD-69: role and display sessions share the project tmux server."""
     import subprocess as _subprocess
 
     from scripts import presentation_controller
@@ -567,6 +562,7 @@ def test_presentation_reaches_each_role_through_its_own_account() -> None:
                 {
                     "project": "porter",
                     "run_as_user": "porter-agent",
+                    "role_state_isolation": True,
                     "roles": [
                         {
                             "role": "director",
@@ -606,17 +602,11 @@ def test_presentation_reaches_each_role_through_its_own_account() -> None:
         finally:
             team_launcher.current_user_name = original_current_user_name
 
-    # Another role's session is reached as that role's account.
-    assert calls[0][:3] == ["sudo", "-u", "porter-app"], calls[0]
-    assert "tmux" in calls[0]
-    # A display slot belongs to the project owner, not to any role.
-    assert calls[1][:3] == ["sudo", "-u", "porter-agent"], calls[1]
-    # The director's own session needs no privileged hop.
-    assert calls[2][0] == "tmux", calls[2]
+    assert all(call[:3] == ["sudo", "-u", "porter-agent"] for call in calls), calls
 
 
 
-def test_role_runner_isolates_even_when_the_project_owner_invokes_switchyard() -> None:
+def test_role_runner_stays_unprivileged_when_project_owner_invokes_switchyard() -> None:
     """SYRD-39: the normal case is the owner running switchyard.
 
     The old shared runner was the plain runner exactly then, so detached,
@@ -651,7 +641,7 @@ def test_role_runner_isolates_even_when_the_project_owner_invokes_switchyard() -
                 }
             )
         config_path.write_text(
-            json.dumps({"project": "porter", "run_as_user": "porter-agent", "roles": roles}, indent=2, sort_keys=True)
+            json.dumps({"project": "porter", "run_as_user": "porter-agent", "role_state_isolation": True, "roles": roles}, indent=2, sort_keys=True)
             + "\n",
             encoding="utf-8",
         )
@@ -691,11 +681,7 @@ def test_role_runner_isolates_even_when_the_project_owner_invokes_switchyard() -
         finally:
             team_launcher.current_user_name = original_current_user_name
 
-    assert calls[0][:3] == ["sudo", "-u", "porter-director"], calls[0]
-    assert calls[1][:3] == ["sudo", "-u", "porter-ops"], calls[1]
-    # A role without its own account falls back to the owner, who is already
-    # the caller, so no privileged hop is inserted.
-    assert calls[2][0] == "tmux", calls[2]
+    assert all(call[0] == "tmux" for call in calls), calls
 
 
 
@@ -751,11 +737,11 @@ def test_launch_refuses_when_isolation_or_credentials_are_incomplete() -> None:
         # every reason.
         gaps = team_launcher.role_isolation_gaps(migrating)
         assert gaps, gaps
-        assert any("does not exist" in gap for gap in gaps), gaps
+        assert all("has not been repatriated" in gap for gap in gaps), gaps
 
 
 
-def test_onboarding_projection_preserves_and_extends_role_accounts() -> None:
+def test_onboarding_projection_erases_legacy_role_accounts() -> None:
     """SYRD-36 x SYRD-39: the two migrations compose.
 
     Projecting the workflow document rewrites the launcher config's roles. An
@@ -794,10 +780,7 @@ def test_onboarding_projection_preserves_and_extends_role_accounts() -> None:
     finally:
         workflow_launcher.validate = original_validate
 
-    accounts = {role["role"]: role.get("run_as_user") for role in projected["roles"]}
-    assert accounts["director"] == "porter-director", accounts
-    assert accounts["perf"] == "porter-perf", accounts
-    assert len(set(accounts.values())) == len(accounts), accounts
+    assert all("run_as_user" not in role for role in projected["roles"]), projected["roles"]
 
     # An unmigrated tenant is left alone: projection must not opt a project into
     # isolation it never asked for.

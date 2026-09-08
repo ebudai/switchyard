@@ -115,7 +115,7 @@ def main():
                     caller="director",
                     expect=400,
                 )
-                assert "selected project/role" in str(response), response
+                assert "selected project" in str(response), response
                 assert app.workflow_configuration() is None
                 response = t.post_json(
                     base,
@@ -269,6 +269,20 @@ def main():
             )
             assert "verifier" in app.workflow_roles()
             assert "verification" in [c["key"] for c in app.workflow_columns()]
+            for index, role in enumerate(
+                r for r in second["roles"] if r.get("runtime") and r.get("active")
+            ):
+                app.register_runtime_assignment(
+                    role=role["name"], runtime=role["runtime"], target=role["target"],
+                    worktree=str(root), session_dir=str(root / "sessions" / role["name"]),
+                    process_pid=50000 + index, process_start_time=60000 + index,
+                    process_uid=os.getuid(), expected_generation=0,
+                )
+            assert "verifier" in app.runtime_targets()
+            assert t.psql(
+                admin,
+                "SELECT count(*) FROM ticket_board.role_runtime_assignment_history WHERE role='verifier'",
+            ) == "1"
             # Existing implementation -> inspection -> second custom review.
             app.update_ticket(
                 "PGU-2", {"needs_inspection": True}, caller_role="director"
@@ -297,6 +311,8 @@ def main():
                 TicketBoardNotifyListener,
                 PaneActivityGate,
             )
+            import scripts.ticket_board.notify_listener as notify_listener_module
+            notify_listener_module.session_is_live = lambda _identity: True
             import psycopg
 
             sent = []
@@ -353,6 +369,11 @@ def main():
                 target_exists=lambda target: True,
             )
             with psycopg.connect(listener.conninfo, autocommit=True) as conn:
+                runtime_rows = conn.execute(
+                    "SELECT role,actual_target,runtime,process_pid,process_start_time "
+                    "FROM ticket_board.role_runtime_assignments WHERE role='verifier'"
+                ).fetchall()
+                assert runtime_rows, runtime_rows
                 listener.refresh_workflow(conn)
                 assert listener.role_targets["verifier"] == "cerulean-verifier:0.0"
                 assert gate.role_runtimes["verifier"] == "claude"

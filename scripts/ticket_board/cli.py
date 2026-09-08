@@ -17,7 +17,14 @@ from .app import (
     TicketBoardApp,
 )
 from .commit_repos import commit_git_dir_env_for_project
-from .server import DirectorNotifier, LocalRoleAuthority, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer
+from .server import (
+    DirectorNotifier,
+    LocalRoleAuthority,
+    ProcessRoleAuthority,
+    TicketBoardEventHub,
+    TicketBoardServer,
+    TicketBoardUnixServer,
+)
 
 DEFAULT_UNIX_SOCKET = (
     os.environ.get("TICKET_BOARD_SOCKET", "").strip()
@@ -66,7 +73,14 @@ def run_server(args: argparse.Namespace) -> int:
     )
     event_hub = TicketBoardEventHub(app)
     director_notifier = DirectorNotifier()
-    role_authority = LocalRoleAuthority.from_environ()
+    role_authority = None
+    if args.unix_socket:
+        if os.environ.get("TICKET_BOARD_PROCESS_AUTHORITY", "").strip() == "1":
+            role_authority = ProcessRoleAuthority(
+                app, os.environ.get("TICKET_BOARD_TENANT_USER", "")
+            )
+        else:
+            role_authority = LocalRoleAuthority.from_environ()
     server = TicketBoardServer(
         (args.host, args.port),
         app,

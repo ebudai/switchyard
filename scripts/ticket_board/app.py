@@ -190,6 +190,81 @@ class TicketBoardApp:
         cfg = self.workflow_configuration()
         return [r["name"] for r in cfg["roles"] if r["active"]] if cfg else list(CALLER_ROLES)
 
+    def runtime_assignment_for_process(self, pid: int, start_time: int, uid: int) -> dict[str, Any] | None:
+        """Resolve authority from the exact live process recorded by the launcher."""
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                """
+SELECT a.role, a.runtime, a.actual_target, a.worktree, a.session_dir,
+       a.process_pid, a.process_start_time, a.process_uid, a.generation
+FROM ticket_board.role_runtime_assignments AS a
+JOIN ticket_board.workflow_roles AS r ON r.name = a.role
+WHERE a.process_pid = %s AND a.process_start_time = %s AND a.process_uid = %s
+  AND (r.definition->>'active')::boolean
+  AND r.definition->>'runtime' = a.runtime
+  AND r.definition->>'target' = a.actual_target
+""",
+                (pid, start_time, uid),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def runtime_assignment(self, role: str) -> dict[str, Any] | None:
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM ticket_board.role_runtime_assignments WHERE role = %s",
+                (role.strip().lower(),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def register_runtime_assignment(
+        self,
+        *,
+        role: str,
+        runtime: str,
+        target: str,
+        worktree: str,
+        session_dir: str,
+        process_pid: int,
+        process_start_time: int,
+        process_uid: int,
+        expected_generation: int,
+    ) -> dict[str, Any]:
+        """Atomically publish routing data and the process that may wield it."""
+        if not target.split(":", 1)[0].startswith(f"{self.project}-"):
+            raise ValueError("runtime target belongs to another project")
+        with self._pg_connect() as conn:
+            row = conn.execute(
+                """
+SELECT * FROM ticket_board.register_role_runtime(
+    %s::text, %s::text, %s::text, %s::text, %s::text,
+    %s::bigint, %s::bigint, %s::bigint, %s::bigint
+)
+""",
+                (
+                    role, runtime, target, worktree, session_dir, process_pid,
+                    process_start_time, process_uid, expected_generation,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("runtime registration returned no row")
+            return dict(row)
+
+    def runtime_targets(self) -> dict[str, dict[str, Any]]:
+        """Current routing rows used by delivery and presentation consumers."""
+        with self._pg_connect() as conn:
+            rows = conn.execute(
+                """
+SELECT a.role, a.runtime, a.actual_target, a.worktree, a.session_dir,
+       a.process_pid, a.process_start_time, a.process_uid, a.generation
+FROM ticket_board.role_runtime_assignments AS a
+JOIN ticket_board.workflow_roles AS r ON r.name=a.role
+WHERE (r.definition->>'active')::boolean
+  AND r.definition->>'runtime'=a.runtime
+  AND r.definition->>'target'=a.actual_target
+"""
+            ).fetchall()
+            return {str(row["role"]): dict(row) for row in rows}
+
     def apply_workflow(self, document: Any, *, expected_revision: int, dry_run: bool, caller_role: str) -> dict[str, Any]:
         from .workflow_config import validate
         if caller_role != "director":
@@ -708,6 +783,17 @@ SELECT
     t.state,
     t.assignee,
     t.commit_hash,
+    t.manually_controlled,
+    t.queued_for_assignee,
+    t.queued_behind_ticket,
+    t.needs_inspection,
+    t.needs_audit,
+    t.needs_user_signoff,
+    COALESCE(to_jsonb(t)->'workflow_flags', '{}'::jsonb)::text AS workflow_flags,
+    COALESCE(
+        (SELECT ns.awaiting_role FROM ticket_board.ticket_notification_state ns WHERE ns.ticket_id = t.id),
+        ''
+    ) AS awaiting_role,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id) AS blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id AND b.resolved) AS resolved_blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id) AS comment_count,
@@ -739,6 +825,14 @@ ORDER BY t.ticket_number;
                 str(row["state"]),
                 str(row["assignee"]),
                 str(row["commit_hash"]),
+                bool(row["manually_controlled"]),
+                str(row["queued_for_assignee"]),
+                str(row["queued_behind_ticket"]),
+                bool(row["needs_inspection"]),
+                bool(row["needs_audit"]),
+                bool(row["needs_user_signoff"]),
+                str(row["workflow_flags"]),
+                str(row["awaiting_role"]),
                 int(row["blocker_count"]),
                 int(row["resolved_blocker_count"]),
                 int(row["comment_count"]),
@@ -752,14 +846,30 @@ ORDER BY t.ticket_number;
         where = "WHERE t.id = %s" if ticket_id is not None else ""
         params = (ticket_id,) if ticket_id is not None else ()
         from .workflow_config import read_configuration
-        configured = read_configuration(conn) is not None
+        workflow = read_configuration(conn)
+        configured = workflow is not None
         owner_sql = "ticket_board.transition_target_role(scoped.state, scoped.assignee)" if configured else """CASE
             WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
             WHEN scoped.state IN ('analysis', 'dat', 'director_review') THEN 'director'
             WHEN scoped.state = 'inspection' THEN 'inspector'
             WHEN scoped.state = 'audit' THEN 'audit'
             ELSE NULL END"""
-        scope_sql = "EXISTS (SELECT FROM ticket_board.workflow_stages ws WHERE ws.name=scoped.state AND NOT ws.is_terminal)" if configured else "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')"
+        if configured:
+            # The persisted document has already passed workflow_config.validate,
+            # but still quote stage names as data before embedding the compact
+            # read-only scope. This avoids granting the board service execution
+            # rights on Director-only workflow mutation helpers.
+            active_stages = [
+                str(stage["name"])
+                for stage in workflow["stages"]
+                if not stage["terminal"] and stage["kind"] != "draft"
+            ]
+            active_stage_sql = ", ".join(
+                "'" + stage.replace("'", "''") + "'" for stage in active_stages
+            ) or "NULL"
+            scope_sql = f"scoped.state IN ({active_stage_sql})"
+        else:
+            scope_sql = "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')"
         return conn.execute(
             f"""
 WITH notification_scope AS (
@@ -767,8 +877,15 @@ WITH notification_scope AS (
         scoped.id,
         scoped.state,
         scoped.ticket_number,
+        scoped.manually_controlled,
+        scoped.queued_for_assignee,
+        scoped.queued_behind_ticket,
+        notification_state.entered_current_state_at,
+        COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
         {owner_sql} AS owner_role
     FROM ticket_board.tickets scoped
+    LEFT JOIN ticket_board.ticket_notification_state notification_state
+        ON notification_state.ticket_id = scoped.id
     WHERE {scope_sql}
 ),
 notification_candidates AS (
@@ -777,11 +894,21 @@ notification_candidates AS (
         notification_scope.state,
         notification_scope.ticket_number,
         notification_scope.owner_role,
-        CASE
-            WHEN notification_scope.state = 'in_progress'
-                THEN notification_scope.state || ':' || notification_scope.owner_role
-            ELSE notification_scope.state
-        END AS active_work_partition,
+        notification_scope.entered_current_state_at,
+        -- Delivery can legitimately be deferred while the assigned pane is
+        -- busy. Current-work visibility therefore comes from durable workflow
+        -- ownership and serial-focus state, never from a successful send.
+        notification_scope.owner_role IS NOT NULL
+            AND NOT notification_scope.manually_controlled
+            AND notification_scope.awaiting_role = ''
+            AND notification_scope.queued_for_assignee = ''
+            AND notification_scope.queued_behind_ticket = ''
+            AND NOT EXISTS (
+                SELECT FROM ticket_board.ticket_blockers blocker
+                WHERE blocker.ticket_id = notification_scope.id
+                  AND NOT blocker.resolved
+            )
+            AS is_actionable_current,
         sent.last_sent_at AS active_work_notified_at
     FROM notification_scope
     LEFT JOIN LATERAL (
@@ -799,12 +926,14 @@ active_work AS (
         notification_candidates.id,
         notification_candidates.owner_role,
         notification_candidates.active_work_notified_at,
-        notification_candidates.active_work_notified_at IS NOT NULL
-            AND notification_candidates.owner_role IS NOT NULL
+        -- There is exactly one visible current ticket per logical owner. The
+        -- send timestamp remains separate evidence and does not rank work.
+        notification_candidates.is_actionable_current
             AND row_number() OVER (
-                PARTITION BY notification_candidates.active_work_partition
-                ORDER BY notification_candidates.active_work_notified_at DESC NULLS LAST,
-                    notification_candidates.ticket_number DESC
+                PARTITION BY notification_candidates.owner_role
+                ORDER BY notification_candidates.is_actionable_current DESC,
+                    notification_candidates.entered_current_state_at NULLS LAST,
+                    notification_candidates.ticket_number
             ) = 1 AS active_work_highlight
     FROM notification_candidates
 )

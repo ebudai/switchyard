@@ -137,5 +137,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.apply_declared_workflow(jsonb,bigint), ti
 GRANT EXECUTE ON FUNCTION ticket_board.declared_workflow() TO ticket_board_listener;
 
 GRANT EXECUTE ON FUNCTION ticket_board.set_declared_flags(text,jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.register_role_runtime(text,text,text,text,text,bigint,bigint,bigint,bigint) TO ticket_board_service;
+GRANT SELECT ON ticket_board.role_runtime_assignments TO ticket_board_service,ticket_board_listener;
+GRANT SELECT ON ticket_board.role_runtime_assignment_history TO ticket_board_service;
 END IF;
 END $workflow_grants$;

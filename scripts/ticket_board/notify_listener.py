@@ -21,6 +21,7 @@ import psycopg
 from psycopg import sql
 
 from .board_skill import SKILL_NAME as BOARD_SKILL_NAME, skills_for_role
+from .peer_identity import SessionIdentity, session_is_live
 from .runtime_paths import directorctl_path
 
 CHANNEL = "ticket_board_state_transition"
@@ -615,6 +616,7 @@ class PaneActivityGate:
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self.role_targets = dict(ROLE_TO_TARGET)
+        self.active_runtime_roles: set[str] = set()
         self.state_store = state_store or PaneHookStateStore()
         self.director_target = director_target
         self.cursor_position_runner = cursor_position_runner
@@ -1907,15 +1909,50 @@ SELECT EXISTS (
         document = read_configuration(conn)
         self.workflow = validate(document, project=self.project) if document else None
         self.role_targets = dict(ROLE_TO_TARGET)
-        if self.workflow:
-            self.role_targets = {r["name"]: r["target"] for r in self.workflow["roles"] if r["active"] and r.get("target")}
+        self.active_runtime_roles = set()
+        # Runtime rows are the routing authority for both declarative and
+        # static compatibility workflows. A replacement pane may deliberately
+        # use a non-conventional target; reconstructing the name would send
+        # work to a missing listener.
+        result = conn.execute(
+            """
+SELECT a.role, a.actual_target, a.runtime, a.process_pid, a.process_start_time
+FROM ticket_board.role_runtime_assignments a
+JOIN ticket_board.workflow_roles r ON r.name=a.role
+WHERE (r.definition->>'active')::boolean
+  AND r.definition->>'runtime'=a.runtime
+  AND r.definition->>'target'=a.actual_target
+"""
+        )
+        rows = result.fetchall() if result is not None and hasattr(result, "fetchall") else []
+        if rows:
+            assignments: dict[str, tuple[str, str]] = {}
+            for row in rows:
+                if isinstance(row, dict):
+                    self.active_runtime_roles.add(self._decode_text(row["role"]))
+                    if row.get("process_pid") and not session_is_live(
+                        SessionIdentity(int(row["process_pid"]), int(row["process_start_time"]))
+                    ):
+                        continue
+                    assignments[self._decode_text(row["role"])] = (
+                        self._decode_text(row["actual_target"]),
+                        self._decode_text(row["runtime"]),
+                    )
+                else:
+                    self.active_runtime_roles.add(self._decode_text(row[0]))
+                    if len(row) >= 5:
+                        if not session_is_live(SessionIdentity(int(row[3]), int(row[4]))):
+                            continue
+                    assignments[self._decode_text(row[0])] = (
+                        self._decode_text(row[1]), self._decode_text(row[2])
+                    )
+            self.role_targets = {role: target for role, (target, _runtime) in assignments.items()}
             gate = getattr(self.activity_gate, "__self__", None)
             if isinstance(gate, PaneActivityGate):
                 gate.role_targets = self.role_targets.copy()
                 gate.role_runtimes = {
-                    r["name"]: HOOK_RUNTIME_NAMES.get(r["runtime"], r["runtime"])
-                    for r in self.workflow["roles"]
-                    if r["active"] and r.get("runtime")
+                    role: HOOK_RUNTIME_NAMES.get(runtime, runtime)
+                    for role, (_target, runtime) in assignments.items()
                 }
                 gate.director_target = self.role_targets.get("director", gate.director_target)
 
@@ -1943,6 +1980,21 @@ SELECT EXISTS (
             if self.stop_event.is_set():
                 break
             if target is None:
+                active_role = target_role in self.active_runtime_roles or (
+                    bool(self.workflow) and any(
+                        role["name"] == target_role and role["active"]
+                        for role in self.workflow["roles"]
+                    )
+                )
+                if active_role:
+                    self.logger.info(
+                        "Requeueing notification %s: active role %s has no live runtime assignment",
+                        notification_id, target_role,
+                    )
+                    self._requeue_notification(
+                        conn, notification_id, attempts, "role_runtime_unassigned"
+                    )
+                    continue
                 self.logger.warning("Acking notification %s with unknown target role %s", notification_id, target_role)
                 self._trace_notification(
                     conn,

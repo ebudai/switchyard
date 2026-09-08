@@ -37,14 +37,17 @@ Pane write API:
   writes are rejected; read-only HTTP requests remain available.
   `X-PGU-Write-Token` and `X-PGU-Caller-Role` are accepted only as legacy
   compatibility aliases.
-- Local pane tooling should write through the Unix-domain socket at
-  `/run/pgu-ticket-board/ticket-board.sock` when it exists. The write client registers the
-  auto-resolved pane role on `/api/register-caller`; the board derives the
-  caller role from the socket connection's OS-verified `SO_PEERCRED` PID and
-  ignores caller-role headers for socket writes.
-- The Unix-socket registration allows one live PID per pane role. Duplicate
-  live registrations are rejected and logged; the registration is released when
-  the socket connection closes, and stale dead-PID registrations are dropped.
+- Local pane tooling writes through the Unix-domain socket at
+  `/run/pgu-ticket-board/ticket-board.sock`. The launcher atomically registers
+  role, runtime, actual target and the pane's kernel-observed PID/start time in
+  PostgreSQL before execing the CLI. Every later write is authorized by that
+  exact live pane ancestry; `SO_PEERCRED` UID only proves the project account,
+  and caller-role headers are ignored. A sibling process under the same account
+  therefore cannot impersonate the registered role. Assignment generations
+  are retained in `role_runtime_assignment_history` for audit. Notifications,
+  active-work checks, presentation attachment, and logical-role Director
+  capture/send resolve the same assignment target. The launcher refuses before
+  local mutation when the running board does not advertise process authority.
 - Ticket-scoped operations are `route`, `start_work`, `submit_to_inspection`,
   `submit_to_audit`,
   `implementer_kick_back`, `audit_sign_off`, `audit_kick_back`,

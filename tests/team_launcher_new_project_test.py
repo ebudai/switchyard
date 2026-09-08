@@ -282,11 +282,11 @@ def test_add_role_updates_generated_config_board_registration_and_starts_only_ne
     pane_calls = [
         call
         for call in runner.calls
-        if call[:3] == ["sudo", "-u", "mefp-ops"]
-        and call[call.index("pane") - 1 : call.index("pane") + 3]
+        if "pane" in call and call[call.index("pane") - 1 : call.index("pane") + 3]
         == ["mefp", "pane", "attach-or-start", "ops"]
     ]
     assert len(pane_calls) == 1
+    assert "mefp-ops" not in pane_calls[0][:3]
     psql_calls = [
         (args, kwargs)
         for args, kwargs in runner.calls_with_kwargs
@@ -423,11 +423,11 @@ def test_add_role_can_add_auditor_to_existing_project() -> None:
     pane_calls = [
         call
         for call in runner.calls
-        if call[:3] == ["sudo", "-u", "mefp-audit_gpt"]
-        and call[call.index("pane") - 1 : call.index("pane") + 3]
+        if "pane" in call and call[call.index("pane") - 1 : call.index("pane") + 3]
         == ["mefp", "pane", "attach-or-start", "audit_gpt"]
     ]
     assert len(pane_calls) == 1
+    assert "mefp-audit_gpt" not in pane_calls[0][:3]
     psql_calls = [
         (args, kwargs)
         for args, kwargs in runner.calls_with_kwargs
@@ -601,10 +601,8 @@ def test_add_role_uses_project_pane_launcher_when_run_as_user_differs() -> None:
         pane_calls = [
             call
             for call in runner.calls
-            # The pane now runs as the role's own account rather than the
-            # project owner; the project pane_launcher choice is what this
-            # test is about and is unchanged (SYRD-39).
-            if call[:4] == ["sudo", "-u", "mefp-ops", "-H"] and call[5:8] == ["mefp", "pane", "attach-or-start"]
+            if call[:4] == ["sudo", "-u", "porter-agent", "-H"]
+            and call[5:8] == ["mefp", "pane", "attach-or-start"]
         ]
     finally:
         team_launcher.current_user_name = original_current_user_name
@@ -717,12 +715,8 @@ def test_add_role_can_recover_half_added_role_without_reappending_config() -> No
     assert "started tmux session for the existing role" in output
 
 
-def test_generated_roles_each_run_as_their_own_unix_account() -> None:
-    """SYRD-39: per-role accounts are what make the board's uid mapping real.
-
-    They also give each role its own tmux server, because a tmux server is
-    per-user, which removes the shared server a role could otherwise reach into.
-    """
+def test_generated_roles_run_as_the_project_account() -> None:
+    """SYRD-69: fresh provisioning creates no per-role Unix identity."""
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="switchyard-role-accounts.") as tmp:
         tmp_path = Path(tmp)
@@ -753,29 +747,21 @@ def test_generated_roles_each_run_as_their_own_unix_account() -> None:
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
         loaded = load_project_config("porter", output_dir / "porter.json")
 
-    accounts = {role["role"]: role.get("run_as_user", "") for role in config["roles"]}
-    assert accounts, config
-    for role_name, account in accounts.items():
-        assert account == f"porter-{role_name}", (role_name, account)
-    # No two roles share an account: a shared uid cannot be told apart.
-    assert len(set(accounts.values())) == len(accounts), accounts
-    # Each role also has its own tmux session, under its own account, so there
-    # is no shared tmux server between roles.
+    assert config["role_state_isolation"] is True
+    assert all("run_as_user" not in role for role in config["roles"])
     sessions = {role["tmux_session"] for role in config["roles"]}
     assert len(sessions) == len(config["roles"]), sessions
 
-    # The board is told the same table it will resolve peer uids against, and
-    # the operator artifact creates exactly those accounts.
-    for role_name, account in accounts.items():
-        assert f"{role_name}={account}" in board_unit, role_name
-        assert f"if ! getent passwd '{account}'" in commands, role_name
+    assert "TICKET_BOARD_ROLE_ACCOUNTS" not in board_unit
+    assert "getent passwd 'porter-director'" not in commands
 
     for role in loaded.roles:
-        assert team_launcher.role_run_as_user(loaded, role) == f"porter-{role.role}", role.role
+        assert team_launcher.role_run_as_user(loaded, role) == current_user
+        assert team_launcher.role_session_dir(loaded, role).name == role.role
 
 
 
-def test_every_role_lifecycle_path_runs_as_that_role_account() -> None:
+def test_every_role_lifecycle_path_runs_as_project_account() -> None:
     """SYRD-39: the uid the board sees must be the role's, on every path.
 
     The regression this pins is precise: the layout selected the role account,
@@ -812,7 +798,7 @@ def test_every_role_lifecycle_path_runs_as_that_role_account() -> None:
 
         for role in config.roles:
             account = team_launcher.role_run_as_user(config, role)
-            assert account == f"porter-{role.role}", (role.role, account)
+            assert account == current_user, (role.role, account)
 
             # The command the launcher hands the window manager.
             outer = team_launcher.pane_command_args(
@@ -823,7 +809,7 @@ def test_every_role_lifecycle_path_runs_as_that_role_account() -> None:
                 script_path=Path("/opt/switchyard/current/scripts/team-launcher"),
                 run_as_user=account,
             )
-            assert outer[:3] == ["sudo", "-u", account], (role.role, outer[:4])
+            assert outer[0] != "sudo", (role.role, outer[:4])
 
             # And the command the pane dispatcher re-execs when it is not
             # already that account. This is the step that used to drop back to
@@ -836,8 +822,7 @@ def test_every_role_lifecycle_path_runs_as_that_role_account() -> None:
                 script_path=Path("/opt/switchyard/current/scripts/team-launcher"),
                 run_as_user=team_launcher.role_run_as_user(config, role),
             )
-            assert dispatch[:3] == ["sudo", "-u", account], (role.role, dispatch[:4])
-            assert config.run_as_user not in dispatch[:3], (role.role, dispatch[:4])
+            assert dispatch[0] != "sudo", (role.role, dispatch[:4])
 
             # Runtime state is per account too, so a role can still write it
             # once it stops running as the project owner.
@@ -845,7 +830,7 @@ def test_every_role_lifecycle_path_runs_as_that_role_account() -> None:
             assert account in str(state_dir) or str(state_dir).startswith("/run/user/"), (role.role, state_dir)
 
 
-def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None:
+def test_upgrade_splits_existing_project_account_session_state() -> None:
     """SYRD-39: a tenant provisioned before per-role identities must migrate.
 
     Its config has no run_as_user at all, so without this every role keeps
@@ -881,6 +866,7 @@ def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         for role in payload["roles"]:
             role.pop("run_as_user", None)
+        payload.pop("role_state_isolation", None)
         config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         legacy = load_project_config("porter", config_path)
         assert all(not role.run_as_user for role in legacy.roles)
@@ -888,34 +874,19 @@ def test_upgrade_gives_an_existing_shared_uid_tenant_per_role_accounts() -> None
         # is exactly what the board refuses to tell apart.
         assert len({team_launcher.role_run_as_user(legacy, role) for role in legacy.roles}) == 1
 
-        changed, message = team_launcher.upgrade_role_accounts_in_config(config_path)
-        assert changed, message
+        changed, problems = team_launcher.repatriate_role_runtime_state(
+            legacy, config_path=config_path, runner=FakeRunner()
+        )
+        assert changed and not problems
         upgraded = load_project_config("porter", config_path)
-        accounts = {role.role: role.run_as_user for role in upgraded.roles}
-        assert all(account == f"porter-{name}" for name, account in accounts.items()), accounts
-        assert len(set(accounts.values())) == len(accounts), accounts
+        assert upgraded.role_state_isolation
+        assert all(not role.run_as_user for role in upgraded.roles)
 
         # Re-running is a no-op rather than a rewrite.
-        changed_again, _ = team_launcher.upgrade_role_accounts_in_config(config_path)
+        changed_again, _ = team_launcher.repatriate_role_runtime_state(
+            upgraded, config_path=config_path, runner=FakeRunner()
+        )
         assert not changed_again
-
-        # The operator artifact creates each role's account and everything it
-        # needs -- but deliberately NOT its worktree. SYRD-45: handing the tree
-        # over while the old account is still working in it takes write access
-        # from a live implementer mid-task, so ownership moves inside the
-        # cutover, after the workers are stopped.
-        migration = team_launcher.render_role_account_migration(upgraded)
-        for role in upgraded.roles:
-            account = f"porter-{role.role}"
-            assert f"if ! getent passwd '{account}'" in migration, role.role
-            assert f"sudo install -d -m 0700 -o '{account}'" in migration, role.role
-            assert role.workdir not in migration, role.role
-        assert "switchyard upgrade porter" in migration
-        assert "visudo -c" in migration
-        # SYRD-48: the upgrade's transaction deploys, health-checks and restarts
-        # the board itself. A second restart here bounces a board that is already
-        # serving the roles the transaction just verified.
-        assert "systemctl restart porter-ticket-board.service" not in migration
 
 
 
@@ -954,37 +925,15 @@ def test_each_role_gets_its_own_runtime_paths_and_prepared_tooling() -> None:
         commands = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
 
     for role in config.roles:
-        account = f"porter-{role.role}"
-        # The CLI is handed a session directory the role account owns, not the
-        # project owner's.
-        # Project-scoped and ambient-free: the path must name THIS project and
-        # this role's account, not whatever project the calling pane belongs to.
         session_dir = str(team_launcher.role_session_dir(config, role))
-        assert session_dir == f"/home/{account}/.local/state/porter-ticket-board/pane-sessions", (
+        assert session_dir == f"/home/{current_user}/.local/state/porter-ticket-board/pane-sessions/roles/{role.role}", (
             role.role,
             session_dir,
         )
         assert str(config.session_dir) != session_dir, (role.role, session_dir)
-        # Pane activity goes to the deliberate aggregation path: every role can
-        # write it and the owner's notify listener can read it. Per-role
-        # /run/user directories are writable by the role and unreadable by the
-        # listener, which is where the state used to go unread (SYRD-39).
         state_dir = str(team_launcher.role_pane_state_dir(config, role))
-        assert state_dir == "/run/porter-ticket-board/pane-state", (role.role, state_dir)
-
-        # And the rollout actually prepares that role: its worktree, its runtime
-        # paths, its pane hooks and its board skill.
-        assert f"sudo chown -R '{account}': '{role.workdir}'" in commands, role.role
-        assert f"/home/{account}/.local/state/porter-ticket-board/pane-sessions" in commands, role.role
-        assert f"/home/{account}/.local/bin/ticket-board-pane-idle-hook" in commands, role.role
-        assert f"ticket-board-install-pane-hooks' install --home '/home/{account}'" in commands, role.role
-        assert f"switchyard-board-skill' install --home '/home/{account}'" in commands, role.role
-
-    # Role runtime preparation runs from the deployed release, so it must come
-    # after the board deploy rather than beside account creation.
-    assert commands.index("useradd -m -d '/home/porter-director'") < commands.index(
-        "ticket-board-install-pane-hooks' install --home '/home/porter-director'"
-    ), "role runtime prepared before the release it installs from"
+        assert current_user in state_dir or state_dir.startswith("/run/user/"), (role.role, state_dir)
+        assert f"getent passwd 'porter-{role.role}'" not in commands
 
 
 def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
@@ -1458,6 +1407,8 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
 
     with tempfile.TemporaryDirectory(prefix="switchyard-publish.") as tmp:
         tmp_path = Path(tmp)
+        owner_home = tmp_path / "ownerhome"
+        registry = tmp_path / "etc" / "switchyard" / "projects"
         origin = tmp_path / "origin.git"
         work = tmp_path / "work"
         subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
@@ -1473,13 +1424,17 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
 
         # The owner's own checkout is where the remote NAME resolves from; the
         # role's checkout must never be consulted for it.
-        owner_checkout = tmp_path / "owner-repo"
+        # Its basename deliberately differs from the project slug: the trusted
+        # registry, not ~/Projects/<slug>, resolves this checkout.
+        owner_checkout = owner_home / "Projects" / "switchyard"
+        owner_checkout.parent.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(owner_checkout)], check=True)
         subprocess.run(
             ["git", "-C", str(owner_checkout), "remote", "add", "origin", str(origin)], check=True
         )
 
-        config_path = tmp_path / "porter.json"
+        config_path = owner_checkout / ".switchyard" / "provision" / "porter.json"
+        config_path.parent.mkdir(parents=True)
         config_path.write_text(
             json.dumps(
                 {
@@ -1504,6 +1459,21 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
             + "\n",
             encoding="utf-8",
         )
+        registry.mkdir(parents=True)
+        (registry / "porter.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "porter",
+                    "name": "Porter",
+                    "config_path": str(config_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         # The role makes the bundle as itself; the owner never runs git in the
         # role's checkout.
@@ -1517,14 +1487,15 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
         def run_helper(*extra: str, sudo_user: str | None = caller) -> subprocess.CompletedProcess[str]:
             env = {
                 **os.environ,
-                "SWITCHYARD_PUBLISH_CONFIG": str(config_path),
-                "HOME": str(tmp_path / "ownerhome"),
+                "HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_OWNER_HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_REGISTRY_ROOT": str(registry),
             }
             if sudo_user is None:
                 env.pop("SUDO_USER", None)
             else:
                 env["SUDO_USER"] = sudo_user
-            (tmp_path / "ownerhome").mkdir(exist_ok=True)
+            owner_home.mkdir(exist_ok=True)
             return subprocess.run(
                 [sys.executable, str(helper), "--project", "porter", *extra],
                 capture_output=True,
@@ -1597,8 +1568,7 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
         assert "is not a valid project name" in traversal.stderr + traversal.stdout
 
         # A configuration that does not claim to be this project is refused too.
-        mismatched = tmp_path / "mismatched.json"
-        mismatched.write_text(json.dumps({"project": "other", "roles": []}), encoding="utf-8")
+        config_path.write_text(json.dumps({"project": "other", "roles": []}), encoding="utf-8")
         wrong_identity = subprocess.run(
             [sys.executable, str(helper), "--project", "porter", "--ref", "ops/topic", "--bundle", str(bundle)],
             capture_output=True,
@@ -1606,8 +1576,9 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
             env={
                 **os.environ,
                 "SUDO_USER": caller,
-                "HOME": str(tmp_path / "ownerhome"),
-                "SWITCHYARD_PUBLISH_CONFIG": str(mismatched),
+                "HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_OWNER_HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_REGISTRY_ROOT": str(registry),
             },
         )
         assert wrong_identity.returncode != 0
@@ -1615,14 +1586,8 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
 
 
 
-def test_fresh_provisioning_emits_one_complete_handoff() -> None:
-    """SYRD-39: following the printed instruction once must be enough.
-
-    The complete artifact -- accounts, ownership, runtime, tooling AND
-    credential seeding -- used to be written only by a later failed start, so an
-    operator who did exactly what provisioning told them still could not close
-    the credential gaps.
-    """
+def test_fresh_provisioning_emits_no_role_account_handoff() -> None:
+    """SYRD-69: provisioning ends with the project account and launch gate."""
     current_user = team_launcher.current_user_name()
     with tempfile.TemporaryDirectory(prefix="switchyard-handoff.") as tmp:
         tmp_path = Path(tmp)
@@ -1654,42 +1619,15 @@ def test_fresh_provisioning_emits_one_complete_handoff() -> None:
             )
 
         handoff = privileged_root / "porter" / "porter-role-accounts.sh"
-        assert handoff.is_file(), printed
-        body = handoff.read_text(encoding="utf-8")
-        assert any(str(handoff) in line for line in printed), printed
-        # And not a second, writable copy in the directory the tenant owns: the
-        # file an operator runs as root must not be one a role can rewrite
-        # (SYRD-62).
+        assert not handoff.exists(), printed
         assert not (output_dir / "porter-role-accounts.sh").exists(), sorted(
             path.name for path in output_dir.iterdir()
         )
 
-    # Accounts, homes, tooling and seeding are all in the one artifact, and the
-    # worktree handover is not: SYRD-45 moves that inside the cutover, after the
-    # workers are stopped, so a live role does not lose write access mid-task.
-    assert "getent passwd 'porter-director'" in body
-    assert "install -d -m 0700 -o 'porter-director'" in body
-    assert "chown -R 'porter-director':" not in body
-    assert "switchyard upgrade porter" in body
-    assert "ticket-board-install-pane-hooks' install --home '/home/porter-director'" in body
-    assert "switchyard seed-role-credentials porter" in body
-    # SYRD-48: the upgrade's transaction restarts the board itself, and the step
-    # after it is the director's own write, not an operator's restart.
-    assert "systemctl restart porter-ticket-board.service" not in body
-    assert "switchyard finish-upgrade porter" in body
 
-
-def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:
-    """SYRD-39: provisioning must not claim a launch it deliberately skipped.
-
-    A fresh project's roles cannot start until an operator has created their
-    Unix accounts, so provisioning defers the launch and prints the handoff.
-    Announcing a started pane window anyway told the operator panes existed
-    that do not, and polling for the session records those panes would have
-    written spent the whole timeout waiting for records nothing was going to
-    write. The closing design guidance still has to be printed: provisioning
-    itself succeeded.
-    """
+def test_fresh_project_launches_without_a_role_account_handoff() -> None:
+    """SYRD-69: the project account can pass directly into the launch gate."""
+    from scripts import presentation_controller
 
     class NewProjectRunner(FakeRunner):
         def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1708,8 +1646,14 @@ def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:
     polled: list[object] = []
     printed: list[str] = []
     original_report = team_launcher.report_launch_session_records
+    original_authority_probe = team_launcher.process_authority_board_compatibility
+    original_runtime_config = presentation_controller.runtime_assignment_config
     try:
         team_launcher.report_launch_session_records = lambda *a, **kw: polled.append(kw) or []
+        team_launcher.process_authority_board_compatibility = lambda _config: (
+            True, "simulated provisioned process-authority board"
+        )
+        presentation_controller.runtime_assignment_config = lambda config: config
         with tempfile.TemporaryDirectory(prefix="switchyard-deferred-launch.") as tmp:
             tmp_path = Path(tmp)
             source_repo = tmp_path / "source-repo"
@@ -1747,12 +1691,14 @@ def test_a_deferred_launch_is_not_reported_as_a_started_window() -> None:
                 )
     finally:
         team_launcher.report_launch_session_records = original_report
+        team_launcher.process_authority_board_compatibility = original_authority_probe
+        presentation_controller.runtime_assignment_config = original_runtime_config
         os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
 
-    assert any("were not started" in line for line in printed), printed
-    assert any("porter-role-accounts.sh" in line for line in printed), printed
-    assert not any("full pane window started" in line for line in printed), printed
-    assert polled == [], polled
+    assert not any("were not started" in line for line in printed), printed
+    assert not any("porter-role-accounts.sh" in line for line in printed), printed
+    assert any("full pane window started" in line for line in printed), printed
+    assert len(polled) == 1, polled
     assert any("design" in line for line in printed), printed
 
 

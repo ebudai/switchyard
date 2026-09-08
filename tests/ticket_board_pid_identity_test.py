@@ -547,15 +547,12 @@ def assert_all_pane_roles_write_through_socket() -> None:
             thread.join(timeout=2)
 
 
-def assert_deploy_probe_matches_what_the_tenant_actually_enforces() -> None:
-    """SYRD-39: the deploy smoke must judge the tenant it is deploying to.
+def assert_deploy_probe_requires_process_bound_authority() -> None:
+    """SYRD-69: no account-layout compatibility mode may bypass the gate.
 
-    The post-restart probe claims `director` from an account that is not a role
-    and expects a refusal. That is only true once the tenant has a role-account
-    table; before the rollout the board still honours a claimed role, and an
-    unconditional probe failed every unmigrated tenant's deploy -- turning a
-    known-open state into an outage. It must report the open state and pass,
-    and it must still catch a MIGRATED tenant that hands out roles.
+    The post-restart probe runs outside every registered launcher pane. A
+    permissive board must therefore fail verification whether or not an old
+    role-account argument happens to be supplied by an upgrade caller.
     """
     import http.server
     import socketserver
@@ -604,12 +601,12 @@ def assert_deploy_probe_matches_what_the_tenant_actually_enforces() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            unmigrated = subprocess.run(
+            project_account = subprocess.run(
                 [sys.executable, str(script_path), socket_path, "5", str(ROOT), ""],
                 capture_output=True,
                 text=True,
             )
-            migrated = subprocess.run(
+            legacy_argument = subprocess.run(
                 [
                     sys.executable,
                     str(script_path),
@@ -626,10 +623,9 @@ def assert_deploy_probe_matches_what_the_tenant_actually_enforces() -> None:
             server.server_close()
             thread.join(timeout=2)
 
-    assert unmigrated.returncode == 0, (unmigrated.returncode, unmigrated.stdout, unmigrated.stderr)
-    assert "NOT enforced yet" in unmigrated.stdout, unmigrated.stdout
-    assert migrated.returncode == 1, (migrated.returncode, migrated.stdout, migrated.stderr)
-    assert "was granted director" in migrated.stderr, migrated.stderr
+    for result in (project_account, legacy_argument):
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert "was granted director" in result.stderr, result.stderr
 
 
 def main() -> int:
@@ -644,7 +640,7 @@ def main() -> int:
     assert_peer_from_an_unconfigured_account_cannot_write()
     assert_rendered_unit_environment_admits_roles_and_refuses_other_tenants()
     assert_unix_socket_replaces_stale_socket_file()
-    assert_deploy_probe_matches_what_the_tenant_actually_enforces()
+    assert_deploy_probe_requires_process_bound_authority()
     print("ticket_board_pid_identity_test: ok")
     return 0
 

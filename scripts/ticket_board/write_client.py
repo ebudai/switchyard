@@ -622,6 +622,21 @@ class TicketBoardWriteClient:
     def route(self, ticket_id: str, *, state: str, assignee: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "route", {"state": state, "assignee": assignee}, caller_role=caller_role)
 
+    def reassign(
+        self,
+        ticket_id: str,
+        *,
+        assignee: str,
+        reason: str,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id,
+            "reassign",
+            {"assignee": assignee, "reason": reason},
+            caller_role=caller_role,
+        )
+
     def release_draft(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "release_draft", {}, caller_role=caller_role)
 
@@ -932,6 +947,11 @@ def _build_parser() -> argparse.ArgumentParser:
     route.add_argument("--state", required=True)
     route.add_argument("--assignee", required=True)
 
+    reassign = subparsers.add_parser("reassign")
+    reassign.add_argument("ticket_id")
+    reassign.add_argument("--assignee", required=True)
+    reassign.add_argument("--reason", required=True)
+
     force_move = subparsers.add_parser("force-move")
     force_move.add_argument("ticket_id")
     force_move.add_argument("--state", required=True)
@@ -1101,6 +1121,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "route":
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
+        elif command == "reassign":
+            response = client.reassign(args.ticket_id, assignee=args.assignee, reason=args.reason)
         elif command == "force_move":
             response = client.force_move(
                 args.ticket_id,

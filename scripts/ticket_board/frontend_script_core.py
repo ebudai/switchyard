@@ -556,6 +556,15 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       return (prompted || '').trim();
     }
 
+    function reassignReason(text) {
+      const trimmedText = text.trim();
+      if (trimmedText) {
+        return trimmedText;
+      }
+      const prompted = window.prompt('Reassignment reason');
+      return (prompted || '').trim();
+    }
+
     async function cancelTicket(ticketId, text) {
       const trimmedText = text.trim();
       if (!trimmedText) {

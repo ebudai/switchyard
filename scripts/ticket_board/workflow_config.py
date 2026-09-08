@@ -24,6 +24,10 @@ DIRECTOR_ONBOARDING_MIGRATION = "director_onboarding"
 # A role remit, not a document. Bounded so a stored prompt cannot grow the tenant
 # configuration without limit, and so it stays small enough to prepend to a session.
 ONBOARDING_PROMPT_MAX_CHARS = 16384
+# Named operations a role may be granted. Unrelated to the document's own
+# `reassign` field below, which maps a stage to the owner its tickets move to
+# when a configuration change would orphan them; the capability here is the
+# per-ticket director operation.
 CAPABILITIES = {
     "create_ticket",
     "file_bug",
@@ -36,6 +40,7 @@ CAPABILITIES = {
     "crop_attachment",
     "merge",
     "dismiss_notification",
+    "reassign",
 }
 RESERVED_FLAGS = {
     "id",

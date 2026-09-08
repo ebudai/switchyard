@@ -63,6 +63,15 @@ def main():
                 ).read_text()
                 t.psql(admin, "BEGIN;\n" + migration + "\nCOMMIT;")
                 t.psql(admin, "BEGIN;\n" + migration + "\nCOMMIT;")
+                # The example document below is the current one, and a capability
+                # it names has to exist in the validator before it will apply. An
+                # upgrade runs every migration in order for exactly this reason;
+                # this fixture stops at the ones the fixture's own document needs.
+                reassign_migration = (
+                    ROOT
+                    / "scripts/ticket_board/migrations/pgu926_syrd77_director_reassign.sql"
+                ).read_text()
+                t.psql(admin, "BEGIN;\n" + reassign_migration + "\nCOMMIT;")
             else:
                 t.psql(admin, schema)
                 t.create_roles(admin)

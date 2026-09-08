@@ -132,6 +132,9 @@ system working, not a bug to route around.
 
 **Director**
 - `route` — the general move, from almost anywhere to almost anywhere. Director-only.
+- `reassign` — a new owner in the same stage, with `--assignee` and a required `--reason`.
+  Changes no stage, no gate and no sign-off. Serial focus still applies: an implementer who
+  already holds work gets the ticket queued, not handed to them.
 - `defer` — → backlog
 - `cancel` — → cancelled
 - `mark-done` — director_review → done (with `--commit-hash`)

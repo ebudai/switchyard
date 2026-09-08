@@ -647,13 +647,17 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         }
         consumed.add('state');
       } else if (Object.prototype.hasOwnProperty.call(patch, 'assignee')) {
+        // An owner change with no stage change is not a transition, and route
+        // has no same-stage form to borrow. The reason travels with it and is
+        // recorded as the attributed comment, so it is not also posted here.
         await updateTicketAction(
           ticketId,
-          'route',
-          { state: ticket?.state || '', assignee: patch.assignee },
+          'reassign',
+          { assignee: patch.assignee, reason: actionReason(patch) },
           normalizedCaller,
         );
         consumed.add('assignee');
+        consumedComment = true;
       }
 
       if (Object.prototype.hasOwnProperty.call(patch, 'blocked_by') || Object.prototype.hasOwnProperty.call(patch, 'blocked_reason')) {

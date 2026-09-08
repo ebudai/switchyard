@@ -246,8 +246,18 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       const assigneeSelect = document.createElement('select');
       state.assignees.forEach((assignee) => buildOption(assigneeSelect, assignee, roleLabel(assignee)));
       assigneeSelect.value = ticket.assignee;
+      assigneeSelect.title = 'Director-only: hand this ticket to another owner in its current stage. Requires a reason.';
       assigneeSelect.addEventListener('change', async () => {
-        await updateDetailTicket({ assignee: assigneeSelect.value }, 'director');
+        const reason = reassignReason(commentText.value);
+        if (!reason) {
+          assigneeSelect.value = ticket.assignee;
+          setCreateStatus('reassignment requires a reason', true);
+          return;
+        }
+        await updateDetailTicket(
+          { assignee: assigneeSelect.value, comment: { who: 'director', text: reason } },
+          'director',
+        );
       });
       assigneeLabel.appendChild(assigneeSelect);
 

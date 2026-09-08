@@ -17,7 +17,8 @@
         "set_manually_controlled",
         "merge",
         "dismiss_notification",
-        "crop_attachment"
+        "crop_attachment",
+        "reassign"
       ],
       "runtime": "claude",
       "target": "cerulean-director:0.0",

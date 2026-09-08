@@ -203,6 +203,7 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         f"  blockers: {format_blocker_records(ticket.get('blockers', []))}",
         f"  blocked_reason: {ticket.get('blocked_reason', '') or '(none)'}",
         "",
+        *format_queue_hold(ticket),
         "Origin:",
         f"  origin_project: {ticket.get('origin_project', '') or '(none)'}",
         f"  external_source_ref: {ticket.get('external_source_ref', '') or '(none)'}",
@@ -217,6 +218,24 @@ def format_ticket(ticket: dict[str, Any]) -> str:
         *format_comments(ticket),
     ]
     return "\n".join(lines)
+
+
+def format_queue_hold(ticket: dict[str, Any]) -> list[str]:
+    """Why an owner change left the ticket parked instead of with its new owner.
+
+    Only rendered when serial focus actually held it, so an ordinary ticket
+    reads exactly as before. Without this the redirect is only legible in the
+    comment thread, which is where it was missed.
+    """
+    queued_for = str(ticket.get("queued_for_assignee", "") or "")
+    if not queued_for:
+        return []
+    return [
+        "Queue:",
+        f"  queued_for_assignee: {queued_for}",
+        f"  queued_behind_ticket: {ticket.get('queued_behind_ticket', '') or '(unknown)'}",
+        "",
+    ]
 
 
 def format_comments(ticket: dict[str, Any]) -> list[str]:

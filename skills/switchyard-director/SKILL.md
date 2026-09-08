@@ -78,6 +78,13 @@ advance it or defer it deliberately - never both nothing.
 - Route work onward with `route --state <stage> --assignee <role>`. This is the
   ordinary way work changes hands and the only one that keeps the record
   coherent; it is not an override.
+- Hand a ticket to a different owner *in the stage it is already in* with
+  `reassign <id> --assignee <role> --reason "..."`. It changes the owner and
+  nothing else: no stage, no gate, no sign-off. Use it when the work is in the
+  right place and the wrong hands - a role that is not running, an implementer
+  who is oversubscribed. It is an ordinary operation, not an override, and the
+  reason it records is what the next person reads. Moving the ticket somewhere
+  else is `route`'s job, not this one.
 - Send it back to the backlog with `defer` when nobody is working it, and
   unassign it, because an assigned ticket sitting in backlog is nudged.
 
@@ -88,7 +95,10 @@ an implementer for code produces a refusal, and the refusal is correct.
 
 An implementer holds one ticket at a time. Route a second and the board returns
 it to the backlog by design, to be picked up when the first clears - that is not
-a failure to work around. If you need a specific ticket held for a specific role
+a failure to work around. `reassign` respects the same reservation: handing
+implementation work to an implementer who already holds some parks it in the
+holding stage, records who it is queued for and what it is queued behind, and
+tells you. The new owner is not notified, because nothing is theirs to do yet. If you need a specific ticket held for a specific role
 rather than queued, hold it deliberately (below) and say why; do not defeat
 serial focus by forcing state.
 

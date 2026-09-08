@@ -71,6 +71,7 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "file_bug": IMPLEMENTER_ROLES | {"audit"},
     "release_draft": DRAFT_ROLES | {"director", "user"},
     "route": {"director"},
+    "reassign": {"director"},
     "force_move": {"director"},
     "override_move": {"director"},
     "start_work": IMPLEMENTER_ROLES,
@@ -1260,6 +1261,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 ticket_id,
                 str(payload.get("state", payload.get("new_state", ""))),
                 str(payload.get("assignee", "")),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        if operation == "reassign":
+            updated = self.app.reassign_ticket(
+                ticket_id,
+                str(payload.get("assignee", payload.get("target_assignee", ""))),
+                reason=str(payload.get("reason", payload.get("text", ""))),
                 caller_role=caller,
             )
             self.events.notify_change(self.app.store_signature())

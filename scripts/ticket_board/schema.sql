@@ -5115,6 +5115,111 @@ BEGIN
 END;
 $$;
 
+-- SYRD-77: ordinary director same-stage reassignment. This is deliberately not
+-- a workflow transition: it never advances or returns a ticket, and it never
+-- sets or clears a gate or a sign-off. Choosing a stage is what the configured
+-- actions are for. The one stage change it can produce is the declared
+-- serial-focus queue redirect, which the update trigger resolves from the
+-- reservation itself so no write path can reach an implementation stage by
+-- going around it.
+CREATE OR REPLACE FUNCTION ticket_board.reassign(
+    id text,
+    assignee text,
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text := ticket_board.current_app_actor();
+    current_state text;
+    current_assignee text;
+    normalized_assignee text := btrim(lower(coalesce(reassign.assignee, '')));
+    normalized_reason text := btrim(coalesce(reassign.reason, ''));
+    ticket_row ticket_board.tickets%ROWTYPE;
+    message text;
+BEGIN
+    -- Director-only at the database boundary, not merely at the API. A missing
+    -- caller role is a refusal here rather than a fallback to the service
+    -- identity: ownership changes are attributed or they do not happen.
+    IF ticket_board.current_actor_role() <> 'ticket_board_service' OR actor IS DISTINCT FROM 'director' THEN
+        RAISE EXCEPTION 'role % cannot call reassign',
+            coalesce(nullif(actor, ''), ticket_board.current_actor_role())
+            USING ERRCODE = '42501';
+    END IF;
+    IF normalized_reason = '' THEN
+        RAISE EXCEPTION 'reassign requires a reason';
+    END IF;
+    IF NOT ticket_board.ticket_valid_assignee(normalized_assignee) THEN
+        RAISE EXCEPTION 'invalid assignee: %', reassign.assignee;
+    END IF;
+
+    SELECT tickets.state, tickets.assignee
+    INTO current_state, current_assignee
+    FROM ticket_board.tickets
+    WHERE tickets.id = reassign.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    IF current_state = 'draft' THEN
+        RAISE EXCEPTION 'draft tickets must be released with release_draft';
+    END IF;
+    IF current_assignee = normalized_assignee THEN
+        RAISE EXCEPTION 'ticket % is already assigned to %', id, normalized_assignee;
+    END IF;
+    -- Refuse an owner the stage cannot have instead of moving the ticket to
+    -- suit the owner.
+    PERFORM ticket_board.require_stage_owner_assignee(current_state, normalized_assignee);
+
+    -- Recorded before the write, so the reason survives even when the serial
+    -- reservation then redirects the ticket and appends its own notice.
+    PERFORM ticket_board.append_ticket_comment(
+        id,
+        actor,
+        'Director reassignment in ' || current_state || ': '
+        || current_assignee || ' -> ' || normalized_assignee
+        || '. Reason: ' || normalized_reason
+    );
+
+    UPDATE ticket_board.tickets
+    SET assignee = normalized_assignee
+    WHERE tickets.id = reassign.id;
+
+    SELECT * INTO ticket_row FROM ticket_board.tickets WHERE tickets.id = reassign.id;
+    -- Serial focus held it. The queue announcement has already told the
+    -- director, and the target implementer has no actionable work yet, so a
+    -- second notification here would be wrong rather than merely noisy.
+    IF ticket_row.state IS DISTINCT FROM current_state OR ticket_row.queued_for_assignee <> '' THEN
+        RETURN;
+    END IF;
+    -- Held or blocked work is not actionable either. It stays reassigned; the
+    -- existing unblock and release paths announce it when it becomes real work.
+    IF coalesce(ticket_row.manually_controlled, false) OR ticket_board.ticket_has_unresolved_blockers(id) THEN
+        RETURN;
+    END IF;
+    message := id
+        || CASE WHEN ticket_row.title <> '' THEN ' -- ' || ticket_row.title ELSE '' END
+        || ' is now assigned to you';
+    -- One notification, through the same durable queue every other handoff
+    -- uses: it dedupes per transaction, suppresses a director self-handoff, and
+    -- stays silent for stages that declare no notification.
+    PERFORM ticket_board.enqueue_transition_notification(
+        id,
+        ticket_row.title,
+        current_state,
+        ticket_row.state,
+        ticket_row.assignee,
+        ticket_row.updated_at,
+        ticket_row.ticket_number,
+        message
+    );
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.start_work(id text)
 RETURNS void
 LANGUAGE plpgsql
@@ -6536,7 +6641,8 @@ BEGIN
            OR jsonb_typeof(r->'active') <> 'boolean' OR jsonb_typeof(r->'capabilities') <> 'array'
            OR EXISTS (SELECT FROM jsonb_array_elements_text(r->'capabilities') c WHERE c NOT IN
                ('create_ticket','file_bug','add_comment','edit_fields','await_role','clear_awaiting_role',
-                'set_blockers','set_manually_controlled','crop_attachment','merge','dismiss_notification')) THEN
+                'set_blockers','set_manually_controlled','crop_attachment','merge','dismiss_notification',
+                'reassign')) THEN
             RAISE EXCEPTION 'invalid role policy: %', r->>'name';
         END IF;
         IF (r->>'runtime' IS NULL) <> (r->>'target' IS NULL)
@@ -6762,6 +6868,35 @@ BEGIN
                AND (flag.value->>'kind'='signoff' OR actor<>'director') THEN
                 RAISE EXCEPTION 'flag change requires authorized workflow action'; END IF;
         END LOOP;
+        -- SYRD-77: an owner change that is not a transition never reached the
+        -- serial-focus redirect below, so a same-stage reassignment could leave
+        -- one implementer holding two implementation tickets -- exactly the
+        -- reservation the queue exists to protect. Resolving it here rather
+        -- than in the caller means no write path can hand an implementer
+        -- reserved work by declining to ask.
+        IF previous.assignee IS DISTINCT FROM proposed.assignee THEN
+            IF ticket_board.declared_stage_kind(proposed.state)='implementation'
+               AND ticket_board.ticket_is_implementer_assignee(proposed.assignee)
+               AND NOT proposed.manually_controlled
+               AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL THEN
+                IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN
+                    RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
+                queued_for:=proposed.assignee;
+                reserved_by:=ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id);
+                proposed.state:=cfg->'queue'->>'stage'; proposed.assignee:=cfg->'queue'->>'assignee';
+                PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
+                proposed.queued_for_assignee:=queued_for;
+                proposed.queued_behind_ticket:=coalesce(reserved_by,'');
+                PERFORM set_config('ticket_board.serial_focus_queued',
+                    jsonb_build_object('queued_for',queued_for,'reserved_by',reserved_by,
+                        'stage',proposed.state,'assignee',proposed.assignee)::text,true);
+            ELSE
+                -- A deliberate new owner ends the hold that named the old one,
+                -- so the marker never outlives the reservation that set it.
+                proposed.queued_for_assignee:='';
+                proposed.queued_behind_ticket:='';
+            END IF;
+        END IF;
         RETURN proposed;
     END IF;
     FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP

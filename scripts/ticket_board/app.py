@@ -665,6 +665,37 @@ WHERE (r.definition->>'active')::boolean
                 self._pg_call(conn, "SELECT ticket_board.route(%s, %s, %s);", (ticket_id, state, assignee))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def reassign_ticket(
+        self,
+        ticket_id: str,
+        assignee: str,
+        *,
+        reason: str,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """Change a ticket's owner without moving it through the workflow.
+
+        No state and no gate is passed in, because there is nothing here for a
+        caller to choose: the stage the ticket already occupies is the only one
+        this operation can leave it in, apart from the serial-focus redirect the
+        database resolves from the target's own reservation.
+        """
+        ticket_id = str(ticket_id).strip().upper()
+        assignee = self._validate_assignee(str(assignee))
+        reason = str(reason).strip()
+        if not reason:
+            raise ValueError("reassign requires a reason")
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.reassign(%s, %s, %s);",
+                    (ticket_id, assignee, reason),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def release_draft(self, ticket_id: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         with self._pg_connect() as conn:

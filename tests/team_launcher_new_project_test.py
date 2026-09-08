@@ -1407,6 +1407,8 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
 
     with tempfile.TemporaryDirectory(prefix="switchyard-publish.") as tmp:
         tmp_path = Path(tmp)
+        owner_home = tmp_path / "ownerhome"
+        registry = tmp_path / "etc" / "switchyard" / "projects"
         origin = tmp_path / "origin.git"
         work = tmp_path / "work"
         subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
@@ -1422,13 +1424,17 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
 
         # The owner's own checkout is where the remote NAME resolves from; the
         # role's checkout must never be consulted for it.
-        owner_checkout = tmp_path / "owner-repo"
+        # Its basename deliberately differs from the project slug: the trusted
+        # registry, not ~/Projects/<slug>, resolves this checkout.
+        owner_checkout = owner_home / "Projects" / "switchyard"
+        owner_checkout.parent.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(owner_checkout)], check=True)
         subprocess.run(
             ["git", "-C", str(owner_checkout), "remote", "add", "origin", str(origin)], check=True
         )
 
-        config_path = tmp_path / "porter.json"
+        config_path = owner_checkout / ".switchyard" / "provision" / "porter.json"
+        config_path.parent.mkdir(parents=True)
         config_path.write_text(
             json.dumps(
                 {
@@ -1453,6 +1459,21 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
             + "\n",
             encoding="utf-8",
         )
+        registry.mkdir(parents=True)
+        (registry / "porter.json").write_text(
+            json.dumps(
+                {
+                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
+                    "slug": "porter",
+                    "name": "Porter",
+                    "config_path": str(config_path),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
         # The role makes the bundle as itself; the owner never runs git in the
         # role's checkout.
@@ -1466,14 +1487,15 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
         def run_helper(*extra: str, sudo_user: str | None = caller) -> subprocess.CompletedProcess[str]:
             env = {
                 **os.environ,
-                "SWITCHYARD_PUBLISH_CONFIG": str(config_path),
-                "HOME": str(tmp_path / "ownerhome"),
+                "HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_OWNER_HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_REGISTRY_ROOT": str(registry),
             }
             if sudo_user is None:
                 env.pop("SUDO_USER", None)
             else:
                 env["SUDO_USER"] = sudo_user
-            (tmp_path / "ownerhome").mkdir(exist_ok=True)
+            owner_home.mkdir(exist_ok=True)
             return subprocess.run(
                 [sys.executable, str(helper), "--project", "porter", *extra],
                 capture_output=True,
@@ -1546,8 +1568,7 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
         assert "is not a valid project name" in traversal.stderr + traversal.stdout
 
         # A configuration that does not claim to be this project is refused too.
-        mismatched = tmp_path / "mismatched.json"
-        mismatched.write_text(json.dumps({"project": "other", "roles": []}), encoding="utf-8")
+        config_path.write_text(json.dumps({"project": "other", "roles": []}), encoding="utf-8")
         wrong_identity = subprocess.run(
             [sys.executable, str(helper), "--project", "porter", "--ref", "ops/topic", "--bundle", str(bundle)],
             capture_output=True,
@@ -1555,8 +1576,9 @@ def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config(
             env={
                 **os.environ,
                 "SUDO_USER": caller,
-                "HOME": str(tmp_path / "ownerhome"),
-                "SWITCHYARD_PUBLISH_CONFIG": str(mismatched),
+                "HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_OWNER_HOME": str(owner_home),
+                "SWITCHYARD_PUBLISH_REGISTRY_ROOT": str(registry),
             },
         )
         assert wrong_identity.returncode != 0

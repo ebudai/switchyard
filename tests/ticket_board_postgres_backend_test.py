@@ -583,6 +583,14 @@ WHERE id = 'PGU-100';
         deferred = service_app.update_ticket("PGU-1", {"state": "backlog"}, caller_role="director")
         assert deferred["state"] == "backlog", deferred
 
+        # Keep this selector fixture independent from the workflow exercises
+        # above it; held tickets neither reserve implementer focus nor qualify
+        # as active work.
+        psql(
+            admin_conn,
+            "UPDATE ticket_board.tickets SET manually_controlled=true WHERE ticket_number < 401 AND state NOT IN ('done', 'cancelled');",
+        )
+
         insert_ticket(admin_conn, "PGU-401", title="Old analysis ping", state="analysis", assignee="director", implementation="")
         insert_ticket(admin_conn, "PGU-402", title="Active analysis ping", state="analysis", assignee="director", implementation="")
         insert_ticket(admin_conn, "PGU-403", title="Old audit ping", state="audit", assignee="audit")
@@ -695,7 +703,8 @@ INSERT INTO ticket_board.notification_trace (
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-408', 'main', 'transition', 'send', 'in_progress', 'main', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-410', 'research', 'transition', 'send', 'in_progress', 'research', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle');
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle'),
+    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-409', 'app', 'transition', 'gate_defer', 'in_progress', 'app', 'busy', 'active_work');
 """,
         )
 
@@ -705,50 +714,111 @@ INSERT INTO ticket_board.notification_trace (
             {ticket["id"] for ticket in tickets}
         ), tickets
         tickets_by_id = {ticket["id"]: ticket for ticket in tickets}
-        assert tickets_by_id["PGU-402"]["active_work_highlight"] is True, tickets_by_id["PGU-402"]
+        # Highlighting describes current actionable ownership, independently
+        # from delivery. A busy-pane defer is evidence that no send happened,
+        # but cannot make the work disappear from the board.
+        assert tickets_by_id["PGU-402"]["active_work_highlight"] is False, tickets_by_id["PGU-402"]
         assert tickets_by_id["PGU-402"]["active_work_owner_role"] == "director", tickets_by_id["PGU-402"]
         assert tickets_by_id["PGU-402"]["active_work_notified_at"], tickets_by_id["PGU-402"]
-        assert tickets_by_id["PGU-401"]["active_work_highlight"] is False, tickets_by_id["PGU-401"]
-        assert tickets_by_id["PGU-404"]["active_work_highlight"] is True, tickets_by_id["PGU-404"]
+        assert tickets_by_id["PGU-401"]["active_work_highlight"] is True, tickets_by_id["PGU-401"]
+        assert tickets_by_id["PGU-401"]["active_work_notified_at"] == "", tickets_by_id["PGU-401"]
+        assert tickets_by_id["PGU-404"]["active_work_highlight"] is False, tickets_by_id["PGU-404"]
         assert tickets_by_id["PGU-404"]["active_work_owner_role"] == "audit", tickets_by_id["PGU-404"]
-        assert tickets_by_id["PGU-403"]["active_work_highlight"] is False, tickets_by_id["PGU-403"]
+        assert tickets_by_id["PGU-403"]["active_work_highlight"] is True, tickets_by_id["PGU-403"]
+        assert tickets_by_id["PGU-403"]["active_work_owner_role"] == "audit", tickets_by_id["PGU-403"]
+        assert tickets_by_id["PGU-403"]["active_work_notified_at"] == "", tickets_by_id["PGU-403"]
         assert tickets_by_id["PGU-408"]["active_work_highlight"] is True, tickets_by_id["PGU-408"]
         assert tickets_by_id["PGU-408"]["active_work_owner_role"] == "main", tickets_by_id["PGU-408"]
         assert tickets_by_id["PGU-408"]["active_work_notified_at"], tickets_by_id["PGU-408"]
-        assert tickets_by_id["PGU-407"]["active_work_highlight"] is False, tickets_by_id["PGU-407"]
+        assert tickets_by_id["PGU-407"]["active_work_highlight"] is True, tickets_by_id["PGU-407"]
         assert tickets_by_id["PGU-410"]["active_work_highlight"] is True, tickets_by_id["PGU-410"]
         assert tickets_by_id["PGU-410"]["active_work_owner_role"] == "research", tickets_by_id["PGU-410"]
-        assert tickets_by_id["PGU-409"]["active_work_highlight"] is False, tickets_by_id["PGU-409"]
+        assert tickets_by_id["PGU-409"]["active_work_highlight"] is True, tickets_by_id["PGU-409"]
+        assert tickets_by_id["PGU-409"]["active_work_owner_role"] == "app", tickets_by_id["PGU-409"]
+        assert tickets_by_id["PGU-409"]["active_work_notified_at"] == "", tickets_by_id["PGU-409"]
         assert tickets_by_id["PGU-411"]["active_work_highlight"] is False, tickets_by_id["PGU-411"]
         assert tickets_by_id["PGU-411"]["active_work_owner_role"] == "", tickets_by_id["PGU-411"]
-        assert tickets_by_id["PGU-412"]["active_work_highlight"] is False, tickets_by_id["PGU-412"]
+        assert tickets_by_id["PGU-412"]["active_work_highlight"] is True, tickets_by_id["PGU-412"]
+        assert tickets_by_id["PGU-412"]["active_work_notified_at"] == "", tickets_by_id["PGU-412"]
         assert tickets_by_id["PGU-413"]["active_work_highlight"] is False, tickets_by_id["PGU-413"]
-        assert tickets_by_id["PGU-406"]["active_work_highlight"] is True, tickets_by_id["PGU-406"]
+        assert tickets_by_id["PGU-406"]["active_work_highlight"] is False, tickets_by_id["PGU-406"]
         assert tickets_by_id["PGU-406"]["active_work_owner_role"] == "director", tickets_by_id["PGU-406"]
         assert tickets_by_id["PGU-414"]["active_work_highlight"] is True, tickets_by_id["PGU-414"]
         assert tickets_by_id["PGU-414"]["active_work_owner_role"] == "inspector", tickets_by_id["PGU-414"]
         assert tickets_by_id["PGU-405"]["active_work_highlight"] is False, tickets_by_id["PGU-405"]
         assert tickets_by_id["PGU-1"]["active_work_highlight"] is False, tickets_by_id["PGU-1"]
 
-        insert_ticket(admin_conn, "PGU-415", title="Prompt refresh analysis ping", state="analysis", assignee="director", implementation="")
-        before_send_signature = service_app.store_signature()
-        before_send = service_app.get_ticket("PGU-415")
-        assert before_send["active_work_highlight"] is False, before_send
+        highlighted = [ticket for ticket in tickets if ticket["active_work_highlight"]]
+        highlighted_roles = [ticket["active_work_owner_role"] for ticket in highlighted]
+        assert len(highlighted_roles) == len(set(highlighted_roles)), highlighted
+
+        # A lower serial ticket wins deterministically. Blocking, waiting,
+        # holding, and queue reservations suppress it; the serially queued
+        # successor stays non-actionable, and every status change is visible
+        # to the SSE signature reconciler.
+        insert_ticket(admin_conn, "PGU-415", title="Next app implementation", state="in_progress", assignee="app")
+        assert service_app.get_ticket("PGU-415")["state"] == "backlog"
+        before_status_signature = service_app.store_signature()
         psql(
             admin_conn,
             """
-INSERT INTO ticket_board.notification_trace (
-    ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
-) VALUES (
-    clock_timestamp(), 'PGU-415', 'director', 'transition', 'send', 'analysis', 'director', 'idle', 'idle'
-);
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-409', 'PGU-411', 0);
 """,
         )
-        after_send_signature = service_app.store_signature()
-        assert after_send_signature != before_send_signature
-        after_send = service_app.get_ticket("PGU-415")
-        assert after_send["active_work_highlight"] is True, after_send
-        assert after_send["active_work_owner_role"] == "director", after_send
+        blocked_signature = service_app.store_signature()
+        assert blocked_signature != before_status_signature
+        assert service_app.get_ticket("PGU-409")["active_work_highlight"] is False
+        assert service_app.get_ticket("PGU-415")["active_work_highlight"] is False
+
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.ticket_blockers SET resolved=true WHERE ticket_id='PGU-409';
+UPDATE ticket_board.ticket_notification_state SET awaiting_role='director' WHERE ticket_id='PGU-409';
+""",
+        )
+        awaiting_signature = service_app.store_signature()
+        assert awaiting_signature != blocked_signature
+        assert service_app.get_ticket("PGU-409")["active_work_highlight"] is False
+
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.ticket_notification_state SET awaiting_role='' WHERE ticket_id='PGU-409';
+UPDATE ticket_board.tickets SET manually_controlled=true WHERE id='PGU-409';
+""",
+        )
+        held_signature = service_app.store_signature()
+        assert held_signature != awaiting_signature
+        assert service_app.get_ticket("PGU-409")["active_work_highlight"] is False
+
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.tickets
+SET manually_controlled=false,
+    queued_for_assignee='app',
+    queued_behind_ticket='PGU-415'
+WHERE id='PGU-409';
+""",
+        )
+        queued_signature = service_app.store_signature()
+        assert queued_signature != held_signature
+        assert service_app.get_ticket("PGU-409")["active_work_highlight"] is False
+
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.tickets
+SET queued_for_assignee='', queued_behind_ticket='', assignee='perf'
+WHERE id='PGU-409';
+""",
+        )
+        reassigned_signature = service_app.store_signature()
+        assert reassigned_signature != queued_signature
+        assert service_app.get_ticket("PGU-409")["active_work_highlight"] is False
+        assert service_app.get_ticket("PGU-407")["active_work_highlight"] is True
 
         old_prefix = os.environ.get("TICKET_BOARD_TICKET_PREFIX")
         try:

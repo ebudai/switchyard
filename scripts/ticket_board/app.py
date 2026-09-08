@@ -783,6 +783,17 @@ SELECT
     t.state,
     t.assignee,
     t.commit_hash,
+    t.manually_controlled,
+    t.queued_for_assignee,
+    t.queued_behind_ticket,
+    t.needs_inspection,
+    t.needs_audit,
+    t.needs_user_signoff,
+    COALESCE(to_jsonb(t)->'workflow_flags', '{}'::jsonb)::text AS workflow_flags,
+    COALESCE(
+        (SELECT ns.awaiting_role FROM ticket_board.ticket_notification_state ns WHERE ns.ticket_id = t.id),
+        ''
+    ) AS awaiting_role,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id) AS blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id AND b.resolved) AS resolved_blocker_count,
     (SELECT count(*)::int FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id) AS comment_count,
@@ -814,6 +825,14 @@ ORDER BY t.ticket_number;
                 str(row["state"]),
                 str(row["assignee"]),
                 str(row["commit_hash"]),
+                bool(row["manually_controlled"]),
+                str(row["queued_for_assignee"]),
+                str(row["queued_behind_ticket"]),
+                bool(row["needs_inspection"]),
+                bool(row["needs_audit"]),
+                bool(row["needs_user_signoff"]),
+                str(row["workflow_flags"]),
+                str(row["awaiting_role"]),
                 int(row["blocker_count"]),
                 int(row["resolved_blocker_count"]),
                 int(row["comment_count"]),
@@ -827,14 +846,30 @@ ORDER BY t.ticket_number;
         where = "WHERE t.id = %s" if ticket_id is not None else ""
         params = (ticket_id,) if ticket_id is not None else ()
         from .workflow_config import read_configuration
-        configured = read_configuration(conn) is not None
+        workflow = read_configuration(conn)
+        configured = workflow is not None
         owner_sql = "ticket_board.transition_target_role(scoped.state, scoped.assignee)" if configured else """CASE
             WHEN scoped.state = 'in_progress' THEN NULLIF(scoped.assignee, 'unassigned')
             WHEN scoped.state IN ('analysis', 'dat', 'director_review') THEN 'director'
             WHEN scoped.state = 'inspection' THEN 'inspector'
             WHEN scoped.state = 'audit' THEN 'audit'
             ELSE NULL END"""
-        scope_sql = "EXISTS (SELECT FROM ticket_board.workflow_stages ws WHERE ws.name=scoped.state AND NOT ws.is_terminal)" if configured else "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')"
+        if configured:
+            # The persisted document has already passed workflow_config.validate,
+            # but still quote stage names as data before embedding the compact
+            # read-only scope. This avoids granting the board service execution
+            # rights on Director-only workflow mutation helpers.
+            active_stages = [
+                str(stage["name"])
+                for stage in workflow["stages"]
+                if not stage["terminal"] and stage["kind"] != "draft"
+            ]
+            active_stage_sql = ", ".join(
+                "'" + stage.replace("'", "''") + "'" for stage in active_stages
+            ) or "NULL"
+            scope_sql = f"scoped.state IN ({active_stage_sql})"
+        else:
+            scope_sql = "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')"
         return conn.execute(
             f"""
 WITH notification_scope AS (
@@ -842,8 +877,15 @@ WITH notification_scope AS (
         scoped.id,
         scoped.state,
         scoped.ticket_number,
+        scoped.manually_controlled,
+        scoped.queued_for_assignee,
+        scoped.queued_behind_ticket,
+        notification_state.entered_current_state_at,
+        COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
         {owner_sql} AS owner_role
     FROM ticket_board.tickets scoped
+    LEFT JOIN ticket_board.ticket_notification_state notification_state
+        ON notification_state.ticket_id = scoped.id
     WHERE {scope_sql}
 ),
 notification_candidates AS (
@@ -852,11 +894,21 @@ notification_candidates AS (
         notification_scope.state,
         notification_scope.ticket_number,
         notification_scope.owner_role,
-        CASE
-            WHEN notification_scope.state = 'in_progress'
-                THEN notification_scope.state || ':' || notification_scope.owner_role
-            ELSE notification_scope.state
-        END AS active_work_partition,
+        notification_scope.entered_current_state_at,
+        -- Delivery can legitimately be deferred while the assigned pane is
+        -- busy. Current-work visibility therefore comes from durable workflow
+        -- ownership and serial-focus state, never from a successful send.
+        notification_scope.owner_role IS NOT NULL
+            AND NOT notification_scope.manually_controlled
+            AND notification_scope.awaiting_role = ''
+            AND notification_scope.queued_for_assignee = ''
+            AND notification_scope.queued_behind_ticket = ''
+            AND NOT EXISTS (
+                SELECT FROM ticket_board.ticket_blockers blocker
+                WHERE blocker.ticket_id = notification_scope.id
+                  AND NOT blocker.resolved
+            )
+            AS is_actionable_current,
         sent.last_sent_at AS active_work_notified_at
     FROM notification_scope
     LEFT JOIN LATERAL (
@@ -874,12 +926,14 @@ active_work AS (
         notification_candidates.id,
         notification_candidates.owner_role,
         notification_candidates.active_work_notified_at,
-        notification_candidates.active_work_notified_at IS NOT NULL
-            AND notification_candidates.owner_role IS NOT NULL
+        -- There is exactly one visible current ticket per logical owner. The
+        -- send timestamp remains separate evidence and does not rank work.
+        notification_candidates.is_actionable_current
             AND row_number() OVER (
-                PARTITION BY notification_candidates.active_work_partition
-                ORDER BY notification_candidates.active_work_notified_at DESC NULLS LAST,
-                    notification_candidates.ticket_number DESC
+                PARTITION BY notification_candidates.owner_role
+                ORDER BY notification_candidates.is_actionable_current DESC,
+                    notification_candidates.entered_current_state_at NULLS LAST,
+                    notification_candidates.ticket_number
             ) = 1 AS active_work_highlight
     FROM notification_candidates
 )

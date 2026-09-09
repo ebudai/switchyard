@@ -20,6 +20,7 @@ import json
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -113,6 +114,122 @@ def _write_launcher(
     os.chown(launcher, uid, 0)
     os.chmod(launcher, mode)
     return launcher
+
+
+#: An owner half that also answers the bridge's handoff descriptor, the way the
+#: real one does when the window belongs to somebody else's session (SYRD-90).
+HANDOFF_LAUNCHER_SOURCE = """#!/usr/bin/env python3
+import json, os, sys
+json.dump(
+    {
+        "uid": os.getuid(),
+        "euid": os.geteuid(),
+        "gid": os.getgid(),
+        "groups": sorted(os.getgroups()),
+        "argv": sys.argv,
+        "environ": dict(os.environ),
+        "cwd": os.getcwd(),
+    },
+    open("@RECORD@", "w"),
+)
+os.write(int(os.environ["SWITCHYARD_PRESENTATION_HANDOFF_FD"]), (@HANDOFF@ + "\\n").encode())
+"""
+
+
+def _handoff_launcher(payload: str) -> str:
+    return HANDOFF_LAUNCHER_SOURCE.replace("@HANDOFF@", json.dumps(payload))
+
+
+def _published_handoff(accounts: "Accounts") -> Path:
+    return (
+        Path(accounts.human.pw_dir)
+        / ".local" / "state" / "switchyard" / "projects" / PROJECT
+        / f"{PROJECT}-presentation-handoff.json"
+    )
+
+
+def case_the_bridge_returns_one_validated_handoff_to_its_caller(
+    accounts: "Accounts", work: Path
+) -> None:
+    """The owner half has no screen; the caller has no tenant. Root carries two facts.
+
+    Nothing here is a general channel: the destination is derived from the uid
+    the kernel reported and the pinned project, and every field is checked as
+    root before anything is written into a person's home (SYRD-90).
+    """
+    # Root's own, inside this namespace: the host's /usr is owned by a uid this
+    # namespace does not map, and the bridge is right to refuse what it cannot
+    # see as root's.
+    pinned = SHARED_ROOT / "releases" / "r1" / "switchyard-pane-window"
+    pinned.parent.mkdir(parents=True, exist_ok=True)
+    pinned.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    os.chown(pinned, 0, 0)
+    pinned.chmod(0o755)
+    good = json.dumps(
+        {
+            "schema": "switchyard.presentation-handoff.v1",
+            "project": PROJECT,
+            "slot_count": 6,
+            "pane_program": str(pinned),
+        },
+        sort_keys=True,
+    )
+    record = _record_path(work, "handoff-record.json", accounts)
+    launcher = _shared_release(work, record, source=_handoff_launcher(good))
+    _write_grant(
+        {
+            "project": PROJECT,
+            "owner": accounts.owner.pw_name,
+            "authorized_user": accounts.human.pw_name,
+            "launcher": str(launcher),
+        }
+    )
+    published = _published_handoff(accounts)
+    if published.exists():
+        published.unlink()
+
+    result = _run(accounts.human.pw_uid, PROJECT, "start")
+    assert result.returncode == 0, result.stdout
+    # The owner half still really ran as the owner: forking rather than
+    # replacing this process changed who it is for nobody.
+    ran = json.loads(record.read_text(encoding="utf-8"))
+    assert ran["uid"] == accounts.owner.pw_uid, ran
+    assert 0 not in ran["groups"], ran["groups"]
+    assert ran["environ"]["SWITCHYARD_PRESENTATION_HANDOFF_FD"] == "3", ran["environ"]
+
+    assert published.is_file(), sorted(str(path) for path in published.parent.parent.glob("*"))
+    info = published.stat()
+    # In the caller's own home, owned by the caller, private -- so the caller
+    # needs no privilege to read it and nobody else can.
+    assert info.st_uid == accounts.human.pw_uid, info.st_uid
+    assert stat.S_IMODE(info.st_mode) == 0o600, oct(info.st_mode)
+    parent = published.parent.stat()
+    assert parent.st_uid == accounts.human.pw_uid and stat.S_IMODE(parent.st_mode) == 0o700
+    assert json.loads(published.read_text(encoding="utf-8")) == json.loads(good)
+
+    # And what is not a handoff is not relayed: each of these leaves the
+    # caller's home exactly as it was.
+    for label, payload in (
+        ("schema", {"schema": "switchyard.other.v1", "project": PROJECT, "slot_count": 6,
+                    "pane_program": str(pinned)}),
+        ("project", {"schema": "switchyard.presentation-handoff.v1", "project": "other",
+                     "slot_count": 6, "pane_program": str(pinned)}),
+        ("slots", {"schema": "switchyard.presentation-handoff.v1", "project": PROJECT,
+                   "slot_count": 99, "pane_program": str(pinned)}),
+        ("program", {"schema": "switchyard.presentation-handoff.v1", "project": PROJECT,
+                     "slot_count": 6, "pane_program": str(work / "theirs")}),
+        ("junk", "not json at all"),
+    ):
+        theirs = work / "theirs"
+        theirs.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        os.chown(theirs, accounts.owner.pw_uid, accounts.owner.pw_gid)
+        theirs.chmod(0o755)
+        published.unlink(missing_ok=True)
+        body = payload if isinstance(payload, str) else json.dumps(payload, sort_keys=True)
+        _shared_release(work, record, source=_handoff_launcher(body))
+        result = _run(accounts.human.pw_uid, PROJECT, "start")
+        assert result.returncode == 0, (label, result.stdout)
+        assert not published.exists(), label
 
 
 def _shared_release(work: Path, record: Path, *, source: str = LAUNCHER_SOURCE) -> Path:
@@ -819,6 +936,7 @@ def end_to_end() -> None:
             case_nothing_reusable_is_ever_written_down,
             case_all_three_verbs_run_through_the_real_public_dispatcher,
             case_repair_reinstalls_the_same_bridge_for_the_same_human,
+            case_the_bridge_returns_one_validated_handoff_to_its_caller,
         ):
             case_work = work / case.__name__
             case_work.mkdir()

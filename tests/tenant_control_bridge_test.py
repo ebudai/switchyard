@@ -199,26 +199,29 @@ def test_the_authorized_human_reaches_the_owner_through_the_bridge_alone() -> No
     grant = {"project": PROJECT, "owner": OWNER, "authorized_user": HUMAN, "launcher": "/x"}
     calls: list[list[str]] = []
 
-    def exec_func(program: str, argv: list[str]) -> None:
-        calls.append([program, *argv])
+    def runner(argv, **_kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(list(argv), 0, "", "")
 
     original = team_launcher.current_user_name
     team_launcher.current_user_name = lambda: HUMAN  # type: ignore[assignment]
     try:
         team_launcher._switchyard_exec_through_tenant_control(
-            PROJECT, "start", grant=grant, exec_func=exec_func
+            PROJECT, "start", grant=grant, runner=runner
         )
-        raise AssertionError("the bridge should have exec'd")
-    except SystemExit:
-        pass
+        raise AssertionError("the bridge should have run")
+    except SystemExit as exit_error:
+        assert int(str(exit_error) or 0) == 0, exit_error
     finally:
         team_launcher.current_user_name = original  # type: ignore[assignment]
 
+    # Run rather than exec'd, because the bridge answers with a handoff the
+    # caller has to act on afterwards; what crosses the boundary is unchanged
+    # (SYRD-90).
     assert len(calls) == 1
-    argv = calls[0][1:]
     # -n: never prompt. And only the project and the verb cross the boundary --
     # no config, no source path, no role, no environment.
-    assert argv == ["sudo", "-n", tenant_control_helper_path(PROJECT), PROJECT, "start"]
+    assert calls[0] == ["sudo", "-n", tenant_control_helper_path(PROJECT), PROJECT, "start"]
 
 
 def test_the_wrapper_uses_the_bridge_first_and_sudo_only_otherwise() -> None:

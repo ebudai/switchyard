@@ -1247,19 +1247,100 @@ def display_attach_args(
     only way to avoid that without this bridge is a blanket sudo grant on the
     owner account (SYRD-65).
     """
-    session = display_session_name(config.project, slot)
+    return display_attach_args_for(
+        config.project, slot, owner=config.run_as_user or "", gui_user=gui_user
+    )
+
+
+def display_attach_args_for(
+    project: str, slot: int, *, owner: str, gui_user: str
+) -> list[str]:
+    """The same answer from primitives, for a caller with no tenant config.
+
+    The bridge caller builds its own layout and has never been able to read the
+    tenant's configuration; what it knows is the project, its owner from the
+    root-owned grant, and itself. One definition, so the tab the desktop half
+    opens runs what the owner half would have given it (SYRD-90).
+    """
+    session = display_session_name(project, slot)
     direct = ["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]
-    owner = (config.run_as_user or "").strip()
+    owner = (owner or "").strip()
     desktop = (gui_user or team_launcher.current_user_name()).strip()
     if not owner or owner == desktop:
         return direct
     return [
         os.environ.get("SWITCHYARD_SUDO_BIN", "sudo"),
         "-n",
-        team_launcher.display_attach_helper_path(config.project),
-        config.project,
+        team_launcher.display_attach_helper_path(project),
+        project,
         str(slot),
     ]
+
+
+def presentation_layout_payload(
+    project: str,
+    *,
+    slot_count: int,
+    owner: str,
+    gui_user: str,
+    pane_program: Path,
+) -> dict[str, Any]:
+    """The Konsole layout for one project's presentation window.
+
+    Rendered from primitives so the owner half and the bridge caller produce
+    the same document, rather than one of them shipping the other a document to
+    write (SYRD-90).
+    """
+    layout = team_launcher._new_project_layout_payload(slot_count)
+    for slot, leaf in enumerate(team_launcher._layout_leaves(layout)):
+        leaf["Command"] = team_launcher.inert_pane_command(
+            pane_program, display_attach_args_for(project, slot, owner=owner, gui_user=gui_user)
+        )
+        # The desktop account's own directory, not this process's. Under a
+        # privileged invocation `Path.home()` is root's, and the tab recorded
+        # `WorkingDirectory=/root` -- a directory the desktop user cannot even
+        # enter (SYRD-65).
+        leaf["WorkingDirectory"] = team_launcher._gui_home(gui_user) if gui_user else str(Path.home())
+        leaf["Title"] = f"{project} slot {slot}"
+    return layout
+
+
+def _hand_off_desktop_half(
+    config: team_launcher.ProjectConfig,
+    state: Mapping[str, Any],
+    *,
+    gui_user: str,
+) -> bool:
+    """Report what the bridge caller needs, when this process cannot do it.
+
+    Only when the bridge asked for it: it opens the descriptor and names it in
+    the environment it built. Nothing here decides where anything is written --
+    this end writes to a pipe it was handed, and root decides what becomes of
+    it (SYRD-90).
+    """
+    raw_fd = os.environ.get(team_launcher.PRESENTATION_HANDOFF_FD_ENV, "").strip()
+    if not raw_fd.isdigit():
+        return False
+    payload = team_launcher.render_presentation_handoff(
+        config.project,
+        slot_count=int(state["slot_count"]),
+        pane_program=team_launcher.pane_window_program(
+            team_launcher.switchyard_pane_launcher_for(config)
+        ),
+    )
+    try:
+        with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError as exc:
+        raise SystemExit(
+            f"switchyard: could not hand {config.project}'s presentation window to "
+            f"{gui_user or 'the desktop account'}: {exc}"
+        ) from exc
+    print(
+        f"switchyard: {config.project}'s display slots are up; its window opens in "
+        f"{gui_user or 'the desktop account'}'s own session."
+    )
+    return True
 
 
 def _launch_separate(
@@ -1275,19 +1356,22 @@ def _launch_separate(
     # Naming it as the GUI user is what sent a launch at the owner's own
     # runtime directory, where there is no compositor listening (SYRD-65).
     gui_user = team_launcher.presentation_gui_user(config)
-    layout = team_launcher._new_project_layout_payload(state["slot_count"])
-    leaves = team_launcher._layout_leaves(layout)
-    for slot, leaf in enumerate(leaves):
-        leaf["Command"] = team_launcher.inert_pane_command(
-            team_launcher.pane_window_program(team_launcher.switchyard_pane_launcher_for(config)),
-            display_attach_args(config, slot, gui_user=gui_user),
-        )
-        # The desktop account's own directory, not this process's. Under a
-        # privileged invocation `Path.home()` is root's, and the tab recorded
-        # `WorkingDirectory=/root` -- a directory the desktop user cannot even
-        # enter (SYRD-65).
-        leaf["WorkingDirectory"] = team_launcher._gui_home(gui_user) if gui_user else str(Path.home())
-        leaf["Title"] = f"{config.project} slot {slot}"
+    layout = presentation_layout_payload(
+        config.project,
+        slot_count=state["slot_count"],
+        owner=config.run_as_user or "",
+        gui_user=gui_user,
+        pane_program=team_launcher.pane_window_program(
+            team_launcher.switchyard_pane_launcher_for(config)
+        ),
+    )
+    # Under the control bridge this process is the project owner: it can
+    # neither write into the desktop account's state directory nor reach that
+    # person's compositor. It does the tenant half, reports the two facts the
+    # desktop half needs, and the caller -- who owns both -- does the rest
+    # (SYRD-90).
+    if _hand_off_desktop_half(config, state, gui_user=gui_user):
+        return
     output = output_path or team_launcher.desktop_presentation_layout_path(
         config, config_path=config_path, gui_user=gui_user
     )

@@ -5211,6 +5211,83 @@ def ensure_owner_file(
         raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
 
 
+PRESENTATION_HANDOFF_SCHEMA = "switchyard.presentation-handoff.v1"
+#: The bridge tells its child which descriptor to answer on. The bridge chooses
+#: it, never the caller: the environment the child gets is rebuilt from
+#: root-owned data, and this is one more field of it.
+PRESENTATION_HANDOFF_FD_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_FD"
+
+
+def desktop_state_dir(project: str, user: str) -> Path:
+    """A desktop account's own private state directory for one project.
+
+    Derived from the account and the project and nothing else, so the two sides
+    of the bridge handoff agree on it by construction rather than by passing a
+    path across (SYRD-90).
+    """
+    return Path(_gui_home(user)) / ".local" / "state" / "switchyard" / "projects" / project
+
+
+def presentation_handoff_path(project: str, user: str) -> Path:
+    """Where the bridge leaves the desktop half's inputs for its caller."""
+    return desktop_state_dir(project, user) / f"{project}-presentation-handoff.json"
+
+
+def render_presentation_handoff(project: str, *, slot_count: int, pane_program: Path) -> dict[str, Any]:
+    """Everything the caller needs to build its own layout, and nothing else.
+
+    Not the layout itself. The account that owns the sessions renders nothing
+    the desktop account will run: it reports two facts -- how many slots there
+    are, and which pinned program a tab runs -- and the caller builds the layout
+    from its own code. What crosses is checkable, and a payload that is not is
+    refused rather than written into somebody's home (SYRD-90).
+    """
+    return {
+        "schema": PRESENTATION_HANDOFF_SCHEMA,
+        "project": project,
+        "slot_count": int(slot_count),
+        "pane_program": str(pane_program),
+    }
+
+
+def validated_presentation_handoff(
+    payload: Any, *, project: str, runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run
+) -> tuple[dict[str, Any], str]:
+    """The handoff, or why it is not one. Checked by both sides independently.
+
+    The bridge checks it as root before it writes it anywhere, and the caller
+    checks it again before it acts on it: a value that has been through another
+    account is not trusted for having arrived (SYRD-90).
+    """
+    if not isinstance(payload, dict):
+        return {}, "the presentation handoff is not an object"
+    if str(payload.get("schema") or "") != PRESENTATION_HANDOFF_SCHEMA:
+        return {}, "the presentation handoff does not carry this schema"
+    if str(payload.get("project") or "") != project:
+        return {}, f"the presentation handoff names {payload.get('project')!r} rather than {project}"
+    slot_count = payload.get("slot_count")
+    if not isinstance(slot_count, int) or isinstance(slot_count, bool):
+        return {}, "the presentation handoff slot count is not an integer"
+    if not 1 <= slot_count <= MAX_VISIBLE_PANES_PER_WINDOW:
+        return {}, f"the presentation handoff slot count {slot_count} is out of range"
+    raw_program = str(payload.get("pane_program") or "")
+    program = Path(raw_program)
+    if not raw_program or not program.is_absolute():
+        return {}, "the presentation handoff pane program is not an absolute path"
+    # The one thing in here that names something to execute, so the whole path
+    # to it has to be root's: this is a program the desktop account will run in
+    # every tab of its own window (SYRD-62, SYRD-90).
+    reasons = untrusted_root_executable_reasons(program, owner_uid=0, runner=runner)
+    if reasons:
+        return {}, f"the presentation handoff pane program is not pinned to root: {reasons[0]}"
+    return {
+        "schema": PRESENTATION_HANDOFF_SCHEMA,
+        "project": project,
+        "slot_count": slot_count,
+        "pane_program": raw_program,
+    }, ""
+
+
 def desktop_presentation_layout_path(
     config: ProjectConfig, *, config_path: Path, gui_user: str
 ) -> Path:
@@ -5230,11 +5307,7 @@ def desktop_presentation_layout_path(
     user = (gui_user or "").strip()
     if not user or user == config.run_as_user or (not config.run_as_user and user == current_user_name()):
         return tenant
-    return (
-        Path(_gui_home(user))
-        / ".local" / "state" / "switchyard" / "projects" / config.project
-        / f"{config.project}-presentation-layout.json"
-    )
+    return desktop_state_dir(config.project, user) / f"{config.project}-presentation-layout.json"
 
 
 def write_desktop_layout(
@@ -18085,8 +18158,89 @@ def _switchyard_exec_through_tenant_control(
             f"switchyard: {caller} may not control {project}; it is registered to {authorized}\n"
             "switchyard: ask that user, or run this as the project owner or an operator"
         )
-    exec_func(sudo_bin, [sudo_bin, "-n", helper, project, operation])
-    raise SystemExit(0)
+    # Run, not replace. The bridge answers with one validated handoff when the
+    # owner half could not do the desktop half, and this process -- which owns
+    # the desktop -- is the one that can. Its terminal is passed through
+    # untouched, so a verb that attaches a tmux client still has one (SYRD-90).
+    result = runner([sudo_bin, "-n", helper, project, operation])
+    code = int(getattr(result, "returncode", 1) or 0)
+    if code == 0:
+        code = complete_desktop_presentation(project, caller=caller, runner=runner)
+    raise SystemExit(code)
+
+
+def complete_desktop_presentation(
+    project: str,
+    *,
+    caller: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    process_launcher: Callable[..., Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Open this project's window here, from what the bridge handed back.
+
+    The owner account has the sessions and no screen; this account has the
+    screen and may not read the tenant's configuration. So the bridge reports
+    two checkable facts and this process does the rest in its own home and its
+    own session: it stages the layout where it already has permission to, and
+    starts the terminal as itself, with no privilege to drop and no password to
+    ask for. Absent handoff means there was nothing to open (SYRD-90).
+    """
+    from scripts import presentation_controller
+
+    handoff_path = presentation_handoff_path(project, caller)
+    try:
+        raw = handoff_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    try:
+        handoff_path.unlink()
+    except OSError:
+        pass
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    handoff, problem = validated_presentation_handoff(payload, project=project, runner=runner)
+    if problem:
+        # Checked again here. It has been through another account, and arriving
+        # is not the same as being trustworthy.
+        print_func(f"switchyard: refusing {project}'s presentation handoff: {problem}")
+        return 1
+    grant = _tenant_control_grant(project)
+    owner = str(grant.get("owner") or "").strip()
+    if not owner:
+        print_func(f"switchyard: {project} has no recorded owner; not opening a window")
+        return 1
+    layout = presentation_controller.presentation_layout_payload(
+        project,
+        slot_count=handoff["slot_count"],
+        owner=owner,
+        gui_user=caller,
+        pane_program=Path(handoff["pane_program"]),
+    )
+    output = desktop_state_dir(project, caller) / f"{project}-presentation-layout.json"
+    refusal = write_desktop_layout(output, layout, gui_user=caller, runner=runner)
+    if refusal:
+        print_func(f"switchyard: cannot open {project}'s presentation window: {refusal}")
+        return 1
+    return launch_konsole_window(
+        output,
+        project=project,
+        window_title=_registered_project_name(project) or project,
+        gui_user=None,
+        runner=runner,
+        process_launcher=process_launcher,
+    )
+
+
+def _registered_project_name(project: str) -> str:
+    """This project's display name, from the root-owned registry it is listed in."""
+    try:
+        entry = _resolve_switchyard_project(project)
+    except SystemExit:
+        return ""
+    return (getattr(entry, "name", "") or "").strip()
 
 
 def _switchyard_exec_with_root(

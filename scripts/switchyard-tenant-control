@@ -262,13 +262,122 @@ def main(argv: list[str]) -> int:
         *(project if part is PROJECT_ARGUMENT else str(part) for part in OPERATIONS[operation]),
     ]
 
-    os.setgroups([])
-    os.initgroups(owner, owner_entry.pw_gid)
-    os.setgid(owner_entry.pw_gid)
-    os.setuid(owner_entry.pw_uid)
-    if os.geteuid() != owner_entry.pw_uid or os.getuid() != owner_entry.pw_uid:
-        fail("could not drop to the owner account")
-    os.execve(command[0], command, environ)
+    # The owner half runs as a child rather than replacing this process, so
+    # root is still here afterwards to carry one constrained answer back. The
+    # child keeps this terminal: a lifecycle verb may attach a tmux client, and
+    # a captured stdout is not a terminal (SYRD-90).
+    read_fd, write_fd = os.pipe()
+    environ[HANDOFF_FD_ENV] = str(HANDOFF_CHILD_FD)
+
+    child = os.fork()
+    if child == 0:  # pragma: no cover - exercised through the real fork
+        try:
+            os.close(read_fd)
+            os.dup2(write_fd, HANDOFF_CHILD_FD)
+            if write_fd != HANDOFF_CHILD_FD:
+                os.close(write_fd)
+            os.set_inheritable(HANDOFF_CHILD_FD, True)
+            os.setgroups([])
+            os.initgroups(owner, owner_entry.pw_gid)
+            os.setgid(owner_entry.pw_gid)
+            os.setuid(owner_entry.pw_uid)
+            if os.geteuid() != owner_entry.pw_uid or os.getuid() != owner_entry.pw_uid:
+                fail("could not drop to the owner account")
+            os.execve(command[0], command, environ)
+        except BaseException:  # pragma: no cover - the child must never return
+            os._exit(126)
+        os._exit(126)
+
+    os.close(write_fd)
+    with os.fdopen(read_fd, "r", encoding="utf-8", closefd=True) as handle:
+        # Bounded: this is a fixed handful of small fields, and a child that
+        # writes anything else is refused rather than relayed.
+        handoff = handle.read(HANDOFF_LIMIT_BYTES + 1)
+    _pid, status = os.waitpid(child, 0)
+    code = os.waitstatus_to_exitcode(status)
+
+    if code == 0 and handoff.strip():
+        publish_handoff(project, handoff, caller=caller)
+    return code
+
+
+#: The descriptor the owner half answers on, and the most it may say. Chosen
+#: here rather than by the caller: the child's environment is built from
+#: root-owned data and this is one more field of it (SYRD-90).
+HANDOFF_FD_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_FD"
+HANDOFF_CHILD_FD = 3
+HANDOFF_LIMIT_BYTES = 4096
+HANDOFF_SCHEMA = "switchyard.presentation-handoff.v1"
+MAX_PRESENTATION_SLOTS = 6
+
+
+def publish_handoff(project: str, raw: str, *, caller: str) -> None:
+    """Put one validated handoff where its caller, and only its caller, can read it.
+
+    This is the whole channel, and it is deliberately not a general one: the
+    destination is derived from the caller the kernel reported and the pinned
+    project, the schema is fixed, and every field is checked here as root before
+    anything is written. A child that answers with something else is ignored --
+    the desktop half simply does not happen, and nothing lands in a human's
+    home (SYRD-90).
+    """
+    if len(raw) > HANDOFF_LIMIT_BYTES:
+        return
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+    if payload.get("schema") != HANDOFF_SCHEMA or payload.get("project") != project:
+        return
+    slots = payload.get("slot_count")
+    if not isinstance(slots, int) or isinstance(slots, bool) or not 1 <= slots <= MAX_PRESENTATION_SLOTS:
+        return
+    program = payload.get("pane_program")
+    if not isinstance(program, str) or not program.startswith("/") or ".." in Path(program).parts:
+        return
+    try:
+        info = os.lstat(program)
+    except OSError:
+        return
+    # A program every tab of that person's window will run: root's, and writable
+    # by nobody else.
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        return
+    try:
+        caller_entry = pwd.getpwnam(caller)
+    except KeyError:
+        return
+    directory = (
+        Path(caller_entry.pw_dir) / ".local" / "state" / "switchyard" / "projects" / project
+    )
+    destination = directory / f"{project}-presentation-handoff.json"
+    body = json.dumps(
+        {
+            "schema": HANDOFF_SCHEMA,
+            "project": project,
+            "slot_count": slots,
+            "pane_program": program,
+        },
+        sort_keys=True,
+    ) + "\n"
+    try:
+        for parent in (*reversed(directory.parents), directory):
+            if not parent.exists():
+                parent.mkdir(mode=0o700)
+                os.chown(parent, caller_entry.pw_uid, caller_entry.pw_gid)
+        staged = directory / f".{destination.name}.new"
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, body.encode("utf-8"))
+            os.fchown(descriptor, caller_entry.pw_uid, caller_entry.pw_gid)
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        os.rename(staged, destination)
+    except OSError:
+        return
 
 
 if __name__ == "__main__":

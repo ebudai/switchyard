@@ -193,6 +193,199 @@ def test_both_launch_paths_choose_the_same_place() -> None:
         assert bootstrap == ordinary, (bootstrap, ordinary)
 
 
+# --------------------------------------------------------------------------
+# The bridge handoff: the owner half reports, the caller opens its own window.
+# --------------------------------------------------------------------------
+
+
+def _pinned_pane_program() -> Path:
+    """A program that really is root's, all the way up: this repo runs as one."""
+    return Path("/usr/bin/env")
+
+
+def test_the_owner_half_hands_the_desktop_half_back_instead_of_refusing() -> None:
+    """Under the bridge this process is the owner: no state, no compositor."""
+    with tempfile.TemporaryDirectory(prefix="handoff-emit.") as raw:
+        tmp = Path(raw)
+        config, config_path = _tenant(tmp)
+        read_fd, write_fd = os.pipe()
+        opened: list[Path] = []
+        original_launch = team_launcher.launch_konsole_window
+        original_env = os.environ.get(team_launcher.PRESENTATION_HANDOFF_FD_ENV)
+        with _Desktop(tmp):
+            try:
+                os.environ[team_launcher.PRESENTATION_HANDOFF_FD_ENV] = str(write_fd)
+                team_launcher.launch_konsole_window = lambda output, **_kwargs: (
+                    opened.append(Path(output)) or 0
+                )
+                presentation._launch_separate(
+                    config,
+                    {"slot_count": len(ROLES)},
+                    config_path=config_path,
+                    runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0),
+                    process_launcher=None,
+                )
+            finally:
+                team_launcher.launch_konsole_window = original_launch
+                if original_env is None:
+                    os.environ.pop(team_launcher.PRESENTATION_HANDOFF_FD_ENV, None)
+                else:
+                    os.environ[team_launcher.PRESENTATION_HANDOFF_FD_ENV] = original_env
+        with os.fdopen(read_fd, "r", encoding="utf-8") as handle:
+            payload = json.loads(handle.read())
+        # It reported facts, not a document, and it opened nothing.
+        assert sorted(payload) == ["pane_program", "project", "schema", "slot_count"], payload
+        assert payload["project"] == PROJECT and payload["slot_count"] == len(ROLES)
+        assert opened == [], opened
+
+
+def _handoff(tmp: Path, caller: str, **overrides) -> Path:
+    payload = {
+        "schema": team_launcher.PRESENTATION_HANDOFF_SCHEMA,
+        "project": PROJECT,
+        "slot_count": len(ROLES),
+        "pane_program": str(_pinned_pane_program()),
+    }
+    payload.update(overrides)
+    path = team_launcher.presentation_handoff_path(PROJECT, caller)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+class _Caller:
+    """This account, standing in for the human whose desktop it is."""
+
+    def __init__(self, tmp: Path):
+        self.user = team_launcher.current_user_name()
+        self.home = tmp / "caller-home"
+        self.home.mkdir(exist_ok=True)
+
+    def __enter__(self):
+        self._gui_home = team_launcher._gui_home
+        self._grant = team_launcher._tenant_control_grant
+        team_launcher._gui_home = lambda user: (
+            str(self.home) if user == self.user else self._gui_home(user)
+        )
+        team_launcher._tenant_control_grant = lambda project, **_kwargs: {
+            "project": project, "owner": "porter-agent", "authorized_user": self.user,
+        }
+        return self
+
+    def __exit__(self, *_exc):
+        team_launcher._gui_home = self._gui_home
+        team_launcher._tenant_control_grant = self._grant
+        return False
+
+
+def _complete(caller: _Caller, opened: list[dict]) -> int:
+    original_launch = team_launcher.launch_konsole_window
+    try:
+        team_launcher.launch_konsole_window = lambda output, **kwargs: (
+            opened.append({"output": Path(output), **kwargs}) or 0
+        )
+        return team_launcher.complete_desktop_presentation(
+            PROJECT, caller=caller.user, print_func=lambda _line: None
+        )
+    finally:
+        team_launcher.launch_konsole_window = original_launch
+
+
+def test_the_caller_stages_the_layout_in_its_own_state_and_opens_its_own_window() -> None:
+    """No privilege to drop, no password to ask for, nothing crossing an account."""
+    with tempfile.TemporaryDirectory(prefix="handoff-consume.") as raw:
+        tmp = Path(raw)
+        with _Caller(tmp) as caller:
+            handoff = _handoff(tmp, caller.user)
+            opened: list[dict] = []
+            code = _complete(caller, opened)
+            assert code == 0, opened
+            assert len(opened) == 1, opened
+            written = opened[0]["output"]
+            expected = (
+                team_launcher.desktop_state_dir(PROJECT, caller.user)
+                / f"{PROJECT}-presentation-layout.json"
+            )
+            assert written == expected, written
+            assert caller.home in written.parents, written
+            # Written by its owner, so it is private and needs no handover.
+            assert stat.S_IMODE(written.stat().st_mode) == 0o600
+            assert stat.S_IMODE(written.parent.stat().st_mode) == 0o700
+            # Its own session: no privilege drop is asked for.
+            assert opened[0]["gui_user"] is None, opened
+            # And the handoff is consumed rather than left lying about.
+            assert not handoff.exists()
+            layout = json.loads(written.read_text(encoding="utf-8"))
+            leaves = team_launcher._layout_leaves(layout)
+            assert len(leaves) == len(ROLES), layout
+            assert all(str(caller.home) == leaf["WorkingDirectory"] for leaf in leaves), leaves
+
+
+def test_nothing_to_open_is_not_a_failure() -> None:
+    """A viewer launch, or any verb that asked for no window, leaves no handoff."""
+    with tempfile.TemporaryDirectory(prefix="handoff-absent.") as raw:
+        tmp = Path(raw)
+        with _Caller(tmp) as caller:
+            opened: list[dict] = []
+            assert _complete(caller, opened) == 0
+            assert opened == [], opened
+
+
+def test_a_handoff_that_is_not_one_is_refused_and_opens_nothing() -> None:
+    """It has been through another account; arriving is not being trustworthy."""
+    cases = {
+        "schema": {"schema": "switchyard.something-else.v1"},
+        "project": {"project": "somebody-else"},
+        "slot count": {"slot_count": 99},
+        "slot count type": {"slot_count": "six"},
+        "relative program": {"pane_program": "scripts/switchyard-pane-window"},
+    }
+    for label, override in cases.items():
+        with tempfile.TemporaryDirectory(prefix="handoff-refused.") as raw:
+            tmp = Path(raw)
+            with _Caller(tmp) as caller:
+                handoff = _handoff(tmp, caller.user, **override)
+                opened: list[dict] = []
+                assert _complete(caller, opened) == 1, label
+                assert opened == [], (label, opened)
+                assert not handoff.exists(), label
+                assert not (
+                    team_launcher.desktop_state_dir(PROJECT, caller.user)
+                    / f"{PROJECT}-presentation-layout.json"
+                ).exists(), label
+
+
+def test_a_pane_program_that_is_not_roots_is_refused() -> None:
+    """Every tab of that window runs it, so the whole path to it must be root's."""
+    with tempfile.TemporaryDirectory(prefix="handoff-program.") as raw:
+        tmp = Path(raw)
+        theirs = tmp / "switchyard-pane-window"
+        theirs.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        theirs.chmod(0o755)
+        with _Caller(tmp) as caller:
+            _handoff(tmp, caller.user, pane_program=str(theirs))
+            opened: list[dict] = []
+            assert _complete(caller, opened) == 1
+            assert opened == [], opened
+
+
+def test_both_halves_render_the_same_window() -> None:
+    """One definition, so what the caller opens is what the owner would have."""
+    with tempfile.TemporaryDirectory(prefix="handoff-parity.") as raw:
+        tmp = Path(raw)
+        config, _config_path = _tenant(tmp)
+        program = _pinned_pane_program()
+        owner_side = presentation.presentation_layout_payload(
+            PROJECT, slot_count=len(ROLES), owner="porter-agent",
+            gui_user=DESKTOP_USER, pane_program=program,
+        )
+        caller_side = presentation.presentation_layout_payload(
+            config.project, slot_count=len(ROLES), owner="porter-agent",
+            gui_user=DESKTOP_USER, pane_program=program,
+        )
+        assert owner_side == caller_side
+
+
 def _fake_process(proc_root: Path, pid: int, *, uid: int, argv: list[str]) -> None:
     entry = proc_root / str(pid)
     entry.mkdir(parents=True, exist_ok=True)

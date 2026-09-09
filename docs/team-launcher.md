@@ -323,6 +323,32 @@ and told an operator to replace a window that was already correct. What decides
 is the program a process is running, so a shell that started a terminal is not
 one either, while the terminal it started still is (SYRD-90).
 
+**The desktop half belongs to the desktop account.** `switchyard <project>` run
+by the human the tenant's control grant names reaches the owner's sessions
+through the control bridge, which drops to the project owner. That account owns
+the sessions and owns no screen: it cannot write into the caller's private state
+directory, and it cannot reach the caller's compositor either. So it does not
+try. It does the tenant half, reports two checkable facts on a descriptor the
+bridge opened -- how many display slots there are, and which pinned program a tab
+runs -- and stops.
+
+The bridge runs that half as a child rather than replacing itself, so root is
+still there afterwards to carry the answer back. It validates the answer as root
+-- fixed schema, this project, a slot count in range, and a pane program that is
+a regular file owned by root and writable by nobody else -- and writes it into
+the caller's own state directory, owned by the caller, 0600 inside 0700. Nothing
+about that destination comes from the caller: it is derived from the uid the
+kernel reported and the pinned project. A child that answers with anything else
+is ignored, and the window simply does not open.
+
+The caller then does the rest in its own home and its own session: it checks the
+handoff again, builds the layout from its own code, writes it where it already
+has permission to write, and starts the terminal as itself -- no privilege to
+drop, no password to ask for, and no root wrapper for the window scan to see.
+The tenant owner is given no traversal or write access into anybody's home, and
+the bridge gained no caller-controlled path, environment or copy channel
+(SYRD-90).
+
 **The layout goes where the terminal can read it.** Konsole is handed a `--layout`
 path and opens it as the desktop account. The tenant's project-state directory is
 0700 and its files 0600, both owned by the project owner, so a layout written

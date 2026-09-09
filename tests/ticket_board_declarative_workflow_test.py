@@ -857,6 +857,54 @@ def main():
                 comment["text"] == "Historical draft note"
                 for comment in retained["comments"]
             )
+            # SYRD-79: merge passed authorization and then failed when its own
+            # terminal close was rechecked as an ordinary configured transition
+            # carrying no action -- after it had already copied the comments and
+            # attachments, so the ticket was left half-merged.
+            source_id, target_id = "PGU-92", "PGU-93"
+            t.seed_postgres_ticket(admin, source_id, title="Duplicate report", state="analysis", assignee="director")
+            t.seed_postgres_ticket(admin, target_id, title="Kept report", state="analysis", assignee="director")
+            app.update_ticket(
+                source_id, {"comment": {"who": "director", "text": "Only on the duplicate"}},
+                caller_role="director",
+            )
+
+            # Nobody but the control role may ask, and a refusal changes nothing.
+            for role in ("main", "audit", "inspector", "user"):
+                rejected(
+                    lambda role=role: app.merge_tickets(source_id, target_id, actor=role),
+                    "actor=director",
+                )
+            assert app.get_ticket(source_id)["state"] == "analysis"
+
+            merged = app.merge_tickets(source_id, target_id, actor="director")
+            source_after, target_after = merged["source"], merged["target"]
+            # The whole operation completed, not the half that ran before the
+            # recheck: provenance on both sides, and the source closed.
+            assert source_after["state"] == "done", source_after
+            assert source_after["commit_exempt"] is True, source_after
+            texts = [comment["text"] for comment in target_after["comments"]]
+            assert any(f"[merged from {source_id}] Only on the duplicate" == text for text in texts), texts
+            assert any(f"Merged in {source_id}" in text for text in texts), texts
+            assert any(
+                f"Merged into {target_id}" in comment["text"]
+                for comment in source_after["comments"]
+            ), source_after["comments"]
+            # No review was synthesized on either side.
+            for ticket in (source_after, target_after):
+                assert ticket["audit_signoff"] is False, ticket
+                assert ticket["inspector_signoff"] is False, ticket
+                assert ticket["user_signoff"] is False, ticket
+            assert target_after["state"] == "analysis", target_after
+
+            # The window closed with the statement that used it: an ordinary
+            # transition attempted afterwards is judged by the workflow again.
+            rejected(
+                lambda: app.update_ticket(
+                    target_id, {"state": "done"}, caller_role="director"
+                ),
+            )
+
             print(
                 "declarative workflow: gates, actor checks, kickback owner, configuration CAS/dry-run/idempotence and second reviewer passed"
             )

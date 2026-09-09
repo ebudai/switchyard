@@ -6437,12 +6437,20 @@ BEGIN
     UPDATE ticket_board.tickets
     SET manually_controlled = true
     WHERE id = source_id;
+    -- Merge's own terminal close, named for exactly one ticket and only for
+    -- the statement that performs it. Without this the update is rechecked as
+    -- an ordinary configured transition carrying no action, which no
+    -- transition table can match, and a merge that had already copied the
+    -- comments and attachments failed half-done (SYRD-79).
+    PERFORM set_config('ticket_board.merge_source', source_id, true);
     UPDATE ticket_board.tickets
     SET state = 'done',
         commit_exempt = true,
         manually_controlled = source_ticket.manually_controlled,
         parked = false
     WHERE id = source_id;
+    -- Closed immediately, so nothing later in this transaction inherits it.
+    PERFORM set_config('ticket_board.merge_source', '', true);
     PERFORM ticket_board.append_ticket_comment(source_id, 'director', 'Merged into ' || target_id);
     PERFORM ticket_board.touch_ticket(source_id);
     PERFORM ticket_board.touch_ticket(target_id);
@@ -6859,6 +6867,30 @@ DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(propose
     queued_for text; reserved_by text;
 BEGIN
     IF actor IS NULL THEN RAISE EXCEPTION 'configured ticket writes require a registered actor' USING ERRCODE='42501'; END IF;
+    -- Merge closes its own source, and only its own source. The window is one
+    -- ticket, named by the operation itself, and one statement: it is opened
+    -- immediately before the close and shut immediately after, so nothing else
+    -- in the transaction can travel through it. The destination has to be a
+    -- stage the workflow declares terminal, and no sign-off may move -- a merge
+    -- that raised one would be manufacturing the review the target still owes
+    -- (SYRD-79).
+    IF nullif(current_setting('ticket_board.merge_source', true), '') = previous.id THEN
+        IF NOT coalesce((
+            SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(cfg->'stages') x
+            WHERE x->>'name' = proposed.state
+        ), false) THEN
+            RAISE EXCEPTION 'merge may only close its source into a terminal stage, not %', proposed.state
+                USING ERRCODE='42501';
+        END IF;
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF flag.value->>'kind'='signoff'
+               AND ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg)
+                   IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg) THEN
+                RAISE EXCEPTION 'a merge cannot change sign-off %', flag.key USING ERRCODE='42501';
+            END IF;
+        END LOOP;
+        RETURN proposed;
+    END IF;
     IF previous.state=proposed.state THEN
         IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director' THEN
             RAISE EXCEPTION 'only director may reassign without transition' USING ERRCODE='42501'; END IF;

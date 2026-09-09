@@ -28,6 +28,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 PROTECTED_REFS = frozenset({"main", "master", "trunk", "release", "head"})
@@ -43,6 +44,18 @@ STAGING_DIR_NAME = ".local/state/switchyard/publish-staging"
 PROJECT_REGISTRY_DIR = Path("/etc/switchyard/projects")
 PROJECT_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 REGISTRY_TEST_ROOT_ENV = "SWITCHYARD_PUBLISH_REGISTRY_ROOT"
+# The board verifies a submitted commit_hash against one bare cache, named by
+# its own unit. Reading the unit is how this program learns which one: the
+# tenant's cache is not derivable from the slug, and guessing produced a path
+# the board does not read (SYRD-73). Root owns the unit, so the name cannot be
+# chosen by a role.
+BOARD_UNIT_DIR = Path("/etc/systemd/system")
+BOARD_UNIT_TEST_DIR_ENV = "SWITCHYARD_PUBLISH_UNIT_DIR"
+COMMIT_CACHE_ENVIRONMENT_KEY = "TICKET_BOARD_COMMIT_GIT_DIR"
+# Publication is remote; the ref does not always resolve on the first read.
+PUBLIC_REF_ATTEMPTS = 5
+CACHE_FETCH_ATTEMPTS = 3
+RETRY_DELAY_SECONDS = 1.0
 OWNER_TEST_HOME_ENV = "SWITCHYARD_PUBLISH_OWNER_HOME"
 
 
@@ -345,6 +358,150 @@ def resolve_remote_url(config: dict, remote_name: str) -> str:
     return resolved.stdout.strip()
 
 
+def configured_commit_cache(
+    project: str,
+    *,
+    unit_dir: Path | None = None,
+    unit_uid: int | None = None,
+    owner_uid: int | None = None,
+) -> Path:
+    """The bare cache the board verifies submitted commits against.
+
+    Read from the tenant's own board unit rather than derived from the slug.
+    The two are not the same path on a real host, and deriving one produced a
+    cache the board never reads, which is the whole shape of SYRD-73. Root owns
+    the unit, so a role cannot choose which cache gets refreshed.
+    """
+    import pwd as _pwd
+
+    test_dir = os.environ.get(BOARD_UNIT_TEST_DIR_ENV, "").strip()
+    resolved_dir = (
+        Path(unit_dir)
+        if unit_dir is not None
+        else Path(test_dir)
+        if test_dir
+        else BOARD_UNIT_DIR
+    )
+    trusted_uid = (
+        unit_uid
+        if unit_uid is not None
+        else 0
+        if (unit_dir is None and not test_dir)
+        else os.geteuid()
+    )
+    unit_path = resolved_dir / f"{project}-ticket-board.service"
+    if not _contained(unit_path, resolved_dir):
+        fail(f"board unit path escapes {resolved_dir}")
+    try:
+        info = unit_path.lstat()
+    except OSError as exc:
+        fail(f"cannot read board unit {unit_path}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"board unit {unit_path} must be a regular file, not a link")
+    if info.st_uid != trusted_uid:
+        fail(f"board unit {unit_path} is not owned by the trusted account")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"board unit {unit_path} is writable by an untrusted account")
+    try:
+        lines = unit_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        fail(f"cannot read board unit {unit_path}: {exc.strerror}")
+
+    # Last assignment wins, the way systemd reads it, so a value appended later
+    # in the unit is the one actually in force.
+    value = ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("Environment="):
+            continue
+        assignment = stripped[len("Environment=") :].strip().strip('"')
+        key, separator, candidate = assignment.partition("=")
+        if separator and key.strip() == COMMIT_CACHE_ENVIRONMENT_KEY:
+            value = candidate.strip().strip('"')
+    if not value:
+        fail(
+            f"board unit {unit_path} names no {COMMIT_CACHE_ENVIRONMENT_KEY}; "
+            "the trusted commit cache is not configured for this tenant"
+        )
+    cache = Path(value)
+    if not cache.is_absolute():
+        fail(f"configured commit cache {value} is not an absolute path")
+    owner = _pwd.getpwuid(os.geteuid())
+    expected_owner_uid = owner.pw_uid if owner_uid is None else owner_uid
+    try:
+        cache_info = cache.lstat()
+    except OSError as exc:
+        fail(f"cannot inspect configured commit cache {cache}: {exc.strerror}")
+    if stat.S_ISLNK(cache_info.st_mode) or not stat.S_ISDIR(cache_info.st_mode):
+        fail(f"configured commit cache {cache} must be a real directory, not a link")
+    # Fetching into it is the least-privilege refresh precisely because the
+    # owner already owns it: no root, no helper, no second account.
+    if cache_info.st_uid != expected_owner_uid:
+        fail(f"configured commit cache {cache} is not owned by this project account")
+    if cache_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"configured commit cache {cache} is writable by an untrusted account")
+    return cache
+
+
+def remote_ref_commit(remote_url: str, ref: str) -> str | None:
+    """What the public remote says the ref is, or None when it cannot be read."""
+    listed = git(["ls-remote", remote_url, f"refs/heads/{ref}"])
+    if listed.returncode != 0:
+        return None
+    for line in listed.stdout.splitlines():
+        commit, _, name = line.partition("\t")
+        if name.strip() == f"refs/heads/{ref}":
+            return commit.strip()
+    return ""
+
+
+def refresh_commit_cache(
+    cache: Path,
+    remote_url: str,
+    ref: str,
+    expected_commit: str,
+    *,
+    sleep=time.sleep,
+) -> str | None:
+    """Fetch exactly this ref into the cache, or say why the work is not ready.
+
+    Only the published ref is fetched, into its own remote-tracking name, so two
+    roles publishing at once touch different refs and neither can move the
+    other's. Returns None on success and the reason on failure.
+    """
+    problem = "the cache was never fetched"
+    for attempt in range(CACHE_FETCH_ATTEMPTS):
+        if attempt:
+            sleep(RETRY_DELAY_SECONDS)
+        fetched = git(
+            [
+                "--git-dir",
+                str(cache),
+                "fetch",
+                remote_url,
+                f"+refs/heads/{ref}:refs/remotes/origin/{ref}",
+            ]
+        )
+        if fetched.returncode != 0:
+            problem = (fetched.stderr or fetched.stdout or "git fetch failed").strip()
+            continue
+        resolved = git(["--git-dir", str(cache), "rev-parse", f"refs/remotes/origin/{ref}^{{commit}}"])
+        if resolved.returncode != 0:
+            problem = (resolved.stderr or "cache does not resolve the fetched ref").strip()
+            continue
+        landed = resolved.stdout.strip()
+        if landed != expected_commit:
+            # The ref moved between the push and this fetch, so the cache holds
+            # a commit that is not the one being submitted. Refusing is the
+            # point: a submission against it would review somebody else's work.
+            return (
+                f"the trusted cache resolved {ref} to {landed}, not {expected_commit}; "
+                "the public ref changed after this publication"
+            )
+        return None
+    return f"could not refresh the trusted commit cache {cache}: {problem}"
+
+
 def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
     # System and global git configuration are ignored so the push cannot be
     # redirected by anything outside this program's control.
@@ -400,6 +557,14 @@ def main(argv: list[str]) -> int:
     if fetch.returncode != 0:
         sys.stderr.write(fetch.stderr)
         fail(f"bundle does not contain refs/heads/{ref}")
+    staged = git(["-C", str(staging), "rev-parse", f"refs/heads/{ref}^{{commit}}"])
+    if staged.returncode != 0 or not staged.stdout.strip():
+        fail(f"staging repository does not resolve refs/heads/{ref}")
+    published_commit = staged.stdout.strip()
+
+    # Resolved before the push, so a tenant whose cache is unconfigured or
+    # untrustworthy is refused while nothing has been published yet.
+    cache = configured_commit_cache(project)
 
     configure = git(["-C", str(staging), "remote", "set-url", "publish", remote_url])
     if configure.returncode != 0:
@@ -415,8 +580,50 @@ def main(argv: list[str]) -> int:
     sys.stderr.write(push.stderr)
     if push.returncode != 0:
         return push.returncode
-    print(f"switchyard-publish-ref: published {ref} for {role_name}")
+
+    # Everything from here is what makes the publication usable. The push
+    # landing is not the same as the work being submittable: the board verifies
+    # a commit_hash against its own cache, and a push that never reached that
+    # cache produced `unknown commit_hash` on the role's very next action
+    # (SYRD-75). So the ref is confirmed on the public remote and the cache is
+    # refreshed before this reports success -- and when either fails, it says
+    # the push landed and the work is not ready, rather than printing
+    # "published" and leaving the role to discover it.
+    public_commit = None
+    for attempt in range(PUBLIC_REF_ATTEMPTS):
+        if attempt:
+            time.sleep(RETRY_DELAY_SECONDS)
+        public_commit = remote_ref_commit(remote_url, ref)
+        if public_commit == published_commit:
+            break
+    if public_commit != published_commit:
+        return not_workflow_ready(
+            ref,
+            published_commit,
+            f"the public ref reads {public_commit or 'nothing'} rather than {published_commit}",
+        )
+
+    problem = refresh_commit_cache(cache, remote_url, ref, published_commit)
+    if problem is not None:
+        return not_workflow_ready(ref, published_commit, problem)
+
+    print(
+        f"switchyard-publish-ref: published {ref} for {role_name} at {published_commit}; "
+        f"trusted commit cache {cache} refreshed"
+    )
     return 0
+
+
+def not_workflow_ready(ref: str, commit: str, problem: str) -> int:
+    """Publication landed; the work is not submittable. Say both, and fail."""
+    sys.stderr.write(
+        f"switchyard-publish-ref: {ref} was pushed at {commit}, but {problem}.\n"
+        "switchyard-publish-ref: the commit is NOT ready to submit -- the board "
+        "verifies commit_hash against its trusted cache and would refuse it. "
+        "Re-run this command once the cause is resolved; publishing the same ref "
+        "again is safe.\n"
+    )
+    return 1
 
 
 if __name__ == "__main__":

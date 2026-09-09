@@ -540,6 +540,13 @@ so an interrupted or uncertain migration remains recoverable.
 The sections below describe the superseded dedicated-account rollout and are
 retained only as historical operator context.
 
+While a tenant remains on that compatibility topology, the root-installed
+`TICKET_BOARD_ROLE_ACCOUNTS` map is also the routing source for notification
+activity probes and `directorctl` capture/send. Unknown roles, malformed maps
+and foreign-project targets fail closed; the absence of the map preserves the
+shared-account PGU path, and `TICKET_BOARD_PROCESS_AUTHORITY=1` atomically
+selects the current PostgreSQL assignment path even if a stale map remains.
+
 ### Why the uid, and nothing else
 
 `SO_PEERCRED` reports the connecting process's uid. The kernel sets it and an

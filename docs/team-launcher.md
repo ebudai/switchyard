@@ -1046,6 +1046,14 @@ Each role entry contains:
 - `effort`: optional effort selector. Claude receives it as `--effort <value>`;
   Codex receives it as `-c reasoning_effort=<value>`; Agy omits a separate
   effort flag.
+- Codex panes additionally receive `-c tui.raw_output_mode=true`, which draws the
+  transcript as ordinary terminal output so the pane's own scrollback holds prior
+  responses and the wheel scrolls them instead of cycling the input history.
+  It is a launch-time override, not a write to the owner's `~/.codex/config.toml`,
+  so it applies to Switchyard-managed Codex panes only and leaves a human's own
+  `codex` alone. A role that states the setting in its own `extra_args` decides
+  it, because those are appended afterwards and Codex resolves repeated `-c`
+  last-wins. Claude, Agy and Hermes panes do not receive it.
 - `yolo`: optional boolean. When true, the launcher appends the appropriate
   bypass-permissions flag for the configured CLI: Agy and Claude use
   `--dangerously-skip-permissions`; Codex uses

@@ -221,6 +221,18 @@ YOLO_ARGS_BY_CLI = {
 STARTUP_ARGS_BY_CLI = {
     "hermes": ["--accept-hooks", "--pass-session-id"],
 }
+# Codex draws its transcript through the TUI's own renderer by default, and what
+# it redraws never reaches the terminal's scrollback: measured on codex-cli
+# 0.153.4 by asking two real panes for sixty numbered lines and reading
+# `tmux capture-pane -S -200` back -- without this setting the scrollback held
+# none of them, with it, all sixty. That is why the wheel in a Codex pane cycles
+# input history while earlier responses stay unreachable. Sent as a launch-time
+# override rather than written into `~/.codex/config.toml`, because that file is
+# also read by every codex the human starts for themselves and this is meant to
+# scope to the Switchyard-managed panes (SYRD-91).
+RAW_OUTPUT_ARGS_BY_CLI = {
+    "codex": ["-c", "tui.raw_output_mode=true"],
+}
 EFFORT_STYLE_BY_CLI = {
     "agy": None,
     "claude": "flag",
@@ -2676,6 +2688,18 @@ def startup_args_for_role(role: RoleConfig) -> list[str]:
     return [flag for flag in flags if flag not in role.extra_args]
 
 
+def raw_output_args_for_role(role: RoleConfig) -> list[str]:
+    """Make this runtime's transcript readable through the pane's own scrollback.
+
+    A CLI with nothing to say here contributes nothing, so Claude and Gemini
+    roles are untouched. The role's own `extra_args` are appended after these by
+    `cli_command_for_role`, and codex resolves repeated `-c` last-wins, so an
+    operator who states the setting themselves still decides it (SYRD-91).
+    """
+    cli_name = _command_name(role.cli[0]) if role.cli else ""
+    return list(RAW_OUTPUT_ARGS_BY_CLI.get(cli_name, []))
+
+
 def effort_args_for_role(role: RoleConfig) -> list[str]:
     if not role.effort:
         return []
@@ -2909,6 +2933,7 @@ def cli_command_for_role(
     if role.model:
         command.extend([role.model_arg, role.model])
     command.extend(effort_args_for_role(role))
+    command.extend(raw_output_args_for_role(role))
     command.extend(yolo_args_for_role(role))
     command.extend(startup_args_for_role(role))
     command.extend(role.extra_args)

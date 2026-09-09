@@ -395,6 +395,41 @@ a role's session loses that role's work, which is worse than the window -- and i
 lists what was running before and after so that is checkable rather than
 promised.
 
+## Attaching to a role
+
+`switchyard attach <project> <role>` puts this terminal on a role's live worker.
+`switchyard attach <project>` lists the project's roles and which of them there
+is anything to attach to.
+
+The name is the whole interface. Nothing about a slot number, a Unix account, or
+an internal tmux session name is asked for or printed, because none of them is
+stable enough to memorise: during the partial per-role-account migration `tmux
+ls` under the project owner showed only `<project>-display-N` proxy sessions
+while the worker was on another user's server entirely. The session is resolved
+from the same registered assignment that notifications, presentation and write
+authority resolve from, so a replacement worker on a recovery target is reached
+by the role's own name.
+
+It never escalates, and that is the point rather than a detail. A wrapper that
+ran it through `sudo` would leave a privileged shell as the parent of the tmux
+client, which is the hazard the presentation window section above describes at
+length; `attach` is classified unprivileged so no such parent can exist.
+
+Reaching a worker that runs as a different Unix account -- historical migrated
+tenants, which keep one tmux server per role -- goes through the same
+preinstalled role-control grant a display slot uses: `sudo -n -u <role account>
+/usr/bin/tmux`, which permits tmux as that account and no other program. The
+worker's session prefix and key table are taken away first, exactly as a display
+slot takes them, so the attached client cannot press prefix-c for a shell in that
+account. A role that runs under the project account is reached directly and
+nothing is taken away from it.
+
+The client sizes the worker when it is the only one watching, and does not when
+a display slot is already showing it, so attaching never resizes what somebody
+else can see. Detaching (`Ctrl-b d`) returns the command normally and leaves the
+worker running; a role that is not running is reported by name, with
+`switchyard present <project> recover <role>` as the way to start it.
+
 ## Upgrading a tenant
 
 `switchyard upgrade` is ordered, journaled, and stops at the phases root does

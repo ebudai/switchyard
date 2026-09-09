@@ -714,6 +714,44 @@ def _proxy_client_flags(observer: bool) -> str:
     return ",".join(flags)
 
 
+def worker_attach_argv(
+    config: team_launcher.ProjectConfig,
+    role: team_launcher.RoleConfig,
+    *,
+    observer: bool,
+) -> list[str]:
+    """The one argv that attaches a terminal to a role's live worker session.
+
+    Display slots and `switchyard attach` share it deliberately. It is the only
+    place that decides whether reaching a worker crosses a Unix account, and a
+    second copy of that decision is a second thing to get wrong.
+
+    `TMUX=` is cleared because the caller may itself be inside tmux, and tmux
+    refuses to nest without it.
+    """
+    argv = ["env", "TMUX="]
+    if _proxy_crosses_account(config, role):
+        # Historical migrated tenants keep one tmux server per role.  The
+        # project owner crosses that boundary through the preinstalled
+        # role-control grant, which permits only tmux as the configured role
+        # account: no root shell and no arbitrary program.
+        argv.extend(
+            [
+                "/usr/bin/sudo", "-n", "-u",
+                team_launcher.role_run_as_user(config, role),
+                "/usr/bin/tmux",
+            ]
+        )
+    else:
+        # Shared-account tenants (including legacy PGU and SYRD-69 process
+        # authority projects) keep the zero-artifact direct path.
+        argv.append("tmux")
+    argv.extend(
+        ["attach", "-f", _proxy_client_flags(observer), "-t", _exact_tmux_target(role.tmux_session)]
+    )
+    return argv
+
+
 def _proxy_crosses_account(
     config: team_launcher.ProjectConfig, role: team_launcher.RoleConfig
 ) -> bool:
@@ -736,25 +774,7 @@ def _proxy_command(
     if role is not None and role_status.get("live"):
         recovery = f"switchyard present {config.project} recover {role_name}"
         message = f"{config.project}: {role_name} disconnected; use `{recovery}`"
-        attach_args = ["env", "TMUX="]
-        worker_account = team_launcher.role_run_as_user(config, role)
-        if _proxy_crosses_account(config, role):
-            # Historical migrated tenants keep one tmux server per role.  The
-            # project owner's display slot crosses that boundary through the
-            # preinstalled role-control grant, which permits only tmux as the
-            # configured role account: no root shell and no arbitrary program.
-            attach_args.extend(["/usr/bin/sudo", "-n", "-u", worker_account, "/usr/bin/tmux"])
-        else:
-            # Shared-account tenants (including legacy PGU and SYRD-69 process
-            # authority projects) keep the zero-artifact direct path.
-            attach_args.append("tmux")
-        attach_args.extend(
-            [
-                "attach", "-f", _proxy_client_flags(observer),
-                "-t", _exact_tmux_target(role.tmux_session),
-            ]
-        )
-        attach = shlex.join(attach_args)
+        attach = shlex.join(worker_attach_argv(config, role, observer=observer))
         script = f"{attach}; printf '%s\\n' {shlex.quote(message)}; exec sleep 2147483647"
         return role.workdir, shlex.join(["sh", "-lc", script])
     state = role_status.get("state", "unavailable")
@@ -1691,6 +1711,113 @@ def presentation_action(
             file_runner=runner,
         )
     raise SystemExit(f"switchyard: unknown presentation action {action!r}")
+
+
+def attachable_roles(
+    config: team_launcher.ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[dict[str, Any]]:
+    """Every configured role and whether a terminal could attach to it now.
+
+    Named by role, in configuration order. No slot number and no session name:
+    those are what an operator should not have to know (SYRD-76).
+    """
+    owner_runner = _tmux_runner(config, runner)
+    return [_role_status(config, role.role, runner=owner_runner) for role in config.roles]
+
+
+def print_attachable_roles(
+    report: Mapping[str, Any],
+    *,
+    json_output: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> None:
+    if json_output:
+        print_func(json.dumps(report, indent=2, sort_keys=True))
+        return
+    project = report["project"]
+    roles = report["roles"]
+    if not roles:
+        print_func(f"{project} has no configured roles")
+        return
+    print_func(f"{project} roles")
+    for worker in roles:
+        attachable = "attach" if worker["live"] else "-"
+        resumable = " resumable" if worker.get("resumable") else ""
+        print_func(f"  {worker['role']:<12} {worker['state']}{resumable} [{attachable}]")
+    print_func(f"Attach with `switchyard attach {project} <role>`.")
+
+
+def attach_role_command(
+    config: team_launcher.ProjectConfig,
+    *,
+    role_name: str | None,
+    json_output: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    attacher: Callable[[list[str]], int] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Attach this terminal to a role's live worker, by project and role name.
+
+    The registered assignment decides which session that is, so a replacement
+    worker on a recovery target is reached by the same name as the original,
+    and a slot number, Unix account or internal session name is never something
+    the operator has to supply or see (SYRD-76).
+    """
+    config = runtime_assignment_config(config)
+    _validate_role_namespace(config)
+    owner_runner = _tmux_runner(config, runner)
+    if not role_name:
+        print_attachable_roles(
+            {"project": config.project, "roles": attachable_roles(config, runner=runner)},
+            json_output=json_output,
+            print_func=print_func,
+        )
+        return 0
+    wanted = role_name.strip()
+    role = _role_by_name(config, wanted)
+    if role is None:
+        known = ", ".join(sorted(item.role for item in config.roles)) or "none"
+        raise SystemExit(
+            f"switchyard: {config.project} has no role {wanted!r}; configured roles: {known}"
+        )
+    status = _role_status(config, role.role, runner=owner_runner)
+    if not status["live"]:
+        resume = " Its session is resumable." if status["resumable"] else ""
+        raise SystemExit(
+            f"switchyard: {config.project} role {role.role} is {status['state']}, so there is "
+            f"nothing to attach to.{resume} Use "
+            f"`switchyard present {config.project} recover {role.role}` to start it."
+        )
+    if _proxy_crosses_account(config, role):
+        # This caller is not the account the worker runs as. Attaching hands
+        # them that session's key tables, so without this they could press
+        # prefix-c for a shell as the worker's account -- the privileged parent
+        # shell this command exists to avoid. Idempotent, and the same options
+        # a display slot already applies to the same session (SYRD-76).
+        for lock_args in display_lock_commands(role.tmux_session):
+            lock = owner_runner(lock_args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            if lock.returncode != 0:
+                detail = str(getattr(lock, "stderr", "") or "").strip()
+                raise SystemExit(
+                    f"switchyard: could not secure {config.project} role {role.role} before "
+                    f"attaching, so it was not attached{': ' + detail if detail else ''}"
+                )
+    # Sizing follows whoever else is watching: alone, this terminal sizes the
+    # worker so the pane fills it; alongside a display slot it must not resize
+    # what that slot shows (SYRD-27).
+    observer = _worker_has_independent_client(role, presentation_ttys=set(), runner=owner_runner)
+    argv = worker_attach_argv(config, role, observer=observer)
+    attach = attacher or (lambda command: subprocess.run(command).returncode)
+    print_func(f"switchyard: attaching to {config.project} role {role.role}; detach with Ctrl-b d")
+    status_code = attach(argv)
+    if status_code != 0:
+        raise SystemExit(
+            f"switchyard: attaching to {config.project} role {role.role} failed (exit {status_code})"
+        )
+    print_func(f"switchyard: detached from {config.project} role {role.role}")
+    return 0
 
 
 def print_presentation_report(report: Mapping[str, Any], *, json_output: bool, print_func: Callable[[str], None] = print) -> None:

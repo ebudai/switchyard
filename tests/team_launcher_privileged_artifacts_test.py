@@ -85,6 +85,16 @@ def privileged_refresh(owner: str) -> None:
         # Provisioning hands the project's .switchyard tree to the tenant with a
         # recursive chown. That is the shape refresh actually runs against.
         subprocess.run(["chown", "-R", f"{owner}:{owner}", str(provision)], check=True)
+        # A per-role tenant, said explicitly. This case is about the authority
+        # table root renders and sanitises, and a table only exists for a tenant
+        # that has not crossed to the one-project-account runtime -- a fresh
+        # project is already on it and carries no table at all. Saying so keeps
+        # the sanitisation below exercising the shape it was written for
+        # (SYRD-87 R6); the crossed shape is covered by
+        # syrd_87_process_authority_projection_test.
+        raw_config = json.loads(config_path.read_text())
+        raw_config["role_state_isolation"] = False
+        config_path.write_text(json.dumps(raw_config, indent=2, sort_keys=True) + "\n")
         config = launcher.load_project_config("porter", config_path)
         plan_path = provision / "plan.json"
         mirror = privileged_root / "porter"

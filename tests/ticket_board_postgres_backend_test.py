@@ -820,6 +820,100 @@ WHERE id='PGU-409';
         assert service_app.get_ticket("PGU-409")["active_work_highlight"] is False
         assert service_app.get_ticket("PGU-407")["active_work_highlight"] is True
 
+        # SYRD-72: delivery is evidence about a notification, never about
+        # whether there is work. A notification retried four times, one that
+        # was dead-lettered and will never be delivered at all, and one that
+        # really was sent, all leave the highlight exactly where workflow
+        # ownership puts it.
+        ops_before = [
+            ticket["id"]
+            for ticket in service_app.list_tickets()[0]
+            if ticket["active_work_highlight"] and ticket["active_work_owner_role"] == "ops"
+        ]
+        assert ops_before == ["PGU-412"], ops_before
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.ticket_notification_queue
+SET attempts = 4, claimed_at = clock_timestamp()
+WHERE ticket_id = 'PGU-412';
+
+-- A send that really did happen, on a ticket a blocker makes non-actionable.
+INSERT INTO ticket_board.ticket_blockers (ticket_id, blocker_ticket_id, position)
+VALUES ('PGU-404', 'PGU-411', 0);
+""",
+        )
+        retried_signature = service_app.store_signature()
+        assert retried_signature != reassigned_signature
+        # Retried and still undelivered: ops keeps its highlight, and no send
+        # is claimed for it.
+        ops_retried = [
+            ticket["id"]
+            for ticket in service_app.list_tickets()[0]
+            if ticket["active_work_highlight"] and ticket["active_work_owner_role"] == "ops"
+        ]
+        assert ops_retried == ops_before, ops_retried
+        assert service_app.get_ticket("PGU-412")["active_work_notified_at"] == ""
+        # Delivery cannot confer one either: PGU-404 was sent and is blocked.
+        blocked_sent = service_app.get_ticket("PGU-404")
+        assert blocked_sent["active_work_highlight"] is False, blocked_sent
+        assert blocked_sent["active_work_notified_at"], blocked_sent
+
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.ticket_notification_queue
+SET claimed_at = NULL,
+    dead_lettered_at = clock_timestamp(),
+    terminal_reason = 'no pane target'
+WHERE ticket_id = 'PGU-412';
+""",
+        )
+        # Dead-lettered: nothing will ever be delivered for it, and ops is
+        # still working. The highlight is unmoved.
+        ops_dead_lettered = [
+            ticket["id"]
+            for ticket in service_app.list_tickets()[0]
+            if ticket["active_work_highlight"] and ticket["active_work_owner_role"] == "ops"
+        ]
+        assert ops_dead_lettered == ops_before, ops_dead_lettered
+        assert service_app.get_ticket("PGU-412")["active_work_notified_at"] == ""
+
+        # A review stage is not serially reserved, so audit really does own two
+        # tickets at once. Resolving what made one non-actionable and holding
+        # the other hands audit's single highlight over -- decided entirely by
+        # ownership, blockers and holds, with no notification involved at any
+        # point in it.
+        audit_before = [
+            ticket["id"]
+            for ticket in service_app.list_tickets()[0]
+            if ticket["active_work_highlight"] and ticket["active_work_owner_role"] == "audit"
+        ]
+        assert audit_before == ["PGU-403"], audit_before
+        psql(
+            admin_conn,
+            """
+UPDATE ticket_board.ticket_blockers SET resolved = true WHERE ticket_id = 'PGU-404';
+UPDATE ticket_board.tickets SET manually_controlled = true WHERE id = 'PGU-403';
+""",
+        )
+        handed_over = [
+            ticket["id"]
+            for ticket in service_app.list_tickets()[0]
+            if ticket["active_work_highlight"] and ticket["active_work_owner_role"] == "audit"
+        ]
+        assert handed_over == ["PGU-404"], handed_over
+        assert service_app.store_signature() != retried_signature
+
+        # One highlight per role still holds across every stage, and every
+        # highlighted row names a role rather than an empty owner.
+        every = [
+            ticket for ticket in service_app.list_tickets()[0] if ticket["active_work_highlight"]
+        ]
+        roles = [ticket["active_work_owner_role"] for ticket in every]
+        assert len(roles) == len(set(roles)), every
+        assert all(role for role in roles), every
+
         old_prefix = os.environ.get("TICKET_BOARD_TICKET_PREFIX")
         try:
             os.environ["TICKET_BOARD_TICKET_PREFIX"] = "OTTO"

@@ -929,7 +929,12 @@ notification_candidates AS (
         -- Delivery can legitimately be deferred while the assigned pane is
         -- busy. Current-work visibility therefore comes from durable workflow
         -- ownership and serial-focus state, never from a successful send.
-        notification_scope.owner_role IS NOT NULL
+        -- A logical role, not merely a non-NULL value. An ownerless stage
+        -- resolves to NULL, but a stage that names an owner as the empty
+        -- string would partition every such ticket together and highlight one
+        -- of them for a role nobody is: the invariant is one ticket per role,
+        -- so the row has to name a role (SYRD-72).
+        NULLIF(notification_scope.owner_role, '') IS NOT NULL
             AND NOT notification_scope.manually_controlled
             AND notification_scope.awaiting_role = ''
             AND notification_scope.queued_for_assignee = ''

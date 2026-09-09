@@ -186,6 +186,7 @@ SWITCHYARD_COMMANDS = (
     "cutover-roles",
     "add-role",
     "present",
+    "attach",
     "replace-window",
     "set-vcs-close-role",
     "set-role-runtime",
@@ -207,7 +208,13 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # `finish-upgrade` is the director's own phase and refuses to run as root by
     # design; classifying it privileged made the wrapper escalate it into the
     # refusal, leaving the director no way to run it at all (SYRD-49).
-    {"present", "board-skill", "role-prompt", "set-role-runtime", "finish-upgrade"}
+    #
+    # `attach` must never escalate either, and for a sharper reason: the whole
+    # point of it is to hand an operator a terminal on a worker without a
+    # privileged parent shell behind it. A wrapper that ran it through sudo
+    # would put exactly that shell there, and every key the operator pressed
+    # would have it as an ancestor (SYRD-76).
+    {"present", "attach", "board-skill", "role-prompt", "set-role-runtime", "finish-upgrade"}
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
     command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
@@ -17888,6 +17895,39 @@ def _build_switchyard_present_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_attach_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard attach",
+        description="Attach this terminal to a project role's live worker, by role name.",
+    )
+    parser.add_argument("project", help="registered project name or slug")
+    parser.add_argument(
+        "role",
+        nargs="?",
+        help="role to attach to; omit to list the project's roles and which are attachable",
+    )
+    parser.add_argument("--json", action="store_true", help="emit the role listing as JSON")
+    return parser
+
+
+def switchyard_attach_command(
+    config: ProjectConfig,
+    *,
+    args: argparse.Namespace,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    from scripts import presentation_controller
+
+    return presentation_controller.attach_role_command(
+        config,
+        role_name=args.role,
+        json_output=args.json,
+        runner=runner,
+        print_func=print_func,
+    )
+
+
 def switchyard_present_command(
     config: ProjectConfig,
     *,
@@ -18042,6 +18082,7 @@ Commands:
   cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
   present          map persistent role sessions into stable display slots at runtime
+  attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker
   set-vcs-close-role
                    set which existing project role can mark tickets done
@@ -18552,6 +18593,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         entry = _resolve_switchyard_project(args.project)
         config = _load_switchyard_project_config_for_command(entry, argv)
         return switchyard_present_command(config, config_path=entry.config_path, args=args)
+    if argv[0].casefold() == "attach":
+        args = _build_switchyard_attach_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return switchyard_attach_command(config, args=args)
     if argv[0].casefold() == "replace-window":
         args = _build_switchyard_replace_window_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(" ".join(args.project))

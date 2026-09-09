@@ -792,16 +792,9 @@ grep -q '"director": "pending"' <<<"$journal_body" || \
 
 # --- SYRD-89: the partial state this artifact resumes from -------------------
 
-partial_body="$(code_of verify_partial_state)"
-grep -qw 'upgrade_journal_state' <<<"$partial_body" || \
-    fail "verify_partial_state must classify the journal rather than assume a state"
-# The marker is checked against the state, not accepted either way: absent in the
-# entry state means something else stripped it, and present in the resumed state
-# means the staging contract did not do what it says.
-grep -q 'state" == "entry"' <<<"$partial_body" || \
-    fail "the marker expectation must follow from which state was found"
-grep -q 'TENANT_RELEASE_MARKER' <<<"$partial_body" || \
-    fail "verify_partial_state must still say something about the staged marker"
+# Superseded by the three-state contract below: the journal and the staged
+# marker are classified together now, because which marker is present is part of
+# what distinguishes the two resumed states (SYRD-89 R5).
 
 # --- the classifier itself, run against fixtures -----------------------------
 #
@@ -820,34 +813,230 @@ json.dump({"phases": {k: {"state": v} for k, v in phases.items()}}, open(sys.arg
 PYJ
 }
 
-classify() {
-    upgrade_journal_state "$1" 2>/dev/null || echo refused
+write_marker() {
+    # $1 destination, $2 commit (or "" to write a marker with no commit)
+    python3 - "$1" "${2:-}" <<'PYJ'
+import json
+import sys
+
+path, commit = sys.argv[1], sys.argv[2]
+payload = {"source_repo": "/tmp/gone-with-the-run"}
+if commit:
+    payload["commit"] = commit
+    payload["source_ref"] = commit
+json.dump(payload, open(path, "w"))
+PYJ
 }
 
-# The exact state the first operator run left, which is the one that matters.
-write_journal "$test_root/resumed.json" \
-    '{"artifacts":"done","accounts":"done","identities":"done","release":"ready","director":"pending"}'
-[[ "$(classify "$test_root/resumed.json")" == "resumed" ]] || \
-    fail "the state the interrupted run left must classify as resumed"
+ENTRY_PHASES='{"artifacts":"done","accounts":"done","identities":"rolled back","director":"pending"}'
+RESUMED_PHASES='{"artifacts":"done","accounts":"done","identities":"done","release":"ready","director":"pending"}'
+PREVIOUS_SHA="$EXPECTED_SHARED_PREVIOUS"
+TARGET_SHA="$EXPECTED_TARGET"
 
-write_journal "$test_root/entry.json" \
-    '{"artifacts":"done","accounts":"done","identities":"rolled back","director":"pending"}'
-[[ "$(classify "$test_root/entry.json")" == "entry" ]] || \
+classify() {
+    # $1 phases json, $2 marker commit or "-" for absent, $3 optional raw marker
+    local jf="$test_root/j.json" mf="$test_root/m.json"
+    write_journal "$jf" "$1"
+    rm -f "$mf"
+    if [[ "${3:-}" == "raw" ]]; then
+        printf '%s' "$2" >"$mf"
+    elif [[ "$2" != "-" ]]; then
+        write_marker "$mf" "$2"
+    fi
+    ( recovery_entry_state "$jf" "$mf" ) 2>/dev/null || echo refused
+}
+
+# --- the three states this artifact is reviewed against ----------------------
+[[ "$(classify "$ENTRY_PHASES" "$PREVIOUS_SHA")" == "entry" ]] || \
     fail "the reviewed baseline must classify as entry"
+[[ "$(classify "$RESUMED_PHASES" "-")" == "resumed-markerless" ]] || \
+    fail "the state the first failed wrapper left must classify as resumed-markerless"
+# Today's exact pair: the R2 run sourced from the marker-bearing installed
+# release, so the staged tooling is correctly provenanced at the target. Its
+# recovery restored the pointers and did not erase that, which is right.
+[[ "$(classify "$RESUMED_PHASES" "$TARGET_SHA")" == "resumed-provenanced" ]] || \
+    fail "a resumed journal with the target marker must classify as resumed-provenanced"
 
-# Anything else is a host nobody reviewed. A journal claiming the release phase
-# is already done is the dangerous one: it would let this artifact skip straight
-# to verifying a deploy that never happened.
-write_journal "$test_root/mid.json" \
-    '{"artifacts":"done","accounts":"done","identities":"done","release":"done","director":"pending"}'
-[[ "$(classify "$test_root/mid.json")" == "refused" ]] || \
+# --- and everything that is not one of them ----------------------------------
+[[ "$(classify "$RESUMED_PHASES" "$PREVIOUS_SHA")" == "refused" ]] || \
+    fail "the previous release's marker under a resumed journal must be refused"
+[[ "$(classify "$ENTRY_PHASES" "$TARGET_SHA")" == "refused" ]] || \
+    fail "the target marker under an entry journal must be refused"
+[[ "$(classify "$ENTRY_PHASES" "-")" == "refused" ]] || \
+    fail "an entry journal with no marker at all must be refused"
+[[ "$(classify "$RESUMED_PHASES" "0000000000000000000000000000000000000000")" == "refused" ]] || \
+    fail "a marker naming some other commit must be refused"
+[[ "$(classify "$RESUMED_PHASES" "")" == "refused" ]] || \
+    fail "a marker with no commit field must be refused"
+[[ "$(classify "$RESUMED_PHASES" "not json at all" raw)" == "refused" ]] || \
+    fail "a malformed marker must be refused, not treated as absent"
+[[ "$(classify '{"artifacts":"done","accounts":"done","identities":"done","release":"done","director":"pending"}' "$TARGET_SHA")" == "refused" ]] || \
     fail "a journal claiming the release phase is done must be refused"
-write_journal "$test_root/rolled.json" \
-    '{"artifacts":"done","accounts":"done","identities":"done","release":"ready","director":"done"}'
-[[ "$(classify "$test_root/rolled.json")" == "refused" ]] || \
-    fail "a journal claiming the director phase is done must be refused"
-write_journal "$test_root/partial.json" '{"artifacts":"done"}'
-[[ "$(classify "$test_root/partial.json")" == "refused" ]] || \
+[[ "$(classify '{"artifacts":"done"}' "-")" == "refused" ]] || \
     fail "an incomplete journal must be refused"
+
+# A marker whose two fields disagree is evidence of nothing.
+disagreeing="$test_root/disagree.json"
+python3 -c '
+import json, sys
+json.dump({"commit": sys.argv[2], "source_ref": sys.argv[3]}, open(sys.argv[1], "w"))
+' "$disagreeing" "$TARGET_SHA" "$PREVIOUS_SHA"
+write_journal "$test_root/j.json" "$RESUMED_PHASES"
+[[ "$( ( recovery_entry_state "$test_root/j.json" "$disagreeing" ) 2>/dev/null || echo refused)" == "refused" ]] || \
+    fail "a marker whose commit and source_ref disagree must be refused"
+
+# --- the marker's stale source_repo is informational -------------------------
+#
+# It names the temporary checkout install-switchyard built from, which is gone.
+# Requiring it would make a correct marker unusable because it is old. The
+# commit is corroborated instead, from the installed release and the trusted
+# cache -- neither of which the tenant writes.
+gone="$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1])).get("source_repo", ""))
+' "$TENANT_RELEASE_MARKER" 2>/dev/null || true)"
+if [[ -n "$gone" ]]; then
+    [[ ! -e "$gone" ]] || \
+        fail "this fixture assumes the marker's source_repo is absent; it exists: $gone"
+fi
+# Driven, not read. The corroboration is what makes a marker naming the target
+# trustworthy, so it is exercised against fixtures rather than pattern-matched.
+corro="$test_root/corro"
+mkdir -p "$corro/release"
+write_marker "$corro/release/.switchyard-release.json" "$TARGET_SHA"
+# A real cache holding the target at its expected tree: the artifact's own.
+corroborates() { ( verify_target_marker_corroborated "$1" "$2" ) >/dev/null 2>&1; }
+
+corroborates "$corro/release" "$CACHE" || \
+    fail "the installed release plus the trusted cache must corroborate the target marker"
+
+# The stale source_repo must not be needed: it names a checkout that is gone.
+python3 -c '
+import json, sys
+json.dump({"commit": sys.argv[2], "source_ref": sys.argv[2],
+           "source_repo": "/tmp/definitely-not-here"}, open(sys.argv[1], "w"))
+' "$corro/release/.switchyard-release.json" "$TARGET_SHA"
+corroborates "$corro/release" "$CACHE" || \
+    fail "corroboration must not require the marker's source_repo to exist"
+
+# An installed release naming something else must not corroborate.
+write_marker "$corro/release/.switchyard-release.json" "0000000000000000000000000000000000000000"
+corroborates "$corro/release" "$CACHE" && \
+    fail "an installed release naming another commit must not corroborate the target"
+
+# No installed marker at all.
+rm -f "$corro/release/.switchyard-release.json"
+corroborates "$corro/release" "$CACHE" && \
+    fail "an installed release with no marker must not corroborate the target"
+
+# A cache that does not hold the target.
+write_marker "$corro/release/.switchyard-release.json" "$TARGET_SHA"
+git init -q --bare "$corro/empty.git" 2>/dev/null || true
+corroborates "$corro/release" "$corro/empty.git" && \
+    fail "a cache that does not contain the target must not corroborate it"
+
+partial_body="$(code_of verify_partial_state)"
+grep -qw 'recovery_entry_state' <<<"$partial_body" || \
+    fail "verify_partial_state must classify rather than assume a state"
+grep -qw 'verify_target_marker_corroborated' <<<"$partial_body" || \
+    fail "a marker naming the target must be corroborated before it is trusted"
+
+# --- SYRD-89 R3: the exported release the canary could not open --------------
+#
+# The R2 run exported and migrated 9a4d0a6, then its canary failed: python could
+# not open the release's own ticket-board.py, EACCES. The root was 0700 because
+# the export created it under the caller's umask, so the ACL mask was `---` and
+# the inherited `user:boardsvc:r-x` entry read `#effective:---`.
+
+repair_body="$(code_of repair_board_release_traversal)"
+[[ -n "$repair_body" ]] || fail "could not read repair_board_release_traversal()"
+
+# Provenance before permissions, and the exact checks the incident calls for.
+grep -q 'pgu-deploy-sha' <<<"$repair_body" || \
+    fail "the repair must verify the release's recorded sha before touching its mode"
+grep -q -- '-L "$root"' <<<"$repair_body" || \
+    fail "the repair must refuse a symlink standing in for a release directory"
+grep -q -- '-d "$root"' <<<"$repair_body" || \
+    fail "the repair must require a regular directory"
+grep -q 'PROJECT_OWNER' <<<"$repair_body" || \
+    fail "the repair must check the expected owner"
+sha_at="$(grep -n 'pgu-deploy-sha' <<<"$repair_body" | head -1 | cut -d: -f1)"
+chmod_at="$(grep -n 'chmod g+rx' <<<"$repair_body" | head -1 | cut -d: -f1)"
+[[ -n "$sha_at" && -n "$chmod_at" ]] || fail "could not order the repair's checks"
+(( sha_at < chmod_at )) || \
+    fail "the repair must verify provenance before it raises the mask"
+
+# The minimum, and only it. Raising the mask on the one release root, never the
+# owner's home and never another release.
+grep -q 'chmod g+rx' <<<"$repair_body" || \
+    fail "the repair must raise the mask rather than replace the mode"
+for forbidden in 'chmod -R' '0755' 'setfacl' '/home/switchyard-agent"' 'BOARD_ROOT/releases"'; do
+    if grep -qF "$forbidden" <<<"$repair_body"; then
+        fail "the repair must not reach beyond the one release root: found $forbidden"
+    fi
+done
+
+# And it proves the access rather than the mode: the kernel is asked, as the
+# account the canary runs as.
+grep -qw 'verify_board_release_readable' <<<"$repair_body" || \
+    fail "the repair must confirm the service account can actually read the entry point"
+readable_body="$(code_of verify_board_release_readable)"
+grep -q 'sudo -u "\$BOARD_SERVICE_USER" test -r' <<<"$readable_body" || \
+    fail "the readability check must read the entry point AS the service account, not as the owner"
+grep -q 'ticket-board.py' <<<"$readable_body" || \
+    fail "the readability check must open the entry point the canary opens"
+
+# It runs before the deploy, because the deploy ends in that canary.
+grep -qw 'repair_board_release_traversal' <<<"$run_release_body" || \
+    fail "the repair must run as part of the release phase"
+repair_at="$(grep -n 'repair_board_release_traversal' <<<"$run_release_body" | head -1 | cut -d: -f1)"
+render_at="$(grep -n 'render_release_phase_commands' <<<"$run_release_body" | head -1 | cut -d: -f1)"
+(( repair_at < render_at )) || \
+    fail "the repair must run before the deploy whose canary it exists to unblock"
+
+# The read check is unconditional. A 0750 root with no named entry for the
+# service account passes every mode test and fails the real read, so a repair
+# that returns early on a numeric verdict never asks the question that matters
+# (SYRD-89 R3 audit).
+# Structural, not textual: on every path that does not die, the last thing the
+# repair does is the real read. Any `return` before it is a path that skipped
+# the question, which is exactly the R2 shape this finding rejected.
+python3 -c '
+import sys
+
+body = sys.argv[1].splitlines()
+read_at = [i for i, l in enumerate(body) if "verify_board_release_readable" in l]
+if not read_at:
+    raise SystemExit("the repair never calls verify_board_release_readable")
+last_read = read_at[-1]
+early = [(i, l.strip()) for i, l in enumerate(body[:last_read]) if l.strip().split(" ")[0] == "return"]
+if early:
+    raise SystemExit("return before the read check at %s" % (early,))
+' "$repair_body" || fail "the repair can reach its end without the boardsvc read"
+
+# The predicate is a diagnostic and must still refuse a symlink before any mode
+# test: stat reports one as lrwxrwxrwx, whose other bits are r-x.
+serviceable_body="$(code_of release_root_serviceable)"
+grep -q -- '-L "$1"' <<<"$serviceable_body" \
+    || fail "the serviceability predicate must reject a symlink before reading its mode"
+grep -q -- '-d "$1"' <<<"$serviceable_body" \
+    || fail "the serviceability predicate must require a directory"
+
+# The serviceability predicate, driven rather than read.
+probe_root="$test_root/serviceable"
+mkdir -p "$probe_root"
+chmod 0700 "$probe_root"
+release_root_serviceable "$probe_root" && fail "0700 must not be called serviceable"
+chmod 0750 "$probe_root"
+release_root_serviceable "$probe_root" || fail "0750 must be serviceable: the mask carries the named entry"
+chmod 0755 "$probe_root"
+release_root_serviceable "$probe_root" || fail "0755 must be serviceable"
+chmod 0710 "$probe_root"
+release_root_serviceable "$probe_root" && fail "0710 grants traversal without read and must not be called serviceable"
+chmod 0755 "$probe_root"
+# A symlink to a perfectly good directory is still not a release root.
+ln -sfn "$probe_root" "$test_root/serviceable-link"
+release_root_serviceable "$test_root/serviceable-link" \
+    && fail "a symlink must not be called a serviceable release root"
 
 echo "SYRD-87 recovery artifact contract regression passed"

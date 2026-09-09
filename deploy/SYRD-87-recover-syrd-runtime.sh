@@ -195,66 +195,155 @@ verify_tenant_ownership() {
 # Both are safe to run from, and they are told apart rather than merged: a state
 # that is neither is a host nobody reviewed, and the point of this check is to
 # refuse it.
-# Which reviewed state this host's journal is in, or a refusal. Separated from
-# the checks around it so the contract regression can drive it over fixtures
-# rather than re-implement it: a test that keeps its own copy of a classifier
-# proves only that the copy agrees with itself (SYRD-89).
-upgrade_journal_state() {
-    python3 - "$1" <<'PY'
+# Which reviewed state this host is in, decided from the journal and the staged
+# provenance marker together. Prints the state name, or refuses.
+#
+# There are three, because there were three runs. The marker is not an optional
+# extra on top of a journal state: which marker is present is part of what
+# distinguishes them, so it is classified here rather than checked separately
+# and loosely afterwards.
+#
+#   entry                 the reviewed baseline. The identities transaction had
+#                         rolled back, no release phase was recorded, and the
+#                         staged tooling still named the previous release.
+#
+#   resumed-markerless    what the first failed wrapper left. The upgrade
+#                         reached identities and recorded release=ready, and the
+#                         staged marker is gone because that run sourced the
+#                         upgrade from a markerless checkout and the staging
+#                         contract removes a marker its source cannot vouch for.
+#
+#   resumed-provenanced   what the R2 run left. Same journal, but that run
+#                         sourced the upgrade from the marker-bearing installed
+#                         release, so the staged tooling is correctly
+#                         provenanced at the target. It then failed at the board
+#                         canary, and its recovery restored the shared and board
+#                         pointers -- which is right, and does not and must not
+#                         erase valid staged provenance. Refusing this state
+#                         rejected a legitimate recovery (SYRD-89 R5).
+#
+# Anything else is a host nobody reviewed. In particular a marker naming some
+# other commit, or one that cannot be read, is a refusal in every state: an
+# unrecognised marker is not an optional extra to be waved through.
+recovery_entry_state() {
+    local journal="${1:-$UPGRADE_JOURNAL}" marker="${2:-$TENANT_RELEASE_MARKER}"
+    python3 - "$journal" "$marker" "$EXPECTED_SHARED_PREVIOUS" "$EXPECTED_TARGET" <<'@M@'
 import json
+import os
 import sys
 
-journal = json.load(open(sys.argv[1]))
+journal_path, marker_path, previous, target = sys.argv[1:5]
+
+try:
+    journal = json.load(open(journal_path))
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"the upgrade journal is unreadable: {exc}")
 phases = {name: entry.get("state") for name, entry in journal.get("phases", {}).items()}
-entry = {
+
+ENTRY = {
     "artifacts": "done",
     "accounts": "done",
     "identities": "rolled back",
     "director": "pending",
 }
-resumed = {
+RESUMED = {
     "artifacts": "done",
     "accounts": "done",
     "identities": "done",
     "release": "ready",
     "director": "pending",
 }
-if phases == entry:
+
+if os.path.lexists(marker_path):
+    try:
+        payload = json.load(open(marker_path))
+        commit = str(payload.get("commit") or "").strip()
+        source_ref = str(payload.get("source_ref") or "").strip()
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"the staged release marker {marker_path} is unreadable: {exc}")
+    if not commit:
+        raise SystemExit(f"the staged release marker {marker_path} names no commit")
+    # source_ref, when present, must agree. A marker whose two fields disagree
+    # is not evidence of anything.
+    if source_ref and source_ref != commit:
+        raise SystemExit(
+            f"the staged release marker names commit {commit} and source_ref {source_ref}"
+        )
+else:
+    commit = None
+
+if phases == ENTRY:
+    if commit is None:
+        raise SystemExit("the journal says nothing has run, but the staged release marker is gone")
+    if commit != previous:
+        raise SystemExit(
+            f"the journal says nothing has run, but the staged tooling names {commit}, not {previous}"
+        )
     print("entry")
-elif phases == resumed:
-    print("resumed")
+elif phases == RESUMED:
+    if commit is None:
+        print("resumed-markerless")
+    elif commit == target:
+        print("resumed-provenanced")
+    else:
+        raise SystemExit(
+            f"the upgrade reached identities, but the staged tooling names {commit}, "
+            f"not {target}; this artifact is reviewed against a marker that is absent "
+            f"or exactly the target"
+        )
 else:
     raise SystemExit(
         f"upgrade journal phases are {phases}; this artifact is reviewed against "
-        f"{entry} (entry) and {resumed} (resumed after an interrupted run) only"
+        f"{ENTRY} (entry) and {RESUMED} (resumed) only"
     )
-PY
+@M@
+}
+
+# The staged marker's `source_repo` is install metadata, not evidence.
+#
+# It records the directory install-switchyard happened to build from, which for
+# the R2 run was a temporary checkout that has since been removed. Requiring it
+# to exist would make a correct marker unusable for the reason that it is old,
+# and would make recovery depend on a directory nobody promised to keep. What is
+# authoritative is the commit, and it is corroborated here from two things this
+# host still has: the installed release directory at that commit carrying its
+# own marker for the same commit, and the trusted cache containing that commit
+# at the expected tree. Neither is the tenant's to write (SYRD-89 R5).
+# The release root and cache are parameters for the same reason the config path
+# is elsewhere: the contract regression has to drive this against fixtures, and
+# it cannot do that against readonly paths pinned to this host.
+verify_target_marker_corroborated() {
+    local release_root="${1:-$TARGET_RELEASE_ROOT}" cache="${2:-$CACHE}"
+    local installed="$release_root/.switchyard-release.json" installed_commit
+    [[ -f "$installed" ]] || \
+        die "the installed release $release_root carries no marker to corroborate the staged one"
+    installed_commit="$(python3 -c '
+import json, sys
+print(str(json.load(open(sys.argv[1])).get("commit") or "").strip())
+' "$installed")" || die "the installed release marker is unreadable: $installed"
+    [[ "$installed_commit" == "$EXPECTED_TARGET" ]] || \
+        die "the installed release names $installed_commit, expected $EXPECTED_TARGET"
+    git -c "safe.directory=$cache" --git-dir="$cache" cat-file -e "$EXPECTED_TARGET^{commit}" 2>/dev/null || \
+        die "the trusted cache does not contain $EXPECTED_TARGET"
+    [[ "$(git -c "safe.directory=$cache" --git-dir="$cache" rev-parse "$EXPECTED_TARGET^{tree}" 2>/dev/null)" == "$EXPECTED_TREE" ]] || \
+        die "the trusted cache resolves $EXPECTED_TARGET to a different tree than $EXPECTED_TREE"
 }
 
 verify_partial_state() {
-    local state marker_commit
+    local state
     [[ "$(shared_release)" == "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" ]] || \
         die "shared release is $(shared_release), expected $EXPECTED_SHARED_PREVIOUS"
 
-    state="$(upgrade_journal_state "$UPGRADE_JOURNAL")" || \
-        die "cannot classify the upgrade journal state"
+    # The journal and the staged marker decide this together; neither alone
+    # distinguishes the two resumed states.
+    state="$(recovery_entry_state)" || die "this host is not in a state this artifact is reviewed against"
 
-    # The marker follows from the state, and is checked against it rather than
-    # accepted either way: an absent marker in the entry state would mean
-    # something else stripped it, and a present one in the resumed state would
-    # mean the staging contract did not do what it says.
-    if [[ "$state" == "entry" ]]; then
-        [[ -f "$TENANT_RELEASE_MARKER" ]] || \
-            die "tenant tooling marker $TENANT_RELEASE_MARKER is absent, but the journal says nothing has run"
-        marker_commit="$(python3 -c '
-import json, sys
-print(json.load(open(sys.argv[1]))["commit"])
-' "$TENANT_RELEASE_MARKER")"
-        [[ "$marker_commit" == "$EXPECTED_SHARED_PREVIOUS" ]] || \
-            die "tenant tooling marker is $marker_commit, expected $EXPECTED_SHARED_PREVIOUS"
-    else
-        [[ ! -e "$TENANT_RELEASE_MARKER" ]] || \
-            die "tenant tooling marker $TENANT_RELEASE_MARKER exists, but the interrupted run should have left none"
+    # A marker naming the target is only worth what corroborates it. Its
+    # source_repo names a temporary checkout that is gone, and that is fine --
+    # the commit is confirmed against the installed release and the trusted
+    # cache instead.
+    if [[ "$state" == "resumed-provenanced" ]]; then
+        verify_target_marker_corroborated
     fi
     note "resuming from the $state state"
 
@@ -607,11 +696,101 @@ if not deployed:
 PY
 }
 
+#: The board release the R2 run already exported, and the account the board
+#: service runs as. Both pinned: this repairs one named tree for one named
+#: service and nothing else.
+readonly BOARD_RELEASE_DIR="$BOARD_ROOT/releases/$EXPECTED_TARGET"
+readonly BOARD_SERVICE_USER="boardsvc"
+
+# Make the already-exported target release traversable by the board service,
+# after proving it is the release it claims to be.
+#
+# The R2 operator run exported and migrated 9a4d0a6 successfully and then failed
+# its canary: python could not open the release's own ticket-board.py with
+# EACCES. The export had created the release root under the caller's umask and
+# `mv` kept that mode, so the root is 0700. Its inherited ACL already names the
+# service account `user:boardsvc:r-x`, but a named entry is capped by the access
+# mask and POSIX derives that mask from the group bits -- at 0700 the mask is
+# `---` and the entry reads `#effective:---`. The entry is there and worth
+# nothing (SYRD-89 R3).
+#
+# So this raises the mask and nothing else. `chmod g+rx` takes the root to 0750,
+# which sets the mask to r-x and makes the entry that already exists effective.
+# It does not touch the owner's home, any other release, or anything inside this
+# one: the files were extracted from the archive at their own modes and are
+# already 0755.
+#
+# It runs before the deploy so that today's exact exported tree is usable
+# without re-running the export that produced it -- the export is fixed in the
+# release, but this artifact must not depend on that fix having been deployed to
+# repair the tree it is about to point the service at.
+repair_board_release_traversal() {
+    local root="$BOARD_RELEASE_DIR" recorded
+
+    [[ -e "$root" ]] || die "the exported board release is missing: $root"
+    [[ ! -L "$root" ]] || die "the board release path is a symlink, not a release directory: $root"
+    [[ -d "$root" ]] || die "the board release path is not a directory: $root"
+    [[ "$(stat -c '%U' "$root")" == "$PROJECT_OWNER" ]] || \
+        die "the board release $root is owned by $(stat -c '%U' "$root"), expected $PROJECT_OWNER"
+    # Provenance before permissions. Raising the mask on a tree that is not this
+    # release would make the wrong tree reachable by the service.
+    recorded="$(cat "$root/.pgu-deploy-sha" 2>/dev/null || true)"
+    [[ "$recorded" == "$EXPECTED_TARGET" ]] || \
+        die "the board release $root records ${recorded:-no sha}, expected $EXPECTED_TARGET"
+
+    # Shape before permissions, and before any early return: `stat` reports a
+    # symlink as `lrwxrwxrwx`, whose `other` bits are r-x, so every mode-based
+    # test waved one through (SYRD-89 R3 audit). The checks above already
+    # refused a symlink; the mode is only ever a diagnostic from here on.
+    if release_root_serviceable "$root"; then
+        note "the exported board release looks traversable; confirming as $BOARD_SERVICE_USER before relying on it"
+    else
+        note "raising the ACL mask on the exported board release so $BOARD_SERVICE_USER can traverse it"
+        chmod g+rx "$root" || die "could not repair the release root mode: $root"
+    fi
+    # Unconditional, for every accepted target. A mode is a claim about access;
+    # this is the access, asked of the kernel as the account the canary runs as.
+    # A 0750 root with no named entry for that account passes every mode test
+    # and fails this one, which is the point (SYRD-89 R3 audit).
+    verify_board_release_readable
+}
+
+# The kernel's own question: can the service account actually read the entry
+# point? Asked of the file the canary will open, as the account that will open
+# it -- a mode is a claim about access and this is the access itself.
+verify_board_release_readable() {
+    local entry="$BOARD_RELEASE_DIR/scripts/ticket-board.py"
+    [[ -f "$entry" ]] || die "the exported board release has no entry point: $entry"
+    id "$BOARD_SERVICE_USER" >/dev/null 2>&1 || \
+        die "the board service account $BOARD_SERVICE_USER does not exist"
+    sudo -u "$BOARD_SERVICE_USER" test -r "$entry" || \
+        die "$BOARD_SERVICE_USER still cannot read $entry after the repair"
+}
+
+# A diagnostic only: it decides whether to attempt a repair, never whether the
+# service can actually read anything -- verify_board_release_readable does that,
+# unconditionally. Still refuses a symlink and a non-directory before looking at
+# any mode, because `stat` reports a symlink as `lrwxrwxrwx` and its `other`
+# bits would otherwise answer yes (SYRD-89 R3 audit).
+release_root_serviceable() {
+    local perms
+    [[ -L "$1" ]] && return 1
+    [[ -d "$1" ]] || return 1
+    perms="$(stat -c '%A' "$1" 2>/dev/null)" || return 1
+    [[ "${perms:4:1}" == "r" && "${perms:6:1}" == "x" ]] && return 0
+    [[ "${perms:7:1}" == "r" && "${perms:9:1}" == "x" ]] && return 0
+    return 1
+}
+
 # Run it. The order is the renderer's, not this artifact's: the listener comes
 # down before the migrations the deploy runs and back up only after, because it
 # reads the schema the release changes (SYRD-45).
 run_release_phase() {
     note "performing the operator release phase: deploying board release $EXPECTED_TARGET"
+    # Before the deploy, because the deploy ends in a canary that runs as the
+    # board service and opens the release's own entry point. The R2 run got that
+    # far and stopped there (SYRD-89 R3).
+    repair_board_release_traversal
     local rendered label command
     rendered="$(render_release_phase_commands)" || \
         die "could not render the release phase from $TARGET_RELEASE_ROOT"

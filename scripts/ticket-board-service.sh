@@ -377,6 +377,173 @@ verify_release_sha() {
     [[ "$actual_sha" == "$expected_sha" ]] || die "release $release_dir sha marker mismatch: expected $expected_sha, got $actual_sha"
 }
 
+#: The mode a published release root is given, independent of the umask the
+#: deploy happened to inherit.
+#:
+#: 0750 rather than 0755, and the difference is the ACL mask rather than the
+#: group bits. The board runs as its own system account (User=boardsvc), which
+#: is not in the release owner's group, so group bits grant it nothing on their
+#: own. What grants it access is the named entry `user:<service>:r-x` that the
+#: releases directory's default ACL puts on every new release root -- and a
+#: named entry is capped by the access mask, which POSIX derives from the mode's
+#: group bits. A root created under umask 077 is 0700, so the mask is `---` and
+#: the inherited entry reads `#effective:---`: present, and worth nothing. Mode
+#: 0750 sets the mask to r-x and the entry starts working.
+#:
+#: 0755 would also work today and is rejected as surface rather than access:
+#: every ancestor is already reached through named entries, and the owner's home
+#: is `drwx--x---` granting `--x` to the service account alone, so `other` bits
+#: on a release root are unreachable by anybody they would nominally admit. They
+#: would become real only if that home were ever loosened -- which is the moment
+#: nobody would think to re-audit a release root (SYRD-89 R3).
+readonly BOARD_RELEASE_ROOT_MODE="0750"
+
+#: Whether a path grants r-x to one named account, evaluated the way the kernel
+#: evaluates it rather than inferred from mode bits.
+#:
+#: Mode bits are not the answer. Group r-x proves nothing unless the account is
+#: in the owning group, and on this deployment it is not: the board runs as its
+#: own system account and the release is owned by the tenant. What grants access
+#: is a named ACL entry, and a named entry is only worth what the mask allows.
+#: Reading `drwxr-x---` and concluding the service can get in accepted a plain
+#: 0750 root with no entry for it at all, which fails with EACCES the moment a
+#: different uid tries (SYRD-89 R3 audit).
+#:
+#: Refuses anything that is not a real directory before it looks at permissions:
+#: `stat` reports a symlink as `lrwxrwxrwx`, whose `other` bits are r-x, so a
+#: symlink satisfied every mode test there was.
+path_grants_rx_to() {
+    local path="$1" account="$2"
+    [[ -n "$account" ]] || return 1
+    [[ -L "$path" ]] && return 1
+    [[ -d "$path" ]] || return 1
+    python3 - "$path" "$account" <<'PY'
+import os
+import pwd
+import grp
+import stat
+import subprocess
+import sys
+
+path, account = sys.argv[1], sys.argv[2]
+# By name, or by uid when the account is configured numerically or has no
+# passwd entry reachable from here.
+try:
+    entry = pwd.getpwnam(account)
+    uid, primary_gid = entry.pw_uid, entry.pw_gid
+except KeyError:
+    if not account.isdigit():
+        raise SystemExit(1)
+    uid = int(account)
+    try:
+        primary_gid = pwd.getpwuid(uid).pw_gid
+    except KeyError:
+        primary_gid = uid
+info = os.lstat(path)
+if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+    raise SystemExit(1)
+
+NEED = 0b101  # r-x
+
+def granted(bits):
+    return (bits & NEED) == NEED
+
+# The owner is decided by the mode's owner bits and nothing else.
+if info.st_uid == uid:
+    raise SystemExit(0 if granted((info.st_mode >> 6) & 7) else 1)
+
+groups = {primary_gid}
+try:
+    groups |= {g.gr_gid for g in grp.getgrall() if account in g.gr_mem}
+except Exception:
+    pass
+
+named_user = None
+named_groups = []
+mask = None
+owning_group = (info.st_mode >> 3) & 7
+other = info.st_mode & 7
+try:
+    acl = subprocess.run(
+        ["getfacl", "-p", "--omit-header", "--absolute-names", path],
+        capture_output=True, text=True, check=False,
+    )
+    lines = acl.stdout.splitlines() if acl.returncode == 0 else []
+except OSError:
+    lines = []
+
+def bits(text):
+    value = 0
+    if "r" in text: value |= 0b100
+    if "w" in text: value |= 0b010
+    if "x" in text: value |= 0b001
+    return value
+
+for line in lines:
+    line = line.split("#", 1)[0].strip()
+    if not line or line.startswith("default:"):
+        continue
+    parts = line.split(":")
+    if len(parts) != 3:
+        continue
+    kind, who, perms = parts
+    if kind == "mask" and not who:
+        mask = bits(perms)
+    elif kind == "user" and who == account:
+        named_user = bits(perms)
+    elif kind == "group":
+        if not who:
+            named_groups.append((info.st_gid, bits(perms)))
+        else:
+            try:
+                named_groups.append((grp.getgrnam(who).gr_gid, bits(perms)))
+            except KeyError:
+                continue
+
+# POSIX.1e evaluation order: named user, then any matching group, then other.
+if named_user is not None:
+    effective = named_user if mask is None else named_user & mask
+    raise SystemExit(0 if granted(effective) else 1)
+
+matching = [b for gid, b in named_groups if gid in groups]
+if not matching and info.st_gid in groups:
+    matching = [owning_group]
+if matching:
+    effective = max(matching)
+    if mask is not None:
+        effective &= mask
+    raise SystemExit(0 if granted(effective) else 1)
+
+raise SystemExit(0 if granted(other) else 1)
+PY
+}
+
+#: Whether this root admits the account the canary will run as.
+release_root_is_serviceable() {
+    path_grants_rx_to "$1" "$BOARD_CANARY_USER"
+}
+
+#: Repair a root the service cannot traverse, or refuse with something an
+#: operator can act on. Only ever raises the mask, which is what activates a
+#: named entry root already placed there; it never invents a grant. A root that
+#: has no entry for the service account is not something a deploy should decide
+#: to create one for, so that fails with the exact command instead.
+#:
+#: Called only after verify_release_sha has passed, so a root is never repaired
+#: before its provenance is known: fixing the permissions on a tree that is not
+#: the release it claims to be would make a wrong tree reachable (SYRD-89 R3).
+ensure_release_root_serviceable() {
+    local root="$1"
+    # Shape before permissions, and before any early return: a symlink reports
+    # `lrwxrwxrwx` and would otherwise be waved through by its `other` bits.
+    [[ ! -L "$root" ]] || die "release root is a symlink, not a release directory: $root"
+    [[ -d "$root" ]] || die "release root is not a directory: $root"
+    release_root_is_serviceable "$root" && return 0
+    chmod g+rx "$root" 2>/dev/null || true
+    release_root_is_serviceable "$root" && return 0
+    die "release root $root is mode $(stat -c '%a' "$root" 2>/dev/null || echo unknown) and $BOARD_CANARY_USER cannot traverse it. Raising the mask was not enough, so it carries no ACL entry for that account. Run: setfacl -m u:$BOARD_CANARY_USER:r-x $root"
+}
+
 deploy_export_release() {
     local release_commit release_commit_status=0 resolved_ref release_dir source_kind tmp_dir
     release_commit="$(source_release_commit)" || release_commit_status=$?
@@ -402,9 +569,21 @@ deploy_export_release() {
             git_source archive "$resolved_ref" | tar -x -C "$tmp_dir"
         fi
         printf '%s\n' "$resolved_ref" >"$tmp_dir/.pgu-deploy-sha"
+        # Before publication, not after: between the mv and the canary the
+        # release is already the tree the service will be pointed at, and the
+        # mode it carries there is whatever umask the caller happened to have.
+        # A deploy run under umask 077 published a 0700 root and the canary
+        # failed with EACCES opening its own entry point (SYRD-89 R3). Only the
+        # root: the modes inside were extracted from the archive and are the
+        # release's own.
+        chmod "$BOARD_RELEASE_ROOT_MODE" "$tmp_dir" || \
+            die "could not normalize the release root mode: $tmp_dir"
         mv "$tmp_dir" "$release_dir"
     fi
     verify_release_sha "$release_dir" "$resolved_ref"
+    # Reused roots too, and only once the sha above has proved which release
+    # this is.
+    ensure_release_root_serviceable "$release_dir"
     printf '%s\t%s\n' "$resolved_ref" "$release_dir"
 }
 

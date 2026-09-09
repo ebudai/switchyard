@@ -18,7 +18,8 @@
         "merge",
         "dismiss_notification",
         "crop_attachment",
-        "reassign"
+        "reassign",
+        "director_edit"
       ],
       "runtime": "claude",
       "target": "cerulean-director:0.0",

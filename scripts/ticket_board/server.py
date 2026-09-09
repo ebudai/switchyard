@@ -73,6 +73,7 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "route": {"director"},
     "reassign": {"director"},
     "force_move": {"director"},
+    "director_edit": {"director"},
     "override_move": {"director"},
     "start_work": IMPLEMENTER_ROLES,
     "submit_to_inspection": IMPLEMENTER_ROLES,
@@ -1295,6 +1296,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
         if operation == "release_draft":
             updated = self.app.release_draft(ticket_id, caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "director_edit":
+            updated = self.app.director_edit_ticket(
+                ticket_id,
+                payload.get("patch", {}),
+                reason=str(payload.get("reason", "")),
+                caller_role=caller,
+            )
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

@@ -77,6 +77,7 @@ wrong and the board would not have accepted it; say so rather than working
 around it.
 
 <!-- switchyard-director-floor:start -->
+- `director_edit`
 - `dismiss_notification`
 - `edit_fields`
 - `merge`

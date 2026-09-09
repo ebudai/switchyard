@@ -640,6 +640,21 @@ class TicketBoardWriteClient:
     def release_draft(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "release_draft", {}, caller_role=caller_role)
 
+    def director_edit(
+        self,
+        ticket_id: str,
+        *,
+        patch: dict[str, Any],
+        reason: str,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id,
+            "director_edit",
+            {"patch": patch, "reason": reason},
+            caller_role=caller_role,
+        )
+
     def force_move(
         self,
         ticket_id: str,
@@ -952,6 +967,11 @@ def _build_parser() -> argparse.ArgumentParser:
     reassign.add_argument("--assignee", required=True)
     reassign.add_argument("--reason", required=True)
 
+    director_edit = subparsers.add_parser("director-edit")
+    director_edit.add_argument("ticket_id")
+    director_edit.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE")
+    director_edit.add_argument("--reason", required=True)
+
     force_move = subparsers.add_parser("force-move")
     force_move.add_argument("ticket_id")
     force_move.add_argument("--state", required=True)
@@ -1123,6 +1143,23 @@ def main(argv: list[str] | None = None) -> int:
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
         elif command == "reassign":
             response = client.reassign(args.ticket_id, assignee=args.assignee, reason=args.reason)
+        elif command == "director_edit":
+            patch: dict[str, Any] = {}
+            for assignment in args.set:
+                if "=" not in assignment:
+                    raise SystemExit(f"--set expects FIELD=VALUE, got {assignment!r}")
+                key, _, raw = assignment.partition("=")
+                key = key.strip()
+                # Typed the way the field is: a gate is a boolean and a title is
+                # not, and the database refuses a value of the wrong shape
+                # rather than coercing it.
+                if raw in ("true", "false"):
+                    patch[key] = raw == "true"
+                else:
+                    patch[key] = raw
+            response = client.director_edit(
+                args.ticket_id, patch=patch, reason=args.reason
+            )
         elif command == "force_move":
             response = client.force_move(
                 args.ticket_id,

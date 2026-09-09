@@ -336,7 +336,14 @@ def run_checks(app, admin, base, write_token, document):
     # that file are generated from schema.sql and held equal to it by
     # ticket_board_schema_function_migration_test; what only the upgrade path
     # can have is this backfill.
-    stale = json.dumps(without)
+    # A tenant this file was written for also predates the capabilities added
+    # after it: its stored document cannot name them, and the validator this
+    # migration reinstalls is the one from its own release, which does not know
+    # them either (SYRD-83).
+    later = copy.deepcopy(without)
+    for role in later["roles"]:
+        role["capabilities"] = [c for c in role["capabilities"] if c != "director_edit"]
+    stale = json.dumps(later)
     assert "$d$" not in stale
     t.psql(
         admin,
@@ -375,6 +382,12 @@ def run_checks(app, admin, base, write_token, document):
     # Re-running it changes nothing.
     t.psql(admin, "BEGIN;\n" + migration + "\nCOMMIT;")
     assert app.workflow_document()["revision"] == granted["revision"]
+
+    # This file reinstalled the validator of its own release, which is what a
+    # tenant at that release runs. Finish the upgrade the way the runner does,
+    # in order, so what the rest of this exercises is a board on today's code.
+    for name in ("pgu927_syrd82_director_capability_floor.sql", "pgu928_syrd83_director_edit.sql"):
+        t.psql(admin, "BEGIN;\n" + (ROOT / "scripts/ticket_board/migrations" / name).read_text() + "\nCOMMIT;")
     after = app.workflow_document()
 
     app.apply_workflow(

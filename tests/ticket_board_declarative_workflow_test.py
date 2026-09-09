@@ -26,6 +26,21 @@ from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 
+def refused_sql(conn, sql):
+    """Run SQL that must fail, and give back what the database said.
+
+    Written here rather than reusing a helper that asserts success: the whole
+    point of these cases is the refusal (SYRD-83).
+    """
+    proc = subprocess.run(
+        ["psql", "-v", "ON_ERROR_STOP=1", "-X", "-q", "-d", conn, "-c", sql],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0, proc.stdout
+    return proc.stderr
+
+
 def rejected(fn, reason=""):
     try:
         fn()
@@ -985,6 +1000,116 @@ def main():
                     target_id, {"state": "done"}, caller_role="director"
                 ),
             )
+
+            # SYRD-83: one Director-only generic edit, and one boundary it may
+            # not cross. It moves any mutable field at any stage and for any
+            # owner and records why; what nothing may do -- through the
+            # operation, an ordinary edit, or a session with rights on the table
+            # itself -- is manufacture a review.
+            edit_id, parent_of_edit = "PGU-94", "PGU-96"
+            t.seed_postgres_ticket(admin, edit_id, title="Cross-stage edit", state="audit", assignee="audit")
+            t.seed_postgres_ticket(admin, parent_of_edit, title="Parent", state="analysis", assignee="director")
+
+            for role in ("main", "audit", "inspector", "user"):
+                rejected(
+                    lambda role=role: app.director_edit_ticket(
+                        edit_id, {"title": "Renamed by the wrong role"},
+                        reason="not mine to make", caller_role=role,
+                    ),
+                    "cannot call director_edit",
+                )
+            assert app.get_ticket(edit_id)["title"] == "Cross-stage edit"
+            rejected(
+                lambda: app.director_edit_ticket(
+                    edit_id, {"title": "No reason"}, reason="  ", caller_role="director"
+                ),
+                "requires a reason",
+            )
+            for immutable in ("id", "created", "ticket_number"):
+                rejected(
+                    lambda immutable=immutable: app.director_edit_ticket(
+                        edit_id, {immutable: "forged"}, reason="try", caller_role="director"
+                    ),
+                    "cannot update",
+                )
+
+            edited = app.director_edit_ticket(
+                edit_id,
+                {
+                    "title": "Renamed by the Director",
+                    "assignee": "ops",
+                    "state": "in_progress",
+                    "needs_inspection": True,
+                    "manually_controlled": True,
+                    "parent_id": parent_of_edit,
+                },
+                reason="reworking after the audit found the wrong scope",
+                caller_role="director",
+            )
+            assert edited["title"] == "Renamed by the Director", edited
+            assert edited["assignee"] == "ops", edited
+            assert edited["state"] in ("in_progress", "backlog"), edited
+            assert edited["needs_inspection"] is True, edited
+            assert edited["manually_controlled"] is True, edited
+            assert edited["parent_id"] == parent_of_edit, edited
+            assert any(
+                "Director edit: reworking after the audit" in comment["text"]
+                for comment in edited["comments"]
+            ), edited["comments"]
+            audited = t.psql(
+                admin,
+                "SELECT field || '=' || coalesce(old_value #>> '{}', '') || '->' "
+                "|| coalesce(new_value #>> '{}', '') FROM ticket_board.ticket_field_audit "
+                f"WHERE ticket_id = '{edit_id}' ORDER BY field;",
+            )
+            assert "title=Cross-stage edit->Renamed by the Director" in audited, audited
+            assert "assignee=audit->ops" in audited, audited
+            assert t.psql(
+                admin,
+                "SELECT DISTINCT actor || ':' || reason FROM ticket_board.ticket_field_audit "
+                f"WHERE ticket_id='{edit_id}';",
+            ) == "director:reworking after the audit found the wrong scope"
+
+            # A ticket that already carries a review, so clearing it is a real
+            # clear and putting it back is a real forgery.
+            signed_id = "PGU-95"
+            t.seed_postgres_ticket(
+                admin, signed_id, title="Signed", state="audit", assignee="audit",
+                audit_signoff=True,
+            )
+            assert app.get_ticket(signed_id)["audit_signoff"] is True
+            cleared = app.director_edit_ticket(
+                signed_id, {"audit_signoff": False},
+                reason="reopening: the audited change was reverted", caller_role="director",
+            )
+            assert cleared["audit_signoff"] is False, cleared
+            assert "audit_signoff" in t.psql(
+                admin,
+                "SELECT string_agg(field, ',') FROM ticket_board.ticket_field_audit "
+                f"WHERE ticket_id='{signed_id}';",
+            )
+
+            # The board's own writer cannot reach the table at all: every write
+            # goes through a definer-rights function. So the paths that remain
+            # are those functions and an owner-rights session -- which is the
+            # shape an import or a migration script has.
+            assert "permission denied for table tickets" in refused_sql(
+                t.conninfo(sock, port, db, t.SERVICE_ROLE),
+                f"UPDATE ticket_board.tickets SET audit_signoff = true WHERE id = '{signed_id}';",
+            )
+            for field in ("audit_signoff", "inspector_signoff", "user_signoff"):
+                rejected(
+                    lambda field=field: app.director_edit_ticket(
+                        signed_id, {field: True}, reason="forge", caller_role="director"
+                    ),
+                    "cannot create sign-off",
+                )
+                rejected(
+                    lambda field=field: app.update_ticket(
+                        signed_id, {field: True}, caller_role="director"
+                    ),
+                )
+                assert app.get_ticket(signed_id)[field] is False, field
 
             print(
                 "declarative workflow: gates, actor checks, kickback owner, configuration CAS/dry-run/idempotence and second reviewer passed"

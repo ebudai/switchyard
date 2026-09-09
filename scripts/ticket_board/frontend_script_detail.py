@@ -1,6 +1,17 @@
 """Ticket-detail rendering JavaScript for the board frontend."""
 
-SCRIPT_DETAIL = """    function selectedTicket() {
+SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The database is the
+    // authority and refuses anything else; this list is what the panel offers,
+    // and identity and creation provenance are deliberately not in it.
+    const DIRECTOR_EDITABLE_FIELDS = [
+      'title', 'body', 'parent_id', 'assignee', 'state', 'implementation',
+      'audit_prompt', 'origin_project', 'external_source_ref', 'blocked_reason',
+      'needs_audit', 'needs_inspection', 'needs_user_signoff', 'commit_exempt',
+      'regression', 'manually_controlled', 'queued_for_assignee',
+      'queued_behind_ticket', 'audit_signoff', 'inspector_signoff', 'user_signoff',
+    ];
+
+    function selectedTicket() {
       return state.tickets.find((ticket) => ticket.id === state.selectedId) || null;
     }
 
@@ -261,6 +272,54 @@ SCRIPT_DETAIL = """    function selectedTicket() {
       });
       assigneeLabel.appendChild(assigneeSelect);
 
+      // SYRD-83: one Director-only generic edit, reachable from the board.
+      // Everything else in this panel is a workflow action wearing a field's
+      // clothes; this is the field itself, at whatever stage the ticket is in
+      // and whoever owns it. A sign-off can be cleared here and never raised --
+      // the database refuses that on every path, this one included.
+      const directorEditField = document.createElement('div');
+      directorEditField.className = 'director-edit';
+      directorEditField.innerHTML = '<div class="field-label">Director Edit</div>';
+      const directorEditSelect = document.createElement('select');
+      DIRECTOR_EDITABLE_FIELDS.forEach((field) => buildOption(directorEditSelect, field, field));
+      const directorEditValue = document.createElement('input');
+      directorEditValue.type = 'text';
+      directorEditValue.placeholder = 'new value';
+      directorEditValue.setAttribute('data-director-edit-value', '');
+      const directorEditReason = document.createElement('input');
+      directorEditReason.type = 'text';
+      directorEditReason.placeholder = 'why this edit is being made';
+      directorEditReason.setAttribute('data-director-edit-reason', '');
+      const directorEditButton = document.createElement('button');
+      directorEditButton.textContent = 'Apply Director Edit';
+      directorEditButton.setAttribute('data-director-edit-apply', '');
+      directorEditButton.title =
+        'Director-only: change any mutable field at any stage, for any owner. Records the reason and the old and new value.';
+      directorEditButton.addEventListener('click', async () => {
+        const reason = directorEditReason.value.trim();
+        if (!reason) {
+          setCreateStatus('a Director edit requires a reason', true);
+          return;
+        }
+        const field = directorEditSelect.value;
+        const raw = directorEditValue.value;
+        // Typed the way the field is: a gate is a boolean and a title is not,
+        // and the database refuses a value of the wrong shape rather than
+        // coercing it.
+        const value = raw === 'true' ? true : raw === 'false' ? false : raw;
+        await updateDetailTicket(
+          { director_edit: true, [field]: value, reason },
+          'director',
+        );
+      });
+      const directorEditActions = document.createElement('div');
+      directorEditActions.className = 'inline-actions';
+      directorEditActions.appendChild(directorEditSelect);
+      directorEditActions.appendChild(directorEditValue);
+      directorEditActions.appendChild(directorEditReason);
+      directorEditActions.appendChild(directorEditButton);
+      directorEditField.appendChild(directorEditActions);
+
       const parentLinkField = document.createElement('div');
       parentLinkField.innerHTML = '<div class="field-label">Parent Ticket</div>';
       const parentLinkInput = document.createElement('input');
@@ -296,7 +355,7 @@ SCRIPT_DETAIL = """    function selectedTicket() {
         parentLinkField.appendChild(parentPreview);
       }
 
-      controls.append(assigneeLabel, parentLinkField);
+      controls.append(assigneeLabel, parentLinkField, directorEditField);
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';

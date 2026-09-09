@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -369,6 +371,102 @@ def test_directorctl_capture_uses_role_map_and_refuses_foreign_target() -> None:
         assert foreign.returncode != 0
         assert "refusing foreign tmux target" in foreign.stderr
         assert log.read_text(encoding="utf-8") == before
+
+
+def test_directorctl_staged_payload_is_group_readable_for_role_accounts() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd66-payload.") as raw:
+        root = Path(raw)
+        bindir = root / "bin"
+        payload_dir = root / "payloads"
+        bindir.mkdir()
+        payload_dir.mkdir()
+        log = root / "calls"
+        capture_count = root / "capture-count"
+        capture_count.write_text("0\n", encoding="utf-8")
+        source = root / "message.txt"
+        message = "cross-account long payload " + ("x" * 220)
+        source.write_text(message, encoding="utf-8")
+
+        fake_id = bindir / "id"
+        fake_id.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  -un) echo syrd-director ;;\n"
+            "  '-u syrd-app') echo 1011 ;;\n"
+            "  -Gn) echo 'syrd-director syrd-roles' ;;\n"
+            "  '-Gn syrd-app') echo 'syrd-app syrd-roles' ;;\n"
+            "  *) exec /usr/bin/id \"$@\" ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake_chgrp = bindir / "chgrp"
+        fake_chgrp.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "printf 'chgrp:%s\\n' \"$*\" >> \"$DIRECTORCTL_TEST_LOG\"\n"
+            "[ \"$1\" = -- ] && [ \"$2\" = syrd-roles ]\n"
+            "exec /usr/bin/chgrp -- \"$(/usr/bin/id -gn)\" \"$3\"\n",
+            encoding="utf-8",
+        )
+        fake_sudo = bindir / "sudo"
+        fake_sudo.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "printf 'sudo:%s\\n' \"$*\" >> \"$DIRECTORCTL_TEST_LOG\"\n"
+            "[ \"$1\" = -n ] && [ \"$2\" = -u ]\n"
+            "shift 3\n"
+            "exec \"$@\"\n",
+            encoding="utf-8",
+        )
+        fake_tmux = bindir / "tmux"
+        fake_tmux.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "printf 'tmux:%s\\n' \"$*\" >> \"$DIRECTORCTL_TEST_LOG\"\n"
+            "case \"$1\" in\n"
+            "  display-message) echo 0 ;;\n"
+            "  send-keys) : ;;\n"
+            "  capture-pane)\n"
+            "    count=$(cat \"$DIRECTORCTL_CAPTURE_COUNT\")\n"
+            "    count=$((count + 1))\n"
+            "    printf '%s\\n' \"$count\" > \"$DIRECTORCTL_CAPTURE_COUNT\"\n"
+            "    if [ \"$count\" -eq 1 ]; then echo before; else echo Working; fi\n"
+            "    ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        for helper in (fake_id, fake_chgrp, fake_sudo, fake_tmux):
+            helper.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "PATH": f"{bindir}:/usr/bin:/bin",
+            "TMPDIR": str(payload_dir),
+            "TICKET_BOARD_PROJECT": "syrd",
+            "TICKET_BOARD_ROLE_ACCOUNTS": "app=syrd-app",
+            "DIRECTORCTL_ENTER_DELAY": "0",
+            "DIRECTORCTL_TEST_LOG": str(log),
+            "DIRECTORCTL_CAPTURE_COUNT": str(capture_count),
+            "DIRECTORCTL_TICKET_NOTIFICATION_JOURNAL": str(root / "journal.jsonl"),
+        }
+        sent = subprocess.run(
+            [str(ROOT / "scripts" / "directorctl"), "send-file", "app", str(source)],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert sent.returncode == 0, sent.stderr
+        calls = log.read_text(encoding="utf-8")
+        match = re.search(r"please read (\S+/directorctl_payload\.[^ ]+\.txt) ", calls)
+        assert match, calls
+        staged = Path(match.group(1))
+        assert staged.parent == payload_dir
+        assert staged.read_text(encoding="utf-8") == message
+        assert stat.S_IMODE(staged.stat().st_mode) == 0o640
+        assert staged.stat().st_mode & stat.S_IRGRP
+        assert not staged.stat().st_mode & stat.S_IROTH
+        assert f"chgrp:-- syrd-roles {staged}" in calls
 
 
 def main() -> int:

@@ -319,12 +319,52 @@ reap_stale_payload_files() {
 
 stage_payload_file() {
     local payload="$1"
+    local target="$2"
     local tmpdir="${TMPDIR:-/tmp}"
     local staged_path
+    local roles_group
+    local recipient_account
     reap_stale_payload_files
     staged_path="$(mktemp "$tmpdir/directorctl_payload.XXXXXX.txt")"
     chmod 600 "$staged_path"
     printf '%s' "$payload" > "$staged_path"
+
+    # Dedicated role-account tenants share only their provisioned project
+    # roles group.  Make staged payloads readable by the receiving account
+    # without exposing them to unrelated local users.  Shared-account and
+    # process-authority tenants still read as the creating uid and retain the
+    # historical owner-only mode.
+    if [ "${TICKET_BOARD_PROCESS_AUTHORITY:-}" != "1" ] \
+        && [ -n "${TICKET_BOARD_ROLE_ACCOUNTS:-}" ]; then
+        roles_group="${PROJECT_SLUG}-roles"
+        if ! [[ "$roles_group" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+            rm -f -- "$staged_path"
+            echo "error: invalid project roles group: $roles_group" >&2
+            return 1
+        fi
+        if ! id -Gn | tr ' ' '\n' | grep -Fqx -- "$roles_group"; then
+            rm -f -- "$staged_path"
+            echo "error: current account is not a member of project roles group: $roles_group" >&2
+            return 1
+        fi
+        if ! recipient_account="$(tmux_account_for_target "$target")" \
+            || [ -z "$recipient_account" ] \
+            || ! id -Gn "$recipient_account" | tr ' ' '\n' | grep -Fqx -- "$roles_group"; then
+            rm -f -- "$staged_path"
+            echo "error: recipient account is not a member of project roles group: $roles_group" >&2
+            return 1
+        fi
+        if ! chgrp -- "$roles_group" "$staged_path"; then
+            rm -f -- "$staged_path"
+            echo "error: could not assign staged payload to project roles group: $roles_group" >&2
+            return 1
+        fi
+        if ! chmod 0640 "$staged_path"; then
+            rm -f -- "$staged_path"
+            echo "error: could not make staged payload group-readable" >&2
+            return 1
+        fi
+    fi
     printf '%s' "$staged_path"
 }
 
@@ -531,7 +571,7 @@ send_payload() {
     # multiline payloads must be staged to a file and referenced indirectly.
     if payload_requires_pointer "$payload"; then
         delivery_mode="staged"
-        staged_path="$(stage_payload_file "$payload")"
+        staged_path="$(stage_payload_file "$payload" "$target")"
         local first_line
         first_line="$(echo "$payload" | head -n 1)"
         first_line="$(echo "$first_line" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]]+//;s/[[:space:]]+$//' | cut -c1-120)"

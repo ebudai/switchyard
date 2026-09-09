@@ -245,7 +245,7 @@ def _fixture(tmp: Path, *, project: str = "porter") -> tuple[object, Path]:
     for role in stored["roles"]:
         if role["role"] != "designer":
             continue
-        for field in ("role", "run_as_user", "target", "tmux_session", "workdir"):
+        for field in ("role", "target", "tmux_session", "workdir"):
             role[field] = role[field].replace("designer", "conductor")
     stored["workflow"] = {
         "roles": [

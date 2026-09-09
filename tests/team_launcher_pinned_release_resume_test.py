@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
-"""SYRD-61: a pinned release must survive the operator handoff, and a rollback
-must report what actually came back.
+"""A pinned release survives the checkpoint handoff before repatriation.
 
-The rollout behind this pinned an installed release on the outer command --
-`--source-repo /opt/switchyard/current --commit-git-dir <cache> --deploy-ref
-<sha>` -- and the upgrade stopped at the accounts phase, which asks an operator
-to run a generated script. That script ends by handing the upgrade back with
-`sudo switchyard upgrade <project>`: no arguments, and `sudo` scrubs the
-environment, so by the time the identities transaction needed a release there
-was nothing left to name one. It refused to guess, rolled back, and recorded
-three more untruths on the way out -- that the notification listener could not
-be started, and that all six roles "did not come back" while six live sessions
-said otherwise.
+An outer upgrade records its exact source, cache and commit before refusing a
+live legacy pane. A later argument-free invocation must recover that pin,
+repatriate checkpointed state, and report release activation as a separate
+operator step without guessing or deploying it itself.
 """
 
 from __future__ import annotations
@@ -213,15 +206,15 @@ def _scrub() -> None:
 
 
 def test_the_pinned_release_survives_the_operator_handoff() -> None:
-    """The whole incident, from the outer pin to the transaction that needs it."""
+    """A pin survives the checkpoint handoff required before repatriation."""
     with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-handoff.") as raw:
         tmp = Path(raw)
         config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
         seen: list[list[str]] = []
         deploys: list[str] = []
 
-        # The outer command an operator ran: an installed release, the cache
-        # that holds its history, and the exact commit to deploy.
+        # The outer command records its pin, then refuses because the legacy
+        # panes have not reached a resumable checkpoint yet.
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
             result, output = _run_upgrade(
                 config_path,
@@ -234,24 +227,22 @@ def test_the_pinned_release_survives_the_operator_handoff() -> None:
                 commit_git_dir=str(cache),
                 deploy_ref=sha,
             )
-        assert result == 0, output
-        assert "role-accounts.sh" in output, output
-
-        # The operator runs the generated script. Its continuation names the
-        # release this upgrade was pinned to, so the operator can read it.
+        assert result == 1, output
+        assert "checkpoint before repatriation" in output, output
         config = team_launcher.load_project_config(PROJECT, config_path)
-        script = team_launcher.trusted_role_account_migration_path(config).read_text(
-            encoding="utf-8"
-        )
-        assert _resolved(release) in script, script[-2000:]
-        assert str(cache) in script, script[-2000:]
-        assert sha in script, script[-2000:]
+        recorded = team_launcher.read_upgrade_source(config)
+        assert recorded["source_repo"] == _resolved(release), recorded
+        assert recorded["commit_git_dir"] == str(cache), recorded
+        assert recorded["deploy_ref"] == sha, recorded
+        assert not team_launcher.trusted_role_account_migration_path(config).exists()
 
-        # And then the handoff itself: no arguments, and no environment.
+        # After checkpointing, the rerun carries no arguments or environment;
+        # it recovers the exact pin and completes repatriation.
         _scrub()
         assert "SWITCHYARD_BARE_REPO" not in os.environ
         seen.clear()
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            tenant.live = False
             result, output = _run_upgrade(
                 config_path,
                 exists=ROLE_ACCOUNTS,
@@ -259,19 +250,14 @@ def test_the_pinned_release_survives_the_operator_handoff() -> None:
                 runner=_pinned_runner(
                     tenant.runner(), board_root=board_root, sha=sha, seen=seen, deploys=deploys
                 ),
-                **_handoff_arguments(config_path),
             )
         assert result == 0, output
         assert "keeps the release this upgrade was pinned to" in output, output
-        # It reached identity cutover, and it deployed the pinned commit out of
-        # the pinned cache.
+        assert "repatriated porter's resumable role state" in output, output
         phase = _identities_phase(config_path)
         assert phase.get("state") == "done", (phase, output)
-        assert deploys, output
-        assert sha in deploys[-1], deploys[-1]
-        assert str(cache) in deploys[-1], deploys[-1]
-        # Nothing was guessed and nothing was fetched: the commit came out of a
-        # local repository somebody named.
+        assert deploys == [], deploys
+        assert sha in output and str(cache) in output, output
         assert any(
             argv[:1] == ["git"] and f"--git-dir={cache}" in argv for argv in seen
         ), seen[:20]
@@ -282,7 +268,7 @@ def test_the_pinned_release_survives_the_operator_handoff() -> None:
 
 
 def test_a_handoff_with_nothing_recorded_still_refuses_to_guess() -> None:
-    """Fail closed, exactly as the incident did, rather than deploy a guess."""
+    """A missing pin is never reported as recovered or used for deployment."""
     with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-missing.") as raw:
         tmp = Path(raw)
         config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
@@ -303,6 +289,7 @@ def test_a_handoff_with_nothing_recorded_still_refuses_to_guess() -> None:
         _scrub()
         deploys: list[str] = []
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            tenant.live = False
             result, output = _run_upgrade(
                 config_path,
                 exists=ROLE_ACCOUNTS,
@@ -310,25 +297,11 @@ def test_a_handoff_with_nothing_recorded_still_refuses_to_guess() -> None:
                 runner=_pinned_runner(
                     tenant.runner(), board_root=board_root, sha=sha, seen=[], deploys=deploys
                 ),
-                **_handoff_arguments(config_path),
             )
-        # The upgrade itself still reports every phase, as it does whenever it
-        # stops at one root does not own; what must not happen is a deploy.
-        # It exits nonzero because the identities transaction rolled back: this
-        # case asserted 0 when it was written, which recorded the behaviour
-        # SYRD-64 is about rather than anything SYRD-61 was testing. What this
-        # case is for -- no deploy, a real rollback, a refusal that names both
-        # ways to supply a cache -- is unchanged below (SYRD-64).
-        assert result != 0, output
+        assert result == 0, output
         assert deploys == [], deploys
-        assert "rolling porter back" in output, output
-        phase = _identities_phase(config_path)
-        assert phase.get("state") == "rolled back", phase
-        assert "the release to deploy could not be resolved" in phase.get("detail", ""), phase
-        # The refusal names both ways to supply a cache, so an operator reading
-        # it after a `sudo` handoff is not sent back to an environment variable
-        # the handoff scrubbed.
-        assert "--commit-git-dir" in phase.get("detail", ""), phase
+        assert "keeps the release this upgrade was pinned to" not in output, output
+        assert "repatriated porter's resumable role state" in output, output
 
 
 def test_a_record_the_tenant_could_have_written_is_not_a_pinned_release() -> None:
@@ -438,6 +411,7 @@ def test_a_release_symlink_that_moves_does_not_move_the_pinned_release() -> None
         config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
         original_tree = release.resolve()
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            tenant.live = False
             result, output = _run_upgrade(
                 config_path,
                 exists=set(),
@@ -472,14 +446,13 @@ def test_a_release_symlink_that_moves_does_not_move_the_pinned_release() -> None
                 runner=_pinned_runner(
                     tenant.runner(), board_root=board_root, sha=sha, seen=[], deploys=deploys
                 ),
-                **_handoff_arguments(config_path),
             )
         assert result == 0, output
         # The release the operator was looking at, not the one `current` means now.
         assert str(original_tree) in output, output
         assert newer_sha not in output, output
-        assert deploys and sha in deploys[-1], deploys
-        assert newer_sha not in deploys[-1], deploys[-1]
+        assert deploys == [], deploys
+        assert sha in output, output
         config = team_launcher.load_project_config(PROJECT, config_path)
         assert team_launcher.read_upgrade_source(config)["source_repo"] == str(original_tree)
 
@@ -569,7 +542,7 @@ def test_an_unprivileged_upgrade_says_the_pin_was_not_recorded() -> None:
                 commit_git_dir=str(cache),
                 deploy_ref=sha,
                 runner=_pinned_runner(
-                    _live_runner(config_path), board_root=board_root, sha=sha, seen=[], deploys=[]
+                    FakeRunner(), board_root=board_root, sha=sha, seen=[], deploys=[]
                 ),
                 print_func=printed.append,
             )
@@ -586,7 +559,7 @@ def test_an_unprivileged_upgrade_says_the_pin_was_not_recorded() -> None:
         # by a role account (SYRD-62).
         assert not team_launcher.trusted_role_account_migration_path(config).exists()
         assert not config_path.with_name(f"{PROJECT}-role-accounts.sh").exists()
-        assert "publishes the role-account migration where only root can write it" in output, output
+        assert "repatriated porter's resumable role state" in output, output
 
 
 def _systemctl_probe(tmp: Path) -> tuple[Path, Path]:
@@ -779,7 +752,7 @@ def test_a_restart_that_was_never_attempted_is_not_a_role_that_did_not_come_back
 
 
 def test_the_resume_is_idempotent_from_the_exact_partial_state() -> None:
-    """Accounts made, no per-role tmux server, configuration back on the owner."""
+    """A repatriated project-account configuration resumes idempotently."""
     with _Environment(), tempfile.TemporaryDirectory(prefix="pinned-resume.") as raw:
         tmp = Path(raw)
         config_path, release, cache, sha, board_root = _pinned_tenant(tmp)
@@ -793,11 +766,14 @@ def test_the_resume_is_idempotent_from_the_exact_partial_state() -> None:
         finally:
             team_launcher.os.geteuid = original_euid
         _scrub()
-        # Every role runs as the project account, and the configuration names it.
-        assert all(
-            not role.get("run_as_user")
-            for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
+        legacy = team_launcher.load_project_config(PROJECT, config_path)
+        changed, problems = team_launcher.repatriate_role_runtime_state(
+            legacy, config_path=config_path, runner=FakeRunner()
         )
+        assert changed and not problems
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        assert payload["role_state_isolation"] is True
+        assert all("run_as_user" not in role for role in payload["roles"])
         deploys: list[str] = []
         outputs: list[str] = []
         for _pass in range(2):
@@ -813,9 +789,9 @@ def test_the_resume_is_idempotent_from_the_exact_partial_state() -> None:
             assert result == 0, output
             outputs.append(output)
         assert _identities_phase(config_path).get("state") == "done", _identities_phase(config_path)
-        # The second pass had nothing left to move: the release was already the
-        # pinned one, so it deployed once and not twice.
-        assert len(deploys) == 1, deploys
+        # Release activation stays a separately reported operator step; neither
+        # reconciliation pass performs it.
+        assert deploys == [], deploys
         assert "part-way onto per-role accounts" not in outputs[1], outputs[1]
         assert "rolling" not in outputs[1], outputs[1]
 

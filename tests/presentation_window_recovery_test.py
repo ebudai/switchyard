@@ -470,9 +470,9 @@ class _PresentationTenant:
 
 
 def test_a_failed_identity_transaction_leaves_exactly_one_prior_window() -> None:
-    """The rollback the incident produced, with the window kept this time."""
+    """A live legacy pane blocks repatriation without touching its window."""
     with tempfile.TemporaryDirectory(prefix="syrd65-rollback-window.") as tmp:
-        config_path, _ = _declarative_tenant(Path(tmp))
+        config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         payload["presentation"] = {
             "slot_count": len(ROLES),
@@ -488,41 +488,44 @@ def test_a_failed_identity_transaction_leaves_exactly_one_prior_window() -> None
                 stopped_whole_project.append(config.project) or 0
             )
             with _PresentationTenant(config_path, account_uid=os.getuid() + 4242) as tenant:
-                result = team_launcher.cutover_role_identities_command(
+                presentation_before = (
+                    set(tenant.world.sessions),
+                    {key: list(value) for key, value in tenant.world.clients.items()},
+                    dict(tenant.world.options),
+                    dict(tenant.world.pane_commands),
+                )
+                changed, problems = team_launcher.repatriate_role_runtime_state(
                     team_launcher.load_project_config(PROJECT, config_path),
                     config_path=config_path,
-                    tooling_dir=config_path.parent / "tooling" / PROJECT,
                     runner=tenant.runner(),
-                    print_func=printed.append,
                 )
                 world = tenant.world
                 windows = list(tenant.windows_opened)
         finally:
             team_launcher.stop_project = original_stop_project
-        output = "\n".join(printed)
-        assert result == 1, output
-        assert config_path.read_bytes() == before, "the configuration was not put back"
+        output = "\n".join(problems)
+        assert changed is False, output
+        assert problems, "the live legacy pane was not refused"
+        assert "checkpoint before repatriation" in output, output
+        assert config_path.read_bytes() == before, "the configuration changed before checkpoint"
         # The presentation was never the transaction's to stop.
         assert stopped_whole_project == [], stopped_whole_project
         # Exactly one window's worth of slots, all of them, and one viewer.
         assert {session for session in world.sessions if "-display-" in session} == set(SLOTS)
         assert VIEWER in world.sessions
-        # No second six-pane window: the rollback re-points, it does not relaunch.
+        # No second six-pane window: the preflight neither stops nor relaunches it.
         assert windows == [], windows
         # The window the tenant had is the window it still has.
         assert world.clients[VIEWER] == [DESKTOP_TTY]
         assert "the presentation window" not in output, output
-        # No slot adds a status row of its own to the worker's, and the frame
-        # around them does not either.
-        assert {
-            world.options[(f"={session}:", "status")] for session in (*SLOTS, VIEWER)
-            if (f"={session}:", "status") in world.options
-        } == {"off"}
-        # Every slot ends at the inert proxy, never at a shell a paste would run in.
-        for session in SLOTS:
-            argv = shlex.split(world.pane_commands[session])
-            assert argv[:2] == ["sh", "-lc"], argv
-            assert "sudo" not in world.pane_commands[session], session
+        # The migration preflight did not address or reconfigure the existing
+        # presentation topology at all.
+        assert (
+            set(world.sessions),
+            {key: list(value) for key, value in world.clients.items()},
+            dict(world.options),
+            dict(world.pane_commands),
+        ) == presentation_before
 
 
 def test_a_rollback_the_user_cannot_see_is_reported_as_one() -> None:

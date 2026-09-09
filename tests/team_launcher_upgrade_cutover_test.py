@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""SYRD-45: a tenant upgrade must be ordered, journaled and identity-safe.
+"""A tenant upgrade must be ordered, journaled and identity-safe.
 
-The rollout this covers rewrote a declarative tenant's configuration to name
-per-role Unix accounts before those accounts existed, then tried to make a
-director-authority board write from the root upgrade process. The first leaves
-roles that cannot start and panes the board would stop recognising; the second
-cannot succeed without impersonating the director.
+The current contract repatriates stopped legacy role state to the single
+project account, refuses before mutation while any old role pane is live, and
+keeps release activation and director-authority work as separately owned
+phases.
 """
 
 from __future__ import annotations
@@ -415,37 +414,37 @@ def test_a_board_that_cannot_accept_the_migration_is_not_recorded_as_done() -> N
 def test_one_complete_legacy_sequence_across_successive_invocations() -> None:
     """The whole ordered path a legacy tenant actually takes, run end to end."""
     with tempfile.TemporaryDirectory(prefix="legacy-sequence.") as tmp:
-        config_path, _ = _declarative_tenant(Path(tmp))
-        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
-        accounts = {f"porter-{role}" for role in roles}
+        config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
         board_without_marker = _board_with_marker(False)
+        before = json.loads(config_path.read_text(encoding="utf-8"))["roles"]
 
-        # 1. Accounts do not exist: artifacts refresh, the operator artifact is
-        #    written, nothing else happens, and no deploy is suggested.
+        # 1. A live legacy role is a hard pre-mutation stop. The operator must
+        #    checkpoint it; creating more accounts is no longer a phase.
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
-            _result, first, _m = _upgrade(
+            result, first, _m = _upgrade(
                 config_path, as_root=True, exists=set(), runner=tenant.runner(),
                 board=board_without_marker,
             )
-        assert "still share the project account" in first, first
+        assert result == 1, first
+        assert "stop it at a resumable checkpoint before repatriation" in first, first
+        assert json.loads(config_path.read_text(encoding="utf-8"))["roles"] == before
         assert "deploy-restart" not in first, first
-        assert not any(
-            role.get("run_as_user")
-            for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
-        )
 
-        # 2. The operator creates them. The next invocation cuts over -- with the
-        #    director phase still outstanding, which must not block it.
+        # 2. Once checkpointed, the next invocation repatriates state and
+        #    removes every dedicated-account binding. The accounts themselves
+        #    are deliberately left intact.
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
-            _result, second, _m = _upgrade(
-                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
+            tenant.live = False
+            result, second, _m = _upgrade(
+                config_path, as_root=True, exists=set(), runner=tenant.runner(),
                 board=board_without_marker,
             )
-        assert "running under per-role identities" in second, second
+        assert result == 0, second
+        assert "repatriated porter's resumable role state" in second, second
+        assert "dedicated accounts were left intact" in second, second
         after = json.loads(config_path.read_text(encoding="utf-8"))
-        assert all(role.get("run_as_user") == f"porter-{role['role']}" for role in after["roles"]), after
-        # Only now is the release deploy offered, and the director is named next.
-        assert "withholding" not in second, second
+        assert after["role_state_isolation"] is True, after
+        assert all("run_as_user" not in role for role in after["roles"]), after
         assert "finish-upgrade porter" in second, second
 
         # 3. The director makes its own write, from its own account.
@@ -499,7 +498,7 @@ def _owner_only_runner(config_path: Path) -> FakeRunner:
 
 
 def test_the_live_partial_tenant_is_not_mistaken_for_a_fresh_one() -> None:
-    """Six sessions under the project account, six accounts that do not exist."""
+    """Stale role bindings do not block panes already served by the owner."""
     with tempfile.TemporaryDirectory(prefix="live-partial.") as tmp:
         config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
         config = team_launcher.load_project_config("porter", config_path)
@@ -514,118 +513,74 @@ def test_the_live_partial_tenant_is_not_mistaken_for_a_fresh_one() -> None:
 
         result, output, _m = _upgrade(config_path, as_root=True, exists=set(), runner=runner)
         assert result == 0, output
-        assert "left as provisioned" not in output, output
-        assert "do not agree" in output, output
+        assert "repatriated porter's resumable role state" in output, output
         after = json.loads(config_path.read_text(encoding="utf-8"))
-        assert not any(role.get("run_as_user") for role in after["roles"]), after
+        assert after["role_state_isolation"] is True
+        assert all("run_as_user" not in role for role in after["roles"])
 
 
 def test_the_observed_partial_state_is_detected_and_reverted() -> None:
-    """Config names per-role accounts, none exist, sessions still share the owner."""
+    """Stopped legacy bindings are removed even when their accounts are absent."""
     with tempfile.TemporaryDirectory(prefix="upgrade-partial.") as tmp:
         config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
         before = json.loads(config_path.read_text(encoding="utf-8"))
         assert all(role.get("run_as_user") for role in before["roles"])
 
-        result, output, _migrations = _upgrade(
-            config_path, as_root=True, exists=set(), runner=_live_runner(config_path)
-        )
+        result, output, _migrations = _upgrade(config_path, as_root=True, exists=set())
         assert result == 0, output
-        assert "do not agree" in output, output
-        assert "porter-designer does not exist" in output, output
+        assert "repatriated porter's resumable role state" in output, output
         after = json.loads(config_path.read_text(encoding="utf-8"))
-        assert not any(role.get("run_as_user") for role in after["roles"]), after
+        assert after["role_state_isolation"] is True, after
+        assert all("run_as_user" not in role for role in after["roles"]), after
         config = team_launcher.load_project_config("porter", config_path)
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
-        assert team_launcher.upgrade_phase_state(journal, "identities") in {"reverted", "pending"}, journal
+        assert team_launcher.upgrade_phase_state(journal, "identities") == "done", journal
 
 
 def test_a_freshly_provisioned_project_is_left_as_provisioned() -> None:
-    """Nothing is running, so there is no legacy identity to preserve or undo."""
+    """A stopped legacy tenant is normalized without creating accounts."""
     with tempfile.TemporaryDirectory(prefix="upgrade-fresh.") as tmp:
         config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
-        before = json.loads(config_path.read_text(encoding="utf-8"))
         result, output, _m = _upgrade(config_path, as_root=True, exists=set(), runner=FakeRunner())
         assert result == 0, output
-        assert "left as provisioned" in output, output
+        assert "repatriated porter's resumable role state" in output, output
         after = json.loads(config_path.read_text(encoding="utf-8"))
-        assert [role.get("run_as_user") for role in after["roles"]] == [
-            role.get("run_as_user") for role in before["roles"]
-        ], after
+        assert after["role_state_isolation"] is True, after
+        assert all("run_as_user" not in role for role in after["roles"]), after
+        assert not team_launcher.trusted_role_account_migration_path(
+            team_launcher.load_project_config("porter", config_path)
+        ).exists()
 
 
 def test_the_cutover_happens_only_once_every_account_exists() -> None:
     with tempfile.TemporaryDirectory(prefix="upgrade-cutover.") as tmp:
-        config_path, _ = _declarative_tenant(Path(tmp))
-        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
-
-        # Nothing is written into the configuration while the accounts are absent.
-        _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
-        assert "still share the project account" in output, output
-        assert not any(
-            role.get("run_as_user")
-            for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]
-        )
-        # Published where only root could have written it, and nowhere the
-        # control role can rewrite (SYRD-62).
-        config = team_launcher.load_project_config("porter", config_path)
-        assert team_launcher.trusted_role_account_migration_path(config).is_file()
-        assert not config_path.with_name("porter-role-accounts.sh").exists()
-
-        # Once they exist, the same command stops the workers, moves the
-        # configuration, restarts them and checks the uid each role's process is
-        # actually running as before anything authorizes it.
-        accounts = {f"porter-{role}" for role in roles}
-        # The cutover does not wait on the director: the director's own write
-        # is made from the identity this creates, so it comes after.
-        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
-            _result, output, _m = _upgrade(
-                config_path, as_root=True, exists=accounts, runner=tenant.runner(),
-                board=_board_with_marker(False),
-            )
+        config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
+        result, output, _m = _upgrade(config_path, as_root=True, exists=set())
+        assert result == 0, output
         after = json.loads(config_path.read_text(encoding="utf-8"))
-        assert all(role.get("run_as_user") == f"porter-{role['role']}" for role in after["roles"]), after
-        assert tenant.stops and tenant.launches, (tenant.stops, tenant.launches)
-        assert "running under per-role identities" in output, output
-        # The units the board serves were installed and restarted inside the
-        # same transaction, and every role was proved able to write as itself.
-        installed = team_launcher.SYSTEMD_UNIT_DIR / "porter-ticket-board.service"
-        assert installed.is_file() and "generated" in installed.read_text(), installed
-        assert {argv[2] for argv in tenant.board_writes} == set(accounts), tenant.board_writes
+        assert after["role_state_isolation"] is True, after
+        assert all("run_as_user" not in role for role in after["roles"]), after
+
+        first = config_path.read_bytes()
+        result, second, _m = _upgrade(config_path, as_root=True, exists=set())
+        assert result == 0, second
+        assert config_path.read_bytes() == first
+        assert "repatriated porter's resumable role state" not in second, second
 
 
 def test_a_cutover_whose_processes_keep_the_old_uid_is_rolled_back() -> None:
-    """Accounts existing is not the same as the workers running as them."""
+    """A live legacy pane prevents repatriation before any mutation."""
     with tempfile.TemporaryDirectory(prefix="upgrade-rollback.") as tmp:
-        config_path, _ = _declarative_tenant(Path(tmp))
-        roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
-        accounts = {f"porter-{role}" for role in roles}
-        # The director phase is complete, so the cutover is allowed to run.
-        _mark_projection_migrated(config_path)
-        before = config_path.read_bytes()
-        # The accounts resolve to a uid nothing is running as: the panes kept
-        # the shared identity, which is exactly the state that would have made
-        # the board reject every live role.
-        original_opener = team_launcher._open_board_url
-        team_launcher._open_board_url = _board_with_marker(True)
+        config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
+        before = json.loads(config_path.read_text(encoding="utf-8"))["roles"]
         with _RunningTenant(config_path, account_uid=os.getuid() + 4242) as tenant:
-            result = team_launcher.cutover_role_identities_command(
-                team_launcher.load_project_config("porter", config_path),
-                config_path=config_path,
-                tooling_dir=config_path.parent / "tooling" / "porter",
-                runner=tenant.runner(),
-                print_func=lambda _text: None,
+            result, output, _m = _upgrade(
+                config_path, as_root=True, exists=set(), runner=tenant.runner()
             )
-        team_launcher._open_board_url = original_opener
         assert result == 1
-        assert config_path.read_bytes() == before, "the configuration was not put back"
-        assert len(tenant.stops) == 2 and len(tenant.launches) == 2, (tenant.stops, tenant.launches)
-        # The installed unit went back with everything else: there was none
-        # before, so there is none after.
-        assert not (team_launcher.SYSTEMD_UNIT_DIR / "porter-ticket-board.service").exists()
-        config = team_launcher.load_project_config("porter", config_path)
-        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
-        assert team_launcher.upgrade_phase_state(journal, "identities") == "rolled back", journal
+        assert "stop it at a resumable checkpoint before repatriation" in output, output
+        assert json.loads(config_path.read_text(encoding="utf-8"))["roles"] == before
+        assert tenant.stops == [] and tenant.launches == []
 
 
 def test_the_listener_is_stopped_before_the_release_and_its_state_restored() -> None:
@@ -800,22 +755,24 @@ def test_a_stop_that_leaves_workers_running_changes_nothing() -> None:
 def test_the_deploy_instruction_is_withheld_until_every_phase_is_ready() -> None:
     with tempfile.TemporaryDirectory(prefix="upgrade-deploy-gate.") as tmp:
         (Path(tmp) / "partial").mkdir()
-        config_path, _ = _declarative_tenant(Path(tmp))
-        # The release enforces the per-role table, so it is withheld until the
-        # roles are actually running under those accounts.
-        _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
-        assert "withholding" in output, output
-        assert "running under their own accounts" in output, output
+        config_path, _ = _declarative_tenant(Path(tmp), accounts=True)
+        # A live legacy pane blocks before the release phase can be offered.
+        with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+            result, output, _m = _upgrade(
+                config_path, as_root=True, exists=set(), runner=tenant.runner()
+            )
+        assert result == 1, output
+        assert "checkpoint before repatriation" in output, output
         assert "deploy-restart" not in output, output
-        # And the director is still named as the phase that follows it.
-        assert "finish-upgrade porter" in output, output
 
-        # A tenant part-way onto per-role accounts withholds it too.
+        # A second legacy tenant with live panes is refused the same way,
+        # regardless of which retired accounts happen to exist.
         partial_path, _ = _declarative_tenant(Path(tmp) / "partial", accounts=True)
-        _result, output, _m = _upgrade(
+        result, output, _m = _upgrade(
             partial_path, as_root=True, exists={"porter-designer"}, runner=_live_runner(partial_path)
         )
-        assert "do not agree" in output or "withholding" in output, output
+        assert result == 1, output
+        assert "checkpoint before repatriation" in output, output
         assert "deploy-restart" not in output, output
 
 
@@ -927,8 +884,7 @@ def test_a_forged_tenant_journal_cannot_release_the_activation() -> None:
         _result, output, _m = _upgrade(
             config_path, as_root=True, exists=set(), board=_board_with_marker(False)
         )
-        assert "withholding" in output, output
-        assert "deploy-restart" not in output, output
+        assert "finish-upgrade porter" in output, output
         trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
         assert team_launcher.upgrade_phase_state(trusted, "director") != "done", trusted
         # Root's record is a different file in a directory the tenant does not own.
@@ -1009,9 +965,10 @@ def _tenant_before_cutover(tmp: Path) -> tuple[Path, Path, Path, set[str]]:
 
 
 def _cut_over(config_path, source_repo, board_root, accounts, *, deploy: bool = True):
-    """Run the invocation that performs the transaction. Returns its output."""
+    """Repatriate a checkpointed tenant and report the separate release step."""
     deploys: list[str] = []
     with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+        tenant.live = False
         _result, output, _m = _upgrade(
             config_path,
             as_root=True,
@@ -1026,32 +983,25 @@ def _cut_over(config_path, source_repo, board_root, accounts, *, deploy: bool = 
 
 
 def test_the_release_the_transaction_deployed_is_reported_done_not_owed() -> None:
-    """The transaction switches the release, so no operator deploy is left."""
+    """Repatriation never folds the separately owned release step into itself."""
     with tempfile.TemporaryDirectory(prefix="release-phase-done.") as tmp:
         config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
         target = _run_git(["git", "rev-parse", "origin/main"], cwd=source_repo).stdout.strip()
 
         output, deploys = _cut_over(config_path, source_repo, board_root, accounts)
 
-        assert "running under per-role identities" in output, output
-        # The deploy happened once, inside the transaction, and moved the pointer.
-        assert len(deploys) == 1, deploys
-        assert (board_root / "current").resolve().name == target
-        assert "release unchanged; no release deploy needed" in output, output
-        assert "board release is deployed and no further deploy is needed" in output, output
-        # The sentence that sent an operator looking for a deploy that must not happen.
-        assert "after that deploy" not in output, output
-        assert "deployment sequence" not in output, output
-        # The phase says so too, in root's own record.
+        assert "repatriated porter's resumable role state" in output, output
+        assert deploys == [], deploys
+        assert (board_root / "current").resolve().name == "1" * 40
+        assert target in output, output
+        assert "matching-release deployment sequence" in output, output
+        assert "after that deploy" in output, output
         config = team_launcher.load_project_config("porter", config_path)
         trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
-        assert team_launcher.upgrade_phase_state(trusted, "release") == "done", trusted
-        assert "identities transaction switched it" in trusted["phases"]["release"]["detail"]
+        assert team_launcher.upgrade_phase_state(trusted, "release") == "ready", trusted
         assert any(
-            line.split()[:3] == ["release", "operator", "done"] for line in output.splitlines()
+            line.split()[:3] == ["release", "operator", "ready"] for line in output.splitlines()
         ), output
-        # The director's step is still named, and is still the director's.
-        assert "The remaining step is the director's" in output, output
         assert "finish-upgrade porter" in output, output
         assert "root cannot make that write" in output, output
 
@@ -1108,18 +1058,17 @@ def test_a_dry_run_reports_the_deployed_release_and_records_nothing() -> None:
             )
 
         assert deploys == [], deploys
-        assert "board release is deployed and no further deploy is needed" in output, output
+        assert "matching-release deployment sequence" in output, output
         assert config_path.read_bytes() == before_config
         assert journal_path.read_bytes() == before_journal
 
 
 def test_the_legacy_to_cutover_to_director_sequence_names_one_remaining_step() -> None:
-    """Legacy tenant, operator accounts, transaction, director -- and no second deploy."""
+    """Live refusal, checkpointed repatriation, then the director-owned phase."""
     with tempfile.TemporaryDirectory(prefix="release-phase-sequence.") as tmp:
         config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
 
-        # 1. Legacy: the accounts do not exist, so nothing is deployed and no
-        #    deploy is offered.
+        # 1. Live legacy panes stop the migration before any release action.
         deploys: list[str] = []
         with _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
             _result, first, _m = _upgrade(
@@ -1127,18 +1076,17 @@ def test_the_legacy_to_cutover_to_director_sequence_names_one_remaining_step() -
                 runner=_deploying_runner(tenant.runner(), board_root=board_root, deploys=deploys),
                 board=_board_with_marker(False), source_repo=source_repo,
             )
-        assert "still share the project account" in first, first
-        assert "withholding" in first, first
+        assert "checkpoint before repatriation" in first, first
         assert deploys == [], deploys
         assert "no further deploy is needed" not in first, first
 
-        # 2. The operator creates the accounts; the transaction switches the
-        #    release itself, and the output names only the director's step.
+        # 2. After checkpointing, state is repatriated and the release remains
+        #    an explicit operator-owned phase.
         second, deploys = _cut_over(config_path, source_repo, board_root, accounts)
-        assert "running under per-role identities" in second, second
-        assert len(deploys) == 1, deploys
-        assert "no further deploy is needed" in second, second
-        assert "deployment sequence" not in second, second
+        assert "repatriated porter's resumable role state" in second, second
+        assert deploys == [], deploys
+        assert "matching-release deployment sequence" in second, second
+        assert "after that deploy" in second, second
 
         # 3. The director's own write, from the director's own account, and the
         #    release it reports is the one already running.
@@ -1166,11 +1114,10 @@ def test_the_legacy_to_cutover_to_director_sequence_names_one_remaining_step() -
             team_launcher._open_board_url = original_opener
             team_launcher.local_account_exists = original_exists
         finished = "\n".join(printed)
-        assert "no release deploy needed" in finished, finished
-        assert "deployment sequence" not in finished, finished
+        assert "matching-release deployment sequence" in finished, finished
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
         assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
-        assert team_launcher.upgrade_phase_state(journal, "release") == "done", journal
+        assert team_launcher.upgrade_phase_state(journal, "release") == "ready", journal
 
 
 def test_the_upgrade_documentation_describes_the_flow_that_exists() -> None:
@@ -1241,17 +1188,16 @@ def test_the_operator_artifact_describes_the_sequence_that_exists() -> None:
 
 
 def test_the_upgrade_writes_that_artifact_when_the_accounts_are_missing() -> None:
-    """The corrected text is what a real upgrade puts in front of an operator."""
+    """Project-account migration never publishes an account-creation artifact."""
     with tempfile.TemporaryDirectory(prefix="role-account-artifact-written.") as tmp:
         config_path, _ = _declarative_tenant(Path(tmp))
         _result, output, _m = _upgrade(config_path, as_root=True, exists=set())
         config = team_launcher.load_project_config("porter", config_path)
-        written = team_launcher.trusted_role_account_migration_path(config).read_text(
-            encoding="utf-8"
-        )
-        assert "porter-role-accounts.sh" in output, output
-        assert "systemctl restart" not in written, written
-        assert "switchyard finish-upgrade porter" in written, written
+        assert "repatriated porter's resumable role state" in output, output
+        assert not team_launcher.trusted_role_account_migration_path(config).exists()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        assert payload["role_state_isolation"] is True
+        assert all("run_as_user" not in role for role in payload["roles"])
 
 
 def main() -> int:

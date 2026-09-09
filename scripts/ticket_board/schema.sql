@@ -3965,6 +3965,24 @@ BEGIN
 END;
 $$;
 
+--
+-- The capabilities that make a role the one controlling a project. One
+-- definition, so the declarative authority layer and everything else that asks
+-- "who controls this project" agree by construction rather than by both
+-- spelling 'director' (SYRD-49).
+CREATE OR REPLACE FUNCTION ticket_board.control_capabilities()
+RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT ARRAY['set_manually_controlled', 'merge']::text[];
+$$;
+
+-- The narrated overrides that belong to that role and to nobody else. The API
+-- advertises both names for the one database entry point; both are named here
+-- so the two layers cannot drift apart (SYRD-78).
+CREATE OR REPLACE FUNCTION ticket_board.control_override_actions()
+RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT ARRAY['force_move', 'override_move']::text[];
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.require_actor(
     p_allowed_roles text[],
     p_action text
@@ -6859,6 +6877,27 @@ DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(propose
     queued_for text; reserved_by text;
 BEGIN
     IF actor IS NULL THEN RAISE EXCEPTION 'configured ticket writes require a registered actor' USING ERRCODE='42501'; END IF;
+    -- A narrated override moves a ticket the declared workflow will not: that
+    -- is what it is for, and the transition table cannot describe it without
+    -- describing its own bypass. Only ticket_board.force_move sets this, it is
+    -- transaction-local, and reaching it already required the control role's
+    -- capabilities. The legacy trigger has always had this escape; the
+    -- declarative one did not, so the operation was refused here even after the
+    -- capability layer let it through (SYRD-78).
+    --
+    -- It does not license a sign-off. An override that raised one would be
+    -- manufacturing the review it exists to route around, so a sign-off flag
+    -- that moves under it is refused rather than written.
+    IF current_setting('ticket_board.force_move', true) = 'on' THEN
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF flag.value->>'kind'='signoff'
+               AND ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg)
+                   IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg) THEN
+                RAISE EXCEPTION 'a forced move cannot change sign-off %', flag.key USING ERRCODE='42501';
+            END IF;
+        END LOOP;
+        RETURN proposed;
+    END IF;
     IF previous.state=proposed.state THEN
         IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director' THEN
             RAISE EXCEPTION 'only director may reassign without transition' USING ERRCODE='42501'; END IF;
@@ -7275,7 +7314,31 @@ BEGIN
     IF ticket_board.declared_workflow() IS NOT NULL THEN
         actor := ticket_board.current_actor_role();
         caller_role := ticket_board.current_app_actor();
-        IF actor <> 'ticket_board_service' OR NOT EXISTS (SELECT FROM ticket_board.workflow_roles r WHERE r.name=caller_role AND (r.definition->>'active')::boolean AND r.definition->'capabilities' ? CASE p_action WHEN 'set_awaiting_role' THEN 'await_role' ELSE p_action END) THEN
+        IF actor <> 'ticket_board_service' OR NOT EXISTS (
+            SELECT FROM ticket_board.workflow_roles r
+            WHERE r.name = caller_role
+              AND (r.definition->>'active')::boolean
+              AND (
+                  r.definition->'capabilities' ? CASE p_action
+                      WHEN 'set_awaiting_role' THEN 'await_role' ELSE p_action END
+                  -- A narrated override is not an ordinary stage capability.
+                  -- These two exist to move a ticket the declared workflow
+                  -- will not, so a workflow that declared them as capabilities
+                  -- would be declaring its own bypass -- and every project
+                  -- would need a document migration before its Director could
+                  -- use an operation the API has always advertised. The
+                  -- authority is the control role, derived from the
+                  -- capabilities that define one rather than from the name
+                  -- 'director', so a project whose control role is called
+                  -- something else is answered the same way (SYRD-49,
+                  -- SYRD-78). Every other role is refused here, before any of
+                  -- the operation's own safety checks run.
+                  OR (
+                      p_action = ANY (ticket_board.control_override_actions())
+                      AND r.definition->'capabilities' ?& ticket_board.control_capabilities()
+                  )
+              )
+        ) THEN
             RAISE EXCEPTION 'role % cannot call %', caller_role,p_action USING ERRCODE='42501';
         END IF;
         RETURN actor;

@@ -857,6 +857,68 @@ def main():
                 comment["text"] == "Historical draft note"
                 for comment in retained["comments"]
             )
+            # SYRD-78: the API has always advertised force-move and
+            # override-move to the control role, and declarative capability
+            # enforcement refused both before their own narrated checks ran.
+            # The authority is the control role, derived from the capabilities
+            # that define one rather than from the name 'director'.
+            from scripts.ticket_board.server import OPERATION_ALLOWED_ROLES
+
+            control_roles = {
+                role["name"]
+                for role in app.workflow_configuration()["roles"]
+                if {"set_manually_controlled", "merge"} <= set(role.get("capabilities", []))
+            }
+            assert control_roles, "this workflow declares a control role"
+            for operation in ("force_move", "override_move"):
+                # The two layers agree about who may ask, which is the whole
+                # point of this alignment.
+                assert OPERATION_ALLOWED_ROLES[operation] == control_roles, (
+                    operation, OPERATION_ALLOWED_ROLES[operation], control_roles
+                )
+
+            forced_id = "PGU-91"
+            before = app.get_ticket(forced_id)
+            assert before["state"] == "draft"
+            # Every role that is not the control role is refused, on a request
+            # that is otherwise entirely valid, and the refusal is the
+            # capability one rather than anything the move itself would say.
+            for role in ("main", "audit", "inspector", "user"):
+                rejected(
+                    lambda role=role: app.force_move_ticket(
+                        forced_id, "audit", "audit", caller_role=role
+                    ),
+                    "cannot call force_move",
+                )
+            unchanged = app.get_ticket(forced_id)
+            assert unchanged["state"] == before["state"], unchanged
+            assert unchanged["assignee"] == before["assignee"], unchanged
+
+            forced = app.force_move_ticket(forced_id, "audit", "audit", caller_role="director")
+            assert forced["state"] == "audit", forced
+            assert forced["assignee"] == "audit", forced
+            # A narrated move does not manufacture the sign-offs the stage it
+            # lands in would otherwise require.
+            assert forced["audit_signoff"] is False, forced
+            assert forced["inspector_signoff"] is False, forced
+            assert forced["user_signoff"] is False, forced
+            # And the operation's own checks still run for the role that may
+            # ask: an invalid state is refused as an invalid state.
+            rejected(
+                lambda: app.force_move_ticket(
+                    forced_id, "not_a_stage", "audit", caller_role="director"
+                ),
+                "invalid state",
+            )
+            rejected(
+                lambda: app.force_move_ticket(
+                    forced_id, "audit", "not_a_role", caller_role="director"
+                ),
+                "invalid assignee",
+            )
+            still_forced = app.get_ticket(forced_id)
+            assert still_forced["state"] == "audit", still_forced
+
             print(
                 "declarative workflow: gates, actor checks, kickback owner, configuration CAS/dry-run/idempotence and second reviewer passed"
             )

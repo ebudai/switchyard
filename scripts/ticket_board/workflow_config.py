@@ -42,6 +42,43 @@ CAPABILITIES = {
     "dismiss_notification",
     "reassign",
 }
+# The control floor: what a declarative document may never take away from the
+# director, and what it may never give. A tenant configures its own pipeline;
+# it does not get to leave the project without a controller, and it does not get
+# to make the controller a reviewer of its own work (SYRD-82).
+#
+# Each entry is here because it carries one of the authorities the ticket names,
+# not because the current document happens to list it:
+#   reassign                -> route/reassign: move work to another owner
+#   set_manually_controlled -> hold; with `merge`, half of what identifies the
+#                              control role, which is what the database derives
+#                              force_move/override_move authority from (SYRD-78)
+#   set_blockers            -> block
+#   merge                   -> merge; the other half of that identity
+#   edit_fields             -> hierarchy (a ticket's parent is set through it)
+#   dismiss_notification    -> notification recovery
+# Queue, defer, cancel and reopen are transitions rather than capabilities, so
+# they are held by the structural rules below instead: a director that cannot
+# leave a stage has lost them whatever its capability list says.
+DIRECTOR_CONTROL_CAPABILITIES = frozenset(
+    {
+        "reassign",
+        "set_manually_controlled",
+        "set_blockers",
+        "merge",
+        "edit_fields",
+        "dismiss_notification",
+    }
+)
+# The subset that identifies which role is the controller, for consumers that
+# must find it without trusting the name. Kept here so it cannot drift from the
+# floor: a discriminator naming a capability the floor does not guarantee would
+# stop finding the director the moment a tenant dropped it.
+DIRECTOR_IDENTIFYING_CAPABILITIES = frozenset(
+    {"merge", "set_blockers", "set_manually_controlled"}
+)
+assert DIRECTOR_IDENTIFYING_CAPABILITIES <= DIRECTOR_CONTROL_CAPABILITIES
+
 RESERVED_FLAGS = {
     "id",
     "ticket_number",
@@ -277,6 +314,11 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         "invalid explicit stage removals",
     )
     need(roles[DIRECTOR_ROLE]["active"], "director must remain active")
+    stripped = sorted(DIRECTOR_CONTROL_CAPABILITIES - set(roles[DIRECTOR_ROLE]["capabilities"]))
+    need(
+        not stripped,
+        "director must keep its control capabilities: " + ", ".join(stripped),
+    )
     stages: dict[str, Any] = {}
     for stage in cfg["stages"]:
         need(isinstance(stage, dict), "stage must be an object")
@@ -475,6 +517,41 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             any(stages[n]["terminal"] for n in reached),
             f"stage cannot reach a terminal: {name}",
         )
+    # What the capability list cannot express. Queue, defer, cancel and reopen
+    # are transitions, and their names are the tenant's to choose, so the floor
+    # is stated as the shape they have to leave behind rather than as a list of
+    # actions to look for: a director that cannot leave a stage has lost control
+    # of every ticket sitting in it, whatever the document calls the move
+    # (SYRD-82).
+    director_exits: set[str] = set()
+    director_reopens: set[str] = set()
+    for tr in cfg["transitions"]:
+        if DIRECTOR_ROLE not in tr["actors"]:
+            continue
+        director_exits.add(tr["from"])
+        if tr["primitive"] == "reopen":
+            director_reopens.add(tr["from"])
+    stuck = sorted(
+        name for name, stage in stages.items() if not stage["terminal"] and name not in director_exits
+    )
+    need(not stuck, "director must be able to move work out of every stage: " + ", ".join(stuck))
+    sealed = sorted(
+        name for name, stage in stages.items() if stage["terminal"] and name not in director_reopens
+    )
+    need(not sealed, "director must be able to reopen every terminal stage: " + ", ".join(sealed))
+    # The other half of the floor, and the one that is a prohibition rather than
+    # a guarantee. An `approve` transition is what writes its source stage's
+    # sign-off flag, so listing the director among its actors is how a document
+    # would hand the controller the power to approve the work it directs.
+    approvals = sorted(
+        tr["action"]
+        for tr in cfg["transitions"]
+        if tr["primitive"] == "approve" and DIRECTOR_ROLE in tr["actors"]
+    )
+    need(
+        not approvals,
+        "director must not be granted sign-off authority: " + ", ".join(approvals),
+    )
     queue = cfg.setdefault("queue", None)
     if queue is not None:
         need(

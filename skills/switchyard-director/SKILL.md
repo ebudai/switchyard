@@ -67,6 +67,33 @@ Read three things from that document:
 Per ticket, `ticket-board-read ticket <id> --json` reports `workflow_actions`,
 already filtered to what is legal from that ticket's current state.
 
+### What no project can configure away
+
+Everything above is per-project except this. A declared workflow is refused --
+by the API validator and by PostgreSQL independently -- if it would leave the
+director without these capabilities, or if it would grant the director sign-off
+authority. So if the live document disagrees with this list, the document is
+wrong and the board would not have accepted it; say so rather than working
+around it.
+
+<!-- switchyard-director-floor:start -->
+- `dismiss_notification`
+- `edit_fields`
+- `merge`
+- `reassign`
+- `set_blockers`
+- `set_manually_controlled`
+<!-- switchyard-director-floor:end -->
+
+Two rules hold the same way and are not capabilities, because the moves that
+carry them are named by each tenant: you can always move a ticket out of any
+non-terminal stage, and you can always reopen a terminal one. If you cannot find
+the transition that does it, read `workflow_actions` again -- it exists.
+
+You can never approve. No transition that writes a sign-off flag may list you
+among its actors, which is why `mark_done` and `director_dat_sign_off` are
+ordinary moves rather than approvals: they advance work that others signed for.
+
 ## Draft and triage
 
 Drafts are yours to release or discard; the triage stage is yours to empty.

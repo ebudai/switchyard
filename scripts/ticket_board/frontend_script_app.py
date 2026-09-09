@@ -535,6 +535,30 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       const consumed = new Set();
       let consumedComment = false;
 
+      // SYRD-83: the Director's generic edit is one authenticated action, not a
+      // decomposition. Everything below turns a patch into the workflow action
+      // that would ordinarily carry each field, which is exactly what a
+      // Director editing across a stage or an owner has to be able to skip. The
+      // reason travels with it and the database records the old and new value
+      // of every field that actually moved.
+      if (patch && patch.director_edit) {
+        const reason = actionReason(patch);
+        if (!reason) {
+          throw new Error('a Director edit requires a reason');
+        }
+        const fields = {};
+        Object.keys(patch).forEach((key) => {
+          if (['director_edit', 'comment', 'reason', 'text'].includes(key)) return;
+          fields[key] = patch[key];
+        });
+        return updateTicketAction(
+          ticketId,
+          'director_edit',
+          { patch: fields, reason },
+          normalizedCaller,
+        );
+      }
+
       if (Object.prototype.hasOwnProperty.call(patch, 'state')) {
         const nextState = String(patch.state || '').trim().toLowerCase();
         if (nextState === 'in_progress' && patch.comment && previousState === 'inspection') {

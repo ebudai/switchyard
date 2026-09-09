@@ -1295,11 +1295,25 @@ def _launch_separate(
         output, layout, gui_user=gui_user or team_launcher.current_user_name(), runner=runner
     )
     if refusal:
+        # Named precisely, because the two ways to arrive here need different
+        # things said. Through the control bridge this process is the project
+        # owner: it has no way into the desktop account's state directory and no
+        # way into that person's compositor either, so the answer is the
+        # privileged route rather than anything this invocation can retry
+        # (SYRD-90).
+        through_bridge = bool(os.environ.get(team_launcher.TENANT_CONTROL_CALLER_ENV, "").strip())
+        arrived = (
+            " This invocation came through the tenant control bridge, which runs as "
+            f"{team_launcher.current_user_name()}: only root can hand a layout to another "
+            "account."
+            if through_bridge
+            else ""
+        )
         raise SystemExit(
-            f"switchyard: refusing to open {config.project}'s presentation window: {refusal}. "
-            f"A terminal handed a layout it cannot read aborts before anything appears; run "
-            f"`sudo switchyard {config.project}` from {gui_user or 'the desktop account'}'s own "
-            "session, which can."
+            f"switchyard: refusing to open {config.project}'s presentation window: {refusal}."
+            f"{arrived} A terminal handed a layout it cannot read aborts before anything appears; "
+            f"run `sudo switchyard {config.project}` from "
+            f"{gui_user or 'the desktop account'}'s own session, which can."
         )
     result = team_launcher.launch_konsole_window(
         output,
@@ -1357,11 +1371,18 @@ def launch_presentation(
     if layout == "viewer":
         _launch_viewer(config, state, runner=owner_runner)
     elif layout == "separate":
+        # Deliberately not derived from the presentation state path. That
+        # path is the tenant's own project-state directory, 0700 and owned by
+        # the project owner, so a layout written beside it is one the desktop
+        # account cannot open however it is chowned -- Konsole reported "A
+        # problem occurred when loading the Layout" and showed a blank window.
+        # Where the layout goes is the one question
+        # `desktop_presentation_layout_path` exists to answer, and bootstrap
+        # already asks it; this is the same launch (SYRD-90).
         _launch_separate(
             config,
             state,
             config_path=config_path,
-            output_path=state_path.with_name(f"{config.project}-presentation-layout.json"),
             runner=runner,
             process_launcher=process_launcher,
         )

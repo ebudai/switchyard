@@ -312,6 +312,27 @@ input to; the same is true of a role whose worktree failed to prepare, and of th
 display-slot proxies, which have always ended this way. A pane that cannot run
 is a dead tab, never a prompt.
 
+**The window is the process, not what a process's arguments mention.** A
+privileged launch reaches the desktop account through `sudo -u <user> -- env -i
+... konsole ...`, and `sudo` stays as the parent to relay the exit status. Its
+argv names the terminal and the layout, but it is not a terminal: it opens no
+tab and there is no shell behind it, and the terminal it started -- the real one,
+running as the desktop account -- is a separate process that this scan finds on
+its own merits. Counting the wrapper reported a root window that did not exist
+and told an operator to replace a window that was already correct. What decides
+is the program a process is running, so a shell that started a terminal is not
+one either, while the terminal it started still is (SYRD-90).
+
+**The layout goes where the terminal can read it.** Konsole is handed a `--layout`
+path and opens it as the desktop account. The tenant's project-state directory is
+0700 and its files 0600, both owned by the project owner, so a layout written
+there is unreadable however it is chowned afterwards -- Konsole reports "A problem
+occurred when loading the Layout" and shows a blank window. It belongs under the
+desktop account's own state directory, which `desktop_presentation_layout_path()`
+decides; both the bootstrap and the ordinary launch ask it, rather than the
+ordinary one deriving a path beside the presentation state it happened to be
+holding (SYRD-90).
+
 A window opened by an earlier release can still be running as root, and the
 tenant cannot signal it. `switchyard <project>`, `switchyard status` and
 `switchyard upgrade` look for one and refuse to report the project safely

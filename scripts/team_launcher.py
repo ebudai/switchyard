@@ -5009,10 +5009,14 @@ def presentation_window_processes(
         argv = _proc_cmdline(proc_root, pid)
         if not argv:
             continue
-        program = _command_name(argv[0])
-        if program not in PRESENTATION_PROGRAM_NAMES and not any(
-            _command_name(part) in PRESENTATION_PROGRAM_NAMES for part in argv
-        ):
+        # What the process IS, not what its arguments mention. A privileged
+        # launch reaches the desktop account through `sudo -u <user> -- env -i
+        # ... konsole ...`, and sudo stays as the parent: its argv names konsole
+        # and the layout, but it is not a terminal and there is no shell behind
+        # any tab of it. Counting it reported a root window that does not exist,
+        # while the terminal it started -- the real one, running as the desktop
+        # account -- is scanned here on its own merits (SYRD-90).
+        if _command_name(argv[0]) not in PRESENTATION_PROGRAM_NAMES:
             continue
         if not any(marker in part for part in argv for marker in markers):
             continue

@@ -423,6 +423,11 @@ class TenantReleaseStatus:
     source_repo: Path
     resolve_error: str = ""
     clone_source_repo: Path | None = None
+    #: Where this tenant's board actually listens. Carried because the deploy
+    #: script's own defaults are a different tenant's board on a shared host
+    #: (SYRD-87 R6).
+    board_port: str = ""
+    board_socket: str = ""
 
     @property
     def unchanged(self) -> bool:
@@ -5828,14 +5833,29 @@ def refresh_generated_project_runtime_artifacts(
         if migrated_fields
         else ""
     )
-    # The staged unit always carries the real table. Withholding it is not a
-    # compatibility authority: the current server resolves every local peer
-    # through that table, so an empty one grants no role to anybody. Safety
-    # comes from WHEN the unit is installed and the release deployed -- the
-    # identities transaction installs and restarts them only once the processes
-    # serving the roles are the accounts it names (SYRD-45).
+    # The staged unit carries the table that matches the identities the tenant
+    # is actually running, which is not always the one the root baseline was
+    # written with.
+    #
+    # A tenant that has crossed to the one-project-account runtime has no
+    # per-role accounts at all: every role runs as the project account and the
+    # board authorises a registered process instead of a uid. Rendering the old
+    # table for it produces a unit that both names retired accounts and omits
+    # TICKET_BOARD_PROCESS_AUTHORITY=1, so the board comes up in legacy_uid mode
+    # resolving peers through accounts that no longer exist -- which is a board
+    # no role can write to, the director included (SYRD-87 R6).
+    #
+    # The migration state comes from the tenant's configuration, which is the
+    # document the identities transaction writes and then verifies against the
+    # kernel-read uid of every role process. The tenant's plan.json is still not
+    # consulted for it. The trust boundary is intact in the direction that
+    # matters: the only thing this can do is EMPTY the table. It can never name
+    # an account, so a tenant that lied about its migration state would remove
+    # its own roles' authority rather than acquire anybody else's -- and an
+    # empty table grants nothing to nobody, which is the property the previous
+    # comment relied on (SYRD-39).
     def _for_current_identities(plan: ProjectBoardProvision) -> ProjectBoardProvision:
-        return plan
+        return plan_for_current_identities(plan, config)
 
     # What the tenant's document said when this upgrade started, captured before
     # anything below republishes it. Root judges the document it found: a value
@@ -6194,6 +6214,43 @@ def _privileged_baseline_plan(
     )
 
 
+def plan_for_current_identities(
+    plan: ProjectBoardProvision, config: ProjectConfig
+) -> ProjectBoardProvision:
+    """The plan as the identities actually running require it to be rendered.
+
+    Module level rather than a closure so the contract regression can drive the
+    decision itself instead of the rendering that follows it.
+    """
+    if not _tenant_runs_on_project_account(config):
+        return plan
+    if not plan.role_accounts:
+        return plan
+    return replace(plan, role_accounts=())
+
+
+def _tenant_runs_on_project_account(config: ProjectConfig) -> bool:
+    """Whether this tenant has crossed to the one-project-account runtime.
+
+    Both halves, because either alone is ambiguous: the flip is recorded on the
+    configuration, and every role must actually name the project account. A
+    configuration that still gives a role its own account has not crossed,
+    whatever the flag says, and is left on its per-role table.
+    """
+    if not config.role_state_isolation:
+        return False
+    if not config.roles:
+        return False
+    owner = (config.run_as_user or "").strip()
+    if not owner:
+        return False
+    for role in config.roles:
+        account = (getattr(role, "run_as_user", "") or "").strip()
+        if account and account != owner:
+            return False
+    return True
+
+
 def authoritative_refresh_plan(
     baseline: ProjectBoardProvision, tenant_data: dict[str, Any]
 ) -> tuple[ProjectBoardProvision, list[str], list[str]]:
@@ -6535,6 +6592,10 @@ def tenant_release_status(
         source_repo=resolved_source_repo,
         resolve_error=resolve_error,
         clone_source_repo=clone_source_repo,
+        # From the tenant's own plan, which is where the unit's --port and
+        # --unix-socket come from, so the deploy probes the board it deployed.
+        board_port=str(plan_data.get("port") or "").strip(),
+        board_socket=str(plan_data.get("socket_path") or "").strip(),
     )
 
 
@@ -6545,6 +6606,20 @@ def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> 
         f"BOARD_ROOT={status.board_root}",
         f"DEPLOY_REF={status.deploy_ref}",
     ]
+    # Where this tenant's board listens, named rather than defaulted.
+    #
+    # ticket-board-service.sh falls back to BOARD_PORT=8770, which on a
+    # multi-tenant host is another tenant's board and is listening. The deploy's
+    # own health gates then probed that board: the HTTP smoke passed against
+    # http://127.0.0.1:8770/api/board, and the build-id check spent its whole
+    # ten-second budget comparing a foreign board's build to this release's
+    # before rolling back a syrd process that had started correctly. A gate that
+    # can pass by reaching somebody else's service is not a check on this one
+    # (SYRD-87 R6).
+    if status.board_port:
+        deploy_env.append(f"BOARD_PORT={status.board_port}")
+    if status.board_socket:
+        deploy_env.append(f"BOARD_UNIX_SOCKET={status.board_socket}")
     if status.provisioned_system_unit is not None:
         deploy_env.append(f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={status.provisioned_system_unit}")
     if status.commit_git_dir:

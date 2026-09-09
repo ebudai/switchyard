@@ -133,6 +133,97 @@ TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
+ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+ACCOUNT_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+def configured_role_accounts(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """Parse the root-installed legacy role authority map, failing closed.
+
+    Process-authority projects deliberately carry no such map.  Older
+    per-role-account units do, and both notification delivery and its activity
+    probes must consult the same declarative mapping instead of guessing an
+    account from a tmux target (SYRD-66).
+    """
+    env = os.environ if environ is None else environ
+    raw = str(env.get("TICKET_BOARD_ROLE_ACCOUNTS") or "").strip()
+    if not raw:
+        return {}
+    accounts: dict[str, str] = {}
+    for item in raw.split(","):
+        fields = item.strip().split("=", 1)
+        if len(fields) != 2:
+            raise ValueError("TICKET_BOARD_ROLE_ACCOUNTS must contain role=account entries")
+        role, account = (field.strip() for field in fields)
+        if not ROLE_NAME_RE.fullmatch(role) or not ACCOUNT_NAME_RE.fullmatch(account):
+            raise ValueError(f"invalid TICKET_BOARD_ROLE_ACCOUNTS entry {item!r}")
+        if role in accounts:
+            raise ValueError(f"duplicate TICKET_BOARD_ROLE_ACCOUNTS role {role!r}")
+        accounts[role] = account
+    return accounts
+
+
+def role_aware_tmux_runner(
+    *,
+    environ: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """Route legacy tmux probes through their configured Unix authority.
+
+    The wrapper accepts only tmux argv.  A configured map makes unknown,
+    cross-project and target-less calls errors rather than silently probing the
+    project owner's server.  With no map, the argv is unchanged so an existing
+    shared-account tenant needs no new artifact.
+    """
+    env = os.environ if environ is None else environ
+    process_authority = str(env.get("TICKET_BOARD_PROCESS_AUTHORITY") or "").strip() == "1"
+    accounts = {} if process_authority else configured_role_accounts(env)
+    project = str(env.get("TICKET_BOARD_PROJECT") or env.get("PGU_TICKET_BOARD_PROJECT") or "").strip()
+
+    def refused(
+        args: list[str], message: str, *, check: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        if check:
+            raise subprocess.CalledProcessError(
+                125, args, output="", stderr=message
+            )
+        return subprocess.CompletedProcess(args, 125, stdout="", stderr=message)
+
+    def run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if not accounts:
+            return runner(args, **kwargs)
+        if not args or args[0] != "tmux":
+            return refused(
+                args, "role-aware runner accepts only tmux",
+                check=bool(kwargs.get("check")),
+            )
+        target = ""
+        for flag in ("-t", "-s"):
+            if flag in args:
+                index = args.index(flag) + 1
+                if index < len(args):
+                    target = str(args[index]).lstrip("=")
+                    break
+        session = target.split(":", 1)[0]
+        prefix = f"{project}-"
+        if not project or not session.startswith(prefix):
+            return refused(
+                args, f"refusing foreign tmux target {target!r}",
+                check=bool(kwargs.get("check")),
+            )
+        role = session[len(prefix) :]
+        account = accounts.get(role)
+        if not account:
+            return refused(
+                args, f"no configured role account for tmux target {target!r}",
+                check=bool(kwargs.get("check")),
+            )
+        return runner(
+            ["sudo", "-n", "-u", account, "/usr/bin/tmux", *args[1:]],
+            **kwargs,
+        )
+
+    return run
 WORK_EVIDENCE_REASONS = frozenset(
     {
         "hook_busy",
@@ -2392,15 +2483,24 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    try:
+        tmux_runner = role_aware_tmux_runner()
+    except ValueError as exc:
+        raise SystemExit(f"ticket notify listener: {exc}") from exc
+    gate = PaneActivityGate(
+        state_store=PaneHookStateStore(args.pane_state_dir),
+        cursor_position_runner=tmux_runner,
+        capture_pane_runner=tmux_runner,
+        pane_pid_runner=tmux_runner,
+        director_composing_timeout_seconds=args.director_composing_timeout_seconds,
+        idle_working_timer_sample_delay_seconds=args.idle_working_timer_sample_delay_seconds,
+    )
     listener = TicketBoardNotifyListener(
         conninfo=args.database,
         channel=args.channel,
         sender=DirectorctlSender(args.directorctl),
-        activity_gate=PaneActivityGate(
-            state_store=PaneHookStateStore(args.pane_state_dir),
-            director_composing_timeout_seconds=args.director_composing_timeout_seconds,
-            idle_working_timer_sample_delay_seconds=args.idle_working_timer_sample_delay_seconds,
-        ).is_working,
+        activity_gate=gate.is_working,
+        target_exists=lambda target: tmux_target_exists(target, runner=tmux_runner),
         reconnect_seconds=args.reconnect_seconds,
         poll_seconds=args.poll_seconds,
         pre_send_recheck_delay_seconds=args.pre_send_recheck_delay_seconds,

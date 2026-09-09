@@ -1897,6 +1897,22 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
     }
     if config.role_state_isolation:
         env["TICKET_BOARD_PROCESS_AUTHORITY"] = "1"
+    else:
+        # Runtime routing follows only explicit legacy bindings.  The
+        # migration renderer may synthesize canonical account names before it
+        # creates them; doing that here would misclassify a shared-account PGU
+        # config as partially migrated and make ordinary startup require
+        # artifacts it never installed (SYRD-66).
+        owner = config.run_as_user or current_user_name()
+        accounts = tuple(
+            (candidate.role, candidate.run_as_user)
+            for candidate in config.roles
+            if candidate.run_as_user and candidate.run_as_user != owner
+        )
+        if accounts:
+            env["TICKET_BOARD_ROLE_ACCOUNTS"] = ",".join(
+                f"{name}={account}" for name, account in accounts
+            )
     if config.run_as_user:
         # directorctl needs the owner's name to reach the display and viewer
         # sessions, which stay in the owner's tmux server (SYRD-39).
@@ -3234,6 +3250,11 @@ def _git_target_path_from_args(args: Sequence[str]) -> Path | None:
 
 
 def _git_owner_for_target(target: Path, owner_rules: Sequence[GitOwnerRule]) -> tuple[str, str]:
+    # A configured target must not be redirected after validation.  In
+    # particular, do not follow a role-owned worktree symlink into another
+    # tenant and then choose that destination's owner (SYRD-66).
+    if target.is_symlink():
+        return "", f"refusing symlink git target {target}"
     for rule in owner_rules:
         if rule.owner_user and _path_is_under(target, rule.root):
             return rule.owner_user, ""
@@ -3281,11 +3302,23 @@ def _config_git_owner_rules(config: ProjectConfig) -> list[GitOwnerRule]:
     owner_user = config.run_as_user or current_user_name()
     if not owner_user:
         return []
+    # Specific role roots precede the broad worktree base.  A migrated config
+    # can therefore validate each worktree through its declared role account,
+    # while missing paths still inherit the project owner rule used during
+    # ordinary shared-account provisioning (SYRD-66).
+    rules = [
+        GitOwnerRule(Path(role.workdir), role_run_as_user(config, role))
+        for role in config.roles
+        if role_run_as_user(config, role)
+        and config.repository is not None
+        and _normalized_path(Path(role.workdir)) != _normalized_path(config.repository)
+    ]
     roots: list[Path] = []
     if config.repository is not None:
         roots.append(config.repository)
     roots.extend(_control_repository_owned_roots(config))
-    return [GitOwnerRule(root, owner_user) for root in roots]
+    rules.extend(GitOwnerRule(root, owner_user) for root in roots)
+    return rules
 
 
 def _launcher_checkout_runner(

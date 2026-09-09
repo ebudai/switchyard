@@ -441,7 +441,25 @@ def _role_status(
     role = _role_by_name(config, role_name)
     if role is None:
         return {"role": role_name, "state": "removed", "live": False, "resumable": False}
-    live = _session_exists(role.tmux_session, runner=runner)
+    session_probe = runner(
+        ["tmux", "has-session", "-t", _exact_tmux_target(role.tmux_session)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    live = session_probe.returncode == 0
+    if not live:
+        error = str(getattr(session_probe, "stderr", "") or "").strip()
+        missing_markers = (
+            "can't find session",
+            "no server running",
+            "failed to connect to server",
+            "no such file or directory",
+        )
+        if error and not any(marker in error.lower() for marker in missing_markers):
+            raise RuntimeError(
+                f"tmux could not query {role_name}'s configured server: {error}"
+            )
     pane_dead = False
     if live:
         proc = runner(
@@ -696,6 +714,14 @@ def _proxy_client_flags(observer: bool) -> str:
     return ",".join(flags)
 
 
+def _proxy_crosses_account(
+    config: team_launcher.ProjectConfig, role: team_launcher.RoleConfig
+) -> bool:
+    worker_account = team_launcher.role_run_as_user(config, role)
+    owner_account = (config.run_as_user or team_launcher.current_user_name()).strip()
+    return bool(worker_account and worker_account != owner_account)
+
+
 def _proxy_command(
     config: team_launcher.ProjectConfig,
     role_name: str | None,
@@ -710,12 +736,25 @@ def _proxy_command(
     if role is not None and role_status.get("live"):
         recovery = f"switchyard present {config.project} recover {role_name}"
         message = f"{config.project}: {role_name} disconnected; use `{recovery}`"
-        attach = shlex.join(
+        attach_args = ["env", "TMUX="]
+        worker_account = team_launcher.role_run_as_user(config, role)
+        if _proxy_crosses_account(config, role):
+            # Historical migrated tenants keep one tmux server per role.  The
+            # project owner's display slot crosses that boundary through the
+            # preinstalled role-control grant, which permits only tmux as the
+            # configured role account: no root shell and no arbitrary program.
+            attach_args.extend(["/usr/bin/sudo", "-n", "-u", worker_account, "/usr/bin/tmux"])
+        else:
+            # Shared-account tenants (including legacy PGU and SYRD-69 process
+            # authority projects) keep the zero-artifact direct path.
+            attach_args.append("tmux")
+        attach_args.extend(
             [
-                "env", "TMUX=", "tmux", "attach", "-f", _proxy_client_flags(observer),
+                "attach", "-f", _proxy_client_flags(observer),
                 "-t", _exact_tmux_target(role.tmux_session),
             ]
         )
+        attach = shlex.join(attach_args)
         script = f"{attach}; printf '%s\\n' {shlex.quote(message)}; exec sleep 2147483647"
         return role.workdir, shlex.join(["sh", "-lc", script])
     state = role_status.get("state", "unavailable")
@@ -778,6 +817,19 @@ def _configure_display_session(
     status = _role_status(config, role_name, runner=runner) if role_name else {"state": "hidden", "live": False}
     role = _role_by_name(config, role_name or "")
     if role is not None and status.get("live"):
+        if _proxy_crosses_account(config, role):
+            # The desktop-facing display session is already locked, but its
+            # pane is a nested client of the role's tmux server.  Lock that
+            # transport too before attaching: otherwise the same keystrokes
+            # could reach the inner prefix and open a role-account shell or
+            # tmux command prompt (SYRD-66).
+            for lock_args in display_lock_commands(role.tmux_session):
+                lock_proc = runner(lock_args)
+                if lock_proc.returncode != 0:
+                    raise RuntimeError(
+                        f"tmux could not secure the {role_name} proxy transport "
+                        f"(exit {lock_proc.returncode})"
+                    )
         detach_proc = runner(
             [
                 "tmux", "set-option", "-t", _exact_tmux_target(f"{role.tmux_session}:"),

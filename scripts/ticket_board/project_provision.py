@@ -2039,6 +2039,9 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
         if plan.role_accounts
         else ""
     )
+    process_authority_line = (
+        "" if plan.role_accounts else "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1\n"
+    )
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
@@ -2058,7 +2061,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=HOME={plan.owner_home}
 Environment=TICKET_BOARD_DIRECTORCTL={plan.board_current}/scripts/directorctl
 Environment=TICKET_BOARD_PROJECT={plan.project}
-Environment=TICKET_BOARD_PROCESS_AUTHORITY=1
+{process_authority_line.rstrip()}
 {systemd_environment("TICKET_BOARD_PROJECT_NAME", plan.project_name)}
 Environment=TICKET_BOARD_TICKET_PREFIX={plan.ticket_prefix}
 Environment=TICKET_BOARD_COMMIT_GIT_DIR={plan.commit_git_dir}
@@ -2105,6 +2108,14 @@ def tenant_primary_group(owner_user: str) -> str:
 
 
 def render_listener_unit(plan: ProjectBoardProvision) -> str:
+    role_accounts_line = (
+        f"Environment=TICKET_BOARD_ROLE_ACCOUNTS={role_accounts_env(plan)}\n"
+        if plan.role_accounts
+        else ""
+    )
+    process_authority_line = (
+        "" if plan.role_accounts else "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1\n"
+    )
     return f"""[Unit]
 Description={plan.project} Ticket Board Notify Listener
 After=network.target postgresql.service
@@ -2118,7 +2129,8 @@ Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=TICKET_BOARD_PROJECT={plan.project}
-Environment=TICKET_BOARD_PROCESS_AUTHORITY=1
+{process_authority_line.rstrip()}
+{role_accounts_line.rstrip()}
 Environment=PGHOST=/var/run/postgresql
 Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}

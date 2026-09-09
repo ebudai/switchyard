@@ -48,6 +48,15 @@ controller also requires every role session and target to use the exact
 another tenant's tmux session. The ordinary commands run against the configured
 project owner's tmux server.
 
+An incompletely repatriated tenant can still declare a different
+`run_as_user` for a role. For that compatibility topology the display proxy
+uses the already-installed role-control interface to attach to that account's
+tmux server, and locks the inner worker session's prefix, secondary prefix and
+root key table before the nested client starts. A missing grant therefore
+fails before a display slot is created, while a shared-account or
+process-authority project takes the direct path and requires no compatibility
+artifact.
+
 All presentation worker, display-slot, and viewer targets use tmux exact-name
 selection. A missing session therefore cannot prefix-match, attach to, relabel,
 respawn, or stop a longer session name owned by another role.

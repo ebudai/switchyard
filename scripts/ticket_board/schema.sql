@@ -3983,6 +3983,20 @@ RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
     SELECT ARRAY['force_move', 'override_move']::text[];
 $$;
 
+-- What a declared document may never take away from the director. A tenant
+-- configures its own pipeline; it does not get to leave the project without a
+-- controller. `control_capabilities()` above is the subset that identifies
+-- which role that is, and is contained in this one by construction -- a
+-- discriminator naming something the floor does not guarantee would stop
+-- finding the director the moment a tenant dropped it (SYRD-82).
+CREATE OR REPLACE FUNCTION ticket_board.director_control_capabilities()
+RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT ARRAY[
+        'reassign', 'set_manually_controlled', 'set_blockers',
+        'merge', 'edit_fields', 'dismiss_notification'
+    ]::text[];
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.require_actor(
     p_allowed_roles text[],
     p_action text
@@ -6659,6 +6673,14 @@ BEGIN
        OR cardinality(role_names) <> (SELECT count(DISTINCT n) FROM unnest(role_names) n)
        OR NOT ARRAY['director','user','unassigned']::text[] <@ role_names
        OR NOT coalesce('director' = ANY(active_roles),false) THEN RAISE EXCEPTION 'missing or duplicate identities'; END IF;
+    IF NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') x
+        WHERE x->>'name'='director'
+          AND x->'capabilities' ?& ticket_board.director_control_capabilities()) THEN
+        RAISE EXCEPTION 'director must keep its control capabilities: %',
+            (SELECT string_agg(c, ', ' ORDER BY c) FROM unnest(ticket_board.director_control_capabilities()) c
+             WHERE NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') x
+                 WHERE x->>'name'='director' AND x->'capabilities' ? c));
+    END IF;
     FOR r IN SELECT value FROM jsonb_array_elements(cfg->'roles') LOOP
         IF jsonb_typeof(r->'name') IS DISTINCT FROM 'string' OR jsonb_typeof(r->'label') IS DISTINCT FROM 'string' OR jsonb_typeof(r->'kind') IS DISTINCT FROM 'string' OR jsonb_typeof(r->'active') IS DISTINCT FROM 'boolean' OR jsonb_typeof(r->'capabilities') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'role fields must have explicit types'; END IF;
         IF NOT r ?& ARRAY['name','label','kind','active','capabilities']
@@ -6763,6 +6785,44 @@ BEGIN
             ) THEN RAISE EXCEPTION 'stage cannot reach a terminal: %', s->>'name'; END IF;
         END IF;
     END LOOP;
+    -- Queue, defer, cancel and reopen are transitions, and their names belong to
+    -- the tenant, so the floor is the shape they must leave behind rather than a
+    -- list of actions to look for: a director that cannot leave a stage has lost
+    -- control of every ticket sitting in it, whatever the document calls the
+    -- move (SYRD-82).
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x
+        WHERE NOT (x->>'terminal')::boolean AND NOT EXISTS (
+            SELECT FROM jsonb_array_elements(cfg->'transitions') tx
+            WHERE tx->>'from'=x->>'name' AND tx->'actors' ? 'director')) THEN
+        RAISE EXCEPTION 'director must be able to move work out of every stage: %',
+            (SELECT string_agg(x->>'name', ', ' ORDER BY x->>'name')
+             FROM jsonb_array_elements(cfg->'stages') x
+             WHERE NOT (x->>'terminal')::boolean AND NOT EXISTS (
+                 SELECT FROM jsonb_array_elements(cfg->'transitions') tx
+                 WHERE tx->>'from'=x->>'name' AND tx->'actors' ? 'director'));
+    END IF;
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x
+        WHERE (x->>'terminal')::boolean AND NOT EXISTS (
+            SELECT FROM jsonb_array_elements(cfg->'transitions') tx
+            WHERE tx->>'from'=x->>'name' AND tx->>'primitive'='reopen' AND tx->'actors' ? 'director')) THEN
+        RAISE EXCEPTION 'director must be able to reopen every terminal stage: %',
+            (SELECT string_agg(x->>'name', ', ' ORDER BY x->>'name')
+             FROM jsonb_array_elements(cfg->'stages') x
+             WHERE (x->>'terminal')::boolean AND NOT EXISTS (
+                 SELECT FROM jsonb_array_elements(cfg->'transitions') tx
+                 WHERE tx->>'from'=x->>'name' AND tx->>'primitive'='reopen' AND tx->'actors' ? 'director'));
+    END IF;
+    -- The half of the floor that is a prohibition. An `approve` transition is
+    -- what writes its source stage's sign-off flag, so listing the director
+    -- among its actors is how a document would hand the controller the power to
+    -- approve the work it directs.
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') x
+        WHERE x->>'primitive'='approve' AND x->'actors' ? 'director') THEN
+        RAISE EXCEPTION 'director must not be granted sign-off authority: %',
+            (SELECT string_agg(x->>'action', ', ' ORDER BY x->>'action')
+             FROM jsonb_array_elements(cfg->'transitions') x
+             WHERE x->>'primitive'='approve' AND x->'actors' ? 'director');
+    END IF;
 END;
 $$;
 

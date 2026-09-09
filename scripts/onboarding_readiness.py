@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board.workflow_config import (  # noqa: E402
+    DIRECTOR_IDENTIFYING_CAPABILITIES,
     DIRECTOR_ONBOARDING_MIGRATION,
     DIRECTOR_ROLE,
 )
@@ -31,7 +32,11 @@ from scripts.ticket_board.workflow_config import (  # noqa: E402
 # declarative document rather than assumed from a name: a tenant is free to label its
 # roles, and a document where these do not land on exactly one role is reported as
 # ambiguous instead of guessed at.
-DIRECTOR_CAPABILITIES = frozenset({"merge", "set_blockers", "set_manually_controlled"})
+#
+# Taken from the workflow model rather than restated, so this cannot come to name
+# something the control floor does not guarantee -- a discriminator that did would
+# stop finding the director the moment a tenant dropped it (SYRD-82).
+DIRECTOR_CAPABILITIES = DIRECTOR_IDENTIFYING_CAPABILITIES
 
 READY = "ready"
 UNVERIFIED = "unverified"

@@ -270,6 +270,20 @@ def main():
                 }
             )
             second["transitions"].append(approve)
+            # A new stage needs a way out for the director, like every other
+            # stage has. Without it the document is refused: work routed into
+            # verification could be stranded there, and the control floor is
+            # what says so rather than an operator discovering it later
+            # (SYRD-82).
+            escape = copy.deepcopy(
+                next(
+                    tr
+                    for tr in second["transitions"]
+                    if tr["from"] == "inspection" and "director" in tr["actors"]
+                )
+            )
+            escape["from"] = "verification"
+            second["transitions"].append(escape)
             app.apply_workflow(
                 validate(second),
                 expected_revision=rev,
@@ -588,10 +602,15 @@ def main():
                 server.server_close()
                 thread.join()
             assert "workflow_actions" in app.snapshot()["tickets"][0]
-            # A five-stage tenant has a legal serial queue without any backlog stage.
+            # A compacted tenant has a legal serial queue without any backlog stage.
+            # `cancelled` is kept because the transitions into it are the
+            # director's way out of `in_progress` and `audit`: a document that
+            # dropped them would leave work only its implementer could move,
+            # which the control floor refuses (SYRD-82). It is a terminal, not a
+            # backlog, so the property this case is about is unchanged.
             act("PGU-4", "release_draft", "director")
             compact = copy.deepcopy(second)
-            names = {"analysis", "in_progress", "audit", "director_review", "done"}
+            names = {"analysis", "in_progress", "audit", "director_review", "done", "cancelled"}
             compact["stages"] = [
                 stage for stage in compact["stages"] if stage["name"] in names
             ]

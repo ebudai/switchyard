@@ -305,30 +305,54 @@ def run_checks(app, admin, base, write_token, document):
         app.get_ticket("PGU-2")["comments"]
     )
 
-    # ACCEPTANCE -- the capability is what grants it. A tenant document that
-    # does not name it takes the operation away again, from the director too.
-    without = copy.deepcopy(document)
-    director_role = next(role for role in without["roles"] if role["name"] == "director")
-    director_role["capabilities"] = [c for c in director_role["capabilities"] if c != "reassign"]
-    revision = app.workflow_document()["revision"]
-    app.apply_workflow(validate(without), expected_revision=revision, dry_run=False, caller_role="director")
+    # ACCEPTANCE -- the capability is what grants it, and a role that does not
+    # hold it is refused at both boundaries.
+    rejected(lambda: app.reassign_ticket("PGU-2", "main", reason="Direct.", caller_role="audit"), "cannot call reassign")
     ungranted = t.post_json(
         base,
         "/api/tickets/PGU-2/actions/reassign",
         {"assignee": "main", "reason": "Should not be possible."},
-        caller="director",
+        caller="audit",
         expect=403,
     )
     assert "cannot call reassign" in str(ungranted), ungranted
     assert app.get_ticket("PGU-2")["assignee"] == "ops"
-    # ... and the database refuses it independently of the server's gate.
-    rejected(lambda: app.reassign_ticket("PGU-2", "main", reason="Direct.", caller_role="audit"), "cannot call reassign")
-    # ACCEPTANCE -- the upgrade grants it back, once. The document now in the
-    # database is exactly what a tenant configured before this capability
-    # existed, so running the migration over it is the real upgrade case. The
-    # function bodies in that file are generated from schema.sql and held equal
-    # to it by ticket_board_schema_function_migration_test; what only the
-    # upgrade path can have is this backfill.
+
+    # SYRD-82 CHANGED THIS CASE. It used to take `reassign` away from the
+    # director to show the same thing, and to show that a deliberate removal
+    # survived the next upgrade. The control floor forbids that removal now: a
+    # document may not leave the project without a controller, and this ticket
+    # was written expecting that follow-up ("the capability floor (SYRD-82) are
+    # untouched"). What the removal was demonstrating is demonstrated above
+    # with a role that legitimately lacks the capability; what only the upgrade
+    # path can show is below, seeded the way a real pre-SYRD-77 tenant's row
+    # already is rather than by applying a document the validator now refuses.
+    without = copy.deepcopy(document)
+    director_role = next(role for role in without["roles"] if role["name"] == "director")
+    director_role["capabilities"] = [c for c in director_role["capabilities"] if c != "reassign"]
+    rejected(lambda: validate(without), "director must keep its control capabilities")
+
+    # ACCEPTANCE -- the upgrade grants it back, once. The function bodies in
+    # that file are generated from schema.sql and held equal to it by
+    # ticket_board_schema_function_migration_test; what only the upgrade path
+    # can have is this backfill.
+    stale = json.dumps(without)
+    assert "$d$" not in stale
+    t.psql(
+        admin,
+        f"""
+        INSERT INTO ticket_board.workflow_revisions(actor, document) VALUES ('seed', $d${stale}$d$::jsonb);
+        UPDATE ticket_board.workflow_configuration
+           SET revision=(SELECT max(revision) FROM ticket_board.workflow_revisions),
+               document=$d${stale}$d$::jsonb
+         WHERE singleton;
+        UPDATE ticket_board.workflow_roles SET definition=$d${stale}$d$::jsonb->'roles'->(
+            SELECT ordinality::int - 1 FROM jsonb_array_elements($d${stale}$d$::jsonb->'roles')
+                 WITH ORDINALITY AS e(value, ordinality) WHERE e.value->>'name'=ticket_board.workflow_roles.name)
+         WHERE name IN (SELECT x->>'name' FROM jsonb_array_elements($d${stale}$d$::jsonb->'roles') x);
+        """,
+    )
+    assert "reassign" not in director_capabilities(app.workflow_document()["document"])
     migration = (ROOT / "scripts/ticket_board/migrations/pgu926_syrd77_director_reassign.sql").read_text()
     stale_revision = app.workflow_document()["revision"]
     t.psql(admin, "BEGIN;\n" + migration + "\nCOMMIT;")
@@ -348,24 +372,10 @@ def run_checks(app, admin, base, write_token, document):
     )
     assert restored["ticket"]["assignee"] == "main", restored
 
-    # Re-running it changes nothing, and a director who removes the capability
-    # afterwards has made a decision the next upgrade must not quietly undo.
+    # Re-running it changes nothing.
     t.psql(admin, "BEGIN;\n" + migration + "\nCOMMIT;")
     assert app.workflow_document()["revision"] == granted["revision"]
-    removed = copy.deepcopy(granted["document"])
-    director_role = next(role for role in removed["roles"] if role["name"] == "director")
-    director_role["capabilities"] = [c for c in director_role["capabilities"] if c != "reassign"]
-    app.apply_workflow(
-        validate(removed),
-        expected_revision=granted["revision"],
-        dry_run=False,
-        caller_role="director",
-    )
-    deliberate = app.workflow_document()["revision"]
-    t.psql(admin, "BEGIN;\n" + migration + "\nCOMMIT;")
     after = app.workflow_document()
-    assert after["revision"] == deliberate, (after["revision"], deliberate)
-    assert "reassign" not in director_capabilities(after["document"]), after["document"]
 
     app.apply_workflow(
         validate(document),

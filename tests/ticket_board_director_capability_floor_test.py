@@ -289,21 +289,34 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
     its next workflow change for a state its director never chose would be the
     rule punishing the wrong party, so the migration grants what is missing,
     once, and records that it did.
+
+    The floor grows, so the upgrade is a sequence rather than one file: each
+    migration knows only the floor of its own release, and a tenant is level
+    with today's floor only once it has run all of them, in order. That is what
+    is driven here (SYRD-82, SYRD-83).
     """
     if not shutil.which("initdb") or not shutil.which("psql"):
         return
     import ticket_board_write_api_test as api
     from temporary_cluster import temporary_cluster
 
+    # A tenant from before either release: it has neither the capability the
+    # floor gained in SYRD-82 nor the one it gained in SYRD-83.
     stale = base_document()
     director_of(stale)["capabilities"] = [
-        c for c in director_of(stale)["capabilities"] if c != "reassign"
+        c
+        for c in director_of(stale)["capabilities"]
+        if c not in ("reassign", "director_edit")
     ]
     payload = json.dumps(stale)
     assert "$d$" not in payload
-    migration = (
-        ROOT / "scripts/ticket_board/migrations/pgu927_syrd82_director_capability_floor.sql"
-    ).read_text(encoding="utf-8")
+    migrations = [
+        (ROOT / "scripts/ticket_board/migrations" / name).read_text(encoding="utf-8")
+        for name in (
+            "pgu927_syrd82_director_capability_floor.sql",
+            "pgu928_syrd83_director_edit.sql",
+        )
+    ]
 
     with temporary_cluster(prefix="floor-upgrade-", shutdown="immediate") as cluster:
         conn = api.conninfo(cluster.socket_dir, cluster.port, "floor_upgrade")
@@ -330,7 +343,21 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
             conn, "SELECT definition->'capabilities' FROM ticket_board.workflow_roles WHERE name='director';"
         )
 
-        api.psql(conn, "BEGIN;\n" + migration + "\nCOMMIT;")
+        for index, migration in enumerate(migrations):
+            api.psql(conn, "BEGIN;\n" + migration + "\nCOMMIT;")
+            # Each one is idempotent on its own, and running it again must not
+            # write a revision nobody asked for.
+            reached = api.psql(conn, "SELECT revision FROM ticket_board.workflow_configuration;")
+            api.psql(conn, "BEGIN;\n" + migration + "\nCOMMIT;")
+            assert api.psql(conn, "SELECT revision FROM ticket_board.workflow_configuration;") == reached
+            if index == 0:
+                # The release that granted it knew nothing of the later one.
+                assert "director_edit" not in api.psql(
+                    conn,
+                    "SELECT definition->'capabilities' FROM ticket_board.workflow_roles "
+                    "WHERE name='director';",
+                )
+
         granted = api.psql(
             conn, "SELECT definition->'capabilities' FROM ticket_board.workflow_roles WHERE name='director';"
         )
@@ -338,10 +365,6 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
         # repair has to reach them and not only the document.
         for capability in sorted(DIRECTOR_CONTROL_CAPABILITIES):
             assert capability in granted, (capability, granted)
-
-        first = api.psql(conn, "SELECT revision FROM ticket_board.workflow_configuration;")
-        api.psql(conn, "BEGIN;\n" + migration + "\nCOMMIT;")
-        assert api.psql(conn, "SELECT revision FROM ticket_board.workflow_configuration;") == first
 
 
 def main() -> int:

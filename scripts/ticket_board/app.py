@@ -727,6 +727,35 @@ WHERE (r.definition->>'active')::boolean
                 )
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def director_edit_ticket(
+        self,
+        ticket_id: str,
+        patch: Any,
+        *,
+        reason: str,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """The Director's generic edit. Every check that matters is in the database.
+
+        Nothing is filtered or normalised here beyond the ticket id: the point
+        of this operation is that one place decides what a Director may change
+        and what no path may manufacture, and that place has to be the one every
+        caller goes through (SYRD-83).
+        """
+        ticket_id = str(ticket_id).strip().upper()
+        if not isinstance(patch, dict):
+            raise ValueError("director_edit patch must be an object")
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.director_edit(%s, %s::jsonb, %s);",
+                    (ticket_id, json.dumps(patch), str(reason)),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         actor_normalized = str(actor).strip().lower()
         if actor_normalized != "director":

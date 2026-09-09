@@ -41,6 +41,10 @@ CAPABILITIES = {
     "merge",
     "dismiss_notification",
     "reassign",
+    # SYRD-83: the Director's generic edit. A capability like any other, so a
+    # tenant that does not want it simply does not grant it, and the handler
+    # decides from the document rather than from a name.
+    "director_edit",
 }
 # The control floor: what a declarative document may never take away from the
 # director, and what it may never give. A tenant configures its own pipeline;
@@ -57,6 +61,10 @@ CAPABILITIES = {
 #   merge                   -> merge; the other half of that identity
 #   edit_fields             -> hierarchy (a ticket's parent is set through it)
 #   dismiss_notification    -> notification recovery
+#   director_edit           -> the generic edit: the one way to move a field the
+#                              transition table has nothing to say about, which
+#                              is what a Director reworking somebody else's
+#                              ticket needs (SYRD-83)
 # Queue, defer, cancel and reopen are transitions rather than capabilities, so
 # they are held by the structural rules below instead: a director that cannot
 # leave a stage has lost them whatever its capability list says.
@@ -68,6 +76,7 @@ DIRECTOR_CONTROL_CAPABILITIES = frozenset(
         "merge",
         "edit_fields",
         "dismiss_notification",
+        "director_edit",
     }
 )
 # The subset that identifies which role is the controller, for consumers that

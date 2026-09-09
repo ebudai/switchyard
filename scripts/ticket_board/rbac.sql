@@ -71,6 +71,14 @@ GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text, text, text[], 
 GRANT EXECUTE ON FUNCTION ticket_board.release_draft(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.route(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.force_move(text, text, text, boolean) TO ticket_board_service;
+-- SYRD-83: the Director's generic edit and the audit record it writes. Nothing
+-- granted here lets the writer raise a sign-off: it reaches the tickets table
+-- only through definer-rights functions, and the one added here refuses to.
+GRANT EXECUTE ON FUNCTION ticket_board.director_edit(text, jsonb, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.signoff_fields() TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.role_controls_project(text) TO ticket_board_service;
+GRANT SELECT, INSERT ON ticket_board.ticket_field_audit TO ticket_board_service;
+GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_field_audit_id_seq TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.reassign(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_inspection(text) TO ticket_board_service;

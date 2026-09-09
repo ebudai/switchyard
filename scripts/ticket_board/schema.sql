@@ -937,7 +937,8 @@ BEGIN
         NEW.parked := false;
     END IF;
 
-    IF current_setting('ticket_board.force_move', true) = 'on' THEN
+    IF current_setting('ticket_board.force_move', true) = 'on'
+       OR nullif(current_setting('ticket_board.director_edit_target', true), '') = NEW.id THEN
         RETURN NEW;
     END IF;
 
@@ -3993,7 +3994,7 @@ CREATE OR REPLACE FUNCTION ticket_board.director_control_capabilities()
 RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
     SELECT ARRAY[
         'reassign', 'set_manually_controlled', 'set_blockers',
-        'merge', 'edit_fields', 'dismiss_notification'
+        'merge', 'edit_fields', 'dismiss_notification', 'director_edit'
     ]::text[];
 $$;
 
@@ -6690,7 +6691,7 @@ BEGIN
            OR EXISTS (SELECT FROM jsonb_array_elements_text(r->'capabilities') c WHERE c NOT IN
                ('create_ticket','file_bug','add_comment','edit_fields','await_role','clear_awaiting_role',
                 'set_blockers','set_manually_controlled','crop_attachment','merge','dismiss_notification',
-                'reassign')) THEN
+                'reassign','director_edit')) THEN
             RAISE EXCEPTION 'invalid role policy: %', r->>'name';
         END IF;
         IF (r->>'runtime' IS NULL) <> (r->>'target' IS NULL)
@@ -6991,6 +6992,14 @@ BEGIN
         END LOOP;
         RETURN proposed;
     END IF;
+    -- A Director edit changes fields the transition table has nothing to say
+    -- about, at whatever stage the ticket is in. The window names one ticket
+    -- and is open for one statement. It carries no sign-off: ticket_board
+    -- .director_edit, the only operation that opens this window, refuses to
+    -- raise one before it writes anything (SYRD-83).
+    IF nullif(current_setting('ticket_board.director_edit_target', true), '') = previous.id THEN
+        RETURN proposed;
+    END IF;
     IF previous.state=proposed.state THEN
         IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director' THEN
             RAISE EXCEPTION 'only director may reassign without transition' USING ERRCODE='42501'; END IF;
@@ -7169,7 +7178,8 @@ BEGIN
         NEW.parked := false;
     END IF;
 
-    IF current_setting('ticket_board.force_move', true) = 'on' THEN
+    IF current_setting('ticket_board.force_move', true) = 'on'
+       OR nullif(current_setting('ticket_board.director_edit_target', true), '') = NEW.id THEN
         RETURN NEW;
     END IF;
 
@@ -8591,3 +8601,234 @@ $$;
 REVOKE ALL ON FUNCTION ticket_board.notify_held_review_completion(text,text) FROM PUBLIC;
 
 COMMIT;
+
+
+--
+-- SYRD-83: review provenance is the one thing a Director edit may not
+-- manufacture, and ticket_board.director_edit refuses to raise one. A
+-- table-level trigger enforcing the same rule for paths that never call that
+-- operation is NOT installed here: it would arrive, on an upgrading tenant,
+-- before the sign-off functions were refreshed to take its grant, and would
+-- refuse every legitimate review until they were. This list is what the
+-- operation checks against.
+--
+CREATE OR REPLACE FUNCTION ticket_board.signoff_fields()
+RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
+    SELECT ARRAY['audit_signoff', 'inspector_signoff', 'user_signoff']::text[];
+$$;
+
+--
+-- What a Director edit leaves behind: the reason, and every field it moved,
+-- old and new. Append-only from the operation's point of view; nothing here
+-- rewrites a row.
+--
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_field_audit (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    actor text NOT NULL,
+    reason text NOT NULL CHECK (btrim(reason) <> ''),
+    field text NOT NULL,
+    old_value jsonb,
+    new_value jsonb,
+    ts timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS ticket_field_audit_ticket_idx
+    ON ticket_board.ticket_field_audit (ticket_id, id);
+
+--
+-- Whether a role is the one controlling this project. Under a declarative
+-- workflow that is the role holding the control capabilities, derived rather
+-- than named, so a project whose control role is not called 'director' is
+-- answered the same way (SYRD-49). Without one, the legacy name stands.
+--
+CREATE OR REPLACE FUNCTION ticket_board.role_controls_project(p_role text)
+RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow();
+BEGIN
+    IF p_role IS NULL OR btrim(p_role) = '' THEN
+        RETURN false;
+    END IF;
+    IF cfg IS NULL THEN
+        RETURN p_role = 'director';
+    END IF;
+    RETURN EXISTS (
+        SELECT FROM ticket_board.workflow_roles r
+        WHERE r.name = p_role
+          AND (r.definition->>'active')::boolean
+          AND r.definition->'capabilities' ?& ARRAY['set_manually_controlled', 'merge']::text[]
+    );
+END;
+$$;
+
+--
+-- SYRD-83: one Director-only generic edit. It may move any mutable field at any
+-- stage and for any owner, and it records why. What it may not do is
+-- manufacture a review: raising a sign-off is refused here, before anything is
+-- written, for every field the workflow declares a sign-off.
+--
+-- Fields with their own invariants reuse them rather than going round them: an
+-- assignee is checked by the same predicate the workflow uses, a state must be a
+-- declared stage, a parent may not close a cycle, and moving a ticket into an
+-- implementer's in-progress slot takes the same serial-focus redirect a routed
+-- move would.
+--
+CREATE OR REPLACE FUNCTION ticket_board.director_edit(
+    id text,
+    patch jsonb,
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    caller text;
+    invalid_field text;
+    current_ticket ticket_board.tickets%ROWTYPE;
+    field text;
+    old_doc jsonb;
+    new_doc jsonb;
+    target_state text;
+    target_assignee text;
+    normalized_parent text;
+    seen text[];
+    loops int := 0;
+BEGIN
+    actor := ticket_board.current_actor_role();
+    IF actor <> 'ticket_board_service' THEN
+        RAISE EXCEPTION 'role % cannot call director_edit; ticket_board_service is the only database writer', actor
+            USING ERRCODE = '42501';
+    END IF;
+    caller := ticket_board.current_app_actor();
+    IF NOT ticket_board.role_controls_project(caller) THEN
+        RAISE EXCEPTION 'role % cannot call director_edit', coalesce(caller, '<none>')
+            USING ERRCODE = '42501';
+    END IF;
+    IF patch IS NULL OR jsonb_typeof(patch) <> 'object' THEN
+        RAISE EXCEPTION 'director_edit patch must be an object';
+    END IF;
+    IF btrim(coalesce(reason, '')) = '' THEN
+        RAISE EXCEPTION 'director_edit requires a reason';
+    END IF;
+
+    SELECT key INTO invalid_field
+    FROM jsonb_object_keys(patch) AS key
+    WHERE key NOT IN (
+        'title','body','parent_id','implementation','audit_prompt','origin_project',
+        'external_source_ref','blocked_reason','assignee','state','needs_audit',
+        'needs_inspection','needs_user_signoff','commit_exempt','regression',
+        'manually_controlled','queued_for_assignee','queued_behind_ticket',
+        'audit_signoff','inspector_signoff','user_signoff'
+    )
+    ORDER BY key LIMIT 1;
+    IF invalid_field IS NOT NULL THEN
+        -- Identity and creation provenance are not editable by anybody.
+        RAISE EXCEPTION 'director_edit cannot update: %', invalid_field;
+    END IF;
+
+    FOREACH field IN ARRAY ticket_board.signoff_fields() LOOP
+        IF patch ? field AND coalesce((patch->>field)::boolean, false) THEN
+            RAISE EXCEPTION
+                'director_edit cannot create sign-off %; only its own sign-off action may', field
+                USING ERRCODE = '42501';
+        END IF;
+    END LOOP;
+
+    SELECT * INTO current_ticket FROM ticket_board.tickets WHERE tickets.id = director_edit.id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    old_doc := to_jsonb(current_ticket);
+
+    IF patch ? 'assignee' THEN
+        target_assignee := patch->>'assignee';
+        IF NOT ticket_board.ticket_valid_assignee(target_assignee) THEN
+            RAISE EXCEPTION 'invalid assignee: %', target_assignee;
+        END IF;
+    END IF;
+    IF patch ? 'state' THEN
+        target_state := patch->>'state';
+        IF NOT EXISTS (SELECT 1 FROM ticket_board.workflow_stages WHERE name = target_state) THEN
+            RAISE EXCEPTION 'invalid state: %', target_state;
+        END IF;
+    END IF;
+    IF patch ? 'parent_id' THEN
+        normalized_parent := nullif(upper(btrim(coalesce(patch->>'parent_id', ''))), '');
+        IF normalized_parent = director_edit.id THEN
+            RAISE EXCEPTION 'a ticket cannot be its own parent';
+        END IF;
+        IF normalized_parent IS NOT NULL THEN
+            IF NOT EXISTS (SELECT 1 FROM ticket_board.tickets WHERE tickets.id = normalized_parent) THEN
+                RAISE EXCEPTION 'parent ticket not found: %', normalized_parent;
+            END IF;
+            seen := ARRAY[director_edit.id];
+            WHILE normalized_parent IS NOT NULL LOOP
+                loops := loops + 1;
+                IF loops > 64 THEN RAISE EXCEPTION 'parent chain is too deep'; END IF;
+                IF normalized_parent = ANY (seen) THEN
+                    RAISE EXCEPTION 'parent change would create a cycle';
+                END IF;
+                seen := seen || normalized_parent;
+                SELECT nullif(btrim(parent_id), '') INTO normalized_parent
+                FROM ticket_board.tickets WHERE tickets.id = normalized_parent;
+            END LOOP;
+            normalized_parent := upper(btrim(patch->>'parent_id'));
+        END IF;
+    END IF;
+
+    -- Serial focus is an invariant of moving into an implementer's slot, not a
+    -- property of the operation that moved it there.
+    IF target_state = 'in_progress'
+       AND ticket_board.ticket_is_implementer_assignee(coalesce(target_assignee, current_ticket.assignee))
+       AND ticket_board.ticket_current_reserved_ticket(
+               coalesce(target_assignee, current_ticket.assignee), director_edit.id) IS NOT NULL THEN
+        target_state := 'backlog';
+    END IF;
+
+    -- Its own window, named for this ticket and open for this statement only.
+    -- Deliberately not the narrated-move one: a Director edit should not
+    -- inherit everything a forced move may bypass, and the sign-off boundary
+    -- is enforced independently of either.
+    PERFORM set_config('ticket_board.director_edit_target', director_edit.id, true);
+    UPDATE ticket_board.tickets SET
+        title = CASE WHEN patch ? 'title' THEN patch->>'title' ELSE title END,
+        body = CASE WHEN patch ? 'body' THEN patch->>'body' ELSE body END,
+        parent_id = CASE WHEN patch ? 'parent_id' THEN coalesce(normalized_parent, '') ELSE parent_id END,
+        implementation = CASE WHEN patch ? 'implementation' THEN patch->>'implementation' ELSE implementation END,
+        audit_prompt = CASE WHEN patch ? 'audit_prompt' THEN patch->>'audit_prompt' ELSE audit_prompt END,
+        origin_project = CASE WHEN patch ? 'origin_project' THEN patch->>'origin_project' ELSE origin_project END,
+        external_source_ref = CASE WHEN patch ? 'external_source_ref' THEN patch->>'external_source_ref' ELSE external_source_ref END,
+        blocked_reason = CASE WHEN patch ? 'blocked_reason' THEN patch->>'blocked_reason' ELSE blocked_reason END,
+        queued_for_assignee = CASE WHEN patch ? 'queued_for_assignee' THEN patch->>'queued_for_assignee' ELSE queued_for_assignee END,
+        queued_behind_ticket = CASE WHEN patch ? 'queued_behind_ticket' THEN patch->>'queued_behind_ticket' ELSE queued_behind_ticket END,
+        assignee = coalesce(target_assignee, assignee),
+        state = coalesce(target_state, state),
+        needs_audit = CASE WHEN patch ? 'needs_audit' THEN (patch->>'needs_audit')::boolean ELSE needs_audit END,
+        needs_inspection = CASE WHEN patch ? 'needs_inspection' THEN (patch->>'needs_inspection')::boolean ELSE needs_inspection END,
+        needs_user_signoff = CASE WHEN patch ? 'needs_user_signoff' THEN (patch->>'needs_user_signoff')::boolean ELSE needs_user_signoff END,
+        commit_exempt = CASE WHEN patch ? 'commit_exempt' THEN (patch->>'commit_exempt')::boolean ELSE commit_exempt END,
+        regression = CASE WHEN patch ? 'regression' THEN (patch->>'regression')::boolean ELSE regression END,
+        manually_controlled = CASE WHEN patch ? 'manually_controlled' THEN (patch->>'manually_controlled')::boolean ELSE manually_controlled END,
+        audit_signoff = CASE WHEN patch ? 'audit_signoff' THEN false ELSE audit_signoff END,
+        inspector_signoff = CASE WHEN patch ? 'inspector_signoff' THEN false ELSE inspector_signoff END,
+        user_signoff = CASE WHEN patch ? 'user_signoff' THEN false ELSE user_signoff END
+    WHERE tickets.id = director_edit.id;
+    PERFORM set_config('ticket_board.director_edit_target', '', true);
+
+    SELECT to_jsonb(tickets) INTO new_doc FROM ticket_board.tickets WHERE tickets.id = director_edit.id;
+    FOR field IN SELECT jsonb_object_keys(patch) LOOP
+        IF old_doc->field IS DISTINCT FROM new_doc->field THEN
+            INSERT INTO ticket_board.ticket_field_audit (ticket_id, actor, reason, field, old_value, new_value)
+            VALUES (director_edit.id, caller, btrim(reason), field, old_doc->field, new_doc->field);
+        END IF;
+    END LOOP;
+    PERFORM ticket_board.append_ticket_comment(
+        director_edit.id, caller,
+        'Director edit: ' || btrim(reason)
+    );
+    PERFORM ticket_board.touch_ticket(director_edit.id);
+END;
+$$;

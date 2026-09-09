@@ -303,18 +303,39 @@ live_role_sessions() {
     return 0
 }
 
+checkpointed_role_sessions() {
+    local role account
+    for role in "${ROLES[@]}"; do
+        account="$PROJECT-$role"
+        id "$account" >/dev/null 2>&1 || continue
+        sudo -u "$account" -H tmux has-session -t "$PROJECT-$role" >/dev/null 2>&1 || \
+            printf '  %s\n' "$PROJECT-$role"
+    done
+    return 0
+}
+
 checkpoint_roles() {
     note "stopping every $PROJECT role at a resumable checkpoint, including the director's session"
+    local before after status=0
+    before="$(live_role_sessions)"
     # Run as root through the candidate entry point: the roles are still bound
     # to dedicated accounts, so each stop is wrapped in `sudo -u <account>` by
     # the release itself, and only root can reach all six.
-    "$source_dir/scripts/switchyard" stop "$PROJECT" || \
-        die "the supported stop command failed; no release or identity was changed"
-    roles_stopped=1
-    local remaining
-    remaining="$(live_role_sessions)"
-    [[ -z "$remaining" ]] || \
-        die "these role sessions are still live after stop: $remaining"
+    "$source_dir/scripts/switchyard" stop "$PROJECT" || status=$?
+    after="$(live_role_sessions)"
+    # What recovery needs to know is what is actually stopped, not what the stop
+    # command returned. A stop that checkpoints some roles and then fails still
+    # leaves sessions down, and taking the exit code as the signal made recovery
+    # silent about exactly that case (SYRD-89).
+    [[ "$before" == "$after" ]] || roles_stopped=1
+    if (( status != 0 )); then
+        if (( roles_stopped == 1 )); then
+            die "the supported stop command failed (exit $status) after checkpointing some roles; no release or identity was changed"
+        fi
+        die "the supported stop command failed (exit $status) and checkpointed nothing; no release or identity was changed"
+    fi
+    [[ -z "$after" ]] || \
+        die "these role sessions are still live after stop: $after"
 }
 
 install_shared_release() {
@@ -494,16 +515,24 @@ recover_previous_state() {
     systemctl is-active --quiet "$SERVICE" || return 1
     verify_foreign_tenants_unchanged
     note "recovery: shared release restored to $EXPECTED_SHARED_PREVIOUS; board build is $(board_build_id); $SERVICE is active"
-    if (( roles_stopped == 1 )); then
+    local still_live checkpointed
+    still_live="$(live_role_sessions)"
+    checkpointed="$(checkpointed_role_sessions)"
+    if (( roles_stopped == 1 )) || [[ -n "$checkpointed" ]]; then
         # Deliberately not restarted from here. The roles are stopped at
         # resumable checkpoints and their state is intact; bringing the six-pane
         # presentation back up is a desktop-session operation, and a root trap
-        # handler is the worst possible place to attempt it. Say so plainly
-        # instead of leaving the operator to guess.
+        # handler is the worst possible place to attempt it. Say so plainly, and
+        # name which sessions are actually down, so a partial checkpoint is not
+        # reported as if it were all or nothing (SYRD-89).
         cat >&2 <<EOF
-SYRD-87 recovery: the $PROJECT roles are stopped at resumable checkpoints and
-were not restarted. Their resumable state is intact and no account, worktree or
-session store was deleted. Bring them back from the authorized desktop account:
+SYRD-87 recovery: these $PROJECT roles are stopped at resumable checkpoints and
+were not restarted:
+${checkpointed:-  (none still resolvable; see roles_stopped=$roles_stopped)}
+Still live:
+${still_live:-  (none)}
+Their resumable state is intact and no account, worktree or session store was
+deleted. Bring them back from the authorized desktop account:
 
     switchyard $PROJECT
 

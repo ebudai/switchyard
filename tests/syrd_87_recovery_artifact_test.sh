@@ -316,4 +316,70 @@ if not probe < refusal < honours_dry_run:
     )
 PY
 
+# --- a stop that checkpoints some roles and then fails (SYRD-89) -------------
+#
+# The exit code is not the signal. A stop that gets part-way through leaves
+# sessions down that recovery has to account for, and reading roles_stopped off
+# the return value made recovery silent about exactly that case.
+
+cat >"$migration_root/scripts/switchyard" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+    stop)
+        # Checkpoints the first two roles, then fails the way a partial stop does.
+        remaining="$(tail -n +3 "$SYRD89_LIVE_ROLES")"
+        printf '%s\n' "$remaining" | grep -v '^$' >"$SYRD89_LIVE_ROLES" || :
+        echo "switchyard: stopped director, main" >&2
+        echo "switchyard: could not reach app's session" >&2
+        exit 1
+        ;;
+    upgrade) echo "switchyard: would repatriate"; ;;
+    *) exit 64 ;;
+esac
+EOF
+chmod +x "$migration_root/scripts/switchyard"
+printf '%s\n' director main app ops audit >"$live_roles"
+roles_stopped=0
+
+partial="$( ( trap 'echo "ROLES_STOPPED=$roles_stopped"' EXIT; checkpoint_roles ) 2>&1 || true )"
+grep -q 'ROLES_STOPPED=1' <<<"$partial" || \
+    fail "a partial stop must be recorded as a checkpoint, got: $partial"
+grep -q 'after checkpointing some roles' <<<"$partial" || \
+    fail "a partial stop must say so rather than claiming nothing was checkpointed, got: $partial"
+grep -qx 'app' "$live_roles" || fail "the fixture should still have app live after a partial stop"
+
+# A stop that fails having checkpointed nothing is a different report, and must
+# not claim a checkpoint that never happened.
+printf '%s\n' director main app ops audit >"$live_roles"
+cat >"$migration_root/scripts/switchyard" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+    stop) echo "switchyard: could not reach any session" >&2; exit 1 ;;
+    upgrade) echo "switchyard: would repatriate"; ;;
+    *) exit 64 ;;
+esac
+EOF
+chmod +x "$migration_root/scripts/switchyard"
+roles_stopped=0
+none="$( ( trap 'echo "ROLES_STOPPED=$roles_stopped"' EXIT; checkpoint_roles ) 2>&1 || true )"
+grep -q 'ROLES_STOPPED=0' <<<"$none" || \
+    fail "a stop that checkpointed nothing must not be recorded as a checkpoint, got: $none"
+grep -q 'checkpointed nothing' <<<"$none" || \
+    fail "a stop that checkpointed nothing must say so, got: $none"
+
+# Recovery names the sessions that are actually down, so a partial checkpoint is
+# not reported as if it were all or nothing.
+printf '%s\n' app ops audit >"$live_roles"
+down="$(checkpointed_role_sessions)"
+grep -q 'syrd-director' <<<"$down" || fail "checkpointed_role_sessions must name a stopped role"
+grep -q 'syrd-main' <<<"$down" || fail "checkpointed_role_sessions must name every stopped role"
+if grep -q 'syrd-app' <<<"$down"; then
+    fail "checkpointed_role_sessions must not name a role that is still live"
+fi
+recovery_body="$(code_of recover_previous_state)"
+grep -q 'checkpointed_role_sessions' <<<"$recovery_body" || \
+    fail "recovery must report the sessions it can observe stopped, not just a flag"
+
 echo "SYRD-87 recovery artifact contract regression passed"

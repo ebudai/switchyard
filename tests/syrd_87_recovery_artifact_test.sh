@@ -43,20 +43,36 @@ code_of() {
 main_body="$(code_of main)"
 [[ -n "$main_body" ]] || fail "could not read main() from the artifact"
 
-# Everything before the mutation marker must be a read, a refusal, or a dry run.
+# Everything before the mutation marker must be a read or a refusal. The dry run
+# is deliberately not among them: the migration contract refuses while legacy
+# panes are live, in dry run exactly as in earnest, so checkpointing has to come
+# first and the dry run is the gate in front of what follows it (SYRD-89).
 before="${main_body%%mutation_started=1*}"
 [[ "$before" != "$main_body" ]] || fail "main() never sets mutation_started"
 # -w throughout: run_upgrade is a substring of dry_run_upgrade, and matching it
 # loosely would report the preflight as a mutation.
-for forbidden in checkpoint_roles install_shared_release run_upgrade recover_previous_state; do
+for forbidden in checkpoint_roles install_shared_release run_upgrade dry_run_upgrade recover_previous_state; do
     if grep -qw "$forbidden" <<<"$before"; then
         fail "$forbidden runs before mutation_started=1"
     fi
 done
 for required in verify_artifact_trust require_commands refuse_role_pane verify_tenant_ownership \
-                verify_partial_state verify_exact_source prepare_source_checkout dry_run_upgrade; do
+                verify_partial_state verify_exact_source prepare_source_checkout; do
     grep -qw "$required" <<<"$before" || fail "$required does not run before the first mutation"
 done
+
+# Ordering inside the mutating phase: checkpoints, then the dry run that is only
+# meaningful once they are taken, then the parts the dry run gates.
+after="${main_body#*mutation_started=1}"
+order=""
+for phase in checkpoint_roles dry_run_upgrade install_shared_release run_upgrade verify_target_state; do
+    grep -qw "$phase" <<<"$after" || fail "$phase does not run after the first mutation"
+    order+="$(grep -nw "$phase" <<<"$after" | head -1 | cut -d: -f1) $phase"$'\n'
+done
+sorted_order="$(sort -n <<<"$order" | awk 'NF')"
+[[ "$(awk '{print $2}' <<<"$sorted_order" | tr '\n' ' ')" == \
+   "checkpoint_roles dry_run_upgrade install_shared_release run_upgrade verify_target_state " ]] || \
+    fail "the mutating phases are out of order:"$'\n'"$sorted_order"
 
 # The already-recovered retry changes nothing at all.
 retry_branch="$(awk '/if \[\[ "\$\(shared_release\)" == "\$SHARED_ROOT\/releases\/\$EXPECTED_TARGET" \]\]/,/^    fi$/' "$ARTIFACT" | grep -v '^[[:space:]]*#')"
@@ -177,5 +193,127 @@ write_config false ""
 expect_fail "a config that never flipped role_state_isolation" verify_project_account_runtime "$config"
 write_config true "app"
 expect_fail "a role still bound to a dedicated account" verify_project_account_runtime "$config"
+
+# --- the refusal the first operator run actually met (SYRD-89) ---------------
+#
+# A stand-in for the project-account migration that behaves the way the shipped
+# one does: it probes for live legacy panes and refuses before it looks at the
+# dry-run flag, so a dry run taken while the roles are up reports only that the
+# roles are up. Everything here is hermetic -- no real tmux, sudo, account or
+# board -- and the artifact's own functions are the ones under test.
+
+migration_root="$test_root/migration"
+mkdir -p "$migration_root/scripts"
+live_roles="$test_root/live-roles"
+printf '%s\n' director main app ops audit >"$live_roles"
+
+cat >"$migration_root/scripts/switchyard" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+command="${1:-}"
+case "$command" in
+    stop)
+        : >"$SYRD89_LIVE_ROLES"
+        echo "switchyard: stopped every role at a resumable checkpoint"
+        ;;
+    upgrade)
+        # The shipped contract: the live-pane probe comes first and does not
+        # care whether --dry-run was passed.
+        if [[ -s "$SYRD89_LIVE_ROLES" ]]; then
+            echo "switchyard: refusing porter's project-account migration:"
+            while read -r role; do
+                [[ -n "$role" ]] || continue
+                echo "  $role: syrd-$role is still live as syrd-$role; stop it at a resumable checkpoint before repatriation"
+            done <"$SYRD89_LIVE_ROLES"
+            echo "switchyard: no account, worktree, installed unit, or release was changed; resume after every named role is safely checkpointed"
+            exit 1
+        fi
+        echo "switchyard: would repatriate syrd's resumable role state and remove dedicated-account bindings"
+        ;;
+    *)
+        echo "fake switchyard: unexpected command: $command" >&2
+        exit 64
+        ;;
+esac
+EOF
+chmod +x "$migration_root/scripts/switchyard"
+
+cat >"$stub_bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# `sudo -u <account> [-H] <command...>` -- run the command, drop the identity.
+args=("$@")
+index=0
+while (( index < ${#args[@]} )); do
+    case "${args[index]}" in
+        -u) index=$((index + 2)) ;;
+        -H) index=$((index + 1)) ;;
+        *) break ;;
+    esac
+done
+exec "${args[@]:index}"
+EOF
+chmod +x "$stub_bin/sudo"
+
+cat >"$stub_bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "has-session" ]]; then
+    session="${3:-}"
+    grep -qx "${session#syrd-}" "$SYRD89_LIVE_ROLES" 2>/dev/null && exit 0
+    exit 1
+fi
+exit 0
+EOF
+chmod +x "$stub_bin/tmux"
+
+cat >"$stub_bin/id" <<'EOF'
+#!/usr/bin/env bash
+# Every syrd-<role> account exists in this fixture; -u answers as root.
+[[ "${1:-}" == "-u" ]] && { echo 0; exit 0; }
+exit 0
+EOF
+chmod +x "$stub_bin/id"
+
+export SYRD89_LIVE_ROLES="$live_roles"
+source_dir="$migration_root"
+
+# 1. The observed failure, reproduced: a dry run taken while the roles are live
+#    refuses and reports the roles, and nothing about the upgrade is learned.
+refusal="$( (dry_run_upgrade) 2>&1 || true )"
+grep -q 'still live as' <<<"$refusal" || \
+    fail "the live-role dry run should have reproduced the migration refusal, got: $refusal"
+grep -q 'no release, unit or identity was changed' <<<"$refusal" || \
+    fail "the refusal must say plainly that nothing was changed, got: $refusal"
+[[ -s "$live_roles" ]] || fail "a refused dry run must not have stopped anything"
+
+# 2. The correction: checkpoint first, and the same dry run then means something.
+(checkpoint_roles) >/dev/null 2>&1 || fail "checkpoint_roles should have stopped the fixture roles"
+[[ ! -s "$live_roles" ]] || fail "checkpoint_roles left roles live"
+progressed="$( (dry_run_upgrade) 2>&1 )" || \
+    fail "the dry run should pass once the roles are checkpointed, got: $progressed"
+grep -q 'would repatriate' <<<"$progressed" || \
+    fail "the checkpointed dry run should reach the repatriation plan, got: $progressed"
+
+# 3. The production refusal this reordering must not weaken is still in the
+#    release, unchanged: this ticket corrects the artifact, never the contract.
+grep -q 'stop it at a resumable checkpoint before repatriation' \
+    "$REPO_ROOT/scripts/team_launcher.py" || \
+    fail "the production live-session refusal is missing from the release"
+python3 - "$REPO_ROOT/scripts/team_launcher.py" <<'PY'
+import re
+import sys
+
+source = open(sys.argv[1], encoding="utf-8").read()
+body = source.split("def repatriate_role_runtime_state", 1)[1].split("\ndef ", 1)[0]
+probe = body.index("stop it at a resumable checkpoint before repatriation")
+refusal = body.index("if problems:")
+honours_dry_run = body.index("if dry_run:")
+if not probe < refusal < honours_dry_run:
+    raise SystemExit(
+        "the release no longer refuses live panes before it honours --dry-run; "
+        "the artifact ordering this test pins was chosen for that contract"
+    )
+PY
 
 echo "SYRD-87 recovery artifact contract regression passed"

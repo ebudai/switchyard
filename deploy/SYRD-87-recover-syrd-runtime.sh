@@ -271,14 +271,22 @@ switchyard_pinned() {
 # Until install_shared_release runs, $SWITCHYARD_BIN is still the abandoned
 # release, whose upgrade predates the repatriation contract this preflight
 # exists to exercise; dry-running that would prove nothing about what follows.
+#
+# This runs after the roles are checkpointed, not before. The project-account
+# migration probes for live legacy panes and refuses before it looks at the
+# dry-run flag at all, so a dry run taken while the roles are up reports only
+# that the roles are up -- which is what happened on the first operator run
+# (SYRD-89). Stopping them is the mutation this artifact must make anyway, and
+# the dry run is the gate in front of the parts that follow it.
 dry_run_upgrade() {
     local output status=0
     output="$(switchyard_pinned "$source_dir/scripts/switchyard" upgrade "$PROJECT" \
         --dry-run --desktop-policy "$DESKTOP_POLICY" 2>&1)" || status=$?
     printf '%s\n' "$output" >&2
-    (( status == 0 )) || die "the supported upgrade refuses this host in dry-run; nothing was changed"
+    (( status == 0 )) || \
+        die "the supported upgrade refuses this host in dry-run; no release, unit or identity was changed"
     if grep -q 'refusing' <<<"$output"; then
-        die "the upgrade dry-run reported a refusal; nothing was changed"
+        die "the upgrade dry-run reported a refusal; no release, unit or identity was changed"
     fi
 }
 
@@ -467,13 +475,21 @@ EOF
 # the resumable checkpoints taken before the cutover. What this must never do is
 # claim more than it did.
 recover_previous_state() {
-    note "recovery: restoring the previous shared release $EXPECTED_SHARED_PREVIOUS"
-    [[ -d "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" ]] || {
-        note "recovery: previous shared release directory is gone; cannot restore it"
-        return 1
-    }
-    ln -sfn "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" "$SHARED_ROOT/current.recovery"
-    mv -Tf "$SHARED_ROOT/current.recovery" "$SHARED_ROOT/current"
+    # The dry run and the checkpoints both sit inside the recovered region now,
+    # so this runs in two quite different situations: one where only the roles
+    # were stopped, and one where the shared release moved too. Saying which is
+    # part of being accurate about what was restored (SYRD-89).
+    if [[ "$(shared_release)" == "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" ]]; then
+        note "recovery: the shared release never moved; it is still $EXPECTED_SHARED_PREVIOUS"
+    else
+        note "recovery: restoring the previous shared release $EXPECTED_SHARED_PREVIOUS"
+        [[ -d "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" ]] || {
+            note "recovery: previous shared release directory is gone; cannot restore it"
+            return 1
+        }
+        ln -sfn "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" "$SHARED_ROOT/current.recovery"
+        mv -Tf "$SHARED_ROOT/current.recovery" "$SHARED_ROOT/current"
+    fi
     [[ "$(shared_release)" == "$SHARED_ROOT/releases/$EXPECTED_SHARED_PREVIOUS" ]] || return 1
     systemctl is-active --quiet "$SERVICE" || return 1
     verify_foreign_tenants_unchanged
@@ -544,10 +560,15 @@ main() {
     verify_partial_state
     verify_exact_source
     prepare_source_checkout
-    dry_run_upgrade
 
+    # Checkpointing the roles is the first mutation and it has to come first:
+    # the migration contract refuses while any legacy pane is live, in dry run
+    # exactly as in earnest, so there is no meaningful dry run to take before
+    # this point. Everything above changed nothing; everything below is covered
+    # by the recovery path (SYRD-89).
     mutation_started=1
     checkpoint_roles
+    dry_run_upgrade
     install_shared_release
     run_upgrade
     verify_target_state

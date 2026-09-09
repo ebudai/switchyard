@@ -9005,6 +9005,7 @@ class FirstRunAuthReport:
     model_validation_failures: list[ModelValidationFailure] = field(default_factory=list)
     owner_user: str = ""
     owner_shell_issue: OwnerShellIssue | None = None
+    github_identity: "GithubIdentityStatus | None" = None
 
     @property
     def has_warnings(self) -> bool:
@@ -9015,7 +9016,173 @@ class FirstRunAuthReport:
             or self.missing_cli_roles
             or self.model_validation_failures
             or self.owner_shell_issue
+            or (self.github_identity is not None and not self.github_identity.ready)
         )
+
+
+@dataclass(frozen=True)
+class GithubIdentityStatus:
+    """Whether the project owner can actually publish, and what is missing.
+
+    Never carries private key material. The public half is here because that is
+    what an operator has to paste into GitHub, and the fingerprint because that
+    is what they can compare against what GitHub already lists (SYRD-74).
+    """
+
+    owner_user: str
+    key_path: Path
+    problems: tuple[str, ...] = ()
+    authenticated: bool = False
+    detail: str = ""
+    public_key: str = ""
+    fingerprint: str = ""
+    checked: bool = False
+
+    @property
+    def ready(self) -> bool:
+        return self.checked and not self.problems and self.authenticated
+
+
+GITHUB_IDENTITY_TIMEOUT_SECONDS = 15.0
+
+
+def github_identity_status(
+    owner_user: str,
+    owner_home: Path,
+    *,
+    key_name: str = "",
+    host: str = "github.com",
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> GithubIdentityStatus:
+    """Read the owner's GitHub identity from the host, and try it once.
+
+    Ownership and modes are read rather than assumed, because the failure this
+    exists for looked like a missing key and was a key nothing selected. The
+    authentication probe is non-interactive and bounded: a check that can ask
+    for a passphrase or sit on a socket is a check that hangs a launch instead
+    of reporting one (SYRD-74).
+    """
+    from scripts.ticket_board.project_provision import (
+        GITHUB_IDENTITY_BEGIN,
+        owner_github_key_path,
+    )
+
+    key = Path(owner_github_key_path(str(owner_home), key_name=key_name))
+    public = key.with_name(key.name + ".pub")
+    config = key.parent / "config"
+    expected_uid = uid_for_user(owner_user)
+    problems: list[str] = []
+
+    def _check(path: Path, mode: int, what: str) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            problems.append(f"{what} {path} does not exist")
+            return False
+        if stat.S_ISLNK(info.st_mode) or not (
+            stat.S_ISDIR(info.st_mode) if what == "the owner's ssh directory" else stat.S_ISREG(info.st_mode)
+        ):
+            problems.append(f"{what} {path} is not a regular {'directory' if what.endswith('directory') else 'file'}")
+            return False
+        if expected_uid is not None and info.st_uid != expected_uid:
+            problems.append(f"{what} {path} is owned by uid {info.st_uid} rather than by {owner_user}")
+        if stat.S_IMODE(info.st_mode) != mode:
+            problems.append(
+                f"{what} {path} is mode {stat.S_IMODE(info.st_mode):04o} rather than {mode:04o}"
+            )
+        return True
+
+    _check(key.parent, 0o700, "the owner's ssh directory")
+    _check(key, 0o600, "the owner's GitHub key")
+    has_public = _check(public, 0o644, "the owner's GitHub public key")
+    public_key = ""
+    fingerprint = ""
+    if has_public:
+        try:
+            public_key = public.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            problems.append(f"the owner's GitHub public key {public} cannot be read: {exc}")
+        else:
+            proc = runner(
+                ["ssh-keygen", "-l", "-f", str(public)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            if proc.returncode == 0:
+                fingerprint = str(proc.stdout or "").strip()
+    if _check(config, 0o600, "the owner's ssh configuration"):
+        try:
+            body = config.read_text(encoding="utf-8")
+        except OSError as exc:
+            problems.append(f"the owner's ssh configuration {config} cannot be read: {exc}")
+        else:
+            if GITHUB_IDENTITY_BEGIN not in body:
+                problems.append(
+                    f"{config} selects no managed identity for {host}; git offers no key and the "
+                    "push is refused as if there were none"
+                )
+            elif str(key) not in body:
+                problems.append(f"{config} selects an identity other than {key} for {host}")
+
+    authenticated = False
+    detail = ""
+    try:
+        proc = runner(
+            _owner_command_env_args(
+                owner_user,
+                owner_home,
+                [
+                    "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", "ConnectTimeout=5", "-T", f"git@{host}",
+                ],
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=GITHUB_IDENTITY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        detail = f"{host} did not answer within {GITHUB_IDENTITY_TIMEOUT_SECONDS:g}s"
+    except OSError as exc:
+        detail = str(exc)
+    else:
+        # GitHub's shell server always exits non-zero; the greeting is the
+        # answer, so the text decides rather than the status.
+        detail = (str(getattr(proc, "stdout", "") or "").strip() or f"exit {proc.returncode}")[:300]
+        authenticated = "successfully authenticated" in detail.casefold()
+    return GithubIdentityStatus(
+        owner_user=owner_user,
+        key_path=key,
+        problems=tuple(problems),
+        authenticated=authenticated,
+        detail=detail,
+        public_key=public_key,
+        fingerprint=fingerprint,
+        checked=True,
+    )
+
+
+def github_identity_remedy(status: GithubIdentityStatus, *, project: str = "") -> str:
+    """Exactly what a human has to do, named rather than implied (SYRD-74)."""
+    if status.ready:
+        return ""
+    lines = [
+        f"warning: switchyard: {status.owner_user} cannot publish to GitHub: {status.detail}"
+    ]
+    for problem in status.problems:
+        lines.append(f"  {problem}")
+    upgrade = f"switchyard upgrade {project}" if project else "switchyard upgrade <project>"
+    if status.problems:
+        lines.append(f"  repair the identity itself with `sudo {upgrade}`, which is re-runnable")
+    if status.public_key and not status.authenticated:
+        lines.append(
+            "  GitHub does not accept this key. Add its public half at "
+            "https://github.com/settings/keys (or to the repository's deploy keys with write "
+            f"access), then rerun `sudo {upgrade}`:"
+        )
+        lines.append(f"    {status.public_key}")
+        if status.fingerprint:
+            lines.append(f"  fingerprint: {status.fingerprint}")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -10637,6 +10804,10 @@ def report_first_run_auth_warnings(
             f"warning: switchyard: model validation failed for role {failure.role} "
             f"(cli {failure.cli}, model {failure.model}): {failure.reason}; {failure.suggestion}"
         )
+    if report.github_identity is not None:
+        remedy = github_identity_remedy(report.github_identity)
+        if remedy:
+            print_func(remedy)
 
 
 def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
@@ -15233,6 +15404,42 @@ def upgrade_project_command(
                 detail="; ".join(staging_problems),
             )
             return 1
+    # The owner's GitHub identity, on every upgrade as well as at provisioning:
+    # the account this found had a key and no configuration selecting it, and an
+    # existing tenant never re-runs the operator script. Idempotent, and it
+    # reads no private material (SYRD-74).
+    owner_home_for_identity = _tenant_owner_home(config, config_path)
+    owner_for_identity = config.run_as_user or current_user_name()
+    if not dry_run and os.geteuid() == 0:
+        from scripts.ticket_board.project_provision import owner_github_identity_commands
+
+        identity_script = "set -eu\n" + "\n".join(
+            owner_github_identity_commands(
+                owner_for_identity,
+                str(owner_home_for_identity),
+                comment=f"{owner_for_identity} switchyard {config.project}",
+            )
+        )
+        applied = runner(
+            ["sh", "-c", identity_script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        if getattr(applied, "returncode", 1) != 0:
+            print_func(
+                f"switchyard: could not provision {owner_for_identity}'s GitHub identity "
+                f"(exit {applied.returncode}): "
+                f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
+            )
+    if not dry_run:
+        identity = github_identity_status(
+            owner_for_identity, owner_home_for_identity, runner=runner
+        )
+        remedy = github_identity_remedy(identity, project=config.project)
+        if remedy:
+            print_func(remedy)
+        else:
+            print_func(
+                f"switchyard: {owner_for_identity} can publish to GitHub as its own identity"
+            )
     if not dry_run:
         # Preparation needs the accounts before the active configuration names
         # them, and it must not read that list from the tenant (SYRD-45).

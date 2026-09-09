@@ -323,6 +323,32 @@ and told an operator to replace a window that was already correct. What decides
 is the program a process is running, so a shell that started a terminal is not
 one either, while the terminal it started still is (SYRD-90).
 
+**The project owner has a GitHub identity, and something selects it.** A key
+the account holds is not a key git offers. The account this was found on had a
+perfectly good ED25519 key under a nonstandard filename and no `ssh_config`
+stanza pointing at it, so git offered nothing and publication failed with
+`Permission denied (publickey)` -- which reads like a missing key and was a
+missing selection.
+
+Provisioning and every upgrade install both, idempotently: the key is generated
+in place by the owner only when it is absent, and a managed block between
+`# BEGIN SWITCHYARD MANAGED GITHUB IDENTITY` and its `END` selects it for
+`github.com` with `IdentitiesOnly yes` -- otherwise an agent holding other keys
+offers those first and GitHub answers for whichever account it recognises. The
+block replaces itself and everything outside the markers is preserved, so an
+operator's own stanzas survive; it goes first in the file, because ssh takes the
+first value it obtains for a keyword. Named keys are the normal case, not the
+exception. Nothing reads, copies or prints private key material at any point.
+
+Readiness is then checked rather than assumed, non-interactively and with a
+deadline: `ssh -o BatchMode=yes -o ConnectTimeout=5 -T git@github.com`, whose
+greeting rather than its exit status is the answer. Ownership and modes are read
+back too -- 0700 on the directory, 0600 on the key and the configuration, 0644 on
+the public half. A tenant that cannot publish is reported with the other
+first-run readiness gates, before work is routed, and the report names the exact
+action: the public half to paste, its fingerprint, where GitHub takes it, and the
+re-runnable command that repairs everything else (SYRD-74).
+
 **The desktop half belongs to the desktop account.** `switchyard <project>` run
 by the human the tenant's control grant names reaches the owner's sessions
 through the control bridge, which drops to the project owner. That account owns

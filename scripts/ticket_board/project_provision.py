@@ -716,6 +716,151 @@ def entry_point_module_dependencies(
     return tuple(sorted(needed))
 
 
+#: The markers around the identity selection this project manages. Everything
+#: between them is rewritten on every run; everything outside them is somebody
+#: else's and is preserved (SYRD-74).
+GITHUB_IDENTITY_BEGIN = "# BEGIN SWITCHYARD MANAGED GITHUB IDENTITY"
+GITHUB_IDENTITY_END = "# END SWITCHYARD MANAGED GITHUB IDENTITY"
+DEFAULT_GITHUB_HOST = "github.com"
+
+
+def owner_github_key_path(owner_home: str, *, key_name: str = "") -> str:
+    """The owner's GitHub key. Named, because a project account may hold several.
+
+    The account this was found on had a perfectly good ED25519 key under a
+    nonstandard filename and no configuration selecting it, so git offered
+    nothing and the push failed with `Permission denied (publickey)`. A named
+    key is the normal case here, not the exception (SYRD-74).
+    """
+    name = (key_name or "").strip() or "id_ed25519"
+    if "/" in name:
+        raise PathContainmentError(f"the GitHub key name {name} may not contain a path separator")
+    return f"{owner_home.rstrip('/')}/.ssh/{name}"
+
+
+def github_identity_block(
+    owner_home: str, *, key_name: str = "", host: str = DEFAULT_GITHUB_HOST, host_alias: str = ""
+) -> str:
+    """The ssh_config stanza that makes git offer this project's key.
+
+    `IdentitiesOnly yes` because an agent holding other keys will otherwise
+    offer those first and GitHub will answer for whichever account it recognises
+    -- which is how a push ends up rejected for the wrong identity rather than
+    for a missing one.
+    """
+    key = owner_github_key_path(owner_home, key_name=key_name)
+    lines = [GITHUB_IDENTITY_BEGIN]
+    for pattern in (host, *( [host_alias] if host_alias.strip() else [] )):
+        lines.extend(
+            [
+                f"Host {pattern}",
+                f"    HostName {host}",
+                "    User git",
+                f"    IdentityFile {key}",
+                "    IdentitiesOnly yes",
+                "",
+            ]
+        )
+    lines[-1] = GITHUB_IDENTITY_END
+    return "\n".join(lines) + "\n"
+
+
+def compose_ssh_config(existing: str, block: str) -> str:
+    """The owner's ssh_config with exactly one managed block, at the front.
+
+    First rather than appended: ssh takes the first value it obtains for each
+    keyword, so a managed identity that lands after somebody else's `Host *`
+    stanza is a managed identity that does not apply. Everything outside the
+    markers is left exactly as it was, including a half-written file with a
+    begin marker and no end (SYRD-74).
+    """
+    kept: list[str] = []
+    inside = False
+    saw_begin = False
+    for line in existing.splitlines():
+        stripped = line.strip()
+        if stripped == GITHUB_IDENTITY_BEGIN:
+            inside = True
+            saw_begin = True
+            continue
+        if inside:
+            if stripped == GITHUB_IDENTITY_END:
+                inside = False
+            continue
+        kept.append(line)
+    if inside and saw_begin:
+        # A begin with no end: everything after it was this block's, so it is
+        # replaced rather than kept as somebody else's configuration.
+        pass
+    remainder = "\n".join(kept).strip("\n")
+    if not remainder:
+        return block
+    # The block already ends in a newline; the rest follows it directly, which
+    # is what the rendered shell produces by concatenation.
+    return f"{block}{remainder}\n"
+
+
+def owner_github_identity_commands(
+    owner_user: str,
+    owner_home: str,
+    *,
+    key_name: str = "",
+    host: str = DEFAULT_GITHUB_HOST,
+    host_alias: str = "",
+    comment: str = "",
+) -> list[str]:
+    """Give the project owner a GitHub identity, and select it. Re-runnable.
+
+    Nothing here reads, prints or copies private key material: the key is
+    generated in place by the owner if it is missing, and everything after that
+    is modes, ownership and one configuration stanza. The public half is the
+    only thing an operator is ever shown (SYRD-74).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    key = owner_github_key_path(owner_home, key_name=key_name)
+    ssh_dir = f"{owner_home.rstrip('/')}/.ssh"
+    config = f"{ssh_dir}/config"
+    q_owner = shell_quote(owner_user)
+    q_key = shell_quote(key)
+    q_dir = shell_quote(ssh_dir)
+    q_config = shell_quote(config)
+    label = comment.strip() or f"{owner_user} switchyard"
+    block = github_identity_block(owner_home, key_name=key_name, host=host, host_alias=host_alias)
+    return [
+        f"sudo install -d -m 0700 -o {q_owner} -g {q_owner} {q_dir}",
+        # Generated only when absent, and never printed. A second run finds it
+        # and leaves it alone, which is what makes this safe to re-run.
+        f"if [ ! -f {q_key} ]; then",
+        f"    sudo -u {q_owner} ssh-keygen -t ed25519 -N '' -C {shell_quote(label)} -f {q_key}",
+        "fi",
+        f"sudo chown {q_owner}:{q_owner} {q_key} {q_key}.pub",
+        f"sudo chmod 0600 {q_key}",
+        f"sudo chmod 0644 {q_key}.pub",
+        # The managed block replaces itself and preserves everything else, so an
+        # operator's own stanzas survive an upgrade.
+        # The managed block replaces itself and everything else is preserved,
+        # so an operator's own stanzas survive an upgrade. sed deletes the old
+        # block inclusive of its markers -- and to end of file when a previous
+        # run was interrupted between them -- and the new one is prepended,
+        # because ssh takes the first value it obtains for a keyword.
+        f"sudo -u {q_owner} sh -c "
+        + shell_quote(
+            "set -e; "
+            f'block={shell_quote(block)}; '
+            f'config={shell_quote(config)}; '
+            'tmp="$(mktemp)"; '
+            'printf "%s" "$block" > "$tmp"; '
+            'if [ -f "$config" ]; then '
+            f"sed {shell_quote(f'/^{GITHUB_IDENTITY_BEGIN}$/,/^{GITHUB_IDENTITY_END}$/d')} "
+            '"$config" >> "$tmp"; fi; '
+            'install -m 0600 "$tmp" "$config"; '
+            'rm -f "$tmp"'
+        ),
+        f"sudo chown {q_owner}:{q_owner} {q_config}",
+        f"sudo chmod 0600 {q_config}",
+    ]
+
+
 def role_tooling_staging_dir(project: str, *, root: Path | str | None = None) -> str:
     """Where a role account reaches this tenant's root-owned tooling."""
     return f"{root if root is not None else TENANT_CONTROL_ROOT}/{project}"
@@ -2641,6 +2786,13 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
     q_role_control_sudoers = shell_quote(f"/etc/sudoers.d/{plan.role_control_sudoers_name}")
+    github_identity = "\n".join(
+        owner_github_identity_commands(
+            plan.owner_user,
+            plan.owner_home,
+            comment=f"{plan.owner_user} switchyard {plan.project}",
+        )
+    )
     if role_control_sudoers(plan).strip():
         # visudo -c first: a malformed sudoers file can lock the host out of
         # sudo entirely, so it is validated before it is installed.
@@ -2814,6 +2966,10 @@ sudo install -m 0644 "$canary_unit_candidate" {q_canary_unit}
 sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 {install_role_control_sudoers}
+# The owner's GitHub identity, and the configuration that selects it. Without
+# the selection git offers no key at all and publication fails as though there
+# were none (SYRD-74). Re-runnable: an existing key is left alone.
+{github_identity}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {postgres_sql_file_command(plan.project + '-database.sql')}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}

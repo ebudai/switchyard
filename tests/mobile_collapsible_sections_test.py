@@ -124,8 +124,10 @@ def run_browser_check(playwright: object, server_port: int) -> None:
         assert done_head.get_attribute("aria-expanded") == "false"
         done_head.click()
         done_column = mobile.locator(".column").filter(has=mobile.locator(".column-title", has_text="Done"))
-        done_column.get_by_text("PGU-1", exact=True).wait_for(timeout=5000)
-        done_column.get_by_text("2 linked children", exact=True).wait_for(timeout=5000)
+        done_column.get_by_text("PGU-4", exact=True).wait_for(timeout=5000)
+        done_column.get_by_text("PGU-5", exact=True).wait_for(timeout=5000)
+        assert done_column.locator(".card-id").all_text_contents() == ["PGU-4", "PGU-5"]
+        assert done_column.locator(".child-ticket-item").count() == 0
 
         desktop = browser.new_page(viewport={"width": 1440, "height": 900})
         desktop.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")

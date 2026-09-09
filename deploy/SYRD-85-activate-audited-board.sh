@@ -230,16 +230,37 @@ PY
 }
 
 verify_legacy_runtime_api() {
-    curl -fsS "$BOARD_URL/api/runtime-assignments" \
-        | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p.get("authority_mode") == "legacy_uid", p'
+    curl -fsS "$BOARD_URL/api/runtime-assignments" | python3 -c '
+import json, sys
+
+payload = json.load(sys.stdin)
+assert payload.get("authority_mode") == "legacy_uid", payload
+# Under legacy UID authority nothing registers a live process, so an empty
+# assignment map is this interim activation contract -- not a missing director.
+# A populated map would mean process authority reached the board ahead of the
+# project-account cutover this activation deliberately defers (SYRD-86).
+assignments = payload.get("assignments")
+assert isinstance(assignments, dict), payload
+assert assignments == {}, payload
+'
 }
 
 verify_director_reassign_capability() {
     curl -fsS "$BOARD_URL/api/workflow" | python3 -c '
 import json, sys
-p = json.load(sys.stdin)
-roles = {role.get("name"): role for role in p.get("roles", [])}
-director = roles.get("director", {})
+
+payload = json.load(sys.stdin)
+# The live API returns the configuration envelope {revision, document}. Reading
+# roles from the top level found none, read an absent list as an inactive
+# director, and failed a board that was healthy and correctly configured
+# (SYRD-86). The envelope is asserted rather than tolerated, so a future shape
+# change fails loudly instead of silently passing on an empty role set.
+assert isinstance(payload.get("revision"), int), payload
+document = payload.get("document")
+assert isinstance(document, dict), payload
+roles = {role.get("name"): role for role in document.get("roles", [])}
+director = roles.get("director")
+assert director is not None, sorted(roles)
 assert director.get("active") is True, director
 assert "reassign" in director.get("capabilities", []), director
 '
@@ -358,15 +379,6 @@ verify_target_health() {
     verify_flat_cards_in_browser
 }
 
-verify_previous_health() {
-    verify_release_pointer "$EXPECTED_PREVIOUS"
-    verify_http_and_build "$EXPECTED_PREVIOUS"
-    verify_unit_and_legacy_authority
-    verify_canary_unit
-    verify_socket_contract
-    verify_write_token_boundary "$EXPECTED_PREVIOUS"
-}
-
 prepare_source_checkout() {
     work_root="$(mktemp -d /tmp/syrd-85-activation.XXXXXX)"
     source_dir="$work_root/source"
@@ -408,30 +420,45 @@ standard_deploy() {
         "$source_dir/scripts/ticket-board-service.sh" deploy-restart
 }
 
-rollback_previous_release() {
+# Recovery after the mutating phase is forward, never backward. The audited
+# migrations are additive and stay applied, and once pgu925 is applied the
+# previous release is not merely stale but security-incompatible: it grants an
+# unregistered process director authority, which is the behaviour that migration
+# exists to stop, and the target release's own process-binding smoke refuses it.
+# The first run learned this the hard way -- it announced a rollback to code that
+# could not be brought up, while the deploy helper's own safety net had already
+# restored the target. Say what is actually true instead (SYRD-86).
+recover_forward_after_migrations() {
     printf '%s\n' \
-        'SYRD-85 activation: activation failed; audited SQL migrations are additive and remain applied.' >&2
-    printf 'SYRD-85 activation: restoring previous release %s through the standard health gate\n' \
+        'SYRD-85 activation: activation did not complete; audited SQL migrations are additive and remain applied.' >&2
+    printf 'SYRD-85 activation: previous release %s is NOT restored and must not be: with the additive migrations applied it would run without process-binding enforcement. Recovery is forward.\n' \
         "$EXPECTED_PREVIOUS" >&2
-    if ! standard_deploy "$EXPECTED_PREVIOUS" 1; then
+    if verify_target_health; then
+        printf 'SYRD-85 activation: board is active and healthy on target %s; nothing needed restoring\n' \
+            "$EXPECTED_TARGET" >&2
+        return 0
+    fi
+    printf 'SYRD-85 activation: target health proof failed; re-deploying %s once through the standard canary and health gate, migrations already applied\n' \
+        "$EXPECTED_TARGET" >&2
+    if ! standard_deploy "$EXPECTED_TARGET" 1; then
         return 1
     fi
-    if ! verify_previous_health; then
+    if ! verify_target_health; then
         return 1
     fi
-    printf 'SYRD-85 activation: rollback healthy; build=%s; additive migrations remain applied\n' \
-        "$EXPECTED_PREVIOUS" >&2
+    printf 'SYRD-85 activation: forward recovery healthy; build=%s; additive migrations remain applied\n' \
+        "$EXPECTED_TARGET" >&2
 }
 
 on_exit() {
     local status="$1"
     trap - EXIT
     if (( status != 0 && mutation_started == 1 && deployment_complete == 0 )); then
-        local rollback_status=0
-        (rollback_previous_release) || rollback_status=$?
-        if (( rollback_status != 0 )); then
-            printf 'SYRD-85 activation: CRITICAL: rollback health proof failed with status %s\n' \
-                "$rollback_status" >&2
+        local recovery_status=0
+        (recover_forward_after_migrations) || recovery_status=$?
+        if (( recovery_status != 0 )); then
+            printf 'SYRD-85 activation: CRITICAL: the board is not healthy on target %s. Do NOT restore %s: the additive migrations are applied and it would run without process-binding enforcement. Escalate with this output.\n' \
+                "$EXPECTED_TARGET" "$EXPECTED_PREVIOUS" >&2
             status=1
         fi
     fi
@@ -446,7 +473,6 @@ main() {
     verify_artifact_trust
     require_commands
     unset GIT_DIR GIT_WORK_TREE
-    verify_exact_source
     verify_unit_and_legacy_authority
     verify_canary_unit
     verify_database_admin
@@ -456,10 +482,15 @@ main() {
     release="$(current_release)"
     build="$(board_build_id)"
     if [[ "$release" == "$BOARD_ROOT/releases/$EXPECTED_TARGET" && "$build" == "$EXPECTED_TARGET" ]]; then
-        work_root="$(mktemp -d /tmp/syrd-85-verify.XXXXXX)"
+        # Verification only: no source checkout, no migration, no deploy, and no
+        # temporary state. mutation_started stays 0, so a failed proof reports
+        # the live board instead of recovering something that was never changed.
+        # The audited build is established here by the release pointer and the
+        # build id; verifying which commit the public branch currently points at
+        # belongs to the run that deploys from it, below.
         verify_target_health
         deployment_complete=1
-        printf 'SYRD-85 activation: already active and healthy at %s\n' "$EXPECTED_TARGET"
+        printf 'SYRD-85 activation: already active and healthy at %s; nothing was changed\n' "$EXPECTED_TARGET"
         return
     fi
     [[ "$release" == "$BOARD_ROOT/releases/$EXPECTED_PREVIOUS" ]] || \
@@ -470,6 +501,7 @@ main() {
     verify_http_and_build "$EXPECTED_PREVIOUS"
     verify_socket_contract
 
+    verify_exact_source
     prepare_source_checkout
     mutation_started=1
     printf 'SYRD-85 activation: applying additive migrations, canarying, and activating %s\n' \

@@ -306,6 +306,23 @@ class ProcessRoleAuthority:
     def role_for_uid(self, uid: int) -> str:
         raise CallerIdentityError("a shared project uid does not identify a role")
 
+    def uids(self) -> set[int]:
+        """The tenant boundary this authority admits: the project account only.
+
+        require_allowed_peer() unions this into the allowed set before any role
+        is resolved, so every authority the socket can be built with has to
+        answer it. A process-authority tenant answered it with nothing at all,
+        and each runtime registration died on the AttributeError before
+        session_for_peer() could refuse anything -- so the board rejected every
+        pane, including the ones it would have authorized.
+
+        Admitting exactly the resolved project uid decides nothing later. The
+        shared uid was never role authority: the pane still has to be the live
+        session behind that pid, and still has to match a PostgreSQL runtime
+        assignment, before it is given a role.
+        """
+        return set() if self.project_uid is None else {self.project_uid}
+
 
 class LocalRoleAuthority:
     """Maps a local peer's Unix uid to its board role.

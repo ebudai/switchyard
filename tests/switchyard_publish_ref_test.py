@@ -190,13 +190,194 @@ def test_missing_and_stale_registrations_fail_closed() -> None:
         refusal(lambda: load_registered(owner_home, registry), "is stale")
 
 
+def test_project_slug_is_validated_before_it_builds_any_path() -> None:
+    """The slug reaches a filesystem path, so it is checked before it does.
+
+    The sudoers grant allows any arguments; --project is the first thing a role
+    controls, and the registry lookup concatenates it into a filename.
+    """
+    assert publisher.validate_project(" syrd ") == "syrd"
+    for hostile in ("../../etc/switchyard", "syrd/../other", "SYRD", "", "-syrd", "syrd.json"):
+        refusal(lambda value=hostile: publisher.validate_project(value), "is not a valid project name")
+
+
+def test_registry_root_itself_must_be_trusted() -> None:
+    """A registry an untrusted account can replace is not a name authority.
+
+    Every later check trusts the entry this directory hands back, so the
+    directory is checked first: a link, a foreign owner, or a writable bit is
+    refused before any entry is read.
+    """
+    with tempfile.TemporaryDirectory(prefix="switchyard-publish-ref-root.") as tmp:
+        root = Path(tmp)
+        owner_home, registry, _config = fixture(root)
+
+        elsewhere = root / "elsewhere"
+        elsewhere.mkdir()
+        linked_registry = root / "linked-registry"
+        linked_registry.symlink_to(registry, target_is_directory=True)
+        refusal(
+            lambda: load_registered(owner_home, linked_registry),
+            "must be a real directory",
+        )
+
+        not_a_directory = root / "registry-file"
+        not_a_directory.write_text("{}", encoding="utf-8")
+        refusal(lambda: load_registered(owner_home, not_a_directory), "must be a real directory")
+
+        missing = root / "absent-registry"
+        refusal(lambda: load_registered(owner_home, missing), "cannot inspect project registry")
+
+        # Owned by somebody else: proved by telling the checker which uid it
+        # should have found, rather than by needing a second account to chown to.
+        refusal(
+            lambda: publisher.load_project(
+                "syrd",
+                owner_home=owner_home,
+                owner_uid=os.getuid(),
+                owner_gid=os.getgid(),
+                registry_root=registry,
+                registry_uid=os.getuid() + 1,
+            ),
+            "is not owned by the trusted account",
+        )
+
+        for mode in (0o775, 0o777):
+            registry.chmod(mode)
+            refusal(
+                lambda: load_registered(owner_home, registry),
+                "writable by an untrusted account",
+            )
+        registry.chmod(0o755)
+
+
+def test_registry_entry_shape_is_validated() -> None:
+    with tempfile.TemporaryDirectory(prefix="switchyard-publish-ref-shape.") as tmp:
+        root = Path(tmp)
+        owner_home, registry, config = fixture(root)
+        entry = registry / "syrd.json"
+        pointer = json.loads(entry.read_text(encoding="utf-8"))
+
+        broken = dict(pointer, schema="switchyard.project-registry.v0")
+        write_json(entry, broken)
+        refusal(lambda: load_registered(owner_home, registry), "unsupported schema")
+
+        for empty in ({k: v for k, v in pointer.items() if k != "config_path"},
+                      dict(pointer, config_path=""),
+                      dict(pointer, config_path="   "),
+                      dict(pointer, config_path=17)):
+            write_json(entry, empty)
+            refusal(lambda: load_registered(owner_home, registry), "has no config_path")
+
+        write_json(entry, pointer)
+        assert load_registered(owner_home, registry)["project"] == "syrd"
+
+
+def test_registered_config_ownership_is_enforced_along_the_whole_path() -> None:
+    """Containment is not enough: the path has to belong to the owner.
+
+    A location inside Projects that some other account controls is exactly what
+    a role would arrange if it could. Note where the refusal lands: every
+    directory component is checked, so a foreign owner is caught while walking
+    the path, before the file itself is ever read. Pinning the component message
+    keeps that ordering from quietly regressing into a leaf-only check.
+    """
+    def load_as(*, owner_uid: int, owner_gid: int):
+        owner_home, registry, _config = fixture(Path(tmp))
+        return publisher.load_project(
+            "syrd",
+            owner_home=owner_home,
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+            registry_root=registry,
+            registry_uid=os.getuid(),
+        )
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-publish-ref-owner.") as tmp:
+        assert load_as(owner_uid=os.getuid(), owner_gid=os.getgid())["project"] == "syrd"
+        refusal(
+            lambda: load_as(owner_uid=os.getuid() + 1, owner_gid=os.getgid()),
+            "has an untrusted owner",
+        )
+
+
+def test_bundle_must_be_a_role_owned_regular_file() -> None:
+    """The role hands over a bundle; the owner must not read one it did not.
+
+    A link here would let a role point the owner's git at a file it cannot
+    otherwise read, so the check is on the link itself, not its destination.
+    """
+    import pwd
+
+    me = pwd.getpwuid(os.getuid()).pw_name
+    with tempfile.TemporaryDirectory(prefix="switchyard-publish-ref-bundle.") as tmp:
+        root = Path(tmp)
+        bundle = root / "work.bundle"
+        bundle.write_bytes(b"not really a bundle, but a real file")
+        publisher.require_role_owned_file(bundle, me)
+
+        link = root / "linked.bundle"
+        link.symlink_to(bundle)
+        refusal(lambda: publisher.require_role_owned_file(link, me), "must be a regular file, not a link")
+
+        directory = root / "directory.bundle"
+        directory.mkdir()
+        refusal(lambda: publisher.require_role_owned_file(directory, me), "must be a regular file, not a link")
+
+        refusal(lambda: publisher.require_role_owned_file(root / "absent.bundle", me), "cannot read bundle")
+
+        # root always exists and never owns this file.
+        refusal(lambda: publisher.require_role_owned_file(bundle, "root"), "is not owned by root")
+        refusal(
+            lambda: publisher.require_role_owned_file(bundle, "switchyard-no-such-account"),
+            "is not a local account",
+        )
+
+
+def test_remote_name_resolves_from_the_owner_checkout() -> None:
+    """The URL comes from the owner's repository, never the role's.
+
+    A role controls its own checkout's git configuration, so a remote NAME is
+    resolved in the owner's repository and anything already a URL is left alone.
+    """
+    with tempfile.TemporaryDirectory(prefix="switchyard-publish-ref-remote.") as tmp:
+        root = Path(tmp)
+        repository = root / "checkout"
+        repository.mkdir()
+        assert publisher.git(["-C", str(repository), "init", "-q"]).returncode == 0
+        expected = "https://example.invalid/switchyard.git"
+        assert publisher.git(
+            ["-C", str(repository), "remote", "add", "origin", expected]
+        ).returncode == 0
+
+        config = {"repository": str(repository)}
+        assert publisher.resolve_remote_url(config, "origin") == expected
+        refusal(lambda: publisher.resolve_remote_url(config, "upstream"), "has no remote named upstream")
+
+        # Already a URL or an scp-style location: returned untouched, and the
+        # owner checkout is not consulted at all.
+        for literal in (expected, "git@github.com:ebudai/switchyard.git", "/srv/git/switchyard.git"):
+            assert publisher.resolve_remote_url({}, literal) == literal
+
+        refusal(
+            lambda: publisher.resolve_remote_url({}, "origin"),
+            "no owner repository",
+        )
+
+
 def test_role_and_ref_boundary_is_unchanged() -> None:
     config = {"roles": [{"role": "app", "run_as_user": "syrd-app"}]}
     assert publisher.role_for_account(config, "syrd-app")["role"] == "app"
     refusal(lambda: publisher.role_for_account(config, "syrd-ops"), "not a configured role account")
     assert publisher.validate_ref("app/syrd-69", "app") == "app/syrd-69"
-    refusal(lambda: publisher.validate_ref("main", "app"), "integration branch")
     refusal(lambda: publisher.validate_ref("ops/syrd-69", "app"), "only publish refs under app/")
+    for protected in ("main", "master", "trunk", "release", "head", "MAIN", "Main"):
+        refusal(lambda value=protected: publisher.validate_ref(value, value), "integration branch")
+    refusal(lambda: publisher.validate_ref("app", "app"), "below its namespace")
+    refusal(lambda: publisher.validate_ref("refs/heads/app/x", "app"), "not a full ref path")
+    refusal(lambda: publisher.validate_ref("app/x.lock", "app"), "not a valid branch name")
+    refusal(lambda: publisher.validate_ref("app/../ops/x", "app"), "not a valid branch name")
+    refusal(lambda: publisher.validate_ref("", "app"), "a ref name is required")
 
 
 def main() -> int:

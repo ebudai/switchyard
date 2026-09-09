@@ -916,6 +916,9 @@ def test_inspector_agy_cli_stays_in_first_run_trust_phase() -> None:
 def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
     roles = {role.role: role for role in config.roles}
+    # Codex roles also carry the raw-output override, which is what puts their
+    # transcript in the pane's own scrollback; Claude and Gemini roles do not
+    # take it (SYRD-91).
     expected_by_role = {
         "director": ["claude", "--model", "claude-opus-5", "--effort", "high", "--dangerously-skip-permissions"],
         "main": [
@@ -924,6 +927,8 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "gpt-5.6-sol",
             "-c",
             "reasoning_effort=high",
+            "-c",
+            "tui.raw_output_mode=true",
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
@@ -933,6 +938,8 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "gpt-5.5",
             "-c",
             "reasoning_effort=high",
+            "-c",
+            "tui.raw_output_mode=true",
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
@@ -943,6 +950,8 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "gpt-5.5",
             "-c",
             "reasoning_effort=high",
+            "-c",
+            "tui.raw_output_mode=true",
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],

@@ -119,7 +119,7 @@ grep -q 'verify_foreign_tenants_unchanged' <<<"$recovery_body" || \
 if grep -qE '"\$SWITCHYARD_BIN" "\$PROJECT"|switchyard_pinned .* "\$PROJECT"$' <<<"$recovery_body"; then
     fail "recovery must not relaunch the desktop presentation from a root trap handler"
 fi
-grep -q 'were not restarted' <<<"$recovery_body" || \
+grep -q 'not restarted' <<<"$recovery_body" || \
     fail "recovery must say plainly that the roles are left stopped"
 
 # --- the checks themselves ---------------------------------------------------
@@ -363,14 +363,17 @@ esac
 EOF
 chmod +x "$migration_root/scripts/switchyard"
 roles_stopped=0
+roles_live_at_entry="$(live_role_sessions)"
 none="$( ( trap 'echo "ROLES_STOPPED=$roles_stopped"' EXIT; checkpoint_roles ) 2>&1 || true )"
 grep -q 'ROLES_STOPPED=0' <<<"$none" || \
     fail "a stop that checkpointed nothing must not be recorded as a checkpoint, got: $none"
 grep -q 'checkpointed nothing' <<<"$none" || \
     fail "a stop that checkpointed nothing must say so, got: $none"
 
-# Recovery names the sessions that are actually down, so a partial checkpoint is
-# not reported as if it were all or nothing.
+# Recovery names the sessions this run actually stopped, so a partial checkpoint
+# is not reported as if it were all or nothing.
+printf '%s\n' director main app ops audit >"$live_roles"
+roles_live_at_entry="$(live_role_sessions)"
 printf '%s\n' app ops audit >"$live_roles"
 down="$(checkpointed_role_sessions)"
 grep -q 'syrd-director' <<<"$down" || fail "checkpointed_role_sessions must name a stopped role"
@@ -378,8 +381,33 @@ grep -q 'syrd-main' <<<"$down" || fail "checkpointed_role_sessions must name eve
 if grep -q 'syrd-app' <<<"$down"; then
     fail "checkpointed_role_sessions must not name a role that is still live"
 fi
+
+# The host this artifact was written for: five roles live at entry, Main already
+# absent. Crediting this run with stopping Main would claim a resumable
+# checkpoint it never took, so the pre-stop set has to survive (SYRD-89).
+printf '%s\n' director app ops audit inspector >"$live_roles"
+roles_live_at_entry="$(live_role_sessions)"
+if grep -q 'syrd-main' <<<"$roles_live_at_entry"; then
+    fail "the fixture should have Main absent at entry"
+fi
+printf '%s\n' app ops audit inspector >"$live_roles"
+down="$(checkpointed_role_sessions)"
+grep -q 'syrd-director' <<<"$down" || \
+    fail "the role this run stopped must be reported as checkpointed, got: [$down]"
+if grep -q 'syrd-main' <<<"$down"; then
+    fail "a role absent before this run started must not be reported as checkpointed, got: [$down]"
+fi
+absent="$(absent_role_sessions_at_entry)"
+grep -q 'syrd-main' <<<"$absent" || \
+    fail "a role absent at entry must be reported separately as such, got: [$absent]"
+if grep -q 'syrd-director' <<<"$absent"; then
+    fail "a role live at entry must not be reported as already absent, got: [$absent]"
+fi
+
 recovery_body="$(code_of recover_previous_state)"
 grep -q 'checkpointed_role_sessions' <<<"$recovery_body" || \
-    fail "recovery must report the sessions it can observe stopped, not just a flag"
+    fail "recovery must report the sessions this run stopped, not just a flag"
+grep -q 'absent_role_sessions_at_entry' <<<"$recovery_body" || \
+    fail "recovery must separate roles that were already absent at entry"
 
 echo "SYRD-87 recovery artifact contract regression passed"

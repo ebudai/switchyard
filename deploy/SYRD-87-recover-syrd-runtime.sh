@@ -57,6 +57,7 @@ readonly FOREIGN_UNITS=(
 work_root=""
 source_dir=""
 foreign_before=""
+roles_live_at_entry=""
 mutation_started=0
 roles_stopped=0
 cutover_complete=0
@@ -303,21 +304,37 @@ live_role_sessions() {
     return 0
 }
 
+# What this run actually checkpointed: live when it started, not live now. A
+# role that was already down before the artifact ran was not stopped by it, and
+# reporting it as checkpointed would credit the artifact with someone else's
+# outage -- Main was already absent on the host this was written for (SYRD-89).
 checkpointed_role_sessions() {
+    local now account
+    now="$(live_role_sessions)"
+    while read -r account; do
+        [[ -n "$account" ]] || continue
+        grep -qxF "$account" <<<"$now" || printf '  %s\n' "$account"
+    done <<<"$roles_live_at_entry"
+    return 0
+}
+
+# Context, kept separate on purpose: these were down before this run touched
+# anything, so they are the operator's to explain, not this artifact's.
+absent_role_sessions_at_entry() {
     local role account
     for role in "${ROLES[@]}"; do
         account="$PROJECT-$role"
         id "$account" >/dev/null 2>&1 || continue
-        sudo -u "$account" -H tmux has-session -t "$PROJECT-$role" >/dev/null 2>&1 || \
-            printf '  %s\n' "$PROJECT-$role"
+        grep -qxF "$account" <<<"$roles_live_at_entry" || printf '  %s\n' "$account"
     done
     return 0
 }
 
 checkpoint_roles() {
     note "stopping every $PROJECT role at a resumable checkpoint, including the director's session"
-    local before after status=0
-    before="$(live_role_sessions)"
+    local after status=0
+    # The pre-stop set is captured before the first mutation and kept, so what
+    # this run stopped stays a difference rather than a snapshot.
     # Run as root through the candidate entry point: the roles are still bound
     # to dedicated accounts, so each stop is wrapped in `sudo -u <account>` by
     # the release itself, and only root can reach all six.
@@ -327,7 +344,7 @@ checkpoint_roles() {
     # command returned. A stop that checkpoints some roles and then fails still
     # leaves sessions down, and taking the exit code as the signal made recovery
     # silent about exactly that case (SYRD-89).
-    [[ "$before" == "$after" ]] || roles_stopped=1
+    [[ "$roles_live_at_entry" == "$after" ]] || roles_stopped=1
     if (( status != 0 )); then
         if (( roles_stopped == 1 )); then
             die "the supported stop command failed (exit $status) after checkpointing some roles; no release or identity was changed"
@@ -515,9 +532,10 @@ recover_previous_state() {
     systemctl is-active --quiet "$SERVICE" || return 1
     verify_foreign_tenants_unchanged
     note "recovery: shared release restored to $EXPECTED_SHARED_PREVIOUS; board build is $(board_build_id); $SERVICE is active"
-    local still_live checkpointed
+    local still_live checkpointed already_absent
     still_live="$(live_role_sessions)"
     checkpointed="$(checkpointed_role_sessions)"
+    already_absent="$(absent_role_sessions_at_entry)"
     if (( roles_stopped == 1 )) || [[ -n "$checkpointed" ]]; then
         # Deliberately not restarted from here. The roles are stopped at
         # resumable checkpoints and their state is intact; bringing the six-pane
@@ -526,11 +544,13 @@ recover_previous_state() {
         # name which sessions are actually down, so a partial checkpoint is not
         # reported as if it were all or nothing (SYRD-89).
         cat >&2 <<EOF
-SYRD-87 recovery: these $PROJECT roles are stopped at resumable checkpoints and
-were not restarted:
-${checkpointed:-  (none still resolvable; see roles_stopped=$roles_stopped)}
+SYRD-87 recovery: these $PROJECT roles were checkpointed by this run and were
+not restarted:
+${checkpointed:-  (none)}
 Still live:
 ${still_live:-  (none)}
+Already absent before this run started, and not this artifact's doing:
+${already_absent:-  (none)}
 Their resumable state is intact and no account, worktree or session store was
 deleted. Bring them back from the authorized desktop account:
 
@@ -589,6 +609,10 @@ main() {
     verify_partial_state
     verify_exact_source
     prepare_source_checkout
+
+    # The pre-stop set, captured while nothing has changed yet, so recovery can
+    # report what this run stopped rather than what happens to be down.
+    roles_live_at_entry="$(live_role_sessions)"
 
     # Checkpointing the roles is the first mutation and it has to come first:
     # the migration contract refuses while any legacy pane is live, in dry run

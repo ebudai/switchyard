@@ -46,9 +46,10 @@ code_of() {
 
 # --- the pins are the ones this ticket authorises ----------------------------
 
-[[ "$EXPECTED_TARGET" == "9a4d0a648c839fa5f8945342edefcd49ab553407" ]] || \
+# The integrated main, not the release the previous run targeted (SYRD-87 R7).
+[[ "$EXPECTED_TARGET" == "ae0293c7fc22b2c308442b109cbdf3eec1f9145b" ]] || \
     fail "artifact targets $EXPECTED_TARGET, not the integrated main this ticket pins"
-[[ "$EXPECTED_TREE" == "e5a685c51e4da4dd816d651a69d6467c9ba823a4" ]] || \
+[[ "$EXPECTED_TREE" == "2d7fc7cadf3c94c17cac39d84c36aaab878b515b" ]] || \
     fail "artifact pins tree $EXPECTED_TREE"
 [[ "$PROJECT" == "syrd" ]] || fail "artifact is not scoped to syrd"
 
@@ -702,8 +703,17 @@ grep -qw 'release_phase_deployed' <<<"$recovery_body" || \
 # because the working directory happened to supply one.
 render_probe="$test_root/render"
 mkdir -p "$render_probe"
-if [[ -d "$TARGET_RELEASE_ROOT" ]]; then
-    rendered_live="$(cd "$render_probe" && render_release_phase_commands 2>&1)" || \
+# The renderer needs an installed, marker-bearing release to read. This run's
+# target has not been exported yet -- that is the point of the run -- so it is
+# driven against the release the previous run installed, which is present and
+# carries its own marker. Same code path, a real release, and it does not
+# pretend the new one exists (SYRD-87 R7).
+render_release_root="$TARGET_RELEASE_ROOT"
+if [[ ! -d "$render_release_root" ]]; then
+    render_release_root="/opt/switchyard/releases/$EXPECTED_PRIOR_TARGET"
+fi
+if [[ -d "$render_release_root" ]]; then
+    rendered_live="$(cd "$render_probe" && render_release_phase_commands "$render_release_root" "$(basename "$render_release_root")" 2>&1)" || \
         fail "render_release_phase_commands failed from a neutral directory:"$'\n'"$rendered_live"
     [[ "$rendered_live" != *"ModuleNotFoundError"* ]] || \
         fail "the renderer cannot import its own release:"$'\n'"$rendered_live"
@@ -733,12 +743,12 @@ for line in sys.stdin:
     if line and "deploy" in json.loads(line)["label"]:
         print(json.loads(line)["command"])
 ')"
-    grep -q "$EXPECTED_TARGET" <<<"$deploy_cmd" || \
-        fail "the deploy step does not name the pinned release $EXPECTED_TARGET"
+    grep -q "$(basename "$render_release_root")" <<<"$deploy_cmd" || \
+        fail "the deploy step does not name the release it was rendered from"
     grep -q '/etc/switchyard/provision/' <<<"$(printf '%s\n' "$rendered_live")" || \
         fail "the units must come from the root-owned mirror, not the tenant's directory"
 else
-    fail "the pinned release $TARGET_RELEASE_ROOT is not installed; the renderer cannot be driven"
+    fail "neither $TARGET_RELEASE_ROOT nor the prior release is installed; the renderer cannot be driven"
 fi
 
 # The recorder must exist and go through the release's own recorder, and
@@ -854,8 +864,11 @@ classify() {
 # Today's exact pair: the R2 run sourced from the marker-bearing installed
 # release, so the staged tooling is correctly provenanced at the target. Its
 # recovery restored the pointers and did not erase that, which is right.
-[[ "$(classify "$RESUMED_PHASES" "$TARGET_SHA")" == "resumed-provenanced" ]] || \
-    fail "a resumed journal with the target marker must classify as resumed-provenanced"
+# Superseded by R7: the marker names the release the PREVIOUS run staged from,
+# which is the prior target, not this run's. Both directions are asserted in the
+# R7 block below.
+[[ "$(classify "$RESUMED_PHASES" "$EXPECTED_PRIOR_TARGET")" == "resumed-provenanced" ]] || \
+    fail "a resumed journal with the previously staged marker must classify as resumed-provenanced"
 
 # --- and everything that is not one of them ----------------------------------
 [[ "$(classify "$RESUMED_PHASES" "$PREVIOUS_SHA")" == "refused" ]] || \
@@ -903,7 +916,7 @@ fi
 # trustworthy, so it is exercised against fixtures rather than pattern-matched.
 corro="$test_root/corro"
 mkdir -p "$corro/release"
-write_marker "$corro/release/.switchyard-release.json" "$TARGET_SHA"
+write_marker "$corro/release/.switchyard-release.json" "$EXPECTED_PRIOR_TARGET"
 # A real cache holding the target at its expected tree: the artifact's own.
 corroborates() { ( verify_target_marker_corroborated "$1" "$2" ) >/dev/null 2>&1; }
 
@@ -915,7 +928,7 @@ python3 -c '
 import json, sys
 json.dump({"commit": sys.argv[2], "source_ref": sys.argv[2],
            "source_repo": "/tmp/definitely-not-here"}, open(sys.argv[1], "w"))
-' "$corro/release/.switchyard-release.json" "$TARGET_SHA"
+' "$corro/release/.switchyard-release.json" "$EXPECTED_PRIOR_TARGET"
 corroborates "$corro/release" "$CACHE" || \
     fail "corroboration must not require the marker's source_repo to exist"
 
@@ -930,7 +943,7 @@ corroborates "$corro/release" "$CACHE" && \
     fail "an installed release with no marker must not corroborate the target"
 
 # A cache that does not hold the target.
-write_marker "$corro/release/.switchyard-release.json" "$TARGET_SHA"
+write_marker "$corro/release/.switchyard-release.json" "$EXPECTED_PRIOR_TARGET"
 git init -q --bare "$corro/empty.git" 2>/dev/null || true
 corroborates "$corro/release" "$corro/empty.git" && \
     fail "a cache that does not contain the target must not corroborate it"
@@ -1009,9 +1022,20 @@ read_at = [i for i, l in enumerate(body) if "verify_board_release_readable" in l
 if not read_at:
     raise SystemExit("the repair never calls verify_board_release_readable")
 last_read = read_at[-1]
+# One early return is legitimate and only one: the board release this run
+# targets has not been exported yet, so there is nothing to read. Every other
+# path must reach the read (SYRD-87 R7).
 early = [(i, l.strip()) for i, l in enumerate(body[:last_read]) if l.strip().split(" ")[0] == "return"]
-if early:
-    raise SystemExit("return before the read check at %s" % (early,))
+allowed = []
+for index, text in early:
+    window = " ".join(body[max(0, index - 6):index])
+    if "has not been exported yet" in window:
+        allowed.append((index, text))
+unexplained = [entry for entry in early if entry not in allowed]
+if unexplained:
+    raise SystemExit("return before the read check at %s" % (unexplained,))
+if len(allowed) > 1:
+    raise SystemExit("only the absent-release path may skip the read, found %s" % (allowed,))
 ' "$repair_body" || fail "the repair can reach its end without the boardsvc read"
 
 # The predicate is a diagnostic and must still refuse a symlink before any mode
@@ -1038,5 +1062,142 @@ chmod 0755 "$probe_root"
 ln -sfn "$probe_root" "$test_root/serviceable-link"
 release_root_serviceable "$test_root/serviceable-link" \
     && fail "a symlink must not be called a serviceable release root"
+
+# --- SYRD-87 R7: the integrated target, and this host's exact resume state ----
+
+[[ "$EXPECTED_TARGET" == "ae0293c7fc22b2c308442b109cbdf3eec1f9145b" ]] || \
+    fail "the artifact must target integrated main, got $EXPECTED_TARGET"
+[[ "$EXPECTED_TREE" == "2d7fc7cadf3c94c17cac39d84c36aaab878b515b" ]] || \
+    fail "the artifact must pin the integrated tree, got $EXPECTED_TREE"
+[[ "$EXPECTED_PRIOR_TARGET" == "9a4d0a648c839fa5f8945342edefcd49ab553407" ]] || \
+    fail "the prior target must be pinned so the staged marker can be recognised"
+[[ "$EXPECTED_TARGET" != "$EXPECTED_PRIOR_TARGET" ]] || \
+    fail "this run's target and the previously staged release must not be the same value"
+
+# The host's exact state: journal resumed, marker naming the PRIOR target.
+[[ "$(classify "$RESUMED_PHASES" "$EXPECTED_PRIOR_TARGET")" == "resumed-provenanced" ]] || \
+    fail "the staged marker names the prior target; that is this host's exact resume state"
+# ...and a marker naming THIS run's target would mean a run that already staged
+# from it, which has not happened and is not a state this artifact resumes from.
+[[ "$(classify "$RESUMED_PHASES" "$EXPECTED_TARGET")" == "refused" ]] || \
+    fail "a marker naming the new target must be refused: nothing has staged from it yet"
+
+# --- the new board release does not exist yet --------------------------------
+#
+# R5 inherited an already-exported board release and existed to repair its mode.
+# This run targets one that has never been exported. The integrated service
+# export now normalizes a new release root before publication, so absent is the
+# ordinary case and must not be a refusal -- while a root that exists and is not
+# serviceable must still be repaired.
+# Driven: an absent release must be allowed, an existing-but-unserviceable one
+# must still be repaired, and a wrong-sha one must still be refused.
+absent_probe="$test_root/no-such-release"
+( repair_board_release_traversal "$absent_probe" ) >/dev/null 2>&1 || \
+    fail "an absent board release must be allowed: the deploy creates it"
+wrong_probe="$test_root/wrong-release"
+mkdir -p "$wrong_probe"
+printf '%s\n' "0000000000000000000000000000000000000000" >"$wrong_probe/.pgu-deploy-sha"
+if ( repair_board_release_traversal "$wrong_probe" ) >/dev/null 2>&1; then
+    fail "a board release recording another sha must still be refused"
+fi
+link_probe="$test_root/release-link"
+ln -sfn "$absent_probe" "$link_probe" 2>/dev/null || true
+if ( repair_board_release_traversal "$link_probe" ) >/dev/null 2>&1; then
+    fail "a symlink standing in for a board release must still be refused"
+fi
+
+repair_body="$(code_of repair_board_release_traversal)"
+absent_at="$(grep -n 'has not been exported yet' <<<"$repair_body" | head -1 | cut -d: -f1)"
+sha_at2="$(grep -n 'pgu-deploy-sha' <<<"$repair_body" | head -1 | cut -d: -f1)"
+[[ -n "$absent_at" && -n "$sha_at2" ]] || fail "could not order the absent-release branch"
+(( absent_at < sha_at2 )) || \
+    fail "the absent case must be decided before the provenance checks that assume a tree"
+
+# --- the wrong-port recurrence ------------------------------------------------
+#
+# 127.0.0.1:8770 is another tenant's board on this host. The previous run's HTTP
+# smoke passed against it and its build-id gate then rolled a correctly started
+# syrd back.
+[[ "$BOARD_PORT" == "23326" ]] || fail "the artifact must pin this tenant's port, got $BOARD_PORT"
+[[ "$BOARD_SOCKET_PATH" == "/run/syrd-ticket-board/ticket-board.sock" ]] || \
+    fail "the artifact must pin this tenant's socket, got $BOARD_SOCKET_PATH"
+
+probe_body="$(code_of verify_deploy_command_probes_this_board)"
+[[ -n "$probe_body" ]] || fail "could not read verify_deploy_command_probes_this_board()"
+if ( verify_deploy_command_probes_this_board "env BOARD_ROOT=/x DEPLOY_REF=y sh -c deploy" ) >/dev/null 2>&1; then
+    fail "a deploy sequence carrying no BOARD_PORT must be refused"
+fi
+if ( verify_deploy_command_probes_this_board "env BOARD_PORT=8770 BOARD_UNIX_SOCKET=$BOARD_SOCKET_PATH x" ) >/dev/null 2>&1; then
+    fail "a deploy sequence naming another tenant's port must be refused"
+fi
+( verify_deploy_command_probes_this_board \
+    "env BOARD_PORT=$BOARD_PORT BOARD_UNIX_SOCKET=$BOARD_SOCKET_PATH sh -c deploy" ) >/dev/null 2>&1 || \
+    fail "a deploy sequence naming this tenant's port and socket must be accepted"
+
+# --- the units are reviewed before they are installed -------------------------
+# Driven over fixture units rather than read. The ownership and boardsvc-read
+# checks need root, so they are stood down for the fixture and asserted by
+# source separately below; everything the incident turned on is exercised.
+units_body="$(code_of verify_staged_units_are_process_authority)"
+[[ -n "$units_body" ]] || fail "could not read verify_staged_units_are_process_authority()"
+grep -q 'BOARD_SERVICE_USER" test -r' <<<"$units_body" || \
+    fail "the unit review must confirm the service account can read the unit"
+
+units_dir="$test_root/staged"
+mkdir -p "$units_dir"
+write_units() {
+    # $1 authority line, $2 accounts line, $3 port
+    {
+        printf '[Service]\n'
+        [[ -n "$1" ]] && printf '%s\n' "$1"
+        [[ -n "$2" ]] && printf '%s\n' "$2"
+        printf 'ExecStart=/usr/bin/python3 /x/ticket-board.py --host 127.0.0.1 --port %s --unix-socket %s --frames /f --assets /a\n' \
+            "$3" "$BOARD_SOCKET_PATH"
+    } >"$units_dir/$PROJECT-ticket-board.service"
+    printf '[Service]\n' >"$units_dir/$PROJECT-ticket-board-notify-listener.service"
+}
+review() { ( SYRD87_SKIP_UNIT_OWNER_CHECK=1 verify_staged_units_are_process_authority "$units_dir" ) >/dev/null 2>&1; }
+
+write_units "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1" "" "$BOARD_PORT"
+review || fail "a correctly regenerated process-authority unit must be accepted"
+
+write_units "" "" "$BOARD_PORT"
+review && fail "a unit without TICKET_BOARD_PROCESS_AUTHORITY=1 must be refused"
+
+write_units "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1" \
+    "Environment=TICKET_BOARD_ROLE_ACCOUNTS=director=syrd-director,designer=syrd-designer" "$BOARD_PORT"
+review && fail "a unit still naming per-role accounts must be refused"
+
+# A table with no retired account in it, so the table check is the only guard
+# that can refuse this one.
+write_units "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1" \
+    "Environment=TICKET_BOARD_ROLE_ACCOUNTS=director=syrd-director,ops=syrd-ops" "$BOARD_PORT"
+review && fail "any per-role table must be refused, retired account or not"
+
+write_units "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1" "" "8770"
+review && fail "a unit serving another tenant's port must be refused"
+
+write_units "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1" "" "$BOARD_PORT"
+rm -f "$units_dir/$PROJECT-ticket-board-notify-listener.service"
+review && fail "a missing listener unit must be refused"
+write_units "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1" "" "$BOARD_PORT"
+
+release_body="$(code_of run_release_phase)"
+review_at="$(grep -n 'verify_staged_units_are_process_authority' <<<"$release_body" | head -1 | cut -d: -f1)"
+render_at2="$(grep -n 'render_release_phase_commands' <<<"$release_body" | head -1 | cut -d: -f1)"
+probe_at="$(grep -n 'verify_deploy_command_probes_this_board' <<<"$release_body" | head -1 | cut -d: -f1)"
+eval_at="$(grep -n 'eval "\$command"' <<<"$release_body" | head -1 | cut -d: -f1)"
+[[ -n "$review_at" && -n "$render_at2" && -n "$probe_at" && -n "$eval_at" ]] || \
+    fail "could not order the release phase steps"
+(( review_at < render_at2 && render_at2 < probe_at && probe_at < eval_at )) || \
+    fail "units must be reviewed, then the sequence rendered and probed, before anything runs"
+
+# --- what a successful run must prove before it reports success ---------------
+state_body2="$(code_of report_state)"
+for required in verify_release_phase_state verify_director_write_path verify_listener_active \
+                verify_role_sessions_restored verify_presentation_recovered; do
+    grep -qw "$required" <<<"$state_body2" || \
+        fail "$required must run before a successful run reports success"
+done
 
 echo "SYRD-87 recovery artifact contract regression passed"

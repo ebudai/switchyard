@@ -23,8 +23,14 @@ set -Eeuo pipefail
 readonly PROJECT="syrd"
 readonly PROJECT_OWNER="switchyard-agent"
 readonly EXPECTED_ARTIFACT_PATH="/etc/switchyard/provision/syrd/SYRD-87-recover-syrd-runtime.sh"
-readonly EXPECTED_TARGET="9a4d0a648c839fa5f8945342edefcd49ab553407"
-readonly EXPECTED_TREE="e5a685c51e4da4dd816d651a69d6467c9ba823a4"
+readonly EXPECTED_TARGET="ae0293c7fc22b2c308442b109cbdf3eec1f9145b"
+readonly EXPECTED_TREE="2d7fc7cadf3c94c17cac39d84c36aaab878b515b"
+#: The release the previous run installed and staged tooling from. It is not
+#: this run's target and must never be confused with it: the shared symlink was
+#: rolled back off it, its board release was never deployed, and the tenant's
+#: staged provenance marker still names it. It is pinned so that state can be
+#: recognised exactly rather than waved through (SYRD-87 R7).
+readonly EXPECTED_PRIOR_TARGET="9a4d0a648c839fa5f8945342edefcd49ab553407"
 readonly EXPECTED_SHARED_PREVIOUS="7a0d44d72fddef60a6c0cb3940a1f4853b30fe44"
 readonly EXPECTED_BOARD_PREVIOUS="0eace2e8cb40c0adf04a3cfe4c61cf7e8e593b59"
 readonly PUBLIC_REMOTE="https://github.com/ebudai/switchyard.git"
@@ -36,7 +42,14 @@ readonly SHARED_ROOT="/opt/switchyard"
 # post-install upgrade may be sourced from. A release directory carries
 # .switchyard-release.json; a plain git checkout does not, and that difference
 # decides whether the roles end up with provenanced tooling (SYRD-89).
-readonly TARGET_RELEASE_ROOT="/opt/switchyard/releases/9a4d0a648c839fa5f8945342edefcd49ab553407"
+readonly TARGET_RELEASE_ROOT="/opt/switchyard/releases/ae0293c7fc22b2c308442b109cbdf3eec1f9145b"
+#: Where this tenant's board actually listens, and the socket its unit names.
+#: Pinned because the deploy script's own fallback is port 8770, which on this
+#: host is another tenant's board and is listening: the previous run's health
+#: gates passed against it and then rolled a correctly started syrd back
+#: (SYRD-87 R6). The artifact asserts the rendered deploy command carries these.
+readonly BOARD_PORT="23326"
+readonly BOARD_SOCKET_PATH="/run/syrd-ticket-board/ticket-board.sock"
 readonly SWITCHYARD_BIN="/usr/local/bin/switchyard"
 readonly BOARD_ROOT="/home/switchyard-agent/syrd-ticketboard-live"
 readonly BOARD_URL="http://127.0.0.1:23326"
@@ -227,12 +240,15 @@ verify_tenant_ownership() {
 # unrecognised marker is not an optional extra to be waved through.
 recovery_entry_state() {
     local journal="${1:-$UPGRADE_JOURNAL}" marker="${2:-$TENANT_RELEASE_MARKER}"
-    python3 - "$journal" "$marker" "$EXPECTED_SHARED_PREVIOUS" "$EXPECTED_TARGET" <<'@M@'
+    python3 - "$journal" "$marker" "$EXPECTED_SHARED_PREVIOUS" "$EXPECTED_PRIOR_TARGET" <<'PYEMBED'
 import json
 import os
 import sys
 
-journal_path, marker_path, previous, target = sys.argv[1:5]
+# `staged` is the release the PREVIOUS run staged the tenant's tooling from,
+# which is the prior target and not this run's. Nothing on this host has been
+# staged from the new target yet -- that is what this run is for (SYRD-87 R7).
+journal_path, marker_path, previous, staged = sys.argv[1:5]
 
 try:
     journal = json.load(open(journal_path))
@@ -283,20 +299,20 @@ if phases == ENTRY:
 elif phases == RESUMED:
     if commit is None:
         print("resumed-markerless")
-    elif commit == target:
+    elif commit == staged:
         print("resumed-provenanced")
     else:
         raise SystemExit(
             f"the upgrade reached identities, but the staged tooling names {commit}, "
-            f"not {target}; this artifact is reviewed against a marker that is absent "
-            f"or exactly the target"
+            f"not {staged}; this artifact is reviewed against a marker that is absent "
+            f"or exactly the release the previous run staged from"
         )
 else:
     raise SystemExit(
         f"upgrade journal phases are {phases}; this artifact is reviewed against "
         f"{ENTRY} (entry) and {RESUMED} (resumed) only"
     )
-@M@
+PYEMBED
 }
 
 # The staged marker's `source_repo` is install metadata, not evidence.
@@ -312,8 +328,13 @@ else:
 # The release root and cache are parameters for the same reason the config path
 # is elsewhere: the contract regression has to drive this against fixtures, and
 # it cannot do that against readonly paths pinned to this host.
+# Corroborates the STAGED marker, which names the prior target: that is the
+# release the tenant's tooling actually came from. This run's own target has no
+# installed release yet, so corroborating against it would be asking a directory
+# that does not exist to vouch for a marker (SYRD-87 R7).
 verify_target_marker_corroborated() {
-    local release_root="${1:-$TARGET_RELEASE_ROOT}" cache="${2:-$CACHE}"
+    local release_root="${1:-/opt/switchyard/releases/$EXPECTED_PRIOR_TARGET}"
+    local cache="${2:-$CACHE}" expected="${3:-$EXPECTED_PRIOR_TARGET}"
     local installed="$release_root/.switchyard-release.json" installed_commit
     [[ -f "$installed" ]] || \
         die "the installed release $release_root carries no marker to corroborate the staged one"
@@ -321,12 +342,10 @@ verify_target_marker_corroborated() {
 import json, sys
 print(str(json.load(open(sys.argv[1])).get("commit") or "").strip())
 ' "$installed")" || die "the installed release marker is unreadable: $installed"
-    [[ "$installed_commit" == "$EXPECTED_TARGET" ]] || \
-        die "the installed release names $installed_commit, expected $EXPECTED_TARGET"
-    git -c "safe.directory=$cache" --git-dir="$cache" cat-file -e "$EXPECTED_TARGET^{commit}" 2>/dev/null || \
-        die "the trusted cache does not contain $EXPECTED_TARGET"
-    [[ "$(git -c "safe.directory=$cache" --git-dir="$cache" rev-parse "$EXPECTED_TARGET^{tree}" 2>/dev/null)" == "$EXPECTED_TREE" ]] || \
-        die "the trusted cache resolves $EXPECTED_TARGET to a different tree than $EXPECTED_TREE"
+    [[ "$installed_commit" == "$expected" ]] || \
+        die "the installed release names $installed_commit, expected $expected"
+    git -c "safe.directory=$cache" --git-dir="$cache" cat-file -e "$expected^{commit}" 2>/dev/null || \
+        die "the trusted cache does not contain $expected"
 }
 
 verify_partial_state() {
@@ -611,8 +630,12 @@ run_upgrade() {
 # for the same reason refresh_staged_role_tooling asks for its staging commands:
 # what this runs and what the upgrade prints have to be the same sequence, and
 # a copy would drift from it silently.
+# The release root and deploy ref are parameters for the same reason the config
+# path is elsewhere: the contract regression has to drive this against a release
+# that is installed, and this run's target has not been exported yet (R7).
 render_release_phase_commands() {
-    python3 - "$TARGET_RELEASE_ROOT" "$TENANT_CONFIG" "$CACHE" "$EXPECTED_TARGET" "$PROJECT" <<'PY'
+    local release_root="${1:-$TARGET_RELEASE_ROOT}" deploy_ref="${2:-$EXPECTED_TARGET}"
+    python3 - "$release_root" "$TENANT_CONFIG" "$CACHE" "$deploy_ref" "$PROJECT" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -725,10 +748,27 @@ readonly BOARD_SERVICE_USER="boardsvc"
 # release, but this artifact must not depend on that fix having been deployed to
 # repair the tree it is about to point the service at.
 repair_board_release_traversal() {
-    local root="$BOARD_RELEASE_DIR" recorded
+    local root="${1:-$BOARD_RELEASE_DIR}" recorded
 
-    [[ -e "$root" ]] || die "the exported board release is missing: $root"
+    # Absent is the expected case now, and it is not a failure.
+    #
+    # The previous run inherited a board release that had already been exported
+    # by an earlier attempt, under a umask that made its root unreadable by the
+    # board service, and this function existed to raise the mask on it. This
+    # run targets a release that has never been exported: the deploy will create
+    # it, and the integrated service export now normalizes a new release root to
+    # 0750 before publication, so there is nothing to repair. Demanding the tree
+    # exist here would refuse the ordinary case and hide the real one, which is
+    # a root that exists and is NOT serviceable (SYRD-87 R7).
+    # Symlink first, and before the absent test: `-e` follows a symlink, so a
+    # DANGLING one reads as absent and would be waved through as "not exported
+    # yet" -- and the deploy would then publish through it. A symlink at a
+    # release path is never legitimate, dangling or not (SYRD-87 R7).
     [[ ! -L "$root" ]] || die "the board release path is a symlink, not a release directory: $root"
+    if [[ ! -e "$root" ]]; then
+        note "board release $EXPECTED_TARGET has not been exported yet; the deploy will create it"
+        return 0
+    fi
     [[ -d "$root" ]] || die "the board release path is not a directory: $root"
     [[ "$(stat -c '%U' "$root")" == "$PROJECT_OWNER" ]] || \
         die "the board release $root is owned by $(stat -c '%U' "$root"), expected $PROJECT_OWNER"
@@ -785,16 +825,80 @@ release_root_serviceable() {
 # Run it. The order is the renderer's, not this artifact's: the listener comes
 # down before the migrations the deploy runs and back up only after, because it
 # reads the schema the release changes (SYRD-45).
+# What R6 must have regenerated before anything is installed or deployed.
+#
+# The previous run's board came up in legacy_uid mode resolving peers through
+# accounts that no longer exist, because the privileged projection rendered the
+# root baseline's retired per-role table for a tenant that had crossed to the
+# one-project-account runtime. R6 fixes the projection; this proves the fix
+# actually produced the unit, on this host, before the unit is installed --
+# reading the bytes root will install rather than trusting that a code change
+# reached them (SYRD-87 R7).
+verify_staged_units_are_process_authority() {
+    # The staged directory is a parameter so the regression can drive this
+    # against fixture units instead of pattern-matching its source.
+    local staged="${1:-/etc/switchyard/provision/$PROJECT}"
+    local board="$staged/$PROJECT-ticket-board.service"
+    local listener="$staged/$PROJECT-ticket-board-notify-listener.service"
+    local unit
+    note "verifying the regenerated units before installing them"
+    for unit in "$board" "$listener"; do
+        [[ -f "$unit" ]] || die "the regenerated unit is missing: $unit"
+        [[ "${SYRD87_SKIP_UNIT_OWNER_CHECK:-}" == "1" ]] || \
+            [[ "$(stat -c '%U:%G' "$unit")" == "root:root" ]] || \
+            die "$unit is $(stat -c '%U:%G' "$unit"), expected root:root"
+    done
+    grep -q '^Environment=TICKET_BOARD_PROCESS_AUTHORITY=1$' "$board" || \
+        die "the regenerated board unit does not set TICKET_BOARD_PROCESS_AUTHORITY=1; the privileged projection did not cross this tenant to process authority"
+    if grep -q 'TICKET_BOARD_ROLE_ACCOUNTS' "$board"; then
+        die "the regenerated board unit still names per-role accounts: $(grep -m1 'TICKET_BOARD_ROLE_ACCOUNTS' "$board")"
+    fi
+    # The retired role must not survive anywhere in it.
+    if grep -q "$PROJECT-designer" "$board"; then
+        die "the regenerated board unit still names the retired designer account"
+    fi
+    # The board this tenant serves, not the deploy script's 8770 default.
+    grep -q -- "--port $BOARD_PORT " "$board" || \
+        die "the regenerated board unit does not serve port $BOARD_PORT"
+    grep -q -- "--unix-socket $BOARD_SOCKET_PATH " "$board" || \
+        die "the regenerated board unit does not serve socket $BOARD_SOCKET_PATH"
+    # And the account that will run it must be able to read it.
+    [[ "${SYRD87_SKIP_UNIT_OWNER_CHECK:-}" == "1" ]] || \
+        sudo -u "$BOARD_SERVICE_USER" test -r "$board" || \
+        die "$BOARD_SERVICE_USER cannot read the regenerated board unit $board"
+    note "regenerated units are process-authority, port $BOARD_PORT, and readable by $BOARD_SERVICE_USER"
+}
+
+# The rendered deploy sequence must name this tenant's board, not the script's
+# default. 127.0.0.1:8770 is another tenant's board on this host and it is
+# listening: the previous run's HTTP smoke passed against it and its build-id
+# gate then rolled a correctly started syrd back (SYRD-87 R6).
+verify_deploy_command_probes_this_board() {
+    local rendered="$1"
+    grep -q "BOARD_PORT=$BOARD_PORT" <<<"$rendered" || \
+        die "the rendered deploy sequence does not carry BOARD_PORT=$BOARD_PORT; it would probe the deploy script's default port"
+    grep -q "BOARD_UNIX_SOCKET=$BOARD_SOCKET_PATH" <<<"$rendered" || \
+        die "the rendered deploy sequence does not carry this tenant's socket"
+    if grep -q "BOARD_PORT=8770" <<<"$rendered"; then
+        die "the rendered deploy sequence names port 8770, which is another tenant's board"
+    fi
+}
+
 run_release_phase() {
     note "performing the operator release phase: deploying board release $EXPECTED_TARGET"
     # Before the deploy, because the deploy ends in a canary that runs as the
     # board service and opens the release's own entry point. The R2 run got that
     # far and stopped there (SYRD-89 R3).
     repair_board_release_traversal
+    # The units are reviewed before they are installed. The rendered sequence's
+    # second step installs and reloads them, so this is the last point at which
+    # refusing costs nothing (SYRD-87 R7).
+    verify_staged_units_are_process_authority
     local rendered label command
     rendered="$(render_release_phase_commands)" || \
         die "could not render the release phase from $TARGET_RELEASE_ROOT"
     [[ -n "$rendered" ]] || die "the release phase rendered no commands"
+    verify_deploy_command_probes_this_board "$rendered"
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         label="$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.load(sys.stdin)["label"])')"
@@ -1019,6 +1123,53 @@ verify_privileged_phase_state() {
 # Only meaningful once the operator has deployed the board release: process-bound
 # authority is a property of the new board build, so asking a board still running
 # the previous one can only ever report the previous answer.
+# The owner's own notification listener, which comes back with the release
+# sequence's last step. It reads the schema the migrations change, so a listener
+# that did not restart is a tenant that stops receiving board notifications.
+verify_listener_active() {
+    [[ "$(capture_listener_state_local)" == "active" ]] || \
+        die "the notification listener is $(capture_listener_state_local), expected active"
+}
+
+# As the owner, without a sudo hop when the caller already is the owner: sudo to
+# yourself needs a grant a tenant has no reason to hold, and is refused where it
+# is absent, which would report every check as failed (SYRD-89).
+as_owner() {
+    if [[ "$(id -un)" == "$PROJECT_OWNER" ]]; then
+        env XDG_RUNTIME_DIR="/run/user/$(id -u "$PROJECT_OWNER")" "$@"
+    else
+        sudo -u "$PROJECT_OWNER" -H env XDG_RUNTIME_DIR="/run/user/$(id -u "$PROJECT_OWNER")" "$@"
+    fi
+}
+
+capture_listener_state_local() {
+    as_owner systemctl --user is-active "$PROJECT-ticket-board-notify-listener.service" 2>/dev/null || true
+}
+
+# Every role that was live when this run started is live again. Counted from the
+# configuration rather than assumed to be six, because the role set is data.
+verify_role_sessions_restored() {
+    local now expected
+    now="$(live_role_sessions)"
+    expected="${#ROLES[@]}"
+    [[ "$(grep -c . <<<"$now")" == "$expected" ]] || \
+        die "only $(grep -c . <<<"$now") of $expected role sessions are live: [$(tr '\n' ' ' <<<"$now")]"
+}
+
+# The slots are re-pointed at the workers that just came back, and somebody can
+# see them. A presentation that reports every slot connected while no terminal
+# displays it is the SYRD-65 failure and is not a recovered tenant.
+verify_presentation_recovered() {
+    local problems
+    problems="$(as_owner "$SHARED_ROOT/current/switchyard" present "$PROJECT" list 2>&1 || true)"
+    if grep -q 'NOT displayed by any terminal' <<<"$problems"; then
+        note "presentation slots are re-pointed but no terminal is displaying them; the desktop window must be reopened with: switchyard $PROJECT"
+        return 0
+    fi
+    grep -qE 'slot 0:' <<<"$problems" || \
+        die "the presentation could not be read back after recovery: $problems"
+}
+
 verify_release_phase_state() {
     [[ "$(board_release)" == "$BOARD_ROOT/releases/$EXPECTED_TARGET" ]] || \
         die "board release is $(board_release), expected $EXPECTED_TARGET"
@@ -1053,6 +1204,9 @@ EOF
 report_state() {
     verify_release_phase_state
     verify_director_write_path
+    verify_listener_active
+    verify_role_sessions_restored
+    verify_presentation_recovered
     report_remaining_phases
 }
 

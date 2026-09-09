@@ -96,13 +96,13 @@ verify_exact_source() {
     public_commit="$(git ls-remote "$PUBLIC_REMOTE" "$PUBLIC_REF" | awk 'NR == 1 {print $1}')"
     [[ "$public_commit" == "$EXPECTED_TARGET" ]] || \
         die "public main is $public_commit, expected $EXPECTED_TARGET"
-    cache_commit="$(git --git-dir="$CACHE" rev-parse "$CACHE_REF^{commit}")"
+    cache_commit="$(git -c "safe.directory=$CACHE" --git-dir="$CACHE" rev-parse "$CACHE_REF^{commit}")"
     [[ "$cache_commit" == "$EXPECTED_TARGET" ]] || \
         die "trusted cache main is $cache_commit, expected $EXPECTED_TARGET"
-    cache_tree="$(git --git-dir="$CACHE" rev-parse "$CACHE_REF^{tree}")"
+    cache_tree="$(git -c "safe.directory=$CACHE" --git-dir="$CACHE" rev-parse "$CACHE_REF^{tree}")"
     [[ "$cache_tree" == "$EXPECTED_TREE" ]] || \
         die "trusted cache tree is $cache_tree, expected $EXPECTED_TREE"
-    git --git-dir="$CACHE" cat-file -e "$EXPECTED_PREVIOUS^{commit}" || \
+    git -c "safe.directory=$CACHE" --git-dir="$CACHE" cat-file -e "$EXPECTED_PREVIOUS^{commit}" || \
         die "trusted cache lacks previous release $EXPECTED_PREVIOUS"
 }
 
@@ -370,7 +370,7 @@ verify_previous_health() {
 prepare_source_checkout() {
     work_root="$(mktemp -d /tmp/syrd-85-activation.XXXXXX)"
     source_dir="$work_root/source"
-    git clone --no-checkout --quiet "$CACHE" "$source_dir"
+    git -c "safe.directory=$CACHE" clone --no-checkout --quiet "$CACHE" "$source_dir"
     git -C "$source_dir" checkout --detach --quiet "$EXPECTED_TARGET"
     [[ "$(git -C "$source_dir" rev-parse HEAD)" == "$EXPECTED_TARGET" ]] || \
         die "temporary checkout commit mismatch"

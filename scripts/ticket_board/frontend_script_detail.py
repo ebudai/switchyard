@@ -320,6 +320,64 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       directorEditActions.appendChild(directorEditButton);
       directorEditField.appendChild(directorEditActions);
 
+      // SYRD-93: what this ticket is waiting on, when it is waiting to be
+      // published. The implementer sees that its ask is recorded; the control
+      // role sees exactly what it is being asked to validate, and can refuse it
+      // here with a reason. Publishing itself is not a browser action: it needs
+      // a credential this page has no way to reach, by design.
+      const publicationField = document.createElement('div');
+      publicationField.className = 'publication-request';
+      publicationField.setAttribute('data-publication', '');
+      const publication = (ticket && ticket.publication) || {};
+      if (publication && publication.id) {
+        publicationField.innerHTML = '<div class="field-label">Publication requested</div>';
+        const summary = document.createElement('div');
+        summary.setAttribute('data-publication-summary', '');
+        summary.textContent =
+          publication.requested_by +
+          ' asks to publish ' +
+          publication.ref +
+          ' at ' +
+          String(publication.commit_hash || '').slice(0, 12) +
+          ' (bundle ' + publication.bundle_path + ')';
+        publicationField.appendChild(summary);
+        const how = document.createElement('div');
+        how.className = 'muted';
+        how.setAttribute('data-publication-command', '');
+        how.textContent = 'Control role: switchyard-publish ' + ticket.id;
+        publicationField.appendChild(how);
+        const rejectReason = document.createElement('input');
+        rejectReason.type = 'text';
+        rejectReason.placeholder = 'why this publication is refused';
+        rejectReason.setAttribute('data-publication-reject-reason', '');
+        const rejectButton = document.createElement('button');
+        rejectButton.textContent = 'Reject publication';
+        rejectButton.setAttribute('data-publication-reject', '');
+        rejectButton.title =
+          'Control role only: refuse this request with a reason. The implementer is told and keeps its commit.';
+        rejectButton.addEventListener('click', async () => {
+          const reason = rejectReason.value.trim();
+          if (!reason) {
+            setCreateStatus('rejecting a publication requires a reason', true);
+            return;
+          }
+          await updateDetailTicket(
+            {
+              resolve_publication: true,
+              request_id: publication.id,
+              outcome: 'rejected',
+              reason,
+            },
+            'director',
+          );
+        });
+        const publicationActions = document.createElement('div');
+        publicationActions.className = 'inline-actions';
+        publicationActions.appendChild(rejectReason);
+        publicationActions.appendChild(rejectButton);
+        publicationField.appendChild(publicationActions);
+      }
+
       const parentLinkField = document.createElement('div');
       parentLinkField.innerHTML = '<div class="field-label">Parent Ticket</div>';
       const parentLinkInput = document.createElement('input');
@@ -355,7 +413,7 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         parentLinkField.appendChild(parentPreview);
       }
 
-      controls.append(assigneeLabel, parentLinkField, directorEditField);
+      controls.append(assigneeLabel, parentLinkField, directorEditField, publicationField);
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';

@@ -39,13 +39,16 @@ UPGRADE = (
     ROOT / "scripts" / "ticket_board" / "migrations" / "pgu928_syrd83_director_edit.sql"
 ).read_text()
 
+#: The state of a tenant at the release this migration was written for: without
+#: the capability it grants, and without the ones later releases added, whose
+#: names the validator this migration reinstalls does not know (SYRD-93).
 STRIP_CAPABILITY = """
 UPDATE ticket_board.workflow_configuration
 SET document = jsonb_set(document, '{roles}', (
     SELECT jsonb_agg(jsonb_set(role, '{capabilities}',
         (SELECT coalesce(jsonb_agg(c), '[]'::jsonb)
          FROM jsonb_array_elements_text(role->'capabilities') c
-         WHERE c <> 'director_edit')) ORDER BY ordinality)
+         WHERE c NOT IN ('director_edit', 'request_publication', 'resolve_publication'))) ORDER BY ordinality)
     FROM jsonb_array_elements(document->'roles') WITH ORDINALITY AS elements(role, ordinality)
 ))
 WHERE singleton;
@@ -53,7 +56,7 @@ UPDATE ticket_board.workflow_roles
 SET definition = jsonb_set(definition, '{capabilities}',
     (SELECT coalesce(jsonb_agg(c), '[]'::jsonb)
      FROM jsonb_array_elements_text(definition->'capabilities') c
-     WHERE c <> 'director_edit'));
+     WHERE c NOT IN ('director_edit', 'request_publication', 'resolve_publication')));
 """
 
 

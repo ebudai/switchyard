@@ -692,33 +692,79 @@ private, and one role cannot read another's home, worktree, session records or
 credentials. It has **no influence on board authority**, which remains derived
 from `SO_PEERCRED`'s uid; seeding a credential grants no board permission.
 
-### Publishing from an isolated role
+### Publishing: an ask, not a credential
 
-A role publishes its own feature ref through `switchyard-publish-ref`, run via
-`sudo` as the project owner. The sudoers grant allows any arguments, so nothing
-about *where* is caller-supplied: the calling role comes from `SUDO_USER`, and
-its worktree and the remote come from the project's own configuration, found
-relative to the effective uid. The project identifier is validated as a slug
-before any path is built and the resolved path must stay inside the directory it
-was built from, and the configuration must itself claim to be that project --
-otherwise `--project ../../tmp/forged` loads a role-written document, and with it
-a role-chosen role mapping and remote. The configured remote is a NAME, resolved
-to a URL from the **owner's** checkout and set on the staging repository before
-the push.
+Every role in a project runs as one Unix account (SYRD-69). That makes "let the
+role publish its own ref" and "let every role push anything" the same sentence,
+so publication is not something a role does with a credential. It is something a
+role **asks for**, and the ask is a row on the board.
 
-Refs are namespaced to the calling role -- `ops` publishes under `ops/` -- so a
-role cannot write, move or delete another role's refs, and the integration
-branches (`main`, `master`, `trunk`, `release`) are refused outright.
+**The implementer's half needs nothing.** `switchyard-request-publication`
+bundles the commit the role already made in its own worktree and files a durable
+request naming one ticket, one ref, one commit and that bundle. No remote is
+contacted, so a missing key, an unreachable network or a sleeping Director
+cannot stop the work being committed or the ask being recorded. The ticket then
+shows the ask, and the control role is waiting on it.
 
-The owner never runs git inside the role's checkout. A role controls its own
-repository configuration, and `core.sshCommand`, `uploadpack.packObjectsHook` or
-an `ext::` remote would turn "run git there" into "run the role's command as the
-owner". Instead the role creates a **bundle** as itself and the owner fetches
-from that bundle into an owner-owned staging repository whose configuration the
-role cannot touch, then pushes from there.
+Both halves are admitted by declared capability and by nothing else. A project
+names its own roles, so `request_publication` and `resolve_publication` are
+capabilities a document grants -- there is no list of role names anywhere in the
+HTTP handler, the database or the publisher that decides who may ask or answer.
+A role the project invented yesterday can ask if its document says so, a role
+called `ops` cannot if its document does not, and answering additionally
+requires control authority, derived from the capabilities that define it. A
+board with no declared workflow has no capability to check, so it refuses both
+halves rather than falling back to names -- and so does a board whose document
+declares nobody holding control authority. That last case matters most at the
+publisher, which holds the only push credential on the host: an absent, empty or
+malformed workflow document must mean nobody may publish, never "whoever
+registered under a familiar name may".
 
-No polkit is involved in ordinary role work: it is a plain `sudo -u` grant
-between two unprivileged accounts.
+Refs stay in the asking role's namespace -- `ops/...`, or `roles/<role>/...` for
+a role whose own name collides with an integration branch, as `main` does -- and
+`main`, `master`, `trunk` and `release` are refused outright, in the database and
+again in the publisher.
+
+**The control role's half is the only path to a push.** `switchyard-publish`
+reads the request and runs `switchyard-publish-ref`, which is root-owned and
+reached through one `NOPASSWD` grant naming that program alone. Holding the
+grant is not the same as being allowed to publish: the publisher walks its own
+process ancestry to the pane the kernel put it under and requires that exact
+`(pid, start time, uid)` to be the live runtime the board registered for the role
+holding control capabilities. A sibling role process under the same account
+resolves to its own pane and is refused; a replaced or dead session no longer
+matches the row. Which role holds control is derived from capabilities rather
+than the name `director` (SYRD-49).
+
+Nothing about *where* is caller-supplied. The publisher takes one request id;
+the ref, the commit, the bundle and the role they belong to come from the board's
+record. The registry, the board unit and the push grant are root-owned, and the
+remote is pinned in the grant rather than read from the project checkout, whose
+configuration the project account can rewrite. The push credential lives in
+`/etc/switchyard/publish/` readable by root alone -- a key the project account
+can read is a key every role can push with, and the publisher refuses one whose
+mode says so.
+
+The bundle is fetched into a root-owned staging mirror and pushed from there, so
+git never runs inside a role's checkout, where `core.sshCommand`,
+`uploadpack.packObjectsHook` or an `ext::` remote would turn "run git there" into
+"run the role's command as root". Afterwards the ref is read back from the remote
+and the tenant's trusted commit cache is refreshed **from the local mirror**, as
+the project account: a local fetch needs no credential, so refreshing the cache
+never puts one inside the shared account.
+
+**The board records what happened.** The control role's driver marks the request
+published or rejected with a reason, which clears the wait and notifies the
+implementer. It never submits: the implementer submits its own work, and it can,
+because the commit is now in the cache the board verifies `commit_hash` against.
+Both halves are idempotent -- re-running a publication pushes the same ref to the
+same commit, and recording the same outcome twice is not an error -- so an
+interrupted handoff is retried rather than unpicked by hand.
+
+One limit worth stating: processes sharing a uid can `ptrace` each other unless
+the host restricts it, so the process boundary above is as strong as
+`kernel.yama.ptrace_scope` on that host. It is the same limit the board's own
+peer-credential authority has.
 
 ### Where what root installs comes from
 

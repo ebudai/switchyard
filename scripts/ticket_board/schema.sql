@@ -3994,7 +3994,8 @@ CREATE OR REPLACE FUNCTION ticket_board.director_control_capabilities()
 RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
     SELECT ARRAY[
         'reassign', 'set_manually_controlled', 'set_blockers',
-        'merge', 'edit_fields', 'dismiss_notification', 'director_edit'
+        'merge', 'edit_fields', 'dismiss_notification', 'director_edit',
+        'resolve_publication'
     ]::text[];
 $$;
 
@@ -6691,7 +6692,7 @@ BEGIN
            OR EXISTS (SELECT FROM jsonb_array_elements_text(r->'capabilities') c WHERE c NOT IN
                ('create_ticket','file_bug','add_comment','edit_fields','await_role','clear_awaiting_role',
                 'set_blockers','set_manually_controlled','crop_attachment','merge','dismiss_notification',
-                'reassign','director_edit')) THEN
+                'reassign','director_edit','request_publication','resolve_publication')) THEN
             RAISE EXCEPTION 'invalid role policy: %', r->>'name';
         END IF;
         IF (r->>'runtime' IS NULL) <> (r->>'target' IS NULL)
@@ -8908,5 +8909,399 @@ BEGIN
         'Director edit: ' || btrim(reason)
     );
     PERFORM ticket_board.touch_ticket(director_edit.id);
+END;
+$$;
+
+--
+-- SYRD-93: publication is a handoff, not a credential.
+--
+-- Every role runs as one Unix account now (SYRD-69), so "let the role push" and
+-- "let every role push" are the same sentence. The way out is to stop treating
+-- publication as something an implementer does with a credential and start
+-- treating it as something an implementer ASKS FOR, durably, on the board: the
+-- request is a row, it survives a crash on either side, and the only thing that
+-- can act on it is the process the board already knows is the control role.
+--
+-- Nothing here pushes anything. This is the record and the routing; the
+-- credential lives behind a boundary the shared account cannot cross, and the
+-- program that holds it reads the row rather than its caller's arguments.
+--
+-- A publication ask is a delivered notification like any other, so the queue
+-- has to be allowed to carry one. Written as a replace-the-constraint step, the
+-- way the awaiting_role kind was added, so it lands the same on a fresh install
+-- and on a board that already has a queue full of rows.
+ALTER TABLE ticket_board.ticket_notification_queue
+    DROP CONSTRAINT IF EXISTS ticket_notification_queue_kind_check;
+ALTER TABLE ticket_board.ticket_notification_queue
+    ADD CONSTRAINT ticket_notification_queue_kind_check
+    CHECK (kind IN ('transition', 'ticket_update', 'nudge', 'escalation', 'idle_reminder',
+                    'awaiting_role', 'publication'));
+
+CREATE TABLE IF NOT EXISTS ticket_board.publication_requests (
+    id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    requested_by text NOT NULL,
+    ref text NOT NULL,
+    commit_hash text NOT NULL CHECK (commit_hash ~ '^[0-9a-f]{40}$'),
+    bundle_path text NOT NULL CHECK (bundle_path LIKE '/%'),
+    state text NOT NULL DEFAULT 'requested'
+        CHECK (state IN ('requested', 'published', 'rejected', 'superseded')),
+    detail text NOT NULL DEFAULT '',
+    decided_by text NOT NULL DEFAULT '',
+    requested_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    decided_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS publication_requests_ticket_idx
+    ON ticket_board.publication_requests (ticket_id, id);
+-- One open ask per role per ticket. A second one would leave the Director
+-- choosing between two claims about the same work, which is exactly the
+-- ambiguity a durable handoff exists to remove.
+CREATE UNIQUE INDEX IF NOT EXISTS publication_requests_one_open_idx
+    ON ticket_board.publication_requests (ticket_id, requested_by)
+    WHERE state = 'requested';
+
+--
+-- Refs a role may ask to publish: its own namespace, nothing that integrates.
+-- Returned rather than raised so both the request path and the helper can ask
+-- the same question and phrase their own refusal.
+--
+-- Two namespaces are accepted, for a reason that is not cosmetic. `<role>/...`
+-- is what the project already publishes, and it works for every role whose name
+-- is not also an integration branch. One is: the implementer called `main`
+-- cannot publish `main/anything`, because git stores refs as paths and
+-- refs/heads/main and refs/heads/main/x cannot both exist. `roles/<role>/...`
+-- always works, so no role is left without a way to publish its own work.
+--
+CREATE OR REPLACE FUNCTION ticket_board.publication_ref_problem(p_ref text, p_role text)
+RETURNS text
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+    name text := btrim(coalesce(p_ref, ''));
+    role_name text := lower(btrim(coalesce(p_role, '')));
+    segments text[];
+    segment text;
+    protected text[] := ARRAY['main', 'master', 'trunk', 'release', 'head'];
+BEGIN
+    IF name = '' THEN
+        RETURN 'a ref name is required';
+    END IF;
+    IF name LIKE 'refs/%' THEN
+        RETURN 'pass a branch name, not a full ref path';
+    END IF;
+    segments := string_to_array(name, '/');
+    FOREACH segment IN ARRAY segments LOOP
+        IF segment !~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' OR segment LIKE '%.lock' THEN
+            RETURN format('%s is not a valid branch name', name);
+        END IF;
+    END LOOP;
+    -- The whole name, and the directory it would create. refs/heads/main/x
+    -- cannot exist beside refs/heads/main, so a first segment that names an
+    -- integration branch is refused whether or not it is also a role name.
+    IF lower(name) = ANY (protected) OR lower(segments[1]) = ANY (protected) THEN
+        RETURN format(
+            '%s collides with an integration branch; roles publish their own feature refs '
+            'and the control role integrates them. Use roles/%s/<name>.', name, role_name);
+    END IF;
+    IF segments[1] = 'roles' THEN
+        IF array_length(segments, 1) < 3 OR segments[2] <> role_name THEN
+            RETURN format('%s may only publish refs under roles/%s/, not %s', role_name, role_name, name);
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF array_length(segments, 1) < 2 OR segments[1] <> role_name THEN
+        RETURN format(
+            '%s may only publish refs under %s/ or roles/%s/, not %s',
+            role_name, role_name, role_name, name);
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+--
+-- Which role integrates. Derived from the capabilities that define control
+-- rather than the name 'director', so a project whose control role is called
+-- something else routes the same way (SYRD-49).
+--
+CREATE OR REPLACE FUNCTION ticket_board.publication_control_role()
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    found text;
+BEGIN
+    SELECT r.name INTO found FROM ticket_board.workflow_roles r
+     WHERE (r.definition->>'active')::boolean
+       AND r.definition->'capabilities' ?& ticket_board.control_capabilities()
+     -- Deterministic when a document gives more than one role control
+     -- authority: the one that also declares the operation is the one that can
+     -- act on what it is told about.
+     ORDER BY (r.definition->'capabilities' ? 'resolve_publication') DESC, r.name
+     LIMIT 1;
+    -- NULL, not 'director'. A stored document that declares no controller is a
+    -- broken document, and routing an ask to a familiar name would hand
+    -- publication authority to whoever holds that name (SYRD-93).
+    RETURN found;
+END;
+$$;
+
+--
+-- The wait the Director sees, written here rather than through set_awaiting_role
+-- so asking for publication does not also require the capability to park a
+-- ticket on another role.
+--
+CREATE OR REPLACE FUNCTION ticket_board.publication_await_control(
+    p_ticket text,
+    p_rearm boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    control_role text := ticket_board.publication_control_role();
+    already boolean;
+BEGIN
+    IF control_role IS NULL THEN
+        RAISE EXCEPTION 'this workflow declares no role with control authority'
+            USING ERRCODE = '42501';
+    END IF;
+    SELECT ns.awaiting_role = control_role AND ns.awaiting_since_at IS NOT NULL
+      INTO already
+      FROM ticket_board.ticket_notification_state ns WHERE ns.ticket_id = p_ticket;
+    IF NOT coalesce(already, false) THEN
+        UPDATE ticket_board.ticket_notification_state
+           SET awaiting_role = control_role,
+               awaiting_since_at = clock_timestamp(),
+               last_activity_at = clock_timestamp(),
+               nudge_count = 0
+         WHERE ticket_id = p_ticket;
+    ELSIF p_rearm THEN
+        UPDATE ticket_board.ticket_notification_state
+           SET awaiting_notified_since_at = NULL
+         WHERE ticket_id = p_ticket;
+    END IF;
+    PERFORM ticket_board.enqueue_awaiting_role_handoff(p_ticket);
+END;
+$$;
+
+--
+-- An implementer asks. This is the only half of publication an implementer can
+-- reach, and it needs no credential at all: a missing key, an unreachable
+-- remote or a Director who is asleep cannot stop the commit being made or the
+-- ask being recorded.
+--
+CREATE OR REPLACE FUNCTION ticket_board.request_publication(
+    p_ticket text,
+    p_ref text,
+    p_commit text,
+    p_bundle text
+)
+RETURNS ticket_board.publication_requests
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    caller text;
+    ticket ticket_board.tickets%ROWTYPE;
+    problem text;
+    normalized_commit text := lower(btrim(coalesce(p_commit, '')));
+    normalized_ref text := btrim(coalesce(p_ref, ''));
+    normalized_bundle text := btrim(coalesce(p_bundle, ''));
+    existing ticket_board.publication_requests%ROWTYPE;
+    created ticket_board.publication_requests%ROWTYPE;
+    control_role text;
+BEGIN
+    -- Admission is the declared capability and nothing else. A board with no
+    -- declared workflow has no capabilities to check, and admitting by role
+    -- name instead would be exactly the reusable-contract violation this
+    -- operation exists to avoid -- so it is refused, not guessed at.
+    IF ticket_board.declared_workflow() IS NULL THEN
+        RAISE EXCEPTION 'publication requires a declared workflow; this board has none'
+            USING ERRCODE = '42501';
+    END IF;
+    actor := ticket_board.require_actor(ARRAY[]::text[], 'request_publication');
+    caller := ticket_board.current_app_actor();
+    SELECT * INTO ticket FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', p_ticket;
+    END IF;
+    -- The work being published is the work this role holds. Anything else is a
+    -- role asking to publish somebody else's ticket.
+    IF ticket.assignee IS DISTINCT FROM caller THEN
+        RAISE EXCEPTION '% may only request publication for its own ticket; % is assigned to %',
+            caller, ticket.id, ticket.assignee USING ERRCODE = '42501';
+    END IF;
+    problem := ticket_board.publication_ref_problem(normalized_ref, caller);
+    IF problem IS NOT NULL THEN
+        RAISE EXCEPTION '%', problem USING ERRCODE = '42501';
+    END IF;
+    IF normalized_commit !~ '^[0-9a-f]{40}$' THEN
+        RAISE EXCEPTION 'publication needs the full 40-character commit, not %', p_commit;
+    END IF;
+    IF normalized_bundle !~ '^/[^\0]+$' OR normalized_bundle LIKE '%/../%'
+       OR normalized_bundle LIKE '%/..' OR normalized_bundle LIKE '%/' THEN
+        RAISE EXCEPTION 'bundle must be an absolute path to a file, not %', p_bundle;
+    END IF;
+
+    SELECT * INTO existing FROM ticket_board.publication_requests
+     WHERE ticket_id = ticket.id AND requested_by = caller AND state = 'requested'
+     FOR UPDATE;
+    IF FOUND THEN
+        IF existing.ref = normalized_ref
+           AND existing.commit_hash = normalized_commit
+           AND existing.bundle_path = normalized_bundle THEN
+            -- The same ask again: a retry after an interruption, or a lost
+            -- notification. Re-arm the handoff, record nothing new.
+            PERFORM ticket_board.publication_await_control(ticket.id, true);
+            RETURN existing;
+        END IF;
+        -- The role amended its work. Both asks stay on the record, and the one
+        -- the Director sees is the current one.
+        UPDATE ticket_board.publication_requests
+           SET state = 'superseded',
+               decided_at = clock_timestamp(),
+               decided_by = caller,
+               detail = format('superseded by a later request for %s at %s',
+                               normalized_ref, left(normalized_commit, 12))
+         WHERE id = existing.id;
+    END IF;
+
+    INSERT INTO ticket_board.publication_requests
+        (ticket_id, requested_by, ref, commit_hash, bundle_path)
+    VALUES (ticket.id, caller, normalized_ref, normalized_commit, normalized_bundle)
+    RETURNING * INTO created;
+
+    control_role := ticket_board.publication_control_role();
+    IF control_role IS NULL THEN
+        RAISE EXCEPTION
+            'this workflow declares no role with control authority, so no publication could be answered'
+            USING ERRCODE = '42501';
+    END IF;
+    PERFORM ticket_board.publication_await_control(ticket.id, false);
+    PERFORM ticket_board.enqueue_notification(
+        ticket.id,
+        'publication',
+        control_role,
+        format('%s -- %s: %s asks to publish %s at %s. Read the ticket, then publish or reject with a reason.',
+               ticket.id, ticket.title, caller, normalized_ref, left(normalized_commit, 12)),
+        jsonb_build_object(
+            'kind', 'publication_request', 'id', ticket.id, 'request_id', created.id,
+            'role', caller, 'ref', normalized_ref, 'commit', normalized_commit),
+        format('publication:%s:%s', created.id, 'requested'));
+    PERFORM ticket_board.add_comment(
+        ticket.id,
+        format('Publication requested: %s at %s. Awaiting the control role; no submission until it lands.',
+               normalized_ref, left(normalized_commit, 12)));
+    RETURN created;
+END;
+$$;
+
+--
+-- The control role records what happened. It does not move the ticket: the
+-- implementer submits its own work, and a publication that submitted for them
+-- would be the control role signing the implementer's name.
+--
+CREATE OR REPLACE FUNCTION ticket_board.resolve_publication(
+    p_request bigint,
+    p_outcome text,
+    p_detail text
+)
+RETURNS ticket_board.publication_requests
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    caller text;
+    request ticket_board.publication_requests%ROWTYPE;
+    ticket ticket_board.tickets%ROWTYPE;
+    outcome text := lower(btrim(coalesce(p_outcome, '')));
+    note text := btrim(coalesce(p_detail, ''));
+    updated ticket_board.publication_requests%ROWTYPE;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN
+        RAISE EXCEPTION 'publication requires a declared workflow; this board has none'
+            USING ERRCODE = '42501';
+    END IF;
+    actor := ticket_board.require_actor(ARRAY[]::text[], 'resolve_publication');
+    caller := ticket_board.current_app_actor();
+    -- The capability admits the caller; control authority is what decides. A
+    -- tenant that hands this capability to a second role still gets one
+    -- publisher.
+    IF NOT ticket_board.role_controls_project(caller) THEN
+        RAISE EXCEPTION 'only the control role may resolve a publication request, not %', caller
+            USING ERRCODE = '42501';
+    END IF;
+    IF outcome NOT IN ('published', 'rejected') THEN
+        RAISE EXCEPTION 'publication outcome must be published or rejected, not %', p_outcome;
+    END IF;
+    IF outcome = 'rejected' AND note = '' THEN
+        RAISE EXCEPTION 'rejecting a publication request requires a reason';
+    END IF;
+    SELECT * INTO request FROM ticket_board.publication_requests
+     WHERE id = p_request FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'publication request % not found', p_request;
+    END IF;
+    IF request.state = outcome THEN
+        -- Already recorded. A helper that pushed and then lost its connection
+        -- re-runs safely rather than reporting a failure it did not have.
+        RETURN request;
+    END IF;
+    IF request.state <> 'requested' THEN
+        RAISE EXCEPTION 'publication request % is already %', request.id, request.state;
+    END IF;
+    SELECT * INTO ticket FROM ticket_board.tickets WHERE id = request.ticket_id FOR UPDATE;
+
+    UPDATE ticket_board.publication_requests
+       SET state = outcome,
+           detail = note,
+           decided_by = caller,
+           decided_at = clock_timestamp()
+     WHERE id = request.id
+    RETURNING * INTO updated;
+
+    UPDATE ticket_board.ticket_notification_state
+       SET awaiting_role = '',
+           awaiting_since_at = NULL,
+           last_activity_at = clock_timestamp(),
+           nudge_count = 0
+     WHERE ticket_id = request.ticket_id;
+
+    PERFORM ticket_board.enqueue_notification(
+        request.ticket_id,
+        'publication',
+        request.requested_by,
+        CASE WHEN outcome = 'published'
+             THEN format('%s -- %s: %s is published at %s. Submit when you are ready.',
+                         request.ticket_id, ticket.title, request.ref,
+                         left(request.commit_hash, 12))
+             ELSE format('%s -- %s: publication of %s was rejected: %s',
+                         request.ticket_id, ticket.title, request.ref, note)
+        END,
+        jsonb_build_object(
+            'kind', 'publication_' || outcome, 'id', request.ticket_id,
+            'request_id', request.id, 'ref', request.ref,
+            'commit', request.commit_hash, 'detail', note),
+        format('publication:%s:%s', request.id, outcome));
+    PERFORM ticket_board.add_comment(
+        request.ticket_id,
+        CASE WHEN outcome = 'published'
+             THEN format('Published %s at %s.%s', request.ref, left(request.commit_hash, 12),
+                         CASE WHEN note = '' THEN '' ELSE ' ' || note END)
+             ELSE format('Publication of %s refused: %s', request.ref, note)
+        END);
+    PERFORM ticket_board.touch_ticket(request.ticket_id);
+    RETURN updated;
 END;
 $$;

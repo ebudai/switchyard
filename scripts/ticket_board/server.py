@@ -105,6 +105,13 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "dismiss_notification": {"director"},
 }
 
+#: SYRD-93: publication is admitted by declared capability, never by role name.
+#: This map is the legacy, pre-declarative admission table, so these two
+#: operations are deliberately absent from it: a board with no declared workflow
+#: has no capability to check, and admitting by name would be the reusable-role
+#: contract broken at the first boundary a caller reaches.
+PUBLICATION_OPERATIONS = frozenset({"request_publication", "resolve_publication"})
+
 
 def _copy_operation_role_map(source: Mapping[str, set[str]]) -> dict[str, set[str]]:
     return {operation: set(roles) for operation, roles in source.items()}
@@ -1012,6 +1019,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if operation not in role["capabilities"]:
                 raise PermissionError(f"{caller_role} cannot call {operation}")
             return
+        if operation in PUBLICATION_OPERATIONS:
+            raise PermissionError(
+                f"{operation} requires a declared workflow; this board has none, so there is "
+                "no capability to admit a caller by"
+            )
         allowed = OPERATION_ALLOWED_ROLES.get(operation)
         if allowed is None:
             raise ValueError(f"unknown ticket operation: {operation}")
@@ -1309,6 +1321,27 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return
+        elif operation == "request_publication":
+            result = self.app.request_publication(
+                ticket_id,
+                ref=str(payload.get("ref", "")),
+                commit=str(payload.get("commit", payload.get("commit_hash", ""))),
+                bundle=str(payload.get("bundle", payload.get("bundle_path", ""))),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json(result)
+            return
+        elif operation == "resolve_publication":
+            result = self.app.resolve_publication(
+                int(payload.get("request_id", payload.get("request", 0)) or 0),
+                outcome=str(payload.get("outcome", "")),
+                detail=str(payload.get("detail", payload.get("reason", ""))),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json(result)
+            return
         elif operation in {"force_move", "override_move"}:
             updated = self.app.force_move_ticket(
                 ticket_id,
@@ -1536,6 +1569,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     ),
                     "assignment": assignment,
                 })
+            return
+        if parsed.path == "/api/publications":
+            query = urllib.parse.parse_qs(parsed.query)
+            self.send_json({
+                "project": getattr(self.app, "project", "pgu"),
+                "requests": self.app.publication_requests(
+                    ticket_id=(query.get("ticket") or [""])[0],
+                    state=(query.get("state") or ["requested"])[0],
+                ),
+            })
             return
         if parsed.path == "/api/client-config":
             self.send_json({

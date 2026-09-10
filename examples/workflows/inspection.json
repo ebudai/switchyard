@@ -19,7 +19,8 @@
         "dismiss_notification",
         "crop_attachment",
         "reassign",
-        "director_edit"
+        "director_edit",
+        "resolve_publication"
       ],
       "runtime": "claude",
       "target": "cerulean-director:0.0",
@@ -37,7 +38,8 @@
         "add_comment",
         "edit_fields",
         "await_role",
-        "clear_awaiting_role"
+        "clear_awaiting_role",
+        "request_publication"
       ],
       "runtime": "codex",
       "target": "cerulean-main:0.0",
@@ -55,7 +57,8 @@
         "add_comment",
         "edit_fields",
         "await_role",
-        "clear_awaiting_role"
+        "clear_awaiting_role",
+        "request_publication"
       ],
       "runtime": "claude",
       "target": "cerulean-app:0.0",
@@ -73,7 +76,8 @@
         "add_comment",
         "edit_fields",
         "await_role",
-        "clear_awaiting_role"
+        "clear_awaiting_role",
+        "request_publication"
       ],
       "runtime": "claude",
       "target": "cerulean-ops:0.0",
@@ -146,7 +150,8 @@
         "add_comment",
         "edit_fields",
         "await_role",
-        "clear_awaiting_role"
+        "clear_awaiting_role",
+        "request_publication"
       ],
       "runtime": null,
       "target": null,
@@ -164,7 +169,8 @@
         "add_comment",
         "edit_fields",
         "await_role",
-        "clear_awaiting_role"
+        "clear_awaiting_role",
+        "request_publication"
       ],
       "runtime": null,
       "target": null,

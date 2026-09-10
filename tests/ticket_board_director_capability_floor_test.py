@@ -303,11 +303,12 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
     # A tenant from before either release: it has neither the capability the
     # floor gained in SYRD-82 nor the one it gained in SYRD-83.
     stale = base_document()
+    later_capabilities = ("reassign", "director_edit", "resolve_publication")
     director_of(stale)["capabilities"] = [
-        c
-        for c in director_of(stale)["capabilities"]
-        if c not in ("reassign", "director_edit")
+        c for c in director_of(stale)["capabilities"] if c not in later_capabilities
     ]
+    for role in stale["roles"]:
+        role["capabilities"] = [c for c in role["capabilities"] if c != "request_publication"]
     payload = json.dumps(stale)
     assert "$d$" not in payload
     migrations = [
@@ -315,6 +316,8 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
         for name in (
             "pgu927_syrd82_director_capability_floor.sql",
             "pgu928_syrd83_director_edit.sql",
+            "pgu929_syrd92_director_defer_backlog.sql",
+            "pgu930_syrd93_publication_requests.sql",
         )
     ]
 
@@ -351,7 +354,7 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
             api.psql(conn, "BEGIN;\n" + migration + "\nCOMMIT;")
             assert api.psql(conn, "SELECT revision FROM ticket_board.workflow_configuration;") == reached
             if index == 0:
-                # The release that granted it knew nothing of the later one.
+                # The release that granted it knew nothing of the later ones.
                 assert "director_edit" not in api.psql(
                     conn,
                     "SELECT definition->'capabilities' FROM ticket_board.workflow_roles "

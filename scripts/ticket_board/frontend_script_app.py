@@ -541,6 +541,21 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       // Director editing across a stage or an owner has to be able to skip. The
       // reason travels with it and the database records the old and new value
       // of every field that actually moved.
+      // One action, not a field edit: the board decides a publication request,
+      // clears the wait and notifies the implementer in one step (SYRD-93).
+      // Publishing is not here: it needs a credential no browser can reach.
+      if (patch && patch.resolve_publication) {
+        const reason = actionReason(patch);
+        if (!reason) {
+          throw new Error('a publication decision requires a reason');
+        }
+        return updateTicketAction(
+          ticketId,
+          'resolve_publication',
+          { request_id: patch.request_id, outcome: patch.outcome || 'rejected', detail: reason },
+          normalizedCaller,
+        );
+      }
       if (patch && patch.director_edit) {
         const reason = actionReason(patch);
         if (!reason) {

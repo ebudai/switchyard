@@ -1391,199 +1391,45 @@ def test_missing_owner_credential_fails_closed_with_a_manifest() -> None:
             team_launcher.home_dir_for_user = original_home_dir_for_user
             team_launcher.uid_for_user = original_uid_for_user_outer
 
+def test_role_publishing_takes_nothing_about_where_from_its_caller() -> None:
+    """SYRD-39, under one Unix account per project (SYRD-69, SYRD-93).
 
-def test_role_publishing_is_bound_to_the_role_and_cannot_use_its_own_git_config() -> None:
-    """SYRD-39: the sudo grant allows any arguments, so the helper must not
-    accept a caller-chosen repository, remote or commit, and must never run git
-    inside the role's own checkout as the owner.
+    The old shape of this took --ref and --bundle and read the calling role from
+    SUDO_USER. With one account there is no role in SUDO_USER to read, and a
+    caller that names its own ref is a caller that publishes whatever it likes.
+    The publisher now takes one board request id and reads the rest from the
+    board's own record, so the flags a caller could aim are simply gone.
 
-    A role controls its repository configuration, and core.sshCommand,
-    uploadpack.packObjectsHook or an ext:: remote turn "run git there" into
-    "run the role's command as the owner". The role hands over a bundle it made
-    as itself; the owner only reads that.
+    The trust rules those flags used to need -- the registry, the owner tree,
+    the ref namespace, the bundle, the credential, the process asking -- are
+    driven against the real program in switchyard_publish_ref_test.
     """
     helper = ROOT / "scripts" / "switchyard-publish-ref"
-    caller = team_launcher.current_user_name()
 
-    with tempfile.TemporaryDirectory(prefix="switchyard-publish.") as tmp:
-        tmp_path = Path(tmp)
-        owner_home = tmp_path / "ownerhome"
-        registry = tmp_path / "etc" / "switchyard" / "projects"
-        origin = tmp_path / "origin.git"
-        work = tmp_path / "work"
-        subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
-        subprocess.run(["git", "init", "-q", "-b", "ops/topic", str(work)], check=True)
-        (work / "file.txt").write_text("content", encoding="utf-8")
-        for args in (
-            ["git", "-C", str(work), "config", "user.email", "role@example.invalid"],
-            ["git", "-C", str(work), "config", "user.name", "role"],
-            ["git", "-C", str(work), "add", "file.txt"],
-            ["git", "-C", str(work), "commit", "-q", "-m", "work"],
-        ):
-            subprocess.run(args, check=True)
-
-        # The owner's own checkout is where the remote NAME resolves from; the
-        # role's checkout must never be consulted for it.
-        # Its basename deliberately differs from the project slug: the trusted
-        # registry, not ~/Projects/<slug>, resolves this checkout.
-        owner_checkout = owner_home / "Projects" / "switchyard"
-        owner_checkout.parent.mkdir(parents=True)
-        subprocess.run(["git", "init", "-q", str(owner_checkout)], check=True)
-        subprocess.run(
-            ["git", "-C", str(owner_checkout), "remote", "add", "origin", str(origin)], check=True
-        )
-
-        config_path = owner_checkout / ".switchyard" / "provision" / "porter.json"
-        config_path.parent.mkdir(parents=True)
-        config_path.write_text(
-            json.dumps(
-                {
-                    "project": "porter",
-                    "run_as_user": "porter-agent",
-                    "worktree_remote": "origin",
-                    "repository": str(owner_checkout),
-                    "roles": [
-                        {
-                            "role": "ops",
-                            "cli": ["codex"],
-                            "tmux_session": "porter-ops",
-                            "target": "porter-ops:0.0",
-                            "workdir": str(work),
-                            "run_as_user": caller,
-                        }
-                    ],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        registry.mkdir(parents=True)
-        (registry / "porter.json").write_text(
-            json.dumps(
-                {
-                    "schema": team_launcher.SWITCHYARD_REGISTRY_SCHEMA,
-                    "slug": "porter",
-                    "name": "Porter",
-                    "config_path": str(config_path),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-
-        # The role makes the bundle as itself; the owner never runs git in the
-        # role's checkout.
-        bundle = tmp_path / "publish.bundle"
-        subprocess.run(
-            ["git", "-C", str(work), "bundle", "create", str(bundle), "refs/heads/ops/topic"],
-            check=True,
-            capture_output=True,
-        )
-
-        def run_helper(*extra: str, sudo_user: str | None = caller) -> subprocess.CompletedProcess[str]:
-            env = {
-                **os.environ,
-                "HOME": str(owner_home),
-                "SWITCHYARD_PUBLISH_OWNER_HOME": str(owner_home),
-                "SWITCHYARD_PUBLISH_REGISTRY_ROOT": str(registry),
-            }
-            if sudo_user is None:
-                env.pop("SUDO_USER", None)
-            else:
-                env["SUDO_USER"] = sudo_user
-            owner_home.mkdir(exist_ok=True)
-            return subprocess.run(
-                [sys.executable, str(helper), "--project", "porter", *extra],
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-
-        # Nothing about where is caller-supplied: those flags do not exist.
-        rejected_flags = run_helper("--ref", "ops/topic", "--bundle", str(bundle), "--repository", "/tmp")
-        assert rejected_flags.returncode != 0, rejected_flags.stdout
-        assert "unrecognized arguments" in rejected_flags.stderr, rejected_flags.stderr
-
-        # Must arrive through sudo; an unattributed caller has no role.
-        no_sudo = run_helper("--ref", "ops/topic", "--bundle", str(bundle), sudo_user=None)
-        assert no_sudo.returncode != 0
-        assert "run through sudo" in no_sudo.stderr + no_sudo.stdout
-
-        # The integration branch is refused.
-        protected = run_helper("--ref", "main", "--bundle", str(bundle))
-        assert protected.returncode != 0
-        assert "integration branch" in protected.stderr + protected.stdout
-
-        # Another role's namespace is refused.
-        foreign = run_helper("--ref", "director/topic", "--bundle", str(bundle))
-        assert foreign.returncode != 0
-        assert "may only publish refs under ops/" in foreign.stderr + foreign.stdout
-
-        # Its own namespaced ref publishes, and main is untouched.
-        published = run_helper("--ref", "ops/topic", "--bundle", str(bundle))
-        assert published.returncode == 0, published.stderr
-        listed = subprocess.run(
-            ["git", "-C", str(origin), "for-each-ref", "--format=%(refname)"],
+    def run(*extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(helper), *extra],
             capture_output=True,
             text=True,
-            check=True,
-        ).stdout
-        assert "refs/heads/ops/topic" in listed, listed
-        assert "refs/heads/main" not in listed, listed
-
-        # The project identifier is validated before any path is built: a
-        # traversal used to load a role-written document, and with it a
-        # role-chosen role mapping and remote (SYRD-39).
-        forged = tmp_path / "forged.json"
-        forged.write_text(
-            json.dumps(
-                {
-                    "project": "porter",
-                    "worktree_remote": str(tmp_path / "attacker.git"),
-                    "roles": [{"role": "ops", "run_as_user": caller, "workdir": str(work)}],
-                }
-            ),
-            encoding="utf-8",
+            env={**os.environ, "SUDO_USER": team_launcher.current_user_name()},
         )
-        traversal = subprocess.run(
-            [
-                sys.executable,
-                str(helper),
-                "--project",
-                f"../../{forged.parent.name}/forged",
-                "--ref",
-                "ops/topic",
-                "--bundle",
-                str(bundle),
-            ],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "SUDO_USER": caller, "HOME": str(tmp_path / "ownerhome")},
-        )
-        assert traversal.returncode != 0, traversal.stdout
-        assert "is not a valid project name" in traversal.stderr + traversal.stdout
 
-        # A configuration that does not claim to be this project is refused too.
-        config_path.write_text(json.dumps({"project": "other", "roles": []}), encoding="utf-8")
-        wrong_identity = subprocess.run(
-            [sys.executable, str(helper), "--project", "porter", "--ref", "ops/topic", "--bundle", str(bundle)],
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                "SUDO_USER": caller,
-                "HOME": str(owner_home),
-                "SWITCHYARD_PUBLISH_OWNER_HOME": str(owner_home),
-                "SWITCHYARD_PUBLISH_REGISTRY_ROOT": str(registry),
-            },
-        )
-        assert wrong_identity.returncode != 0
-        assert "not the configuration for project porter" in wrong_identity.stderr + wrong_identity.stdout
+    for flag in ("--ref", "--bundle", "--repository", "--remote", "--commit"):
+        rejected = run("--project", "porter", "--request", "1", flag, "value")
+        assert rejected.returncode != 0, (flag, rejected.stdout)
+        assert "unrecognized arguments" in rejected.stderr, (flag, rejected.stderr)
 
+    # And the request id is required: there is no default publication.
+    missing = run("--project", "porter")
+    assert missing.returncode != 0
+    assert "--request" in missing.stderr, missing.stderr
+
+    # The project identifier is validated before it builds any path. A
+    # traversal used to load a role-written document, and with it a role-chosen
+    # remote (SYRD-39).
+    traversal = run("--project", "../../tmp/forged", "--request", "1")
+    assert traversal.returncode != 0, traversal.stdout
+    assert "is not a valid project name" in traversal.stderr + traversal.stdout
 
 
 def test_fresh_provisioning_emits_no_role_account_handoff() -> None:

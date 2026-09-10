@@ -27,6 +27,7 @@ from scripts.ticket_board.project_provision import (
     render_polkit_rule,
     role_account_table,
     role_accounts_command,
+    publish_grant_commands,
     role_control_sudoers,
     role_runtime_command,
     render_tmpfiles,
@@ -920,7 +921,43 @@ def test_role_control_interface_covers_every_control_path_narrowly() -> None:
     """
     plan = build_plan(project="otto", owner_user="otto-agent")
     sudoers = role_control_sudoers(plan)
-    assert sudoers == ""
+    # With one Unix identity per project there are no per-role tmux grants left
+    # to make. What remains is the one publication grant: a single root-owned
+    # program the project account may run, and no other command and no root
+    # shell (SYRD-93).
+    assert "/usr/bin/tmux" not in sudoers, sudoers
+    assert sudoers.strip().splitlines()[-1] == (
+        "otto-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/otto/switchyard-publish-ref"
+    ), sudoers
+
+
+def test_publication_credential_is_root_owned_and_never_regenerated() -> None:
+    """The one credential on the host that may push, and its guard rails.
+
+    A key the project account can read is a key every role can push with, so it
+    is created as root's, mode 0600, and the operator is told to make the
+    project account's own key read-only. Regenerating it on a re-run would break
+    publication silently until the new public key was registered, so an existing
+    key is left alone (SYRD-93).
+    """
+    plan = build_plan(project="otto", owner_user="otto-agent")
+    commands = "\n".join(publish_grant_commands(plan))
+    assert "install -d -m 0755 -o root -g root '/etc/switchyard/publish'" in commands
+    assert "install -d -m 0755 -o root -g root '/var/lib/switchyard/publish'" in commands
+    assert "if ! sudo test -f '/etc/switchyard/publish/otto-publish-key'; then" in commands
+    assert "ssh-keygen" in commands and "chmod 0600 '/etc/switchyard/publish/otto-publish-key'" in commands
+    assert "read-only" in commands, commands
+    # The destination is pinned in root-owned data rather than read from a
+    # checkout the project account can rewrite.
+    assert "install -m 0640 -o root -g root /dev/stdin '/etc/switchyard/publish/otto.json'" in commands
+    assert "switchyard.publish-grant.v1" in commands
+    # And the whole thing is in what an operator actually runs.
+    operator = render_operator_commands(plan)
+    assert "/etc/switchyard/publish/otto.json" in operator
+    # And the grant that lets the control role reach the publisher is installed
+    # by the same run, validated by visudo before it is moved into place.
+    assert "/etc/sudoers.d/49-otto-role-control" in operator
+    assert "visudo -c -f" in operator
 
 
 def test_cli_writes_reviewable_artifacts() -> None:

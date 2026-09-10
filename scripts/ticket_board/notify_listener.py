@@ -131,6 +131,16 @@ STATE_RANK = {
 }
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
+#: Kinds that say "this role has not moved". A handoff established after one of
+#: them was generated says the opposite, so delivering it afterwards reports a
+#: stall the board itself no longer believes in. `awaiting_role` is deliberately
+#: absent: it IS the handoff's own bounded schedule, and dropping it here would
+#: silence the very notifications the wait exists to send (SYRD-99).
+SUPERSEDABLE_REMINDER_KINDS = frozenset({"idle_reminder", "nudge", "escalation"})
+#: Distinct from `stale_notification`, which means the ticket moved, and from
+#: `pane busy`, which means delivery was only postponed. This one means the
+#: reminder was answered before it could be delivered.
+SUPERSEDED_BY_AWAITING_ROLE = "superseded_by_awaiting_role"
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -1972,6 +1982,120 @@ WHERE id = %s
             return "director" if state in {"analysis", "backlog", "dat", "director_review"} else "audit"
         return None
 
+    def _superseding_awaiting_role(
+        self, conn: Any, notification_id: int, ticket_id: str, kind: str
+    ) -> dict[str, Any] | None:
+        """The handoff that makes an already-queued reminder wrong to deliver.
+
+        A reminder, a nudge and an escalation all assert the same thing: the role
+        that owns this ticket has not moved it. An awaiting-role handoff
+        established after that wave was generated asserts the opposite -- the
+        owner did move, and the next step belongs to somebody else.
+
+        `notify_idle_turn_end_nudges()` and `notify_idle_stall_nudges()` already
+        refuse to generate reminders while a wait is active. That is the enqueue
+        half, and it is not enough on its own. The wait can
+        also begin *after* the wave is generated, while the target's pane is
+        busy, and the queued row then survives every deferral and is delivered
+        later against a board that no longer agrees with it. That is what
+        happened: an Ops escalation queued at 07:40:18 was deferred repeatedly on
+        a busy Director pane and delivered at 07:50:56, more than eight minutes
+        after Ops set `awaiting_role=director` at 07:42:37. Ops was not stuck, and
+        the Director and the User were interrupted for it repeatedly (SYRD-99).
+
+        Decided from the ticket's current notification state -- the awaiting role,
+        the identity of the wait and its age -- rather than from the payload's
+        copy of the state and assignee, which is precisely what did not change.
+        Returns the trace detail when the reminder is superseded, or None.
+        """
+        if kind not in SUPERSEDABLE_REMINDER_KINDS:
+            return None
+        # `created_at` is when this wave was generated, and it is the only column
+        # that means that: `updated_at` moves on every claim and every requeue,
+        # so comparing against it would make each deferral look like a fresh
+        # reminder and nothing would ever be superseded. The dedupe upsert leaves
+        # `created_at` alone for the same reason.
+        result = conn.execute(
+            """
+SELECT ns.awaiting_role,
+       ns.awaiting_since_at,
+       q.created_at AS queued_at,
+       ticket_board.ticket_awaiting_role_is_active(
+           ns.awaiting_role, ns.awaiting_since_at, clock_timestamp()
+       ) AS wait_is_active,
+       (ns.awaiting_since_at > q.created_at) AS established_after_queueing
+FROM ticket_board.ticket_notification_queue q
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = q.ticket_id
+WHERE q.id = %s AND q.ticket_id = %s
+""",
+            (notification_id, ticket_id),
+        )
+        row = result.fetchone() if result is not None and hasattr(result, "fetchone") else None
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            awaiting_role, awaiting_since_at, queued_at, wait_is_active, established_after = (
+                row["awaiting_role"], row["awaiting_since_at"], row["queued_at"],
+                row["wait_is_active"], row["established_after_queueing"],
+            )
+        else:
+            awaiting_role, awaiting_since_at, queued_at, wait_is_active, established_after = row[:5]
+        # A wait that was cleared, or one whose window has expired, supersedes
+        # nothing: the owner is answerable again and the reminder is the truth.
+        if not wait_is_active or not established_after:
+            return None
+        return {
+            "awaiting_role": self._decode_text(awaiting_role),
+            "awaiting_since_at": str(awaiting_since_at),
+            "queued_at": str(queued_at),
+            "superseded_kind": kind,
+        }
+
+    def _drop_superseded_notification(
+        self,
+        conn: Any,
+        *,
+        notification_id: int,
+        ticket_id: str,
+        target_role: str,
+        kind: str,
+        detail: dict[str, Any],
+        phase: str,
+    ) -> None:
+        """Remove one superseded reminder, saying exactly why it went."""
+        self.logger.info(
+            "Dropping %s notification %s for %s: %s took the handoff at %s, after it was queued at %s",
+            kind, notification_id, ticket_id,
+            detail.get("awaiting_role"), detail.get("awaiting_since_at"), detail.get("queued_at"),
+        )
+        self._trace_notification(
+            conn,
+            notification_id=notification_id,
+            ticket_id=ticket_id,
+            target_role=target_role,
+            kind=kind,
+            event="drop",
+            busy_reason=SUPERSEDED_BY_AWAITING_ROLE,
+            detail={**detail, "phase": phase},
+        )
+        self._trace_notification(
+            conn,
+            notification_id=notification_id,
+            ticket_id=ticket_id,
+            target_role=target_role,
+            kind=kind,
+            event="listener_discard",
+            detail={"reason": SUPERSEDED_BY_AWAITING_ROLE, "phase": phase},
+        )
+        # Discarded, never acked. This reminder was answered before it could be
+        # delivered, and `ack_notification` records delivery accounting:
+        # for an idle_reminder it increments idle_reminder_count, which the next
+        # idle wave reads as "already reminded" and turns into an escalation to
+        # the Director (SYRD-32). Acking here would answer one false escalation
+        # by scheduling the next one.
+        self._discard_notification(conn, notification_id, SUPERSEDED_BY_AWAITING_ROLE)
+        self._traced_gate_defer_notifications.discard(notification_id)
+
     def _notification_is_current(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> bool:
         current = self._current_ticket_state(conn, ticket_id)
         if current is None:
@@ -2216,6 +2340,13 @@ WHERE (r.definition->>'active')::boolean
                 self._ack_notification(conn, notification_id)
                 self._traced_gate_defer_notifications.discard(notification_id)
                 continue
+            superseded = self._superseding_awaiting_role(conn, notification_id, ticket_id, kind)
+            if superseded is not None:
+                self._drop_superseded_notification(
+                    conn, notification_id=notification_id, ticket_id=ticket_id,
+                    target_role=target_role, kind=kind, detail=superseded, phase="claim",
+                )
+                continue
             # Pane hook state can outlive its tmux pane. Probe the target once per
             # claimed notification before the activity gate so stale state files
             # cannot hold delivery forever; this keeps the subprocess cost off the
@@ -2374,8 +2505,20 @@ WHERE (r.definition->>'active')::boolean
                     PANE_BUSY_REQUEUE_ERROR,
                 )
                 continue
-            # Activity probing can take time. Recheck handoffs immediately before
-            # sending so a resolution during that probe suppresses this delivery.
+            # Activity probing can take time, and a deferred reminder can have
+            # been waiting far longer than that. Recheck immediately before
+            # sending so a handoff established in either window suppresses this
+            # delivery rather than being overtaken by it (SYRD-99).
+            superseded = self._superseding_awaiting_role(conn, notification_id, ticket_id, kind)
+            if superseded is not None:
+                self._drop_superseded_notification(
+                    conn, notification_id=notification_id, ticket_id=ticket_id,
+                    target_role=target_role, kind=kind, detail=superseded,
+                    phase="pre_send_recheck",
+                )
+                continue
+            # Recheck handoffs too, so a resolution during that probe suppresses
+            # this delivery.
             if kind == "awaiting_role" and not self._notification_is_current(conn, ticket_id, target_role, payload):
                 self._trace_notification(
                     conn, notification_id=notification_id, ticket_id=ticket_id,

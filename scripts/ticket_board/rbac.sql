@@ -135,6 +135,11 @@ GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timest
 -- otherwise every delivery throws "permission denied for function" and no
 -- notification is ever sent. Added after PGU-549 introduced the call without a grant.
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_has_unresolved_blockers(text) TO ticket_board_listener;
+-- The superseded-reminder check (_superseding_awaiting_role) asks the same
+-- predicate the enqueue side uses, so delivery and enqueue cannot drift apart on
+-- what an active wait is. Without the grant every delivery throws instead
+-- (SYRD-99).
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_awaiting_role_is_active(text, timestamptz, timestamptz, interval) TO ticket_board_listener;
 
 COMMIT;
 

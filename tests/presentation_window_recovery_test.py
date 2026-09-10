@@ -35,7 +35,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from team_launcher_test_helpers import *
-from team_launcher_upgrade_cutover_test import _RunningTenant, _declarative_tenant
+from team_launcher_upgrade_cutover_test import (
+    _RunningTenant,
+    _declarative_tenant,
+    trusted_release_root,
+)
 
 from scripts import presentation_controller as presentation
 from scripts.ticket_board import project_provision as provision
@@ -553,6 +557,7 @@ def test_a_rollback_the_user_cannot_see_is_reported_as_one() -> None:
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config(PROJECT, config_path),
                     config_path=config_path,
+                    source_repo=trusted_release_root(),
                     tooling_dir=config_path.parent / "tooling" / PROJECT,
                     runner=tenant.runner(),
                     print_func=printed.append,
@@ -1067,6 +1072,7 @@ def test_a_cutover_that_succeeds_but_loses_the_window_is_not_a_success() -> None
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config(PROJECT, config_path),
                     config_path=config_path,
+                    source_repo=trusted_release_root(),
                     tooling_dir=config_path.parent / "tooling" / PROJECT,
                     runner=tenant.runner(),
                     print_func=printed.append,

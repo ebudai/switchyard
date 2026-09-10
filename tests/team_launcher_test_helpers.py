@@ -82,6 +82,13 @@ LIVE_PANE_STATE_PATHS = candidate_live_pane_state_paths()
 strip_ticket_board_pane_env(os.environ)
 TEST_SWITCHYARD_SHARED_INSTALL_ROOT = Path(tempfile.gettempdir()) / f"switchyard-test-{os.getpid()}" / "opt" / "switchyard"
 os.environ["SWITCHYARD_SHARED_INSTALL_ROOT"] = str(TEST_SWITCHYARD_SHARED_INSTALL_ROOT)
+# The publication boundary is installed by the real privileged branch these
+# suites drive, so without these it would create /etc/switchyard/publish and
+# /var/lib/switchyard/publish on the machine running the tests (SYRD-97 review).
+TEST_SWITCHYARD_PUBLISH_ROOT = TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent / "publish"
+os.environ["SWITCHYARD_PUBLISH_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "etc")
+os.environ["SWITCHYARD_PUBLISH_STAGING_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "var")
+os.environ["SWITCHYARD_SUDOERS_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "sudoers.d")
 os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"
 os.environ["KDE_FULL_SESSION"] = ""
 
@@ -211,6 +218,14 @@ class FakeRunner:
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
+        if args[:2] == ["git", "-C"] and args[3:5] == ["rev-parse", "--verify"]:
+            # Exactly the form the release resolver asks: which commit is being
+            # installed is a real question about a real repository, and stubbing
+            # it made the verification privileged staging now depends on
+            # unreachable in every fixture. Narrow on purpose -- these suites
+            # model other `rev-parse` calls, and answering those for real
+            # changes what they are testing (SYRD-97 review).
+            return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if args[:2] == ["sudo", "-u"] and len(args) >= 4:
             inner = args[4:] if len(args) >= 5 and args[3] == "-H" else args[3:]
             if inner[:2] == ["tmux", "has-session"]:
@@ -620,6 +635,78 @@ def _write_source_onboarding_docs(source_repo: Path, *, initialize_git: bool = F
     )
     return _run_git(["git", "rev-parse", "HEAD"], cwd=source_repo).stdout.strip()
 
+#: The ref an upgrade selects when nothing is pinned, which is what these
+#: fixtures exercise. Named rather than positional: staging several and taking
+#: the last one silently staged the tooling from a different release than the
+#: upgrade went on to verify it against.
+DEFAULT_UPGRADE_REF = "origin/main"
+
+
+def stage_trusted_releases(repo_root: Path | None = None) -> dict[str, str]:
+    """Every ref an upgrade in these fixtures might select, staged by name.
+
+    Privileged tooling may only be staged from a verified release (SYRD-97
+    review), so a tenant fixture needs one for whichever ref the upgrade
+    resolves -- `deploy_ref` is the pinned release, else the deploy branch, not
+    HEAD.
+    """
+    staged: dict[str, str] = {}
+    for ref in (DEFAULT_UPGRADE_REF, "HEAD"):
+        try:
+            staged[ref] = stage_trusted_release(repo_root, ref=ref)
+        except subprocess.CalledProcessError:
+            continue
+    return staged
+
+
+def trusted_release_root_for(staged: dict[str, str], ref: str = DEFAULT_UPGRADE_REF) -> Path | None:
+    """Where the release for one ref landed, or None when it was not staged."""
+    commit = staged.get(ref) or next(iter(staged.values()), "")
+    if not commit:
+        return None
+    return TEST_SWITCHYARD_SHARED_INSTALL_ROOT / "releases" / commit
+
+
+def stage_trusted_release(repo_root: Path | None = None, *, ref: str = "HEAD") -> str:
+    """A consumable root-owned release for the test shared install root.
+
+    The upgrade stages `switchyard-publish-ref` into a path a NOPASSWD rule
+    points root at, so it may only be staged from a verified immutable release
+    (SYRD-97 review). These suites are unprivileged, so the release is owned by
+    the test user and the ownership walk is based at the overridden install root
+    -- the same seam that lets them exercise the privileged branch at all.
+
+    Consuming an existing release runs no subprocess: it is a path walk and a
+    marker read, which is what makes it usable here.
+    """
+    repo = Path(repo_root) if repo_root is not None else ROOT
+    commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    release = TEST_SWITCHYARD_SHARED_INSTALL_ROOT / "releases" / commit
+    if not (release / ".switchyard-release.json").exists():
+        # From the object store, the way the real one is built: whatever the
+        # commit holds is what the release holds.
+        release.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["sh", "-c",
+             f"git -C {shlex.quote(str(repo))} archive {shlex.quote(commit)} "
+             f"| tar -C {shlex.quote(str(release))} -x"],
+            check=True,
+        )
+        (release / ".switchyard-release.json").write_text(
+            json.dumps({"commit": commit, "source_repo": str(repo), "source_ref": commit},
+                       sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    for path in [release, *release.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else (path.stat().st_mode | 0o444) & ~0o022)
+    for parent in (TEST_SWITCHYARD_SHARED_INSTALL_ROOT, TEST_SWITCHYARD_SHARED_INSTALL_ROOT / "releases"):
+        parent.chmod(0o755)
+    return commit
+
+
 def _owner_file_install_runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
     if args[:1] == ["git"]:
         run_kwargs = dict(kwargs)
@@ -628,8 +715,11 @@ def _owner_file_install_runner(args: list[str], **kwargs: object) -> subprocess.
         run_kwargs.setdefault("stderr", subprocess.PIPE)
         return subprocess.run(args, **run_kwargs)
     if args[:1] == ["install"]:
-        for raw_path in args[args.index("-g") + 2 :]:
-            Path(raw_path).mkdir(parents=True, exist_ok=True)
+        if "-d" in args:
+            for raw_path in args[args.index("-g") + 2 :]:
+                Path(raw_path).mkdir(parents=True, exist_ok=True)
+        else:
+            Path(args[-1]).parent.mkdir(parents=True, exist_ok=True)
         return subprocess.CompletedProcess(args, 0)
     if args[:1] == ["chown"]:
         return subprocess.CompletedProcess(args, 0)

@@ -55,6 +55,16 @@ class _RunningTenant:
             bare = argv[4:] if argv[:2] == ["sudo", "-u"] and len(argv) > 4 else argv
             if not tenant.live and bare[:2] == ["tmux", "has-session"]:
                 return subprocess.CompletedProcess(argv, 1, "", "")
+            if argv[:2] == ["git", "-C"] and argv[3:5] == ["rev-parse", "--verify"]:
+                # Resolving which commit is being installed is a real question
+                # about a real repository; answering it with a stub would make
+                # the release verification untestable here.
+                return subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if argv[:1] == ["install"] and "-d" in argv:
+                # The directory form names no source; modelling it as a copy
+                # made the last flag value look like one.
+                Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(argv, 0, "", "")
             if argv[:1] == ["install"] and len(argv) >= 3:
                 Path(argv[-1]).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(argv[-2], argv[-1])
@@ -203,14 +213,34 @@ def _deployed_release(tmp: Path, project: str, sha: str) -> Path:
     return board_root
 
 
+#: The release these fixtures stage their privileged tooling from.
+TRUSTED_RELEASE_ROOT: Path | None = None
+
+
+def trusted_release_root() -> Path | None:
+    """The release the last tenant staged from.
+
+    A function rather than the global, because a suite that imports the name
+    binds it once at import time and would get the value from before any tenant
+    was built (SYRD-97 review).
+    """
+    return TRUSTED_RELEASE_ROOT
+
+
 def _declarative_tenant(
     tmp: Path, *, project: str = "porter", accounts: bool = False, board_root: Path | None = None
 ) -> tuple[Path, Path]:
     _privileged_root(tmp)
+    # Privileged tooling may only be staged from a verified release, so these
+    # tenants have one to be staged from (SYRD-97 review).
+    global TRUSTED_RELEASE_ROOT
+    TRUSTED_RELEASE_ROOT = trusted_release_root_for(stage_trusted_releases())
     _stage_units(project)
     # The upgrade stages and verifies this tenant's role tooling before it moves
     # any role, so the sandbox holds a real bundle (SYRD-62).
-    _stage_role_tooling(tmp, project)
+    # From the verified release, because that is where the upgrade will stage
+    # from and the bundle is checked against it (SYRD-97 review).
+    _stage_role_tooling(tmp, project, release_root=TRUSTED_RELEASE_ROOT)
     config_path = _write_six_visible_role_config(tmp, project=project)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     # A real account: the privileged paths chown generated files to the project
@@ -597,6 +627,7 @@ def test_the_listener_is_stopped_before_the_release_and_its_state_restored() -> 
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config("porter", config_path),
                     config_path=config_path,
+                    source_repo=TRUSTED_RELEASE_ROOT,
                     tooling_dir=config_path.parent / "tooling" / "porter",
                     runner=tenant.runner(),
                     launcher=lambda config, **kwargs: 1,
@@ -635,6 +666,7 @@ def test_a_presentation_that_will_not_reconnect_rolls_back_in_place() -> None:
                     result = team_launcher.cutover_role_identities_command(
                         team_launcher.load_project_config("porter", config_path),
                         config_path=config_path,
+                        source_repo=TRUSTED_RELEASE_ROOT,
                         tooling_dir=config_path.parent / "tooling" / "porter",
                         runner=tenant.runner(),
                         print_func=printed.append,
@@ -672,6 +704,7 @@ def test_a_listener_that_will_not_start_rolls_the_whole_thing_back() -> None:
             result = team_launcher.cutover_role_identities_command(
                 team_launcher.load_project_config("porter", config_path),
                 config_path=config_path,
+                source_repo=TRUSTED_RELEASE_ROOT,
                 tooling_dir=config_path.parent / "tooling" / "porter",
                 runner=refuses_to_start,
                 print_func=printed.append,
@@ -701,6 +734,7 @@ def test_a_listener_that_will_not_stop_blocks_the_release() -> None:
             result = team_launcher.cutover_role_identities_command(
                 team_launcher.load_project_config("porter", config_path),
                 config_path=config_path,
+                source_repo=TRUSTED_RELEASE_ROOT,
                 tooling_dir=config_path.parent / "tooling" / "porter",
                 runner=stuck,
                 print_func=printed.append,
@@ -734,6 +768,7 @@ def test_a_stop_that_leaves_workers_running_changes_nothing() -> None:
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config("porter", config_path),
                     config_path=config_path,
+                    source_repo=TRUSTED_RELEASE_ROOT,
                     tooling_dir=config_path.parent / "tooling" / "porter",
                     runner=watching,
                     # The stop reports success and leaves everything running,
@@ -899,19 +934,48 @@ def test_a_forged_tenant_journal_cannot_release_the_activation() -> None:
 
 
 def _origin_backed_source(tmp: Path) -> tuple[Path, str]:
-    """A real source checkout, and the sha its `origin/main` resolves to."""
+    """A real source checkout, and the sha its `origin/main` resolves to.
+
+    Its release is staged here rather than at each caller: privileged tooling may
+    only be staged from a verified release, and this repository's commits are the
+    ones an upgrade pinned at it will select (SYRD-97 review).
+    """
     _origin, repo = _make_origin_backed_repo(tmp)
-    return repo, _run_git(["git", "rev-parse", "origin/main"], cwd=repo).stdout.strip()
+    # Shaped like the thing it stands in for. An upgrade pinned at this checkout
+    # stages its privileged tooling from the release built out of this commit, so
+    # a repository holding only a text file cannot stand for a Switchyard source
+    # -- there would be nothing to stage and nothing to verify (SYRD-97 review).
+    for name in ("scripts", "skills"):
+        source = ROOT / name
+        if source.is_dir():
+            shutil.copytree(source, repo / name, dirs_exist_ok=True)
+    _run_git(["git", "add", "scripts", "skills"], cwd=repo)
+    _run_git(["git", "commit", "-m", "Switchyard source"], cwd=repo)
+    _run_git(["git", "push", "origin", "HEAD:main"], cwd=repo)
+    _run_git(["git", "fetch", "origin"], cwd=repo)
+    sha = _run_git(["git", "rev-parse", "origin/main"], cwd=repo).stdout.strip()
+    stage_trusted_release(repo, ref=sha)
+    return repo, sha
 
 
-def _advance_origin(repo: Path) -> str:
+def _advance_origin(repo: Path, tmp: Path | None = None) -> str:
     """Publish a newer release on the pinned ref, as a later Switchyard would."""
     (repo / "tracked.txt").write_text("newer\n", encoding="utf-8")
     _run_git(["git", "add", "tracked.txt"], cwd=repo)
     _run_git(["git", "commit", "-m", "newer release"], cwd=repo)
     _run_git(["git", "push", "origin", "HEAD:main"], cwd=repo)
     _run_git(["git", "fetch", "origin"], cwd=repo)
-    return _run_git(["git", "rev-parse", "origin/main"], cwd=repo).stdout.strip()
+    sha = _run_git(["git", "rev-parse", "origin/main"], cwd=repo).stdout.strip()
+    # The newer release has to be stageable too, or the upgrade that is supposed
+    # to move onto it has nothing verified to move onto -- and the tenant's
+    # staged bundle has to come from it, because that is what the transaction
+    # checks the bundle against (SYRD-97 review).
+    stage_trusted_release(repo, ref=sha)
+    if tmp is not None:
+        _stage_role_tooling(
+            tmp, "porter", release_root=TEST_SWITCHYARD_SHARED_INSTALL_ROOT / "releases" / sha
+        )
+    return sha
 
 
 def _deploying_runner(inner, *, board_root: Path, deploys: list[str], deploy: bool = True):
@@ -956,10 +1020,17 @@ def _deploying_runner(inner, *, board_root: Path, deploys: list[str], deploy: bo
 
 def _tenant_before_cutover(tmp: Path) -> tuple[Path, Path, Path, set[str]]:
     """A legacy tenant, its source checkout, its board root, and its role accounts."""
-    source_repo, _target = _origin_backed_source(tmp)
+    source_repo, target = _origin_backed_source(tmp)
     _deploying_runner.source = source_repo
     board_root = _deployed_release(tmp, "porter", "1" * 40)
     config_path, _ = _declarative_tenant(tmp, board_root=board_root)
+    # This tenant's upgrade is pinned at its own checkout, so its staged bundle
+    # has to come from that checkout's release rather than from the one
+    # `_declarative_tenant` staged for the default ref: the transaction checks
+    # the bundle against whichever release it was pinned at (SYRD-97 review).
+    _stage_role_tooling(
+        tmp, "porter", release_root=TEST_SWITCHYARD_SHARED_INSTALL_ROOT / "releases" / target
+    )
     roles = [role["role"] for role in json.loads(config_path.read_text(encoding="utf-8"))["roles"]]
     return config_path, source_repo, board_root, {f"porter-{role}" for role in roles}
 
@@ -1014,7 +1085,7 @@ def test_a_release_that_really_moved_on_is_still_owed_and_still_printed() -> Non
         deployed = (board_root / "current").resolve().name
         # A later release is published. The tenant is already cut over, so no
         # transaction runs and the deploy is genuinely an operator's to make.
-        newer = _advance_origin(source_repo)
+        newer = _advance_origin(source_repo, Path(tmp))
         assert newer != deployed
 
         deploys: list[str] = []

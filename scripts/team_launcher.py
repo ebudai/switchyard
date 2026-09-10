@@ -14051,6 +14051,299 @@ def role_account_migration_instruction(
     return path, []
 
 
+def install_tenant_publication_boundary(
+    config: ProjectConfig,
+    *,
+    release,
+    publish_remote: str = "",
+    dry_run: bool = False,
+    sudoers_root: Path | None = None,
+    registration_root: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Give an existing tenant the publication boundary a fresh one is given.
+
+    `publish_grant_commands()` is reachable from the operator command packet and
+    from nowhere else, and the shared-project-account path skips the role-account
+    migration that used to carry it, so a tenant that was provisioned before
+    SYRD-93 upgrades everything except the one thing that stops every role under
+    the shared account from pushing. This is that step, on the ordinary upgrade,
+    run by root in this process rather than written out for an operator to
+    execute -- a generated file is writable by every role under one account, and
+    running it as root would hand them root (SYRD-97).
+    """
+    from scripts.ticket_board.project_provision import (
+        publish_sudoers_document,
+        publish_sudoers_path,
+    )
+    from scripts.ticket_board.publication_boundary import (
+        install_publication_boundary,
+        report_publication_outcome,
+    )
+
+    owner_user = config.run_as_user or current_user_name()
+    sudoers_path = str(publish_sudoers_path(config.project, root=sudoers_root))
+    outcome = install_publication_boundary(
+        project=config.project,
+        release=release,
+        registration_root=registration_root or switchyard_privileged_provision_root(),
+        sudoers_path=sudoers_path,
+        sudoers_document=publish_sudoers_document(config.project, owner_user),
+        declared_remote=publish_remote,
+        dry_run=dry_run,
+        runner=runner,
+        print_func=print_func,
+    )
+    for problem in outcome.problems:
+        print_func(f"warning: switchyard: {problem}")
+    if not dry_run:
+        # After the problems, and driven by what is on disk: a report that runs
+        # before the verdict prints artifacts a failed run never reached.
+        report_publication_outcome(outcome, project=config.project, print_func=print_func)
+    # Pending is not success. It used to reach nobody, so a failed keyscan left
+    # the phase recorded done while the boundary was demonstrably unfinished
+    # (SYRD-97 review).
+    return list(outcome.problems) + [
+        f"{path} was not installed, so {config.project}'s publication boundary is incomplete"
+        for path in outcome.pending
+    ]
+
+
+def running_launcher_release(root: Path | None = None) -> SharedSwitchyardRelease | None:
+    """Which installed release this process is executing out of, if any."""
+    return shared_switchyard_release_for_path(
+        (root or Path(__file__).resolve().parent.parent)
+    )
+
+
+def trusted_bootstrap_commands(
+    source_repo: Path,
+    commit: str,
+    *,
+    project: str = "",
+    publish_remote: str = "",
+) -> list[str]:
+    """How root reaches an exact release without reading a role-writable repository.
+
+    The public wrapper dispatches privileged commands to whatever
+    `<install root>/current` points at, so an operator who upgrades a checkout
+    and runs `sudo switchyard upgrade` is still running whatever was installed
+    last. The way out cannot be `sudo ./install`: that executes a script from the
+    checkout, and under one shared account (SYRD-69) every role can write it.
+
+    Nor can root simply read that checkout with an exact sha. A full sha does NOT
+    make the content immutable: `git archive <sha>` honours `refs/replace/<sha>`,
+    so whoever can write the repository can substitute the tree -- and the old
+    installer executes the exported release before activating it, which turns
+    that substitution into code execution as root. Git config in that repository
+    can name programs to run as well. Root is given no access to it at all
+    (SYRD-97 review).
+
+    Instead the operator, unprivileged and in their own repository, produces a
+    bundle; root builds its own repository from that bundle and demands the exact
+    commit inside it. Object lookup is by content hash, so an object served under
+    that sha hashes to it or git does not return it, and a bundle that does not
+    carry it leaves root with nothing to check out. Replacement is disabled
+    throughout, and only root's own configuration is ever in effect.
+    """
+    install_root = switchyard_shared_install_root()
+    bootstrap = install_root / "bootstrap"
+    src = bootstrap / "src"
+    # Inside the checkout, because the operator writes it as themselves and the
+    # root-owned bootstrap directory is not theirs to write. Root only reads it,
+    # and reading it is safe for the same reason the whole design is: root
+    # demands the exact commit afterwards, so anything else fails closed.
+    bundle = source_repo / f".switchyard-bootstrap-{commit}.bundle"
+    ref = f"refs/switchyard/bootstrap-{commit}"
+    repo, sha = shlex.quote(str(source_repo)), shlex.quote(commit)
+    q_src, q_bundle, q_ref = shlex.quote(str(src)), shlex.quote(str(bundle)), shlex.quote(ref)
+    installer = shlex.quote(str(install_root / "current" / "scripts" / "install-switchyard"))
+    release = shlex.quote(str(install_root / "releases" / commit))
+    # Nothing root runs reads the checkout, so `no-replace` here is the
+    # operator's own protection rather than the boundary.
+    no_replace = "env GIT_NO_REPLACE_OBJECTS=1"
+    return [
+        f"sudo install -d -m 0755 -o root -g root {shlex.quote(str(bootstrap))}",
+        # Unprivileged, in the operator's own repository, as themselves.
+        f"{no_replace} git -C {repo} update-ref {q_ref} {sha}",
+        f"{no_replace} git -C {repo} bundle create {q_bundle} {q_ref}",
+        # Root, in a repository root creates, reading only that bundle.
+        f"sudo {no_replace} git init -q {q_src}",
+        f"sudo {no_replace} git -C {q_src} -c fetch.fsckObjects=true fetch --no-tags "
+        f"{q_bundle} {q_ref}:{q_ref}",
+        # The exact commit, or nothing: a bundle that does not carry it fails
+        # here and no release is built.
+        f"sudo {no_replace} git -C {q_src} checkout -q --detach {sha}",
+        f"sudo {no_replace} SWITCHYARD_SOURCE_REPO={q_src} SWITCHYARD_SOURCE_REF={sha} "
+        f"{installer} --apply",
+        # Repointing `current` is not enough. The root-owned upgrade source record
+        # still pins whatever was selected last, and the next upgrade recovers it
+        # and goes straight back. This is what durably re-selects the reviewed
+        # release, and it is the first command that runs the reviewed code.
+        f"sudo switchyard upgrade {shlex.quote(project or '<project>')} --source-repo {release} "
+        f"--deploy-ref {sha} --publish-remote {shlex.quote(publish_remote or '<url>')}",
+    ]
+
+
+def stale_launcher_problems(
+    release, *, source_repo: Path, project: str = "", publish_remote: str = ""
+) -> list[str]:
+    """Refuse when this process is not the release it is about to install.
+
+    `/usr/local/bin/switchyard` sends privileged commands to whatever
+    `<install root>/current` points at. An operator who pulls a checkout and runs
+    `sudo switchyard upgrade` is therefore running the previously installed
+    launcher, which does not contain this code at all -- so the upgrade quietly
+    stages that older release's tools and reports success. It is the same trap as
+    "pulling is not installing", one level up, and the only symptom is that the
+    thing the operator was told exists is not there.
+
+    Nothing can be done about it from inside the old launcher, which is why this
+    is stated as a precondition of the new one: if this process is running from
+    an installed release that is not the one selected, it stops and names the
+    bootstrap (SYRD-97 review).
+    """
+    running = running_launcher_release()
+    if running is None:
+        # A checkout, not an installed release. Ordinary for a developer run and
+        # for the bootstrap itself; the wrapper's dispatch is what this is about.
+        return []
+    if running.marker_commit == release.commit:
+        return []
+    running_name = running.marker_commit or f"an unmarked release at {running.root}"
+    return [
+        f"this command is running from installed release {running_name}, but the upgrade "
+        f"selected {release.commit}. The public `switchyard` wrapper dispatches privileged "
+        "commands to whatever is installed, so it is not running the release you pinned and "
+        "nothing privileged was staged.",
+        "install that release first, with root-owned code only:",
+        *(
+            f"  {line}"
+            for line in trusted_bootstrap_commands(
+                source_repo, release.commit, project=project, publish_remote=publish_remote
+            )
+        ),
+        "then re-run this command.",
+    ]
+
+
+def resolve_trusted_upgrade_release(
+    source_repo: Path,
+    commit: str,
+    *,
+    ref_is_pinned: bool = False,
+    install_root: Path | None = None,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+):
+    """The immutable root-owned tree every privileged artifact is installed from.
+
+    This has to happen before staging, not after it. `refresh_staged_role_tooling`
+    copies `switchyard-publish-ref` -- the one program the NOPASSWD rule grants
+    root on -- into a root-owned path, and it used to copy it out of the source
+    checkout. Under one shared account (SYRD-69) a role can write that checkout,
+    so root was copying role-writable bytes into the program root would later run
+    for them: planting the file was a root shell. The commit selects what is
+    staged now, and `git archive` reads the object store rather than the working
+    tree (SYRD-97 review).
+    """
+    from scripts.ticket_board.publication_boundary import (
+        TrustedRelease,
+        materialize_trusted_release,
+        read_release_marker,
+        root_controlled_problems,
+    )
+
+    # The pinned source may already BE an immutable release -- an operator who
+    # pinned /opt/switchyard/releases/<sha> has handed us the exact thing this
+    # would otherwise go and build. It is a tree, not a checkout, so asking git
+    # which commit it is fails; its marker says. Consumed rather than rebuilt,
+    # after the same whole-path check (SYRD-97 review).
+    marker = read_release_marker(source_repo)
+    marked_commit = str(marker.get("commit") or "").strip()
+    if marked_commit:
+        overridden_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", "").strip()
+        problems = root_controlled_problems(
+            str(source_repo), base=overridden_root or "/"
+        )
+        if problems:
+            return None, [
+                f"{source_repo} is an installed release but is not root-controlled, so it "
+                "will not be used"
+            ] + problems
+        # Being a release is not the same as being the release that was asked
+        # for. An operator pointing at the installed one while pinning a newer
+        # ref would otherwise stage the OLD tools and be told it worked, which
+        # is the stale-global-release case this ticket is about (SYRD-97 review).
+        wanted = (commit or "").strip()
+        # A ref only competes with the marker when somebody actually chose it.
+        # The resolver fills one in when only a source was pinned, and treating
+        # that default as a pin refuses the ordinary "install exactly this
+        # release" case.
+        if wanted and ref_is_pinned and wanted != marked_commit:
+            if re.fullmatch(r"[0-9a-f]{40}", wanted):
+                # An exact commit needs no resolution to be compared, so there is
+                # no state in which this can fail open (SYRD-97 review).
+                return None, [
+                    f"{source_repo} is the installed release for {marked_commit}, but this "
+                    f"upgrade is pinned at {wanted}. Nothing was staged: pointing at one "
+                    "release while pinning another installs the older tools and reports success."
+                ]
+            # Symbolic, and there is nowhere trustworthy to resolve it. The
+            # release tree is not a repository, and the checkout and cache it
+            # records are writable by the account every role runs as -- a role
+            # could move that ref back onto the old release and be believed.
+            return None, [
+                f"{source_repo} is the installed release for {marked_commit}, and this upgrade "
+                f"is pinned at {wanted!r}, which is a name rather than a commit. It is not "
+                "resolved here: the repositories that could resolve it are writable by the "
+                "account every role runs as. Pin the exact commit instead."
+            ]
+        return TrustedRelease(root=source_repo, commit=marked_commit), []
+
+    selected = _selected_release_commit(source_repo, commit, runner=runner)
+    if not selected:
+        return None, [
+            f"could not resolve which commit {source_repo} is being installed from, so no "
+            "release can be verified and nothing privileged can be staged from it"
+        ]
+    root = install_root or switchyard_shared_install_root()
+    # "/" on a host. It moves only when the shared install root has been
+    # overridden, which is the documented seam for exercising the real
+    # privileged branch without writing to the host's /opt; a fixture cannot own
+    # "/", and refusing its temp directory would be the correct answer to the
+    # wrong question.
+    overridden = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", "").strip()
+    return materialize_trusted_release(
+        selected,
+        source_repo=source_repo,
+        install_root=root,
+        trust_base=str(root) if overridden else "/",
+        runner=runner,
+        dry_run=dry_run,
+    )
+
+
+def _selected_release_commit(
+    source_repo: Path,
+    ref: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    """The exact commit the upgrade is installing, named rather than implied."""
+    candidate = (ref or "").strip() or "HEAD"
+    proc = runner(
+        ["git", "-C", str(source_repo), "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if getattr(proc, "returncode", 1) != 0:
+        return ""
+    return str(getattr(proc, "stdout", "") or "").strip()
+
+
 def refresh_staged_role_tooling(
     config: ProjectConfig,
     *,
@@ -15156,6 +15449,10 @@ def upgrade_project_command(
     # Where this tenant's root-owned role tooling is staged. Only a test names
     # it; on a host it is /usr/local/lib/switchyard (SYRD-62).
     tooling_root: Path | None = None,
+    # Stated once by an operator and then recorded root-owned. It is not read
+    # from the tenant, because every role runs as the account that owns the
+    # tenant's git config and could aim the push somewhere else (SYRD-97 review).
+    publish_remote: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -15178,6 +15475,9 @@ def upgrade_project_command(
     pinned_explicitly = (
         source_repo is not None or commit_git_dir is not None or deploy_ref is not None
     )
+    # Whether the deploy ref is somebody's choice or a default the resolver
+    # supplies. Only a choice may contradict an installed release's marker.
+    deploy_ref_chosen = deploy_ref is not None
     # Read back first, then record what this invocation actually ends up using.
     # Doing it the other way round would let an operator who pins one of the
     # three erase the other two, and the phase after theirs would then be the
@@ -15185,6 +15485,7 @@ def upgrade_project_command(
     source_repo, commit_git_dir, deploy_ref, recovered = resolve_pinned_upgrade_source(
         config, source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref
     )
+    deploy_ref_chosen = deploy_ref_chosen or bool(recovered)
     if recovered:
         print_func(
             f"switchyard: {config.project} keeps the release this upgrade was pinned to: {recovered}"
@@ -15318,6 +15619,8 @@ def upgrade_project_command(
             cutover = role_account_cutover(config, runner=runner)
 
     release_report_config = config
+    trusted_release_root: Path | None = None
+    publication_detail = ""
     warn_if_artifact_source_checkout_is_stale(
         config, source_repo=effective_source_repo, runner=runner, print_func=print_func,
     )
@@ -15372,6 +15675,28 @@ def upgrade_project_command(
             f"switchyard: would stage {config.project} role tooling in "
             f"{_staged_tooling_dir(config, tooling_root)} from {effective_source_repo}"
         )
+        previewed_release, preview_problems = resolve_trusted_upgrade_release(
+            effective_source_repo, deploy_ref or "", dry_run=True, ref_is_pinned=deploy_ref_chosen, runner=runner
+        )
+        if previewed_release is not None:
+            trusted_release_root = previewed_release.root
+        for problem in preview_problems or (
+            install_tenant_publication_boundary(
+                config,
+                release=previewed_release,
+                publish_remote=publish_remote,
+                dry_run=True,
+                runner=runner,
+                print_func=print_func,
+            )
+            if previewed_release is not None
+            else []
+        ):
+            # A preview that hides what it could not work out is not a preview.
+            # This is the one place an operator finds out that the real run
+            # would install nothing privileged, and finding out then is the
+            # whole point of asking.
+            print_func(f"warning: switchyard: {problem}")
     elif os.geteuid() == 0:
         legacy_problems = remove_untrusted_role_account_migration(
             config, config_path=config_path, print_func=print_func
@@ -15392,9 +15717,40 @@ def upgrade_project_command(
                 detail="; ".join(legacy_problems),
             )
             return 1
+        trusted_release, release_problems = resolve_trusted_upgrade_release(
+            effective_source_repo, deploy_ref or "", ref_is_pinned=deploy_ref_chosen, runner=runner
+        )
+        if trusted_release is not None:
+            release_problems = stale_launcher_problems(
+                trusted_release,
+                source_repo=effective_source_repo,
+                project=config.project,
+                publish_remote=publish_remote,
+            )
+            if release_problems:
+                trusted_release = None
+        if trusted_release is None:
+            # Staging is the thing that must not proceed. `switchyard-publish-ref`
+            # is copied into a root-owned path that a NOPASSWD rule points root
+            # at, so staging it from a checkout every role can write is the
+            # escalation. Absent a verified release there is no safe source, and
+            # continuing would be worse than stopping (SYRD-97 review).
+            for problem in release_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any later phase: {config.project}'s privileged "
+                "tooling can only be staged from a verified root-owned release, and none is "
+                "available."
+            )
+            record_upgrade_phase(
+                config, config_path=config_path, phase="artifacts", state="blocked",
+                detail="; ".join(release_problems),
+            )
+            return 1
+        trusted_release_root = trusted_release.root
         staging_problems = refresh_staged_role_tooling(
             config,
-            release_root=effective_source_repo,
+            release_root=trusted_release.root,
             staging_root=tooling_root,
             runner=runner,
             print_func=print_func,
@@ -15411,6 +15767,32 @@ def upgrade_project_command(
                 detail="; ".join(staging_problems),
             )
             return 1
+        publication_problems = install_tenant_publication_boundary(
+            config,
+            release=trusted_release,
+            publish_remote=publish_remote,
+            dry_run=False,
+            runner=runner,
+            print_func=print_func,
+        )
+        if publication_problems:
+            # Reported, not fatal. Absence is the safe direction here: with no
+            # grant and no key, publication refuses, so the boundary this
+            # installs is still correct when it is missing. Failing the upgrade
+            # would take the board, the schema and the role tooling down with
+            # it, and would leave a tenant that cannot reach its forge unable to
+            # upgrade at all. It is said loudly and recorded, because the one
+            # thing that must not happen is an operator believing it is there.
+            for problem in publication_problems:
+                print_func(f"warning: switchyard: {problem}")
+            print_func(
+                f"warning: switchyard: {config.project}'s publication boundary was NOT installed, so "
+                "only the shared project credential can push and every role under that account "
+                "still can. The rest of this upgrade continued."
+            )
+            publication_detail = "publication boundary not installed: " + "; ".join(
+                publication_problems
+            )
     # The owner's GitHub identity, on every upgrade as well as at provisioning:
     # the account this found had a key and no configuration selecting it, and an
     # existing tenant never re-runs the operator script. Idempotent, and it
@@ -15451,7 +15833,18 @@ def upgrade_project_command(
         # Preparation needs the accounts before the active configuration names
         # them, and it must not read that list from the tenant (SYRD-45).
         write_pending_identities(config)
-    record_upgrade_phase(config, config_path=config_path, phase="artifacts", state="done", dry_run=dry_run)
+    # The phase's own verdict, recorded once and last. Recording the publication
+    # failure and then unconditionally recording "done" over it left the journal
+    # claiming a phase completed cleanly when part of it had not run at all
+    # (SYRD-97 review).
+    record_upgrade_phase(
+        config,
+        config_path=config_path,
+        phase="artifacts",
+        state="incomplete" if publication_detail else "done",
+        detail=publication_detail,
+        dry_run=dry_run,
+    )
 
     accounts_ready = _role_accounts_ready(config)
     if not accounts_ready:
@@ -15521,7 +15914,18 @@ def upgrade_project_command(
                 config_path=config_path,
                 dry_run=dry_run,
                 runner=runner,
-                source_repo=effective_source_repo if source_repo is not None else None,
+                # The verified release, not the checkout. The transaction
+                # restarts every role against the staged bundle and checks that
+                # bundle against this source, and the bundle now comes out of
+                # the release rather than out of a tree the project account can
+                # write. Pinning it here is the same repair, one layer up: the
+                # check and the thing being checked have to name one release
+                # (SYRD-97 review).
+                source_repo=(
+                    trusted_release_root
+                    if trusted_release_root is not None
+                    else (effective_source_repo if source_repo is not None else None)
+                ),
                 commit_git_dir=commit_git_dir,
                 deploy_ref=deploy_ref,
                 tooling_dir=_staged_tooling_dir(config, tooling_root),
@@ -17892,6 +18296,14 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
         help="replace and persist the git repository path(s) used to verify board commit hashes",
     )
     parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
+    parser.add_argument(
+        "--publish-remote",
+        default="",
+        help=(
+            "the exact remote root may publish to, recorded root-owned and reused afterwards; "
+            "it is never read from the project account, which every role runs as"
+        ),
+    )
     return parser
 
 
@@ -18730,6 +19142,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             commit_git_dir=args.commit_git_dir,
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
+            publish_remote=getattr(args, "publish_remote", ""),
         )
     if argv[0].casefold() == "cutover-roles":
         args = _build_switchyard_cutover_roles_parser().parse_args(argv[1:])
@@ -19001,6 +19414,7 @@ def main(argv: list[str] | None = None) -> int:
             commit_git_dir=args.commit_git_dir,
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
+            publish_remote=getattr(args, "publish_remote", ""),
         )
     if args.command == "add-role":
         if not args.pane_mode or args.role:

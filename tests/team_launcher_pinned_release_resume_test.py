@@ -22,6 +22,7 @@ from team_launcher_upgrade_cutover_test import (
     _RunningTenant,
     _board_with_marker,
     _declarative_tenant,
+    trusted_release_root,
     _deployed_release,
     _live_runner,
     _upgrade,
@@ -674,6 +675,7 @@ def _rolls_back(config_path: Path, *, runner, launcher=None):
         result = team_launcher.cutover_role_identities_command(
             team_launcher.load_project_config(PROJECT, config_path),
             config_path=config_path,
+            source_repo=trusted_release_root(),
             tooling_dir=config_path.parent / "tooling" / PROJECT,
             runner=runner,
             launcher=launcher,

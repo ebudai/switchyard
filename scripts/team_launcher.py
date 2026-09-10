@@ -185,6 +185,9 @@ SWITCHYARD_COMMANDS = (
     "finish-upgrade",
     "cutover-roles",
     "add-role",
+    # Records which of the owner's existing keys a tenant publishes with, and
+    # rewrites the managed ssh_config block. Both are root's writes (SYRD-100).
+    "set-owner-identity",
     "present",
     "attach",
     "replace-window",
@@ -9267,6 +9270,165 @@ def github_identity_status(
         fingerprint=fingerprint,
         checked=True,
     )
+
+
+def _record_owner_github_key(path: Path, key_name: str, host_alias: str) -> bool:
+    """Write the selection into one plan document, leaving everything else alone.
+
+    Returns whether the file changed. The document is rewritten field for field
+    rather than regenerated: a plan carries decisions this command has no opinion
+    about, and rendering a fresh one would be deciding them again.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if (
+        str(data.get("owner_github_key_name") or "") == key_name
+        and str(data.get("owner_github_host_alias") or "") == host_alias
+    ):
+        return False
+    data["owner_github_key_name"] = key_name
+    data["owner_github_host_alias"] = host_alias
+    info = path.stat()
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # The tenant's copy belongs to the tenant even when root writes it.
+    os.chown(path, info.st_uid, info.st_gid)
+    os.chmod(path, stat.S_IMODE(info.st_mode))
+    return True
+
+
+def set_owner_github_identity_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    key_name: str,
+    host_alias: str = "",
+    host: str = "github.com",
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Record which existing key this tenant publishes with, and select it.
+
+    The supported repair for a tenant whose managed block was pointed at the
+    wrong key. An upgrade will not choose between an owner's keys and will not
+    generate one beside them -- that refusal is the point of SYRD-100 -- so
+    somebody has to say which key is the one, once, and have it recorded where
+    both the tenant and root will read it afterwards.
+
+    It names a key that already exists and does nothing else: no key is created,
+    no private material is read, and only the managed block between the markers
+    is rewritten. An operator's own stanzas, including whatever they were using
+    to work around this, are left exactly as they are.
+    """
+    from scripts.ticket_board.project_provision import (
+        existing_owner_ssh_key_names,
+        owner_github_identity_commands,
+        owner_github_key_path,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    owner_home = _tenant_owner_home(config, config_path)
+    selected = key_name.strip()
+    if not selected or "/" in selected:
+        print_func(
+            f"switchyard: {selected!r} is not a key file name. Name one of the owner's keys, "
+            "without a path."
+        )
+        return 1
+    key = Path(owner_github_key_path(str(owner_home), key_name=selected))
+    existing = existing_owner_ssh_key_names(str(owner_home))
+    if not key.is_file() or not key.with_name(key.name + ".pub").is_file():
+        # Never created here. This command selects an identity; making one is
+        # provisioning, and doing it silently is the substitution being repaired.
+        print_func(
+            f"switchyard: {owner} has no key pair named {selected} in {owner_home}/.ssh, so there "
+            "is nothing to select. Nothing was changed."
+        )
+        if existing:
+            print_func(f"switchyard: keys found there: {', '.join(existing)}")
+        return 1
+
+    tenant_plan = config_path.parent / "plan.json"
+    root_plan = privileged_baseline_plan_path(config.project)
+    authorities = [path for path in (tenant_plan, root_plan) if path.is_file()]
+    missing = [path for path in (tenant_plan, root_plan) if not path.is_file()]
+
+    if dry_run:
+        print_func(
+            f"switchyard: would record {config.project}'s publication identity as {selected}"
+            + (f" with host alias {host_alias}" if host_alias else "")
+        )
+        for path in authorities:
+            print_func(f"switchyard:   would record it in {path}")
+        for path in missing:
+            print_func(f"warning: switchyard:   {path} does not exist and would not be created")
+        print_func(f"switchyard: would select {key} in {owner_home}/.ssh/config, managed block only")
+        return 0
+
+    if os.geteuid() != 0:
+        print_func(
+            f"switchyard: recording {config.project}'s publication identity writes root's own plan "
+            f"and the owner's ssh configuration. Run: sudo switchyard set-owner-identity "
+            f"{config.project} --key-name {selected}"
+            + (f" --host-alias {host_alias}" if host_alias else "")
+        )
+        return 1
+
+    if not authorities:
+        print_func(
+            f"switchyard: neither {tenant_plan} nor {root_plan} exists, so there is nowhere durable "
+            "to record this. Nothing was changed."
+        )
+        return 1
+    for path in missing:
+        # Said, not created. A plan this command invents is a plan nothing else
+        # agrees with.
+        print_func(f"warning: switchyard: {path} does not exist, so the selection is not recorded there")
+    for path in authorities:
+        changed = _record_owner_github_key(path, selected, host_alias.strip())
+        print_func(
+            f"switchyard: {'recorded' if changed else 'already recorded'} {selected} in {path}"
+        )
+
+    script = "set -eu\n" + "\n".join(
+        owner_github_identity_commands(
+            owner,
+            str(owner_home),
+            key_name=selected,
+            host=host,
+            host_alias=host_alias.strip(),
+            comment=f"{owner} switchyard {config.project}",
+        )
+    )
+    applied = runner(["sh", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if getattr(applied, "returncode", 1) != 0:
+        print_func(
+            f"switchyard: could not select {selected} for {owner} (exit {applied.returncode}): "
+            f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
+        )
+        return 1
+    print_func(f"switchyard: {owner_home}/.ssh/config now selects {key} for {host}")
+
+    identity = github_identity_status(owner, owner_home, key_name=selected, host=host, runner=runner)
+    if identity.fingerprint:
+        print_func(f"switchyard: fingerprint: {identity.fingerprint}")
+    remedy = github_identity_remedy(identity, project=config.project)
+    if remedy:
+        # The selection is recorded and installed either way; what is not true is
+        # that the tenant can publish, and saying so is the whole point of
+        # verifying rather than asserting.
+        print_func(remedy)
+        print_func(
+            f"switchyard: {selected} is selected and recorded, but it did not authenticate. "
+            "Register its public half with the forge, or select a different key."
+        )
+        return 1
+    print_func(f"switchyard: {owner} can publish to GitHub as {selected}")
+    return 0
 
 
 def github_identity_remedy(status: GithubIdentityStatus, *, project: str = "") -> str:
@@ -19283,6 +19445,38 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         config = _load_switchyard_project_config_for_command(entry, argv)
         return switchyard_seed_role_credentials_command(
             config, role_name=args.role, reseed=args.reseed
+        )
+    if argv[0].casefold() == "set-owner-identity":
+        parser = argparse.ArgumentParser(
+            prog="switchyard set-owner-identity",
+            description=(
+                "Record which of the tenant owner's existing SSH keys this project publishes "
+                "with, and select it for the forge. Creates no key and reads no private material."
+            ),
+        )
+        parser.add_argument("project", help="registered project name or slug")
+        parser.add_argument(
+            "--key-name",
+            required=True,
+            help="file name of an existing key pair in the owner's ~/.ssh, without a path",
+        )
+        parser.add_argument(
+            "--host-alias",
+            default="",
+            help="an additional Host pattern the managed block should answer to",
+        )
+        parser.add_argument("--host", default="github.com", help="forge host, default github.com")
+        parser.add_argument("--dry-run", action="store_true", help="say what would change")
+        args = parser.parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return set_owner_github_identity_command(
+            config,
+            config_path=entry.config_path,
+            key_name=args.key_name,
+            host_alias=args.host_alias,
+            host=args.host,
+            dry_run=args.dry_run,
         )
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])

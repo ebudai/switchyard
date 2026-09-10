@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -304,6 +305,168 @@ def test_the_generated_operator_script_renders_the_tenant_s_key() -> None:
     assert names_key(rendered, f"/home/otto-agent/.ssh/{DEPLOY_KEY}"), rendered[-2000:]
     assert not names_key(rendered, f"/home/otto-agent/.ssh/{DEFAULT_KEY}"), rendered[-2000:]
     assert "Host github-otto" in rendered, rendered[-2000:]
+
+
+@contextmanager
+def identity_reported_as(authenticated: bool, *, fingerprint: str = "SHA256:example"):
+    """Pin what the readiness probe answers, so a case tests one thing.
+
+    The fixture's keys are placeholder text and its `.ssh` has ordinary modes,
+    so a real probe reports a pile of true but unrelated problems. Whether the
+    probe is consulted at all, and with which key, is asserted separately.
+    """
+    real = team_launcher.github_identity_status
+    asked: list[str] = []
+
+    def stub(owner_user, owner_home, **kwargs):
+        asked.append(str(kwargs.get("key_name")))
+        return team_launcher.GithubIdentityStatus(
+            owner_user=owner_user,
+            key_path=Path(owner_github_key_path(str(owner_home), key_name=kwargs["key_name"])),
+            problems=(),
+            authenticated=authenticated,
+            detail="" if authenticated else "Permission denied (publickey)",
+            fingerprint=fingerprint,
+            checked=True,
+        )
+
+    team_launcher.github_identity_status = stub
+    try:
+        yield asked
+    finally:
+        team_launcher.github_identity_status = real
+
+
+def repair(config_path: Path, home: Path, **kwargs):
+    """The operator repair command, run the way the CLI runs it."""
+    printed: list[str] = []
+    runner = FakeRunner()
+    config = team_launcher.load_project_config("porter", config_path)
+    original_euid = team_launcher.os.geteuid
+    try:
+        team_launcher.os.geteuid = lambda: 0
+        result = team_launcher.set_owner_github_identity_command(
+            config,
+            config_path=config_path,
+            runner=runner,
+            print_func=printed.append,
+            **kwargs,
+        )
+    finally:
+        team_launcher.os.geteuid = original_euid
+    return result, "\n".join(printed), runner
+
+
+def root_plan_path() -> Path:
+    return team_launcher.privileged_baseline_plan_path("porter")
+
+
+def test_the_operator_repair_records_the_key_in_both_plan_authorities() -> None:
+    """The supported way out for a tenant whose block was pointed at the wrong key."""
+    with tempfile.TemporaryDirectory(prefix="identity-repair.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY, DEFAULT_KEY), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        root_plan = root_plan_path()
+        root_plan.parent.mkdir(parents=True, exist_ok=True)
+        root_plan.write_text(json.dumps({"project": "porter", "owner_home": str(home)}), encoding="utf-8")
+
+        with identity_reported_as(True) as asked:
+            result, output, runner = repair(
+                config_path, home, key_name=DEPLOY_KEY, host_alias="github-switchyard"
+            )
+
+        assert result == 0, output
+        assert asked == [DEPLOY_KEY], asked
+        # Both durable authorities, the tenant's and root's own.
+        for path in (config_path.parent / "plan.json", root_plan):
+            recorded = json.loads(path.read_text(encoding="utf-8"))
+            assert recorded["owner_github_key_name"] == DEPLOY_KEY, (path, recorded)
+            assert recorded["owner_github_host_alias"] == "github-switchyard", (path, recorded)
+            assert str(path) in output, output
+        # Only the managed block is rewritten, and it names the chosen key.
+        rendered = "\n".join(identity_scripts(runner))
+        assert names_key(rendered, owner_github_key_path(str(home), key_name=DEPLOY_KEY)), rendered
+        assert not names_key(rendered, owner_github_key_path(str(home), key_name=DEFAULT_KEY)), rendered
+        assert GITHUB_IDENTITY_BEGIN in rendered and GITHUB_IDENTITY_END in rendered, rendered
+        assert "Host github-switchyard" in rendered, rendered
+        # And nothing outside the markers is touched: the operator's own stanza
+        # survives, because the block replaces itself rather than the file.
+        assert "Host bastion.invalid" in (home / ".ssh" / "config").read_text(encoding="utf-8")
+
+
+def test_the_repair_never_creates_a_key() -> None:
+    """Selecting an identity is not provisioning one, and must not become it."""
+    with tempfile.TemporaryDirectory(prefix="identity-repair-missing.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEFAULT_KEY,))
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+
+        result, output, runner = repair(config_path, home, key_name=DEPLOY_KEY)
+
+        assert result == 1, output
+        assert "has no key pair named" in output, output
+        assert DEFAULT_KEY in output, output
+        assert identity_scripts(runner) == [], identity_scripts(runner)
+        assert not (home / ".ssh" / DEPLOY_KEY).exists()
+        recorded = json.loads((config_path.parent / "plan.json").read_text(encoding="utf-8"))
+        assert "owner_github_key_name" not in recorded, recorded
+
+
+def test_the_repair_verifies_the_key_it_selected() -> None:
+    """A selection that cannot authenticate is reported, not announced as done."""
+    with tempfile.TemporaryDirectory(prefix="identity-repair-verify.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+
+        with identity_reported_as(
+            False, fingerprint="SHA256:GJXVwhfB26C6U4Zway32Hgcou+cH498/TYuQwyhfo94"
+        ) as asked:
+            result, output, _runner = repair(config_path, home, key_name=DEPLOY_KEY)
+
+        assert asked == [DEPLOY_KEY], asked
+        assert result == 1, output
+        assert "did not authenticate" in output, output
+        assert "SHA256:GJXVwhfB26C6U4Zway32Hgcou" in output, output
+        # Recorded and installed even so, because it was: the honest report is
+        # that the selection is made and the key is not usable yet.
+        recorded = json.loads((config_path.parent / "plan.json").read_text(encoding="utf-8"))
+        assert recorded["owner_github_key_name"] == DEPLOY_KEY, recorded
+
+
+def test_a_dry_run_repair_writes_nothing() -> None:
+    with tempfile.TemporaryDirectory(prefix="identity-repair-dry.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        before = (home / ".ssh" / "config").read_text(encoding="utf-8")
+
+        result, output, runner = repair(config_path, home, key_name=DEPLOY_KEY, dry_run=True)
+
+        assert result == 0, output
+        assert "would record" in output and DEPLOY_KEY in output, output
+        assert identity_scripts(runner) == [], identity_scripts(runner)
+        assert (home / ".ssh" / "config").read_text(encoding="utf-8") == before
+        recorded = json.loads((config_path.parent / "plan.json").read_text(encoding="utf-8"))
+        assert "owner_github_key_name" not in recorded, recorded
+
+
+def test_the_upgrade_then_keeps_what_the_repair_recorded() -> None:
+    """The two halves meet: repair once, and every later upgrade honours it."""
+    with tempfile.TemporaryDirectory(prefix="identity-repair-upgrade.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY, DEFAULT_KEY), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+
+        with identity_reported_as(True):
+            result, _output, _runner = repair(config_path, home, key_name=DEPLOY_KEY)
+        assert result == 0
+
+        _upgraded, runner = run_upgrade(config_path)
+        rendered = "\n".join(identity_scripts(runner))
+        assert names_key(rendered, owner_github_key_path(str(home), key_name=DEPLOY_KEY)), rendered
+        assert not names_key(rendered, owner_github_key_path(str(home), key_name=DEFAULT_KEY)), rendered
 
 
 def main() -> int:

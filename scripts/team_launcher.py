@@ -18618,11 +18618,50 @@ def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, a
     return config
 
 
+def report_installed_release_version(
+    *,
+    root: Path | None = None,
+    environ: dict[str, str] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] | None = None,
+) -> list[str]:
+    """Say when the installed release is older than the checkout it came from.
+
+    Pulling a checkout does not change what `switchyard` runs, because it runs
+    from the installed release. The only symptom is a bug the user has already
+    been told is fixed, so the conclusion they draw is that it was not -- which
+    costs trust rather than time. This reports the mismatch and stops there:
+    reinstalling is privileged and is theirs to decide (SYRD-94).
+
+    Nothing here can fail the command it is attached to. A version notice that
+    can break the tool is worse than the silence it replaces.
+    """
+    from scripts.version_notice import release_notice_lines
+
+    emit = print_func or (lambda line: print(line, file=sys.stderr))
+    try:
+        lines = release_notice_lines(
+            (root or _repo_root()),
+            environ=dict(os.environ) if environ is None else environ,
+            runner=runner,
+        )
+    except Exception:
+        return []
+    for line in lines:
+        emit(line)
+    return lines
+
+
 def switchyard_main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--switchyard-wrapper-requires-root"]:
         print("requires-root" if switchyard_invocation_requires_root(argv[1:]) else "no-root")
         return 0
+    # Before the work, so it is read alongside whatever the command says rather
+    # than scrolled past after it. `release_notice_lines` is silent unless this
+    # process really is running from an installed release whose source checkout
+    # is present and ahead of it, so an ordinary checkout run prints nothing.
+    report_installed_release_version()
     if not argv:
         return switchyard_menu_command()
     if argv[0] in {"-h", "--help", "help"}:

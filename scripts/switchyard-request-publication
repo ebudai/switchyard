@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Ask for one commit to be published. Runs as the implementer, needs no key.
+
+This is the whole implementer side of publication. It makes a bundle out of the
+work the role already committed in its own worktree and files a durable request
+on the board. Nothing here talks to a remote, so a missing credential, a
+sleeping Director or an unreachable network cannot stop a role committing its
+work or recording that the work is ready to go out (SYRD-93).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+OUTBOX = ".local/state/switchyard/publish-outbox"
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"switchyard-request-publication: {message}")
+
+
+def git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True)
+
+
+def require(result: subprocess.CompletedProcess[str], what: str) -> str:
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        fail(what)
+    return result.stdout.strip()
+
+
+def default_ref(role: str, branch: str) -> str:
+    """The role's namespace, from the branch it is already on.
+
+    A branch called `feature/syrd-93` belongs to whoever made it, and the board
+    will only accept a ref inside the asking role's namespace, so the local name
+    is carried across rather than imposed: `roles/<role>/<branch leaf>`.
+    """
+    leaf = branch.split("/")[-1] if branch else ""
+    return f"roles/{role}/{leaf}" if leaf else ""
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="switchyard-request-publication")
+    parser.add_argument("ticket_id")
+    parser.add_argument("--ref", default="", help="ref to publish; defaults to roles/<role>/<branch>")
+    parser.add_argument("--commit", default="HEAD")
+    parser.add_argument("--worktree", default="")
+    parser.add_argument("--role", default=os.environ.get("TICKET_BOARD_CALLER_ROLE", "").strip())
+    parser.add_argument("--project", default=os.environ.get("TICKET_BOARD_PROJECT", "").strip())
+    parser.add_argument(
+        "--write-client",
+        default=os.environ.get("TICKET_BOARD_WRITE_CLIENT", "ticket-board-write"),
+    )
+    parser.add_argument(
+        "--board-url",
+        default="",
+        help="board to file the request with. Left unset, the board client chooses its own "
+        "route -- normally this tenant's local socket.",
+    )
+    parser.add_argument("--print-only", action="store_true", help="build the bundle, file nothing")
+    args = parser.parse_args(argv[1:])
+
+    role = args.role.strip().lower()
+    if not role:
+        fail("no role: run this from a role pane, or pass --role")
+    worktree = Path(args.worktree).expanduser() if args.worktree else Path.cwd()
+    if not (worktree / ".git").exists():
+        fail(f"{worktree} is not a git worktree")
+
+    commit = require(git(["rev-parse", f"{args.commit}^{{commit}}"], cwd=worktree),
+                     f"{args.commit} does not resolve to a commit in {worktree}")
+    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree).stdout.strip()
+    ref = args.ref.strip() or default_ref(role, branch)
+    if not ref:
+        fail("cannot tell which ref to publish; pass --ref")
+
+    # The published name has to exist locally for the bundle to carry it, and
+    # having it exist is the point: the worktree then shows exactly what was
+    # asked for rather than a name that lives only in the request.
+    require(git(["branch", "--force", ref, commit], cwd=worktree),
+            f"could not name {ref} at {commit} in {worktree}")
+
+    project = args.project or "project"
+    outbox = Path.home() / OUTBOX / project
+    outbox.mkdir(parents=True, exist_ok=True)
+    outbox.chmod(0o755)
+    bundle = outbox / f"{args.ticket_id.upper()}-{commit[:12]}.bundle"
+    require(git(["bundle", "create", str(bundle), ref], cwd=worktree),
+            f"could not bundle {ref}")
+    bundle.chmod(0o644)
+
+    payload = {"ticket": args.ticket_id.upper(), "ref": ref, "commit": commit, "bundle": str(bundle)}
+    if args.print_only:
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+
+    filed = subprocess.run(
+        [
+            args.write_client,
+            *(["--board-url", args.board_url] if args.board_url else []),
+            "request-publication",
+            args.ticket_id.upper(),
+            "--ref",
+            ref,
+            "--commit",
+            commit,
+            "--bundle",
+            str(bundle),
+        ],
+        text=True,
+        capture_output=True,
+    )
+    sys.stdout.write(filed.stdout)
+    if filed.returncode != 0:
+        sys.stderr.write(filed.stderr)
+        fail(
+            "the board did not record the request. The commit and the bundle are still here, "
+            f"so re-running this after fixing the board is safe: {bundle}"
+        )
+    print(
+        f"switchyard-request-publication: asked to publish {ref} at {commit[:12]} for "
+        f"{args.ticket_id.upper()}. The control role decides; you will be notified."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

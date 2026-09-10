@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
-"""Publish one role's feature ref as the project owner, safely.
+"""Publish one implementer's ref, for the one process the board says may ask.
 
-A role account runs this through sudo as the project owner so the owner's git
-identity performs the push and the role never gains read access to the owner's
-SSH key files. Three things make the grant genuinely narrow (SYRD-39):
+Every role in a project now runs as one Unix account (SYRD-69). That made the
+old shape of this program impossible: it took the calling role from SUDO_USER
+and hopped from a per-role account to the project owner, and with one account
+there is no hop to make and no role to read. Worse, it made the old shape
+pointless -- a credential the project account can use is a credential every role
+can use, so "the implementer publishes its own ref" and "any role pushes
+anything" became the same sentence.
 
-* Nothing about WHERE is caller-supplied. The calling role comes from SUDO_USER,
-  and its worktree and the remote come from the project's own configuration, so
-  a role cannot aim the owner's credentials at another repository or remote.
-* The ref is namespaced to the calling role and integration branches are
-  refused, so a role publishes its own feature refs and cannot write the branch
-  the Director integrates.
-* The owner never runs git inside the role's checkout. A role controls its own
-  repository configuration, and knobs such as core.sshCommand,
-  uploadpack.packObjectsHook and ext:: remote URLs turn "run git there" into
-  "run the role's command as the owner". The role hands over a bundle instead --
-  which it creates as itself -- and the owner fetches from that bundle into an
-  owner-owned staging repository whose config the role cannot touch.
+So publication is not something a role does with a credential any more. It is
+something a role ASKS FOR, on the board, durably; this program is what the
+control role runs to answer one ask. Four things keep the grant narrow:
+
+* WHO. Not the caller's word, not the shared uid, not a pane name, not an
+  environment variable. This walks its own process ancestry to the pane root the
+  kernel put it under, and requires that exact (pid, start time, uid) to be the
+  live runtime the board registered for the role holding control authority. A
+  sibling role process under the same uid resolves to its own pane root and is
+  refused; a stale or replaced process no longer matches the row.
+* WHAT. One request id. The ref, the commit, the bundle and the role they belong
+  to come from the board's own record of what the implementer asked for, so a
+  caller cannot aim this at a ref nobody requested.
+* WHERE. The project registry is root-owned, the board unit is root-owned, and
+  everything else -- the checkout, the remote, the trusted commit cache, the
+  board to ask -- is read from those. The project account owns its configuration
+  and could otherwise name a board of its own making.
+* WITH WHAT. The push credential is root-owned and never readable by the project
+  account, which is the whole difference between this and handing every role a
+  key. The trusted cache is refreshed from a root-owned local mirror instead,
+  as the project account and with no credential at all.
 """
 
 from __future__ import annotations
@@ -24,50 +37,122 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import re
+import shlex
 import stat
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 PROTECTED_REFS = frozenset({"main", "master", "trunk", "release", "head"})
-# The sudoers grant allows any arguments, so the project identifier is validated
-# before it is used to build any path. Without this, --project ../../tmp/forged
-# loaded a role-written document and with it a role-chosen role mapping and
-# remote (SYRD-39).
 PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 REF_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-# The owner's staging repository. Owner-owned, so its configuration -- including
-# the remote and any transport settings -- is never role-controlled.
-STAGING_DIR_NAME = ".local/state/switchyard/publish-staging"
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
 PROJECT_REGISTRY_DIR = Path("/etc/switchyard/projects")
 PROJECT_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 REGISTRY_TEST_ROOT_ENV = "SWITCHYARD_PUBLISH_REGISTRY_ROOT"
-# The board verifies a submitted commit_hash against one bare cache, named by
-# its own unit. Reading the unit is how this program learns which one: the
-# tenant's cache is not derivable from the slug, and guessing produced a path
-# the board does not read (SYRD-73). Root owns the unit, so the name cannot be
-# chosen by a role.
+#: Root-owned, and the only place a push credential is named.
+PUBLISH_GRANT_DIR = Path("/etc/switchyard/publish")
+PUBLISH_GRANT_SCHEMA = "switchyard.publish-grant.v1"
+PUBLISH_GRANT_TEST_DIR_ENV = "SWITCHYARD_PUBLISH_GRANT_DIR"
+#: Root-owned staging. Readable by everyone, writable by root: the project
+#: account refreshes its cache from it and cannot alter what it mirrors.
+STAGING_ROOT = Path("/var/lib/switchyard/publish")
+STAGING_TEST_ROOT_ENV = "SWITCHYARD_PUBLISH_STAGING_ROOT"
 BOARD_UNIT_DIR = Path("/etc/systemd/system")
 BOARD_UNIT_TEST_DIR_ENV = "SWITCHYARD_PUBLISH_UNIT_DIR"
 COMMIT_CACHE_ENVIRONMENT_KEY = "TICKET_BOARD_COMMIT_GIT_DIR"
-# Publication is remote; the ref does not always resolve on the first read.
+PROC_ROOT_ENV = "SWITCHYARD_PUBLISH_PROC_ROOT"
+#: Test-only redirections for the two locations that are otherwise derived from
+#: the real host: the owner's home, and (above) the kernel's process table.
+OWNER_TEST_HOME_ENV = "SWITCHYARD_PUBLISH_OWNER_HOME"
 PUBLIC_REF_ATTEMPTS = 5
 CACHE_FETCH_ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 1.0
-OWNER_TEST_HOME_ENV = "SWITCHYARD_PUBLISH_OWNER_HOME"
+MAX_ANCESTRY_DEPTH = 128
 
 
-def fail(message: str) -> "NoReturn":  # type: ignore[valid-type]
+def fail(message: str) -> NoReturn:
     raise SystemExit(f"switchyard-publish-ref: {message}")
 
 
-def calling_role_account() -> str:
-    account = (os.environ.get("SUDO_USER") or "").strip()
-    if not account:
-        fail("must be run through sudo by a role account")
-    return account
+# --------------------------------------------------------------------------
+# Who is asking. Kernel-backed, mirroring ticket_board/peer_identity.py, which
+# is how the board itself decides which role a local connection belongs to.
+# --------------------------------------------------------------------------
+
+
+def proc_root() -> Path:
+    override = os.environ.get(PROC_ROOT_ENV, "").strip()
+    return Path(override) if override else Path("/proc")
+
+
+def read_process(pid: int, *, root: Path | None = None) -> dict | None:
+    base = root or proc_root()
+    if pid <= 0:
+        return None
+    try:
+        raw = (base / str(pid) / "stat").read_text(encoding="utf-8")
+        close = raw.rindex(")")
+        open_ = raw.index("(")
+        fields = raw[close + 2 :].split()
+        return {
+            "pid": pid,
+            "ppid": int(fields[1]),
+            "start_time": int(fields[19]),
+            "comm": raw[open_ + 1 : close],
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_uid(pid: int, *, root: Path | None = None) -> int | None:
+    base = root or proc_root()
+    try:
+        for line in (base / str(pid) / "status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def pane_identity(pid: int, *, root: Path | None = None) -> tuple[int, int, int] | None:
+    """The pane-root process this program is running under, or nothing.
+
+    sudo does not disturb this: it is one more process on the same chain, and
+    the chain still ends at the pane the launcher started. A caller that
+    detaches itself from its pane has no identity here, and is refused rather
+    than guessed at.
+    """
+    base = root or proc_root()
+    seen: set[int] = set()
+    current = pid
+    for _ in range(MAX_ANCESTRY_DEPTH):
+        if current <= 1 or current in seen:
+            return None
+        seen.add(current)
+        child = read_process(current, root=base)
+        if child is None:
+            return None
+        parent = read_process(child["ppid"], root=base)
+        if parent is not None and parent["comm"].startswith("tmux"):
+            uid = process_uid(child["pid"], root=base)
+            if uid is None:
+                return None
+            return (child["pid"], child["start_time"], uid)
+        current = child["ppid"]
+    return None
+
+
+# --------------------------------------------------------------------------
+# Root-owned data: the registry, the board unit, the push grant.
+# --------------------------------------------------------------------------
 
 
 def validate_project(project: str) -> str:
@@ -123,6 +208,7 @@ def _require_trusted_owner_path(
     owner_gid: int,
     directory: bool = False,
 ) -> Path:
+    """A path the project owner controls, reached only through owner or root."""
     if not path.is_absolute():
         fail("registered project configuration path must be absolute")
     lexical_root = Path(os.path.abspath(projects_root))
@@ -148,16 +234,7 @@ def _require_trusted_owner_path(
         fail(f"registered project configuration is stale: {path}: {exc}")
     if not _contained(resolved, projects_root):
         fail(f"registered project configuration escapes {projects_root}: {path}")
-
-    # Every directory that can replace the registered file is controlled by
-    # root or the project owner. The owner's primary group is accepted because
-    # generated provision directories deliberately use owner-group mode 0775;
-    # role accounts are not members of that group.
-    # Inspect lexical components as well as the resolved destination. This
-    # rejects an owner path that traverses a replaceable symlink even when that
-    # symlink currently lands back inside Projects.
     current = lexical_path if directory else lexical_path.parent
-    root = lexical_root
     while True:
         try:
             info = current.lstat()
@@ -174,224 +251,114 @@ def _require_trusted_owner_path(
             fail(f"registered project path component {current} is world-writable")
         if info.st_mode & stat.S_IWGRP and info.st_gid != owner_gid:
             fail(f"registered project path component {current} has an untrusted writable group")
-        if current == root:
+        if current == lexical_root:
             break
         current = current.parent
     return resolved
 
 
-def load_project(
-    project: str,
-    *,
-    owner_home: Path | None = None,
-    owner_uid: int | None = None,
-    owner_gid: int | None = None,
-    registry_root: Path | None = None,
-    registry_uid: int | None = None,
-) -> dict:
-    """Find the project configuration without trusting the caller.
+def registry_root() -> tuple[Path, int]:
+    override = os.environ.get(REGISTRY_TEST_ROOT_ENV, "").strip()
+    if override:
+        return Path(override), os.geteuid()
+    return PROJECT_REGISTRY_DIR, 0
 
-    The location is derived from the effective uid -- the owner this is running
-    as -- rather than from an argument, because the sudoers grant allows any
-    arguments and a caller-supplied path would let a role aim the owner's
-    credentials at a configuration of its own making.
 
-    The root-owned registry is the only name-to-checkout authority. Its
-    config_path may name a checkout whose basename differs from the project
-    slug; the resolved configuration must still live below the owner's Projects
-    tree and be controlled by that owner.
+def load_project(project: str) -> dict:
+    """The project's own configuration, found without trusting the caller.
+
+    The owner is not this program's euid any more -- this runs as root -- so it
+    is taken from the configuration file the ROOT-OWNED registry points at. The
+    registry decides which file; the file's owner decides which account the rest
+    of this trusts.
     """
-    import pwd as _pwd
-
-    owner = _pwd.getpwuid(os.geteuid())
-    test_registry_root = os.environ.get(REGISTRY_TEST_ROOT_ENV, "").strip()
-    test_owner_home = os.environ.get(OWNER_TEST_HOME_ENV, "").strip()
-    resolved_registry_root = (
-        Path(registry_root)
-        if registry_root is not None
-        else Path(test_registry_root)
-        if test_registry_root
-        else PROJECT_REGISTRY_DIR
-    )
-    resolved_registry_uid = (
-        registry_uid
-        if registry_uid is not None
-        else owner.pw_uid
-        if test_registry_root
-        else 0
-    )
-    resolved_home = (
-        Path(owner_home)
-        if owner_home is not None
-        else Path(test_owner_home)
-        if test_owner_home
-        else Path(owner.pw_dir)
-    )
-    resolved_owner_uid = owner.pw_uid if owner_uid is None else owner_uid
-    resolved_owner_gid = owner.pw_gid if owner_gid is None else owner_gid
-    projects_root = resolved_home / "Projects"
+    root, trusted_uid = registry_root()
     try:
-        registry_root_info = resolved_registry_root.lstat()
+        info = root.lstat()
     except OSError as exc:
-        fail(f"cannot inspect project registry {resolved_registry_root}: {exc.strerror}")
-    if stat.S_ISLNK(registry_root_info.st_mode) or not stat.S_ISDIR(registry_root_info.st_mode):
-        fail(f"project registry {resolved_registry_root} must be a real directory")
-    if registry_root_info.st_uid != resolved_registry_uid:
-        fail(f"project registry {resolved_registry_root} is not owned by the trusted account")
-    if registry_root_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        fail(f"project registry {resolved_registry_root} is writable by an untrusted account")
-    registry_path = resolved_registry_root / f"{project}.json"
-    if not _contained(registry_path, resolved_registry_root):
-        fail(f"registry path escapes {resolved_registry_root}")
-    if not registry_path.exists():
+        fail(f"cannot inspect project registry {root}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        fail(f"project registry {root} must be a real directory")
+    if info.st_uid != trusted_uid:
+        fail(f"project registry {root} is not owned by the trusted account")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"project registry {root} is writable by an untrusted account")
+    entry_path = root / f"{project}.json"
+    if not _contained(entry_path, root):
+        fail(f"registry path escapes {root}")
+    if not entry_path.exists():
         fail(f"no registered configuration found for project {project}")
-
     registry = _read_trusted_json(
-        registry_path,
+        entry_path,
         description="project registry entry",
-        expected_uid=resolved_registry_uid,
+        expected_uid=trusted_uid,
         reject_group_write=True,
     )
     if str(registry.get("schema") or "") != PROJECT_REGISTRY_SCHEMA:
-        fail(f"project registry entry {registry_path} has an unsupported schema")
+        fail(f"project registry entry {entry_path} has an unsupported schema")
     if str(registry.get("slug") or "") != project:
-        fail(f"project registry entry {registry_path} is not for project {project}")
+        fail(f"project registry entry {entry_path} is not for project {project}")
     raw_config_path = registry.get("config_path")
     if not isinstance(raw_config_path, str) or not raw_config_path.strip():
-        fail(f"project registry entry {registry_path} has no config_path")
+        fail(f"project registry entry {entry_path} has no config_path")
+    candidate = Path(raw_config_path)
     try:
-        candidate = Path(raw_config_path)
-    except (TypeError, ValueError) as exc:
-        fail(f"project registry entry {registry_path} has an invalid config_path: {exc}")
+        config_info = candidate.lstat()
+    except OSError as exc:
+        fail(f"registered project configuration is stale: {candidate}: {exc.strerror}")
+    if stat.S_ISLNK(config_info.st_mode) or not stat.S_ISREG(config_info.st_mode):
+        fail(f"registered project configuration {candidate} must be a regular file, not a link")
+    try:
+        owner = pwd.getpwuid(config_info.st_uid)
+    except KeyError:
+        fail(f"registered project configuration {candidate} has no local owner account")
+    owner_home = os.environ.get(OWNER_TEST_HOME_ENV, "").strip() or owner.pw_dir
+    projects_root = Path(owner_home) / "Projects"
     config_path = _require_trusted_owner_path(
         candidate,
         projects_root=projects_root,
-        owner_uid=resolved_owner_uid,
-        owner_gid=resolved_owner_gid,
+        owner_uid=owner.pw_uid,
+        owner_gid=owner.pw_gid,
     )
     document = _read_trusted_json(
         config_path,
         description="project configuration",
-        expected_uid=resolved_owner_uid,
-        expected_gid=resolved_owner_gid,
+        expected_uid=owner.pw_uid,
+        expected_gid=owner.pw_gid,
     )
     if str(document.get("project") or "") != project:
         fail(f"{config_path} is not the configuration for project {project}")
-
     repository = document.get("repository")
     if not isinstance(repository, str) or not repository.strip():
         fail(f"project configuration {config_path} has no owner repository")
-    repository_path = _require_trusted_owner_path(
-        Path(repository),
-        projects_root=projects_root,
-        owner_uid=resolved_owner_uid,
-        owner_gid=resolved_owner_gid,
-        directory=True,
+    document["repository"] = str(
+        _require_trusted_owner_path(
+            Path(repository),
+            projects_root=projects_root,
+            owner_uid=owner.pw_uid,
+            owner_gid=owner.pw_gid,
+            directory=True,
+        )
     )
-    document["repository"] = str(repository_path)
+    document["owner_uid"] = owner.pw_uid
+    document["owner_gid"] = owner.pw_gid
+    document["owner_user"] = owner.pw_name
     return document
 
 
-def role_for_account(config: dict, account: str) -> dict:
-    for role in config.get("roles", []):
-        if isinstance(role, dict) and str(role.get("run_as_user") or "") == account:
-            return role
-    fail(f"{account} is not a configured role account of this project")
+def board_unit(project: str) -> dict:
+    """What the tenant's own board unit says: its cache, and where to read it.
 
-
-def validate_ref(ref: str, role_name: str) -> str:
-    name = ref.strip()
-    if not name:
-        fail("a ref name is required")
-    if name.startswith("refs/"):
-        fail("pass a branch name, not a full ref path")
-    segments = name.split("/")
-    if any(not REF_SEGMENT.fullmatch(segment) or segment.endswith(".lock") for segment in segments):
-        fail(f"{name!r} is not a valid branch name")
-    if segments[0].casefold() in PROTECTED_REFS or name.casefold() in PROTECTED_REFS:
-        fail(
-            f"{name} is an integration branch; roles publish their own feature refs and the "
-            "Director integrates them"
-        )
-    # Bound to the caller: a role publishes under its own namespace and cannot
-    # write, move or delete another role's refs.
-    if segments[0] != role_name:
-        fail(f"{role_name} may only publish refs under {role_name}/, not {name}")
-    if len(segments) < 2:
-        fail(f"{role_name} must publish a ref below its namespace, such as {role_name}/my-work")
-    return name
-
-
-def require_role_owned_file(path: Path, account: str) -> None:
-    try:
-        info = path.lstat()
-    except OSError as exc:
-        fail(f"cannot read bundle {path}: {exc.strerror}")
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        fail(f"bundle {path} must be a regular file, not a link")
-    import pwd
-
-    try:
-        expected = pwd.getpwnam(account).pw_uid
-    except KeyError:
-        fail(f"{account} is not a local account")
-    if info.st_uid != expected:
-        fail(f"bundle {path} is not owned by {account}")
-
-
-def resolve_remote_url(config: dict, remote_name: str) -> str:
-    """Turn the configured remote NAME into a URL from an owner-owned checkout.
-
-    Generated configuration stores a name such as "origin". A freshly created
-    staging repository has no remotes, so pushing by name fails; and the URL must
-    not come from the role's checkout, whose configuration the role controls.
+    Root owns the unit, so a role cannot choose which board this asks or which
+    cache it refreshes. The project configuration names both too, and it is
+    owner-writable -- which under one shared account means role-writable.
     """
-    if "://" in remote_name or remote_name.startswith("/") or ":" in remote_name:
-        # Already a URL or an scp-style location.
-        return remote_name
-    repository = str(config.get("repository") or "").strip()
-    if not repository:
-        fail(f"project configuration names remote {remote_name} but no owner repository")
-    resolved = git(["-C", repository, "remote", "get-url", remote_name])
-    if resolved.returncode != 0 or not resolved.stdout.strip():
-        fail(f"{repository} has no remote named {remote_name}")
-    return resolved.stdout.strip()
-
-
-def configured_commit_cache(
-    project: str,
-    *,
-    unit_dir: Path | None = None,
-    unit_uid: int | None = None,
-    owner_uid: int | None = None,
-) -> Path:
-    """The bare cache the board verifies submitted commits against.
-
-    Read from the tenant's own board unit rather than derived from the slug.
-    The two are not the same path on a real host, and deriving one produced a
-    cache the board never reads, which is the whole shape of SYRD-73. Root owns
-    the unit, so a role cannot choose which cache gets refreshed.
-    """
-    import pwd as _pwd
-
-    test_dir = os.environ.get(BOARD_UNIT_TEST_DIR_ENV, "").strip()
-    resolved_dir = (
-        Path(unit_dir)
-        if unit_dir is not None
-        else Path(test_dir)
-        if test_dir
-        else BOARD_UNIT_DIR
-    )
-    trusted_uid = (
-        unit_uid
-        if unit_uid is not None
-        else 0
-        if (unit_dir is None and not test_dir)
-        else os.geteuid()
-    )
-    unit_path = resolved_dir / f"{project}-ticket-board.service"
-    if not _contained(unit_path, resolved_dir):
-        fail(f"board unit path escapes {resolved_dir}")
+    override = os.environ.get(BOARD_UNIT_TEST_DIR_ENV, "").strip()
+    directory = Path(override) if override else BOARD_UNIT_DIR
+    trusted_uid = os.geteuid() if override else 0
+    unit_path = directory / f"{project}-ticket-board.service"
+    if not _contained(unit_path, directory):
+        fail(f"board unit path escapes {directory}")
     try:
         info = unit_path.lstat()
     except OSError as exc:
@@ -407,45 +374,372 @@ def configured_commit_cache(
     except OSError as exc:
         fail(f"cannot read board unit {unit_path}: {exc.strerror}")
 
-    # Last assignment wins, the way systemd reads it, so a value appended later
-    # in the unit is the one actually in force.
-    value = ""
+    environment: dict[str, str] = {}
+    exec_start = ""
     for line in lines:
         stripped = line.strip()
-        if not stripped.startswith("Environment="):
-            continue
-        assignment = stripped[len("Environment=") :].strip().strip('"')
-        key, separator, candidate = assignment.partition("=")
-        if separator and key.strip() == COMMIT_CACHE_ENVIRONMENT_KEY:
-            value = candidate.strip().strip('"')
-    if not value:
+        if stripped.startswith("Environment="):
+            assignment = stripped[len("Environment=") :].strip().strip('"')
+            key, separator, value = assignment.partition("=")
+            if separator:
+                environment[key.strip()] = value.strip().strip('"')
+        elif stripped.startswith("ExecStart="):
+            exec_start = stripped[len("ExecStart=") :].strip()
+    cache = environment.get(COMMIT_CACHE_ENVIRONMENT_KEY, "").strip()
+    if not cache:
         fail(
             f"board unit {unit_path} names no {COMMIT_CACHE_ENVIRONMENT_KEY}; "
             "the trusted commit cache is not configured for this tenant"
         )
-    cache = Path(value)
-    if not cache.is_absolute():
-        fail(f"configured commit cache {value} is not an absolute path")
-    owner = _pwd.getpwuid(os.geteuid())
-    expected_owner_uid = owner.pw_uid if owner_uid is None else owner_uid
+    host, port = "127.0.0.1", ""
     try:
-        cache_info = cache.lstat()
+        argv = shlex.split(exec_start)
+    except ValueError:
+        argv = []
+    for index, token in enumerate(argv):
+        if token == "--host" and index + 1 < len(argv):
+            host = argv[index + 1]
+        elif token == "--port" and index + 1 < len(argv):
+            port = argv[index + 1]
+    if not port.isdigit():
+        fail(f"board unit {unit_path} does not say which port its board reads on")
+    return {
+        "unit_path": str(unit_path),
+        "commit_cache": cache,
+        "board_url": f"http://{host}:{port}",
+    }
+
+
+def publish_grant(project: str) -> dict:
+    """The push credential. Root-owned, and the project account cannot read it."""
+    override = os.environ.get(PUBLISH_GRANT_TEST_DIR_ENV, "").strip()
+    directory = Path(override) if override else PUBLISH_GRANT_DIR
+    trusted_uid = os.geteuid() if override else 0
+    grant_path = directory / f"{project}.json"
+    if not _contained(grant_path, directory):
+        fail(f"publish grant path escapes {directory}")
+    if not grant_path.exists():
+        fail(
+            f"no publish grant for {project} at {grant_path}; the control role has no push "
+            "credential installed, and nothing else on this host does either"
+        )
+    grant = _read_trusted_json(
+        grant_path,
+        description="publish grant",
+        expected_uid=trusted_uid,
+        reject_group_write=True,
+    )
+    if str(grant.get("schema") or "") != PUBLISH_GRANT_SCHEMA:
+        fail(f"publish grant {grant_path} has an unsupported schema")
+    identity = str(grant.get("identity_file") or "").strip()
+    if not identity:
+        fail(f"publish grant {grant_path} names no identity_file")
+    identity_path = Path(identity)
+    try:
+        info = identity_path.lstat()
     except OSError as exc:
-        fail(f"cannot inspect configured commit cache {cache}: {exc.strerror}")
-    if stat.S_ISLNK(cache_info.st_mode) or not stat.S_ISDIR(cache_info.st_mode):
-        fail(f"configured commit cache {cache} must be a real directory, not a link")
-    # Fetching into it is the least-privilege refresh precisely because the
-    # owner already owns it: no root, no helper, no second account.
-    if cache_info.st_uid != expected_owner_uid:
-        fail(f"configured commit cache {cache} is not owned by this project account")
-    if cache_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        fail(f"configured commit cache {cache} is writable by an untrusted account")
-    return cache
+        fail(f"cannot read publish identity {identity_path}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"publish identity {identity_path} must be a regular file, not a link")
+    if info.st_uid != trusted_uid:
+        fail(f"publish identity {identity_path} is not owned by the trusted account")
+    # The whole point: a key any role can read is a key every role can push
+    # with. This one is readable by root and nobody else.
+    if info.st_mode & (stat.S_IRGRP | stat.S_IROTH | stat.S_IWGRP | stat.S_IWOTH):
+        fail(
+            f"publish identity {identity_path} is readable or writable outside the trusted "
+            "account; a credential the project account can read is a credential every role has"
+        )
+    grant["identity_file"] = str(identity_path)
+    known_hosts = str(grant.get("known_hosts") or "").strip()
+    if known_hosts:
+        grant["known_hosts"] = str(Path(known_hosts))
+    return grant
 
 
-def remote_ref_commit(remote_url: str, ref: str) -> str | None:
-    """What the public remote says the ref is, or None when it cannot be read."""
-    listed = git(["ls-remote", remote_url, f"refs/heads/{ref}"])
+# --------------------------------------------------------------------------
+# What the board says.
+# --------------------------------------------------------------------------
+
+
+def board_get(url: str, path: str, *, allow_missing: bool = False) -> dict | None:
+    try:
+        with urllib.request.urlopen(url + path, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if allow_missing and exc.code == 404:
+            return None
+        fail(f"cannot read {path} from the board at {url}: {exc}")
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        fail(f"cannot read {path} from the board at {url}: {exc}")
+
+
+def control_role_of(document: dict) -> str:
+    """The role that integrates, by capability rather than by name (SYRD-49).
+
+    Empty when the document declares no active role holding control authority,
+    and the caller refuses. There is deliberately no fallback to the name
+    `director`: this program holds the only push credential on the host, so a
+    document that is absent, empty or malformed would otherwise turn into
+    "whatever process registered itself under a familiar name may push", which
+    is the authority this whole ticket exists to take away.
+    """
+    roles = document.get("roles") if isinstance(document, dict) else None
+    if isinstance(roles, list):
+        for role in sorted(
+            (r for r in roles if isinstance(r, dict)), key=lambda r: str(r.get("name") or "")
+        ):
+            capabilities = role.get("capabilities")
+            if not isinstance(capabilities, list) or not role.get("active"):
+                continue
+            if {"set_manually_controlled", "merge"} <= set(capabilities):
+                return str(role.get("name") or "")
+    return ""
+
+
+def require_control_caller(board_url: str) -> str:
+    """Refuse anything but the live registered process of the control role."""
+    workflow = board_get(board_url, "/api/workflow")
+    document = workflow.get("document") if isinstance(workflow, dict) else None
+    control_role = control_role_of(document if isinstance(document, dict) else {})
+    if not control_role:
+        fail(
+            "this board declares no role with control authority, so nothing here may publish. "
+            "A missing or malformed workflow document is not permission to push"
+        )
+    listing = board_get(board_url, f"/api/runtime-assignments/{control_role}", allow_missing=True)
+    if listing is None:
+        fail(
+            f"the board has no registered runtime for {control_role}; its session is not running, "
+            "so there is no process this publication could belong to"
+        )
+    if str(listing.get("authority_mode") or "") != "process":
+        fail(
+            "this board does not run on process authority; publication authority cannot be "
+            "established from a shared uid alone"
+        )
+    assignment = listing.get("assignment")
+    if not isinstance(assignment, dict):
+        fail(f"the board has no registered runtime for {control_role}")
+    caller = pane_identity(os.getpid())
+    if caller is None:
+        fail(
+            "cannot establish which pane this was run from; publication must be run from the "
+            "control role's own session, not detached from it"
+        )
+    registered = (
+        int(assignment.get("process_pid") or 0),
+        int(assignment.get("process_start_time") or 0),
+        int(assignment.get("process_uid") or -1),
+    )
+    if caller != registered:
+        fail(
+            f"only {control_role}'s registered process may publish. This ran under process "
+            f"{caller[0]} (started {caller[1]}, uid {caller[2]}) and the board registered "
+            f"{registered[0]} (started {registered[1]}, uid {registered[2]})"
+        )
+    # The row can outlive the process it names; a pid is reused, a start time is
+    # not, so this is what makes a dead or replaced session fail closed.
+    live = read_process(caller[0])
+    if live is None or live["start_time"] != caller[1]:
+        fail(f"the registered {control_role} process is no longer running")
+    return control_role
+
+
+def fetch_request(board_url: str, request_id: int) -> dict:
+    listing = board_get(board_url, "/api/publications?state=requested")
+    for row in listing.get("requests") or []:
+        if isinstance(row, dict) and int(row.get("id") or 0) == request_id:
+            return row
+    fail(
+        f"publication request {request_id} is not open on this board; it may already have been "
+        "published, rejected, or replaced by a later request"
+    )
+
+
+def ref_problem(ref: str, role: str) -> str | None:
+    """The same rule the board applies, asked again here rather than assumed."""
+    name = ref.strip()
+    if not name:
+        return "a ref name is required"
+    if name.startswith("refs/"):
+        return "the request names a full ref path rather than a branch"
+    segments = name.split("/")
+    for segment in segments:
+        if not REF_SEGMENT.fullmatch(segment) or segment.endswith(".lock"):
+            return f"{name} is not a valid branch name"
+    if name.casefold() in PROTECTED_REFS or segments[0].casefold() in PROTECTED_REFS:
+        return f"{name} collides with an integration branch"
+    if segments[0] == "roles":
+        if len(segments) < 3 or segments[1] != role:
+            return f"{name} is not in {role}'s namespace"
+        return None
+    if len(segments) < 2 or segments[0] != role:
+        return f"{name} is not in {role}'s namespace"
+    return None
+
+
+# --------------------------------------------------------------------------
+# Doing the work.
+# --------------------------------------------------------------------------
+
+
+def git(args: list[str], *, ssh_command: str = "", **kwargs) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    if ssh_command:
+        env["GIT_SSH_COMMAND"] = ssh_command
+    else:
+        env.pop("GIT_SSH_COMMAND", None)
+    return subprocess.run(["git", *args], text=True, capture_output=True, env=env, **kwargs)
+
+
+def ssh_command_for(grant: dict) -> str:
+    parts = [
+        "ssh",
+        "-i",
+        shlex.quote(str(grant["identity_file"])),
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "BatchMode=yes",
+    ]
+    known_hosts = str(grant.get("known_hosts") or "").strip()
+    if known_hosts:
+        parts += ["-o", f"UserKnownHostsFile={shlex.quote(known_hosts)}", "-o", "StrictHostKeyChecking=yes"]
+    return " ".join(parts)
+
+
+def remote_url_for(grant: dict) -> str:
+    """Where to push, from root-owned data and nowhere else.
+
+    Not from the project checkout. Under one shared account the checkout's
+    configuration is role-writable, so a role that could name the remote could
+    aim a push -- carrying the project's private history -- at a server of its
+    own. The grant pins it, and a grant that pins nothing publishes nothing.
+    """
+    pinned = str(grant.get("remote") or "").strip()
+    if not pinned:
+        fail(
+            "the publish grant names no remote; pin the destination in the root-owned grant "
+            "rather than reading it from a checkout the project account can rewrite"
+        )
+    if pinned.startswith("ext::") or pinned.startswith("-"):
+        fail(f"publish grant remote {pinned!r} would run a command rather than name a repository")
+    return pinned
+
+
+def staging_repository(project: str) -> Path:
+    override = os.environ.get(STAGING_TEST_ROOT_ENV, "").strip()
+    root = Path(override) if override else STAGING_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    # Readable, not writable: the project account refreshes its cache from this
+    # mirror and cannot change what the mirror says.
+    os.chmod(root, 0o755)
+    staging = root / f"{project}.git"
+    if not (staging / "HEAD").exists():
+        created = git(["init", "--bare", "-q", str(staging)])
+        if created.returncode != 0:
+            sys.stderr.write(created.stderr)
+            fail("could not create the publish staging repository")
+    os.chmod(staging, 0o755)
+    return staging
+
+
+def require_requester_bundle(path: Path, owner_uid: int) -> None:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        fail(f"cannot read bundle {path}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        fail(f"bundle {path} must be a regular file, not a link")
+    if info.st_uid != owner_uid:
+        fail(f"bundle {path} is not owned by the project account")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"bundle {path} is writable by an account outside the project")
+
+
+def refresh_commit_cache(
+    cache: Path,
+    staging: Path,
+    ref: str,
+    expected_commit: str,
+    *,
+    owner_uid: int,
+    owner_gid: int,
+    sleep=time.sleep,
+) -> str | None:
+    """Fetch the published ref into the tenant's trusted cache, as the tenant.
+
+    From the local mirror, not the remote: a local fetch needs no credential, so
+    refreshing the cache never puts one inside the project account, and the
+    objects it writes belong to the account that owns the cache rather than to
+    root.
+    """
+    problem = "the cache was never fetched"
+    for attempt in range(CACHE_FETCH_ATTEMPTS):
+        if attempt:
+            sleep(RETRY_DELAY_SECONDS)
+        fetched = run_as(
+            owner_uid,
+            owner_gid,
+            [
+                "git",
+                "--git-dir",
+                str(cache),
+                "fetch",
+                str(staging),
+                f"+refs/heads/{ref}:refs/remotes/origin/{ref}",
+            ],
+        )
+        if fetched.returncode != 0:
+            problem = (fetched.stderr or fetched.stdout or "git fetch failed").strip()
+            continue
+        resolved = run_as(
+            owner_uid,
+            owner_gid,
+            ["git", "--git-dir", str(cache), "rev-parse", f"refs/remotes/origin/{ref}^{{commit}}"],
+        )
+        if resolved.returncode != 0:
+            problem = (resolved.stderr or "cache does not resolve the fetched ref").strip()
+            continue
+        landed = resolved.stdout.strip()
+        if landed != expected_commit:
+            return (
+                f"the trusted cache resolved {ref} to {landed}, not {expected_commit}; "
+                "the public ref changed after this publication"
+            )
+        return None
+    return f"could not refresh the trusted commit cache {cache}: {problem}"
+
+
+def run_as(uid: int, gid: int, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one command as the project account, dropping every privilege first."""
+
+    def drop() -> None:
+        os.setgid(gid)
+        os.setgroups([gid])
+        os.setuid(uid)
+
+    env = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "HOME": pwd.getpwuid(uid).pw_dir,
+    }
+    preexec = drop if os.geteuid() == 0 else None
+    return subprocess.run(argv, text=True, capture_output=True, env=env, preexec_fn=preexec)
+
+
+def remote_ref_commit(remote_url: str, ref: str, ssh_command: str) -> str | None:
+    listed = git(["ls-remote", remote_url, f"refs/heads/{ref}"], ssh_command=ssh_command)
     if listed.returncode != 0:
         return None
     for line in listed.stdout.splitlines():
@@ -455,175 +749,123 @@ def remote_ref_commit(remote_url: str, ref: str) -> str | None:
     return ""
 
 
-def refresh_commit_cache(
-    cache: Path,
-    remote_url: str,
-    ref: str,
-    expected_commit: str,
-    *,
-    sleep=time.sleep,
-) -> str | None:
-    """Fetch exactly this ref into the cache, or say why the work is not ready.
-
-    Only the published ref is fetched, into its own remote-tracking name, so two
-    roles publishing at once touch different refs and neither can move the
-    other's. Returns None on success and the reason on failure.
-    """
-    problem = "the cache was never fetched"
-    for attempt in range(CACHE_FETCH_ATTEMPTS):
-        if attempt:
-            sleep(RETRY_DELAY_SECONDS)
-        fetched = git(
-            [
-                "--git-dir",
-                str(cache),
-                "fetch",
-                remote_url,
-                f"+refs/heads/{ref}:refs/remotes/origin/{ref}",
-            ]
-        )
-        if fetched.returncode != 0:
-            problem = (fetched.stderr or fetched.stdout or "git fetch failed").strip()
-            continue
-        resolved = git(["--git-dir", str(cache), "rev-parse", f"refs/remotes/origin/{ref}^{{commit}}"])
-        if resolved.returncode != 0:
-            problem = (resolved.stderr or "cache does not resolve the fetched ref").strip()
-            continue
-        landed = resolved.stdout.strip()
-        if landed != expected_commit:
-            # The ref moved between the push and this fetch, so the cache holds
-            # a commit that is not the one being submitted. Refusing is the
-            # point: a submission against it would review somebody else's work.
-            return (
-                f"the trusted cache resolved {ref} to {landed}, not {expected_commit}; "
-                "the public ref changed after this publication"
-            )
-        return None
-    return f"could not refresh the trusted commit cache {cache}: {problem}"
-
-
-def git(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
-    # System and global git configuration are ignored so the push cannot be
-    # redirected by anything outside this program's control.
-    env = {
-        **os.environ,
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_SYSTEM": "/dev/null",
-        "GIT_TERMINAL_PROMPT": "0",
-    }
-    return subprocess.run(["git", *args], text=True, capture_output=True, env=env, **kwargs)
+def not_workflow_ready(ref: str, commit: str, problem: str) -> int:
+    """Publication landed; the work is not submittable. Say both, and fail."""
+    sys.stderr.write(
+        f"switchyard-publish-ref: {ref} was pushed at {commit}, but {problem}.\n"
+        "switchyard-publish-ref: the commit is NOT ready to submit -- the board verifies "
+        "commit_hash against its trusted cache and would refuse it. Re-running this for the "
+        "same request is safe.\n"
+    )
+    return 1
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="switchyard-publish-ref")
     parser.add_argument("--project", required=True)
-    parser.add_argument("--ref", required=True, help="branch to publish, under <role>/")
     parser.add_argument(
-        "--bundle",
+        "--request",
         required=True,
-        help="git bundle the role created, containing the commits to publish",
+        type=int,
+        help="the board's publication request id; everything else comes from that record",
     )
     args = parser.parse_args(argv[1:])
 
-    account = calling_role_account()
     project = validate_project(args.project)
-    config = load_project(project)
-    role = role_for_account(config, account)
-    role_name = str(role.get("role") or "")
-    ref = validate_ref(args.ref, role_name)
-    bundle = Path(args.bundle).expanduser()
-    require_role_owned_file(bundle, account)
+    unit = board_unit(project)
+    control_role = require_control_caller(unit["board_url"])
+    request = fetch_request(unit["board_url"], args.request)
+    role = str(request.get("requested_by") or "")
+    ref = str(request.get("ref") or "")
+    commit = str(request.get("commit_hash") or "").lower()
+    bundle = Path(str(request.get("bundle_path") or ""))
+    problem = ref_problem(ref, role)
+    if problem is not None:
+        fail(f"refusing publication request {args.request}: {problem}")
+    if not COMMIT.fullmatch(commit):
+        fail(f"refusing publication request {args.request}: {commit!r} is not a commit")
 
-    verify = git(["bundle", "verify", str(bundle)])
-    if verify.returncode != 0:
-        sys.stderr.write(verify.stderr)
+    config = load_project(project)
+    grant = publish_grant(project)
+    owner_uid, owner_gid = int(config["owner_uid"]), int(config["owner_gid"])
+    require_requester_bundle(bundle, owner_uid)
+
+    verified = git(["bundle", "verify", str(bundle)])
+    if verified.returncode != 0:
+        sys.stderr.write(verified.stderr)
         fail("bundle did not verify")
 
-    # worktree_remote is a remote NAME in generated configuration, so it is
-    # resolved to a URL from the owner's own project checkout. A fresh staging
-    # repository has no remotes at all, which is why pushing by name failed.
-    remote_name = str(config.get("worktree_remote") or "origin")
-    remote_url = resolve_remote_url(config, remote_name)
-    staging = Path.home() / STAGING_DIR_NAME / project
-    if not (staging / "HEAD").exists():
-        staging.mkdir(parents=True, exist_ok=True)
-        staging.chmod(0o700)
-        init = git(["init", "--bare", "-q", str(staging)])
-        if init.returncode != 0:
-            sys.stderr.write(init.stderr)
-            fail("could not create the owner staging repository")
-
-    fetch = git(["-C", str(staging), "fetch", str(bundle), f"refs/heads/{ref}:refs/heads/{ref}", "--force"])
-    if fetch.returncode != 0:
-        sys.stderr.write(fetch.stderr)
+    staging = staging_repository(project)
+    fetched = git(
+        ["-C", str(staging), "fetch", str(bundle), f"+refs/heads/{ref}:refs/heads/{ref}"]
+    )
+    if fetched.returncode != 0:
+        sys.stderr.write(fetched.stderr)
         fail(f"bundle does not contain refs/heads/{ref}")
     staged = git(["-C", str(staging), "rev-parse", f"refs/heads/{ref}^{{commit}}"])
-    if staged.returncode != 0 or not staged.stdout.strip():
-        fail(f"staging repository does not resolve refs/heads/{ref}")
-    published_commit = staged.stdout.strip()
+    if staged.returncode != 0 or staged.stdout.strip() != commit:
+        fail(
+            f"the bundle's {ref} is {staged.stdout.strip() or 'unresolvable'}, not the requested "
+            f"{commit}; publish the request the implementer actually filed"
+        )
 
-    # Resolved before the push, so a tenant whose cache is unconfigured or
-    # untrustworthy is refused while nothing has been published yet.
-    cache = configured_commit_cache(project)
+    cache = Path(unit["commit_cache"])
+    try:
+        cache_info = cache.lstat()
+    except OSError as exc:
+        fail(f"cannot inspect configured commit cache {cache}: {exc.strerror}")
+    if stat.S_ISLNK(cache_info.st_mode) or not stat.S_ISDIR(cache_info.st_mode):
+        fail(f"configured commit cache {cache} must be a real directory, not a link")
+    if cache_info.st_uid != owner_uid:
+        fail(f"configured commit cache {cache} is not owned by the project account")
+    if cache_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(f"configured commit cache {cache} is writable by an untrusted account")
 
-    configure = git(["-C", str(staging), "remote", "set-url", "publish", remote_url])
-    if configure.returncode != 0:
-        added = git(["-C", str(staging), "remote", "add", "publish", remote_url])
-        if added.returncode != 0:
-            sys.stderr.write(added.stderr)
-            fail("could not configure the staging remote")
-    verify_remote = git(["-C", str(staging), "remote", "get-url", "publish"])
-    if verify_remote.returncode != 0 or verify_remote.stdout.strip() != remote_url:
-        fail("staging remote did not resolve to the configured URL")
-    push = git(["-C", str(staging), "push", "publish", f"refs/heads/{ref}:refs/heads/{ref}"])
-    sys.stdout.write(push.stdout)
-    sys.stderr.write(push.stderr)
-    if push.returncode != 0:
-        return push.returncode
+    remote_url = remote_url_for(grant)
+    ssh_command = ssh_command_for(grant)
+    pushed = git(
+        ["-C", str(staging), "push", remote_url, f"refs/heads/{ref}:refs/heads/{ref}"],
+        ssh_command=ssh_command,
+    )
+    sys.stdout.write(pushed.stdout)
+    sys.stderr.write(pushed.stderr)
+    if pushed.returncode != 0:
+        return pushed.returncode
 
-    # Everything from here is what makes the publication usable. The push
-    # landing is not the same as the work being submittable: the board verifies
-    # a commit_hash against its own cache, and a push that never reached that
-    # cache produced `unknown commit_hash` on the role's very next action
-    # (SYRD-75). So the ref is confirmed on the public remote and the cache is
-    # refreshed before this reports success -- and when either fails, it says
-    # the push landed and the work is not ready, rather than printing
-    # "published" and leaving the role to discover it.
     public_commit = None
     for attempt in range(PUBLIC_REF_ATTEMPTS):
         if attempt:
             time.sleep(RETRY_DELAY_SECONDS)
-        public_commit = remote_ref_commit(remote_url, ref)
-        if public_commit == published_commit:
+        public_commit = remote_ref_commit(remote_url, ref, ssh_command)
+        if public_commit == commit:
             break
-    if public_commit != published_commit:
+    if public_commit != commit:
         return not_workflow_ready(
-            ref,
-            published_commit,
-            f"the public ref reads {public_commit or 'nothing'} rather than {published_commit}",
+            ref, commit, f"the public ref reads {public_commit or 'nothing'} rather than {commit}"
         )
 
-    problem = refresh_commit_cache(cache, remote_url, ref, published_commit)
-    if problem is not None:
-        return not_workflow_ready(ref, published_commit, problem)
+    stale = refresh_commit_cache(
+        cache, staging, ref, commit, owner_uid=owner_uid, owner_gid=owner_gid
+    )
+    if stale is not None:
+        return not_workflow_ready(ref, commit, stale)
 
     print(
-        f"switchyard-publish-ref: published {ref} for {role_name} at {published_commit}; "
-        f"trusted commit cache {cache} refreshed"
+        json.dumps(
+            {
+                "published": True,
+                "project": project,
+                "request": args.request,
+                "role": role,
+                "ref": ref,
+                "commit": commit,
+                "control_role": control_role,
+                "cache": str(cache),
+            },
+            sort_keys=True,
+        )
     )
     return 0
-
-
-def not_workflow_ready(ref: str, commit: str, problem: str) -> int:
-    """Publication landed; the work is not submittable. Say both, and fail."""
-    sys.stderr.write(
-        f"switchyard-publish-ref: {ref} was pushed at {commit}, but {problem}.\n"
-        "switchyard-publish-ref: the commit is NOT ready to submit -- the board "
-        "verifies commit_hash against its trusted cache and would refuse it. "
-        "Re-run this command once the cause is resolved; publishing the same ref "
-        "again is safe.\n"
-    )
-    return 1
 
 
 if __name__ == "__main__":

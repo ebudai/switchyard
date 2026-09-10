@@ -645,6 +645,11 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     "ticket-board-install-pane-hooks",
     "switchyard-board-skill",
     "switchyard-publish-ref",
+    # SYRD-93: the two ends of the publication handoff. The implementer's end
+    # needs no credential at all; the control role's end reaches the privileged
+    # publisher above through this tenant's one sudo grant.
+    "switchyard-request-publication",
+    "switchyard-publish",
     "ticket-board-register-runtime",
     # Root-owned and reached only through this tenant's sudo grant.
     "switchyard-tenant-control",
@@ -1510,26 +1515,39 @@ def render_role_control_sudoers(
     a command the CLI has, so the setup failed before the rule was installed
     (SYRD-51).
     """
+    publish_helper = f"/usr/local/lib/switchyard/{project}/switchyard-publish-ref"
+    # SYRD-93: publication runs as root, not as the owner, because the push
+    # credential must be one the project account cannot read -- under one shared
+    # account (SYRD-69) a credential any role can read is a credential every
+    # role can push with. The grant is one program and no arguments of the
+    # operator's choosing; the program decides for itself whether the process
+    # invoking it is the live runtime the board registered for the control role,
+    # so holding this grant is not the same as being allowed to publish.
+    publication = [
+        f"# {project}: publication. The project account may run one root-owned",
+        "# publisher, which refuses any caller but the control role's registered process.",
+        f"{owner_user} ALL=(root) NOPASSWD: {publish_helper}",
+    ]
     if not role_accounts:
-        return ""
+        return "\n".join(publication) + "\n"
     director_account = next(
         (account for role, account in role_accounts if role == "director"),
         "",
     )
     role_targets = ",".join(account for _role, account in role_accounts)
-    publish_helper = f"/usr/local/lib/switchyard/{project}/switchyard-publish-ref"
     lines = [
+        *publication,
+        "",
         f"# {project}: role control interface. Each entry grants one command and",
         "# nothing else, so a holder can drive another account's tmux server or publish a",
         "# feature ref, and gains no other command and no root.",
         f"{owner_user} ALL=({role_targets}) NOPASSWD: /usr/bin/tmux",
     ]
-    # Roles publish their own feature refs through the owner's git identity. The
-    # helper validates the ref and refuses integration branches, so the grant
-    # cannot be used to write main, and the owner's SSH key files stay
-    # unreadable by every role (SYRD-39).
+    # A project that still has per-role accounts reaches the same publisher the
+    # same way: through the root-owned grant above, which authorizes the process
+    # rather than the account (SYRD-93 replaced the per-role sudo hop).
     for _role, account in role_accounts:
-        lines.append(f"{account} ALL=({owner_user}) NOPASSWD: {publish_helper}")
+        lines.append(f"{account} ALL=(root) NOPASSWD: {publish_helper}")
     if director_account:
         director_targets = ",".join(
             account for _role, account in role_accounts if account != director_account
@@ -1540,6 +1558,82 @@ def render_role_control_sudoers(
         lines.append(f"{director_account} ALL=({owner_user}) NOPASSWD: /usr/bin/tmux")
     return "\n".join(lines) + "\n"
 
+
+PUBLISH_GRANT_ROOT = "/etc/switchyard/publish"
+PUBLISH_STAGING_ROOT = "/var/lib/switchyard/publish"
+PUBLISH_GRANT_SCHEMA = "switchyard.publish-grant.v1"
+
+
+def publish_grant_path(project: str) -> str:
+    return f"{PUBLISH_GRANT_ROOT}/{project}.json"
+
+
+def publish_identity_path(project: str) -> str:
+    return f"{PUBLISH_GRANT_ROOT}/{project}-publish-key"
+
+
+def publish_grant_commands(plan: "ProjectBoardProvision") -> list[str]:
+    """Install the one credential on this host that may push, owned by root.
+
+    Under one Unix account per project (SYRD-69), a key the project account
+    can read is a key every role can push with, which is the same as no
+    boundary at all. So the push credential is root's, the publisher that
+    uses it is root's, and the project account reaches it only through a sudo
+    grant for that one program -- which authorizes the calling PROCESS against
+    the board's registered control-role runtime rather than the account
+    (SYRD-93).
+
+    Re-runnable: an existing key is never regenerated, because doing so would
+    silently break publication until the new public key was registered with
+    the forge. The grant document is rewritten, because it is derived.
+    """
+    key = publish_identity_path(plan.project)
+    grant = publish_grant_path(plan.project)
+    known_hosts = f"{PUBLISH_GRANT_ROOT}/known_hosts"
+    q_key = shell_quote(key)
+    q_grant = shell_quote(grant)
+    q_known = shell_quote(known_hosts)
+    q_cache = shell_quote(plan.commit_git_dir)
+    q_owner = shell_quote(plan.owner_user)
+    writer = (
+        "import json, os, sys; "
+        "print(json.dumps({"
+        "'schema': os.environ['PUBLISH_SCHEMA'], "
+        "'project': os.environ['PUBLISH_PROJECT'], "
+        "'identity_file': os.environ['PUBLISH_KEY'], "
+        "'known_hosts': os.environ['PUBLISH_KNOWN_HOSTS'], "
+        "'remote': os.environ['PUBLISH_REMOTE']}, indent=2, sort_keys=True))"
+    )
+    return [
+        f"sudo install -d -m 0755 -o root -g root {shell_quote(PUBLISH_GRANT_ROOT)}",
+        f"sudo install -d -m 0755 -o root -g root {shell_quote(PUBLISH_STAGING_ROOT)}",
+        f"if ! sudo test -f {q_key}; then",
+        f"    sudo ssh-keygen -q -t ed25519 -N '' -C {shell_quote(f'switchyard {plan.project} publication')} -f {q_key}",
+        f"    sudo chmod 0600 {q_key}",
+        f"    sudo chmod 0644 {q_key}.pub",
+        f"    echo 'switchyard: register the public key below with the forge as a WRITE key for {plan.project}.'",
+        "    echo 'switchyard: then make the project account key read-only -- until you do, every role can still push.'",
+        f"    sudo cat {q_key}.pub",
+        "fi",
+        "# The destination is pinned in root-owned data. The project checkout names",
+        "# a remote too, but the project account can rewrite that, and a role that",
+        "# can choose the remote can aim a push at a server of its own.",
+        f"PUBLISH_REMOTE=\"$(sudo -u {q_owner} git --git-dir {q_cache} remote get-url origin 2>/dev/null || true)\"",
+        'if [ -n "$PUBLISH_REMOTE" ]; then',
+        '    publish_host="${PUBLISH_REMOTE#*@}"',
+        '    publish_host="${publish_host%%:*}"',
+        '    publish_host="${publish_host%%/*}"',
+        f'    if [ -n "$publish_host" ] && ! sudo grep -qs "$publish_host" {q_known}; then',
+        f'        ssh-keyscan -H "$publish_host" 2>/dev/null | sudo tee -a {q_known} >/dev/null',
+        f"        sudo chmod 0644 {q_known}",
+        "    fi",
+        f'    PUBLISH_SCHEMA={shell_quote(PUBLISH_GRANT_SCHEMA)} PUBLISH_PROJECT={shell_quote(plan.project)} '
+        f'PUBLISH_KEY={q_key} PUBLISH_KNOWN_HOSTS={q_known} PUBLISH_REMOTE="$PUBLISH_REMOTE" '
+        f'/usr/bin/python3 -c {shell_quote(writer)} | sudo install -m 0640 -o root -g root /dev/stdin {q_grant}',
+        "else",
+        f"    echo 'switchyard: no remote is known for {plan.project}; publication stays refused until one is pinned in {grant}.'",
+        "fi",
+    ]
 
 TENANT_CONTROL_ROOT = "/usr/local/lib/switchyard"
 TENANT_CONTROL_GRANT_NAME = "control-grant.json"
@@ -2786,6 +2880,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
     q_role_control_sudoers = shell_quote(f"/etc/sudoers.d/{plan.role_control_sudoers_name}")
+    publish_grant = "\n".join(publish_grant_commands(plan))
     github_identity = "\n".join(
         owner_github_identity_commands(
             plan.owner_user,
@@ -2970,6 +3065,10 @@ sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 # the selection git offers no key at all and publication fails as though there
 # were none (SYRD-74). Re-runnable: an existing key is left alone.
 {github_identity}
+# The one credential on this host that may push, and the staging the publisher
+# mirrors through. Root owns both: a key the project account can read is a key
+# every role can push with (SYRD-93).
+{publish_grant}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {postgres_sql_file_command(plan.project + '-database.sql')}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}

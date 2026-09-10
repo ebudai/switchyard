@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Answer one publication request. Runs as the control role, in its own pane.
+
+The push itself happens behind a boundary this program cannot cross: the
+credential is root-owned, and `switchyard-publish-ref` decides for itself
+whether the process asking is the one the board registered for the control role.
+This is the part that belongs to the Director -- read what was asked, run the
+publisher, and record on the board what became of it, so the implementer is told
+and can submit its own work (SYRD-93).
+
+It deliberately does not submit anything. A publication that also submitted
+would be the control role signing an implementer's name to work it did not
+review.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from typing import NoReturn
+
+PRIVILEGED_ROOT = "/usr/local/lib/switchyard"
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"switchyard-publish: {message}")
+
+
+def board_get(url: str, path: str) -> dict:
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + path, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        fail(f"cannot read {path} from the board: {exc}")
+
+
+def open_requests(url: str) -> list[dict]:
+    listing = board_get(url, "/api/publications?state=requested")
+    return [row for row in listing.get("requests") or [] if isinstance(row, dict)]
+
+
+def select(requests: list[dict], *, ticket: str, request_id: int) -> dict:
+    if request_id:
+        for row in requests:
+            if int(row.get("id") or 0) == request_id:
+                return row
+        fail(f"no open publication request {request_id}")
+    if ticket:
+        matches = [row for row in requests if str(row.get("ticket_id") or "") == ticket]
+        if not matches:
+            fail(f"no open publication request for {ticket}")
+        if len(matches) > 1:
+            fail(
+                f"{ticket} has {len(matches)} open requests; name one with --request: "
+                + ", ".join(f"{row['id']} ({row['requested_by']} {row['ref']})" for row in matches)
+            )
+        return matches[0]
+    if not requests:
+        fail("no publication requests are waiting")
+    if len(requests) > 1:
+        fail(
+            "more than one request is waiting; name one with --request: "
+            + ", ".join(
+                f"{row['id']} ({row['ticket_id']} {row['requested_by']} {row['ref']})"
+                for row in requests
+            )
+        )
+    return requests[0]
+
+
+def describe(row: dict) -> str:
+    return (
+        f"request {row.get('id')}: {row.get('requested_by')} asks to publish "
+        f"{row.get('ref')} at {str(row.get('commit_hash') or '')[:12]} for "
+        f"{row.get('ticket_id')} (bundle {row.get('bundle_path')})"
+    )
+
+
+def resolve(
+    write_client: str, row: dict, *, outcome: str, detail: str, forward: list[str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            write_client,
+            *(forward or []),
+            "resolve-publication",
+            str(row.get("ticket_id") or ""),
+            "--request-id",
+            str(row.get("id") or 0),
+            "--outcome",
+            outcome,
+            "--reason",
+            detail,
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="switchyard-publish")
+    parser.add_argument("ticket_id", nargs="?", default="")
+    parser.add_argument("--request", type=int, default=0)
+    parser.add_argument("--project", default=os.environ.get("TICKET_BOARD_PROJECT", "").strip())
+    parser.add_argument(
+        "--board-url",
+        default="",
+        help="board to read, and to write the outcome to. Defaults to TICKET_BOARD_URL, and "
+        "when it is left to default the board client chooses its own route -- normally this "
+        "tenant's local socket, whose peer credentials are what authenticate the caller.",
+    )
+    parser.add_argument("--reject", default="", metavar="REASON")
+    parser.add_argument("--list", action="store_true", help="show what is waiting and stop")
+    parser.add_argument(
+        "--write-client",
+        default=os.environ.get("TICKET_BOARD_WRITE_CLIENT", "ticket-board-write"),
+    )
+    parser.add_argument("--publisher", default="", help="override the privileged publisher path")
+    parser.add_argument("--sudo", default="sudo", help="how to reach the publisher")
+    args = parser.parse_args(argv[1:])
+
+    if not args.project:
+        fail("no project: run this from a role pane, or pass --project")
+    board_url = args.board_url or os.environ.get("TICKET_BOARD_URL", "").strip()
+    if not board_url:
+        fail("no board url: run this from a role pane, or pass --board-url")
+    # Only a board named on the command line is forwarded: a pane's own writes
+    # should keep taking the socket route the client picks for itself.
+    forward = ["--board-url", args.board_url] if args.board_url else []
+
+    waiting = open_requests(board_url)
+    if args.list:
+        if not waiting:
+            print("switchyard-publish: nothing is waiting to be published")
+        for row in waiting:
+            print(describe(row))
+        return 0
+
+    row = select(waiting, ticket=args.ticket_id.strip().upper(), request_id=args.request)
+
+    if args.reject.strip():
+        recorded = resolve(
+            args.write_client, row, outcome="rejected", detail=args.reject.strip(), forward=forward
+        )
+        sys.stdout.write(recorded.stdout)
+        if recorded.returncode != 0:
+            sys.stderr.write(recorded.stderr)
+            fail("the board did not record the rejection")
+        print(f"switchyard-publish: rejected {row['ref']}: {args.reject.strip()}")
+        return 0
+
+    publisher = args.publisher or f"{PRIVILEGED_ROOT}/{args.project}/switchyard-publish-ref"
+    command = [*([args.sudo, "-n"] if args.sudo else []), publisher,
+               "--project", args.project, "--request", str(row["id"])]
+    print(f"switchyard-publish: {describe(row)}")
+    published = subprocess.run(command, text=True, capture_output=True)
+    sys.stdout.write(published.stdout)
+    sys.stderr.write(published.stderr)
+    if published.returncode != 0:
+        # The request stays open on purpose: nothing was recorded, the
+        # implementer is still waiting, and re-running after fixing the cause is
+        # safe. Rejecting is a separate, deliberate act.
+        fail(
+            f"the publisher refused or failed; {row['ticket_id']} request {row['id']} is still "
+            f"open. Fix the cause and run this again, or reject it with "
+            f"--reject '<reason>' so {row['requested_by']} is told."
+        )
+
+    detail = ""
+    try:
+        detail = str(json.loads(published.stdout.strip().splitlines()[-1]).get("ref") or "")
+    except (ValueError, IndexError, AttributeError):
+        detail = ""
+    recorded = resolve(
+        args.write_client,
+        row,
+        outcome="published",
+        detail=f"pushed {detail or row['ref']} and refreshed the trusted commit cache",
+        forward=forward,
+    )
+    sys.stdout.write(recorded.stdout)
+    if recorded.returncode != 0:
+        sys.stderr.write(recorded.stderr)
+        fail(
+            f"{row['ref']} IS published, but the board was not told. Re-run this command: the "
+            "push is idempotent and recording the outcome twice is not an error."
+        )
+    print(
+        f"switchyard-publish: published {row['ref']} at {str(row['commit_hash'])[:12]}; "
+        f"{row['requested_by']} has been notified and may submit."
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

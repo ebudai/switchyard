@@ -251,7 +251,15 @@ def test_a_partial_role_set_is_refused_rather_than_installed() -> None:
     """The file is installed whole, so a partial document revokes what it omits."""
     assert provision.role_control_sudoers_install_commands("otto", "") == []
     assert provision.role_control_sudoers_install_commands("otto", "   \n") == []
-    assert provision.render_role_control_sudoers("otto", OWNER, ()) == ""
+    # With no role accounts -- which is every project since one Unix identity
+    # per project (SYRD-69) -- the document is the publication grant alone: one
+    # root-owned program the project account may run, and no tmux control of
+    # anybody. What it must never be is a document that omits roles it should
+    # have named while still granting control of their sessions.
+    shared = provision.render_role_control_sudoers("otto", OWNER, ())
+    assert "switchyard-publish-ref" in shared, shared
+    assert "/usr/bin/tmux" not in shared, shared
+    assert all(account not in shared for _role, account in ROLE_ACCOUNTS), shared
     # A caller cannot forget the role set and silently get one role's document.
     try:
         provision.role_account_commands("otto", "app", OWNER, "boardsvc")

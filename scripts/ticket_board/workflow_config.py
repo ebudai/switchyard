@@ -41,6 +41,10 @@ CAPABILITIES = {
     "merge",
     "dismiss_notification",
     "reassign",
+    # SYRD-93: the two halves of publication. An implementer asks; the control
+    # role decides. Neither one is a credential, which is the point.
+    "request_publication",
+    "resolve_publication",
     # SYRD-83: the Director's generic edit. A capability like any other, so a
     # tenant that does not want it simply does not grant it, and the handler
     # decides from the document rather than from a name.
@@ -61,6 +65,10 @@ CAPABILITIES = {
 #   merge                   -> merge; the other half of that identity
 #   edit_fields             -> hierarchy (a ticket's parent is set through it)
 #   dismiss_notification    -> notification recovery
+#   resolve_publication     -> publish or reject an implementer's ref: the only
+#                              path to an outbound push, so a project without it
+#                              has work that can be committed and never shipped
+#                              (SYRD-93)
 #   director_edit           -> the generic edit: the one way to move a field the
 #                              transition table has nothing to say about, which
 #                              is what a Director reworking somebody else's
@@ -77,6 +85,7 @@ DIRECTOR_CONTROL_CAPABILITIES = frozenset(
         "edit_fields",
         "dismiss_notification",
         "director_edit",
+        "resolve_publication",
     }
 )
 # The subset that identifies which role is the controller, for consumers that

@@ -137,6 +137,18 @@ def crop_filename_slug(raw: str) -> str:
     return slug[:80] or "render"
 
 
+
+def _publication_row(row: Any) -> dict[str, Any]:
+    """One publication request, as JSON the socket, CLI and UI all read."""
+    if row is None:
+        return {}
+    record = dict(row)
+    for key in ("requested_at", "decided_at"):
+        value = record.get(key)
+        record[key] = value.isoformat() if hasattr(value, "isoformat") else ("" if value is None else str(value))
+    record["id"] = int(record.get("id") or 0)
+    return record
+
 class TicketBoardApp:
     def __init__(
         self,
@@ -756,6 +768,84 @@ WHERE (r.definition->>'active')::boolean
                 )
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def request_publication(
+        self,
+        ticket_id: str,
+        *,
+        ref: str,
+        commit: str,
+        bundle: str,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """An implementer asks for its ref to be published. No credential involved.
+
+        Everything that decides whether the ask is legitimate -- who owns the
+        ticket, whose namespace the ref is in, whether an earlier ask is being
+        retried or replaced -- is in the database, so the socket, the CLI and
+        the UI cannot disagree about it (SYRD-93).
+        """
+        ticket_id = str(ticket_id).strip().upper()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
+                row = conn.execute(
+                    "SELECT * FROM ticket_board.request_publication(%s, %s, %s, %s);",
+                    (ticket_id, str(ref), str(commit), str(bundle)),
+                ).fetchone()
+                return {
+                    "request": _publication_row(row),
+                    "ticket": self._pg_get_ticket(ticket_id, conn),
+                }
+
+    def resolve_publication(
+        self,
+        request_id: int,
+        *,
+        outcome: str,
+        detail: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """The control role records what became of one ask."""
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                if caller_role:
+                    self._pg_set_caller_role(conn, caller_role)
+                row = conn.execute(
+                    "SELECT * FROM ticket_board.resolve_publication(%s::bigint, %s, %s);",
+                    (int(request_id), str(outcome), str(detail)),
+                ).fetchone()
+                request = _publication_row(row)
+                return {
+                    "request": request,
+                    "ticket": self._pg_get_ticket(str(request["ticket_id"]), conn),
+                }
+
+    def publication_requests(
+        self,
+        *,
+        ticket_id: str = "",
+        state: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if ticket_id:
+            clauses.append("ticket_id = %s")
+            parameters.append(str(ticket_id).strip().upper())
+        if state:
+            clauses.append("state = %s")
+            parameters.append(str(state).strip().lower())
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        parameters.append(int(limit))
+        with self._pg_connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ticket_board.publication_requests"
+                f"{where} ORDER BY id DESC LIMIT %s",
+                tuple(parameters),
+            ).fetchall()
+        return [_publication_row(row) for row in rows]
+
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         actor_normalized = str(actor).strip().lower()
         if actor_normalized != "director":
@@ -1102,6 +1192,15 @@ ORDER BY rank;
         cfg = read_configuration(conn)
         if cfg:
             ticket["workflow_actions"] = available_transitions(cfg, ticket)
+        # SYRD-93: what this ticket is waiting on, if it is waiting on a
+        # publication. It travels with the ticket so the panel, the CLI and a
+        # reader of the JSON all see the same thing without a second call.
+        open_request = conn.execute(
+            "SELECT * FROM ticket_board.publication_requests "
+            "WHERE ticket_id = %s AND state = 'requested' ORDER BY id DESC LIMIT 1",
+            (ticket["id"],),
+        ).fetchone()
+        ticket["publication"] = _publication_row(open_request)
         return ticket
 
     def _pg_row_to_ticket(self, row: dict[str, Any]) -> dict[str, Any]:

@@ -79,6 +79,12 @@ GRANT EXECUTE ON FUNCTION ticket_board.signoff_fields() TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.role_controls_project(text) TO ticket_board_service;
 GRANT SELECT, INSERT ON ticket_board.ticket_field_audit TO ticket_board_service;
 GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_field_audit_id_seq TO ticket_board_service;
+-- SYRD-93: the two halves of publication. The writer may record an ask and
+-- record a decision; it cannot push anything, because nothing here is a
+-- credential and the program that holds one runs as another account entirely.
+GRANT EXECUTE ON FUNCTION ticket_board.request_publication(text, text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text) TO ticket_board_service;
+GRANT SELECT ON ticket_board.publication_requests TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.reassign(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.submit_to_inspection(text) TO ticket_board_service;

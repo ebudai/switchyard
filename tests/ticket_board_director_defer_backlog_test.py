@@ -38,6 +38,21 @@ from temporary_cluster import temporary_cluster  # noqa: E402
 CANONICAL = json.loads((ROOT / "examples/workflows/inspection.json").read_text())
 MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu929_syrd92_director_defer_backlog.sql"
 MIGRATION = MIGRATION_PATH.read_text()
+#: Applying this file alone to a board running today's schema reinstalls the
+#: validator of ITS release, which knows nothing of the capabilities later
+#: releases added. A real tenant never stops there -- the runner applies the
+#: rest of the tail in the same pass -- so neither does this suite.
+LATER_MIGRATIONS = [
+    path.read_text()
+    for path in sorted(MIGRATION_PATH.parent.glob("pgu*.sql"))
+    if path.name > MIGRATION_PATH.name
+]
+
+
+def apply_migration_tail(admin: str) -> None:
+    """This migration, then everything numbered after it, in order."""
+    for sql in (MIGRATION, *LATER_MIGRATIONS):
+        t.psql(admin, "BEGIN;\n" + sql + "\nCOMMIT;")
 
 
 def rejected(call, expected: str = ""):
@@ -48,6 +63,22 @@ def rejected(call, expected: str = ""):
             assert expected in str(exc), f"expected {expected!r} in: {exc}"
         return str(exc)
     raise AssertionError(f"expected a refusal containing {expected!r}")
+
+
+def before_later_releases(document: dict) -> dict:
+    """The document as a tenant at this migration's release could have it.
+
+    A stored document cannot name a capability that did not exist yet, and the
+    validator this migration reinstalls does not know those names either -- so
+    seeding today's example document as "the state before" would test a tenant
+    that never existed, and fail for that reason rather than a real one
+    (SYRD-93).
+    """
+    document = copy.deepcopy(document)
+    later = {"request_publication", "resolve_publication"}
+    for role in document.get("roles", []):
+        role["capabilities"] = [c for c in role.get("capabilities", []) if c not in later]
+    return document
 
 
 def degraded(document: dict) -> dict:
@@ -144,7 +175,7 @@ def migration_numbers() -> dict[int, list[str]]:
     return numbers
 
 
-def test_the_migration_is_numbered_above_every_migration_that_exists() -> None:
+def test_the_migration_is_numbered_above_everything_that_preceded_it() -> None:
     """A new migration may not reuse or undercut a number already in the tree.
 
     The runner applies every file it has not recorded, in filename order. A
@@ -155,11 +186,17 @@ def test_the_migration_is_numbered_above_every_migration_that_exists() -> None:
     """
     numbers = migration_numbers()
     mine = int(MIGRATION_PATH.name[3:].split("_", 1)[0])
-    # Older numbers were reused more than once in this tree's history, so this
-    # asks only about the one being added: it shares its number with nothing,
-    # and nothing sorts after it.
+    # This file shares its number with nothing, and sorts after every migration
+    # that existed when it was written.
     assert numbers[mine] == [MIGRATION_PATH.name], numbers[mine]
-    assert mine == max(numbers), (mine, max(numbers), numbers[max(numbers)])
+    assert mine > max(n for n in numbers if n < mine)
+    # And the rule generalised, because the failure it guards against happened:
+    # two branches independently allocated pgu929 and neither noticed until
+    # integration (SYRD-93). Numbers before the declarative era were reused, so
+    # this asks about the era where the runner's ordering is load-bearing.
+    for number, names in numbers.items():
+        if number >= 920:
+            assert len(names) == 1, (number, names)
 
 
 def test_the_migration_carries_the_schema_definition_of_every_function_it_creates() -> None:
@@ -188,9 +225,27 @@ def test_the_migration_carries_the_schema_definition_of_every_function_it_create
         }
     )
     assert created, migration[:200]
+    # A later migration may advance one of these definitions further -- SYRD-93
+    # re-creates the validator to add its capabilities. What must never happen
+    # is that the LAST file to touch a function carries an older body than the
+    # schema, because that is the silent rollback. So each function is checked
+    # against schema.sql unless a higher-numbered migration re-creates it, and
+    # then that one is checked instead.
+    later = [
+        path
+        for path in sorted(MIGRATION_PATH.parent.glob("pgu*.sql"))
+        if path.name > MIGRATION_PATH.name
+    ]
     for name in created:
         in_schema = bodies(schema, name)
         assert in_schema, f"{name} is created by the migration but not by schema.sql"
+        successors = [path for path in later if bodies(path.read_text(), name)]
+        if successors:
+            assert bodies(successors[-1].read_text(), name)[-1] == in_schema[-1], (
+                name,
+                successors[-1].name,
+            )
+            continue
         assert bodies(migration, name)[-1] == in_schema[-1], name
 
     # SYRD-83's director edit lives in both of these functions, and this
@@ -205,7 +260,7 @@ def main() -> int:
             test_the_canonical_workflow_keeps_somewhere_to_defer_to,
             test_cancel_is_not_a_substitute_for_somewhere_to_put_work_down,
             test_a_review_stage_is_not_exempt_from_the_floor,
-            test_the_migration_is_numbered_above_every_migration_that_exists,
+            test_the_migration_is_numbered_above_everything_that_preceded_it,
             test_the_migration_carries_the_schema_definition_of_every_function_it_creates,
         ):
             test()
@@ -317,7 +372,7 @@ def run_database_checks(cluster) -> None:
         commit_exempt=True,
     )
 
-    t.psql(admin, "BEGIN;\n" + MIGRATION + "\nCOMMIT;")
+    apply_migration_tail(admin)
     after = app.workflow_document()["document"]
     assert parking_stage_names(after) == {"backlog"}, after["stages"]
     active_stages = {s["name"] for s in after["stages"] if not s["terminal"] and s["name"] != "backlog"}
@@ -335,7 +390,7 @@ def run_database_checks(cluster) -> None:
     ]
 
     revision = app.workflow_document()["revision"]
-    t.psql(admin, "BEGIN;\n" + MIGRATION + "\nCOMMIT;")
+    apply_migration_tail(admin)
     assert app.workflow_document()["revision"] == revision, "the repair must be idempotent"
 
     run_deferral_checks(app, admin)
@@ -344,7 +399,7 @@ def run_database_checks(cluster) -> None:
     fresh_app, fresh_admin = board(cluster, "syrd92_fresh", CANONICAL)
     fresh = fresh_app.workflow_document()["document"]
     assert parking_stage_names(fresh) == {"backlog"}, fresh["stages"]
-    t.psql(fresh_admin, "BEGIN;\n" + MIGRATION + "\nCOMMIT;")
+    apply_migration_tail(fresh_admin)
     assert fresh_app.workflow_document()["document"] == fresh, "a healthy tenant must not be rewritten"
 
     run_fresh_board_checks(fresh_app, fresh_admin)
@@ -486,13 +541,21 @@ def assert_current_floor_and_director_edit(admin: str, label: str) -> None:
         assert rule in validator, (label, rule)
     # Not just present as text: the validator actually refuses a degraded
     # document, and accepts a role that declares the director_edit capability.
-    document = copy.deepcopy(degraded(CANONICAL))
+    # Asked with a document the INSTALLED validator could actually have been
+    # given: this history may end on a release whose vocabulary predates a later
+    # capability, and a document naming one would be refused for that instead
+    # (SYRD-93).
+    document = degraded(CANONICAL)
+    if "'resolve_publication'" not in validator:
+        document = before_later_releases(document)
+    document = copy.deepcopy(document)
     document["project"] = "cerulean"
     rejected(
         lambda: t.psql(admin, f"SELECT ticket_board.validate_declared_workflow('{json.dumps(document).replace(chr(39), chr(39) * 2)}'::jsonb);"),
         "stage where deferred work can wait",
     )
-    with_edit = copy.deepcopy(CANONICAL)
+    with_edit = CANONICAL if "'resolve_publication'" in validator else before_later_releases(CANONICAL)
+    with_edit = copy.deepcopy(with_edit)
     with_edit["project"] = "cerulean"
     with_edit.setdefault("reassign", {})
     with_edit.setdefault("remove_stages", [])
@@ -516,12 +579,20 @@ def run_upgrade_history_checks(cluster) -> None:
     director edit missing from the second, and out-of-order numbering as a
     difference between the two.
     """
+    # The tail is whatever is numbered at or after the release the history
+    # starts from, so a migration added later joins it instead of being
+    # pre-recorded as applied on a schema that predates it.
+    tail = {
+        path.name
+        for path in MIGRATION_PATH.parent.glob("pgu*.sql")
+        if path.name >= "pgu928_syrd83_director_edit.sql"
+    }
     histories = {
-        "ordered-tail": (
-            schema_before("pgu928_syrd83_director_edit.sql"),
-            {"pgu928_syrd83_director_edit.sql", MIGRATION_PATH.name},
+        "ordered-tail": (schema_before("pgu928_syrd83_director_edit.sql"), tail),
+        "pgu928-tenant": (
+            t.SCHEMA_PATH.read_text(),
+            {path.name for path in MIGRATION_PATH.parent.glob("pgu*.sql") if path.name >= MIGRATION_PATH.name},
         ),
-        "pgu928-tenant": (t.SCHEMA_PATH.read_text(), {MIGRATION_PATH.name}),
     }
     for label, (schema, applying) in histories.items():
         db = f"syrd92_{label.replace('-', '_')}"
@@ -533,7 +604,13 @@ def run_upgrade_history_checks(cluster) -> None:
         except AssertionError as exc:
             if "already exists" not in str(exc):
                 raise
-        document = copy.deepcopy(degraded(CANONICAL))
+        # Period-accurate: a document may only name what the schema this tenant
+        # is running knows about, so it is stripped exactly when that schema
+        # predates the capability (SYRD-93).
+        document = degraded(CANONICAL)
+        if "'resolve_publication'" not in schema:
+            document = before_later_releases(document)
+        document = copy.deepcopy(document)
         document["project"] = "cerulean"
         document.setdefault("reassign", {})
         document.setdefault("remove_stages", [])

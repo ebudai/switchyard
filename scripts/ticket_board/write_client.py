@@ -655,6 +655,38 @@ class TicketBoardWriteClient:
             caller_role=caller_role,
         )
 
+    def request_publication(
+        self,
+        ticket_id: str,
+        *,
+        ref: str,
+        commit: str,
+        bundle: str,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id,
+            "request_publication",
+            {"ref": ref, "commit": commit, "bundle": bundle},
+            caller_role=caller_role,
+        )
+
+    def resolve_publication(
+        self,
+        ticket_id: str,
+        *,
+        request_id: int,
+        outcome: str,
+        detail: str = "",
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id,
+            "resolve_publication",
+            {"request_id": int(request_id), "outcome": outcome, "detail": detail},
+            caller_role=caller_role,
+        )
+
     def force_move(
         self,
         ticket_id: str,
@@ -967,6 +999,18 @@ def _build_parser() -> argparse.ArgumentParser:
     reassign.add_argument("--assignee", required=True)
     reassign.add_argument("--reason", required=True)
 
+    request_publication = subparsers.add_parser("request-publication")
+    request_publication.add_argument("ticket_id")
+    request_publication.add_argument("--ref", required=True)
+    request_publication.add_argument("--commit", required=True)
+    request_publication.add_argument("--bundle", required=True)
+
+    resolve_publication = subparsers.add_parser("resolve-publication")
+    resolve_publication.add_argument("ticket_id")
+    resolve_publication.add_argument("--request-id", required=True, type=int)
+    resolve_publication.add_argument("--outcome", required=True, choices=("published", "rejected"))
+    resolve_publication.add_argument("--reason", default="")
+
     director_edit = subparsers.add_parser("director-edit")
     director_edit.add_argument("ticket_id")
     director_edit.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE")
@@ -1159,6 +1203,17 @@ def main(argv: list[str] | None = None) -> int:
                     patch[key] = raw
             response = client.director_edit(
                 args.ticket_id, patch=patch, reason=args.reason
+            )
+        elif command == "request_publication":
+            response = client.request_publication(
+                args.ticket_id, ref=args.ref, commit=args.commit, bundle=args.bundle
+            )
+        elif command == "resolve_publication":
+            response = client.resolve_publication(
+                args.ticket_id,
+                request_id=args.request_id,
+                outcome=args.outcome,
+                detail=args.reason,
             )
         elif command == "force_move":
             response = client.force_move(

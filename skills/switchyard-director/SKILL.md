@@ -82,6 +82,7 @@ around it.
 - `edit_fields`
 - `merge`
 - `reassign`
+- `resolve_publication`
 - `set_blockers`
 - `set_manually_controlled`
 <!-- switchyard-director-floor:end -->

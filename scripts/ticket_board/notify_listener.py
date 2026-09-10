@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import psycopg
 from psycopg import sql
@@ -632,6 +632,89 @@ def tmux_target_exists(target: str, *, runner: Callable[..., subprocess.Complete
     if reason == "tmux_target_missing":
         return False
     return None
+
+
+@dataclass(frozen=True)
+class PaneStateAuthority:
+    """Whether the directory the listener reads is the one the panes write to.
+
+    The listener decides delivery from hook state, and a missing file reads as
+    "cannot tell, assume busy" -- which is the right default for one pane and
+    the wrong one for all of them at once. Pointed at a directory no hook
+    writes to, it defers every notification forever while the process, the
+    socket and the runtime assignments all look healthy. That is what a
+    process-active check cannot see, so this is the thing to check instead
+    (SYRD-95).
+    """
+
+    state_dir: Path
+    registered: tuple[str, ...]
+    with_state: tuple[str, ...]
+    without_state: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        # Nothing registered is not a disagreement: a board with no panes yet
+        # has nobody to serve and nothing to be wrong about. Registered roles
+        # with hook state for none of them is the failure, because it can only
+        # mean the two halves are looking at different directories.
+        return not self.registered or bool(self.with_state)
+
+    def describe(self) -> str:
+        if not self.registered:
+            return f"pane-state authority: no registered roles; nothing to serve from {self.state_dir}"
+        if not self.with_state:
+            return (
+                f"pane-state authority: {self.state_dir} holds hook state for none of the "
+                f"{len(self.registered)} registered roles ({', '.join(self.registered)}). "
+                "The listener and the pane hooks are reading and writing different "
+                "directories, so every pane reads as busy and nothing is delivered."
+            )
+        line = (
+            f"pane-state authority: {self.state_dir} holds hook state for "
+            f"{len(self.with_state)} of {len(self.registered)} registered roles"
+        )
+        if self.without_state:
+            # Not a failure. A pane that has not run a hook yet has no file,
+            # and one role being quiet is not the two halves disagreeing.
+            line += f"; no state yet for {', '.join(self.without_state)}"
+        return line
+
+
+def pane_state_authority(
+    targets: Iterable[str], store: "PaneHookStateStore"
+) -> PaneStateAuthority:
+    """Compare the configured directory against the roles actually registered."""
+
+    registered = tuple(dict.fromkeys(target for target in targets if target))
+    with_state = tuple(target for target in registered if store.read(target) is not None)
+    without_state = tuple(target for target in registered if target not in set(with_state))
+    return PaneStateAuthority(
+        state_dir=store.state_dir,
+        registered=registered,
+        with_state=with_state,
+        without_state=without_state,
+    )
+
+
+def registered_pane_targets(payload: Any) -> tuple[str, ...]:
+    """The targets a board's runtime assignments say are live.
+
+    Read from the board rather than assumed from a role list, because the
+    question is what the listener would actually try to deliver to.
+    """
+
+    assignments = (payload or {}).get("assignments") if isinstance(payload, dict) else None
+    if not isinstance(assignments, dict):
+        return ()
+    targets: list[str] = []
+    for assignment in assignments.values():
+        if not isinstance(assignment, dict):
+            continue
+        target = str(assignment.get("actual_target") or "").strip()
+        if target:
+            targets.append(target)
+    return tuple(dict.fromkeys(targets))
 
 
 class PaneHookStateStore:
@@ -2474,7 +2557,61 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pre-send-recheck-delay-seconds", type=float, default=DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS)
     parser.add_argument("--idle-working-timer-sample-delay-seconds", type=float, default=DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--verify-pane-state-authority",
+        action="store_true",
+        help="check that the configured pane-state directory holds hook state for the board's registered roles, then exit",
+    )
+    parser.add_argument(
+        "--board-url",
+        default=os.environ.get("TICKET_BOARD_URL", "").strip(),
+        help="board HTTP root to read registered roles from (default: TICKET_BOARD_URL)",
+    )
+    parser.add_argument(
+        "--assignments-json",
+        default="",
+        help="read runtime assignments from this file instead of the board (for provisioning checks and tests)",
+    )
     return parser
+
+
+def load_runtime_assignments(*, board_url: str, assignments_json: str) -> Any:
+    if assignments_json:
+        return json.loads(Path(assignments_json).read_text(encoding="utf-8"))
+    if not board_url:
+        raise SystemExit(
+            "ticket notify listener: --verify-pane-state-authority needs --board-url or TICKET_BOARD_URL"
+        )
+    import urllib.request
+
+    with urllib.request.urlopen(board_url.rstrip("/") + "/api/runtime-assignments", timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def verify_pane_state_authority(args: argparse.Namespace) -> int:
+    """Fail closed when the configured directory serves none of the live roles.
+
+    Deliberately not a liveness check. The listener process, its socket and the
+    board's runtime assignments were all healthy throughout SYRD-95; the one
+    thing that was wrong was which directory it read, and only this comparison
+    can see that.
+    """
+
+    payload = load_runtime_assignments(
+        board_url=args.board_url, assignments_json=args.assignments_json
+    )
+    report = pane_state_authority(
+        registered_pane_targets(payload), PaneHookStateStore(args.pane_state_dir)
+    )
+    print(report.describe())
+    if report.ok:
+        return 0
+    print(
+        "the listener would defer every notification while looking healthy; "
+        "point TICKET_BOARD_PANE_STATE_DIR at the directory the installed pane hooks write to",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2483,6 +2620,8 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    if args.verify_pane_state_authority:
+        return verify_pane_state_authority(args)
     try:
         tmux_runner = role_aware_tmux_runner()
     except ValueError as exc:
@@ -2505,6 +2644,19 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=args.poll_seconds,
         pre_send_recheck_delay_seconds=args.pre_send_recheck_delay_seconds,
     )
+    # Rediscovery on every start. A restarted listener re-reads whatever the
+    # hooks have written since, and says out loud which directory that is --
+    # so a disagreement appears in the log at startup instead of only as
+    # notifications that quietly never arrive (SYRD-95).
+    startup_report = pane_state_authority(
+        [target for target in ROLE_TO_TARGET.values()], gate.state_store
+    )
+    LOGGER.info("%s", startup_report.describe())
+    if not startup_report.ok:
+        LOGGER.error(
+            "pane hook state is unreadable for every configured role; delivery will defer until "
+            "TICKET_BOARD_PANE_STATE_DIR names the directory the pane hooks write to"
+        )
     listener.run_forever()
     return 0
 

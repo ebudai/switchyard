@@ -2253,6 +2253,33 @@ def tenant_primary_group(owner_user: str) -> str:
 
 
 def render_listener_unit(plan: ProjectBoardProvision) -> str:
+    """The listener's unit, including where it reads pane hook state.
+
+    Where the hooks write depends on the tenant's identity model, so where the
+    listener reads has to depend on it the same way. team_launcher's
+    role_pane_state_dir is the runtime authority for that and this mirrors it:
+
+    - roles running as their own accounts write the shared board runtime
+      directory, because a role account cannot write the owner's XDG runtime
+      directory and the listener cannot read each role's own (SYRD-39);
+    - one project account for every role -- process authority, SYRD-69 -- means
+      the hooks write the owner's XDG runtime directory, which is what this
+      provisioning hands the hook installer, and %t in a user unit is exactly
+      that directory. Both halves then resolve to one path without naming a
+      uid, a home, or anything else this tenant happens to have.
+
+    This line used to be the shared path unconditionally. On a single-account
+    tenant that made it the board service's RuntimeDirectory: a directory the
+    listener could read, no hook ever wrote to, and systemd erases and
+    recreates whenever the board service restarts. The listener then saw no
+    hook state for any pane, called every idle role busy, and deferred every
+    notification while looking healthy (SYRD-95).
+    """
+    pane_state_dir = (
+        f"/run/{plan.runtime_directory}/pane-state"
+        if plan.role_accounts
+        else f"%t/{plan.runtime_directory}/pane-state"
+    )
     role_accounts_line = (
         f"Environment=TICKET_BOARD_ROLE_ACCOUNTS={role_accounts_env(plan)}\n"
         if plan.role_accounts
@@ -2281,7 +2308,7 @@ Environment=PGDATABASE={plan.database}
 Environment=PGUSER={plan.listener_role}
 Environment=TICKET_BOARD_DATABASE_URL={plan.listener_database_url}
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL={plan.listener_database_url}
-Environment=TICKET_BOARD_PANE_STATE_DIR=/run/{plan.runtime_directory}/pane-state
+Environment=TICKET_BOARD_PANE_STATE_DIR={pane_state_dir}
 EnvironmentFile=-%h/.config/{plan.project}/ticket-board-notify-listener.env
 StandardOutput=append:{plan.listener_log}
 StandardError=append:{plan.listener_log}

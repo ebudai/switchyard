@@ -87,10 +87,17 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "if ! sudo -u 'stellaris-agent' test -s '/home/stellaris-agent/.config/stellaris/ticket-board.env'; then" in combined
     assert "TICKET_BOARD_TENANT_REPORT_TOKEN=%s" in combined
     assert "sudo -u 'stellaris-agent' chmod 0600 '/home/stellaris-agent/.config/stellaris/ticket-board.env'" in combined
-    # SYRD-39: the listener reads the shared aggregation path so it can see an
-    # isolated role's activity. Each role writes there; per-role /run/user
-    # directories are unreadable by the listener.
-    assert "TICKET_BOARD_PANE_STATE_DIR=/run/stellaris-ticket-board/pane-state" in combined
+    # SYRD-39 gave roles running as their own accounts a shared aggregation
+    # path, because a role account cannot write the owner's runtime directory
+    # and the listener cannot read each role's own. This plan has no role
+    # accounts: every role runs as the one project account (SYRD-69), its hooks
+    # write the owner's runtime directory, and that is where the listener has
+    # to read. %t is that directory in a user unit, and the shared path here
+    # would be the board service's RuntimeDirectory -- readable, never written,
+    # and erased whenever the board restarts (SYRD-95).
+    assert not plan.role_accounts, plan.role_accounts
+    assert "TICKET_BOARD_PANE_STATE_DIR=%t/stellaris-ticket-board/pane-state" in combined
+    assert "TICKET_BOARD_PANE_STATE_DIR=/run/stellaris-ticket-board/pane-state" not in combined
     assert (
         "sudo -u 'stellaris-agent' -H env XDG_RUNTIME_DIR=\"$owner_runtime_dir\" "
         "TICKET_BOARD_PROJECT='stellaris' "

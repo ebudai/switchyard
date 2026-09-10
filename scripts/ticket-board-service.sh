@@ -51,6 +51,9 @@ readonly BOARD_CANARY_PORT="${BOARD_CANARY_PORT:-}"
 readonly BOARD_CANARY_TIMEOUT_SECONDS="${BOARD_CANARY_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
 readonly BOARD_CANARY_SOCKET="${BOARD_CANARY_SOCKET:-}"
 readonly BOARD_CANARY_SERVICE_NAME="${BOARD_CANARY_SERVICE_NAME:-$PROJECT_SLUG-ticket-board-canary.service}"
+# Same default as ticket-board-notify-listener-service.sh, because a deploy
+# has to move the listener with the board (SYRD-95).
+readonly LISTENER_SERVICE_NAME="${TICKET_BOARD_NOTIFY_LISTENER_SERVICE_NAME:-$PROJECT_SLUG-ticket-board-notify-listener.service}"
 readonly BOARD_CANARY_ENV_FILE="${BOARD_CANARY_ENV_FILE:-$BOARD_ROOT/canary.env}"
 readonly SWITCHYARD_SHARED_PYTHON="${SWITCHYARD_SHARED_PYTHON:-/opt/switchyard/venv/bin/python}"
 DEFAULT_TICKET_BOARD_PYTHON="/usr/bin/python3"
@@ -615,6 +618,91 @@ deploy_export() {
     printf '%s\n' "$deployed_sha"
 }
 
+# --- notification listener, moved with the board ---------------------------
+#
+# The listener runs the same release as the board, through the `current`
+# symlink, but in its own user unit. Two things follow from that, and SYRD-95
+# is what happens when a deploy ignores both.
+#
+# It has to be out of the way while the migrations run. A listener still on the
+# old code that reads a document written by the new schema can meet vocabulary
+# it does not know and exit; that is exactly how the SYRD-92 deploy killed it
+# (`ValueError: invalid capabilities: director`). Stopped, it cannot crash, and
+# nothing is lost while it is down: pending notifications are rows in the
+# database, and it re-claims them when it comes back.
+#
+# And once it is back it has to be checked, not merely started. The failure
+# that followed was invisible to every liveness check: process up, socket up,
+# runtime assignments complete, and every notification deferred because the
+# directory it read held no pane hook state.
+
+LISTENER_WAS_STOPPED_FOR_DEPLOY=0
+
+listener_is_installed() {
+    systemctl_user list-unit-files "$LISTENER_SERVICE_NAME" >/dev/null 2>&1 || return 1
+    systemctl_user cat "$LISTENER_SERVICE_NAME" >/dev/null 2>&1
+}
+
+stop_listener_for_upgrade() {
+    listener_is_installed || return 0
+    systemctl_user is-active --quiet "$LISTENER_SERVICE_NAME" || return 0
+    systemctl_user stop "$LISTENER_SERVICE_NAME" || die "could not stop $LISTENER_SERVICE_NAME before migrating"
+    LISTENER_WAS_STOPPED_FOR_DEPLOY=1
+    # Every exit from here on has to put it back, and most of them are not
+    # branches this script writes: `set -e` ends the shell the moment a
+    # migration, a canary or a verification step fails, and `die` exits
+    # outright. An explicit restart on the paths that were thought of leaves
+    # exactly the ones that were not -- a failed migration would have left the
+    # tenant with no notification delivery at all, which is the outage this
+    # ticket exists to stop recreating. So the restart is a trap, not a line.
+    trap restore_listener_after_incomplete_deploy EXIT
+    log "stopped $LISTENER_SERVICE_NAME for the duration of the migration"
+}
+
+restore_listener_after_incomplete_deploy() {
+    [[ "$LISTENER_WAS_STOPPED_FOR_DEPLOY" == "1" ]] || return 0
+    # No `die` and no `exit` anywhere in here. This runs while the shell is
+    # already on its way out, and bash keeps the status it was leaving with as
+    # long as the trap does not exit on its own account. The deploy's own
+    # failure is what the caller has to see; a listener that will not start is
+    # said out loud without becoming the reported failure.
+    if systemctl_user start "$LISTENER_SERVICE_NAME"; then
+        LISTENER_WAS_STOPPED_FOR_DEPLOY=0
+        log "restarted $LISTENER_SERVICE_NAME after a deploy that did not finish"
+    else
+        printf '[ticket-board-service] ERROR: %s could not be restarted and is still stopped; notification delivery is down until it starts\n' "$LISTENER_SERVICE_NAME" >&2
+    fi
+}
+
+start_listener_after_upgrade() {
+    [[ "$LISTENER_WAS_STOPPED_FOR_DEPLOY" == "1" ]] || return 0
+    systemctl_user start "$LISTENER_SERVICE_NAME" || die "could not restart $LISTENER_SERVICE_NAME after deploy"
+    LISTENER_WAS_STOPPED_FOR_DEPLOY=0
+    log "restarted $LISTENER_SERVICE_NAME on the deployed release"
+}
+
+listener_pane_state_dir() {
+    systemctl_user show "$LISTENER_SERVICE_NAME" -p Environment --value 2>/dev/null \
+        | tr ' ' '\n' \
+        | sed -n 's/^TICKET_BOARD_PANE_STATE_DIR=//p' \
+        | tail -n 1
+}
+
+verify_listener_pane_state_authority() {
+    listener_is_installed || return 0
+    local state_dir python_bin
+    state_dir="$(listener_pane_state_dir)"
+    if [[ -z "$state_dir" ]]; then
+        printf '[ticket-board-service] ERROR: %s declares no TICKET_BOARD_PANE_STATE_DIR, so it cannot tell an idle pane from a busy one\n' "$LISTENER_SERVICE_NAME" >&2
+        return 1
+    fi
+    python_bin="${TICKET_BOARD_PYTHON:-/usr/bin/python3}"
+    "$python_bin" "$BOARD_CURRENT_LINK/scripts/ticket-board-notify-listener" \
+        --verify-pane-state-authority \
+        --pane-state-dir "$state_dir" \
+        --board-url "http://$BOARD_HOST:$BOARD_PORT"
+}
+
 apply_database_migrations_for_release() {
     local release_dir="$1"
     local migration_runner="$release_dir/scripts/ticket-board-migrate"
@@ -1164,6 +1252,11 @@ install_service() {
 
 deploy_service() {
     local deployed_sha
+    # Exports and migrates, and deliberately restarts nothing -- so it also
+    # cannot move the listener onto the code that understands what it just
+    # migrated. A change to workflow vocabulary belongs in deploy-restart,
+    # which stops the listener across the migration and brings it back on the
+    # deployed release (SYRD-95).
     deployed_sha="$(deploy_export)"
     apply_database_migrations
     printf '%s\n' "$deployed_sha"
@@ -1181,6 +1274,7 @@ deploy_restart_service() {
     if [[ "$scope" == "system" ]]; then
         assert_system_unit_reload_not_required_for_release "$release_dir"
     fi
+    stop_listener_for_upgrade
     apply_database_migrations_for_release "$release_dir"
     run_release_canary "$release_dir" "$scope"
     activate_release "$release_dir"
@@ -1188,9 +1282,16 @@ deploy_restart_service() {
     restart_live_service "$scope"
     if ! smoke_check_http; then
         rollback_live_service "$scope" "$previous_release"
+        start_listener_after_upgrade
         exit 1
     fi
     if ! verify_live_build_id "$deployed_sha"; then
+        rollback_live_service "$scope" "$previous_release"
+        start_listener_after_upgrade
+        exit 1
+    fi
+    start_listener_after_upgrade
+    if ! verify_listener_pane_state_authority; then
         rollback_live_service "$scope" "$previous_release"
         exit 1
     fi

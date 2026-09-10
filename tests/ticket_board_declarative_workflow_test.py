@@ -617,15 +617,20 @@ def main():
                 server.server_close()
                 thread.join()
             assert "workflow_actions" in app.snapshot()["tickets"][0]
-            # A compacted tenant has a legal serial queue without any backlog stage.
+            # A compacted tenant still has a legal serial queue: its holding
+            # destination is `analysis`, not the parking stage.
             # `cancelled` is kept because the transitions into it are the
             # director's way out of `in_progress` and `audit`: a document that
             # dropped them would leave work only its implementer could move,
-            # which the control floor refuses (SYRD-82). It is a terminal, not a
-            # backlog, so the property this case is about is unchanged.
+            # which the control floor refuses (SYRD-82).
+            # `backlog` is kept because a tenant with nowhere to defer to is no
+            # longer a legal document at all -- cancel ends work rather than
+            # putting it down, and dropping the parking stage is how live syrd
+            # lost the Director's defer (SYRD-92). Compaction is about which
+            # stages a tenant needs, and somewhere to wait is one of them.
             act("PGU-4", "release_draft", "director")
             compact = copy.deepcopy(second)
-            names = {"analysis", "in_progress", "audit", "director_review", "done", "cancelled"}
+            names = {"analysis", "backlog", "in_progress", "audit", "director_review", "done", "cancelled"}
             compact["stages"] = [
                 stage for stage in compact["stages"] if stage["name"] in names
             ]
@@ -687,7 +692,13 @@ def main():
                 dry_run=False,
                 caller_role="director",
             )
-            assert "backlog" not in [c["key"] for c in app.workflow_columns()]
+            columns = [c["key"] for c in app.workflow_columns()]
+            assert compact["remove_stages"], compact["remove_stages"]
+            for dropped in compact["remove_stages"]:
+                assert dropped not in columns, (dropped, columns)
+            # Somewhere to defer to survives compaction; a document without it
+            # is refused outright (SYRD-92).
+            assert "backlog" in columns, columns
             # SYRD-31: routing PGU-4 at a reserved implementer is redirected to
             # the configured queue, which here is the analysis/director slot the
             # ticket already occupied. Before this was surfaced the action
@@ -873,14 +884,10 @@ def main():
                 "BEGIN; SET LOCAL ROLE ticket_board_service; SELECT set_config('ticket_board.caller_role','director',true); SELECT ticket_board.add_comment('PGU-91','Historical draft note'); COMMIT;",
             )
             existing = copy.deepcopy(cfg)
-            existing["stages"] = [
-                stage for stage in existing["stages"] if stage["name"] != "backlog"
-            ]
-            existing["transitions"] = [
-                tr
-                for tr in existing["transitions"]
-                if tr["from"] != "backlog" and tr["to"] != "backlog"
-            ]
+            # The serial-focus holding destination is deliberately not the
+            # parking stage here: the two are independent, and a tenant that
+            # queues overflow back into triage still has to keep somewhere to
+            # defer to (SYRD-92).
             existing["queue"] = {"stage": "analysis", "assignee": "director"}
             app.apply_workflow(
                 existing, expected_revision=0, dry_run=False, caller_role="director"

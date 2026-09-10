@@ -122,6 +122,22 @@ BUILTIN_FLAGS = {
 }
 
 
+def parking_stage_names(cfg: dict[str, Any]) -> set[str]:
+    """Stages that hold work nobody is doing.
+
+    Described by shape rather than by name, because the label is the tenant's:
+    somewhere a ticket can wait that is not finished, that nobody owns, and that
+    notifies nobody. That is what makes deferral different from cancelling --
+    the work survives -- and different from routing, which always lands on an
+    owner (SYRD-92).
+    """
+    return {
+        stage["name"]
+        for stage in cfg["stages"]
+        if not stage["terminal"] and not stage["owners"] and stage["notify"]["kind"] == "none"
+    }
+
+
 def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     """Validate the complete desired graph. Never infer silence or actor authority."""
     cfg = copy.deepcopy(document)
@@ -544,6 +560,42 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         name for name, stage in stages.items() if not stage["terminal"] and name not in director_exits
     )
     need(not stuck, "director must be able to move work out of every stage: " + ", ".join(stuck))
+    # Being able to leave is not the same as being able to put something down.
+    # This floor was satisfied by `cancel`, which is an exit from everywhere and
+    # the wrong one: it ends the work rather than parking it, so a director with
+    # nothing but cancel has to destroy a ticket to clear a queue. A tenant must
+    # keep somewhere to defer to, and a way to get there and back (SYRD-92).
+    parking = parking_stage_names(cfg)
+    need(bool(parking), "workflow must keep a stage where deferred work can wait")
+    parked_from: set[str] = set()
+    parked_revivals: set[str] = set()
+    for tr in cfg["transitions"]:
+        if DIRECTOR_ROLE not in tr["actors"]:
+            continue
+        if tr["to"] in parking:
+            parked_from.add(tr["from"])
+        if tr["from"] in parking and tr["to"] not in parking and not stages[tr["to"]]["terminal"]:
+            parked_revivals.add(tr["from"])
+    # Every stage where work is live: not finished and not already parked. That
+    # includes reviews. A defer is not a review decision -- it raises no
+    # sign-off, clears none, and leaves every gate, comment and flag where it
+    # was -- so a stage being a review is no reason to take the control away.
+    # Whether anybody is mid-judgement is an operational question the director
+    # answers before using it; the document must not answer it by silently
+    # removing the control (SYRD-92).
+    active = sorted(
+        name for name, stage in stages.items() if not stage["terminal"] and name not in parking
+    )
+    unparkable = [name for name in active if name not in parked_from]
+    need(
+        not unparkable,
+        "director must be able to defer work out of every active stage: " + ", ".join(unparkable),
+    )
+    stranded = sorted(name for name in parking if name not in parked_revivals)
+    need(
+        not stranded,
+        "deferred work must have an ordinary way back: " + ", ".join(stranded),
+    )
     sealed = sorted(
         name for name, stage in stages.items() if stage["terminal"] and name not in director_reopens
     )

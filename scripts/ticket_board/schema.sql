@@ -6824,6 +6824,48 @@ BEGIN
              FROM jsonb_array_elements(cfg->'transitions') x
              WHERE x->>'primitive'='approve' AND x->'actors' ? 'director');
     END IF;
+
+    -- Somewhere to put work down, and a way to pick it back up. `cancel` leaves
+    -- every stage, so a floor that only asked whether the director could leave
+    -- was satisfied by a document that could only end work, never park it
+    -- (SYRD-92).
+    IF NOT EXISTS (
+        SELECT FROM jsonb_array_elements(cfg->'stages') x
+        WHERE NOT (x->>'terminal')::boolean
+          AND jsonb_array_length(coalesce(x->'owners','[]'::jsonb))=0
+          AND x->'notify'->>'kind'='none'
+    ) THEN
+        RAISE EXCEPTION 'workflow must keep a stage where deferred work can wait';
+    END IF;
+    IF EXISTS (
+        SELECT FROM jsonb_array_elements(cfg->'stages') held
+        WHERE NOT (held->>'terminal')::boolean
+          AND NOT (jsonb_array_length(coalesce(held->'owners','[]'::jsonb))=0
+                   AND held->'notify'->>'kind'='none')
+          AND NOT EXISTS (
+              SELECT FROM jsonb_array_elements(cfg->'transitions') t
+              JOIN LATERAL jsonb_array_elements(cfg->'stages') dest ON dest->>'name'=t->>'to'
+              WHERE t->>'from'=held->>'name' AND t->'actors' ? 'director'
+                AND NOT (dest->>'terminal')::boolean
+                AND jsonb_array_length(coalesce(dest->'owners','[]'::jsonb))=0
+                AND dest->'notify'->>'kind'='none')
+    ) THEN
+        RAISE EXCEPTION 'director must be able to defer work out of every active stage';
+    END IF;
+    IF EXISTS (
+        SELECT FROM jsonb_array_elements(cfg->'stages') parked
+        WHERE NOT (parked->>'terminal')::boolean
+          AND jsonb_array_length(coalesce(parked->'owners','[]'::jsonb))=0
+          AND parked->'notify'->>'kind'='none'
+          AND NOT EXISTS (
+              SELECT FROM jsonb_array_elements(cfg->'transitions') t
+              JOIN LATERAL jsonb_array_elements(cfg->'stages') dest ON dest->>'name'=t->>'to'
+              WHERE t->>'from'=parked->>'name' AND t->'actors' ? 'director'
+                AND NOT (dest->>'terminal')::boolean
+                AND jsonb_array_length(coalesce(dest->'owners','[]'::jsonb))>0)
+    ) THEN
+        RAISE EXCEPTION 'deferred work must have an ordinary way back';
+    END IF;
 END;
 $$;
 
@@ -7106,6 +7148,28 @@ BEGIN
         -- reservation that caused it.
         proposed.queued_for_assignee:='';
         proposed.queued_behind_ticket:='';
+    END IF;
+    -- Deferring is putting work down, so it has to stop looking like work
+    -- somebody has. An owner left on a parked ticket keeps its implementer's
+    -- serial reservation and keeps the board highlighting it as current, which
+    -- is how a deferral would quietly go on nudging the person who deferred it.
+    -- Everything the ticket is -- content, hierarchy, blockers, gates,
+    -- sign-offs, comments -- is untouched; only who holds it changes (SYRD-92).
+    IF ticket_board.declared_parking_stage(proposed.state) THEN
+        -- queued_for is set only by the serial-focus redirect just above, whose
+        -- holding destination is frequently this same stage. That ticket is
+        -- waiting on a busy implementer rather than being put down, and its
+        -- queue bookkeeping is what makes the outcome legible, so it is left
+        -- exactly as it was.
+        IF queued_for IS NULL THEN
+            proposed.assignee:='unassigned';
+            proposed.parked:=true;
+            proposed.queued_for_assignee:='';
+            proposed.queued_behind_ticket:='';
+        END IF;
+    ELSIF ticket_board.declared_parking_stage(previous.state) THEN
+        -- Reviving it: the hold ends with the stage that carried it.
+        proposed.parked:=false;
     END IF;
     RETURN proposed;
 END;
@@ -7554,6 +7618,20 @@ BEGIN
 END;
 $$;
 
+
+-- Stages that hold work nobody is doing: not finished, nobody owns them, and
+-- they notify nobody. Named by shape and not by label, which is the tenant's to
+-- choose, and kept identical to workflow_config.parking_stage_names so the two
+-- layers agree by construction rather than by both spelling 'backlog'
+-- (SYRD-92).
+CREATE OR REPLACE FUNCTION ticket_board.declared_parking_stage(stage text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+ SELECT coalesce((SELECT NOT (x->>'terminal')::boolean
+   AND jsonb_array_length(coalesce(x->'owners','[]'::jsonb))=0
+   AND x->'notify'->>'kind'='none'
+  FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
+  WHERE x->>'name'=stage), false);
+$$;
 
 CREATE OR REPLACE FUNCTION ticket_board.declared_stage_kind(stage text)
 RETURNS text LANGUAGE sql STABLE AS $$

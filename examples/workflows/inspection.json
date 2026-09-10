@@ -462,6 +462,111 @@
       "allow_no_code": false
     },
     {
+      "allow_no_code": false,
+      "from": "draft",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "primitive": "move",
+      "actors": [
+        "director"
+      ],
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": []
+    },
+    {
+      "from": "in_progress",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "inspection",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "audit",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "dat",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "user_review",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
+      "from": "director_review",
+      "to": "backlog",
+      "action": "defer",
+      "label": "Defer",
+      "actors": [
+        "director"
+      ],
+      "primitive": "move",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": false,
+      "clear_signoffs": [],
+      "allow_no_code": false
+    },
+    {
       "from": "in_progress",
       "to": "inspection",
       "action": "submit_to_audit",

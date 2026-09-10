@@ -1559,17 +1559,76 @@ def render_role_control_sudoers(
     return "\n".join(lines) + "\n"
 
 
-PUBLISH_GRANT_ROOT = "/etc/switchyard/publish"
-PUBLISH_STAGING_ROOT = "/var/lib/switchyard/publish"
+def publish_sudoers_path(project: str, *, root: Path | str | None = None) -> Path:
+    """Its own file, separate from the role-control rule.
+
+    An existing tenant has no role accounts, so `render_role_control_sudoers`
+    returns only the publisher line and the upgrade would otherwise have to
+    rewrite a file whose other purpose it is not responsible for. A rule of its
+    own is installed and validated independently, and removing publication does
+    not disturb the tmux grants (SYRD-97).
+    """
+    import os as _os
+
+    configured = _os.environ.get("SWITCHYARD_SUDOERS_ROOT", "").strip()
+    directory = Path(root) if root is not None else Path(configured or "/etc/sudoers.d")
+    return directory / f"48-{project}-publish"
+
+
+def publish_sudoers_document(project: str, owner_user: str) -> str:
+    """The one grant that lets the project account reach the root publisher.
+
+    One program, no arguments of the operator's choosing. The program decides
+    for itself whether the process invoking it is the live runtime the board
+    registered for the control role, so holding this grant is not the same as
+    being allowed to publish (SYRD-93).
+    """
+    helper = f"{TENANT_CONTROL_ROOT}/{project}/switchyard-publish-ref"
+    lines = [
+        f"# {project}: publication. The project account may run one root-owned",
+        "# publisher, which refuses any caller but the control role's registered process.",
+        f"{owner_user} ALL=(root) NOPASSWD: {helper}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+DEFAULT_PUBLISH_GRANT_ROOT = "/etc/switchyard/publish"
+DEFAULT_PUBLISH_STAGING_ROOT = "/var/lib/switchyard/publish"
+
+
+def publish_grant_root() -> str:
+    """Where root keeps the publication grant, key and pinned hosts.
+
+    Overridable for the same reason the shared install root and the privileged
+    provision root are: a suite has to be able to exercise the real privileged
+    branch without writing into the host's /etc. Without it these fixtures would
+    have created /etc/switchyard/publish on the machine running them.
+    """
+    import os as _os
+
+    return _os.environ.get("SWITCHYARD_PUBLISH_ROOT", "").strip() or DEFAULT_PUBLISH_GRANT_ROOT
+
+
+def publish_staging_root() -> str:
+    import os as _os
+
+    return (
+        _os.environ.get("SWITCHYARD_PUBLISH_STAGING_ROOT", "").strip()
+        or DEFAULT_PUBLISH_STAGING_ROOT
+    )
+
+
+PUBLISH_GRANT_ROOT = DEFAULT_PUBLISH_GRANT_ROOT
+PUBLISH_STAGING_ROOT = DEFAULT_PUBLISH_STAGING_ROOT
 PUBLISH_GRANT_SCHEMA = "switchyard.publish-grant.v1"
 
 
 def publish_grant_path(project: str) -> str:
-    return f"{PUBLISH_GRANT_ROOT}/{project}.json"
+    return f"{publish_grant_root()}/{project}.json"
 
 
 def publish_identity_path(project: str) -> str:
-    return f"{PUBLISH_GRANT_ROOT}/{project}-publish-key"
+    return f"{publish_grant_root()}/{project}-publish-key"
 
 
 def publish_grant_commands(plan: "ProjectBoardProvision") -> list[str]:

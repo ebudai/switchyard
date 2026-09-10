@@ -36,6 +36,7 @@ from team_launcher_test_helpers import *
 from team_launcher_upgrade_cutover_test import (
     _RunningTenant,
     _declarative_tenant,
+    trusted_release_root,
     _deployed_release,
     _origin_backed_source,
 )
@@ -134,6 +135,14 @@ def _migrating_tenant(tmp: Path) -> tuple[Path, Path, Path, Path]:
     source_repo, _target = _origin_backed_source(tmp)
     board_root = _deployed_release(tmp, PROJECT, "1" * 40)
     config_path, _ = _declarative_tenant(tmp, board_root=board_root)
+    # This tenant's transaction is pinned at its own checkout's release, so its
+    # staged bundle has to come from that one rather than from the default-ref
+    # release `_declarative_tenant` staged (SYRD-97 review).
+    # Staged from the source this tenant's transaction is pinned at. The
+    # transaction checks the bundle against that source, and this fixture is
+    # about unit installation order rather than the release boundary, so the two
+    # simply have to agree (SYRD-97 review).
+    _stage_role_tooling(tmp, PROJECT, release_root=source_repo)
     staged = team_launcher.privileged_provision_dir(
         PROJECT, root=team_launcher.switchyard_privileged_provision_root()
     ) / BOARD_UNIT
@@ -319,7 +328,12 @@ def test_a_tenant_with_no_release_to_deploy_still_restarts_the_board() -> None:
                 calls.append([str(part) for part in args])
                 return inner(args, **kwargs)
 
-            result, output = _cutover(config_path, runner=record, source_repo=ROOT)
+            # This tenant's bundle was staged from the release built out of this
+            # checkout, so the transaction is pinned at that release rather than
+            # at the checkout it came from (SYRD-97 review).
+            result, output = _cutover(
+                config_path, runner=record, source_repo=trusted_release_root()
+            )
         assert result == 0, output
         assert installed.read_text(encoding="utf-8") == NEW_UNIT
         restarts = [argv for argv in calls if argv[:2] == ["systemctl", "restart"] and argv[-1] == BOARD_UNIT]

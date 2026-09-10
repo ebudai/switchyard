@@ -276,7 +276,7 @@ def test_a_blocked_release_phase_never_reports_success() -> None:
 
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
-    print("tenant_release_from_installed_release_test: ok")
+    print("team_launcher_installed_release_deploy_test: ok")
     return 0
 
 

@@ -37,6 +37,7 @@ from scripts.ticket_board.notify_listener import (
     PaneActivityGate,
     PaneHookStateStore,
     TicketBoardNotifyListener,
+    _boot_time_epoch_seconds,
     descendant_work_sample,
     read_process_table,
 )
@@ -155,13 +156,24 @@ def test_the_real_process_table_parses() -> None:
     assert table, "no processes were readable"
     import os
 
-    by_pid = {pid: (ppid, cpu_ticks, session) for pid, ppid, cpu_ticks, session in table}
+    by_pid = {
+        pid: (ppid, cpu_ticks, session, started_at)
+        for pid, ppid, cpu_ticks, session, started_at in table
+    }
     assert os.getpid() in by_pid, "this process is missing from its own table"
     # The session column is the one the cold case depends on, so it is read from
     # the kernel here rather than only from a fixture.
     assert by_pid[os.getpid()][2] == os.getsid(0), by_pid[os.getpid()]
-    for _pid, (_ppid, cpu_ticks, session) in by_pid.items():
+    for _pid, (_ppid, cpu_ticks, session, started_at) in by_pid.items():
         assert cpu_ticks >= 0 and session >= 0
+        assert started_at >= 0, started_at
+    # And the start time is a real wall clock, read from this host rather than
+    # from a fixture: this process started after the machine booted and has not
+    # started in the future (SYRD-101).
+    started_at = by_pid[os.getpid()][3]
+    assert started_at > 0, "this process has no readable start time"
+    assert started_at <= time.time() + 1, started_at
+    assert started_at >= _boot_time_epoch_seconds(), (started_at, _boot_time_epoch_seconds())
 
 
 def test_a_running_turn_is_busy_for_every_configured_role() -> None:

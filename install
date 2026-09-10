@@ -80,6 +80,7 @@ ORIGINAL_HOME="${ORIGINAL_HOME:-$HOME}"
 
 dry_run_install() {
     printf 'DRY RUN: no changes will be made.\n'
+    report_checkout_version
     run_cmd env \
         SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
         SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \
@@ -97,6 +98,28 @@ print_final_next_step() {
     printf '\nNEXT STEP\n'
     printf 'Switchyard does not install agent CLIs. Install at least one of claude, codex, agy, or hermes yourself, with that vendor'"'"'s own installer, for the user that will own the project.\n'
     printf 'Then run `switchyard new`: it detects which agent CLIs are installed and walks you through signing in to each one before any pane starts.\n'
+}
+
+report_checkout_version() {
+    # Facts, not a verdict. ./install exports what is checked out here; a
+    # checkout behind its upstream therefore installs older code and used to say
+    # nothing at all. It is reported and the install proceeds: someone pinning a
+    # version that works for them, avoiding a regression, or reproducing a bug
+    # report is doing what a distributed tool is supposed to allow, and refusing
+    # would be this installer overriding a choice they made (SYRD-94).
+    #
+    # Run as the human who owns the checkout, like the pre-commit policy below
+    # and for the same reason: by this point we may be root, and root reading a
+    # repository it does not own is refused by git's own ownership check.
+    local reporter="$REPO_ROOT/scripts/version_notice.py"
+    [[ -f "$reporter" ]] || return 0
+    local -a report_cmd=(python3 "$reporter" --checkout "$REPO_ROOT")
+    if [[ "$ORIGINAL_USER" != "root" ]] \
+        && { [[ "${EUID:-$(id -u)}" -eq 0 ]] || [[ "${SWITCHYARD_INSTALL_TEST_ASSUME_ROOT:-}" == "1" ]]; }; then
+        report_cmd=("$SUDO_BIN" -u "$ORIGINAL_USER" "${report_cmd[@]}")
+    fi
+    # A report that fails is still only a report: it must never fail the install.
+    "${report_cmd[@]}" || true
 }
 
 install_source_checkout_policy() {
@@ -136,6 +159,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     exit 0
 fi
 
+report_checkout_version
 run_cmd env \
     SWITCHYARD_INSTALL_ORIGINAL_USER="$ORIGINAL_USER" \
     SWITCHYARD_INSTALL_ORIGINAL_HOME="$ORIGINAL_HOME" \

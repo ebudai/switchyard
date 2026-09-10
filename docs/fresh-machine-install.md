@@ -171,6 +171,33 @@ authenticate on first run.
   only used in the pacman package set.
 - `PyYAML` is optional for preserving an existing Hermes config.
 
+## Version Reporting
+
+The installer does not fetch, pull, or reach the network at any point, and
+neither does the check described here. Both comparisons read refs that are
+already on disk, so their answer is as current as your last `git fetch` and they
+say so.
+
+`./install` (including `--dry-run`) compares `HEAD` with the upstream its branch
+tracks and reports any divergence, then installs the checkout as it stands.
+Nothing is refused: installing a version you deliberately checked out is the
+point of a distributed tool, so there is no override flag, because there is
+nothing to override. Where the comparison cannot be made -- no git checkout,
+detached `HEAD`, a branch tracking nothing, or an upstream nothing has been
+fetched for -- it reports what it found and proceeds, because an unknown state
+is not a diverged one.
+
+`switchyard` reports the reverse mismatch: the running release being older than
+the checkout it was installed from. `.switchyard-release.json` inside a release
+records the commit, the source checkout and the ref, which is what makes that
+comparison possible from a release directory at all. It reports only when the
+release commit is strictly an ancestor of the checkout's; a source checkout that
+is absent, moved, no longer a git repository, unrelated, or itself behind
+produces no warning.
+
+Silence either for good with `git -C <checkout> config switchyard.versionNotice
+false`, or for one invocation with `SWITCHYARD_VERSION_NOTICE=0`.
+
 ## Install Scripts
 
 ```bash

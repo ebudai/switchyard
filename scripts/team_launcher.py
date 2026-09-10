@@ -6660,6 +6660,36 @@ def tenant_release_status(
     current_release, current_sha = _current_tenant_release(board_root)
     clone_source_repo: Path | None = None
     if shared_switchyard_release_for_path(resolved_source_repo) is not None:
+        # Root's own marker first, when the operator named this release and its
+        # exact commit. The release is the content; asking the publication cache
+        # whether it has heard of a commit that has deliberately not been
+        # published yet is a question with only one answer (SYRD-100 review).
+        marked_sha, marker_refusal = installed_release_deploy_target(
+            resolved_source_repo, deploy_ref
+        )
+        if marked_sha or marker_refusal:
+            return TenantReleaseStatus(
+                board_root=board_root,
+                owner_user=owner_user,
+                owner_home=owner_home,
+                provisioned_system_unit=provisioned_system_unit,
+                # Unchanged. The tenant's ordinary provenance cache is what a
+                # commit hash is verified against and it stays exactly what it
+                # was; nothing here seeds it, and the bootstrap repository never
+                # becomes it.
+                commit_git_dir=selected_commit_git_dir,
+                current_release=current_release,
+                current_sha=current_sha,
+                target_sha=marked_sha,
+                deploy_ref=deploy_ref,
+                source_repo=resolved_source_repo,
+                resolve_error=marker_refusal,
+                # None: the release tree is deployed directly, with no archive
+                # step, because it is already the materialized commit.
+                clone_source_repo=None,
+                board_port=str(plan_data.get("port") or "").strip(),
+                board_socket=str(plan_data.get("socket_path") or "").strip(),
+            )
         # The argument, never the tenant's plan. The plan's commit_git_dir is a
         # tenant-writable document and it stays what it has always been -- the
         # list of repositories a commit hash is verified against. Choosing which
@@ -6808,6 +6838,78 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
     )
 
 
+def installed_release_deploy_target(
+    source_repo: Path, deploy_ref: str, *, install_root: Path | None = None
+) -> tuple[str, str]:
+    """The commit an explicitly named installed release deploys, or why not.
+
+    An operator who has just bootstrapped a release names it and its exact SHA:
+    `--source-repo /opt/switchyard/releases/<sha> --deploy-ref <sha>`. The
+    release is root-owned, immutable, and carries root's own marker saying which
+    commit it is. That marker is the deploy target.
+
+    It used to be resolved instead through the tenant's ordinary publication
+    cache, which is circular for the case the bootstrap exists to serve: the
+    whole point of bootstrapping from a bundle is that the commit has not been
+    published yet, so the cache does not have it and never will until it is. The
+    live upgrade refused with `cannot produce a safe release update` for a
+    release root had already materialized and activated (SYRD-100 review).
+
+    Returns (commit, ""), or ("", reason). A reason is a refusal: the caller must
+    not fall back to anything. Only an exact 40-character SHA is answered here --
+    a symbolic ref is somebody asking to resolve a name, which this cannot do and
+    must not guess at -- and it must be the SHA this release says it is.
+    """
+    wanted = (deploy_ref or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", wanted):
+        return "", ""
+    release = shared_switchyard_release_for_path(source_repo, install_root=install_root)
+    if release is None:
+        return "", ""
+    from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+    # The same documented seam the rest of the trusted-release path uses: the
+    # walk starts at "/" on a host, and moves only when the shared install root
+    # has been overridden, because a fixture cannot own "/" (SYRD-97).
+    overridden_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", "").strip()
+    problems = root_controlled_problems(str(source_repo), base=overridden_root or "/")
+    if problems:
+        return "", (
+            f"{source_repo} is named as an installed release but is not root-controlled: "
+            + "; ".join(problems)
+        )
+    marked = (release.marker_commit or "").strip().lower()
+    if not marked:
+        return "", (
+            f"{source_repo} carries no release marker, so there is nothing to say which commit it "
+            "is; it is not deployed from"
+        )
+    if marked != wanted:
+        return "", (
+            f"{source_repo} is the installed release for {marked}, but this deploy is pinned at "
+            f"{wanted}. Nothing was deployed: deploying one release while naming another is how a "
+            "board ends up running code nobody selected."
+        )
+    return marked, ""
+
+
+def release_update_blocked(status: "TenantReleaseStatus | None") -> str:
+    """Why no safe release update can be produced, or "" when one can.
+
+    One reading, used both by the report an operator sees and by the exit status
+    the caller returns. Printing `cannot produce a safe release update` and then
+    exiting 0 is what let a bounded wrapper announce REAL UPGRADE COMPLETE over a
+    board that had not moved (SYRD-100 review).
+    """
+    if status is None:
+        return ""
+    if not status.target_sha:
+        return status.resolve_error or f"{status.deploy_ref} did not resolve"
+    if not status.unchanged and status.provisioned_system_unit is None:
+        return "generated board, canary, and listener units are incomplete"
+    return ""
+
+
 def _format_release_sha(sha: str) -> str:
     return sha if sha else "(none)"
 
@@ -6854,18 +6956,17 @@ def report_tenant_release_upgrade(
             f"switchyard: {config.project} deployed board release new: "
             f"(unresolved {status.deploy_ref}: {status.resolve_error})"
         )
+    blocked = release_update_blocked(status)
     if not status.target_sha:
         print_func(
-            f"switchyard: cannot produce a safe release update for {config.project}: "
-            f"{status.resolve_error}"
+            f"switchyard: cannot produce a safe release update for {config.project}: {blocked}"
         )
     elif status.unchanged:
         print_func(f"switchyard: {config.project} deployed board release unchanged; no release deploy needed")
     else:
         if status.provisioned_system_unit is None:
             print_func(
-                f"switchyard: cannot produce a safe release update for {config.project}: generated board, "
-                "canary, and listener units are incomplete"
+                f"switchyard: cannot produce a safe release update for {config.project}: {blocked}"
             )
             return status
         print_func("switchyard: matching-release deployment sequence (keep the listener stopped through migrations):")
@@ -16017,6 +16118,7 @@ def upgrade_project_command(
 
     final_cutover = role_account_cutover(config, runner=runner)
     release_deployed = False
+    release_blocked = ""
     if not final_cutover.is_complete:
         print_func(
             f"switchyard: withholding the {config.project} release deploy instruction until its "
@@ -16024,20 +16126,22 @@ def upgrade_project_command(
             "process-bound authority and must not strand a resumable pane."
         )
     else:
+        release_status = report_tenant_release_upgrade(
+            release_report_config,
+            config_path=config_path,
+            source_repo=effective_source_repo,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            runner=runner,
+            print_func=print_func,
+        )
         release_deployed = record_release_phase_from_status(
             config,
             config_path=config_path,
-            status=report_tenant_release_upgrade(
-                release_report_config,
-                config_path=config_path,
-                source_repo=effective_source_repo,
-                commit_git_dir=commit_git_dir,
-                deploy_ref=deploy_ref,
-                runner=runner,
-                print_func=print_func,
-            ),
+            status=release_status,
             dry_run=dry_run,
         )
+        release_blocked = release_update_blocked(release_status)
 
     if director_state in {"pending", "unknown"}:
         director_action = (
@@ -16069,6 +16173,17 @@ def upgrade_project_command(
     unsafe_windows = unsafe_root_presentation_windows(config, config_path=config_path)
     if unsafe_windows:
         print_func(unsafe_presentation_report(config, unsafe_windows))
+    if release_blocked:
+        # The release this upgrade was asked to deploy could not be. Saying so
+        # and exiting 0 is worse than either on its own: every wrapper that reads
+        # the status reported the upgrade complete over a board that had not
+        # moved, and the operator had to read the transcript to find out
+        # otherwise (SYRD-100 review).
+        print_func(
+            f"switchyard: {config.project}'s release phase did not complete: {release_blocked}. "
+            "Nothing after it is claimed."
+        )
+        return 1
     return 0
 
 

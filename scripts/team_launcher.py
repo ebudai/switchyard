@@ -15799,13 +15799,47 @@ def upgrade_project_command(
     # reads no private material (SYRD-74).
     owner_home_for_identity = _tenant_owner_home(config, config_path)
     owner_for_identity = config.run_as_user or current_user_name()
-    if not dry_run and os.geteuid() == 0:
-        from scripts.ticket_board.project_provision import owner_github_identity_commands
+    from scripts.ticket_board.project_provision import (
+        owner_github_identity_commands,
+        owner_github_key_path,
+        resolve_owner_github_identity,
+    )
 
+    # Which key this tenant publishes with, before anything is rendered from it.
+    # The renderer defaults to `id_ed25519` when it is not told, and being not
+    # told is how a live upgrade generated that key, pointed the managed block
+    # at it, and left the tenant unable to push with the deploy key it had been
+    # using for weeks (SYRD-100).
+    plan_data = _plan_data_from_config(config, config_path)
+    selected_identity = resolve_owner_github_identity(
+        str(owner_home_for_identity),
+        recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
+        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
+    )
+    if not selected_identity.resolved:
+        # Nothing is rendered, nothing is generated, and the managed block is
+        # left exactly as it is. Choosing among the owner's keys, or making a
+        # new one beside them, is the substitution this must not perform.
+        for problem in selected_identity.problems:
+            print_func(f"warning: switchyard: {problem}")
+        print_func(
+            f"warning: switchyard: {config.project}'s owner GitHub identity was left untouched, "
+            "so publication continues with whatever is already configured."
+        )
+    elif dry_run:
+        print_func(
+            f"switchyard: would keep {owner_for_identity}'s GitHub identity on "
+            f"{owner_github_key_path(str(owner_home_for_identity), key_name=selected_identity.key_name)}, "
+            f"from {selected_identity.source}"
+        )
+    if selected_identity.resolved and not dry_run and os.geteuid() == 0:
         identity_script = "set -eu\n" + "\n".join(
             owner_github_identity_commands(
                 owner_for_identity,
                 str(owner_home_for_identity),
+                key_name=selected_identity.key_name,
+                host=selected_identity.host,
+                host_alias=selected_identity.host_alias,
                 comment=f"{owner_for_identity} switchyard {config.project}",
             )
         )
@@ -15818,16 +15852,24 @@ def upgrade_project_command(
                 f"(exit {applied.returncode}): "
                 f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
             )
-    if not dry_run:
+    if selected_identity.resolved and not dry_run:
+        # Read back against the same key the block selects. Checking the default
+        # while the block names another is a readiness answer about a key nobody
+        # publishes with.
         identity = github_identity_status(
-            owner_for_identity, owner_home_for_identity, runner=runner
+            owner_for_identity,
+            owner_home_for_identity,
+            key_name=selected_identity.key_name,
+            host=selected_identity.host,
+            runner=runner,
         )
         remedy = github_identity_remedy(identity, project=config.project)
         if remedy:
             print_func(remedy)
         else:
             print_func(
-                f"switchyard: {owner_for_identity} can publish to GitHub as its own identity"
+                f"switchyard: {owner_for_identity} can publish to GitHub as its own identity "
+                f"({selected_identity.key_name}, from {selected_identity.source})"
             )
     if not dry_run:
         # Preparation needs the accounts before the active configuration names

@@ -103,6 +103,12 @@ class ProjectBoardProvision:
     # (role, worktree path) so the rollout can transfer ownership of the
     # tree each role actually works in.
     role_worktrees: tuple[tuple[str, str], ...] = ()
+    #: Which of the owner's SSH keys this tenant publishes with, and the host
+    #: patterns its managed block covers. Empty means a plan written before this
+    #: was recorded, and the selection is recovered from the tenant's own
+    #: managed block instead of being defaulted away (SYRD-100).
+    owner_github_key_name: str = ""
+    owner_github_host_alias: str = ""
     workflow: dict | None = None
 
 
@@ -325,6 +331,11 @@ def build_plan(
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
     vcs_close_role: str | None = None,
+    #: Which of the owner's keys this tenant publishes with. Recorded here so an
+    #: upgrade does not have to recover it, and so the generated operator script
+    #: names it (SYRD-100).
+    owner_github_key_name: str = "",
+    owner_github_host_alias: str = "",
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     resolved_project_name = _validate_project_name(project_name or ("PGU" if project == "pgu" else project))
@@ -448,6 +459,8 @@ def build_plan(
         owner_user=owner_user,
         control_user=control_user,
         owner_home=str(home),
+        owner_github_key_name=owner_github_key_name.strip(),
+        owner_github_host_alias=owner_github_host_alias.strip(),
         service_user=service_user,
         board_unit=f"{unit_prefix}.service",
         canary_unit=f"{unit_prefix}-canary.service",
@@ -803,6 +816,162 @@ def compose_ssh_config(existing: str, block: str) -> str:
     # The block already ends in a newline; the rest follows it directly, which
     # is what the rendered shell produces by concatenation.
     return f"{block}{remainder}\n"
+
+
+@dataclass(frozen=True)
+class OwnerGithubIdentity:
+    """Which of the owner's keys this tenant publishes with, and how that is known.
+
+    SYRD-74 made a named key the normal case. The upgrade path then called the
+    renderer without one, so it defaulted to `id_ed25519`, generated that key,
+    and rewrote the managed block away from the working deploy key the tenant
+    had been using -- and the next push was refused for an identity GitHub had
+    never seen (SYRD-100).
+    """
+
+    key_name: str
+    host: str = DEFAULT_GITHUB_HOST
+    host_alias: str = ""
+    #: Where the selection came from, for the operator line that reports it.
+    source: str = "default"
+    #: Non-empty when the selection could not be established. The caller must
+    #: then change nothing at all rather than fall back to a default.
+    problems: tuple[str, ...] = ()
+
+    @property
+    def resolved(self) -> bool:
+        return not self.problems
+
+
+def parse_managed_github_identity(config_text: str) -> tuple[str, str, str, tuple[str, ...]]:
+    """The key file, host and alias the managed block currently selects.
+
+    Read from the block's own markers, so an operator's other stanzas are never
+    mistaken for this tenant's selection. Returns empty strings when there is no
+    managed block, which is a fresh tenant rather than a problem.
+    """
+    identity_files: list[str] = []
+    host_patterns: list[str] = []
+    host_names: list[str] = []
+    inside = False
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped == GITHUB_IDENTITY_BEGIN:
+            inside = True
+            continue
+        if not inside:
+            continue
+        if stripped == GITHUB_IDENTITY_END:
+            inside = False
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) != 2:
+            continue
+        keyword, value = parts[0].casefold(), parts[1].strip()
+        if keyword == "identityfile":
+            identity_files.append(value)
+        elif keyword == "host":
+            host_patterns.append(value)
+        elif keyword == "hostname":
+            host_names.append(value)
+    if not host_patterns and not identity_files:
+        return "", "", "", ()
+    unique_files = sorted(set(identity_files))
+    if len(unique_files) != 1:
+        return "", "", "", (
+            f"the managed GitHub identity block selects {len(unique_files)} different key files "
+            f"({', '.join(unique_files) or 'none'}), so which one this tenant publishes with "
+            "cannot be read from it",
+        )
+    key_file = unique_files[0]
+    name = key_file.rsplit("/", 1)[-1]
+    if not name or name != Path(key_file).name:
+        return "", "", "", (
+            f"the managed GitHub identity block names {key_file}, which is not a key file this "
+            "tenant can select",
+        )
+    host = host_names[0] if host_names else DEFAULT_GITHUB_HOST
+    alias = host_patterns[1] if len(host_patterns) > 1 else ""
+    return name, host, alias, ()
+
+
+def existing_owner_ssh_key_names(owner_home: str) -> tuple[str, ...]:
+    """The keys the owner already holds, by file name.
+
+    A key with both halves present is one somebody set up. Offering to generate
+    a competing default alongside it is how the working one stopped being used.
+    """
+    ssh_dir = Path(owner_home.rstrip("/")) / ".ssh"
+    names: list[str] = []
+    try:
+        entries = sorted(ssh_dir.iterdir())
+    except OSError:
+        return ()
+    for entry in entries:
+        if entry.suffix != ".pub":
+            continue
+        private = entry.with_name(entry.name[: -len(".pub")])
+        if private.is_file():
+            names.append(private.name)
+    return tuple(names)
+
+
+def resolve_owner_github_identity(
+    owner_home: str,
+    *,
+    recorded_key_name: str = "",
+    recorded_host: str = "",
+    recorded_host_alias: str = "",
+) -> OwnerGithubIdentity:
+    """Which key this tenant publishes with, from what is recorded or installed.
+
+    In order: what the tenant recorded when it was provisioned; then what its
+    own managed block currently selects, which is the only record a tenant
+    provisioned before this existed has; then, only for an owner holding no keys
+    at all, the default a fresh provision would create.
+
+    An owner who holds keys and has no readable selection is the case that must
+    stop rather than guess: choosing one of several existing keys, or generating
+    a new one beside them, is exactly the substitution this ticket is about.
+    """
+    if recorded_key_name.strip():
+        return OwnerGithubIdentity(
+            key_name=recorded_key_name.strip(),
+            host=(recorded_host.strip() or DEFAULT_GITHUB_HOST),
+            host_alias=recorded_host_alias.strip(),
+            source="the tenant's recorded selection",
+        )
+    config = Path(owner_home.rstrip("/")) / ".ssh" / "config"
+    try:
+        text = config.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    installed, host, alias, problems = parse_managed_github_identity(text)
+    if problems:
+        return OwnerGithubIdentity(key_name="", problems=problems)
+    if installed:
+        return OwnerGithubIdentity(
+            key_name=installed,
+            host=host or DEFAULT_GITHUB_HOST,
+            host_alias=alias,
+            source=f"the managed block in {config}",
+        )
+    existing = existing_owner_ssh_key_names(owner_home)
+    if existing:
+        return OwnerGithubIdentity(
+            key_name="",
+            problems=(
+                f"{owner_home} holds {', '.join(existing)} and nothing records which of them this "
+                f"tenant publishes with: {config} has no managed GitHub identity block and the "
+                "tenant's plan predates recording one. Nothing was changed. Re-provision the "
+                "tenant, or add the block naming the key it has been using, and run this again.",
+            ),
+        )
+    return OwnerGithubIdentity(
+        key_name="",
+        host=DEFAULT_GITHUB_HOST,
+        source="the default for an owner with no keys",
+    )
 
 
 def owner_github_identity_commands(
@@ -2971,6 +3140,8 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         owner_github_identity_commands(
             plan.owner_user,
             plan.owner_home,
+            key_name=plan.owner_github_key_name,
+            host_alias=plan.owner_github_host_alias,
             comment=f"{plan.owner_user} switchyard {plan.project}",
         )
     )

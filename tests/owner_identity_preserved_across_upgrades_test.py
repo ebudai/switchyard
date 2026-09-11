@@ -671,6 +671,169 @@ def test_a_dry_run_repair_writes_nothing() -> None:
         assert "owner_github_key_name" not in recorded, recorded
 
 
+SECRET = "SECRET_SENTINEL_SHOULD_NOT_BE_PRINTED"
+
+
+def test_a_public_key_swapped_between_validation_and_read_is_never_printed() -> None:
+    """SYRD-100 review: lstat then read_text is two lookups of one name.
+
+    A same-UID tenant can replace `<key>.pub` with a symlink in between. The
+    status path runs as root during the repair, and the remedy prints
+    `status.public_key`, so root would read and print whatever the symlink names.
+    The Director reproduced it by pinning lstat to the original stat while the
+    path was swapped; this drives the same swap against the real code.
+    """
+    with tempfile.TemporaryDirectory(prefix="identity-pub-swap.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEPLOY_KEY)
+        victim = tmp_path / "root-readable-secret"
+        victim.write_text(f"{SECRET}\n", encoding="utf-8")
+        public = home / ".ssh" / f"{DEPLOY_KEY}.pub"
+        public.chmod(0o644)
+
+        # The race itself. A plain symlink is refused by the leaf check, so the
+        # hole is the interval: validation sees the real file, and the read that
+        # follows sees whatever the name points at by then. Reproduced by
+        # swapping at the moment the old code took its stat, which is what the
+        # tenant would be racing to do.
+        # Swapped at the moment the path is stat'd, which is the interval the
+        # two-lookup read left open. Against the repaired code this hook never
+        # fires, because that code never stats this path: it opens it once with
+        # O_NOFOLLOW and reads the descriptor it validated. That is the fix, so
+        # the case asserts the outcome rather than that the swap occurred.
+        real_lstat = Path.lstat
+        swapped: list[bool] = []
+
+        def lstat_then_swap(self, *args, **kwargs):
+            info = real_lstat(self, *args, **kwargs)
+            if self == public and not swapped:
+                swapped.append(True)
+                public.unlink()
+                public.symlink_to(victim)
+            return info
+
+        Path.lstat = lstat_then_swap
+        try:
+            status = team_launcher.github_identity_status(
+                team_launcher.current_user_name(), home, key_name=DEPLOY_KEY, runner=FakeRunner()
+            )
+        finally:
+            Path.lstat = real_lstat
+
+
+        # The one property that matters: nothing root read through a name the
+        # tenant controls reaches the report. Whether the swap was reachable at
+        # all is the implementation's business, and the repaired code makes it
+        # unreachable rather than detecting it.
+        assert SECRET not in status.public_key, status.public_key
+        remedy = team_launcher.github_identity_remedy(status, project="porter")
+        assert SECRET not in remedy, remedy
+        assert SECRET not in " ".join(status.problems), status.problems
+        if swapped:
+            # Only the two-lookup read gets here, and it must not have believed
+            # what it found the second time.
+            assert status.public_key == "", status.public_key
+
+
+def test_an_ssh_config_swapped_for_a_symlink_cannot_steer_the_report() -> None:
+    """The other file the status path reads, and what it may not become.
+
+    Its contents decide what the report says about which identity is selected,
+    so a symlink here is a tenant choosing what root concludes. A symlink as the
+    last component was already refused before this ticket; this holds that while
+    the read underneath it changes, rather than demonstrating a defect.
+    """
+    with tempfile.TemporaryDirectory(prefix="identity-config-swap.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEPLOY_KEY)
+        victim = tmp_path / "root-readable-config"
+        victim.write_text(f"# {SECRET}\n", encoding="utf-8")
+        config = home / ".ssh" / "config"
+        config.unlink()
+        config.symlink_to(victim)
+
+        status = team_launcher.github_identity_status(
+            team_launcher.current_user_name(), home, key_name=DEPLOY_KEY, runner=FakeRunner()
+        )
+
+        assert any("is not a regular file" in problem for problem in status.problems), status.problems
+        joined = " ".join(status.problems) + team_launcher.github_identity_remedy(status, project="porter")
+        assert SECRET not in joined, joined
+
+
+def test_a_symlinked_ssh_directory_is_refused_before_anything_is_read() -> None:
+    """The ancestor route, which needs no race at all.
+
+    `lstat` refuses a symlink as the last component and follows every one before
+    it, so pointing `.ssh` somewhere else passes the leaf check and the read then
+    goes wherever the directory does. Found while proving the case above.
+    """
+    with tempfile.TemporaryDirectory(prefix="identity-dir-swap.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEPLOY_KEY)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / f"{DEPLOY_KEY}.pub").write_text(f"{SECRET}\n", encoding="utf-8")
+        # A configuration too, so the read that decides what the report concludes
+        # is exercised and not merely the one that decides what it prints.
+        (elsewhere / "config").write_text(
+            f"{GITHUB_IDENTITY_BEGIN}\nHost github.com\n"
+            f"    IdentityFile {home}/.ssh/{DEFAULT_KEY}\n{GITHUB_IDENTITY_END}\n",
+            encoding="utf-8",
+        )
+        (elsewhere / "config").chmod(0o600)
+        ssh_dir = home / ".ssh"
+        for child in ssh_dir.iterdir():
+            child.unlink()
+        ssh_dir.rmdir()
+        ssh_dir.symlink_to(elsewhere)
+
+        status = team_launcher.github_identity_status(
+            team_launcher.current_user_name(), home, key_name=DEPLOY_KEY, runner=FakeRunner()
+        )
+
+        assert SECRET not in status.public_key, status.public_key
+        remedy = team_launcher.github_identity_remedy(status, project="porter")
+        assert SECRET not in remedy, remedy
+        # And nothing was concluded from the configuration behind that symlink:
+        # the report must not claim the tenant selected the default key on the
+        # strength of a file the tenant redirected root to.
+        assert not any(
+            "selects an identity other than" in problem for problem in status.problems
+        ), status.problems
+        assert any(
+            "the owner's ssh configuration" in problem for problem in status.problems
+        ), status.problems
+
+
+def test_the_fingerprint_comes_from_the_bytes_that_were_validated() -> None:
+    """Not from handing the path back to ssh-keygen to open a second time."""
+    with tempfile.TemporaryDirectory(prefix="identity-fingerprint.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEPLOY_KEY)
+        (home / ".ssh" / f"{DEPLOY_KEY}.pub").chmod(0o644)
+        (home / ".ssh").chmod(0o700)
+        (home / ".ssh" / DEPLOY_KEY).chmod(0o600)
+        (home / ".ssh" / "config").chmod(0o600)
+
+        seen: list[list[str]] = []
+
+        def recording(args, **kwargs):
+            seen.append(list(args))
+            return subprocess.CompletedProcess(args, 0, stdout="256 SHA256:x probe (ED25519)\n")
+
+        status = team_launcher.github_identity_status(
+            team_launcher.current_user_name(), home, key_name=DEPLOY_KEY, runner=recording
+        )
+
+        fingerprint_calls = [argv for argv in seen if argv[:2] == ["ssh-keygen", "-l"]]
+        assert fingerprint_calls, seen
+        # Read from stdin, so the path is never opened a second time.
+        assert fingerprint_calls[0][-1] == "-", fingerprint_calls[0]
+        assert str(home) not in " ".join(fingerprint_calls[0]), fingerprint_calls[0]
+        assert status.fingerprint.startswith("256 SHA256:"), status.fingerprint
+
+
 def test_the_upgrade_then_keeps_what_the_repair_recorded() -> None:
     """The two halves meet: repair once, and every later upgrade honours it."""
     with tempfile.TemporaryDirectory(prefix="identity-repair-upgrade.") as tmp:

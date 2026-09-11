@@ -9184,6 +9184,64 @@ def github_identity_status(
     expected_uid = uid_for_user(owner_user)
     problems: list[str] = []
 
+    def _read_no_follow(path: Path, mode: int, what: str) -> str | None:
+        """Validate and read one file through a single descriptor.
+
+        `lstat` then `read_text` is two lookups of one name, and between them a
+        same-UID tenant can replace the name with a symlink. Root then reads,
+        and `github_identity_remedy` prints, whatever it points at -- which for
+        a root-run repair is any file root can read. One open with O_NOFOLLOW,
+        fstat on that descriptor, and the bytes read from it, so what is
+        reported is what was checked (SYRD-100 review).
+
+        Returns the text, or None when it could not be safely read.
+        """
+        relative = Path(str(path).lstrip("/"))
+        dir_fd, problem = _walk_no_follow(Path(path.anchor or "/"), relative)
+        if dir_fd < 0:
+            problems.append(f"{what} {path} cannot be reached safely: {problem}")
+            return None
+        try:
+            try:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.EMLINK):
+                    problems.append(f"{what} {path} is not a regular file")
+                elif exc.errno == errno.ENOENT:
+                    problems.append(f"{what} {path} does not exist")
+                else:
+                    problems.append(f"{what} {path} cannot be read ({exc.strerror})")
+                return None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    problems.append(f"{what} {path} is not a regular file")
+                    return None
+                if expected_uid is not None and info.st_uid != expected_uid:
+                    problems.append(
+                        f"{what} {path} is owned by uid {info.st_uid} rather than by {owner_user}"
+                    )
+                if stat.S_IMODE(info.st_mode) != mode:
+                    problems.append(
+                        f"{what} {path} is mode {stat.S_IMODE(info.st_mode):04o} rather than "
+                        f"{mode:04o}"
+                    )
+                raw = b""
+                while True:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        break
+                    raw += chunk
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            problems.append(f"{what} {path} is not text")
+            return None
+
     def _check(path: Path, mode: int, what: str) -> bool:
         try:
             info = path.lstat()
@@ -9204,35 +9262,31 @@ def github_identity_status(
         return True
 
     _check(key.parent, 0o700, "the owner's ssh directory")
+    # The private half is checked and never read. Nothing here opens it.
     _check(key, 0o600, "the owner's GitHub key")
-    has_public = _check(public, 0o644, "the owner's GitHub public key")
     public_key = ""
     fingerprint = ""
-    if has_public:
-        try:
-            public_key = public.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            problems.append(f"the owner's GitHub public key {public} cannot be read: {exc}")
-        else:
-            proc = runner(
-                ["ssh-keygen", "-l", "-f", str(public)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    public_text = _read_no_follow(public, 0o644, "the owner's GitHub public key")
+    if public_text is not None:
+        public_key = public_text.strip()
+        # Fingerprinted from the bytes that were validated, not by handing the
+        # path back to ssh-keygen to open a second time.
+        proc = runner(
+            ["ssh-keygen", "-l", "-f", "-"],
+            input=public_key + "\n",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if getattr(proc, "returncode", 1) == 0:
+            fingerprint = str(getattr(proc, "stdout", "") or "").strip()
+    body = _read_no_follow(config, 0o600, "the owner's ssh configuration")
+    if body is not None:
+        if GITHUB_IDENTITY_BEGIN not in body:
+            problems.append(
+                f"{config} selects no managed identity for {host}; git offers no key and the "
+                "push is refused as if there were none"
             )
-            if proc.returncode == 0:
-                fingerprint = str(proc.stdout or "").strip()
-    if _check(config, 0o600, "the owner's ssh configuration"):
-        try:
-            body = config.read_text(encoding="utf-8")
-        except OSError as exc:
-            problems.append(f"the owner's ssh configuration {config} cannot be read: {exc}")
-        else:
-            if GITHUB_IDENTITY_BEGIN not in body:
-                problems.append(
-                    f"{config} selects no managed identity for {host}; git offers no key and the "
-                    "push is refused as if there were none"
-                )
-            elif str(key) not in body:
-                problems.append(f"{config} selects an identity other than {key} for {host}")
+        elif str(key) not in body:
+            problems.append(f"{config} selects an identity other than {key} for {host}")
 
     authenticated = False
     detail = ""

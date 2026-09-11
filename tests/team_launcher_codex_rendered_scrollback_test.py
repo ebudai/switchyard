@@ -270,6 +270,50 @@ def _pane_format(server: str, target: str, spec: str) -> str:
     return str(proc.stdout or "").strip()
 
 
+def _pane_process_tree(server: str, target: str) -> set[str]:
+    """Every program running under the pane, read from the process table.
+
+    `#{pane_current_command}` names the pane's foreground process group
+    leader, which is the shell whenever the pane's shell does not replace
+    itself with its argument -- and this account's login shell, fish, does
+    not. tmux takes `default-shell` from the invoker's `$SHELL`, so that
+    format would make this case pass or fail on who ran it. What the case
+    needs to know is whether codex is running under the pane, so the tree
+    below `#{pane_pid}` is walked instead (SYRD-91 audit kick-back).
+    """
+    pane_pid = _pane_format(server, target, "#{pane_pid}")
+    if not pane_pid.isdigit():
+        return set()
+    names: dict[int, str] = {}
+    children: dict[int, list[int]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            names[int(entry.name)] = (entry / "comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        # The second field is the executable name in parentheses and may itself
+        # contain spaces, so the fields after it are counted from the last `)`.
+        after = stat[stat.rfind(")") + 1 :].split()
+        if len(after) < 2:
+            continue
+        children.setdefault(int(after[1]), []).append(int(entry.name))
+    found: set[str] = set()
+    seen: set[int] = set()
+    stack = [int(pane_pid)]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if pid in names:
+            found.add(names[pid])
+        stack.extend(children.get(pid, []))
+    return found
+
+
 def _wheel_up_through_an_attached_client(server: str, session: str, notches: int = 3) -> None:
     """Deliver a real wheel event the way a terminal attached to the pane does.
 
@@ -350,13 +394,20 @@ def test_a_real_codex_pane_scrolls_rather_than_typing() -> None:
                     server, option[1:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
                 )
             target = f"{session}:0.0"
-            deadline = time.time() + 30
+            deadline = time.time() + 60
+            running: set[str] = set()
             while time.time() < deadline:
-                if _pane_format(server, target, "#{pane_current_command}").startswith("codex"):
+                running = _pane_process_tree(server, target)
+                if "codex" in running:
                     break
                 time.sleep(0.5)
-            assert _pane_format(server, target, "#{pane_current_command}").startswith("codex"), (
-                _pane_format(server, target, "#{pane_current_command}")
+            assert "codex" in running, (
+                sorted(running),
+                _pane_format(server, target, "#{pane_current_command}"),
+                run_isolated_tmux(
+                    server, ["capture-pane", "-p", "-t", target],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=20,
+                ).stdout,
             )
 
             flags = _pane_format(server, target, "#{alternate_on},#{mouse_any_flag}")

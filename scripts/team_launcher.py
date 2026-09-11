@@ -6874,8 +6874,21 @@ def installed_release_deploy_target(
     # The same documented seam the rest of the trusted-release path uses: the
     # walk starts at "/" on a host, and moves only when the shared install root
     # has been overridden, because a fixture cannot own "/" (SYRD-97).
+    #
+    # `expect_uid` is root's, stated rather than defaulted. The default is the
+    # caller's own uid, which is right where the caller IS root writing its own
+    # artifacts -- what that helper was built for -- and exactly wrong here. The
+    # question is whether ROOT controls this release, and an unprivileged caller
+    # asking it was told that a root-owned path is not root-controlled because
+    # root owns it. `finish-upgrade` is unprivileged by design and is the command
+    # that most needs this answer, so the branch could never fire where it was
+    # needed most (SYRD-100 review).
     overridden_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", "").strip()
-    problems = root_controlled_problems(str(source_repo), base=overridden_root or "/")
+    problems = root_controlled_problems(
+        str(source_repo),
+        expect_uid=os.getuid() if overridden_root else 0,
+        base=overridden_root or "/",
+    )
     if problems:
         return "", (
             f"{source_repo} is named as an installed release but is not root-controlled: "
@@ -17813,19 +17826,28 @@ def finish_upgrade_command(
             "deploy instruction is still withheld."
         )
         return 0
-    record_release_phase_from_status(
+    release_status = report_tenant_release_upgrade(
         config,
         config_path=config_path,
-        status=report_tenant_release_upgrade(
-            config,
-            config_path=config_path,
-            source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
-            commit_git_dir=commit_git_dir,
-            deploy_ref=deploy_ref,
-            runner=runner,
-            print_func=print_func,
-        ),
+        source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
+        commit_git_dir=commit_git_dir,
+        deploy_ref=deploy_ref,
+        runner=runner,
+        print_func=print_func,
     )
+    record_release_phase_from_status(config, config_path=config_path, status=release_status)
+    blocked = release_update_blocked(release_status)
+    if blocked:
+        # The same rule as the privileged phase, which this command is the other
+        # half of. Saying the release cannot be produced and exiting 0 is what
+        # let a wrapper report the upgrade complete over a board that had not
+        # moved; applying it to one of the two commands fixed half of that
+        # (SYRD-100 review).
+        print_func(
+            f"switchyard: {config.project}'s release phase did not complete: {blocked}. "
+            "Nothing after it is claimed."
+        )
+        return 1
     return 0
 
 

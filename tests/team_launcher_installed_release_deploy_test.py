@@ -36,6 +36,7 @@ if str(ROOT / "tests") not in sys.path:
 
 from team_launcher_test_helpers import *  # noqa: F401,F403
 from scripts import team_launcher
+from team_launcher_test_helpers import FakeRunner, stage_trusted_releases, trusted_release_root_for
 from scripts.team_launcher import (
     installed_release_deploy_target,
     release_update_blocked,
@@ -272,6 +273,94 @@ def test_a_blocked_release_phase_never_reports_success() -> None:
         assert result != 0, output
         assert "release phase did not complete" in output, output
         assert "Nothing after it is claimed" in output, output
+
+
+def test_the_release_check_asks_whether_root_owns_it_not_the_caller() -> None:
+    """The unprivileged vantage, which is the one `finish-upgrade` has.
+
+    The whole-path helper defaults its expected owner to the caller's uid. That
+    is right where the caller is root writing its own artifacts, and backwards
+    here: an unprivileged caller asking "does root control this release" was
+    told that a root-owned path is not root-controlled because root owns it. The
+    branch could never fire on the command that most needs it (SYRD-100 review).
+    """
+    from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+    # The release this host actually has installed, not whichever sorts first:
+    # an older directory can carry a marker naming a different commit, and this
+    # case is about the one the command would be handed.
+    current = Path("/opt/switchyard/current")
+    if not current.is_dir():
+        return
+    release = current.resolve(strict=False)
+    marker = release / ".switchyard-release.json"
+    if not marker.is_file():
+        return
+    commit = json.loads(marker.read_text(encoding="utf-8")).get("commit", "")
+    if commit != release.name:
+        return
+
+    # The default expectation refuses it, from this account, for being root's.
+    assert root_controlled_problems(str(release)), "this host's release is not root-owned"
+    # Asking the question that was meant answers it.
+    assert root_controlled_problems(str(release), expect_uid=0) == [], str(release)
+
+    # And the deploy target resolves from here, unprivileged, which is the point.
+    # The suite redirects the shared install root so cases cannot write to /opt;
+    # this one is about the real one, so that redirection is lifted and restored.
+    assert os.getuid() != 0, "this case is about the unprivileged vantage"
+    with install_root_at(None):
+        assert installed_release_deploy_target(release, commit) == (commit, ""), release
+
+
+def test_finish_upgrade_never_reports_success_over_a_blocked_release() -> None:
+    """The other half of the command pair, which kept the defect after the fix.
+
+    `upgrade_project_command` stopped pairing that verdict with exit 0; this one
+    still did, and it is the command a director actually runs.
+    """
+    import team_launcher_upgrade_cutover_test as cutover
+
+    with tempfile.TemporaryDirectory(prefix="finish-blocked.") as tmp:
+        tmp_path = Path(tmp)
+        board = cutover._deployed_release(tmp_path, "porter", "a" * 40)
+        config_path, _root = cutover._declarative_tenant(tmp_path, board_root=board)
+        privileged = team_launcher.privileged_provision_dir(
+            "porter", root=team_launcher.switchyard_privileged_provision_root()
+        )
+        for unit in (*privileged.glob("porter-ticket-board*.service"),
+                     *config_path.parent.glob("porter-ticket-board*.service")):
+            unit.unlink()
+        config = team_launcher.load_project_config("porter", config_path)
+        printed: list[str] = []
+        staged = trusted_release_root_for(stage_trusted_releases())
+        commit = json.loads((staged / ".switchyard-release.json").read_text(encoding="utf-8"))["commit"]
+
+        # The director's own board write is not what this case is about, and a
+        # fixture has no board to make it against.
+        # Neither the director's board write nor the board read that confirms it
+        # is what this case is about, and a fixture has no board for either.
+        real_migrate = team_launcher.migrate_declarative_director_onboarding
+        real_state = team_launcher.director_onboarding_state
+        team_launcher.migrate_declarative_director_onboarding = lambda cfg, **kw: True
+        team_launcher.director_onboarding_state = lambda cfg, **kw: ("done", "")
+        try:
+            result = team_launcher.finish_upgrade_command(
+                config,
+                config_path=config_path,
+                source_repo=staged,
+                deploy_ref=commit,
+                runner=FakeRunner(),
+                print_func=printed.append,
+            )
+        finally:
+            team_launcher.migrate_declarative_director_onboarding = real_migrate
+            team_launcher.director_onboarding_state = real_state
+        output = "\n".join(printed)
+
+        assert "cannot produce a safe release update" in output, output
+        assert result != 0, output
+        assert "release phase did not complete" in output, output
 
 
 def main() -> int:

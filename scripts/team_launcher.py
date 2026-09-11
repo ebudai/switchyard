@@ -9272,32 +9272,256 @@ def github_identity_status(
     )
 
 
-def _record_owner_github_key(path: Path, key_name: str, host_alias: str) -> bool:
-    """Write the selection into one plan document, leaving everything else alone.
+@dataclass(frozen=True)
+class TrustedOwnerIdentity:
+    """Who a tenant's owner is, taken from root's own record and the kernel."""
 
-    Returns whether the file changed. The document is rewritten field for field
-    rather than regenerated: a plan carries decisions this command has no opinion
-    about, and rendering a fresh one would be deciding them again.
+    owner_user: str
+    owner_home: Path
+    owner_uid: int
+    owner_gid: int
+    problems: tuple[str, ...] = ()
+
+    @property
+    def trusted(self) -> bool:
+        return not self.problems
+
+
+def trusted_owner_identity(project: str) -> TrustedOwnerIdentity:
+    """The owner root will act for, derived from things the tenant cannot write.
+
+    The tenant's configuration and its plan are both writable by the account
+    every role runs as, so neither can say whose SSH state a root command
+    modifies: a role could point `run_as_user` or `owner_home` somewhere else
+    between the operator deciding to run this and the command reading it. Root's
+    own baseline plan lives in a directory only root can write, and passwd is the
+    kernel's. Both are consulted, and they have to agree (SYRD-100 review).
     """
+    baseline = privileged_baseline_plan_path(project)
+    problems: list[str] = []
+    walk = root_controlled_problems_for(str(baseline))
+    if walk:
+        return TrustedOwnerIdentity("", Path(), -1, -1, tuple(
+            [f"{baseline} is not root-controlled, so it cannot say who this tenant's owner is"] + walk
+        ))
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
+        recorded = json.loads(baseline.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return TrustedOwnerIdentity("", Path(), -1, -1, (f"{baseline} could not be read: {exc}",))
+    if not isinstance(recorded, dict):
+        return TrustedOwnerIdentity("", Path(), -1, -1, (f"{baseline} is not a plan document",))
+    owner_user = str(recorded.get("owner_user") or "").strip()
+    recorded_home = str(recorded.get("owner_home") or "").strip()
+    if not owner_user:
+        problems.append(f"{baseline} records no owner_user")
+    if not recorded_home:
+        problems.append(f"{baseline} records no owner_home")
+    if problems:
+        return TrustedOwnerIdentity("", Path(), -1, -1, tuple(problems))
+    owner_uid = uid_for_user(owner_user)
+    owner_home = home_dir_for_user(owner_user)
+    if owner_uid is None or owner_home is None:
+        return TrustedOwnerIdentity(
+            "", Path(), -1, -1, (f"{owner_user} is not an account on this host",)
+        )
+    # The kernel's answer and root's record have to be the same answer. A
+    # divergence is not something to pick a winner from.
+    if owner_home != Path(recorded_home):
+        return TrustedOwnerIdentity(
+            "", Path(), -1, -1,
+            (
+                f"{baseline} records {owner_user}'s home as {recorded_home}, and this host says "
+                f"{owner_home}. Nothing was changed: which one is right is not this command's "
+                "to decide.",
+            ),
+        )
+    try:
+        owner_gid = int(pwd.getpwuid(owner_uid).pw_gid)
+    except KeyError:
+        owner_gid = owner_uid
+    return TrustedOwnerIdentity(owner_user, owner_home, owner_uid, owner_gid)
+
+
+def expected_privileged_uid() -> int:
+    """Whose files count as root's for the privileged provision directory.
+
+    Root's on a host. When the privileged provision root has been overridden it
+    is the caller's own uid, because that override is the documented seam for
+    exercising these paths without writing to /etc and a fixture cannot own a
+    root-owned file. The same seam the trusted-release checks use (SYRD-97).
+    """
+    return os.getuid() if os.environ.get(PRIVILEGED_PROVISION_ROOT_ENV, "").strip() else 0
+
+
+def root_controlled_problems_for(path: str) -> list[str]:
+    """The whole-path root ownership check, through the documented test seam."""
+    from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+    overridden = os.environ.get(PRIVILEGED_PROVISION_ROOT_ENV, "").strip()
+    return root_controlled_problems(path, base=overridden or "/")
+
+
+@dataclass(frozen=True)
+class PlanDocument:
+    """One plan authority, opened without following anything."""
+
+    path: Path
+    data: dict[str, Any]
+    raw: bytes
+    uid: int
+    gid: int
+    mode: int
+
+
+def read_plan_no_follow(path: Path, *, require_root_owned: bool) -> tuple[PlanDocument | None, str]:
+    """Read one plan authority by fd, refusing symlinks at every component.
+
+    `Path.read_text` on a tenant-controlled directory follows whatever is there.
+    The tenant can replace its plan with a symlink to anything, and root would
+    then read, truncate and re-own the referent instead (SYRD-100 review).
+    """
+    relative = Path(str(path).lstrip("/"))
+    dir_fd, problem = _walk_no_follow(Path(path.anchor or "/"), relative)
+    if dir_fd < 0:
+        return None, f"{path}: {problem}"
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                return None, f"{path} is a symlink, so it is not a plan this will read or write"
+            if exc.errno == errno.ENOENT:
+                return None, f"{path} does not exist"
+            return None, f"{path} could not be opened ({exc.strerror})"
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return None, f"{path} is not a regular file"
+            if require_root_owned:
+                expected = expected_privileged_uid()
+                if info.st_uid != expected:
+                    return None, (
+                        f"{path} is owned by uid {info.st_uid} rather than by uid {expected}"
+                    )
+                if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return None, (
+                        f"{path} is mode {stat.S_IMODE(info.st_mode):04o}, which anybody in its "
+                        "group or beyond can write"
+                    )
+            raw = b""
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, f"{path} is not readable as a plan document: {exc}"
     if not isinstance(data, dict):
-        return False
-    if (
-        str(data.get("owner_github_key_name") or "") == key_name
-        and str(data.get("owner_github_host_alias") or "") == host_alias
+        return None, f"{path} is not a plan document"
+    return PlanDocument(path, data, raw, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), ""
+
+
+def write_plan_no_follow(document: PlanDocument, body: bytes) -> str:
+    """Replace one plan authority atomically, inside its own directory.
+
+    Staged beside it and renamed over, so a symlink at the destination is
+    replaced rather than followed, and a reader never sees a half-written plan.
+    Owner and mode are carried from the file that was there, so the tenant's copy
+    stays the tenant's and root's stays root's.
+    """
+    relative = Path(str(document.path).lstrip("/"))
+    dir_fd, problem = _walk_no_follow(Path(document.path.anchor or "/"), relative)
+    if dir_fd < 0:
+        return f"{document.path}: {problem}"
+    staged = f".{document.path.name}.switchyard-new"
+    try:
+        try:
+            fd = os.open(
+                staged,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                document.mode,
+                dir_fd=dir_fd,
+            )
+        except FileExistsError:
+            os.unlink(staged, dir_fd=dir_fd)
+            fd = os.open(
+                staged,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                document.mode,
+                dir_fd=dir_fd,
+            )
+        try:
+            os.write(fd, body)
+            os.fchmod(fd, document.mode)
+            if os.geteuid() == 0:
+                os.fchown(fd, document.uid, document.gid)
+        finally:
+            os.close(fd)
+        os.rename(staged, document.path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        try:
+            os.unlink(staged, dir_fd=dir_fd)
+        except OSError:
+            pass
+        return f"{document.path} could not be replaced ({exc.strerror})"
+    finally:
+        os.close(dir_fd)
+    return ""
+
+
+def selected_key_problems(owner_home: Path, key_name: str, owner_uid: int) -> list[str]:
+    """Whether both halves of the named key are the owner's own regular files.
+
+    lstat rather than stat, on every component of the pair: a role can point the
+    name at a root-owned file, and a check that follows it would report a
+    perfectly good key that belongs to somebody else entirely. Nothing here
+    opens, reads or changes either half -- selection is not provisioning
+    (SYRD-100 review).
+    """
+    problems: list[str] = []
+    for label, path in (
+        ("private half", owner_home / ".ssh" / key_name),
+        ("public half", owner_home / ".ssh" / f"{key_name}.pub"),
     ):
-        return False
+        try:
+            info = os.lstat(path)
+        except OSError:
+            problems.append(f"the {label} {path} does not exist")
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            problems.append(f"the {label} {path} is a symlink, so what it names is not this key")
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            problems.append(f"the {label} {path} is not a regular file")
+            continue
+        if info.st_uid != owner_uid:
+            problems.append(
+                f"the {label} {path} is owned by uid {info.st_uid} rather than by the tenant owner"
+            )
+    return problems
+
+
+def _plan_with_selection(document: PlanDocument, key_name: str, host_alias: str) -> bytes | None:
+    """The plan's own bytes with the selection set, or None when already right.
+
+    Rewritten field for field rather than regenerated: a plan carries decisions
+    this command has no opinion about.
+    """
+    if (
+        str(document.data.get("owner_github_key_name") or "") == key_name
+        and str(document.data.get("owner_github_host_alias") or "") == host_alias
+    ):
+        return None
+    data = dict(document.data)
     data["owner_github_key_name"] = key_name
     data["owner_github_host_alias"] = host_alias
-    info = path.stat()
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    # The tenant's copy belongs to the tenant even when root writes it.
-    os.chown(path, info.st_uid, info.st_gid)
-    os.chmod(path, stat.S_IMODE(info.st_mode))
-    return True
+    return (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def set_owner_github_identity_command(
@@ -9315,93 +9539,125 @@ def set_owner_github_identity_command(
 
     The supported repair for a tenant whose managed block was pointed at the
     wrong key. An upgrade will not choose between an owner's keys and will not
-    generate one beside them -- that refusal is the point of SYRD-100 -- so
-    somebody has to say which key is the one, once, and have it recorded where
-    both the tenant and root will read it afterwards.
+    generate one beside them, so somebody has to say which key is the one, once,
+    and have it recorded where both the tenant and root will read it.
 
-    It names a key that already exists and does nothing else: no key is created,
-    no private material is read, and only the managed block between the markers
-    is rewritten. An operator's own stanzas, including whatever they were using
-    to work around this, are left exactly as they are.
+    Everything about this runs as root on paths a tenant controls, so nothing
+    the tenant writes is treated as authority and nothing under the owner's home
+    is written by root. Who the owner is comes from root's own baseline plan and
+    from passwd; the key is validated without following symlinks and is never
+    opened, created or modified; the ssh_config rewrite is performed by the owner
+    as the owner; and both plan authorities are read and validated before either
+    is written (SYRD-100 review).
     """
     from scripts.ticket_board.project_provision import (
-        existing_owner_ssh_key_names,
-        owner_github_identity_commands,
         owner_github_key_path,
+        owner_github_selection_commands,
     )
 
-    owner = config.run_as_user or current_user_name()
-    owner_home = _tenant_owner_home(config, config_path)
+    project = config.project
     selected = key_name.strip()
+    alias = host_alias.strip()
     if not selected or "/" in selected:
         print_func(
-            f"switchyard: {selected!r} is not a key file name. Name one of the owner's keys, "
+            f"switchyard: {key_name!r} is not a key file name. Name one of the owner's keys, "
             "without a path."
         )
         return 1
-    key = Path(owner_github_key_path(str(owner_home), key_name=selected))
-    existing = existing_owner_ssh_key_names(str(owner_home))
-    if not key.is_file() or not key.with_name(key.name + ".pub").is_file():
-        # Never created here. This command selects an identity; making one is
-        # provisioning, and doing it silently is the substitution being repaired.
+
+    identity = trusted_owner_identity(project)
+    if not identity.trusted:
+        for problem in identity.problems:
+            print_func(f"switchyard: {problem}")
         print_func(
-            f"switchyard: {owner} has no key pair named {selected} in {owner_home}/.ssh, so there "
-            "is nothing to select. Nothing was changed."
+            f"switchyard: refusing to change {project}'s publication identity: root cannot "
+            "establish whose it is. Nothing was changed."
         )
-        if existing:
-            print_func(f"switchyard: keys found there: {', '.join(existing)}")
+        return 1
+    owner, owner_home = identity.owner_user, identity.owner_home
+
+    key_problems = selected_key_problems(owner_home, selected, identity.owner_uid)
+    if key_problems:
+        for problem in key_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: {selected} is not a key pair {owner} owns, so there is nothing to "
+            "select. Nothing was changed, and no key was created."
+        )
         return 1
 
+    # Both authorities, read and validated before either is written. Root's own
+    # copy must be root's; the tenant's is the tenant's and is replaced rather
+    # than followed.
     tenant_plan = config_path.parent / "plan.json"
-    root_plan = privileged_baseline_plan_path(config.project)
-    authorities = [path for path in (tenant_plan, root_plan) if path.is_file()]
-    missing = [path for path in (tenant_plan, root_plan) if not path.is_file()]
+    root_plan = privileged_baseline_plan_path(project)
+    documents: list[PlanDocument] = []
+    for path, require_root in ((root_plan, True), (tenant_plan, False)):
+        document, problem = read_plan_no_follow(path, require_root_owned=require_root)
+        if document is None:
+            print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: {project}'s publication identity is recorded in two places and both "
+                "have to be writable, or the two disagree afterwards. Nothing was changed."
+            )
+            return 1
+        documents.append(document)
 
+    key = Path(owner_github_key_path(str(owner_home), key_name=selected))
     if dry_run:
         print_func(
-            f"switchyard: would record {config.project}'s publication identity as {selected}"
-            + (f" with host alias {host_alias}" if host_alias else "")
+            f"switchyard: would record {project}'s publication identity as {selected}"
+            + (f" with host alias {alias}" if alias else "")
         )
-        for path in authorities:
-            print_func(f"switchyard:   would record it in {path}")
-        for path in missing:
-            print_func(f"warning: switchyard:   {path} does not exist and would not be created")
-        print_func(f"switchyard: would select {key} in {owner_home}/.ssh/config, managed block only")
+        for document in documents:
+            pending = _plan_with_selection(document, selected, alias)
+            print_func(
+                f"switchyard:   {document.path} "
+                + ("would be updated" if pending is not None else "already records it")
+            )
+        print_func(
+            f"switchyard: would have {owner} select {key} in {owner_home}/.ssh/config, "
+            "managed block only"
+        )
         return 0
 
     if os.geteuid() != 0:
         print_func(
-            f"switchyard: recording {config.project}'s publication identity writes root's own plan "
-            f"and the owner's ssh configuration. Run: sudo switchyard set-owner-identity "
-            f"{config.project} --key-name {selected}"
-            + (f" --host-alias {host_alias}" if host_alias else "")
+            f"switchyard: recording {project}'s publication identity writes root's own plan. Run: "
+            f"sudo switchyard set-owner-identity {project} --key-name {selected}"
+            + (f" --host-alias {alias}" if alias else "")
         )
         return 1
 
-    if not authorities:
-        print_func(
-            f"switchyard: neither {tenant_plan} nor {root_plan} exists, so there is nowhere durable "
-            "to record this. Nothing was changed."
-        )
-        return 1
-    for path in missing:
-        # Said, not created. A plan this command invents is a plan nothing else
-        # agrees with.
-        print_func(f"warning: switchyard: {path} does not exist, so the selection is not recorded there")
-    for path in authorities:
-        changed = _record_owner_github_key(path, selected, host_alias.strip())
-        print_func(
-            f"switchyard: {'recorded' if changed else 'already recorded'} {selected} in {path}"
-        )
+    # Written one after the other, with what was there kept so the first can be
+    # put back if the second fails. Two authorities that disagree are worse than
+    # two that are both stale: the next upgrade would read one of them.
+    written: list[PlanDocument] = []
+    for document in documents:
+        body = _plan_with_selection(document, selected, alias)
+        if body is None:
+            print_func(f"switchyard: {document.path} already records {selected}")
+            continue
+        problem = write_plan_no_follow(document, body)
+        if problem:
+            print_func(f"switchyard: {problem}")
+            for done in reversed(written):
+                restored = write_plan_no_follow(done, done.raw)
+                print_func(
+                    f"switchyard: {done.path} "
+                    + (f"could not be put back: {restored}" if restored else "was put back as it was")
+                )
+            print_func(
+                f"switchyard: {project}'s publication identity was not changed, and neither plan "
+                "was left disagreeing with the other."
+            )
+            return 1
+        written.append(document)
+        print_func(f"switchyard: recorded {selected} in {document.path}")
 
     script = "set -eu\n" + "\n".join(
-        owner_github_identity_commands(
-            owner,
-            str(owner_home),
-            key_name=selected,
-            host=host,
-            host_alias=host_alias.strip(),
-            comment=f"{owner} switchyard {config.project}",
+        owner_github_selection_commands(
+            owner, str(owner_home), key_name=selected, host=host, host_alias=alias
         )
     )
     applied = runner(["sh", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -9410,17 +9666,18 @@ def set_owner_github_identity_command(
             f"switchyard: could not select {selected} for {owner} (exit {applied.returncode}): "
             f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
         )
+        print_func(
+            f"switchyard: both plans record {selected}; {owner_home}/.ssh/config does not yet. "
+            f"Rerun this command, which is safe to repeat."
+        )
         return 1
     print_func(f"switchyard: {owner_home}/.ssh/config now selects {key} for {host}")
 
-    identity = github_identity_status(owner, owner_home, key_name=selected, host=host, runner=runner)
-    if identity.fingerprint:
-        print_func(f"switchyard: fingerprint: {identity.fingerprint}")
-    remedy = github_identity_remedy(identity, project=config.project)
+    status = github_identity_status(owner, owner_home, key_name=selected, host=host, runner=runner)
+    if status.fingerprint:
+        print_func(f"switchyard: fingerprint: {status.fingerprint}")
+    remedy = github_identity_remedy(status, project=project)
     if remedy:
-        # The selection is recorded and installed either way; what is not true is
-        # that the tenant can publish, and saying so is the whole point of
-        # verifying rather than asserting.
         print_func(remedy)
         print_func(
             f"switchyard: {selected} is selected and recorded, but it did not authenticate. "

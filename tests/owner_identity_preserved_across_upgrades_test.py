@@ -337,7 +337,34 @@ def identity_reported_as(authenticated: bool, *, fingerprint: str = "SHA256:exam
         team_launcher.github_identity_status = real
 
 
-def repair(config_path: Path, home: Path, **kwargs):
+@contextmanager
+def trusted_owner(home: Path, *, owner: str = "porter-owner", uid: int | None = None):
+    """Root's baseline plan, and the host facts it must agree with.
+
+    The owner and the home now come from root's own plan cross-checked against
+    the host, never from the tenant's config or plan, so a fixture has to supply
+    both sides. `home_dir_for_user` and `uid_for_user` are the codebase's own
+    kernel lookups and are where a test stands in for passwd.
+    """
+    root_plan = team_launcher.privileged_baseline_plan_path("porter")
+    root_plan.parent.mkdir(parents=True, exist_ok=True)
+    root_plan.write_text(
+        json.dumps({"project": "porter", "owner_user": owner, "owner_home": str(home)}, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+    real_home, real_uid = team_launcher.home_dir_for_user, team_launcher.uid_for_user
+    team_launcher.home_dir_for_user = lambda user: home if user == owner else real_home(user)
+    team_launcher.uid_for_user = (
+        lambda user: (os.getuid() if uid is None else uid) if user == owner else real_uid(user)
+    )
+    try:
+        yield root_plan
+    finally:
+        team_launcher.home_dir_for_user, team_launcher.uid_for_user = real_home, real_uid
+
+
+def repair(config_path: Path, **kwargs):
     """The operator repair command, run the way the CLI runs it."""
     printed: list[str] = []
     runner = FakeRunner()
@@ -357,8 +384,8 @@ def repair(config_path: Path, home: Path, **kwargs):
     return result, "\n".join(printed), runner
 
 
-def root_plan_path() -> Path:
-    return team_launcher.privileged_baseline_plan_path("porter")
+def selection_scripts(runner: Any) -> list[str]:
+    return [call[2] for call in runner.calls if len(call) >= 3 and call[0] == "sh" and call[1] == "-c"]
 
 
 def test_the_operator_repair_records_the_key_in_both_plan_authorities() -> None:
@@ -367,50 +394,244 @@ def test_the_operator_repair_records_the_key_in_both_plan_authorities() -> None:
         tmp_path = Path(tmp)
         home = owner_home_with(tmp_path, keys=(DEPLOY_KEY, DEFAULT_KEY), selected=DEFAULT_KEY)
         config_path, _plan = tenant_with_owner_home(tmp_path, home)
-        root_plan = root_plan_path()
-        root_plan.parent.mkdir(parents=True, exist_ok=True)
-        root_plan.write_text(json.dumps({"project": "porter", "owner_home": str(home)}), encoding="utf-8")
-
-        with identity_reported_as(True) as asked:
+        with trusted_owner(home) as root_plan, identity_reported_as(True) as asked:
             result, output, runner = repair(
-                config_path, home, key_name=DEPLOY_KEY, host_alias="github-switchyard"
+                config_path, key_name=DEPLOY_KEY, host_alias="github-switchyard"
             )
 
         assert result == 0, output
         assert asked == [DEPLOY_KEY], asked
-        # Both durable authorities, the tenant's and root's own.
         for path in (config_path.parent / "plan.json", root_plan):
             recorded = json.loads(path.read_text(encoding="utf-8"))
             assert recorded["owner_github_key_name"] == DEPLOY_KEY, (path, recorded)
             assert recorded["owner_github_host_alias"] == "github-switchyard", (path, recorded)
             assert str(path) in output, output
-        # Only the managed block is rewritten, and it names the chosen key.
-        rendered = "\n".join(identity_scripts(runner))
+        rendered = "\n".join(selection_scripts(runner))
         assert names_key(rendered, owner_github_key_path(str(home), key_name=DEPLOY_KEY)), rendered
         assert not names_key(rendered, owner_github_key_path(str(home), key_name=DEFAULT_KEY)), rendered
-        assert GITHUB_IDENTITY_BEGIN in rendered and GITHUB_IDENTITY_END in rendered, rendered
         assert "Host github-switchyard" in rendered, rendered
-        # And nothing outside the markers is touched: the operator's own stanza
-        # survives, because the block replaces itself rather than the file.
         assert "Host bastion.invalid" in (home / ".ssh" / "config").read_text(encoding="utf-8")
 
 
-def test_the_repair_never_creates_a_key() -> None:
-    """Selecting an identity is not provisioning one, and must not become it."""
-    with tempfile.TemporaryDirectory(prefix="identity-repair-missing.") as tmp:
+def test_the_selection_never_generates_or_touches_the_key_pair() -> None:
+    """Selection is not provisioning, and root writes nothing under the owner's home."""
+    with tempfile.TemporaryDirectory(prefix="identity-no-touch.") as tmp:
         tmp_path = Path(tmp)
-        home = owner_home_with(tmp_path, keys=(DEFAULT_KEY,))
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        with trusted_owner(home), identity_reported_as(True):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+
+        assert result == 0, output
+        rendered = "\n".join(selection_scripts(runner))
+        # No key is created, and root changes neither half's owner nor its mode.
+        assert "ssh-keygen" not in rendered, rendered
+        for forbidden in ("sudo chown", "sudo chmod", "chown root", "chmod 0600"):
+            assert forbidden not in rendered, (forbidden, rendered)
+        # Everything it does, it does as the owner.
+        assert rendered.strip().startswith("set -eu\nsudo -u "), rendered[:120]
+        assert rendered.count("sudo ") == rendered.count("sudo -u "), rendered
+
+
+def test_a_tenant_cannot_redirect_the_write_by_editing_its_own_documents() -> None:
+    """Finding 1: the tenant's config and plan are writable by every role."""
+    with tempfile.TemporaryDirectory(prefix="identity-substitute.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        elsewhere = tmp_path / "attacker-home"
+        (elsewhere / ".ssh").mkdir(parents=True)
         config_path, _plan = tenant_with_owner_home(tmp_path, home)
 
-        result, output, runner = repair(config_path, home, key_name=DEPLOY_KEY)
+        # A role rewrites both tenant documents to name another account and home.
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload["run_as_user"] = "somebody-else"
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+        plan_path = config_path.parent / "plan.json"
+        tenant_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        tenant_plan["owner_home"] = str(elsewhere)
+        plan_path.write_text(json.dumps(tenant_plan), encoding="utf-8")
+
+        with trusted_owner(home), identity_reported_as(True):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+
+        # Root acted for the owner its own baseline names, in that owner's home.
+        assert result == 0, output
+        rendered = "\n".join(selection_scripts(runner))
+        assert str(elsewhere) not in rendered, rendered
+        assert "somebody-else" not in rendered, rendered
+        assert str(home) in rendered, rendered
+
+
+def test_a_baseline_that_disagrees_with_the_host_stops_everything() -> None:
+    """Divergence is not something to pick a winner from."""
+    with tempfile.TemporaryDirectory(prefix="identity-divergent.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        with trusted_owner(home) as root_plan:
+            recorded = json.loads(root_plan.read_text(encoding="utf-8"))
+            recorded["owner_home"] = str(tmp_path / "somewhere-else")
+            root_plan.write_text(json.dumps(recorded), encoding="utf-8")
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
 
         assert result == 1, output
-        assert "has no key pair named" in output, output
-        assert DEFAULT_KEY in output, output
-        assert identity_scripts(runner) == [], identity_scripts(runner)
+        assert "which one is right is not this command's to decide" in output, output
+        assert selection_scripts(runner) == [], selection_scripts(runner)
+        assert "owner_github_key_name" not in (config_path.parent / "plan.json").read_text()
+
+
+def test_a_plan_replaced_by_a_symlink_is_refused_rather_than_followed() -> None:
+    """Finding 2: root must not read, truncate or re-own a symlink's referent."""
+    with tempfile.TemporaryDirectory(prefix="identity-symlink-plan.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        victim = tmp_path / "victim.json"
+        victim.write_text(json.dumps({"do not": "touch"}), encoding="utf-8")
+        plan_path = config_path.parent / "plan.json"
+        plan_path.unlink()
+        plan_path.symlink_to(victim)
+
+        with trusted_owner(home):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+
+        assert result == 1, output
+        assert "is a symlink" in output, output
+        assert selection_scripts(runner) == [], selection_scripts(runner)
+        # The referent is exactly as it was.
+        assert json.loads(victim.read_text(encoding="utf-8")) == {"do not": "touch"}
+
+
+def test_a_key_half_replaced_by_a_symlink_is_refused() -> None:
+    """Finding 3: a name pointed at somebody else's file is not this owner's key."""
+    for half in ("", ".pub"):
+        with tempfile.TemporaryDirectory(prefix="identity-symlink-key.") as tmp:
+            tmp_path = Path(tmp)
+            home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+            victim = tmp_path / "root-owned-secret"
+            victim.write_text("not the tenant's\n", encoding="utf-8")
+            target = home / ".ssh" / f"{DEPLOY_KEY}{half}"
+            target.unlink()
+            target.symlink_to(victim)
+            config_path, _plan = tenant_with_owner_home(tmp_path, home)
+
+            with trusted_owner(home):
+                result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+
+            assert result == 1, (half, output)
+            assert "is a symlink" in output, output
+            assert "no key was created" in output, output
+            assert selection_scripts(runner) == [], selection_scripts(runner)
+            assert victim.read_text(encoding="utf-8") == "not the tenant's\n"
+
+
+def test_a_key_half_owned_by_somebody_else_is_refused() -> None:
+    """The check is the owner's own files, not merely files that exist."""
+    with tempfile.TemporaryDirectory(prefix="identity-foreign-key.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        # The owner is somebody whose uid is not the one that owns these files.
+        with trusted_owner(home, uid=os.getuid() + 1):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+
+        assert result == 1, output
+        assert "rather than by the tenant owner" in output, output
+        assert selection_scripts(runner) == [], selection_scripts(runner)
+
+
+def test_a_key_that_disappears_after_validation_is_never_recreated() -> None:
+    """Finding 3's interval: deleting the key mid-command must not generate one."""
+    with tempfile.TemporaryDirectory(prefix="identity-vanishing-key.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+
+        with trusted_owner(home), identity_reported_as(True):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+        # The key goes away in the interval the renderer used to cover.
+        (home / ".ssh" / DEPLOY_KEY).unlink()
+
+        assert result == 0, output
+        rendered = "\n".join(selection_scripts(runner))
+        # What was rendered cannot create it: there is no keygen in it at all,
+        # so the interval has nothing to exploit.
+        assert "ssh-keygen" not in rendered, rendered
         assert not (home / ".ssh" / DEPLOY_KEY).exists()
-        recorded = json.loads((config_path.parent / "plan.json").read_text(encoding="utf-8"))
-        assert "owner_github_key_name" not in recorded, recorded
+
+
+def test_a_root_plan_the_tenant_could_have_written_is_refused() -> None:
+    """Root's own authority has to be root's, or it is not an authority."""
+    with tempfile.TemporaryDirectory(prefix="identity-weak-root-plan.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        with trusted_owner(home) as root_plan:
+            root_plan.chmod(0o666)
+            try:
+                result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+            finally:
+                root_plan.chmod(0o644)
+
+        assert result == 1, output
+        # Caught by the whole-path check before the plan is even read, which is
+        # earlier than the file's own mode check and is the right place: a plan
+        # anyone can write cannot say who root should act for.
+        assert "is not root-controlled" in output, output
+        assert "cannot establish whose it is" in output, output
+        assert selection_scripts(runner) == [], selection_scripts(runner)
+        assert "owner_github_key_name" not in (config_path.parent / "plan.json").read_text()
+
+
+def test_a_missing_authority_stops_before_anything_is_written() -> None:
+    """Finding 4: both, or neither. Two plans that disagree is the worst outcome."""
+    with tempfile.TemporaryDirectory(prefix="identity-one-authority.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        (config_path.parent / "plan.json").unlink()
+
+        with trusted_owner(home):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+
+        assert result == 1, output
+        assert "both have to be writable" in output, output
+        assert selection_scripts(runner) == [], selection_scripts(runner)
+        root_plan = json.loads(team_launcher.privileged_baseline_plan_path("porter").read_text())
+        assert "owner_github_key_name" not in root_plan, root_plan
+
+
+def test_a_failed_second_write_puts_the_first_one_back() -> None:
+    """The transaction: the two authorities never disagree because of a failure."""
+    with tempfile.TemporaryDirectory(prefix="identity-rollback.") as tmp:
+        tmp_path = Path(tmp)
+        home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
+        config_path, _plan = tenant_with_owner_home(tmp_path, home)
+        tenant_plan = config_path.parent / "plan.json"
+        real_write = team_launcher.write_plan_no_follow
+        calls: list[Path] = []
+
+        def fails_on_the_tenant_copy(document, body):
+            calls.append(document.path)
+            if document.path == tenant_plan and len(calls) == 2:
+                return f"{document.path} could not be replaced (simulated)"
+            return real_write(document, body)
+
+        team_launcher.write_plan_no_follow = fails_on_the_tenant_copy
+        try:
+            # Inside the context, because that is what writes root's baseline.
+            with trusted_owner(home) as root_plan:
+                before = {"root": root_plan.read_bytes(), "tenant": tenant_plan.read_bytes()}
+                result, output, runner = repair(config_path, key_name=DEPLOY_KEY)
+        finally:
+            team_launcher.write_plan_no_follow = real_write
+
+        assert result == 1, output
+        assert "was put back as it was" in output, output
+        assert "neither plan was left disagreeing" in output, output
+        assert selection_scripts(runner) == [], selection_scripts(runner)
+        assert team_launcher.privileged_baseline_plan_path("porter").read_bytes() == before["root"]
+        assert tenant_plan.read_bytes() == before["tenant"]
 
 
 def test_the_repair_verifies_the_key_it_selected() -> None:
@@ -419,18 +640,15 @@ def test_the_repair_verifies_the_key_it_selected() -> None:
         tmp_path = Path(tmp)
         home = owner_home_with(tmp_path, keys=(DEPLOY_KEY,), selected=DEFAULT_KEY)
         config_path, _plan = tenant_with_owner_home(tmp_path, home)
-
-        with identity_reported_as(
+        with trusted_owner(home), identity_reported_as(
             False, fingerprint="SHA256:GJXVwhfB26C6U4Zway32Hgcou+cH498/TYuQwyhfo94"
         ) as asked:
-            result, output, _runner = repair(config_path, home, key_name=DEPLOY_KEY)
+            result, output, _runner = repair(config_path, key_name=DEPLOY_KEY)
 
         assert asked == [DEPLOY_KEY], asked
         assert result == 1, output
         assert "did not authenticate" in output, output
         assert "SHA256:GJXVwhfB26C6U4Zway32Hgcou" in output, output
-        # Recorded and installed even so, because it was: the honest report is
-        # that the selection is made and the key is not usable yet.
         recorded = json.loads((config_path.parent / "plan.json").read_text(encoding="utf-8"))
         assert recorded["owner_github_key_name"] == DEPLOY_KEY, recorded
 
@@ -442,11 +660,12 @@ def test_a_dry_run_repair_writes_nothing() -> None:
         config_path, _plan = tenant_with_owner_home(tmp_path, home)
         before = (home / ".ssh" / "config").read_text(encoding="utf-8")
 
-        result, output, runner = repair(config_path, home, key_name=DEPLOY_KEY, dry_run=True)
+        with trusted_owner(home):
+            result, output, runner = repair(config_path, key_name=DEPLOY_KEY, dry_run=True)
 
         assert result == 0, output
         assert "would record" in output and DEPLOY_KEY in output, output
-        assert identity_scripts(runner) == [], identity_scripts(runner)
+        assert selection_scripts(runner) == [], selection_scripts(runner)
         assert (home / ".ssh" / "config").read_text(encoding="utf-8") == before
         recorded = json.loads((config_path.parent / "plan.json").read_text(encoding="utf-8"))
         assert "owner_github_key_name" not in recorded, recorded
@@ -459,8 +678,8 @@ def test_the_upgrade_then_keeps_what_the_repair_recorded() -> None:
         home = owner_home_with(tmp_path, keys=(DEPLOY_KEY, DEFAULT_KEY), selected=DEFAULT_KEY)
         config_path, _plan = tenant_with_owner_home(tmp_path, home)
 
-        with identity_reported_as(True):
-            result, _output, _runner = repair(config_path, home, key_name=DEPLOY_KEY)
+        with trusted_owner(home), identity_reported_as(True):
+            result, _output, _runner = repair(config_path, key_name=DEPLOY_KEY)
         assert result == 0
 
         _upgraded, runner = run_upgrade(config_path)

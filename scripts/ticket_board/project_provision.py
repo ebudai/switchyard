@@ -1035,6 +1035,61 @@ def owner_github_identity_commands(
     ]
 
 
+def owner_github_selection_commands(
+    owner_user: str,
+    owner_home: str,
+    *,
+    key_name: str,
+    host: str = DEFAULT_GITHUB_HOST,
+    host_alias: str = "",
+) -> list[str]:
+    """Select an existing key, and touch nothing else.
+
+    Deliberately not `owner_github_identity_commands`. That one provisions: it
+    creates the key when it is absent and then chowns and chmods both halves as
+    root. Every one of those is wrong for a repair that only chooses between
+    keys the owner already has, and each is a root write onto a path the tenant
+    controls -- a role can point the named key at a root-owned file, or delete
+    the key between the check and the command, and turn selection into creation
+    or into root changing the owner of something it should not (SYRD-100 review).
+
+    So this emits one thing: the managed block, rewritten by the owner as the
+    owner. No key is created, no key is read, and no path under the owner's home
+    is written by root. A symlink anywhere in it is the owner's own business,
+    because the owner is who is writing.
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    if not key_name.strip():
+        raise PathContainmentError("a key name is required to select an identity")
+    # Raises when the name carries a path separator, which is the check that
+    # keeps the selection inside the owner's own .ssh.
+    owner_github_key_path(owner_home, key_name=key_name)
+    ssh_dir = f"{owner_home.rstrip('/')}/.ssh"
+    config = f"{ssh_dir}/config"
+    block = github_identity_block(owner_home, key_name=key_name, host=host, host_alias=host_alias)
+    q_owner = shell_quote(owner_user)
+    return [
+        # As the owner, in the owner's own directory. The block replaces itself
+        # between its markers and everything else is preserved, so an operator's
+        # other stanzas survive.
+        f"sudo -u {q_owner} sh -c "
+        + shell_quote(
+            "set -e; "
+            f'block={shell_quote(block)}; '
+            f'dir={shell_quote(ssh_dir)}; '
+            f'config={shell_quote(config)}; '
+            'mkdir -p "$dir"; chmod 0700 "$dir"; '
+            'tmp="$(mktemp)"; '
+            'printf "%s" "$block" > "$tmp"; '
+            'if [ -f "$config" ]; then '
+            f"sed {shell_quote(f'/^{GITHUB_IDENTITY_BEGIN}$/,/^{GITHUB_IDENTITY_END}$/d')} "
+            '"$config" >> "$tmp"; fi; '
+            'install -m 0600 "$tmp" "$config"; '
+            'rm -f "$tmp"'
+        ),
+    ]
+
+
 def role_tooling_staging_dir(project: str, *, root: Path | str | None = None) -> str:
     """Where a role account reaches this tenant's root-owned tooling."""
     return f"{root if root is not None else TENANT_CONTROL_ROOT}/{project}"

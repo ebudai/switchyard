@@ -80,12 +80,13 @@ def last_migration_to_create(name: str) -> tuple[Path, str]:
 def test_every_function_it_re_creates_matches_the_schema_it_ships_with() -> None:
     """A body older than the schema beside it is a rollback nobody is told about.
 
-    The tenant runs every migration in filename order, so what it ends up with
-    is whichever migration creates the function last -- and that is what has to
-    agree with schema.sql, or a fresh install and an upgraded tenant are running
-    different code. This migration is allowed to be superseded by a later one
-    (SYRD-118 changes resolve_publication again); it is not allowed to be the
-    last word on a function while carrying a body the schema has moved past.
+    The runner applies every migration in filename order, so what a tenant ends
+    up with is whichever migration creates the function last -- and that is what
+    has to agree with schema.sql, or a fresh install and an upgraded tenant are
+    running different code. This migration is allowed to be superseded by a
+    later one (SYRD-118 changes resolve_publication again); it is not allowed to
+    be the last word on a function while carrying a body the schema has moved
+    past.
     """
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     migration = MINE.read_text()
@@ -119,28 +120,37 @@ def git(*args: str) -> str:
     ).stdout
 
 
-def file_at(migration_name: str, path: str) -> str:
-    """One file as it stood in the release that added `migration_name`.
+def schema_at(migration_name: str) -> str:
+    """schema.sql as it stood in the release that added `migration_name`.
 
     Asked of the PREVIOUS migration rather than this one, so it describes a
     tenant that stopped at the last released schema -- which is the tenant this
     upgrade has to work for, and which does not depend on this branch's own
     commits existing yet.
     """
+    return _at_release(migration_name, "scripts/ticket_board/schema.sql")
+
+
+def rbac_at(migration_name: str) -> str:
+    """rbac.sql from that same release, for the same reason schema.sql is.
+
+    The two ship together and are applied together -- schema.sql, the runner,
+    then rbac.sql, all out of one release tree -- so a tenant stopped at an
+    older release has that release's rbac, not this branch's. Pairing an old
+    schema with today's grants builds a database no host is ever in, and the
+    first grant naming a function introduced after that release fails on a
+    board that is not broken (SYRD-119).
+    """
+    return _at_release(migration_name, "scripts/ticket_board/rbac.sql")
+
+
+def _at_release(migration_name: str, path: str) -> str:
     adding = git(
         "log", "--format=%H", "--diff-filter=A", "--",
         f"scripts/ticket_board/migrations/{migration_name}",
     ).strip().splitlines()
     assert adding, migration_name
     return git("show", f"{adding[-1]}:{path}")
-
-
-def schema_at(migration_name: str) -> str:
-    return file_at(migration_name, "scripts/ticket_board/schema.sql")
-
-
-def rbac_at(migration_name: str) -> str:
-    return file_at(migration_name, "scripts/ticket_board/rbac.sql")
 
 
 def run_migration_runner(cluster, db: str) -> str:
@@ -264,53 +274,25 @@ def main() -> int:
         except AssertionError as exc:
             if "already exists" not in str(exc):
                 raise
-        # A tenant at the previous release also carries that release's grants;
-        # the migrations after this one grant on functions by name, and a
-        # tenant that never ran an rbac.sql has none of the roles they name.
-        t.psql(admin, rbac_at(PREVIOUS))
         document = before_this_release(CANONICAL)
         document["project"] = "cerulean"
         document.setdefault("reassign", {})
         document.setdefault("remove_stages", [])
         seed_stored_document(admin, document)
-        # Everything from this release onward is pending, which is what a
-        # tenant stopped at the previous release actually looks like -- and the
-        # only shape in which the current rbac.sql, applied below, can grant on
-        # the functions the later releases introduce.
-        pre_record_migrations(
-            admin,
-            applying={path.name for path in MIGRATIONS.glob("*.sql") if path.name >= MINE.name},
-        )
+        pre_record_migrations(admin, applying={MINE.name})
         assert "request_publication" not in capabilities(admin, "ops")
 
         applied = run_migration_runner(cluster, db)
         assert f"apply {MINE.name}" in applied, applied
         # Only this one: the tenant already ran the release before it.
         assert f"apply {PREVIOUS}" not in applied, applied
-        t.psql(admin, t.RBAC_PATH.read_text())
+        t.psql(admin, rbac_at(PREVIOUS))
 
         # The upgrade landed, on the roles it belongs to.
         assert "request_publication" in capabilities(admin, "ops"), capabilities(admin, "ops")
         assert "resolve_publication" in capabilities(admin, "director"), capabilities(admin, "director")
         assert "request_publication" not in capabilities(admin, "audit")
         assert_every_floor_survives(admin, "ordered-tail")
-
-        # SYRD-118, which is in the tail this tenant just ran: the upgraded
-        # board has one resolve_publication, it is the one that takes proof,
-        # and there is somewhere to keep what was proven. An overload left
-        # behind would be a way back to the version that proved nothing.
-        assert t.psql(
-            admin,
-            "SELECT coalesce(string_agg(p.pronargs::text, ','), '') FROM pg_proc p "
-            "JOIN pg_namespace n ON n.oid = p.pronamespace "
-            "WHERE n.nspname = 'ticket_board' AND p.proname = 'resolve_publication';",
-        ) == "4"
-        assert t.psql(
-            admin,
-            "SELECT count(*)::text FROM information_schema.columns "
-            "WHERE table_schema = 'ticket_board' AND table_name = 'publication_requests' "
-            "AND column_name = 'verified_commit';",
-        ) == "1"
 
         # Applying the same upgrade again changes nothing: not the document, not
         # the revision, not the recorded history.

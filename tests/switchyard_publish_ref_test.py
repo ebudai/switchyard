@@ -275,6 +275,36 @@ class Host:
             env={**os.environ, **self.environment()},
         )
 
+    def rebuild(self, label: str) -> str:
+        """Replace the candidate with one that is not a descendant of the old.
+
+        An orphan commit, because that is the shape a rebase onto a main that
+        has moved actually produces: the same work, a different commit, and no
+        ancestry the published ref can fast-forward along (SYRD-119).
+        """
+        git("checkout", "-q", "--orphan", label, cwd=self.work)
+        (self.work / "file.txt").write_text(f"{label}\n", encoding="utf-8")
+        git("add", "file.txt", cwd=self.work)
+        git("commit", "-q", "-m", label, cwd=self.work)
+        self.commit = git("rev-parse", "HEAD", cwd=self.work).stdout.strip()
+        git("branch", "-f", self.ref, "HEAD", cwd=self.work)
+        self.bundle.unlink()
+        git("bundle", "create", str(self.bundle), self.ref, cwd=self.work)
+        self.board.requests[0]["commit_hash"] = self.commit
+        return self.commit
+
+    def record_published(self, commit: str) -> None:
+        """What the board says it last published at this ref."""
+        self.board.requests[0]["previous_published_commit"] = commit
+
+    def move_public_ref(self, commit: str) -> None:
+        """Somebody else's update, landing on the remote without this workflow."""
+        git("--git-dir", str(self.remote), "update-ref", f"refs/heads/{self.ref}", commit)
+
+    def send_to_remote(self, commit: str, holding_ref: str) -> None:
+        """Put an object in the remote without touching the ref under test."""
+        git("push", "-q", str(self.remote), f"{commit}:refs/heads/{holding_ref}", cwd=self.work)
+
     def close(self) -> None:
         self.board.close()
 
@@ -662,6 +692,202 @@ def test_a_publication_that_cannot_be_verified_is_not_reported_as_ready() -> Non
         finally:
             host.cache.chmod(0o755)
             host.close()
+
+
+def test_a_rewritten_candidate_replaces_exactly_what_the_board_published() -> None:
+    """The case this exists for: a candidate rebuilt on a main that moved.
+
+    SYRD-109 request 22 published, was sent back by Audit, was rebuilt on
+    current main twice, and then could not be published again: the new commit is
+    not a descendant of the old one, so the ordinary push was a non-fast-forward
+    and the forge refused it. The old answer was to rename the branch by hand.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        host = Host(Path(raw))
+        try:
+            first = host.commit
+            assert host.publish().returncode == 0
+            assert remote_ref(host) == first
+
+            host.record_published(first)
+            second = host.rebuild("rebuilt-on-current-main")
+            assert second != first
+            result = host.publish()
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert remote_ref(host) == second, "the public ref did not move to the replacement"
+        finally:
+            host.close()
+
+
+def test_a_public_ref_this_workflow_did_not_move_is_never_replaced() -> None:
+    """An unexpected advance stops the publication and keeps the request open."""
+    with tempfile.TemporaryDirectory() as raw:
+        host = Host(Path(raw))
+        try:
+            first = host.commit
+            assert host.publish().returncode == 0
+            host.record_published(first)
+
+            # Somebody else's commit, landed on the ref outside this workflow.
+            intruder = host.rebuild("someone-elses-work")
+            host.send_to_remote(intruder, "parking")
+            host.move_public_ref(intruder)
+            host.rebuild("our-replacement")
+
+            result = host.publish()
+            refusal(result, "something moved the ref outside this workflow")
+            assert remote_ref(host) == intruder, "the refusal must not have moved the ref"
+            assert "still open" in (result.stdout + result.stderr)
+        finally:
+            host.close()
+
+
+def test_a_ref_with_no_published_record_is_never_replaced() -> None:
+    """A ref the board never published is not a ref the board may overwrite."""
+    with tempfile.TemporaryDirectory() as raw:
+        host = Host(Path(raw))
+        try:
+            stranger = host.rebuild("a-ref-nobody-here-created")
+            host.send_to_remote(stranger, "parking")
+            host.move_public_ref(stranger)
+            host.rebuild("our-candidate")
+            host.record_published("")
+
+            result = host.publish()
+            refusal(result, "has no record of publishing anything there")
+            assert remote_ref(host) == stranger
+        finally:
+            host.close()
+
+
+def test_publishing_the_same_commit_again_is_a_safe_retry() -> None:
+    """The program already promises this; a lease must not take it away.
+
+    Everything after the push can fail on its own -- the verification, the cache
+    refresh -- and the documented answer is to run the same request again. By
+    then the ref is already at the requested commit, so a lease against the
+    commit before it would refuse the very retry the program asks for.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        host = Host(Path(raw))
+        try:
+            earlier = host.commit
+            assert host.publish().returncode == 0
+            host.record_published(earlier)
+            replacement = host.rebuild("replacement")
+            assert host.publish().returncode == 0
+            assert remote_ref(host) == replacement
+
+            # The board has not recorded the replacement yet, so the record is
+            # still the commit before it -- exactly the retry that must work.
+            result = host.publish()
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "already public" in result.stderr, result.stderr
+            assert remote_ref(host) == replacement
+        finally:
+            host.close()
+
+
+def test_a_concurrent_replacement_leaves_the_loser_refused_and_the_ref_intact() -> None:
+    """Two replacements of one ref: the second is refused, not merged over."""
+    with tempfile.TemporaryDirectory() as raw:
+        host = Host(Path(raw))
+        try:
+            first = host.commit
+            assert host.publish().returncode == 0
+            host.record_published(first)
+
+            winner = host.rebuild("first-replacement")
+            assert host.publish().returncode == 0
+            assert remote_ref(host) == winner
+
+            # The second publisher still holds the board's older record, which
+            # is what makes this concurrent rather than sequential.
+            host.rebuild("second-replacement")
+            host.record_published(first)
+            result = host.publish()
+            refusal(result, "something moved the ref outside this workflow")
+            assert remote_ref(host) == winner, "the loser must not overwrite the winner"
+        finally:
+            host.close()
+
+
+def test_the_lease_names_the_recorded_commit_and_nothing_is_ever_forced() -> None:
+    """The guard itself, without the host around it.
+
+    The readings above decide whether to attempt a push; the lease is what
+    actually protects the ref, because the forge evaluates it atomically at the
+    update. So it has to carry the recorded commit explicitly: `--force-with-
+    lease` with no value leases against whatever this repository last fetched,
+    which for a staging tree filled from a bundle says nothing about the public
+    ref at all.
+    """
+    kind, extra, _ = publisher.push_decision("ops/x", "b" * 40, "a" * 40, "a" * 40)
+    assert kind == "replace", kind
+    assert extra == [f"--force-with-lease=refs/heads/ops/x:{'a' * 40}"], extra
+
+    spread = [
+        ("", ""), ("", "a" * 40), ("a" * 40, ""), ("a" * 40, "a" * 40),
+        ("a" * 40, "b" * 40), ("b" * 40, "a" * 40), ("b" * 40, "b" * 40),
+    ]
+    for public, recorded in spread:
+        _kind, args, _reason = publisher.push_decision("ops/x", "b" * 40, public, recorded)
+        for argument in args:
+            assert argument != "--force", (public, recorded)
+            assert argument != "--force-with-lease", (public, recorded)
+            assert argument.startswith("--force-with-lease=refs/heads/ops/x:"), argument
+            assert len(argument.rsplit(":", 1)[1]) == 40, argument
+
+
+def test_the_forge_enforces_the_lease_even_if_the_reading_was_stale() -> None:
+    """What happens when the ref moves after the decision and before the push.
+
+    The readings cannot cover this window -- that is the whole reason the lease
+    is an argument to the push rather than a check beside it -- so this drives
+    git directly with the arguments the decision produces.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        remote, work = root / "remote.git", root / "work"
+        git("init", "--bare", "-q", str(remote))
+        work.mkdir()
+        git("init", "-q", "-b", "trunk", str(work))
+        git("config", "user.email", "role@example.invalid", cwd=work)
+        git("config", "user.name", "Role", cwd=work)
+        (work / "f").write_text("one\n", encoding="utf-8")
+        git("add", "f", cwd=work)
+        git("commit", "-q", "-m", "one", cwd=work)
+        recorded = git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        git("branch", "-f", "ops/x", "HEAD", cwd=work)
+        git("push", "-q", str(remote), "refs/heads/ops/x:refs/heads/ops/x", cwd=work)
+
+        # Somebody else replaces it after the decision was taken.
+        git("checkout", "-q", "--orphan", "theirs", cwd=work)
+        (work / "f").write_text("theirs\n", encoding="utf-8")
+        git("add", "f", cwd=work)
+        git("commit", "-q", "-m", "theirs", cwd=work)
+        theirs = git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        git("push", "-q", str(remote), f"{theirs}:refs/heads/ops/x", "--force", cwd=work)
+
+        git("checkout", "-q", "--orphan", "ours", cwd=work)
+        (work / "f").write_text("ours\n", encoding="utf-8")
+        git("add", "f", cwd=work)
+        git("commit", "-q", "-m", "ours", cwd=work)
+        ours = git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        git("branch", "-f", "ops/x", "HEAD", cwd=work)
+
+        _kind, extra, _reason = publisher.push_decision("ops/x", ours, recorded, recorded)
+        attempted = subprocess.run(
+            ["git", "push", *extra, str(remote), "refs/heads/ops/x:refs/heads/ops/x"],
+            cwd=str(work), text=True, capture_output=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"},
+        )
+        assert attempted.returncode != 0, attempted.stdout + attempted.stderr
+        landed = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", "refs/heads/ops/x"],
+            text=True, capture_output=True,
+        ).stdout.strip()
+        assert landed == theirs, "the lease let a stale decision overwrite somebody else's push"
 
 
 def main() -> int:

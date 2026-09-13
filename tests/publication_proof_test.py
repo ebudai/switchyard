@@ -99,6 +99,111 @@ def queued_for(admin: str, role: str) -> list[str]:
     return json.loads(raw)
 
 
+MIGRATIONS = ROOT / "scripts/ticket_board/migrations"
+MINE = "pgu935_syrd118_proven_publication.sql"
+PREVIOUS = "pgu934_syrd109_queued_reminder_suppression.sql"
+
+
+def at_release(migration_name: str, path: str) -> str:
+    """One file as it stood in the release that added `migration_name`.
+
+    Asked of the previous migration, so it is the tenant this upgrade has to
+    work for: that release's schema.sql and that release's rbac.sql, which ship
+    and are applied together out of one tree.
+    """
+    adding = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "--format=%H", "--diff-filter=A", "--",
+         f"scripts/ticket_board/migrations/{migration_name}"],
+        text=True, capture_output=True, check=True,
+    ).stdout.strip().splitlines()
+    assert adding, migration_name
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{adding[-1]}:{path}"],
+        text=True, capture_output=True, check=True,
+    ).stdout
+
+
+def test_the_upgrade_carries_it_to_an_existing_board(cluster, cache: Path, work: Path) -> None:
+    """schema.sql is applied once, at install, so an existing tenant gets this
+    through the migration or not at all. A board is built from the release
+    before it, the shipped runner is driven over it, and the rule is then driven
+    on the upgraded board rather than asserted about its text.
+    """
+    db = "publication_proof_upgraded"
+    admin = t.conninfo(cluster.socket_dir, cluster.port, db)
+    t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", db])
+    t.psql(admin, at_release(PREVIOUS, "scripts/ticket_board/schema.sql"))
+    try:
+        t.create_roles(admin)
+    except AssertionError as exc:
+        if "already exists" not in str(exc):
+            raise
+    t.psql(admin, at_release(PREVIOUS, "scripts/ticket_board/rbac.sql"))
+    t.seed_postgres_ticket(admin, "PGU-9", title="Upgraded work", state="in_progress", assignee="main")
+
+    names = [path.name for path in sorted(MIGRATIONS.glob("*.sql")) if path.name != MINE]
+    t.psql(
+        admin,
+        "CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations ("
+        "name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());\n"
+        + "INSERT INTO ticket_board.schema_migrations(name) VALUES "
+        + ",".join(f"('{name}')" for name in names)
+        + " ON CONFLICT DO NOTHING;",
+    )
+    applied = subprocess.run(
+        [str(ROOT / "scripts/ticket-board-migrate")],
+        text=True, capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "TICKET_BOARD_ADMIN_DATABASE_URL": admin,
+        },
+    )
+    assert applied.returncode == 0, applied.stderr or applied.stdout
+    assert f"apply {MINE}" in applied.stderr, applied.stderr
+    t.psql(admin, t.RBAC_PATH.read_text())
+
+    # One resolve_publication, and it is the one that takes proof. An overload
+    # left behind would be a way back to the version that proved nothing.
+    assert t.psql(
+        admin,
+        "SELECT coalesce(string_agg(p.pronargs::text, ','), '') FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid = p.pronamespace "
+        "WHERE n.nspname = 'ticket_board' AND p.proname = 'resolve_publication';",
+    ) == "4"
+
+    frames = cluster.root / f"frames-{db}"
+    assets = cluster.root / f"assets-{db}"
+    frames.mkdir(exist_ok=True)
+    assets.mkdir(exist_ok=True)
+    app = t.TicketBoardApp(
+        frames, assets, project="cerulean", ticket_prefix="PGU",
+        commit_git_dir=str(cache),
+        database_url=t.conninfo(cluster.socket_dir, cluster.port, db, t.SERVICE_ROLE),
+    )
+    cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+    app.apply_workflow(cfg, expected_revision=0, dry_run=False, caller_role="director")
+
+    ref = "roles/main/syrd-118-upgraded"
+    commit = commit_file(work, "upgraded")
+    asked = app.request_publication("PGU-9", ref=ref, commit=commit, bundle=BUNDLE, caller_role="main")
+    request_id = asked["request"]["id"]
+    try:
+        app.resolve_publication(request_id, outcome="published", detail="pushed", caller_role="director")
+    except Exception as exc:  # noqa: BLE001
+        assert "is not published" in str(exc), exc
+    else:
+        raise AssertionError("the upgraded board recorded a publication it had not seen")
+    assert app.publication_requests(ticket_id="PGU-9")[0]["state"] == "requested"
+
+    publish(cache, work, ref, commit)
+    recorded = app.resolve_publication(
+        request_id, outcome="published", detail="pushed", caller_role="director"
+    )
+    assert recorded["request"]["state"] == "published", recorded
+    assert recorded["request"]["verified_commit"] == commit, recorded
+
+
 def main() -> int:
     with temporary_cluster(prefix="publication-proof-", shutdown="immediate") as cluster:
         root, sock, port = cluster.root, cluster.socket_dir, cluster.port
@@ -256,6 +361,7 @@ def main() -> int:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+        test_the_upgrade_carries_it_to_an_existing_board(cluster, cache, work)
     print("publication_proof_test: ok")
     return 0
 

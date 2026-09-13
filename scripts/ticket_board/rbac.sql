@@ -130,6 +130,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.reset_notification_backoff_for_idle_roles
 GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_serial_focus_queue_wakeups(timestamptz) TO ticket_board_listener;
 -- The delivery currency check (_notification_is_current -> _current_ticket_state)
 -- calls ticket_has_unresolved_blockers; the listener role must be able to run it,
 -- otherwise every delivery throws "permission denied for function" and no

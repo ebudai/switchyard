@@ -1990,6 +1990,36 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
             self.logger.info("Enqueued %s idle turn-end ticket nudges", enqueued)
         return enqueued
 
+    def process_serial_focus_queue_wakeups(self, conn: Any) -> int:
+        """Tell the director when a capacity wait they were told about has ended.
+
+        Takes no idle map and no pane state, unlike the reminder generators
+        either side of it. A reservation ending is a fact about the board, not
+        about whether anybody's pane happens to be free, and gating it on a
+        fresh idle sample would make the announcement wait for a coincidence
+        (SYRD-109).
+        """
+        try:
+            result = conn.execute(
+                """
+SELECT ticket_board.notify_serial_focus_queue_wakeups(clock_timestamp())
+"""
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to enqueue serial-focus queue wake-ups: %s", exc)
+            return 0
+        if row is None:
+            return 0
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        try:
+            enqueued = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if enqueued:
+            self.logger.info("Enqueued %s serial-focus capacity hand-offs", enqueued)
+        return enqueued
+
     def process_idle_stall_nudges(self, conn: Any) -> int:
         idle_since = self._idle_since_by_role()
         work_observed_at = self._work_observed_at_for_roles(sorted(self.role_targets))
@@ -2759,6 +2789,7 @@ WHERE (r.definition->>'active')::boolean
                 self.refresh_workflow(conn)
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
+                self.process_serial_focus_queue_wakeups(conn)
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:
                     break

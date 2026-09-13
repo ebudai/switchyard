@@ -29,10 +29,10 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from publication_cache_fixture import build_cache, commit_file, publish
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
 
-COMMIT = "f" * 40
 BUNDLE = "/home/agent/.local/state/switchyard/publish-outbox/cerulean/PGU-1.bundle"
 
 
@@ -99,11 +99,14 @@ def main() -> int:
         t.seed_postgres_ticket(admin, "PGU-2", title="Ops work", state="in_progress", assignee="ops")
         (root / "frames").mkdir(exist_ok=True)
         (root / "assets").mkdir(exist_ok=True)
+        cache, work = build_cache(root)
+        COMMIT = commit_file(work, "delta")
         app = t.TicketBoardApp(
             root / "frames",
             root / "assets",
             project="cerulean",
             ticket_prefix="PGU",
+            commit_git_dir=str(cache),
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
         )
         server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier())
@@ -173,7 +176,9 @@ def main() -> int:
             assert app.publication_requests(state="requested"), "the ask must still be open"
 
             # And a role that is not called director but holds control
-            # authority answers it.
+            # authority answers it -- once the ref is where the board can see
+            # it for itself (SYRD-118).
+            publish(cache, work, "roles/delta/first-work", COMMIT)
             resolved = t.post_json(
                 base,
                 "/api/tickets/PGU-1/actions/resolve_publication",

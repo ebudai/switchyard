@@ -38,6 +38,20 @@ def _role_list_from_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(roles) or default
 
 
+#: Where a publication proves itself (SYRD-118). The privileged publisher writes
+#: this namespace into the tenant's trusted commit cache only after it has
+#: pushed and read the exact commit back from the public remote, so a ref here
+#: is the board's own sight of a completed publication. `refs/heads/<ref>` in
+#: the same repository is not: `switchyard-request-publication` creates that
+#: locally when the ask is filed, and accepting it would prove only that
+#: somebody asked.
+PUBLISHED_REF_NAMESPACE = "refs/remotes/origin"
+#: Branch names this will hand to git. The board already refuses anything else
+#: when the ask is filed; asked again here so no ref shape can become an
+#: argument to the command that is supposed to be reading it.
+PUBLISHABLE_REF = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*")
+
+
 ASSIGNEES = _role_list_from_env("TICKET_BOARD_ASSIGNEES", DEFAULT_ASSIGNEES)
 CALLER_ROLES = _role_list_from_env("TICKET_BOARD_CALLER_ROLES", DEFAULT_CALLER_ROLES)
 LEGACY_ASSIGNEE_ALIASES = {"ui": "app"}
@@ -806,20 +820,128 @@ WHERE (r.definition->>'active')::boolean
         detail: str = "",
         caller_role: str | None = None,
     ) -> dict[str, Any]:
-        """The control role records what became of one ask."""
+        """The control role records what became of one ask.
+
+        A published verdict is the one outcome this board will not take on the
+        deciding role's word (SYRD-118). It resolves the requested ref through
+        the trusted publication path first, and hands what it found to the
+        database, which refuses the verdict unless that is the commit the
+        implementer asked for. A verdict that cannot be proven records nothing:
+        the request stays open and the failure says what is missing, because a
+        request that is neither published nor rejected is one the control role
+        can still act on, and a false 'published' is one nobody can undo.
+        """
         with self._pg_connect() as conn:
             with conn.transaction():
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
+                proof = ""
+                if str(outcome).strip().lower() == "published":
+                    # Authority first, and from the database, so a caller with
+                    # no standing to decide is refused for that reason instead
+                    # of being answered about a ref it could not have published.
+                    conn.execute("SELECT ticket_board.require_publication_control();")
+                    proof = self._prove_publication(conn, int(request_id))
                 row = conn.execute(
-                    "SELECT * FROM ticket_board.resolve_publication(%s::bigint, %s, %s);",
-                    (int(request_id), str(outcome), str(detail)),
+                    "SELECT * FROM ticket_board.resolve_publication(%s::bigint, %s, %s, %s);",
+                    (int(request_id), str(outcome), str(detail), proof),
                 ).fetchone()
                 request = _publication_row(row)
                 return {
                     "request": request,
                     "ticket": self._pg_get_ticket(str(request["ticket_id"]), conn),
                 }
+
+    def _prove_publication(self, conn: Any, request_id: int) -> str:
+        """What the trusted publication path says about one open request.
+
+        Returns the commit the requested ref resolves to when that is the
+        commit the request named, and raises otherwise. Only a request that is
+        still open is checked: re-recording a verdict that already landed is a
+        retry, and the row already carries what was proven the first time.
+        """
+        row = conn.execute(
+            "SELECT ref, commit_hash, state FROM ticket_board.publication_requests WHERE id = %s;",
+            (int(request_id),),
+        ).fetchone()
+        if row is None or str(row["state"]) != "requested":
+            # Not this function's refusal to make: the database says "not
+            # found" or "already published/rejected" in its own words.
+            return ""
+        ref, commit = str(row["ref"]), str(row["commit_hash"]).lower()
+        published = self.published_ref_commit(ref)
+        if published == commit:
+            return commit
+        if published:
+            raise ValueError(
+                f"{ref} is published at {published[:12]}, not the requested {commit[:12]}. "
+                "Nothing was recorded and the request is still open: publish the commit that "
+                "was asked for, or reject the request with a reason."
+            )
+        if not self._readable_commit_repos():
+            # A tenant whose cache is missing proves nothing either way, and
+            # saying "not published" here would blame the publisher for a
+            # misconfigured board. Still a refusal: unproven is unproven.
+            raise ValueError(
+                f"{ref} cannot be proven published: none of this board's commit repositories "
+                f"({', '.join(str(path) for path in self.commit_git_dirs)}) can be read, so it "
+                "has no trusted copy of anything. Nothing was recorded and the request is still "
+                "open."
+            )
+        raise ValueError(
+            f"{ref} is not published: {self._published_ref_absence(ref, commit)} "
+            "Nothing was recorded and the request is still open -- publish the ref and record "
+            "the outcome again, or reject the request with a reason."
+        )
+
+    def _readable_commit_repos(self) -> bool:
+        for commit_git_dir in self.commit_git_dirs:
+            try:
+                self._commit_repo_git_args(commit_git_dir)
+            except ValueError:
+                continue
+            return True
+        return False
+
+    def _published_ref_absence(self, ref: str, commit: str) -> str:
+        """Why the proof is missing, said precisely enough to act on."""
+        local = self._cache_ref_commit(f"refs/heads/{ref}")
+        if local == commit:
+            return (
+                f"the trusted commit cache has no {PUBLISHED_REF_NAMESPACE}/{ref}. Its local "
+                f"refs/heads/{ref} is at {commit[:12]}, but that branch is what filing the "
+                "request creates, not evidence that anything reached the remote."
+            )
+        return f"the trusted commit cache has no {PUBLISHED_REF_NAMESPACE}/{ref}."
+
+    def published_ref_commit(self, ref: str) -> str:
+        """Resolve one published ref in the tenant's trusted commit cache.
+
+        Local git against the root-configured repositories and nothing else: no
+        remote is named, contacted, or taken at its word, so this stays safe to
+        re-run and cannot be pointed at a remote of the caller's choosing.
+        """
+        return self._cache_ref_commit(f"{PUBLISHED_REF_NAMESPACE}/{ref}")
+
+    def _cache_ref_commit(self, refname: str) -> str:
+        candidate = refname.strip()
+        if not PUBLISHABLE_REF.fullmatch(candidate) or ".." in candidate:
+            return ""
+        for commit_git_dir in self.commit_git_dirs:
+            try:
+                git_args = self._commit_repo_git_args(commit_git_dir)
+            except ValueError:
+                continue
+            resolved = subprocess.run(
+                [*git_args, "rev-parse", "--verify", "--quiet", "--end-of-options",
+                 f"{candidate}^{{commit}}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if resolved.returncode == 0 and resolved.stdout.strip():
+                return resolved.stdout.strip().lower()
+        return ""
 
     def publication_requests(
         self,

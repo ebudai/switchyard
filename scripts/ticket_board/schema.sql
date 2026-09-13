@@ -9083,6 +9083,11 @@ CREATE TABLE IF NOT EXISTS ticket_board.publication_requests (
         CHECK (state IN ('requested', 'published', 'rejected', 'superseded')),
     detail text NOT NULL DEFAULT '',
     decided_by text NOT NULL DEFAULT '',
+    -- What the board itself saw before it accepted a published verdict, not
+    -- what the deciding role said it had done (SYRD-118). Empty on every other
+    -- outcome, because a rejection needs no push to be true.
+    verified_commit text NOT NULL DEFAULT ''
+        CHECK (verified_commit = '' OR verified_commit ~ '^[0-9a-f]{40}$'),
     requested_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     decided_at timestamptz
 );
@@ -9340,35 +9345,27 @@ END;
 $$;
 
 --
--- The control role records what happened. It does not move the ticket: the
--- implementer submits its own work, and a publication that submitted for them
--- would be the control role signing the implementer's name.
+-- Who may answer an ask, asked on its own so the board can settle that question
+-- before it does any work on the caller's behalf (SYRD-118). Proving a
+-- publication means running git; a caller with no authority to decide anything
+-- should be refused for that reason, and told that, rather than handed the
+-- result of a check that was never theirs to trigger.
 --
-CREATE OR REPLACE FUNCTION ticket_board.resolve_publication(
-    p_request bigint,
-    p_outcome text,
-    p_detail text
-)
-RETURNS ticket_board.publication_requests
+CREATE OR REPLACE FUNCTION ticket_board.require_publication_control()
+RETURNS text
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
 SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
-    actor text;
     caller text;
-    request ticket_board.publication_requests%ROWTYPE;
-    ticket ticket_board.tickets%ROWTYPE;
-    outcome text := lower(btrim(coalesce(p_outcome, '')));
-    note text := btrim(coalesce(p_detail, ''));
-    updated ticket_board.publication_requests%ROWTYPE;
 BEGIN
     IF ticket_board.declared_workflow() IS NULL THEN
         RAISE EXCEPTION 'publication requires a declared workflow; this board has none'
             USING ERRCODE = '42501';
     END IF;
-    actor := ticket_board.require_actor(ARRAY[]::text[], 'resolve_publication');
+    PERFORM ticket_board.require_actor(ARRAY[]::text[], 'resolve_publication');
     caller := ticket_board.current_app_actor();
     -- The capability admits the caller; control authority is what decides. A
     -- tenant that hands this capability to a second role still gets one
@@ -9377,6 +9374,46 @@ BEGIN
         RAISE EXCEPTION 'only the control role may resolve a publication request, not %', caller
             USING ERRCODE = '42501';
     END IF;
+    RETURN caller;
+END;
+$$;
+
+--
+-- The control role records what happened. It does not move the ticket: the
+-- implementer submits its own work, and a publication that submitted for them
+-- would be the control role signing the implementer's name.
+--
+-- A published verdict is not taken on anybody's word (SYRD-118). Request 17 was
+-- recorded published while its ref was on neither the remote nor the trusted
+-- commit cache, so the implementer was told to submit a commit this same board
+-- would then refuse. The board resolves the ref through the trusted publication
+-- path first and hands what it found in as p_verified_commit; this function
+-- refuses the verdict unless that is exactly the commit the implementer asked
+-- for, and stores it, so the record says what was seen rather than what was
+-- claimed. Nothing about rejection changes: a refusal needs no push to be true.
+--
+CREATE OR REPLACE FUNCTION ticket_board.resolve_publication(
+    p_request bigint,
+    p_outcome text,
+    p_detail text,
+    p_verified_commit text DEFAULT ''
+)
+RETURNS ticket_board.publication_requests
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    caller text;
+    request ticket_board.publication_requests%ROWTYPE;
+    ticket ticket_board.tickets%ROWTYPE;
+    outcome text := lower(btrim(coalesce(p_outcome, '')));
+    note text := btrim(coalesce(p_detail, ''));
+    proof text := lower(btrim(coalesce(p_verified_commit, '')));
+    updated ticket_board.publication_requests%ROWTYPE;
+BEGIN
+    caller := ticket_board.require_publication_control();
     IF outcome NOT IN ('published', 'rejected') THEN
         RAISE EXCEPTION 'publication outcome must be published or rejected, not %', p_outcome;
     END IF;
@@ -9396,12 +9433,22 @@ BEGIN
     IF request.state <> 'requested' THEN
         RAISE EXCEPTION 'publication request % is already %', request.id, request.state;
     END IF;
+    -- The one thing a control role may not decide on its own authority.
+    IF outcome = 'published' AND proof <> request.commit_hash THEN
+        RAISE EXCEPTION
+            'publication request % cannot be recorded published: % has to be proven at %, %',
+            request.id, request.ref, request.commit_hash,
+            CASE WHEN proof = '' THEN 'and the board proved nothing'
+                 ELSE format('and the board proved %s instead', proof) END
+            USING ERRCODE = '42501';
+    END IF;
     SELECT * INTO ticket FROM ticket_board.tickets WHERE id = request.ticket_id FOR UPDATE;
 
     UPDATE ticket_board.publication_requests
        SET state = outcome,
            detail = note,
            decided_by = caller,
+           verified_commit = CASE WHEN outcome = 'published' THEN proof ELSE '' END,
            decided_at = clock_timestamp()
      WHERE id = request.id
     RETURNING * INTO updated;

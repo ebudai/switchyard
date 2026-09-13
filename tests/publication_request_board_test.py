@@ -26,11 +26,10 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from publication_cache_fixture import build_cache, commit_file, publish
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
 
-COMMIT_A = "a" * 40
-COMMIT_B = "b" * 40
 BUNDLE = "/home/agent/.local/state/switchyard/publish-outbox/syrd/PGU-1.bundle"
 
 
@@ -74,11 +73,17 @@ def main() -> int:
         t.seed_postgres_ticket(admin, "PGU-2", title="Main work", state="in_progress", assignee="main")
         (root / "frames").mkdir(exist_ok=True)
         (root / "assets").mkdir(exist_ok=True)
+        # Real commits in a real cache: a published verdict is only recorded
+        # for a ref the board can resolve there for itself (SYRD-118).
+        cache, work = build_cache(root)
+        COMMIT_A = commit_file(work, "a")
+        COMMIT_B = commit_file(work, "b")
         app = t.TicketBoardApp(
             root / "frames",
             root / "assets",
             project="cerulean",
             ticket_prefix="PGU",
+            commit_git_dir=str(cache),
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
         )
         cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
@@ -213,12 +218,26 @@ def main() -> int:
             )
             assert "requires a reason" in str(silent), silent
 
+            # Before anything was pushed the verdict is refused, and the ask
+            # survives to be answered again.
+            unproven = t.post_json(
+                base,
+                "/api/tickets/PGU-1/actions/resolve_publication",
+                {"request_id": open_request["id"], "outcome": "published", "detail": "pushed"},
+                caller="director",
+                expect=400,
+            )
+            assert "is not published" in str(unproven), unproven
+            assert [r for r in requests_for(admin, "PGU-1") if r["state"] == "requested"]
+
+            publish(cache, work, "ops/syrd-92-defer-backlog", COMMIT_B)
             published = t.post_json(
                 base,
                 "/api/tickets/PGU-1/actions/resolve_publication",
                 {"request_id": open_request["id"], "outcome": "published", "detail": "pushed"},
                 caller="director",
             )
+            assert published["request"]["verified_commit"] == COMMIT_B, published
             assert published["request"]["state"] == "published", published
             assert published["request"]["decided_by"] == "director", published
             # The wait is cleared and the implementer is told, by the board, not

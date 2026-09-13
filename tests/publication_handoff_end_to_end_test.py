@@ -250,17 +250,46 @@ def main() -> int:
             (root / "stamp.py").write_text(STAMP, encoding="utf-8")
             wrapped_publisher.chmod(0o755)
 
-            published = subprocess.run(
-                [
-                    sys.executable, "-c", STAMP, str(proc), str(DIRECTOR_PANE),
-                    str(ROOT / "scripts" / "switchyard-publish"), "PGU-1",
-                    "--project", "cerulean", "--board-url", base,
-                    "--publisher", str(wrapped_publisher), "--sudo", "",
-                    "--write-client", write_client,
-                ],
-                text=True, capture_output=True,
-                env={**board_env, **publisher_env, "TICKET_BOARD_CALLER_ROLE": "director"},
-            )
+            publish_argv = [
+                sys.executable, "-c", STAMP, str(proc), str(DIRECTOR_PANE),
+                str(ROOT / "scripts" / "switchyard-publish"), "PGU-1",
+                "--project", "cerulean", "--board-url", base,
+                "--publisher", str(wrapped_publisher), "--sudo", "",
+                "--write-client", write_client,
+            ]
+            publish_env = {**board_env, **publisher_env, "TICKET_BOARD_CALLER_ROLE": "director"}
+
+            # ---- a push that does not land leaves the ask where it was ----
+            # The remote refuses this one. Nothing reaches it, so nothing
+            # reaches the trusted cache, and the board must not be told that
+            # anything was published -- that disagreement is what SYRD-118 is
+            # about. The request stays open, which is what makes the retry
+            # below an ordinary thing to do rather than a repair.
+            hook = Path(remote) / "hooks" / "pre-receive"
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text("#!/bin/sh\necho 'remote refuses this ref' >&2\nexit 1\n", encoding="utf-8")
+            hook.chmod(0o755)
+            failed = subprocess.run(publish_argv, text=True, capture_output=True, env=publish_env)
+            assert failed.returncode != 0, failed.stdout
+            assert "still" in (failed.stdout + failed.stderr), failed.stdout + failed.stderr
+            still_open = app.publication_requests(state="requested")
+            assert len(still_open) == 1 and still_open[0]["id"] == request["id"], still_open
+            assert app.publication_requests(ticket_id="PGU-1")[0]["state"] == "requested"
+            assert t.psql(
+                admin,
+                "SELECT count(*)::text FROM ticket_board.ticket_notification_queue "
+                "WHERE target_role = 'ops' AND kind = 'publication';",
+            ) == "0"
+            assert git("--git-dir", str(cache), "for-each-ref", "--format=%(refname)",
+                       "refs/remotes/origin/roles/ops/trunk") == ""
+            assert t.psql(
+                admin,
+                "SELECT awaiting_role FROM ticket_board.ticket_notification_state "
+                "WHERE ticket_id = 'PGU-1';",
+            ) == "director", "the control role is still the one holding this"
+            hook.unlink()
+
+            published = subprocess.run(publish_argv, text=True, capture_output=True, env=publish_env)
             assert published.returncode == 0, published.stdout + published.stderr
             assert "published roles/ops/trunk" in published.stdout, published.stdout
 

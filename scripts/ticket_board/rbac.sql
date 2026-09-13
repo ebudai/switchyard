@@ -83,7 +83,8 @@ GRANT USAGE, SELECT ON SEQUENCE ticket_board.ticket_field_audit_id_seq TO ticket
 -- record a decision; it cannot push anything, because nothing here is a
 -- credential and the program that holds one runs as another account entirely.
 GRANT EXECUTE ON FUNCTION ticket_board.request_publication(text, text, text, text) TO ticket_board_service;
-GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.require_publication_control() TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.resolve_publication(bigint, text, text, text) TO ticket_board_service;
 GRANT SELECT ON ticket_board.publication_requests TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.reassign(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.start_work(text) TO ticket_board_service;

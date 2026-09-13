@@ -187,8 +187,12 @@ def main(argv: list[str]) -> int:
     if recorded.returncode != 0:
         sys.stderr.write(recorded.stderr)
         fail(
-            f"{row['ref']} IS published, but the board was not told. Re-run this command: the "
-            "push is idempotent and recording the outcome twice is not an error."
+            f"the publisher reported success but the board did not record it, so {row['ticket_id']} "
+            f"request {row['id']} is still open and {row['requested_by']} has not been told. The "
+            "board refuses a published verdict it cannot see for itself (SYRD-118), so if it says "
+            f"{row['ref']} is not published, the ref did not reach the remote that feeds the "
+            "trusted commit cache and nothing was published. Re-running this command is safe "
+            "either way: the push is idempotent and recording the outcome twice is not an error."
         )
     print(
         f"switchyard-publish: published {row['ref']} at {str(row['commit_hash'])[:12]}; "

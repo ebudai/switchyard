@@ -25,6 +25,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from publication_cache_fixture import build_cache, commit_file, publish
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
 
@@ -50,7 +51,6 @@ SET definition = jsonb_set(definition, '{capabilities}',
      WHERE c NOT IN ('request_publication', 'resolve_publication')));
 """
 
-COMMIT = "e" * 40
 BUNDLE = "/home/agent/.local/state/switchyard/publish-outbox/cerulean/PGU-1.bundle"
 
 
@@ -74,11 +74,14 @@ def main() -> int:
         t.seed_postgres_ticket(admin, "PGU-1", title="Ops work", state="in_progress", assignee="ops")
         (root / "frames").mkdir(exist_ok=True)
         (root / "assets").mkdir(exist_ok=True)
+        cache, work = build_cache(root)
+        COMMIT = commit_file(work, "ops")
         app = t.TicketBoardApp(
             root / "frames",
             root / "assets",
             project="cerulean",
             ticket_prefix="PGU",
+            commit_git_dir=str(cache),
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
         )
         cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
@@ -113,6 +116,7 @@ def main() -> int:
                 base, "/api/tickets/PGU-1/actions/request_publication", ask, caller="ops",
             )
             request_id = asked["request"]["id"]
+            publish(cache, work, ask["ref"], COMMIT)
             resolved = t.post_json(
                 base,
                 "/api/tickets/PGU-1/actions/resolve_publication",

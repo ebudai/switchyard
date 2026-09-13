@@ -62,15 +62,33 @@ def test_the_number_is_unused_and_sorts_after_everything_before_it() -> None:
             assert len(names) == 1, (number, names)
 
 
+def bodies(text: str, name: str) -> list[str]:
+    marker = f"CREATE OR REPLACE FUNCTION ticket_board.{name}("
+    starts = [i for i in range(len(text)) if text.startswith(marker, i)]
+    return [text[start : text.index("\n$$;", start) + 4] for start in starts]
+
+
+def last_migration_to_create(name: str) -> tuple[Path, str]:
+    """The body a tenant ends up with: the highest-numbered migration wins."""
+    for path in sorted(MIGRATIONS.glob("pgu*.sql"), reverse=True):
+        found = bodies(path.read_text(), name)
+        if found:
+            return path, found[-1]
+    raise AssertionError(f"no migration creates {name}")
+
+
 def test_every_function_it_re_creates_matches_the_schema_it_ships_with() -> None:
-    """A body older than the schema beside it is a rollback nobody is told about."""
+    """A body older than the schema beside it is a rollback nobody is told about.
+
+    The tenant runs every migration in filename order, so what it ends up with
+    is whichever migration creates the function last -- and that is what has to
+    agree with schema.sql, or a fresh install and an upgraded tenant are running
+    different code. This migration is allowed to be superseded by a later one
+    (SYRD-118 changes resolve_publication again); it is not allowed to be the
+    last word on a function while carrying a body the schema has moved past.
+    """
     schema = (ROOT / "scripts/ticket_board/schema.sql").read_text()
     migration = MINE.read_text()
-
-    def bodies(text: str, name: str) -> list[str]:
-        marker = f"CREATE OR REPLACE FUNCTION ticket_board.{name}("
-        starts = [i for i in range(len(text)) if text.startswith(marker, i)]
-        return [text[start : text.index("\n$$;", start) + 4] for start in starts]
 
     created = sorted({
         line.split("ticket_board.")[1].split("(")[0]
@@ -81,7 +99,8 @@ def test_every_function_it_re_creates_matches_the_schema_it_ships_with() -> None
     for name in created:
         in_schema = bodies(schema, name)
         assert in_schema, f"{name} is created by the migration but not by schema.sql"
-        assert bodies(migration, name)[-1] == in_schema[-1], name
+        path, body = last_migration_to_create(name)
+        assert body == in_schema[-1], (name, path.name)
 
     # Named outright, so the check above cannot pass vacuously: this migration
     # re-creates the validator, and the validator carries the floors of the two
@@ -100,8 +119,8 @@ def git(*args: str) -> str:
     ).stdout
 
 
-def schema_at(migration_name: str) -> str:
-    """schema.sql as it stood in the release that added `migration_name`.
+def file_at(migration_name: str, path: str) -> str:
+    """One file as it stood in the release that added `migration_name`.
 
     Asked of the PREVIOUS migration rather than this one, so it describes a
     tenant that stopped at the last released schema -- which is the tenant this
@@ -113,7 +132,15 @@ def schema_at(migration_name: str) -> str:
         f"scripts/ticket_board/migrations/{migration_name}",
     ).strip().splitlines()
     assert adding, migration_name
-    return git("show", f"{adding[-1]}:scripts/ticket_board/schema.sql")
+    return git("show", f"{adding[-1]}:{path}")
+
+
+def schema_at(migration_name: str) -> str:
+    return file_at(migration_name, "scripts/ticket_board/schema.sql")
+
+
+def rbac_at(migration_name: str) -> str:
+    return file_at(migration_name, "scripts/ticket_board/rbac.sql")
 
 
 def run_migration_runner(cluster, db: str) -> str:
@@ -237,12 +264,23 @@ def main() -> int:
         except AssertionError as exc:
             if "already exists" not in str(exc):
                 raise
+        # A tenant at the previous release also carries that release's grants;
+        # the migrations after this one grant on functions by name, and a
+        # tenant that never ran an rbac.sql has none of the roles they name.
+        t.psql(admin, rbac_at(PREVIOUS))
         document = before_this_release(CANONICAL)
         document["project"] = "cerulean"
         document.setdefault("reassign", {})
         document.setdefault("remove_stages", [])
         seed_stored_document(admin, document)
-        pre_record_migrations(admin, applying={MINE.name})
+        # Everything from this release onward is pending, which is what a
+        # tenant stopped at the previous release actually looks like -- and the
+        # only shape in which the current rbac.sql, applied below, can grant on
+        # the functions the later releases introduce.
+        pre_record_migrations(
+            admin,
+            applying={path.name for path in MIGRATIONS.glob("*.sql") if path.name >= MINE.name},
+        )
         assert "request_publication" not in capabilities(admin, "ops")
 
         applied = run_migration_runner(cluster, db)
@@ -256,6 +294,23 @@ def main() -> int:
         assert "resolve_publication" in capabilities(admin, "director"), capabilities(admin, "director")
         assert "request_publication" not in capabilities(admin, "audit")
         assert_every_floor_survives(admin, "ordered-tail")
+
+        # SYRD-118, which is in the tail this tenant just ran: the upgraded
+        # board has one resolve_publication, it is the one that takes proof,
+        # and there is somewhere to keep what was proven. An overload left
+        # behind would be a way back to the version that proved nothing.
+        assert t.psql(
+            admin,
+            "SELECT coalesce(string_agg(p.pronargs::text, ','), '') FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = 'ticket_board' AND p.proname = 'resolve_publication';",
+        ) == "4"
+        assert t.psql(
+            admin,
+            "SELECT count(*)::text FROM information_schema.columns "
+            "WHERE table_schema = 'ticket_board' AND table_name = 'publication_requests' "
+            "AND column_name = 'verified_commit';",
+        ) == "1"
 
         # Applying the same upgrade again changes nothing: not the document, not
         # the revision, not the recorded history.

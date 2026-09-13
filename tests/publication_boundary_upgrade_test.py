@@ -54,18 +54,25 @@ def _namespaces_available() -> bool:
     return probe.returncode == 0
 
 
-def test_the_publisher_rule_is_one_program_and_its_own_file() -> None:
-    """A grant wide enough to be convenient is not a boundary."""
+def test_the_publisher_rule_is_named_programs_and_its_own_file() -> None:
+    """A grant wide enough to be convenient is not a boundary.
+
+    Two programs, because publication and integration are two operations with
+    opposite rules -- one moves a role's ref and refuses integration branches,
+    the other moves only the integration branch (SYRD-93). Each is named in
+    full, and neither takes an argument the caller chooses.
+    """
     document = publish_sudoers_document("porter", "porter-owner")
     lines = [line for line in document.splitlines() if line and not line.startswith("#")]
 
-    assert len(lines) == 1, document
-    assert lines[0] == (
-        "porter-owner ALL=(root) NOPASSWD: /usr/local/lib/switchyard/porter/switchyard-publish-ref"
-    ), lines
+    assert lines == [
+        "porter-owner ALL=(root) NOPASSWD: /usr/local/lib/switchyard/porter/switchyard-publish-ref",
+        "porter-owner ALL=(root) NOPASSWD: /usr/local/lib/switchyard/porter/switchyard-integrate-main",
+    ], document
     # No wildcard, no argument the caller chooses, no shell.
-    for forbidden in ("*", "ALL:", "/bin/sh", "%"):
-        assert forbidden not in lines[0], lines[0]
+    for line in lines:
+        for forbidden in ("*", "ALL:", "/bin/sh", "%"):
+            assert forbidden not in line, line
     # Its own file: an existing tenant has no role accounts, so the role-control
     # rule is not this rule's business and removing one must not disturb the other.
     assert publish_sudoers_path("porter").name == "48-porter-publish"
@@ -500,10 +507,12 @@ def test_the_whole_operator_sequence_runs_including_its_last_command() -> None:
         assert state["uid"] == 0, (path, state)
     assert report["upgrade_artifact_modes"]["/etc/switchyard/publish/porter-publish-key"]["mode"] == "0o600"
     assert report["upgrade_artifact_modes"]["/etc/sudoers.d/48-porter-publish"]["mode"] == "0o440"
-    # One rule, one program, no wildcard.
+    # One rule, the two named programs, no wildcard.
     rule = report["upgrade_sudoers_text"]
-    assert rule.count("NOPASSWD:") == 1, rule
-    assert "switchyard-publish-ref" in rule and "*" not in rule, rule
+    assert rule.count("NOPASSWD:") == 2, rule
+    assert "switchyard-publish-ref" in rule, rule
+    assert "switchyard-integrate-main" in rule, rule
+    assert "*" not in rule, rule
 
     # The host key could not be read, so the boundary is incomplete -- and says
     # so, in the output and in root's own journal, instead of reporting a phase
@@ -551,17 +560,48 @@ def test_the_privileged_run_leaves_this_host_alone() -> None:
     """
     if not _namespaces_available():
         return
-    _privileged_report()
 
-    for path in (
+    watched = (
         "/usr/local/lib/switchyard/porter",
         "/etc/sudoers.d/48-porter-publish",
         "/etc/switchyard/provision/porter",
         "/etc/switchyard/projects/porter.json",
         "/opt/switchyard/bootstrap",
         "/srv/porter",
-    ):
-        assert not Path(path).exists(), f"the privileged run escaped its namespace: {path}"
+    )
+
+    def state() -> dict[str, object]:
+        """Whether each path exists, and if so exactly which object it is.
+
+        Asked as "unchanged" rather than "absent", because one of these is
+        shared rather than tenant-specific: a host with Switchyard genuinely
+        installed has /opt/switchyard/bootstrap already, and demanding its
+        absence made this fail on every such host while proving nothing about
+        the namespace (SYRD-93 live acceptance).
+        """
+        seen: dict[str, object] = {}
+        for path in watched:
+            try:
+                info = Path(path).lstat()
+            except OSError:
+                seen[path] = None
+            else:
+                seen[path] = (info.st_ino, info.st_mtime_ns, info.st_size)
+        return seen
+
+    before = state()
+    _privileged_report()
+    after = state()
+
+    for path in watched:
+        assert after[path] == before[path], (
+            f"the privileged run escaped its namespace and changed {path}"
+        )
+    # And the tenant it installs is this suite's, so none of its own paths may
+    # have appeared at all.
+    for path in watched:
+        if "porter" in path:
+            assert after[path] is None, f"the privileged run installed {path} on this host"
 
 
 def test_an_installed_release_that_is_not_the_pinned_one_is_refused() -> None:

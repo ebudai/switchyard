@@ -1144,6 +1144,15 @@ Each role entry contains:
   record to the `.superseded` sidecar, and launch a fresh CLI session. Use it
   only for roles where carrying context between tickets is more dangerous than
   losing continuity; it is a role policy, not a CLI policy.
+- `ephemeral`: optional boolean, defaulting to false. Projected from the
+  workflow document's role entry, so the document is where a director sets it
+  and this generated file is where it is recorded. When true, the notify
+  listener sends the role's CLI its clear command once before the first
+  notification that hands it a given ticket, so the role starts that ticket on
+  an empty conversation. It is not a launcher behaviour: nothing about starting
+  or reloading the pane changes, because the reset happens at the ticket
+  boundary in a pane that is already running. Compare `fresh_session_per_ticket`,
+  which is a launcher behaviour and discards the recorded session id instead.
 - `resume_flag`: flag used by that CLI for context resume.
 - `live_commands`: optional command names accepted as the live pane process
   before destructive reload.

@@ -90,6 +90,35 @@ SELF_REMINDER_KINDS = frozenset({"nudge", "idle_reminder"})
 #: source it writes. This is the whole of that vocabulary difference, in one
 #: place, so neither name is special-cased at a decision site.
 HOOK_RUNTIME_NAMES = {"agy": "gemini"}
+#: What each supported CLI is told, in its own composer, to start the next
+#: ticket on an empty conversation. Every runtime the workflow document accepts
+#: has an entry, and a runtime with no entry is not cleared silently -- the
+#: notification waits instead (SYRD-135). They all spell it the same way today;
+#: the table is here because that is a fact about four products, not a property
+#: of the mechanism, and the day one of them spells it differently this is the
+#: one line that changes. What each of them does with a typed `/clear` was
+#: probed in disposable panes and written down in
+#: docs/pgu-816-clear-sessionstart-evidence.md: all four start a fresh
+#: conversation, and only Claude and Codex also announce it through a hook --
+#: which is why nothing here depends on the hook.
+SESSION_CLEAR_COMMANDS = {
+    "claude": "/clear",
+    "codex": "/clear",
+    "agy": "/clear",
+    "hermes": "/clear",
+}
+#: The notification kinds that hand a ticket to a role as work to do now.
+#: Everything else a pane receives is about work it already has -- a comment on
+#: its own ticket, a reminder that it looks idle, the director's escalation
+#: about somebody else -- and clearing on any of those would delete the context
+#: of the very work being asked about.
+SESSION_CLEAR_KINDS = frozenset({"transition", "awaiting_role"})
+SESSION_CLEAR_FAILED_ERROR = "ephemeral_session_clear_failed"
+SESSION_CLEAR_UNSUPPORTED_RUNTIME_ERROR = "ephemeral_session_clear_unsupported_runtime"
+#: How long to let a cleared CLI finish resetting before the ticket is typed
+#: into it. Short, because the clear is a local composer action; non-zero,
+#: because the message that follows is the whole point of the clear.
+DEFAULT_SESSION_CLEAR_SETTLE_SECONDS = 0.5
 DEFAULT_PRE_SEND_RECHECK_DELAY_SECONDS = 0.5
 DEFAULT_DIRECTOR_COMPOSER_HOME_X = 2
 DEFAULT_WORKING_TIMER_SAMPLE_DELAY_SECONDS = 0.0
@@ -1465,6 +1494,7 @@ class TicketBoardNotifyListener:
         idle_stall_escalate_after: int = DEFAULT_IDLE_STALL_ESCALATE_AFTER,
         present_idle_freshness_seconds: float = DEFAULT_PRESENT_IDLE_FRESHNESS_SECONDS,
         pre_send_recheck_delay_seconds: float = 0.0,
+        session_clear_settle_seconds: float = DEFAULT_SESSION_CLEAR_SETTLE_SECONDS,
         sleeper: Callable[[float], None] = time.sleep,
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
@@ -1472,6 +1502,10 @@ class TicketBoardNotifyListener:
     ) -> None:
         self.role_targets = dict(ROLE_TO_TARGET)
         self.workflow = None
+        # Both read from the declared document on every refresh: which roles
+        # start each ticket cleared, and which CLI each of them is running.
+        self.ephemeral_roles: set[str] = set()
+        self.role_runtimes: dict[str, str] = {}
         self.project = project
         self.conninfo = conninfo
         self.channel = channel
@@ -1490,6 +1524,7 @@ class TicketBoardNotifyListener:
         # cutoff because the live activity gate is the delivery safety check.
         self.present_idle_freshness_seconds = max(0.0, present_idle_freshness_seconds)
         self.pre_send_recheck_delay_seconds = max(0.0, pre_send_recheck_delay_seconds)
+        self.session_clear_settle_seconds = max(0.0, session_clear_settle_seconds)
         self.sleeper = sleeper
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
@@ -1778,6 +1813,148 @@ SELECT ticket_board.record_notification_trace(
             )
         except Exception as exc:  # Trace failures must not wedge delivery.
             self.logger.warning("Failed to record notification trace for %s/%s: %s", notification_id, event, exc)
+
+    def _session_clear_is_due(self, conn: Any, ticket_id: str, target_role: str, kind: str, payload: str) -> bool:
+        """Whether this delivery is the first handoff of this ticket to an ephemeral role.
+
+        Four independent questions, and every one of them has to say yes.
+        The kind, because a comment or a reminder is about work the pane
+        already has. The role, because ephemerality is declared per role and
+        absent means false. The queue announcement, because being told a ticket
+        is reserved for you later is not the ticket becoming yours now -- that
+        is the same distinction the serial-focus gate above draws, and clearing
+        on the announcement would erase the work the role is still doing. And
+        the board, because "first" has to survive listener restarts.
+
+        A database that cannot answer raises rather than returning False: the
+        contract is that the ticket does not arrive until the clear has, and a
+        failed read is not evidence that the clear already happened.
+        """
+        if kind not in SESSION_CLEAR_KINDS:
+            return False
+        if target_role not in self.ephemeral_roles:
+            return False
+        if self._announced_queue_identity(payload) is not None:
+            return False
+        result = conn.execute(
+            "SELECT ticket_board.role_session_clear_pending(%s::text, %s::text)",
+            (ticket_id, target_role),
+        )
+        row = result.fetchone() if result is not None and hasattr(result, "fetchone") else None
+        if row is None:
+            return False
+        pending = row["role_session_clear_pending"] if isinstance(row, dict) else row[0]
+        return bool(pending)
+
+    def _record_session_clear(self, conn: Any, ticket_id: str, target_role: str) -> bool:
+        result = conn.execute(
+            "SELECT ticket_board.record_role_session_clear(%s::text, %s::text)",
+            (ticket_id, target_role),
+        )
+        row = result.fetchone() if result is not None and hasattr(result, "fetchone") else None
+        if row is None:
+            return False
+        recorded = row["record_role_session_clear"] if isinstance(row, dict) else row[0]
+        return bool(recorded)
+
+    def _clear_role_session(
+        self,
+        conn: Any,
+        *,
+        notification_id: int,
+        ticket_id: str,
+        target_role: str,
+        kind: str,
+        target: str,
+        message: str,
+        attempts: int,
+    ) -> bool:
+        """Send the role's CLI its clear command, and say whether the ticket may follow.
+
+        Recording happens after the send returns, never before: a row written
+        first would mark a clear that did not happen, and the ticket would then
+        be delivered onto the previous one's context with the board believing
+        the opposite. A send that fails leaves no row, so the requeued
+        notification tries again.
+        """
+        runtime = self.role_runtimes.get(target_role, "")
+        command = SESSION_CLEAR_COMMANDS.get(runtime, "")
+        if not command:
+            self.logger.error(
+                "Holding notification %s for %s: no clear command is known for runtime %r of ephemeral role %s",
+                notification_id, ticket_id, runtime, target_role,
+            )
+            self._trace_notification(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                event="session_clear_failed",
+                busy_reason=SESSION_CLEAR_UNSUPPORTED_RUNTIME_ERROR,
+                detail={"target": target, "runtime": runtime, "attempts": attempts},
+            )
+            self._requeue_notification(
+                conn, notification_id, attempts, SESSION_CLEAR_UNSUPPORTED_RUNTIME_ERROR
+            )
+            return False
+        try:
+            self.sender(target, command)
+        except (subprocess.SubprocessError, OSError) as exc:
+            failure_reason = delivery_failure_reason(exc, target)
+            self.logger.warning(
+                "Failed to clear the session of ephemeral role %s before %s: %s",
+                target_role, ticket_id, exc,
+            )
+            self._trace_notification(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                event="session_clear_failed",
+                busy_reason=failure_reason,
+                detail={
+                    "target": target,
+                    "runtime": runtime,
+                    "command": command,
+                    "attempts": attempts,
+                },
+            )
+            if failure_reason == "tmux_target_missing":
+                self._dead_letter_notification(
+                    conn,
+                    notification_id,
+                    failure_reason,
+                    target=target,
+                    message=message,
+                    attempts=attempts,
+                    payload="",
+                )
+            else:
+                self._requeue_notification(
+                    conn, notification_id, attempts, f"{SESSION_CLEAR_FAILED_ERROR}: {failure_reason}"
+                )
+            return False
+        recorded = self._record_session_clear(conn, ticket_id, target_role)
+        self._trace_notification(
+            conn,
+            notification_id=notification_id,
+            ticket_id=ticket_id,
+            target_role=target_role,
+            kind=kind,
+            event="session_clear",
+            detail={
+                "target": target,
+                "runtime": runtime,
+                "command": command,
+                "recorded": recorded,
+                "attempts": attempts,
+            },
+        )
+        if self.session_clear_settle_seconds > 0:
+            self.sleeper(self.session_clear_settle_seconds)
+        return True
 
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
@@ -2438,9 +2615,17 @@ SELECT EXISTS (
         return self._decode_text(row[0])
 
     def refresh_workflow(self, conn: Any) -> None:
-        from .workflow_config import read_configuration, validate
+        from .workflow_config import ephemeral_roles, read_configuration, validate
         document = read_configuration(conn)
         self.workflow = validate(document, project=self.project) if document else None
+        # A tenant with no declared workflow declares no ephemeral role, which
+        # is the same answer as declaring them all false.
+        self.ephemeral_roles = ephemeral_roles(self.workflow) if self.workflow else set()
+        self.role_runtimes = {
+            role["name"]: role["runtime"]
+            for role in (self.workflow["roles"] if self.workflow else [])
+            if role.get("runtime")
+        }
         self.role_targets = dict(ROLE_TO_TARGET)
         self.active_runtime_roles = set()
         # Runtime rows are the routing authority for both declarative and
@@ -2782,6 +2967,23 @@ WHERE (r.definition->>'active')::boolean
                 )
                 self._ack_notification(conn, notification_id)
                 continue
+            # Last, deliberately: every gate above decides whether this role is
+            # free to be handed this ticket at all, and a clear is only allowed
+            # once that answer is yes. Anywhere earlier and a role that turns
+            # out to be busy -- or a notification that turns out to be stale --
+            # would have had its conversation deleted for nothing (SYRD-135).
+            if self._session_clear_is_due(conn, ticket_id, target_role, kind, payload):
+                if not self._clear_role_session(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    target=target,
+                    message=message,
+                    attempts=attempts,
+                ):
+                    continue
             directorctl_diagnostic: dict[str, Any] = {}
             try:
                 sender_result = self.sender(target, display_message(message))

@@ -516,6 +516,20 @@ CREATE INDEX IF NOT EXISTS ticket_notification_queue_claimed_idx
     ON ticket_board.ticket_notification_queue (claimed_at, next_attempt_at, id)
     WHERE claimed_at IS NOT NULL AND dead_lettered_at IS NULL;
 
+-- SYRD-135: one row per (ticket, role) whose CLI session was cleared before the
+-- ticket's first handoff to that role. The listener asks before it clears and
+-- records only after the clear actually succeeded, so a failed clear is retried
+-- and a succeeded one is never repeated -- across retries, restarts, duplicate
+-- notifications, comments, same-stage reroutes, and a later return of the same
+-- ticket to the same role. A different ticket is a different row, which is what
+-- makes "once per ticket" mean what it says.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_role_session_clears (
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    role text NOT NULL CHECK (btrim(role) <> ''),
+    cleared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (ticket_id, role)
+);
+
 CREATE TABLE IF NOT EXISTS ticket_board.notification_trace (
     id bigserial PRIMARY KEY,
     ts timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -2602,6 +2616,46 @@ BEGIN
     LIMIT 1;
 
     RETURN coalesce(blocker_ticket_id, '');
+END;
+$$;
+
+-- SYRD-135: the two halves of "clear this role's session once for this ticket".
+-- They are deliberately separate. Claiming the pair before the clear is sent
+-- would mark a clear that never happened, and a pane would then be handed a
+-- ticket on top of the previous one's context with the board believing
+-- otherwise; recording only after the send succeeded is what keeps a failed
+-- clear retryable.
+CREATE OR REPLACE FUNCTION ticket_board.role_session_clear_pending(p_ticket_id text, p_role text)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('role_session_clear_pending');
+    RETURN NOT EXISTS (
+        SELECT FROM ticket_board.ticket_role_session_clears
+        WHERE ticket_id = p_ticket_id AND role = p_role
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.record_role_session_clear(p_ticket_id text, p_role text)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE inserted integer := 0;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('record_role_session_clear');
+    INSERT INTO ticket_board.ticket_role_session_clears(ticket_id, role)
+    VALUES (p_ticket_id, p_role)
+    ON CONFLICT (ticket_id, role) DO NOTHING;
+    GET DIAGNOSTICS inserted = ROW_COUNT;
+    RETURN inserted > 0;
 END;
 $$;
 
@@ -6808,6 +6862,10 @@ BEGIN
            OR (r->>'runtime' IS NOT NULL AND (r->>'runtime' NOT IN ('claude','codex','agy','hermes')
                OR r->>'target' !~ '^[a-zA-Z0-9_-]+:[0-9]+\.[0-9]+$')) THEN
             RAISE EXCEPTION 'invalid runtime/target'; END IF;
+        -- SYRD-135: absent is false. Only a real boolean may say otherwise, so
+        -- a quoted "false" cannot read as a value and behave as its truthiness.
+        IF r ? 'ephemeral' AND jsonb_typeof(r->'ephemeral') <> 'boolean' THEN
+            RAISE EXCEPTION 'ephemeral must be a boolean: %', r->>'name'; END IF;
     END LOOP;
     IF EXISTS (SELECT x->>'slot' FROM jsonb_array_elements(cfg->'roles') x
        WHERE x->>'slot' IS NOT NULL GROUP BY x->>'slot' HAVING count(*) > 1)

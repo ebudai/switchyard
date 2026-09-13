@@ -40,6 +40,12 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
         )
         role.pop("slot", None)
         role.pop("detached", None)
+        # SYRD-135: popped unconditionally, so turning ephemerality off in the
+        # document actually removes it from the generated config instead of
+        # leaving the previous answer behind.
+        role.pop("ephemeral", None)
+        if spec.get("ephemeral"):
+            role["ephemeral"] = True
         if spec.get("slot") is None:
             role["detached"] = True
         else:

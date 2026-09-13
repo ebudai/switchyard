@@ -159,6 +159,21 @@ def parking_stage_names(cfg: dict[str, Any]) -> set[str]:
     }
 
 
+def ephemeral_roles(cfg: dict[str, Any]) -> set[str]:
+    """Roles that start each ticket with a cleared CLI session (SYRD-135).
+
+    Absent is false, and only `true` is true: a role is ephemeral because the
+    document says so, never because a value happened to be truthy. Read from
+    the document rather than from a role name, so the policy is the tenant's
+    and applies to implementers, reviewers and future roles alike.
+    """
+    return {
+        role["name"]
+        for role in cfg.get("roles", [])
+        if role.get("ephemeral") is True
+    }
+
+
 def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     """Validate the complete desired graph. Never infer silence or actor authority."""
     cfg = copy.deepcopy(document)
@@ -256,6 +271,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "onboarding",
                 "onboarding_prompt",
                 "template_role",
+                "ephemeral",
             },
             "unknown role field",
         )
@@ -334,6 +350,19 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 f"onboarding_prompt must be at most {ONBOARDING_PROMPT_MAX_CHARS} characters: {name}",
             )
             need("\x00" not in prompt, f"onboarding_prompt must not contain NUL: {name}")
+        if "ephemeral" in role:
+            # SYRD-135: absent means false, and only a real boolean may say
+            # otherwise. A string "false" or a 0 would read as a value and
+            # behave as its truthiness, which is how a role quietly stops
+            # being cleared -- or starts being cleared -- without anyone
+            # changing the policy they think they wrote. Presence is what is
+            # tested rather than non-None, so that an explicit null is rejected
+            # here exactly as PostgreSQL rejects it, instead of the two
+            # validators disagreeing about one spelling of "no value".
+            need(
+                type(role["ephemeral"]) is bool,
+                f"ephemeral must be a boolean: {name}",
+            )
         if role.get("template_role") is not None:
             need(
                 isinstance(role["template_role"], str)

@@ -40,6 +40,7 @@ REVOKE ALL ON ticket_board.ticket_comments FROM director, "user", ops, app, audi
 REVOKE ALL ON ticket_board.ticket_attachments FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.ticket_notification_queue FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.notification_trace FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
+REVOKE ALL ON ticket_board.ticket_role_session_clears FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.schema_migrations FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.workflow_stages FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
 REVOKE ALL ON ticket_board.workflow_transitions FROM director, "user", ops, app, audit, inspector, perf, research, main, ticket_board_service, ticket_board_listener;
@@ -131,6 +132,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.dead_letter_notification(bigint, text, js
 GRANT EXECUTE ON FUNCTION ticket_board.requeue_notification(bigint, interval, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.reset_notification_backoff_for_idle_roles(jsonb, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.record_notification_trace(text, bigint, text, text, text, text, text, text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_session_clear_pending(text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.record_role_session_clear(text, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_serial_focus_queue_wakeups(timestamptz) TO ticket_board_listener;

@@ -18,6 +18,20 @@ Replace its project and absolute onboarding path when creating a tenant.
   `<project>-<role>:0.0`. A template role copies existing trusted local runtime
   arguments; the document itself cannot supply commands or environment values.
   Identity and notification target do not depend on a visible slot.
+- `roles[].ephemeral`: optional boolean, absent meaning false (SYRD-135). When
+  true, the notify listener sends that role's CLI its clear command once before
+  the first notification that hands it a given ticket, so the role starts each
+  ticket on an empty conversation and carries nothing from the last one. The
+  policy is role-neutral -- an implementer, Audit, Inspector or a role invented
+  later may declare it -- and only a real boolean is accepted; a string or a
+  number is rejected naming the role. The clear happens after every delivery
+  gate has already agreed the role is free to take the ticket, so a busy role is
+  never cleared mid-work, and it is recorded only once it has actually
+  succeeded, so a failed clear is retried and the ticket waits rather than
+  arriving on top of the previous one's context. A comment, an idle reminder,
+  a director escalation and a queue announcement never clear; a different
+  ticket clears again. The field is projected into the generated team-launcher
+  config as `ephemeral`.
 - `stages`: ordered names, labels, owners, kind, optional gate/skip target and
   signoff, terminal flag, and explicit notification policy (`none`, `assignee`,
   `fixed_role`, or `stage_owner_fallback`). Silence is deliberate. Exactly one

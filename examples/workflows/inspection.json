@@ -101,7 +101,8 @@
       "runtime": "claude",
       "target": "cerulean-audit:0.0",
       "slot": 4,
-      "onboarding": null
+      "onboarding": null,
+      "ephemeral": false
     },
     {
       "name": "inspector",

@@ -411,6 +411,11 @@ class RoleConfig:
     # project account; authority is the registered live process, not this UID.
     run_as_user: str = ""
     unset_env: tuple[str, ...] = ()
+    # SYRD-135: declared on the role, projected from the workflow document, and
+    # acted on by the notify listener rather than here -- the reset happens at
+    # the ticket boundary in a running pane, not at launch. It is carried in the
+    # generated config so the two descriptions of a role cannot disagree.
+    ephemeral: bool = False
 
 
 @dataclass(frozen=True)
@@ -1853,6 +1858,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         live_commands=_string_list(raw.get("live_commands"), field="live_commands", role=role),
         env={str(key): str(value) for key, value in env_raw.items()},
         run_as_user=str(raw.get("run_as_user") or "").strip(),
+        ephemeral=_bool_value(raw.get("ephemeral"), field="ephemeral", role=role),
     )
 
 

@@ -84,6 +84,9 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "start_task": TASK_ROLES,
     "complete_task": TASK_ROLES,
     "await_role": CALLER_ROLES - {"user"},
+    # The same permission as await_role, because it IS await_role plus the
+    # sentence that explains it (SYRD-133).
+    "request_dependency": CALLER_ROLES - {"user"},
     "clear_awaiting_role": CALLER_ROLES - {"user"},
     "inspector_sign_off": {"inspector"},
     "inspector_kick_back": {"inspector"},
@@ -1396,6 +1399,16 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
         elif operation == "complete_task":
             updated = self.app.complete_task(ticket_id, self.action_comment_text(payload), caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "request_dependency":
+            updated = self.app.request_dependency(
+                ticket_id,
+                awaiting_role=str(payload.get("role", payload.get("awaiting_role", ""))),
+                reason=str(payload.get("reason", payload.get("text", ""))),
+                caller_role=caller,
+            )
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

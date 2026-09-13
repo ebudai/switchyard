@@ -96,6 +96,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.request_commit_exempt(text, text) TO tick
 GRANT EXECUTE ON FUNCTION ticket_board.start_task(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.complete_task(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_awaiting_role(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.request_dependency(text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.clear_awaiting_role(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_kick_back(text, text) TO ticket_board_service;

@@ -483,7 +483,12 @@ def case_the_upgrade_carries_it_to_an_existing_board(cluster, tmpdir: Path) -> i
     for subject in live:
         assert board.queued(subject) == [], board.queued(subject)
 
-    names = [path.name for path in sorted(MIGRATIONS.glob("*.sql")) if path.name != MINE]
+    # Everything BEFORE this release is already applied; this one and the tail
+    # after it are pending. Pre-recording the later ones would leave the tenant
+    # claiming migrations it never ran, and the current rbac.sql -- which grants
+    # on functions those later releases add -- then fails on a board that is not
+    # broken (the same pairing SYRD-119 found from the other side).
+    names = [path.name for path in sorted(MIGRATIONS.glob("*.sql")) if path.name < MINE]
     t.psql(
         admin,
         "CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations ("

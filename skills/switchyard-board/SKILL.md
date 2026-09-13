@@ -140,15 +140,31 @@ A ticket that cannot proceed stays in its own stage with its own assignee. Do no
 move it to backlog; that reads as abandoned.
 
 ```bash
+ticket-board-write request-dependency <id> --role <role> --reason "what they have to do"
 ticket-board-write set-blockers <id> --blocked-by <other-ticket-id> --blocked-reason "..."
 ticket-board-write await-role <id> --role <role>
 ticket-board-write clear-awaiting-role <id>
 ```
 
-`blocked_by` accepts ticket IDs only. When the next action is genuinely another
-role's and there is no ticket to point at, use `await-role` - it suppresses nudges
-and surfaces the ticket to the director. It does not reassign anything, because the
-work is still yours. It clears when the awaited role *acts*, not when they reply.
+**Saying you are blocked is not the same as recording it.** A comment explaining
+that you need something from another role leaves the board thinking the work is
+yours and moving: the ticket stays in your stage with your name on it, nobody is
+told, and it sits there. Use `request-dependency` - it writes your reason as the
+comment you would have written AND sets the durable wait, in one action, so the
+half that matters cannot be the half you forget. It does not reassign anything,
+because the work is still yours; it is waiting.
+
+`blocked_by` accepts ticket IDs only, and is for a dependency you can point at a
+ticket. `await-role` is the bare wait without a reason - prefer
+`request-dependency`, which is that plus the sentence the awaited role needs.
+Either way the wait clears when the awaited role *acts*, not when they reply.
+
+**If you finish, transition.** A comment saying the work is done leaves the
+ticket exactly where it was. When the work produced no commit, the no-code
+submission is the action that ends your turn - see `allow_no_code` in
+`workflow_actions`. The board will eventually tell the director that an active
+ticket's owner went quiet without advancing it, which is a backstop and not a
+workflow: it means somebody has to come and find out what you meant.
 
 ## Review sign-offs
 

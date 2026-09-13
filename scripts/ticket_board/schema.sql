@@ -444,6 +444,17 @@ ALTER TABLE ticket_board.ticket_notification_state
 -- the queue row does not (SYRD-109).
 ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS serial_focus_wake_key text NOT NULL DEFAULT '';
+
+-- Which stall the director has already been escalated about (SYRD-133). The
+-- escalation's dedupe key holds only while its queue row exists; once the
+-- director acknowledges it the row is deleted, and the next wave -- still
+-- finding an idle owner and an unmoved ticket -- enqueues the same escalation
+-- again. On SYRD-131 that produced a delivered escalation at 15:43:19 and
+-- another enqueued at 15:44:15. This marker survives the acknowledgement, so
+-- the fail-safe fires once per stall rather than once per wave, and re-arms
+-- when the stall's identity changes.
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD COLUMN IF NOT EXISTS idle_escalation_key text NOT NULL DEFAULT '';
 ALTER TABLE ticket_board.ticket_notification_state
     DROP CONSTRAINT IF EXISTS ticket_notification_state_awaiting_role_check;
 ALTER TABLE ticket_board.ticket_notification_state
@@ -8294,6 +8305,27 @@ BEGIN
               AND q.target_role = candidates.target_role
               AND q.kind NOT IN ('idle_reminder', 'escalation')
         )
+          -- One escalation per stall, not one per wave. The dedupe key holds
+          -- only while the queue row does; once the director acknowledges it,
+          -- the next wave finds the same idle owner and the same unmoved
+          -- ticket and enqueues it again -- which on SYRD-131 it did, within a
+          -- minute of delivering the first. This marker outlives the
+          -- acknowledgement and re-arms when the stall's identity changes
+          -- (SYRD-133).
+          AND (
+            candidates.kind <> 'escalation'
+            OR NOT EXISTS (
+                SELECT 1
+                FROM ticket_board.ticket_notification_state escalated
+                WHERE escalated.ticket_id = candidates.id
+                  AND escalated.idle_escalation_key = ticket_board.idle_escalation_identity(
+                      candidates.id,
+                      candidates.state,
+                      candidates.assignee,
+                      candidates.idle_since_at
+                  )
+            )
+        )
         ORDER BY candidates.target_role, candidates.priority, candidates.ticket_number
     LOOP
         payload := jsonb_build_object(
@@ -8336,6 +8368,15 @@ BEGIN
                     'idle-reminder:' || candidate.id || ':' || candidate.target_role || ':' || extract(epoch FROM candidate.idle_since_at)::bigint::text
             END
         );
+        IF candidate.kind = 'escalation' THEN
+            -- Claimed in the same transaction that enqueues it, so two waves
+            -- racing cannot both decide they are the first.
+            UPDATE ticket_board.ticket_notification_state
+               SET idle_escalation_key = ticket_board.idle_escalation_identity(
+                       candidate.id, candidate.state, candidate.assignee, candidate.idle_since_at
+                   )
+             WHERE ticket_id = candidate.id;
+        END IF;
         delivered_count := delivered_count + 1;
     END LOOP;
 
@@ -8739,6 +8780,71 @@ BEGIN
     SET awaiting_notified_since_at = ns.awaiting_since_at WHERE ticket_id = p_ticket_id;
 END;
 $$;
+-- Which stall an escalation was about. Identity rather than a flag: the same
+-- ticket can stall again, and a second stall deserves a second escalation
+-- (SYRD-133).
+CREATE OR REPLACE FUNCTION ticket_board.idle_escalation_identity(
+    p_ticket text,
+    p_state text,
+    p_assignee text,
+    p_idle_since timestamptz
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT coalesce(p_ticket, '') || ':' || coalesce(p_state, '') || ':'
+        || coalesce(p_assignee, '') || ':'
+        || coalesce(extract(epoch FROM p_idle_since)::bigint::text, '');
+$$;
+
+--
+-- SYRD-133: the dependency and the handoff, in one act.
+--
+-- On SYRD-131 Ops wrote that the next step was a privileged Director one and
+-- stopped. The sentence was on the ticket; the wait was not. `awaiting_role`
+-- stayed empty, so no durable handoff existed, and the work sat in
+-- `in_progress/ops` with nobody holding it.
+--
+-- Two calls where one will do is how that happens: the comment is the part a
+-- role naturally writes, and the wait is the part that is easy to mean and not
+-- do. This is both, in one transaction -- either the ticket records the reason
+-- AND the handoff, or it records neither.
+--
+-- It deliberately does not reassign. The work is still the requesting role's;
+-- it is waiting on somebody, which is what `awaiting_role` says. When the wait
+-- clears, the ticket is already where it belongs.
+--
+CREATE OR REPLACE FUNCTION ticket_board.request_dependency(
+    p_ticket text,
+    p_awaiting_role text,
+    p_reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    reason text := btrim(coalesce(p_reason, ''));
+    normalized_role text := lower(btrim(coalesce(p_awaiting_role, '')));
+BEGIN
+    IF reason = '' THEN
+        -- The reason is why this is recorded here rather than as a bare flag:
+        -- the awaited role has to be able to act on it.
+        RAISE EXCEPTION 'requesting a dependency requires a reason';
+    END IF;
+    IF normalized_role = '' THEN
+        RAISE EXCEPTION 'requesting a dependency requires the role it waits on';
+    END IF;
+    -- The comment first, so a wait never exists without the sentence that
+    -- explains it. One transaction, so neither can exist without the other.
+    PERFORM ticket_board.add_comment(p_ticket, reason);
+    PERFORM ticket_board.set_awaiting_role(p_ticket, normalized_role);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.set_awaiting_role(
     id text,
     awaiting_role text

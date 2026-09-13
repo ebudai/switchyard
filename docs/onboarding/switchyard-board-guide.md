@@ -144,6 +144,14 @@ system working, not a bug to route around.
 - `force-move` / `override-move` — last resort; **always narrate in a comment**
 
 **Non-user roles**
+- `request-dependency <id> --role <role> --reason "..."` — the action to use when your
+  work is waiting on somebody. It records the reason as a comment AND sets the durable
+  wait in one transaction, so the board cannot end up believing the work is yours and
+  moving while you wait. This exists because on SYRD-131 the reason was written as a
+  plain comment, `awaiting_role` stayed empty, and the ticket sat in `in_progress/ops`
+  with nobody holding it until the idle-owner escalation reached the director over an
+  hour later (SYRD-133). Prefer it over bare `await-role`: same wait, plus the sentence
+  the awaited role needs in order to act. It does not reassign; the work is still yours.
 - `await-role` / `clear-awaiting-role` — mark or clear an active ticket as waiting on a
   role. Use it when the next action is genuinely someone else's and there is no ticket to
   point `blocked_by` at (that field only accepts ticket IDs). It does **two** things:

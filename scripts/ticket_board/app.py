@@ -1735,6 +1735,29 @@ ORDER BY rank;
                 self._pg_call(conn, "SELECT ticket_board.complete_task(%s, %s);", (ticket_id, completion_note))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def request_dependency(
+        self, ticket_id: str, *, awaiting_role: str, reason: str, caller_role: str
+    ) -> dict[str, Any]:
+        """Record why this work is waiting and who it waits on, in one act.
+
+        The two halves used to be two calls, and the durable one was the half
+        that got left out: on SYRD-131 the reason was written as a comment and
+        `awaiting_role` stayed empty, so nothing held the work and nobody was
+        told (SYRD-133). One database function, one transaction: the ticket
+        records both or neither. The assignee is untouched, because the work is
+        still the requesting role's -- it is waiting, not handed over.
+        """
+        ticket_id = str(ticket_id).strip().upper()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.request_dependency(%s, %s, %s);",
+                    (ticket_id, str(awaiting_role), str(reason)),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def set_awaiting_role(self, ticket_id: str, awaiting_role: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         awaiting_role = self._require_text(awaiting_role, "awaiting_role").strip().lower()

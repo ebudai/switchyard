@@ -769,6 +769,13 @@ class TicketBoardWriteClient:
     def complete_task(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "complete_task", {"text": text}, caller_role=caller_role)
 
+    def request_dependency(
+        self, ticket_id: str, *, role: str, reason: str, caller_role: str | None = None
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id, "request_dependency", {"role": role, "reason": reason}, caller_role=caller_role
+        )
+
     def await_role(self, ticket_id: str, *, role: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "await_role", {"role": role}, caller_role=caller_role)
 
@@ -1064,6 +1071,13 @@ def _build_parser() -> argparse.ArgumentParser:
     request_exempt.add_argument("ticket_id")
     request_exempt.add_argument("--reason", required=True)
 
+    request_dependency = subparsers.add_parser(
+        "request-dependency",
+        help="record why this work is waiting and hand it to the role it waits on, in one action",
+    )
+    request_dependency.add_argument("ticket_id")
+    request_dependency.add_argument("--role", required=True, help="the role this work waits on")
+    request_dependency.add_argument("--reason", required=True, help="what they have to do, in their words")
     await_role = subparsers.add_parser("await-role")
     await_role.add_argument("ticket_id")
     await_role.add_argument("--role", required=True)
@@ -1247,6 +1261,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.start_task(args.ticket_id, text=args.text)
         elif command == "complete_task":
             response = client.complete_task(args.ticket_id, text=args.text)
+        elif command == "request_dependency":
+            response = client.request_dependency(
+                args.ticket_id, role=args.role, reason=args.reason
+            )
         elif command == "await_role":
             response = client.await_role(args.ticket_id, role=args.role)
         elif command == "clear_awaiting_role":

@@ -32,7 +32,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -361,6 +362,12 @@ class PublicationOutcome:
     public_key: str = ""
     fingerprint: str = ""
     registration_required: bool = False
+    #: What the report reasons about rather than guesses at: where this project
+    #: publishes, the shared credential it is being compared with, and the exact
+    #: bounded check an operator can run for the half no push can establish.
+    remote: str = ""
+    shared_fingerprint: str = ""
+    shared_check_command: str = ""
     #: Named artifacts this run could not install. The boundary is then partial,
     #: and must be reported as partial rather than as done: an operator who is
     #: told known_hosts is installed when it is absent has been told the push
@@ -414,6 +421,10 @@ def install_publication_boundary(
     sudoers_path: str,
     sudoers_document: str,
     declared_remote: str = "",
+    #: The shared project credential this boundary is meant to replace, so the
+    #: report can name the exact check for it rather than a shape of one.
+    shared_identity_file: str = "",
+    owner_user: str = "",
     dry_run: bool = False,
     runner: Runner = subprocess.run,
     print_func: Callable[[str], None] = print,
@@ -544,6 +555,17 @@ def install_publication_boundary(
     remote, remote_problem = resolve_pinned_remote(
         project, registration_root=registration_root, declared_remote=declared_remote
     )
+    outcome.remote = remote
+    if remote and shared_identity_file:
+        outcome.shared_check_command = " ".join(
+            _quote(part) if " " in part or "\n" in part else part
+            for part in shared_credential_check_command(
+                remote, owner_user=owner_user or _current_user_name(), identity_file=shared_identity_file
+            )
+        )
+        shown = _run(["ssh-keygen", "-l", "-f", f"{shared_identity_file}.pub"], runner=runner)
+        if getattr(shown, "returncode", 1) == 0:
+            outcome.shared_fingerprint = _fingerprint_of(_output(shown))
     if remote and declared_remote.strip():
         registration = publish_remote_registration_path(project, registration_root)
         made = _run(
@@ -671,6 +693,285 @@ def enforce_artifact_permissions(
     return problems
 
 
+#: Root-owned, non-secret, and keyed to the things that can change underneath it.
+CUTOVER_SCHEMA = "switchyard.publication-cutover.v1"
+
+#: What is known about one credential's write authority.
+WRITE_VERIFIED = "verified"
+WRITE_READ_ONLY = "read_only"
+WRITE_PRESENT = "writable"
+WRITE_UNKNOWN = "unknown"
+
+#: The state of the cutover as a whole, in the order an operator meets them.
+CUTOVER_UNREGISTERED = "unregistered"
+CUTOVER_UNVERIFIED = "configured-unverified"
+CUTOVER_READY = "ready"
+CUTOVER_SHARED_WRITE = "shared-write-present"
+CUTOVER_UNKNOWN = "unknown"
+
+
+def cutover_evidence_path(project: str) -> Path:
+    return Path(publish_grant_root()) / f"{project}-cutover.json"
+
+
+@dataclass(frozen=True)
+class CredentialFinding:
+    """What is known about one credential, and where the knowledge came from."""
+
+    state: str = WRITE_UNKNOWN
+    at: str = ""
+    detail: str = ""
+
+    @property
+    def known(self) -> bool:
+        return self.state in {WRITE_VERIFIED, WRITE_READ_ONLY, WRITE_PRESENT}
+
+
+@dataclass(frozen=True)
+class CutoverEvidence:
+    """Everything recorded about a project's publication cutover.
+
+    Never secret: a remote, two public-key fingerprints, two verdicts and when
+    they were reached. It is keyed by all three of project, remote and
+    fingerprint precisely so that rotating a key or repointing the remote makes
+    the old verdict inapplicable rather than quietly wrong.
+    """
+
+    project: str = ""
+    remote: str = ""
+    publication_fingerprint: str = ""
+    shared_fingerprint: str = ""
+    publication: CredentialFinding = field(default_factory=CredentialFinding)
+    shared: CredentialFinding = field(default_factory=CredentialFinding)
+    stale: tuple[str, ...] = ()
+
+    def as_document(self) -> dict[str, Any]:
+        return {
+            "schema": CUTOVER_SCHEMA,
+            "project": self.project,
+            "remote": self.remote,
+            "publication_fingerprint": self.publication_fingerprint,
+            "shared_fingerprint": self.shared_fingerprint,
+            "publication_write": self.publication.state,
+            "publication_write_at": self.publication.at,
+            "publication_write_detail": self.publication.detail,
+            "shared_write": self.shared.state,
+            "shared_write_at": self.shared.at,
+            "shared_write_detail": self.shared.detail,
+        }
+
+
+def _fingerprint_of(text: str) -> str:
+    """The fingerprint field of `ssh-keygen -l` output, or the whole line."""
+    for token in text.split():
+        if token.startswith("SHA256:") or token.startswith("MD5:"):
+            return token
+    return text.strip()
+
+
+def read_cutover_evidence(
+    project: str,
+    *,
+    remote: str,
+    publication_fingerprint: str,
+    shared_fingerprint: str = "",
+) -> CutoverEvidence:
+    """What is on record, with anything the world has outgrown thrown away.
+
+    A verdict about a key that has since been rotated, or about a remote this
+    project no longer publishes to, is not evidence about the boundary that
+    exists now. Rather than reporting it as current, this drops it and says
+    which half went stale, so the report can ask for it again instead of
+    asserting something it cannot support.
+    """
+    path = cutover_evidence_path(project)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = {}
+    if not isinstance(document, dict) or str(document.get("schema") or "") != CUTOVER_SCHEMA:
+        document = {}
+
+    recorded_remote = str(document.get("remote") or "")
+    recorded_publication = str(document.get("publication_fingerprint") or "")
+    recorded_shared = str(document.get("shared_fingerprint") or "")
+    stale: list[str] = []
+
+    publication = CredentialFinding(
+        state=str(document.get("publication_write") or WRITE_UNKNOWN),
+        at=str(document.get("publication_write_at") or ""),
+        detail=str(document.get("publication_write_detail") or ""),
+    )
+    shared = CredentialFinding(
+        state=str(document.get("shared_write") or WRITE_UNKNOWN),
+        at=str(document.get("shared_write_at") or ""),
+        detail=str(document.get("shared_write_detail") or ""),
+    )
+    if document and remote and recorded_remote and recorded_remote != remote:
+        stale.append(f"the recorded remote was {recorded_remote} and is now {remote}")
+        publication = CredentialFinding()
+        shared = CredentialFinding()
+    if publication.known and publication_fingerprint and recorded_publication != publication_fingerprint:
+        stale.append(
+            f"the publication key changed from {recorded_publication or 'an unrecorded key'} "
+            f"to {publication_fingerprint}"
+        )
+        publication = CredentialFinding()
+    if shared.known and shared_fingerprint and recorded_shared and recorded_shared != shared_fingerprint:
+        stale.append(
+            f"the shared credential changed from {recorded_shared} to {shared_fingerprint}"
+        )
+        shared = CredentialFinding()
+    return CutoverEvidence(
+        project=project,
+        remote=remote or recorded_remote,
+        publication_fingerprint=publication_fingerprint or recorded_publication,
+        shared_fingerprint=shared_fingerprint or recorded_shared,
+        publication=publication,
+        shared=shared,
+        stale=tuple(stale),
+    )
+
+
+def write_cutover_evidence(evidence: CutoverEvidence, *, runner: Runner = subprocess.run) -> str:
+    """Persist it as root, world-readable, with nothing secret in it."""
+    path = cutover_evidence_path(evidence.project)
+    payload = json.dumps(evidence.as_document(), indent=2, sort_keys=True)
+    # Fed on stdin rather than embedded in a shell string: this document is
+    # multi-line, and a quoting mistake in a security record is a record that
+    # silently does not exist.
+    written = runner(
+        ["install", "-m", "0644", "-o", "root", "-g", "root", "/dev/stdin", str(path)],
+        input=payload + "\n",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if getattr(written, "returncode", 1) != 0:
+        return f"could not record the cutover state in {path}: {_failure(written)}"
+    return ""
+
+
+def record_publication_write(
+    project: str,
+    *,
+    remote: str,
+    publication_fingerprint: str,
+    detail: str,
+    runner: Runner = subprocess.run,
+) -> str:
+    """A protected publication succeeded, so that key demonstrably has write.
+
+    This is the one verdict that needs no separate probe: a push that the forge
+    accepted is proof, and it is the evidence a later upgrade reads instead of
+    guessing.
+    """
+    current = read_cutover_evidence(
+        project, remote=remote, publication_fingerprint=publication_fingerprint
+    )
+    updated = replace(
+        current,
+        project=project,
+        remote=remote,
+        publication_fingerprint=publication_fingerprint,
+        publication=CredentialFinding(
+            state=WRITE_VERIFIED,
+            at=datetime.now(timezone.utc).isoformat(),
+            detail=detail,
+        ),
+    )
+    return write_cutover_evidence(updated, runner=runner)
+
+
+def shared_credential_check_command(remote: str, *, owner_user: str, identity_file: str) -> list[str]:
+    """The bounded check, as one command line an operator can read and rerun.
+
+    A dry-run push of the remote's own tip back onto the ref it already points
+    at. It proposes no change even if the dry run were disregarded, so the only
+    question it can answer is the one being asked: whether this credential is
+    allowed to write at all. Read access is untouched and no ref is created or
+    moved.
+    """
+    ssh = (
+        f"ssh -i {_quote(identity_file)} -o IdentitiesOnly=yes -o BatchMode=yes"
+    )
+    script = (
+        f"set -eu\n"
+        f"tip=$(GIT_SSH_COMMAND={_quote(ssh)} git ls-remote {_quote(remote)} HEAD | cut -f1)\n"
+        f'[ -n "$tip" ] || exit 3\n'
+        f"ref=$(GIT_SSH_COMMAND={_quote(ssh)} git ls-remote --symref {_quote(remote)} HEAD "
+        f"| awk '/^ref:/ {{print $2}}')\n"
+        f'[ -n "$ref" ] || exit 3\n'
+        f'GIT_SSH_COMMAND={_quote(ssh)} git push --dry-run {_quote(remote)} "$tip:$ref"\n'
+    )
+    return ["sudo", "-u", owner_user, "sh", "-c", script]
+
+
+def verify_shared_credential(
+    project: str,
+    *,
+    remote: str,
+    owner_user: str,
+    identity_file: str,
+    publication_fingerprint: str = "",
+    shared_fingerprint: str = "",
+    runner: Runner = subprocess.run,
+) -> CredentialFinding:
+    """Ask the forge whether the shared credential may still write.
+
+    Explicit and bounded: it runs only when somebody asks for it, it proposes no
+    change, and a failure that is not an answer is reported as no answer rather
+    than as either verdict.
+    """
+    proc = _run(shared_credential_check_command(remote, owner_user=owner_user, identity_file=identity_file), runner=runner)
+    now = datetime.now(timezone.utc).isoformat()
+    combined = f"{_output(proc)}\n{str(getattr(proc, 'stderr', '') or '')}".strip()
+    lowered = combined.casefold()
+    if getattr(proc, "returncode", 1) == 0:
+        finding = CredentialFinding(WRITE_PRESENT, now, "a dry-run push was accepted")
+    elif "read only" in lowered or "read-only" in lowered:
+        finding = CredentialFinding(WRITE_READ_ONLY, now, "the forge refused the push as read only")
+    else:
+        finding = CredentialFinding(
+            WRITE_UNKNOWN, now, (combined.splitlines() or ["the check produced no output"])[-1][:200]
+        )
+    current = read_cutover_evidence(
+        project,
+        remote=remote,
+        publication_fingerprint=publication_fingerprint,
+        shared_fingerprint=shared_fingerprint,
+    )
+    write_cutover_evidence(
+        replace(
+            current,
+            project=project,
+            remote=remote,
+            shared_fingerprint=shared_fingerprint or current.shared_fingerprint,
+            shared=finding,
+        ),
+        runner=runner,
+    )
+    return finding
+
+
+def cutover_state(evidence: CutoverEvidence, *, key_created: bool = False) -> str:
+    """One word for where this project is, decided only by what is on record."""
+    if evidence.publication.state == WRITE_VERIFIED:
+        if evidence.shared.state == WRITE_READ_ONLY:
+            return CUTOVER_READY
+        if evidence.shared.state == WRITE_PRESENT:
+            return CUTOVER_SHARED_WRITE
+        # Verified here, and nothing known about the credential it replaces:
+        # attempted-and-failed is a different thing to say than never-asked.
+        return CUTOVER_UNKNOWN if evidence.shared.at else CUTOVER_UNVERIFIED
+    if key_created:
+        # A key the forge has never seen: certain, whatever else failed.
+        return CUTOVER_UNREGISTERED
+    if evidence.shared.at and evidence.shared.state == WRITE_UNKNOWN:
+        return CUTOVER_UNKNOWN
+    return CUTOVER_UNVERIFIED
+
+
 def report_publication_outcome(
     outcome: PublicationOutcome,
     *,
@@ -729,14 +1030,75 @@ def report_publication_outcome(
         print_func(f"switchyard: {project} has a new publication key. It is root's; no role can read it.")
     else:
         print_func(f"switchyard: {project} already had a publication key and it was left alone.")
+
+    # What is said next is decided by what is on record, never by the fact that
+    # a public key could be printed. Saying "the shared credential still has
+    # write authority" when it demonstrably does not is not a harmless nag: it
+    # trains an operator to ignore the one line that would matter if it were
+    # ever true (SYRD-116).
+    evidence = read_cutover_evidence(
+        project,
+        remote=outcome.remote,
+        publication_fingerprint=_fingerprint_of(outcome.fingerprint),
+        shared_fingerprint=outcome.shared_fingerprint,
+    )
+    state = cutover_state(evidence, key_created=outcome.key_created)
+    for reason in evidence.stale:
+        print_func(
+            f"switchyard: {project}'s recorded cutover state no longer applies: {reason}. "
+            "It is being reported as unproven until it is checked again."
+        )
+
+    if state == CUTOVER_READY:
+        print_func(
+            f"switchyard: {project} publication cutover is complete: the publication key has "
+            f"write authority ({evidence.publication.detail or 'verified'}) and the shared "
+            f"project credential is read only ({evidence.shared.detail or 'verified'})."
+        )
+        return
+
     print_func(f"switchyard: public key:  {outcome.public_key}")
     if outcome.fingerprint:
         print_func(f"switchyard: fingerprint: {outcome.fingerprint}")
+
+    if state == CUTOVER_SHARED_WRITE:
+        print_func(
+            f"switchyard: {project}'s publication key has write authority, and the shared "
+            "project credential still does too -- checked, not assumed. Every role under that "
+            "account can push until it is removed."
+        )
+        print_func(
+            f"switchyard: remove write authority from the shared credential at the forge; the "
+            "publication key above is what publishes from now on."
+        )
+        return
+
+    if state == CUTOVER_UNREGISTERED:
+        print_func(
+            f"switchyard: this key is new, so the forge has never seen it. Register it as a "
+            f"WRITE key for {project}, then remove write authority from the shared "
+            "project-account credential."
+        )
+    elif state == CUTOVER_UNKNOWN:
+        print_func(
+            f"switchyard: {project}'s forge permissions could not be established"
+            + (f": {evidence.shared.detail}" if evidence.shared.detail else "")
+            + ". They are UNKNOWN -- this run is not saying they are safe and not saying they "
+            "are unsafe."
+        )
+    else:
+        print_func(
+            f"switchyard: {project}'s publication key is installed. Whether the forge grants it "
+            "write authority, and whether the shared project credential still has any, is not "
+            "recorded yet."
+        )
+
+    if outcome.shared_check_command:
+        print_func(
+            "switchyard: check the shared credential with this, which proposes no change and "
+            f"moves no ref: {outcome.shared_check_command}"
+        )
     print_func(
-        f"switchyard: register that key with the forge as a WRITE key for {project}, then remove "
-        "write authority from the shared project-account credential."
-    )
-    print_func(
-        "switchyard: until you do both, the shared project credential still has write authority "
-        "and every role under that account can still push. This upgrade cannot change that for you."
+        f"switchyard: a successful protected publication records the publication key's write "
+        f"authority by itself; nothing here needs to be asserted in advance."
     )

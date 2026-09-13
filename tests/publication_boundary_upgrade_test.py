@@ -198,8 +198,14 @@ def test_the_privileged_install_end_to_end() -> None:
     # this cannot do for them.
     assert report["public_key"].startswith("ssh-ed25519 "), report
     assert "SHA256:" in report["fingerprint"], report
-    assert "WRITE key" in report["report_text"], report["report_text"]
-    assert "still has write authority" in report["report_text"], report["report_text"]
+    # This report is of the RETRY, where the key already existed and nothing has
+    # checked the forge. It must say that plainly and must not assert that the
+    # shared credential still has write authority: nothing knows, and saying it
+    # on a host where the cutover is already done is how a real warning gets
+    # ignored (SYRD-116). The registration steps for a genuinely new key are
+    # covered in publication_cutover_state_test.
+    assert "not recorded yet" in report["report_text"], report["report_text"]
+    assert "still has write authority" not in report["report_text"], report["report_text"]
 
     # A release path somebody else could write is refused, not repaired.
     assert report["untrusted_refused"] is True, report
@@ -527,7 +533,15 @@ def test_the_whole_operator_sequence_runs_including_its_last_command() -> None:
 
     # What the ticket requires an operator be told, said by the real command.
     assert "public key:" in text and "fingerprint:" in text, text
-    assert "shared project credential still has write authority" in text, text
+    # And what it must not be told: that the shared credential still has write
+    # authority. Nothing on this run checked, so the report says the state is
+    # not recorded rather than asserting the unsafe half of it (SYRD-116).
+    assert "shared project credential still has write authority" not in text, text
+    # This key is new, so the steps really are outstanding and are named. What
+    # is not claimed is that the shared credential still has write authority:
+    # nothing checked it.
+    assert "the forge has never seen it" in text, text
+    assert "Register it as a WRITE key for porter" in text, text
 
     # CONVERGENT RETRY: the same command again, with the host reachable. It
     # completes, and the key it made the first time is the key it keeps.

@@ -14620,6 +14620,8 @@ def install_tenant_publication_boundary(
     *,
     release,
     publish_remote: str = "",
+    verify_shared: bool = False,
+    config_path: Path | None = None,
     dry_run: bool = False,
     sudoers_root: Path | None = None,
     registration_root: Path | None = None,
@@ -14648,6 +14650,27 @@ def install_tenant_publication_boundary(
 
     owner_user = config.run_as_user or current_user_name()
     sudoers_path = str(publish_sudoers_path(config.project, root=sudoers_root))
+    # The credential this boundary exists to replace. Named so the report can
+    # print the exact bounded check for it, and so its fingerprint keys the
+    # evidence: a rotated shared key is not the one a verdict was about.
+    from scripts.ticket_board.project_provision import (
+        owner_github_key_path,
+        resolve_owner_github_identity,
+    )
+
+    # Which key this tenant actually publishes with, not the default name. A
+    # verdict recorded against the wrong key would be a verdict about a
+    # credential nobody uses (SYRD-100 found the same trap from the other side).
+    owner_home = home_dir_for_user(owner_user)
+    plan_data = _plan_data_from_config(config, config_path) if config_path else {}
+    selected = resolve_owner_github_identity(
+        str(owner_home),
+        recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
+        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
+    )
+    shared_identity = owner_github_key_path(
+        str(owner_home), key_name=selected.key_name if selected.resolved else ""
+    )
     outcome = install_publication_boundary(
         project=config.project,
         release=release,
@@ -14655,10 +14678,30 @@ def install_tenant_publication_boundary(
         sudoers_path=sudoers_path,
         sudoers_document=publish_sudoers_document(config.project, owner_user),
         declared_remote=publish_remote,
+        shared_identity_file=shared_identity,
+        owner_user=owner_user,
         dry_run=dry_run,
         runner=runner,
         print_func=print_func,
     )
+    if verify_shared and not dry_run and outcome.remote:
+        # Explicit, bounded, and only when asked: it contacts the forge, so it
+        # is not something an ordinary upgrade should do behind an operator.
+        from scripts.ticket_board.publication_boundary import verify_shared_credential
+
+        finding = verify_shared_credential(
+            config.project,
+            remote=outcome.remote,
+            owner_user=owner_user,
+            identity_file=shared_identity,
+            publication_fingerprint=outcome.fingerprint,
+            shared_fingerprint=outcome.shared_fingerprint,
+            runner=runner,
+        )
+        print_func(
+            f"switchyard: {config.project} shared credential write authority: {finding.state}"
+            + (f" -- {finding.detail}" if finding.detail else "")
+        )
     for problem in outcome.problems:
         print_func(f"warning: switchyard: {problem}")
     if not dry_run:
@@ -16158,6 +16201,10 @@ def upgrade_project_command(
     # from the tenant, because every role runs as the account that owns the
     # tenant's git config and could aim the push somewhere else (SYRD-97 review).
     publish_remote: str = "",
+    # Asked for explicitly, because it contacts the forge. Without it an
+    # unproven cutover is reported as unproven rather than guessed at either way
+    # (SYRD-116).
+    verify_publication_cutover: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -16390,6 +16437,7 @@ def upgrade_project_command(
                 config,
                 release=previewed_release,
                 publish_remote=publish_remote,
+                config_path=config_path,
                 dry_run=True,
                 runner=runner,
                 print_func=print_func,
@@ -16493,6 +16541,8 @@ def upgrade_project_command(
             config,
             release=trusted_release,
             publish_remote=publish_remote,
+            verify_shared=verify_publication_cutover,
+            config_path=config_path,
             dry_run=False,
             runner=runner,
             print_func=print_func,
@@ -19091,6 +19141,15 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
             "it is never read from the project account, which every role runs as"
         ),
     )
+    parser.add_argument(
+        "--verify-publication-cutover",
+        action="store_true",
+        help=(
+            "ask the forge whether the shared project credential can still write, and record the "
+            "answer. Proposes no change and moves no ref; without it an unproven state is "
+            "reported as unproven rather than guessed at"
+        ),
+    )
     return parser
 
 
@@ -19962,6 +20021,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
             publish_remote=getattr(args, "publish_remote", ""),
+            verify_publication_cutover=bool(getattr(args, "verify_publication_cutover", False)),
         )
     if argv[0].casefold() == "cutover-roles":
         args = _build_switchyard_cutover_roles_parser().parse_args(argv[1:])
@@ -20234,6 +20294,7 @@ def main(argv: list[str] | None = None) -> int:
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
             publish_remote=getattr(args, "publish_remote", ""),
+            verify_publication_cutover=bool(getattr(args, "verify_publication_cutover", False)),
         )
     if args.command == "add-role":
         if not args.pane_mode or args.role:

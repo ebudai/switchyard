@@ -53,6 +53,7 @@ from switchyard_publication_authority import (  # noqa: E402
     git,
     load_project,
     publish_grant,
+    record_publication_success,
     remote_ref_commit,
     remote_url_for,
     require_control_caller,
@@ -283,6 +284,12 @@ def main(argv: list[str]) -> int:
     if problem is not None:
         return not_integrated(ref, commit, problem)
 
+    record_publication_success(
+        project,
+        grant=grant,
+        remote=remote_url,
+        detail=f"integrated {ref} at {commit[:12]}",
+    )
     print(json.dumps({
         "integrated": True,
         "project": project,

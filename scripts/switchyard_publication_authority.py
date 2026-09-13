@@ -701,6 +701,43 @@ def run_as(uid: int, gid: int, argv: list[str]) -> subprocess.CompletedProcess[s
     return subprocess.run(argv, text=True, capture_output=True, env=env, preexec_fn=preexec)
 
 
+def record_publication_success(
+    project: str, *, grant: dict, remote: str, detail: str
+) -> None:
+    """Write down that this key was just allowed to write, and never fail over it.
+
+    A push the forge accepted is the only proof of write authority that costs
+    nothing to obtain, and it is what a later upgrade reads instead of asserting
+    that the cutover is unfinished. Recording is bookkeeping: the publication has
+    already happened, so a problem here is reported and swallowed rather than
+    turned into a failure of work that succeeded (SYRD-116).
+    """
+    try:
+        sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
+        from ticket_board.publication_boundary import record_publication_write
+    except Exception:  # noqa: BLE001 - an older staged tree has no recorder
+        return
+    identity = str(grant.get("identity_file") or "")
+    fingerprint = ""
+    if identity:
+        shown = subprocess.run(
+            ["ssh-keygen", "-l", "-f", f"{identity}.pub"], text=True, capture_output=True
+        )
+        if shown.returncode == 0:
+            for token in shown.stdout.split():
+                if token.startswith("SHA256:"):
+                    fingerprint = token
+                    break
+    try:
+        problem = record_publication_write(
+            project, remote=remote, publication_fingerprint=fingerprint, detail=detail
+        )
+    except Exception as exc:  # noqa: BLE001 - see above
+        problem = str(exc)
+    if problem:
+        sys.stderr.write(f"{PROGRAM}: note: {problem}\n")
+
+
 def remote_ref_commit(remote_url: str, ref: str, ssh_command: str) -> str | None:
     listed = git(["ls-remote", remote_url, f"refs/heads/{ref}"], ssh_command=ssh_command)
     if listed.returncode != 0:

@@ -307,8 +307,14 @@ def main(argv: list[str]) -> int:
 HANDOFF_FD_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_FD"
 HANDOFF_CHILD_FD = 3
 HANDOFF_LIMIT_BYTES = 4096
-HANDOFF_SCHEMA = "switchyard.presentation-handoff.v1"
+HANDOFF_SCHEMA = "switchyard.presentation-handoff.v2"
 MAX_PRESENTATION_SLOTS = 6
+#: A slot title is rendered into the caller's terminal through an escape
+#: sequence, so it is checked here for what is in it and not only for its type.
+#: Root re-serialises this file field by field, so a title that is not checked
+#: here is a title that never reaches the window at all (SYRD-130).
+MAX_TITLE_LENGTH = 120
+REJECTED_TITLE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def publish_handoff(project: str, raw: str, *, caller: str) -> None:
@@ -345,6 +351,14 @@ def publish_handoff(project: str, raw: str, *, caller: str) -> None:
     # by nobody else.
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         return
+    titles = payload.get("slot_titles")
+    if not isinstance(titles, list) or len(titles) != slots:
+        return
+    for title in titles:
+        if not isinstance(title, str) or not title.strip():
+            return
+        if len(title) > MAX_TITLE_LENGTH or REJECTED_TITLE.search(title):
+            return
     try:
         caller_entry = pwd.getpwnam(caller)
     except KeyError:
@@ -359,6 +373,7 @@ def publish_handoff(project: str, raw: str, *, caller: str) -> None:
             "project": project,
             "slot_count": slots,
             "pane_program": program,
+            "slot_titles": list(titles),
         },
         sort_keys=True,
     ) + "\n"

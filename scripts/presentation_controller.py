@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -1304,24 +1304,34 @@ def presentation_layout_payload(
     owner: str,
     gui_user: str,
     pane_program: Path,
+    slot_titles: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The Konsole layout for one project's presentation window.
 
     Rendered from primitives so the owner half and the bridge caller produce
     the same document, rather than one of them shipping the other a document to
     write (SYRD-90).
+
+    The titles are passed to the pane wrapper, not written into the layout and
+    hoped for: Konsole's layout parser has no key for a split's title, which is
+    why `leaf["Title"]` alone left every header reading the fallback
+    cwd-and-program text on the desktop handoff path (SYRD-122, SYRD-130).
     """
+    titles = list(slot_titles)
     layout = team_launcher._new_project_layout_payload(slot_count)
     for slot, leaf in enumerate(team_launcher._layout_leaves(layout)):
+        title = titles[slot] if slot < len(titles) else ""
         leaf["Command"] = team_launcher.inert_pane_command(
-            pane_program, display_attach_args_for(project, slot, owner=owner, gui_user=gui_user)
+            pane_program,
+            display_attach_args_for(project, slot, owner=owner, gui_user=gui_user),
+            title=title,
         )
         # The desktop account's own directory, not this process's. Under a
         # privileged invocation `Path.home()` is root's, and the tab recorded
         # `WorkingDirectory=/root` -- a directory the desktop user cannot even
         # enter (SYRD-65).
         leaf["WorkingDirectory"] = team_launcher._gui_home(gui_user) if gui_user else str(Path.home())
-        leaf["Title"] = f"{project} slot {slot}"
+        leaf["Title"] = title or f"{project} slot {slot}"
     return layout
 
 
@@ -1347,6 +1357,7 @@ def _hand_off_desktop_half(
         pane_program=team_launcher.pane_window_program(
             team_launcher.switchyard_pane_launcher_for(config)
         ),
+        slot_titles=team_launcher.presentation_slot_titles(config, int(state["slot_count"])),
     )
     try:
         with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:
@@ -1384,6 +1395,7 @@ def _launch_separate(
         pane_program=team_launcher.pane_window_program(
             team_launcher.switchyard_pane_launcher_for(config)
         ),
+        slot_titles=team_launcher.presentation_slot_titles(config, state["slot_count"]),
     )
     # Under the control bridge this process is the project owner: it can
     # neither write into the desktop account's state directory nor reach that

@@ -5265,7 +5265,18 @@ def ensure_owner_file(
         raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
 
 
-PRESENTATION_HANDOFF_SCHEMA = "switchyard.presentation-handoff.v1"
+#: v2 carries the slot titles. The shape changed, so the name changed with it:
+#: a half that predates the titles would otherwise accept a payload it cannot
+#: honour and open a window with the fallback titles the User reported
+#: (SYRD-130). Both halves ship out of one release tree.
+PRESENTATION_HANDOFF_SCHEMA = "switchyard.presentation-handoff.v2"
+#: A title crosses from the tenant into the desktop account's terminal and is
+#: rendered there through an escape sequence. A control character in one is not
+#: a display problem, it is whatever else that terminal does with it, so titles
+#: are checked for content and not only for type. Bounded for the same reason a
+#: header is bounded.
+PRESENTATION_TITLE_MAX_LENGTH = 120
+PRESENTATION_TITLE_REJECTED = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 #: The bridge tells its child which descriptor to answer on. The bridge chooses
 #: it, never the caller: the environment the child gets is rebuilt from
 #: root-owned data, and this is one more field of it.
@@ -5287,20 +5298,56 @@ def presentation_handoff_path(project: str, user: str) -> Path:
     return desktop_state_dir(project, user) / f"{project}-presentation-handoff.json"
 
 
-def render_presentation_handoff(project: str, *, slot_count: int, pane_program: Path) -> dict[str, Any]:
+def presentation_title_problem(value: Any) -> str:
+    """Why one slot title may not cross the boundary, or "" if it may."""
+    if not isinstance(value, str):
+        return "a presentation slot title is not a string"
+    if not value.strip():
+        return "a presentation slot title is empty"
+    if len(value) > PRESENTATION_TITLE_MAX_LENGTH:
+        return f"a presentation slot title is longer than {PRESENTATION_TITLE_MAX_LENGTH} characters"
+    if PRESENTATION_TITLE_REJECTED.search(value):
+        return "a presentation slot title carries a control character"
+    return ""
+
+
+def presentation_slot_titles(config: ProjectConfig, slot_count: int) -> list[str]:
+    """What each slot in the presentation window calls itself.
+
+    A slot no role occupies keeps the project's own name: the window is still
+    that project's, and there is no role to claim it (SYRD-130).
+    """
+    titles = [project_window_title(config)] * max(int(slot_count), 0)
+    for role in config.roles:
+        if role.detached or role.slot is None:
+            continue
+        if 0 <= role.slot < len(titles):
+            titles[role.slot] = pane_split_title(config, role)
+    return titles
+
+
+def render_presentation_handoff(
+    project: str, *, slot_count: int, pane_program: Path, slot_titles: Sequence[str]
+) -> dict[str, Any]:
     """Everything the caller needs to build its own layout, and nothing else.
 
     Not the layout itself. The account that owns the sessions renders nothing
-    the desktop account will run: it reports two facts -- how many slots there
-    are, and which pinned program a tab runs -- and the caller builds the layout
-    from its own code. What crosses is checkable, and a payload that is not is
-    refused rather than written into somebody's home (SYRD-90).
+    the desktop account will run: it reports what it alone knows -- how many
+    slots there are, which pinned program a tab runs, and what each slot is
+    called -- and the caller builds the layout from its own code. What crosses
+    is checkable, and a payload that is not is refused rather than written into
+    somebody's home (SYRD-90).
+
+    The titles are here because the desktop half has no other way to learn
+    them: it knows the project's slug and nothing about its roles, which is why
+    its window opened with the fallback title (SYRD-130).
     """
     return {
         "schema": PRESENTATION_HANDOFF_SCHEMA,
         "project": project,
         "slot_count": int(slot_count),
         "pane_program": str(pane_program),
+        "slot_titles": [str(title) for title in slot_titles],
     }
 
 
@@ -5334,11 +5381,21 @@ def validated_presentation_handoff(
     reasons = untrusted_root_executable_reasons(program, owner_uid=0, runner=runner)
     if reasons:
         return {}, f"the presentation handoff pane program is not pinned to root: {reasons[0]}"
+    titles = payload.get("slot_titles")
+    if not isinstance(titles, list):
+        return {}, "the presentation handoff slot titles are not a list"
+    if len(titles) != slot_count:
+        return {}, f"the presentation handoff carries {len(titles)} slot titles for {slot_count} slots"
+    for title in titles:
+        problem = presentation_title_problem(title)
+        if problem:
+            return {}, f"the presentation handoff is refused: {problem}"
     return {
         "schema": PRESENTATION_HANDOFF_SCHEMA,
         "project": project,
         "slot_count": slot_count,
         "pane_program": raw_program,
+        "slot_titles": [str(title) for title in titles],
     }, ""
 
 
@@ -20234,6 +20291,7 @@ def complete_desktop_presentation(
         owner=owner,
         gui_user=caller,
         pane_program=Path(handoff["pane_program"]),
+        slot_titles=handoff["slot_titles"],
     )
     output = desktop_state_dir(project, caller) / f"{project}-presentation-layout.json"
     refusal = write_desktop_layout(output, layout, gui_user=caller, runner=runner)

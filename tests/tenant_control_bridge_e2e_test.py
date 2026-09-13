@@ -90,6 +90,10 @@ def _write_grant(payload: dict[str, str], *, mode: int = 0o644, uid: int = 0) ->
     return path
 
 
+def _titles(count: int) -> list[str]:
+    return [f"Demo -- Role{index}" for index in range(count)]
+
+
 def _record_path(work: Path, name: str, accounts: Accounts) -> Path:
     """A drop box the owner account can write, so the run can be read back."""
     box = work / "records"
@@ -167,10 +171,11 @@ def case_the_bridge_returns_one_validated_handoff_to_its_caller(
     pinned.chmod(0o755)
     good = json.dumps(
         {
-            "schema": "switchyard.presentation-handoff.v1",
+            "schema": "switchyard.presentation-handoff.v2",
             "project": PROJECT,
             "slot_count": 6,
             "pane_program": str(pinned),
+            "slot_titles": [f"Demo -- Role{index}" for index in range(6)],
         },
         sort_keys=True,
     )
@@ -211,13 +216,19 @@ def case_the_bridge_returns_one_validated_handoff_to_its_caller(
     # caller's home exactly as it was.
     for label, payload in (
         ("schema", {"schema": "switchyard.other.v1", "project": PROJECT, "slot_count": 6,
-                    "pane_program": str(pinned)}),
-        ("project", {"schema": "switchyard.presentation-handoff.v1", "project": "other",
-                     "slot_count": 6, "pane_program": str(pinned)}),
-        ("slots", {"schema": "switchyard.presentation-handoff.v1", "project": PROJECT,
-                   "slot_count": 99, "pane_program": str(pinned)}),
-        ("program", {"schema": "switchyard.presentation-handoff.v1", "project": PROJECT,
-                     "slot_count": 6, "pane_program": str(work / "theirs")}),
+                    "pane_program": str(pinned), "slot_titles": _titles(6)}),
+        ("project", {"schema": "switchyard.presentation-handoff.v2", "project": "other",
+                     "slot_count": 6, "pane_program": str(pinned), "slot_titles": _titles(6)}),
+        ("slots", {"schema": "switchyard.presentation-handoff.v2", "project": PROJECT,
+                   "slot_count": 99, "pane_program": str(pinned), "slot_titles": _titles(99)}),
+        ("program", {"schema": "switchyard.presentation-handoff.v2", "project": PROJECT,
+                     "slot_count": 6, "pane_program": str(work / "theirs"), "slot_titles": _titles(6)}),
+        # SYRD-130: the titles cross the same boundary as everything else here.
+        ("titles missing", {"schema": "switchyard.presentation-handoff.v2", "project": PROJECT,
+                            "slot_count": 6, "pane_program": str(pinned)}),
+        ("titles control character", {"schema": "switchyard.presentation-handoff.v2", "project": PROJECT,
+                                      "slot_count": 6, "pane_program": str(pinned),
+                                      "slot_titles": ["Demo -- Ops"] * 5 + ["Demo\033]0;pwned\007"]}),
         ("junk", "not json at all"),
     ):
         theirs = work / "theirs"

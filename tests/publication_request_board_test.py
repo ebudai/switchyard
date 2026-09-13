@@ -31,6 +31,7 @@ from temporary_cluster import temporary_cluster
 
 COMMIT_A = "a" * 40
 COMMIT_B = "b" * 40
+COMMIT_C = "c" * 40
 BUNDLE = "/home/agent/.local/state/switchyard/publish-outbox/syrd/PGU-1.bundle"
 
 
@@ -284,6 +285,52 @@ def main() -> int:
                 listing = json.loads(response.read().decode("utf-8"))
             waiting = {r["ticket_id"]: r["requested_by"] for r in listing["requests"]}
             assert waiting == {"PGU-1": "ops", "PGU-2": "main"}, listing
+
+            # SYRD-119: what the publisher leases a replacement against. PGU-1's
+            # open ask names a ref this board has published before, so the row
+            # carries that commit; PGU-2's names one whose only prior ask was
+            # rejected, so it carries nothing and the publisher will refuse to
+            # replace anything sitting there. Superseded and rejected rows are
+            # not publications, and a ref with no record is not one this
+            # workflow may overwrite.
+            by_ticket = {r["ticket_id"]: r for r in listing["requests"]}
+            assert by_ticket["PGU-1"]["previous_published_commit"] == COMMIT_B, by_ticket["PGU-1"]
+            assert by_ticket["PGU-2"]["previous_published_commit"] == "", by_ticket["PGU-2"]
+            # The open request never names itself, whatever its own state.
+            assert by_ticket["PGU-1"]["commit_hash"] == COMMIT_A, by_ticket["PGU-1"]
+            # And the same answer travels with the ticket, so the panel and the
+            # publisher cannot be looking at two different records.
+            assert app.get_ticket("PGU-1")["publication"]["previous_published_commit"] == COMMIT_B
+
+            # A ref published twice reports the LATEST publication, not the
+            # first. This is the shape that produced SYRD-119: a candidate is
+            # published, rebuilt, published again, and rebuilt again. Leasing
+            # against the first publication would refuse every replacement after
+            # the second one.
+            second = [r for r in requests_for(admin, "PGU-1") if r["state"] == "requested"][0]
+            t.post_json(
+                base,
+                "/api/tickets/PGU-1/actions/resolve_publication",
+                {"request_id": second["id"], "outcome": "published", "detail": "pushed again"},
+                caller="director",
+            )
+            third = t.post_json(
+                base,
+                "/api/tickets/PGU-1/actions/request_publication",
+                {"ref": "ops/syrd-92-defer-backlog", "commit": COMMIT_C, "bundle": BUNDLE},
+                caller="ops",
+            )
+            assert third["request"]["previous_published_commit"] == COMMIT_A, third["request"]
+
+            # No row is ever its own predecessor. Only requested rows reach the
+            # publisher, where a self-reference cannot arise, but this field is
+            # in every listing's JSON and an answer of "itself" would be a trap
+            # for whoever reads it next.
+            with urllib.request.urlopen(base + "/api/publications?state=published", timeout=5) as response:
+                done = json.loads(response.read().decode("utf-8"))
+            assert done["requests"], done
+            for row in done["requests"]:
+                assert row["previous_published_commit"] != row["commit_hash"], row
         finally:
             server.shutdown()
             server.server_close()

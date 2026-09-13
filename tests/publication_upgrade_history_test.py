@@ -108,12 +108,29 @@ def schema_at(migration_name: str) -> str:
     upgrade has to work for, and which does not depend on this branch's own
     commits existing yet.
     """
+    return _at_release(migration_name, "scripts/ticket_board/schema.sql")
+
+
+def rbac_at(migration_name: str) -> str:
+    """rbac.sql from that same release, for the same reason schema.sql is.
+
+    The two ship together and are applied together -- schema.sql, the runner,
+    then rbac.sql, all out of one release tree -- so a tenant stopped at an
+    older release has that release's rbac, not this branch's. Pairing an old
+    schema with today's grants builds a database no host is ever in, and the
+    first grant naming a function introduced after that release fails on a
+    board that is not broken (SYRD-119).
+    """
+    return _at_release(migration_name, "scripts/ticket_board/rbac.sql")
+
+
+def _at_release(migration_name: str, path: str) -> str:
     adding = git(
         "log", "--format=%H", "--diff-filter=A", "--",
         f"scripts/ticket_board/migrations/{migration_name}",
     ).strip().splitlines()
     assert adding, migration_name
-    return git("show", f"{adding[-1]}:scripts/ticket_board/schema.sql")
+    return git("show", f"{adding[-1]}:{path}")
 
 
 def run_migration_runner(cluster, db: str) -> str:
@@ -249,7 +266,7 @@ def main() -> int:
         assert f"apply {MINE.name}" in applied, applied
         # Only this one: the tenant already ran the release before it.
         assert f"apply {PREVIOUS}" not in applied, applied
-        t.psql(admin, t.RBAC_PATH.read_text())
+        t.psql(admin, rbac_at(PREVIOUS))
 
         # The upgrade landed, on the roles it belongs to.
         assert "request_publication" in capabilities(admin, "ops"), capabilities(admin, "ops")

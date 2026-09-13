@@ -98,6 +98,57 @@ def ref_problem(ref: str, role: str) -> str | None:
     return None
 
 
+def push_decision(
+    ref: str, commit: str, public_commit: str, recorded_commit: str
+) -> tuple[str, list[str], str]:
+    """How this publication may move the public ref, or why it must not.
+
+    A candidate that has been rebuilt on current main is not a descendant of the
+    one published before it, so an ordinary push of the same ref is a
+    non-fast-forward and the forge refuses it. That refusal is correct and the
+    old answer to it -- rename the branch by hand and file the request again --
+    is a workflow doing by convention what it should be doing by rule
+    (SYRD-119).
+
+    The rule: a replacement may move the public ref off exactly the commit this
+    board recorded publishing there, and off nothing else. The lease carries
+    that recorded commit explicitly, so the forge performs the comparison
+    atomically at the moment of the update; the reading below only decides
+    whether to attempt it and what to say when it will obviously fail.
+
+    There is deliberately no path to a bare `--force`, and none to a lease
+    without an explicit value: `--force-with-lease` with no value leases against
+    whatever this repository last happened to fetch, which for a staging tree
+    filled from a bundle is not a statement about the public ref at all.
+
+    Returns (kind, extra push arguments, reason). `refuse` leaves the ref and
+    the request exactly as they were.
+    """
+    if public_commit == "":
+        # Nothing to replace. An ordinary create, which still refuses on its own
+        # if the ref appears underneath this.
+        return "create", [], ""
+    if public_commit == commit:
+        # Already there: a retry of a request whose push landed before something
+        # later in the run failed. Pushing again would be a no-op, but a lease
+        # against the previous commit would now fail, so say so rather than
+        # turn a safe retry into a refusal.
+        return "already", [], ""
+    if recorded_commit and public_commit == recorded_commit:
+        return "replace", [f"--force-with-lease=refs/heads/{ref}:{recorded_commit}"], ""
+    if not recorded_commit:
+        return "refuse", [], (
+            f"{ref} already exists publicly at {public_commit} and this board has no record of "
+            f"publishing anything there; a ref this workflow did not create is not one it may "
+            f"replace"
+        )
+    return "refuse", [], (
+        f"{ref} is publicly at {public_commit}, but the last publication this board recorded for "
+        f"it was {recorded_commit}; something moved the ref outside this workflow, so replacing it "
+        f"now would discard a change nobody here has seen"
+    )
+
+
 def not_workflow_ready(ref: str, commit: str, problem: str) -> int:
     """Publication landed; the work is not submittable. Say both, and fail."""
     sys.stderr.write(
@@ -172,14 +223,46 @@ def main(argv: list[str]) -> int:
 
     remote_url = remote_url_for(grant)
     ssh_command = ssh_command_for(grant)
-    pushed = git(
-        ["-C", str(staging), "push", remote_url, f"refs/heads/{ref}:refs/heads/{ref}"],
-        ssh_command=ssh_command,
-    )
-    sys.stdout.write(pushed.stdout)
-    sys.stderr.write(pushed.stderr)
-    if pushed.returncode != 0:
-        return pushed.returncode
+    recorded_commit = str(request.get("previous_published_commit") or "").strip().lower()
+    if recorded_commit and not COMMIT.fullmatch(recorded_commit):
+        fail(
+            f"the board's record of what was last published at {ref} is {recorded_commit!r}, "
+            "which is not a commit; nothing was pushed"
+        )
+    public_before = remote_ref_commit(remote_url, ref, ssh_command)
+    if public_before is None:
+        fail(
+            f"could not read the public {ref} from the pinned remote; nothing was pushed and "
+            f"publication request {args.request} is unchanged, so this can be run again"
+        )
+    kind, extra, reason = push_decision(ref, commit, public_before, recorded_commit)
+    if kind == "refuse":
+        fail(
+            f"refusing publication request {args.request}: {reason}. Nothing was pushed and the "
+            "request is still open; resolve the ref by hand, or reject the request, and this can "
+            "be run again"
+        )
+    if kind == "already":
+        sys.stderr.write(
+            f"{PROGRAM}: {ref} is already public at {commit}; continuing with verification "
+            "rather than pushing again\n"
+        )
+    else:
+        pushed = git(
+            ["-C", str(staging), "push", *extra, remote_url, f"refs/heads/{ref}:refs/heads/{ref}"],
+            ssh_command=ssh_command,
+        )
+        sys.stdout.write(pushed.stdout)
+        sys.stderr.write(pushed.stderr)
+        if pushed.returncode != 0:
+            if kind == "replace":
+                sys.stderr.write(
+                    f"{PROGRAM}: the replacement was refused. {ref} was {recorded_commit} when "
+                    "this started; if the forge says the lease failed, it moved in between and "
+                    "the public ref still holds whatever replaced it. Nothing here changed and "
+                    f"publication request {args.request} is still open.\n"
+                )
+            return pushed.returncode
 
     public_commit = None
     for attempt in range(PUBLIC_REF_ATTEMPTS):

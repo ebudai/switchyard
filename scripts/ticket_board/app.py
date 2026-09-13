@@ -138,6 +138,18 @@ def crop_filename_slug(raw: str) -> str:
 
 
 
+#: What this board last published at the same ref. The publisher leases a
+#: replacement candidate against exactly this value, so a rebuilt candidate can
+#: move the public ref off what the board put there and off nothing else
+#: (SYRD-119). Asked once, through one query, so that the row the publisher acts
+#: on and the row a reader sees cannot be two different answers.
+PREVIOUS_PUBLISHED_COMMIT_QUERY = (
+    "SELECT coalesce((SELECT prior.commit_hash FROM ticket_board.publication_requests prior"
+    " WHERE prior.ref = %s AND prior.state = 'published' AND prior.id <> %s"
+    " ORDER BY prior.decided_at DESC NULLS LAST, prior.id DESC LIMIT 1), '')"
+)
+
+
 def _publication_row(row: Any) -> dict[str, Any]:
     """One publication request, as JSON the socket, CLI and UI all read."""
     if row is None:
@@ -148,6 +160,29 @@ def _publication_row(row: Any) -> dict[str, Any]:
         record[key] = value.isoformat() if hasattr(value, "isoformat") else ("" if value is None else str(value))
     record["id"] = int(record.get("id") or 0)
     return record
+
+def _publication_row_with_history(conn: Any, row: Any) -> dict[str, Any]:
+    """A publication row, plus what this board last published at its ref.
+
+    Computed for every path that returns a publication rather than only the
+    listing the publisher happens to read today: a field that is present in one
+    caller's JSON and absent from another's is the kind of difference that gets
+    discovered by something failing at the far end (SYRD-119).
+    """
+    record = _publication_row(row)
+    if not record:
+        return record
+    ref = str(record.get("ref") or "")
+    if not ref:
+        record["previous_published_commit"] = ""
+        return record
+    found = conn.execute(
+        PREVIOUS_PUBLISHED_COMMIT_QUERY, (ref, int(record.get("id") or 0))
+    ).fetchone()
+    value = found[0] if not isinstance(found, dict) else next(iter(found.values()))
+    record["previous_published_commit"] = str(value or "")
+    return record
+
 
 class TicketBoardApp:
     def __init__(
@@ -794,7 +829,7 @@ WHERE (r.definition->>'active')::boolean
                     (ticket_id, str(ref), str(commit), str(bundle)),
                 ).fetchone()
                 return {
-                    "request": _publication_row(row),
+                    "request": _publication_row_with_history(conn, row),
                     "ticket": self._pg_get_ticket(ticket_id, conn),
                 }
 
@@ -815,7 +850,7 @@ WHERE (r.definition->>'active')::boolean
                     "SELECT * FROM ticket_board.resolve_publication(%s::bigint, %s, %s);",
                     (int(request_id), str(outcome), str(detail)),
                 ).fetchone()
-                request = _publication_row(row)
+                request = _publication_row_with_history(conn, row)
                 return {
                     "request": request,
                     "ticket": self._pg_get_ticket(str(request["ticket_id"]), conn),
@@ -844,7 +879,7 @@ WHERE (r.definition->>'active')::boolean
                 f"{where} ORDER BY id DESC LIMIT %s",
                 tuple(parameters),
             ).fetchall()
-        return [_publication_row(row) for row in rows]
+            return [_publication_row_with_history(conn, row) for row in rows]
 
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         actor_normalized = str(actor).strip().lower()
@@ -1200,7 +1235,7 @@ ORDER BY rank;
             "WHERE ticket_id = %s AND state = 'requested' ORDER BY id DESC LIMIT 1",
             (ticket["id"],),
         ).fetchone()
-        ticket["publication"] = _publication_row(open_request)
+        ticket["publication"] = _publication_row_with_history(conn, open_request)
         return ticket
 
     def _pg_row_to_ticket(self, row: dict[str, Any]) -> dict[str, Any]:

@@ -1239,11 +1239,27 @@ BEGIN
     END IF;
 
     IF TG_OP = 'UPDATE' THEN
-        IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
-            RETURN NULL;
-        END IF;
         IF OLD.state IS NOT DISTINCT FROM NEW.state THEN
             RETURN NULL;
+        END IF;
+        -- Manual control is a deliberate silence: no nudges, no reminders, no
+        -- announcement of every edit while the Director steers a ticket by
+        -- hand. It was also silencing the one message that is not a reminder.
+        -- An actionable transition that moves work to a DIFFERENT owner is a
+        -- handoff, and the new owner is the one person who cannot be expected
+        -- to find out any other way -- on the live case, Audit sat idle while
+        -- the work waited for it, and a Director had to hand-deliver a comment
+        -- (SYRD-107).
+        --
+        -- Narrow on purpose, and every clause is a case that must stay silent:
+        -- a destination nobody owns or that notifies nobody has no target at
+        -- all, and a move that keeps the same owner is not a handoff.
+        IF coalesce(OLD.manually_controlled, false) OR coalesce(NEW.manually_controlled, false) THEN
+            IF ticket_board.transition_target_role(NEW.state, NEW.assignee) IS NULL
+               OR ticket_board.transition_target_role(NEW.state, NEW.assignee)
+                  IS NOT DISTINCT FROM ticket_board.transition_target_role(OLD.state, OLD.assignee) THEN
+                RETURN NULL;
+            END IF;
         END IF;
         IF ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
             RETURN NULL;

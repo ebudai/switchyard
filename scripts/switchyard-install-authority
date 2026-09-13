@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""Install the publication and integration authority, and nothing else.
+
+The two privileged operations are the way out of the credential cutover, and the
+first host to need them cannot get them the ordinary way: the release carrying
+them is younger than the release the tenant runs, so installing it whole would
+replace a board, generated artifacts, hooks, skills and staged tooling that were
+audited and accepted separately. A bootstrap that downgrades everything else to
+deliver one boundary is not a bootstrap, it is an outage with a good reason
+(SYRD-93 live acceptance).
+
+So this installs exactly four files and one sudo rule:
+
+    switchyard-publish-ref          the publisher
+    switchyard-integrate-main       the integrator
+    switchyard-integrate            the unprivileged driver a person runs
+    switchyard_publication_authority.py   the rules those two share
+
+and the grant that lets the project account reach the two privileged ones. It
+touches no release pointer, no board release, no generated artifact, no hook, no
+skill and no other staged tool. What it replaces it first copies aside, so
+`--rollback` puts the host back exactly.
+
+It is meant to be run by root, out of root's own checkout of the audited commit
+-- the tree `trusted_bootstrap_commands` builds from a bundle and checks out by
+content hash. It refuses to run from anywhere the identity running it does not
+control, so a copy in a role-writable path cannot be what installs the boundary.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import NoReturn
+
+HERE = Path(os.path.realpath(__file__)).parent
+sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
+
+try:  # the release tree, where this normally runs
+    from scripts.ticket_board.project_provision import (
+        publish_sudoers_document,
+        publish_sudoers_path,
+        role_tooling_staging_dir,
+        untrusted_root_executable_reasons,
+    )
+except ModuleNotFoundError:  # a staged copy, where the package is a sibling
+    from ticket_board.project_provision import (  # type: ignore[no-redef]
+        publish_sudoers_document,
+        publish_sudoers_path,
+        role_tooling_staging_dir,
+        untrusted_root_executable_reasons,
+    )
+
+#: What the boundary is made of. Two privileged programs, the driver a person
+#: runs, and the module the privileged pair share.
+AUTHORITY_FILES: tuple[tuple[str, int], ...] = (
+    ("switchyard-publish-ref", 0o755),
+    ("switchyard-integrate-main", 0o755),
+    ("switchyard-integrate", 0o755),
+    ("switchyard_publication_authority.py", 0o644),
+)
+ROLLBACK_SCHEMA = "switchyard.authority-install.v1"
+STAGING_ROOT_ENV = "SWITCHYARD_AUTHORITY_STAGING_ROOT"
+VISUDO_ENV = "SWITCHYARD_AUTHORITY_VISUDO"
+PROVISION_ROOT_ENV = "SWITCHYARD_PRIVILEGED_PROVISION_ROOT"
+DEFAULT_PROVISION_ROOT = Path("/etc/switchyard/provision")
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"switchyard-install-authority: {message}")
+
+
+def provision_dir(project: str) -> Path:
+    configured = os.environ.get(PROVISION_ROOT_ENV, "").strip()
+    return (Path(configured) if configured else DEFAULT_PROVISION_ROOT) / project
+
+
+def staging_dir(project: str) -> Path:
+    configured = os.environ.get(STAGING_ROOT_ENV, "").strip()
+    return Path(role_tooling_staging_dir(project, root=configured or None))
+
+
+def require_trusted_source() -> Path:
+    """This program, and every directory above it, belongs to whoever runs it.
+
+    In production that is root, so what installs the boundary is root's own copy
+    of the audited commit. The identity is read rather than assumed for the same
+    reason the rest of this codebase reads it: the security cases have to be
+    exercisable without a root-owned sandbox.
+    """
+    # How far up the path this answers for. On a host, all the way to the
+    # filesystem root: /opt and /usr/local are root's and are checked like
+    # everything else. When the privileged provision root has been redirected --
+    # which only a test does -- everything above that redirection belongs to
+    # whoever set it up, so the walk stops at this release tree and still covers
+    # every directory the bootstrap created (the same rule SYRD-62 uses for
+    # published artifacts).
+    redirected = bool(os.environ.get(PROVISION_ROOT_ENV, "").strip())
+    reasons = untrusted_root_executable_reasons(
+        Path(os.path.realpath(__file__)),
+        boundary=HERE.parent if redirected else None,
+    )
+    if reasons:
+        fail(
+            "refusing to install the authority boundary from a path this account does not "
+            f"control: {reasons[0]}"
+        )
+    return HERE
+
+
+def source_commit(source: Path) -> str:
+    """Which commit these bytes are, from the tree's own marker or its git."""
+    marker = source.parent / ".switchyard-release.json"
+    try:
+        if marker.is_file():
+            recorded = str(json.loads(marker.read_text(encoding="utf-8")).get("commit") or "")
+            if recorded:
+                return recorded
+    except (OSError, ValueError):
+        pass
+    resolved = subprocess.run(
+        ["git", "-C", str(source.parent), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
+    )
+    return resolved.stdout.strip() if resolved.returncode == 0 else ""
+
+
+def install_file(source: Path, target: Path, mode: int) -> None:
+    """Replace one file atomically, leaving nothing half-written behind."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.", delete=False) as handle:
+        staged = Path(handle.name)
+        handle.write(source.read_bytes())
+    os.chmod(staged, mode)
+    try:
+        os.chown(staged, os.getuid(), os.getgid())
+    except PermissionError:  # pragma: no cover - only when not privileged
+        pass
+    os.replace(staged, target)
+
+
+def save_previous(project: str, files: list[tuple[Path, Path, int]], sudoers: Path) -> dict:
+    """Copy aside everything about to be replaced, and say what was absent."""
+    keep = provision_dir(project) / "authority-rollback"
+    if keep.exists():
+        shutil.rmtree(keep)
+    keep.mkdir(parents=True, exist_ok=True)
+    os.chmod(keep, 0o755)
+    previous: dict[str, object] = {}
+    for _source, target, _mode in files:
+        if target.is_file() and not target.is_symlink():
+            shutil.copy2(target, keep / target.name)
+            previous[target.name] = True
+        else:
+            previous[target.name] = False
+    if sudoers.is_file():
+        shutil.copy2(sudoers, keep / "publish.sudoers")
+        previous["publish.sudoers"] = True
+    else:
+        previous["publish.sudoers"] = False
+    return previous
+
+
+def write_record(project: str, record: dict) -> Path:
+    path = provision_dir(project) / "authority-install.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as handle:
+        json.dump(record, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        staged = Path(handle.name)
+    os.chmod(staged, 0o644)
+    os.replace(staged, path)
+    return path
+
+
+def install_sudoers(document: str, target: Path) -> None:
+    """Validate before it can be read as policy, and only then give it its name."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f"{target.name}.staged")
+    staged.write_text(document, encoding="utf-8")
+    os.chmod(staged, 0o440)
+    visudo = os.environ.get(VISUDO_ENV, "").strip() or "visudo"
+    checked = subprocess.run([visudo, "-c", "-f", str(staged)], text=True, capture_output=True)
+    if checked.returncode != 0:
+        staged.unlink(missing_ok=True)
+        fail(
+            "the publication grant did not validate, so it was not installed: "
+            + (checked.stderr or checked.stdout or "no output").strip()
+        )
+    os.replace(staged, target)
+
+
+def rollback(project: str) -> int:
+    keep = provision_dir(project) / "authority-rollback"
+    record_path = provision_dir(project) / "authority-install.json"
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        fail(f"no authority install is recorded for {project}; there is nothing to undo")
+    if str(record.get("schema") or "") != ROLLBACK_SCHEMA:
+        fail(f"{record_path} is not an authority install record")
+    staging = Path(str(record.get("staging_dir") or staging_dir(project)))
+    sudoers = Path(str(record.get("sudoers_path") or publish_sudoers_path(project)))
+    previous = record.get("previously_present") or {}
+    for name, _mode in AUTHORITY_FILES:
+        target = staging / name
+        if previous.get(name):
+            install_file(keep / name, target, dict(AUTHORITY_FILES)[name])
+        else:
+            target.unlink(missing_ok=True)
+    if previous.get("publish.sudoers"):
+        install_sudoers((keep / "publish.sudoers").read_text(encoding="utf-8"), sudoers)
+    else:
+        sudoers.unlink(missing_ok=True)
+    record_path.unlink(missing_ok=True)
+    shutil.rmtree(keep, ignore_errors=True)
+    print(
+        json.dumps(
+            {"rolled_back": True, "project": project, "staging_dir": str(staging),
+             "sudoers": str(sudoers)},
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="switchyard-install-authority")
+    parser.add_argument("--project", required=True)
+    parser.add_argument("--owner", default="", help="the project account the grant is for")
+    parser.add_argument("--rollback", action="store_true", help="undo the recorded install")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv[1:])
+
+    project = args.project.strip()
+    if not project or not project.replace("-", "").replace("_", "").isalnum():
+        fail(f"{args.project!r} is not a valid project name")
+    if args.rollback:
+        return rollback(project)
+
+    source = require_trusted_source()
+    staging = staging_dir(project)
+    sudoers = publish_sudoers_path(project)
+    owner = args.owner.strip()
+    if not owner:
+        try:
+            owner = staging.owner()
+        except (OSError, KeyError):
+            owner = ""
+    if not owner:
+        fail("cannot tell which account the grant is for; pass --owner")
+
+    files: list[tuple[Path, Path, int]] = []
+    for name, mode in AUTHORITY_FILES:
+        origin = source / name
+        if not origin.is_file():
+            fail(f"this release does not carry {name}; it is not the audited authority release")
+        files.append((origin, staging / name, mode))
+
+    document = publish_sudoers_document(project, owner)
+    commit = source_commit(source)
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "would_install": [str(target) for _o, target, _m in files],
+                    "would_write": str(sudoers),
+                    "from_commit": commit,
+                    "leaves_alone": [
+                        "the shared release pointer", "the board release",
+                        "generated tenant artifacts", "git hooks", "skills",
+                        "every other staged tool",
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if not staging.is_dir():
+        fail(f"{staging} does not exist; this tenant has no staged tooling to add the boundary to")
+
+    previous = save_previous(project, files, sudoers)
+    for origin, target, mode in files:
+        install_file(origin, target, mode)
+    install_sudoers(document, sudoers)
+    record = {
+        "schema": ROLLBACK_SCHEMA,
+        "project": project,
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+        "from_commit": commit,
+        "staging_dir": str(staging),
+        "sudoers_path": str(sudoers),
+        "files": [name for name, _mode in AUTHORITY_FILES],
+        "previously_present": previous,
+    }
+    record_path = write_record(project, record)
+    print(
+        json.dumps(
+            {
+                "installed": [str(target) for _o, target, _m in files],
+                "sudoers": str(sudoers),
+                "from_commit": commit,
+                "rollback_record": str(record_path),
+                "rollback_command": (
+                    f"sudo {Path(os.path.realpath(__file__))} --project {project} --rollback"
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

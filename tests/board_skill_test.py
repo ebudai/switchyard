@@ -393,48 +393,47 @@ def test_a_skill_switchyard_did_not_write_is_never_overwritten() -> None:
         assert board_skill.parse_provenance(codex.read_text(encoding="utf-8")) is not None
 
 
-def test_every_pointer_names_the_skill_that_is_actually_installed() -> None:
-    """A rename must not leave a session chasing a skill by an old name.
+def test_neither_the_hook_nor_the_listener_names_a_skill_any_more() -> None:
+    """The pointer is the catalog's job, so neither of these carries a copy.
 
-    The pane hook is deliberately import-free -- it runs inside every CLI's hook
-    path -- so its copy of the name is pinned here instead of shared.
+    Both used to hold their own sentence naming the skills, and both pasted it
+    into things a session sees repeatedly. A name that lives in two places is
+    also a name that can go stale in one of them; the way to keep them honest
+    is for them not to have one (SYRD-106).
     """
     hook = _load_pane_hook()
-    assert hook.BOARD_SKILL_NAME == board_skill.BOARD_SKILL.name
-    assert hook.DIRECTOR_SKILL_NAME == board_skill.DIRECTOR_SKILL.name
-    assert hook.DIRECTOR_ROLE == board_skill.DIRECTOR_ROLE
-    assert notify_listener.BOARD_SKILL_NAME == board_skill.BOARD_SKILL.name
+    for module, what in ((hook, "the pane hook"), (notify_listener, "the listener")):
+        for attribute in (
+            "BOARD_SKILL_INSTRUCTION",
+            "DIRECTOR_SKILL_INSTRUCTION",
+            "BOARD_SKILL_NAME",
+            "DIRECTOR_SKILL_NAME",
+            "_skill_instruction_for_role",
+            "board_skill_instruction_for_role",
+            "with_board_skill_instruction",
+            "_with_board_skill_instruction",
+        ):
+            assert not hasattr(module, attribute), f"{what} still carries {attribute}"
 
-    # Both pointer sites name exactly the skills the projection installs for
-    # that role, so a rename cannot leave one of them chasing an old name.
-    for role in ("director", "ops", ""):
-        expected = [skill.name for skill in board_skill.skills_for_role(role)]
-        hook_line = hook._skill_instruction_for_role(role)
-        listener_line = notify_listener.board_skill_instruction_for_role(role)
-        for line in (hook_line, listener_line):
-            assert [name for name in expected if name in line] == expected, (role, line)
-        absent = [
-            skill.name for skill in board_skill.CANONICAL_SKILLS if skill.name not in expected
-        ]
-        for name in absent:
-            assert name not in hook_line and name not in listener_line, (role, name)
-
-
-def test_only_real_handoffs_carry_the_skill_pointer() -> None:
-    message = "SYRD-1 -- Title entered Implementation"
-    handed_off = notify_listener.with_board_skill_instruction(message, kind="transition")
-    assert handed_off.startswith(message)
-    assert notify_listener.BOARD_SKILL_NAME in handed_off
-    # The pointer, not the body.
-    assert len(handed_off) - len(message) < 120
-    for quiet in ("nudge", "idle_reminder", "escalation", "awaiting_role"):
-        assert notify_listener.with_board_skill_instruction(message, kind=quiet) == message
-    assert notify_listener.with_board_skill_instruction(handed_off, kind="transition") == handed_off
+    # The skills themselves are untouched: still canonical, still installed for
+    # every runtime, and still selected for a director by the same projection.
+    assert board_skill.BOARD_SKILL.name == "switchyard-board"
+    assert board_skill.DIRECTOR_SKILL.name == "switchyard-director"
+    assert [skill.name for skill in board_skill.skills_for_role("director")] == [
+        board_skill.BOARD_SKILL.name,
+        board_skill.DIRECTOR_SKILL.name,
+    ]
+    assert [skill.name for skill in board_skill.skills_for_role("ops")] == [
+        board_skill.BOARD_SKILL.name
+    ]
 
 
-def test_every_session_start_context_names_the_skill() -> None:
+def test_a_fresh_session_hears_its_remit_and_no_skill_sentence() -> None:
     hook = _load_pane_hook()
-    with tempfile.TemporaryDirectory(prefix="switchyard-board-skill-hook.") as tmp:
+    # Deliberately not named after a skill: the remit path is echoed into the
+    # context, and a directory called switchyard-board would make the assertion
+    # below pass or fail on the fixture rather than on the behaviour.
+    with tempfile.TemporaryDirectory(prefix="pane-hook-remit.") as tmp:
         remit = Path(tmp) / "app.md"
         remit.write_text("# Role remit\n", encoding="utf-8")
         environ = {
@@ -447,9 +446,12 @@ def test_every_session_start_context_names_the_skill() -> None:
             environ=environ,
         )
     context = output["hookSpecificOutput"]["additionalContext"]
-    assert context.startswith(hook.BOARD_SKILL_INSTRUCTION)
     assert "Read your role remit" in context
-    assert hook._with_board_skill_instruction(context) == context
+    assert "# Role remit" in context
+    # The onboarding survives; the instruction that used to sit above it does not.
+    for name in (skill.name for skill in board_skill.CANONICAL_SKILLS):
+        assert name not in context, name
+    assert "Load the" not in context
 
 
 def _deployed_tree(root: Path) -> Path:

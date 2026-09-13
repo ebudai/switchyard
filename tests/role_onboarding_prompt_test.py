@@ -219,13 +219,20 @@ def test_every_runtime_start_shape_receives_the_prompt() -> None:
         assert "Never touch prod on Friday." not in text, continued
 
 
-def test_the_board_skill_instruction_is_present_exactly_once() -> None:
-    """It is prepended by the shared wrapper, so the prompt must not carry its own copy."""
-    hook = _load_hook_module()
+def test_a_stored_prompt_is_delivered_without_a_skill_sentence() -> None:
+    """The prompt is the whole of what a fresh session is told.
+
+    A shared wrapper used to prepend a line naming the skills to load. It is
+    gone, so what arrives is the director's own words and nothing bolted onto
+    them (SYRD-106).
+    """
     text = _context_text(
         _session_start({"TICKET_BOARD_ROLE_ONBOARDING_PROMPT": MULTILINE_PROMPT})
     )
-    assert text.count(hook.BOARD_SKILL_INSTRUCTION) == 1
+    assert MULTILINE_PROMPT.strip() in text
+    assert "Load the" not in text
+    for name in ("switchyard-board", "switchyard-director"):
+        assert name not in text, name
 
 
 # --- the director is no longer a special case --------------------------------
@@ -286,19 +293,18 @@ def test_the_legacy_bridge_is_gated_on_the_migration_marker() -> None:
     """
     with _controlled_project_root(packet=True) as env:
         unmigrated = _context_text(_director_start(env))
-        migrated = _context_text(
-            _director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"})
-        )
+        migrated = _director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"})
 
     assert "Read the onboarding packet first:" in unmigrated, unmigrated
-    # Migrated and cleared: the bridge must not answer for this director.
-    assert "Read the onboarding packet first:" not in migrated, migrated
-    assert "onboarding packet" not in migrated
+    # Migrated and cleared: the bridge must not answer for this director, and
+    # with the skill sentence gone there is nothing else left to send, so the
+    # hook emits no context at all rather than an empty one (SYRD-106).
+    assert migrated is None, migrated
 
-    # And with no packet anywhere, an unmigrated director simply gets nothing extra.
+    # And with no packet anywhere, an unmigrated director gets nothing either.
     with _controlled_project_root(packet=False) as env:
-        bare = _context_text(_director_start(env))
-    assert "onboarding packet" not in bare, bare
+        bare = _director_start(env)
+    assert bare is None, bare
 
 
 def test_a_migrated_director_with_a_prompt_still_gets_the_prompt() -> None:

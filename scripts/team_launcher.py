@@ -186,6 +186,10 @@ SWITCHYARD_COMMANDS = (
     "upgrade",
     "finish-upgrade",
     "cutover-roles",
+    # Reports the publication-key cutover, and on request checks the one thing
+    # no push can establish. Its only possible write is the root-owned,
+    # non-secret evidence file (SYRD-116).
+    "publication-status",
     "add-role",
     # Records which of the owner's existing keys a tenant publishes with, and
     # rewrites the managed ssh_config block. Both are root's writes (SYRD-100).
@@ -14620,7 +14624,6 @@ def install_tenant_publication_boundary(
     *,
     release,
     publish_remote: str = "",
-    verify_shared: bool = False,
     config_path: Path | None = None,
     dry_run: bool = False,
     sudoers_root: Path | None = None,
@@ -14684,24 +14687,6 @@ def install_tenant_publication_boundary(
         runner=runner,
         print_func=print_func,
     )
-    if verify_shared and not dry_run and outcome.remote:
-        # Explicit, bounded, and only when asked: it contacts the forge, so it
-        # is not something an ordinary upgrade should do behind an operator.
-        from scripts.ticket_board.publication_boundary import verify_shared_credential
-
-        finding = verify_shared_credential(
-            config.project,
-            remote=outcome.remote,
-            owner_user=owner_user,
-            identity_file=shared_identity,
-            publication_fingerprint=outcome.fingerprint,
-            shared_fingerprint=outcome.shared_fingerprint,
-            runner=runner,
-        )
-        print_func(
-            f"switchyard: {config.project} shared credential write authority: {finding.state}"
-            + (f" -- {finding.detail}" if finding.detail else "")
-        )
     for problem in outcome.problems:
         print_func(f"warning: switchyard: {problem}")
     if not dry_run:
@@ -16201,10 +16186,6 @@ def upgrade_project_command(
     # from the tenant, because every role runs as the account that owns the
     # tenant's git config and could aim the push somewhere else (SYRD-97 review).
     publish_remote: str = "",
-    # Asked for explicitly, because it contacts the forge. Without it an
-    # unproven cutover is reported as unproven rather than guessed at either way
-    # (SYRD-116).
-    verify_publication_cutover: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -16541,7 +16522,6 @@ def upgrade_project_command(
             config,
             release=trusted_release,
             publish_remote=publish_remote,
-            verify_shared=verify_publication_cutover,
             config_path=config_path,
             dry_run=False,
             runner=runner,
@@ -19141,16 +19121,154 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
             "it is never read from the project account, which every role runs as"
         ),
     )
+    return parser
+
+
+def _build_switchyard_publication_status_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard publication-status",
+        description=(
+            "Report where a project's publication-key cutover stands, and optionally check the "
+            "one thing no successful push can establish."
+        ),
+    )
+    parser.add_argument("project", help="project name or slug")
     parser.add_argument(
-        "--verify-publication-cutover",
+        "--verify",
         action="store_true",
         help=(
-            "ask the forge whether the shared project credential can still write, and record the "
-            "answer. Proposes no change and moves no ref; without it an unproven state is "
-            "reported as unproven rather than guessed at"
+            "ask the forge whether the shared project credential may still write. The check is a "
+            "dry-run push of the remote's own tip onto its own ref: it proposes no change, moves "
+            "no ref, and leaves read access alone"
         ),
     )
     return parser
+
+
+def publication_status_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    verify: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Report the cutover, and nothing else at all.
+
+    Deliberately not a flag on `upgrade`. Asking whether one credential may
+    write should not run a tenant upgrade: that path resolves releases, stages
+    root-owned tooling, rewrites grants and advances recorded phases, and none of
+    that is what was asked for. The only thing this can write is the root-owned,
+    non-secret evidence file, and only when --verify is given (SYRD-116 review).
+    """
+    from scripts.ticket_board.project_provision import (
+        owner_github_key_path,
+        publish_identity_path,
+        resolve_owner_github_identity,
+    )
+    from scripts.ticket_board.publication_boundary import (
+        CUTOVER_READY,
+        cutover_state,
+        read_cutover_evidence,
+        resolve_pinned_remote,
+        shared_credential_check_command,
+        verify_shared_credential,
+    )
+
+    project = config.project
+    owner_user = config.run_as_user or current_user_name()
+    owner_home = home_dir_for_user(owner_user)
+    plan_data = _plan_data_from_config(config, config_path)
+    selected = resolve_owner_github_identity(
+        str(owner_home),
+        recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
+        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
+    )
+    shared_identity = owner_github_key_path(
+        str(owner_home), key_name=selected.key_name if selected.resolved else ""
+    )
+
+    remote, remote_problem = resolve_pinned_remote(
+        project, registration_root=switchyard_privileged_provision_root(), declared_remote=""
+    )
+    if not remote:
+        print_func(f"switchyard: {project} has no root-owned publication remote: {remote_problem}")
+        return 1
+
+    publication_fingerprint = _public_key_fingerprint(
+        f"{publish_identity_path(project)}.pub", runner=runner
+    )
+    shared_fingerprint = _public_key_fingerprint(f"{shared_identity}.pub", runner=runner)
+    if not publication_fingerprint:
+        print_func(
+            f"switchyard: {project}'s publication public key could not be read, so the key in use "
+            "cannot be identified and no recorded verdict describes it."
+        )
+    if not shared_fingerprint:
+        print_func(
+            f"switchyard: {project}'s shared credential could not be identified at "
+            f"{shared_identity}.pub, so any recorded verdict about it no longer describes what is "
+            "in use."
+        )
+
+    if verify:
+        finding = verify_shared_credential(
+            project,
+            remote=remote,
+            owner_user=owner_user,
+            identity_file=shared_identity,
+            publication_fingerprint=publication_fingerprint,
+            shared_fingerprint=shared_fingerprint,
+            runner=runner,
+        )
+        print_func(
+            f"switchyard: {project} shared credential write authority: {finding.state}"
+            + (f" -- {finding.detail}" if finding.detail else "")
+        )
+
+    evidence = read_cutover_evidence(
+        project,
+        remote=remote,
+        publication_fingerprint=publication_fingerprint,
+        shared_fingerprint=shared_fingerprint,
+    )
+    for reason in evidence.stale:
+        print_func(f"switchyard: {project}'s recorded cutover state no longer applies: {reason}")
+    state = cutover_state(evidence)
+    print_func(f"switchyard: {project} publication cutover: {state}")
+    print_func(
+        f"switchyard:   publication key ({publication_fingerprint or 'unidentified'}): "
+        f"{evidence.publication.state}"
+        + (f" -- {evidence.publication.detail}" if evidence.publication.detail else "")
+    )
+    print_func(
+        f"switchyard:   shared credential ({shared_fingerprint or 'unidentified'}): "
+        f"{evidence.shared.state}"
+        + (f" -- {evidence.shared.detail}" if evidence.shared.detail else "")
+    )
+    if state != CUTOVER_READY and not verify:
+        command = " ".join(
+            shlex.quote(part)
+            for part in shared_credential_check_command(
+                remote, owner_user=owner_user, identity_file=shared_identity
+            )
+        )
+        print_func(
+            f"switchyard: check the shared credential with `switchyard publication-status "
+            f"{project} --verify`, which runs: {command}"
+        )
+    return 0
+
+
+def _public_key_fingerprint(path: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
+    """The SHA256 fingerprint of a public key, or nothing if it cannot be read."""
+    shown = runner(["ssh-keygen", "-l", "-f", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if getattr(shown, "returncode", 1) != 0:
+        return ""
+    for token in str(getattr(shown, "stdout", "") or "").split():
+        if token.startswith("SHA256:"):
+            return token
+    return ""
 
 
 def _build_switchyard_cutover_roles_parser() -> argparse.ArgumentParser:
@@ -20021,7 +20139,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
             publish_remote=getattr(args, "publish_remote", ""),
-            verify_publication_cutover=bool(getattr(args, "verify_publication_cutover", False)),
+        )
+    if argv[0].casefold() == "publication-status":
+        args = _build_switchyard_publication_status_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return publication_status_command(
+            config, config_path=entry.config_path, verify=args.verify
         )
     if argv[0].casefold() == "cutover-roles":
         args = _build_switchyard_cutover_roles_parser().parse_args(argv[1:])
@@ -20294,7 +20418,6 @@ def main(argv: list[str] | None = None) -> int:
             deploy_ref=args.deploy_ref,
             desktop_policy=args.desktop_policy,
             publish_remote=getattr(args, "publish_remote", ""),
-            verify_publication_cutover=bool(getattr(args, "verify_publication_cutover", False)),
         )
     if args.command == "add-role":
         if not args.pane_mode or args.role:

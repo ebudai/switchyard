@@ -811,17 +811,36 @@ def read_cutover_evidence(
         stale.append(f"the recorded remote was {recorded_remote} and is now {remote}")
         publication = CredentialFinding()
         shared = CredentialFinding()
-    if publication.known and publication_fingerprint and recorded_publication != publication_fingerprint:
-        stale.append(
-            f"the publication key changed from {recorded_publication or 'an unrecorded key'} "
-            f"to {publication_fingerprint}"
-        )
-        publication = CredentialFinding()
-    if shared.known and shared_fingerprint and recorded_shared and recorded_shared != shared_fingerprint:
-        stale.append(
-            f"the shared credential changed from {recorded_shared} to {shared_fingerprint}"
-        )
-        shared = CredentialFinding()
+    # A verdict survives only while the credential it was about is still the
+    # credential in use, and that has to be established rather than assumed. An
+    # unreadable or missing public half means the current credential cannot be
+    # identified -- so the old verdict is about a key nobody can point to, and
+    # keeping it would let a ready state describe an unidentified credential
+    # (SYRD-116 review).
+    for label, finding, recorded, current in (
+        ("publication key", publication, recorded_publication, publication_fingerprint),
+        ("shared credential", shared, recorded_shared, shared_fingerprint),
+    ):
+        if not finding.known:
+            continue
+        if not current:
+            stale.append(
+                f"the current {label} cannot be identified, so the recorded verdict about "
+                f"{recorded or 'an unrecorded key'} no longer describes it"
+            )
+        elif not recorded:
+            stale.append(
+                f"the recorded verdict about the {label} names no key, so it cannot be "
+                f"matched against the {current} in use now"
+            )
+        elif recorded != current:
+            stale.append(f"the {label} changed from {recorded} to {current}")
+        else:
+            continue
+        if label == "publication key":
+            publication = CredentialFinding()
+        else:
+            shared = CredentialFinding()
     return CutoverEvidence(
         project=project,
         remote=remote or recorded_remote,

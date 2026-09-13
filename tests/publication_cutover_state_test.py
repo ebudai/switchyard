@@ -279,6 +279,66 @@ def test_nothing_written_is_secret() -> None:
         assert any("-m 0644 -o root -g root" in " ".join(str(p) for p in c) for c in written), written
 
 
+def test_an_unidentifiable_credential_cannot_hold_a_ready_verdict() -> None:
+    """REVIEW FINDING: a verdict outliving the key it was about.
+
+    The shared half was invalidated only when a NON-EMPTY current fingerprint
+    differed. If the configured public key is missing or unreadable there is no
+    current fingerprint, so an old read-only verdict survived and the cutover
+    still reported ready -- for a credential nobody could identify.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        sandbox(Path(raw))
+        recorder = Recorder()
+        pb.write_cutover_evidence(
+            pb.CutoverEvidence(
+                project="demo", remote=REMOTE,
+                publication_fingerprint=PUBLICATION_FINGERPRINT,
+                shared_fingerprint=SHARED_FINGERPRINT,
+                publication=pb.CredentialFinding(pb.WRITE_VERIFIED, "2026-09-13T00:00:00+00:00", "published"),
+                shared=pb.CredentialFinding(pb.WRITE_READ_ONLY, "2026-09-13T00:00:00+00:00", "refused as read only"),
+            ),
+            runner=recorder,
+        )
+        assert pb.cutover_state(evidence()) == pb.CUTOVER_READY
+
+        # The shared public key can no longer be read, so nothing identifies the
+        # credential in use now.
+        blind = pb.read_cutover_evidence(
+            "demo", remote=REMOTE,
+            publication_fingerprint=PUBLICATION_FINGERPRINT, shared_fingerprint="",
+        )
+        assert blind.shared.state == pb.WRITE_UNKNOWN, blind
+        assert pb.cutover_state(blind) != pb.CUTOVER_READY, blind
+        assert any("cannot be identified" in reason for reason in blind.stale), blind.stale
+
+        # The same hole existed for the publication key, and is closed the same
+        # way: a verdict describes a key, not a project.
+        unnamed = pb.read_cutover_evidence(
+            "demo", remote=REMOTE, publication_fingerprint="", shared_fingerprint=SHARED_FINGERPRINT
+        )
+        assert unnamed.publication.state == pb.WRITE_UNKNOWN, unnamed
+        assert pb.cutover_state(unnamed) != pb.CUTOVER_READY, unnamed
+
+        # And a verdict recorded before any fingerprint was kept cannot be
+        # matched against the key in use either.
+        pb.write_cutover_evidence(
+            pb.CutoverEvidence(
+                project="demo", remote=REMOTE,
+                publication=pb.CredentialFinding(pb.WRITE_VERIFIED, "2026-09-13T00:00:00+00:00", "published"),
+                shared=pb.CredentialFinding(pb.WRITE_READ_ONLY, "2026-09-13T00:00:00+00:00", "refused"),
+            ),
+            runner=recorder,
+        )
+        unmatched = evidence()
+        assert unmatched.shared.state == pb.WRITE_UNKNOWN, unmatched
+        assert pb.cutover_state(unmatched) != pb.CUTOVER_READY, unmatched
+
+        text = "\n".join(report(shared_fingerprint=""))
+        assert "cutover is complete" not in text, text
+        assert "no longer applies" in text, text
+
+
 def main() -> int:
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]

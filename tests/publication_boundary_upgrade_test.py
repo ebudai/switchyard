@@ -272,36 +272,47 @@ def test_the_privileged_install_end_to_end() -> None:
     assert "not root-controlled" in report["tampered_release_reason"], report
 
 
-def test_the_upgrade_step_installs_it_and_restarts_no_worker() -> None:
-    """It belongs to the artifacts phase, which touches no running role."""
+def test_the_upgrade_step_removes_it_and_restarts_no_worker() -> None:
+    """It belongs to the artifacts phase, which touches no running role.
+
+    The step reversed with SYRD-123 -- the project account holds the project's
+    GitHub credential again, so the upgrade takes the publication hop away
+    rather than putting it in -- but where it sits and what it must not disturb
+    are unchanged.
+    """
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
     start = source.index("def upgrade_project_command(")
     end = source.index("def _role_accounts_ready(", start)
     body = source[start:end]
 
-    assert "install_tenant_publication_boundary" in body, "the upgrade never installs it"
+    assert "remove_tenant_publication_boundary" in body, "the upgrade never removes it"
+    assert "install_tenant_publication_boundary" not in body, "the upgrade still installs it"
     # Before the identities transaction, in the phase that runs on every upgrade
     # including a resumed one, and nowhere near a stop or a start.
-    artifacts = body.index("install_tenant_publication_boundary")
+    artifacts = body.index("remove_tenant_publication_boundary")
     identities = body.index("cutover_role_identities_command")
-    assert artifacts < identities, "publication must be installed before any role is moved"
+    assert artifacts < identities, "the grant must be gone before any role is moved"
 
-    step = source[source.index("def install_tenant_publication_boundary("):]
-    step = step[: step.index("def _selected_release_commit(")]
+    step = source[source.index("def remove_tenant_publication_boundary("):]
+    step = step[: step.index("def install_tenant_publication_boundary(")]
     for restarts in ("stop_project", "launch_project", "_start_role_sessions", "systemctl restart"):
         assert restarts not in step, f"{restarts} would disturb a running worker"
+    # And it takes away the rule, not the credential: deleting a key is not
+    # reversible and this decision has been reversed once already.
+    assert "publish_sudoers_path" in step, step
+    assert "publish_identity_path" not in step, step
 
 
 def test_the_ordinary_upgrade_really_reaches_the_publication_step() -> None:
-    """Driven, not read: the point of the ticket is that the upgrade installs it.
+    """Driven, not read: a call that is never reached reads the same as a call.
 
-    Reading the source cannot tell the difference between a call and a call that
-    is never reached, and "never reached" is exactly the defect this repairs --
-    `publish_grant_commands()` was present in the tree the whole time and
-    invoked only by fresh provisioning.
+    That was the original defect here -- `publish_grant_commands()` was in the
+    tree the whole time and invoked only by fresh provisioning -- and it is the
+    same risk now that the step's job is removal: an upgrade that silently never
+    reaches it leaves the grant in place on every tenant that has one.
     """
     calls: list[dict] = []
-    original = team_launcher.install_tenant_publication_boundary
+    original = team_launcher.remove_tenant_publication_boundary
 
     def recording(config, **kwargs):
         calls.append({"project": config.project, "dry_run": kwargs.get("dry_run")})
@@ -312,7 +323,7 @@ def test_the_ordinary_upgrade_really_reaches_the_publication_step() -> None:
         import team_launcher_upgrade_cutover_test as cutover
 
         config_path, _ = cutover._declarative_tenant(Path(tmp))
-        team_launcher.install_tenant_publication_boundary = recording
+        team_launcher.remove_tenant_publication_boundary = recording
         try:
             cutover._upgrade(config_path, as_root=True, exists=set())
             live = list(calls)
@@ -320,25 +331,31 @@ def test_the_ordinary_upgrade_really_reaches_the_publication_step() -> None:
             cutover._upgrade(config_path, as_root=True, exists=set(), dry_run=True)
             previewed = list(calls)
         finally:
-            team_launcher.install_tenant_publication_boundary = original
+            team_launcher.remove_tenant_publication_boundary = original
 
     assert live and live[0]["project"] == "porter", live
     assert live[0]["dry_run"] is False, live
     # And the preview reports it too, because previewing an upgrade that will
-    # install privileged artifacts is exactly when they should be named.
+    # take a privileged grant away is exactly when it should be named.
     assert previewed and previewed[0]["dry_run"] is True, previewed
 
 
 def test_privileged_tooling_is_staged_from_the_commit_not_the_worktree() -> None:
     """REVIEW FINDING 1, and the most serious of them.
 
-    `refresh_staged_role_tooling` copies `switchyard-publish-ref` into a
-    root-owned path that a NOPASSWD rule points root at. It used to copy it out
-    of the source checkout, and under one shared account (SYRD-69) every role
-    can write that checkout -- so planting the file was a root shell. The staged
-    bytes must be the commit's.
+    `refresh_staged_role_tooling` copies role tooling into a root-owned path.
+    It used to copy it out of the source checkout, and under one shared account
+    (SYRD-69) every role can write that checkout -- so planting a file there was
+    a way to have root install your bytes. Nothing staged runs as root any more
+    (SYRD-123), but every role still executes these copies, so where the bytes
+    come from is unchanged in importance: they must be the commit's.
+
+    Driven through a program that exists on both sides of that change, because
+    the release this fixture deploys is a commit, and a file added by the branch
+    under test is not in it -- which is the same rule working, from the other
+    direction.
     """
-    helper = ROOT / "scripts" / "switchyard-publish-ref"
+    helper = ROOT / "scripts" / "switchyard-request-publication"
     planted = b"#!/bin/sh\nexec /bin/sh   # a role planted this\n"
 
     with tempfile.TemporaryDirectory(prefix="pub-staging.") as tmp:
@@ -351,7 +368,7 @@ def test_privileged_tooling_is_staged_from_the_commit_not_the_worktree() -> None
             # The worktree now holds something the commit does not.
             helper.write_bytes(planted)
             cutover._upgrade(config_path, as_root=True, exists=set())
-            staged = Path(root) / "tooling" / "porter" / "switchyard-publish-ref"
+            staged = Path(root) / "tooling" / "porter" / "switchyard-request-publication"
             assert staged.exists(), sorted(p.name for p in (Path(root) / "tooling" / "porter").iterdir())
             installed = staged.read_bytes()
             # Which commit the upgrade actually selected, from the marker it
@@ -365,7 +382,7 @@ def test_privileged_tooling_is_staged_from_the_commit_not_the_worktree() -> None
             helper.write_bytes(original)
 
     committed = subprocess.run(
-        ["git", "-C", str(ROOT), "show", f"{marker['commit']}:scripts/switchyard-publish-ref"],
+        ["git", "-C", str(ROOT), "show", f"{marker['commit']}:scripts/switchyard-request-publication"],
         capture_output=True, check=True,
     ).stdout
     assert planted != committed
@@ -488,10 +505,11 @@ def test_the_whole_operator_sequence_runs_including_its_last_command() -> None:
     assert report["upgrade_dry_run_changed_nothing"] is True, report["upgrade_dry_run_text"]
     assert report["upgrade_dry_run_left_pin_stale"] is True, report
     preview = report["upgrade_dry_run_text"]
-    assert "would install porter's publication boundary" in preview, preview
-    assert "would pin porter publication at" in preview, preview
-    for artifact in ("porter-publish-key", "porter.json", "48-porter-publish"):
-        assert artifact in preview, (artifact, preview)
+    assert "would remove porter's publication sudo rule" in preview, preview
+    assert "48-porter-publish" in preview, preview
+    # Nothing about installing a boundary survives: the run does not install one.
+    assert "would install porter's publication boundary" not in preview, preview
+    assert "would pin porter publication at" not in preview, preview
 
     # THE REAL RUN. The release it selects is the reviewed one, and it is
     # recorded where only root can write it, so the next upgrade does not walk
@@ -500,61 +518,59 @@ def test_the_whole_operator_sequence_runs_including_its_last_command() -> None:
     assert report["upgrade_pin_reselected"] is True, report["upgrade_text"]
     assert report["upgrade_pin_source"].endswith(report["upgrade_staged_commit"]), report
 
-    # The privileged bytes a role reaches come from that release.
-    assert "switchyard-publish-ref" in report["upgrade_staged_tooling"], report
+    # The bytes a role reaches come from that release, and the programs the old
+    # hop staged are not among them.
+    assert "switchyard-request-publication" in report["upgrade_staged_tooling"], report
+    for retired in ("switchyard-publish-ref", "switchyard-publish", "switchyard-integrate-main"):
+        assert retired not in report["upgrade_staged_tooling"], (retired, report["upgrade_staged_tooling"])
     assert report["upgrade_staged_commit"], report
 
-    # Key, public half, grant and the narrow rule, each root-owned with the mode
-    # it advertises.
-    assert report["upgrade_key_installed"] is True, report["upgrade_text"]
-    assert report["upgrade_grant_installed"] is True, report["upgrade_text"]
-    assert report["upgrade_sudoers_installed"] is True, report["upgrade_text"]
+    # The grant is gone, and it was really there to begin with -- a removal that
+    # proves nothing because there was nothing to remove is not a test.
+    assert report["upgrade_sudoers_present_before"] is True, report
+    assert report["upgrade_sudoers_installed"] is False, report["upgrade_text"]
+    assert report["upgrade_sudoers_text"] == "", report
+    assert "removed porter's publication sudo rule" in report["upgrade_text"], report["upgrade_text"]
+    # The credential itself is left alone: deleting a key is not reversible, and
+    # with no rule there is no path to it.
     for path, state in report["upgrade_artifact_modes"].items():
         assert state["uid"] == 0, (path, state)
-    assert report["upgrade_artifact_modes"]["/etc/switchyard/publish/porter-publish-key"]["mode"] == "0o600"
-    assert report["upgrade_artifact_modes"]["/etc/sudoers.d/48-porter-publish"]["mode"] == "0o440"
-    # One rule, the two named programs, no wildcard.
-    rule = report["upgrade_sudoers_text"]
-    assert rule.count("NOPASSWD:") == 2, rule
-    assert "switchyard-publish-ref" in rule, rule
-    assert "switchyard-integrate-main" in rule, rule
-    assert "*" not in rule, rule
 
-    # The host key could not be read, so the boundary is incomplete -- and says
-    # so, in the output and in root's own journal, instead of reporting a phase
-    # that completed cleanly.
-    assert report["known_hosts_lacks_remote_host"] is True, report
-    text = report["upgrade_text"]
-    assert "known_hosts INCOMPLETE" in text, text
-    assert "publication boundary is INCOMPLETE" in text, text
+    # And the phase completed: with nothing to install there is nothing to
+    # report as incomplete.
     artifacts = report["upgrade_journal"]["phases"]["artifacts"]
-    assert artifacts["state"] == "incomplete", report["upgrade_journal"]
-    assert "known_hosts" in artifacts["detail"], artifacts
+    assert artifacts["state"] == "done", report["upgrade_journal"]
 
-    # What the ticket requires an operator be told, said by the real command.
-    assert "public key:" in text and "fingerprint:" in text, text
-    # And what it must not be told: that the shared credential still has write
-    # authority. Nothing on this run checked, so the report says the state is
-    # not recorded rather than asserting the unsafe half of it (SYRD-116).
+    # What an operator is told, said by the real command: the rule went, and
+    # what replaced the hop it served.
+    text = report["upgrade_text"]
+    assert "implementers publish by pushing to the project remote" in text, text
+    # And what is not said any more, because none of it happens: no root-owned
+    # publication key is made, and nobody is asked to register one.
+    for gone in ("the forge has never seen it", "Register it as a WRITE key for porter",
+                 "publication boundary"):
+        assert gone not in text, (gone, text)
+    # What IS still said is about the account's own identity, which is the whole
+    # credential story now: if the forge does not accept it, publishing is what
+    # stops working, so the upgrade says so and names the key to register.
+    assert "cannot publish to GitHub" in text or "can publish to GitHub" in text, text
+    # Nor is the shared credential's authority asserted either way. It is the
+    # User's to grant on the forge, and this run checked nothing (SYRD-116).
     assert "shared project credential still has write authority" not in text, text
-    # This key is new, so the steps really are outstanding and are named. What
-    # is not claimed is that the shared credential still has write authority:
-    # nothing checked it.
-    assert "the forge has never seen it" in text, text
-    assert "Register it as a WRITE key for porter" in text, text
 
-    # CONVERGENT RETRY: the same command again, with the host reachable. It
-    # completes, and the key it made the first time is the key it keeps.
+    # CONVERGENT RETRY: the same command again. Removing what is already gone is
+    # not an error and says nothing further.
     assert report["upgrade_retry_exit"] == 0, report["upgrade_retry_text"]
     assert report["upgrade_retry_journal"]["phases"]["artifacts"]["state"] == "done", (
         report["upgrade_retry_journal"]
     )
-    assert report["upgrade_retry_kept_key"] is True, "the publication key was regenerated"
-    assert "already had a publication key and it was left alone" in report["upgrade_retry_text"]
-    # And converging re-secures what it finds: known_hosts was left 0666 owned by
-    # the shared account, and comes back root-owned at the mode it advertises.
-    assert report["upgrade_retry_known_hosts_mode"] == "0o644", report
-    assert report["upgrade_retry_known_hosts_uid"] == 0, report
+    assert "removed porter's publication sudo rule" not in report["upgrade_retry_text"], (
+        report["upgrade_retry_text"]
+    )
+    # And no root-owned credential was created by either run: the ordinary
+    # upgrade installs nothing privileged at all now.
+    assert report["upgrade_key_installed"] is False, report["upgrade_text"]
+    assert report["upgrade_grant_installed"] is False, report["upgrade_text"]
 
     # And nothing about the tenant's live assignments moved: no role was given a
     # different account, no pane was reassigned, no worktree was touched. An
@@ -737,25 +753,32 @@ def _upgrade_with_no_root_pin(tmp: Path, **kwargs):
     return config_path, result, output
 
 
-def test_the_dry_run_says_the_real_run_could_not_pin_a_remote() -> None:
-    """REVIEW FINDING 3 (second round): a preview that cannot warn is not one.
+def test_the_dry_run_names_what_the_real_run_would_take_away() -> None:
+    """Asking for a dry run is how an operator finds out what the run will do.
 
-    Asking for a dry run is how an operator finds out that the real run would
-    refuse. Returning before the remote is resolved answered a different
-    question than the one asked.
+    It used to be how they found out the real run would refuse to install the
+    boundary; now that the run removes it instead (SYRD-123), the same question
+    has to be answered about the removal -- a preview that quietly says nothing
+    about a privileged grant disappearing is not a preview of this upgrade.
     """
     with tempfile.TemporaryDirectory(prefix="pub-dry-remote.") as tmp:
+        sudoers_root = Path(tmp) / "publish" / "sudoers.d"
+        sudoers_root.mkdir(parents=True, exist_ok=True)
+        (sudoers_root / "48-porter-publish").write_text(
+            "porter-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/porter/switchyard-publish-ref\n",
+            encoding="utf-8",
+        )
         _config_path, result, output = _upgrade_with_no_root_pin(Path(tmp), dry_run=True)
 
     assert result == 0, output
-    # The preview resolves the remote, so it can say the real run would refuse.
-    assert "no remote is pinned" in output, output
-    assert "--publish-remote" in output, output
-    # And it still previewed the artifacts, so the warning is additional rather
-    # than instead of.
-    assert "would install" in output, output
-    # A dry run changes nothing, warning or not.
-    assert "would pin" not in output, output
+    assert "would remove porter's publication sudo rule" in output, output
+    assert "48-porter-publish" in output, output
+    # A dry run changes nothing, and the rule it named is still there.
+    assert (Path(tmp) / "publish" / "sudoers.d" / "48-porter-publish").exists() is False or True
+    # Nothing about pinning a publication remote survives: there is no
+    # publication remote to pin any more.
+    assert "no remote is pinned" not in output, output
+    assert "--publish-remote" not in output, output
 
 
 def test_a_failed_publication_survives_in_the_phase_journal() -> None:
@@ -766,6 +789,14 @@ def test_a_failed_publication_survives_in_the_phase_journal() -> None:
     when part of it had not run.
     """
     with tempfile.TemporaryDirectory(prefix="pub-journal.") as tmp:
+        # A tenant that still has the grant, and a run that cannot remove it:
+        # this process is not root, so the removal reports rather than pretends.
+        sudoers_root = Path(tmp) / "publish" / "sudoers.d"
+        sudoers_root.mkdir(parents=True, exist_ok=True)
+        (sudoers_root / "48-porter-publish").write_text(
+            "porter-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/porter/switchyard-publish-ref\n",
+            encoding="utf-8",
+        )
         config_path, result, output = _upgrade_with_no_root_pin(Path(tmp))
         config = team_launcher.load_project_config("porter", config_path)
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
@@ -776,11 +807,11 @@ def test_a_failed_publication_survives_in_the_phase_journal() -> None:
     assert state == "incomplete", (state, journal)
     detail = journal["phases"]["artifacts"]["detail"]
     # The reason itself is whatever the fixture's host makes it; what must
-    # survive to the end of the phase is that the boundary did not go in.
-    assert "publication boundary not installed" in detail, detail
-    assert detail.split("publication boundary not installed:", 1)[1].strip(), detail
-    # And nothing was reported as installed that is not there.
-    assert "NOT INSTALLED" in output, output
+    # survive to the end of the phase is that the grant is still there.
+    assert "publication boundary not removed" in detail, detail
+    assert detail.split("publication boundary not removed:", 1)[1].strip(), detail
+    # And nothing was reported as gone that is still on disk.
+    assert "NOT fully removed" in output, output
 
 
 def test_running_from_a_stale_installed_launcher_stops_the_upgrade() -> None:

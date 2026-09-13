@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""Push one implementer's candidate to the project's GitHub repository.
+
+Every role in a project runs as one Unix account, and that account holds the
+project's GitHub credential, so publishing a candidate is an ordinary push and
+this program is a thin, careful wrapper around one (SYRD-123). It talks to the
+configured remote and to nothing else: no board write, no Director, no sudo, no
+privileged helper. A push that fails leaves the work exactly where it was and
+says what to do about it, which is what makes re-running it the ordinary
+response rather than a repair.
+
+Two things it does beyond `git push`, both of them about not aiming a push
+somewhere it was not meant to go:
+
+* WHERE. The ref is derived from the role and the branch, and a name that
+  collides with an integration branch or sits in another role's namespace is
+  refused here. This is a guard rail, not a boundary -- the account can reach
+  plain git, and forge-side branch protection is the thing that actually holds
+  `main`. It exists so a mistyped `--ref` does not become a push to `main`.
+* WHAT. After the push, the remote is asked what the ref now resolves to, and
+  the answer has to be exactly the commit that was sent. Submission records a
+  public commit, so "the push reported success" is not the same claim as "the
+  public ref is at this commit" and the second one is the one that matters.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+PROGRAM = "switchyard-publish-candidate"
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+REF_SEGMENT = re.compile(r"[0-9A-Za-z._-]+")
+#: Names a candidate may not take, whatever the caller passes. Integration is a
+#: workflow responsibility and not something a candidate push should be able to
+#: reach by accident.
+PROTECTED_REFS = frozenset({"main", "master", "trunk", "release"})
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"{PROGRAM}: {message}")
+
+
+def git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(cwd), *args], text=True, capture_output=True)
+
+
+def require(result: subprocess.CompletedProcess[str], what: str) -> str:
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        fail(what)
+    return result.stdout.strip()
+
+
+def default_ref(role: str, branch: str) -> str:
+    """The role's namespace, from the branch it is already on.
+
+    A branch called `feature/syrd-123` belongs to whoever made it, so the local
+    name is carried across rather than imposed: `roles/<role>/<leaf>`. The
+    `roles/` prefix is not decoration -- git stores refs as paths, so the role
+    called `main` cannot have `refs/heads/main/x` beside `refs/heads/main`, and
+    without the prefix one implementer would have no way to publish at all.
+    """
+    leaf = branch.split("/")[-1] if branch else ""
+    return f"roles/{role}/{leaf}" if leaf else ""
+
+
+def ref_problem(ref: str, role: str) -> str | None:
+    name = ref.strip()
+    if not name:
+        return "a ref name is required"
+    if name.startswith("refs/"):
+        return "pass a branch name, not a full ref path"
+    segments = name.split("/")
+    for segment in segments:
+        if not REF_SEGMENT.fullmatch(segment) or segment.endswith(".lock"):
+            return f"{name} is not a valid branch name"
+    if name.casefold() in PROTECTED_REFS or segments[0].casefold() in PROTECTED_REFS:
+        return (
+            f"{name} collides with an integration branch. Integration is a workflow "
+            f"responsibility; publish under roles/{role}/... instead"
+        )
+    if segments[0] == "roles":
+        if len(segments) < 3 or segments[1] != role:
+            return f"{name} is not in {role}'s namespace"
+        return None
+    if len(segments) < 2 or segments[0] != role:
+        return f"{name} is not in {role}'s namespace; try roles/{role}/{segments[-1]}"
+    return None
+
+
+def remote_ref_commit(remote: str, ref: str, *, cwd: Path) -> str:
+    """What the remote says the ref is, right now. Empty when it has no such ref."""
+    listed = git(["ls-remote", remote, f"refs/heads/{ref}"], cwd=cwd)
+    if listed.returncode != 0:
+        sys.stderr.write(listed.stderr)
+        fail(f"could not read {ref} from {remote}; nothing was pushed")
+    for line in listed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == f"refs/heads/{ref}":
+            return parts[0].strip().lower()
+    return ""
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog=PROGRAM)
+    parser.add_argument("ticket_id", nargs="?", default="")
+    parser.add_argument("--ref", default="", help="ref to publish; defaults to roles/<role>/<branch>")
+    parser.add_argument("--commit", default="HEAD")
+    parser.add_argument("--worktree", default="")
+    parser.add_argument("--role", default=os.environ.get("TICKET_BOARD_CALLER_ROLE", "").strip())
+    parser.add_argument("--remote", default="origin")
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="replace a candidate already published at this ref, leased against exactly "
+        "what the remote holds right now",
+    )
+    parser.add_argument("--print-only", action="store_true", help="say what would be pushed")
+    args = parser.parse_args(argv[1:])
+
+    role = args.role.strip().lower()
+    if not role:
+        fail("no role: run this from a role pane, or pass --role")
+    worktree = Path(args.worktree).expanduser() if args.worktree else Path.cwd()
+    if not (worktree / ".git").exists():
+        fail(f"{worktree} is not a git worktree")
+
+    commit = require(
+        git(["rev-parse", f"{args.commit}^{{commit}}"], cwd=worktree),
+        f"{args.commit} does not resolve to a commit in {worktree}",
+    ).lower()
+    if not COMMIT.fullmatch(commit):
+        fail(f"{args.commit} did not resolve to a full commit id")
+    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree).stdout.strip()
+    ref = args.ref.strip() or default_ref(role, branch)
+    problem = ref_problem(ref, role)
+    if problem is not None:
+        fail(problem)
+
+    if args.print_only:
+        print(json.dumps(
+            {"ref": ref, "commit": commit, "remote": args.remote, "role": role,
+             "ticket": args.ticket_id.upper()},
+            sort_keys=True,
+        ))
+        return 0
+
+    public_before = remote_ref_commit(args.remote, ref, cwd=worktree)
+    if public_before == commit:
+        # Already there. A retry after something later in the run failed is an
+        # ordinary thing to do, so it verifies and reports rather than refusing.
+        print(f"{PROGRAM}: {args.remote}/{ref} is already at {commit[:12]}; nothing to push")
+    else:
+        lease: list[str] = []
+        if public_before:
+            if not args.replace:
+                fail(
+                    f"{args.remote} already has {ref} at {public_before[:12]}, which is not an "
+                    f"ancestor of {commit[:12]} or is different work. Nothing was pushed. Re-run "
+                    f"with --replace to move that ref off exactly {public_before[:12]}, or "
+                    f"publish under a different name."
+                )
+            # Leased against what was read a moment ago, never a bare force: a
+            # ref that moves in between is refused by the forge rather than
+            # overwritten, which is the only place that comparison is race-free.
+            lease = [f"--force-with-lease=refs/heads/{ref}:{public_before}"]
+        pushed = git(
+            ["push", *lease, args.remote, f"{commit}:refs/heads/{ref}"], cwd=worktree
+        )
+        sys.stdout.write(pushed.stdout)
+        sys.stderr.write(pushed.stderr)
+        if pushed.returncode != 0:
+            fail(
+                f"the push was refused, so {ref} is unchanged on {args.remote} and nothing here "
+                "has moved. Fix the cause and run this again; if the remote refuses your "
+                "credential, tell the Director rather than working around it."
+            )
+
+    public_after = remote_ref_commit(args.remote, ref, cwd=worktree)
+    if public_after != commit:
+        fail(
+            f"{args.remote}/{ref} reads {public_after[:12] or 'nothing'} rather than the "
+            f"{commit[:12]} that was just pushed. Do NOT submit this commit: the board records a "
+            "public commit and would refuse it. Re-running this is safe."
+        )
+
+    submit_hint = f" --commit {commit}" if not args.ticket_id else (
+        f"\n{PROGRAM}: submit with: ticket-board-write submit-to-audit "
+        f"{args.ticket_id.upper()} --commit {commit}"
+    )
+    print(
+        f"{PROGRAM}: published {ref} at {commit[:12]} to {args.remote}."
+        + (submit_hint if args.ticket_id else f" Submit it with{submit_hint}.")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -692,120 +692,70 @@ private, and one role cannot read another's home, worktree, session records or
 credentials. It has **no influence on board authority**, which remains derived
 from `SO_PEERCRED`'s uid; seeding a credential grants no board permission.
 
-### Publishing: an ask, not a credential
+### Publishing: a push, by the implementer
 
-Every role in a project runs as one Unix account (SYRD-69). That makes "let the
-role publish its own ref" and "let every role push anything" the same sentence,
-so publication is not something a role does with a credential. It is something a
-role **asks for**, and the ask is a row on the board.
+Every role in a project runs as one Unix account (SYRD-69), and the User has
+restored that account's ordinary write access to the project's GitHub
+repository. So publishing a candidate is a push, made by the implementer that
+wrote it, with no Director in the path and nothing on the host running as root
+to do it (SYRD-123).
 
-**The implementer's half needs nothing.** `switchyard-request-publication`
-bundles the commit the role already made in its own worktree and files a durable
-request naming one ticket, one ref, one commit and that bundle. No remote is
-contacted, so a missing key, an unreachable network or a sleeping Director
-cannot stop the work being committed or the ask being recorded. The ticket then
-shows the ask, and the control role is waiting on it.
+**The implementer publishes and then submits.** `switchyard-publish-candidate`
+pushes the commit the role already made in its own worktree to
+`roles/<role>/<branch leaf>` on the project remote, and prints the exact commit
+to submit. Submission records that commit: the write client checks it is on
+`origin` before it asks, and the board resolves it in its own copy of the
+repository -- refreshing that copy from the project's public URL if it has never
+seen the commit -- so a recorded `commit_hash` is a public commit. Audit fetches
+it into its own separate worktree by that id.
 
-Both halves are admitted by declared capability and by nothing else. A project
-names its own roles, so `request_publication` and `resolve_publication` are
-capabilities a document grants -- there is no list of role names anywhere in the
-HTTP handler, the database or the publisher that decides who may ask or answer.
-A role the project invented yesterday can ask if its document says so, a role
-called `ops` cannot if its document does not, and answering additionally
-requires control authority, derived from the capabilities that define it. A
-board with no declared workflow has no capability to check, so it refuses both
-halves rather than falling back to names -- and so does a board whose document
-declares nobody holding control authority. That last case matters most at the
-publisher, which holds the only push credential on the host: an absent, empty or
-malformed workflow document must mean nobody may publish, never "whoever
-registered under a familiar name may".
+**A push that fails is the implementer's to retry.** Nothing is recorded, the
+remote is unchanged, and re-running the command after fixing the cause is the
+ordinary response rather than a repair. The Director is involved when there is
+something to escalate -- a credential the forge refuses, a ref someone else
+moved -- and not as a step in the normal path.
 
-Refs stay in the asking role's namespace -- `ops/...`, or `roles/<role>/...` for
-a role whose own name collides with an integration branch, as `main` does -- and
-`main`, `master`, `trunk` and `release` are refused outright, in the database and
-again in the publisher.
+Two things the push wrapper does beyond `git push`, both about not aiming a push
+somewhere it was not meant to go. The ref is derived from the role and the
+branch, and a name that collides with an integration branch or sits in another
+role's namespace is refused; this is a guard rail rather than a boundary, since
+the account can reach plain git, and forge-side branch protection is what
+actually holds `main`. And after the push the remote is asked what the ref now
+resolves to, because "the push reported success" and "the public ref is at this
+commit" are different claims and submission depends on the second.
 
-**The control role's half is the only path to a push.** `switchyard-publish`
-reads the request and runs `switchyard-publish-ref`, which is root-owned and
-reached through one `NOPASSWD` grant naming that program alone. Holding the
-grant is not the same as being allowed to publish: the publisher walks its own
-process ancestry to the pane the kernel put it under and requires that exact
-`(pid, start time, uid)` to be the live runtime the board registered for the role
-holding control capabilities. A sibling role process under the same account
-resolves to its own pane and is refused; a replaced or dead session no longer
-matches the row. Which role holds control is derived from capabilities rather
-than the name `director` (SYRD-49).
+**Replacing a candidate.** Work that is rebuilt on a moved `main` is not a
+descendant of what was published before it, so an ordinary push is refused as a
+non-fast-forward. `--replace` pushes with `--force-with-lease` against exactly
+the commit the remote held a moment earlier, so a ref that moved in between is
+refused by the forge rather than overwritten. There is no path to a bare
+`--force`.
 
-Nothing about *where* is caller-supplied. The publisher takes one request id;
-the ref, the commit, the bundle and the role they belong to come from the board's
-record. The registry, the board unit and the push grant are root-owned, and the
-remote is pinned in the grant rather than read from the project checkout, whose
-configuration the project account can rewrite. The push credential lives in
-`/etc/switchyard/publish/` readable by root alone -- a key the project account
-can read is a key every role can push with, and the publisher refuses one whose
-mode says so.
+**What this replaced.** Between SYRD-93 and SYRD-123 the shared credential was
+read-only at the forge and publication was a request on the board answered by a
+root-owned publisher the control role reached through one NOPASSWD rule. That
+hop is gone: the rule is removed on upgrade, the privileged programs are no
+longer staged, and fresh provisioning installs no credential root owns. The
+machinery is disconnected rather than deleted -- `switchyard-install-authority`
+still offers it to an operator who deliberately asks -- and the board's
+publication request and verdict remain available for escalation while no longer
+appearing in any normal handoff.
 
-The bundle is fetched into a root-owned staging mirror and pushed from there, so
-git never runs inside a role's checkout, where `core.sshCommand`,
-`uploadpack.packObjectsHook` or an `ext::` remote would turn "run git there" into
-"run the role's command as root". Afterwards the ref is read back from the remote
-and the tenant's trusted commit cache is refreshed **from the local mirror**, as
-the project account: a local fetch needs no credential, so refreshing the cache
-never puts one inside the shared account.
+### Integrating into the integration branch
 
-**The board records what happened.** The control role's driver marks the request
-published or rejected with a reason, which clears the wait and notifies the
-implementer. It never submits: the implementer submits its own work, and it can,
-because the commit is now in the cache the board verifies `commit_hash` against.
-Both halves are idempotent -- re-running a publication pushes the same ref to the
-same commit, and recording the same outcome twice is not an error -- so an
-interrupted handoff is retried rather than unpicked by hand.
+Integration is a workflow responsibility, not a local credential boundary. The
+Director merges reviewed work and pushes the integration branch with the same
+account credential everyone else publishes with, so what keeps an implementer
+from pushing `main` is the candidate wrapper declining to aim there and, where a
+project wants it enforced, branch protection configured on the forge. That is an
+operator and project policy rather than a Switchyard helper (SYRD-123).
 
-**A published verdict is something the board saw, not something it was told**
-(SYRD-118). Before it records one, the board resolves the requested ref itself,
-in the tenant's trusted commit cache, and refuses the verdict unless
-`refs/remotes/origin/<ref>` is exactly the commit the implementer asked for; what
-it resolved is stored on the request. That namespace is written only by the
-publisher's cache refresh, and only after the push and the read-back above, so
-it is the board's own sight of a completed publication. The local
-`refs/heads/<ref>` beside it is not: filing the request creates that branch, and
-accepting it would prove only that somebody asked. The check is local git
-against the root-configured repositories, so it names no remote, contacts none,
-and stays safe to repeat.
-
-A verdict that cannot be proven records nothing and leaves the request open,
-which is what makes re-running the driver ordinary rather than a repair; the
-refusal says whether the ref is absent, at another commit, or unprovable because
-the board's own cache cannot be read. Rejections are unaffected, needing no push
-to be true. Without this the board could record a publication it could not see:
-publication request 17 was marked published while its ref was on neither GitHub
-nor the cache, and the same board then refused the commit it had just told the
-implementer to submit.
-
-### Integrating, after the cutover
-
-Publication moves a role's own ref and refuses `main`, `master`, `trunk` and
-`release` outright. Once the shared account's credential is read-only, that
-leaves the control role able to publish reviewed work and unable to merge it, so
-there is a second root-owned program with the opposite rule:
-`switchyard-integrate-main` moves the integration branch named in the root-owned
-grant and nothing else.
-
-It is the same WHO -- the live pane process the board registered for the role
-holding control authority, derived from capabilities, with no fallback to a name
--- and the same credential. What it adds is a lease and a direction. The caller
-states the exact tip its candidate was prepared against; that OID must still be
-the tip when the program reads it, the prepared commit must be a descendant of
-it, and the same OID is sent to the remote as `--force-with-lease`, so an
-integration that lands in between is refused by the server rather than
-overwritten. Afterwards the branch is read back and the tenant's trusted commit
-cache is updated, both as the branch and as its remote-tracking copy, so the
-board can verify commits that depend on the merge.
-
-`switchyard-integrate` is the unprivileged half a person runs: it resolves the
-prepared commit, reads the current tip, checks the fast-forward locally for a
-quick answer, bundles the commit, and hands all of it to the privileged program.
-Neither it nor the caller ever holds a push credential.
+The root-owned `switchyard-integrate-main`, which moved the integration branch
+under an exact lease on behalf of the registered control-role process, is no
+longer staged or granted. Its lease discipline is worth keeping by hand: state
+the tip the candidate was prepared against, push with `--force-with-lease`
+against exactly that value, and let the forge refuse an integration that landed
+in between rather than overwriting it.
 
 One limit worth stating: processes sharing a uid can `ptrace` each other unless
 the host restricts it, so the process boundary above is as strong as

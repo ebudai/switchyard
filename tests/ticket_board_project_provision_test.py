@@ -922,36 +922,43 @@ def test_role_control_interface_covers_every_control_path_narrowly() -> None:
     plan = build_plan(project="otto", owner_user="otto-agent")
     sudoers = role_control_sudoers(plan)
     # With one Unix identity per project there are no per-role tmux grants left
-    # to make. What remains is the one publication grant: a single root-owned
-    # program the project account may run, and no other command and no root
-    # shell (SYRD-93).
+    # to make, and since the project account holds the project's own GitHub
+    # credential again there is nothing that runs as root to publish either
+    # (SYRD-123). A project provisioned today is granted nothing at all.
     assert "/usr/bin/tmux" not in sudoers, sudoers
     granted = [line for line in sudoers.splitlines() if line and not line.startswith("#")]
-    # Two root-owned programs and nothing else: one publishes a role's ref and
-    # refuses integration branches, one fast-forwards the integration branch
-    # and moves nothing else (SYRD-93).
-    assert granted == [
-        "otto-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/otto/switchyard-publish-ref",
-        "otto-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/otto/switchyard-integrate-main",
-    ], sudoers
+    assert granted == [], sudoers
 
 
-def test_both_privileged_publication_programs_are_staged_with_what_they_share() -> None:
-    """A staged entry point that cannot import its sibling is not runnable.
+def test_the_publication_hop_is_staged_away_rather_than_forgotten() -> None:
+    """Publishing is a push again, and the programs for the old hop are removed.
 
-    The two root-owned operations keep their trust rules in one module rather
-    than two copies that drift, and each puts its own directory on sys.path to
-    import it -- so the module has to be staged beside them (SYRD-60, SYRD-93).
+    Dropping a name from the staged list only stops it being refreshed; the copy
+    root installed stays on disk until something removes it by name. Leaving a
+    root-owned publisher staged while the documentation says there is no
+    privileged gate would make the second statement the false one (SYRD-123).
     """
     from scripts.ticket_board.project_provision import (
+        RETIRED_STAGED_EXECUTABLES,
         ROLE_STAGED_EXECUTABLES,
         entry_point_module_dependencies,
+        role_tooling_staging_commands,
     )
 
-    assert "switchyard-publish-ref" in ROLE_STAGED_EXECUTABLES
-    assert "switchyard-integrate-main" in ROLE_STAGED_EXECUTABLES
-    assert "switchyard-integrate" in ROLE_STAGED_EXECUTABLES
-    assert "switchyard_publication_authority" in entry_point_module_dependencies()
+    assert "switchyard-publish-candidate" in ROLE_STAGED_EXECUTABLES
+    # The old name still works, and says once what changed.
+    assert "switchyard-request-publication" in ROLE_STAGED_EXECUTABLES
+    for retired in ("switchyard-publish-ref", "switchyard-publish",
+                    "switchyard-integrate-main", "switchyard-integrate"):
+        assert retired not in ROLE_STAGED_EXECUTABLES, retired
+        assert retired in RETIRED_STAGED_EXECUTABLES, retired
+    # Nothing staged imports the privileged module any more, and the staged copy
+    # of it is removed rather than left behind.
+    assert "switchyard_publication_authority" not in entry_point_module_dependencies()
+    staging = "\n".join(role_tooling_staging_commands("otto", "/opt/release"))
+    for retired in RETIRED_STAGED_EXECUTABLES:
+        assert f"rm -f '/usr/local/lib/switchyard/otto/{retired}'" in staging, retired
+    assert "/opt/release/scripts/switchyard-publish-candidate" in staging, staging
 
 
 def test_publication_credential_is_root_owned_and_never_regenerated() -> None:
@@ -974,13 +981,17 @@ def test_publication_credential_is_root_owned_and_never_regenerated() -> None:
     # checkout the project account can rewrite.
     assert "install -m 0640 -o root -g root /dev/stdin '/etc/switchyard/publish/otto.json'" in commands
     assert "switchyard.publish-grant.v1" in commands
-    # And the whole thing is in what an operator actually runs.
+    # But a project provisioned today is not given any of it. The generator is
+    # kept because the authority installer still offers it to an operator who
+    # asks for it deliberately; the ordinary rollout installs no credential root
+    # owns, and no sudo rule reaching one (SYRD-123).
     operator = render_operator_commands(plan)
-    assert "/etc/switchyard/publish/otto.json" in operator
-    # And the grant that lets the control role reach the publisher is installed
-    # by the same run, validated by visudo before it is moved into place.
-    assert "/etc/sudoers.d/49-otto-role-control" in operator
-    assert "visudo -c -f" in operator
+    assert "/etc/switchyard/publish/otto.json" not in operator, operator
+    assert "switchyard-publish-ref" not in operator, operator
+    assert "NOPASSWD: /usr/local/lib/switchyard" not in operator, operator
+    # What it does install is the owner's own GitHub identity, which is the
+    # whole credential story for a new project now.
+    assert "ssh-keygen" in operator or "IdentityFile" in operator, operator
 
 
 def test_cli_writes_reviewable_artifacts() -> None:

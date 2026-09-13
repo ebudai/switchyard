@@ -46,6 +46,10 @@ def _role_list_from_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 #: locally when the ask is filed, and accepting it would prove only that
 #: somebody asked.
 PUBLISHED_REF_NAMESPACE = "refs/remotes/origin"
+#: How long the board will wait for its own copy of the repository to catch up
+#: with a commit somebody has just published. Short enough that a submission
+#: does not hang on an unreachable forge, long enough for an ordinary fetch.
+COMMIT_REFRESH_TIMEOUT_SECONDS = 30
 #: Branch names this will hand to git. The board already refuses anything else
 #: when the ask is filed; asked again here so no ref shape can become an
 #: argument to the command that is supposed to be reading it.
@@ -1945,6 +1949,29 @@ SELECT EXISTS (
             return ""
         if not re.fullmatch(r"[0-9A-Fa-f]{7,40}", value):
             raise ValueError("commit_hash must be a 7-40 character hex commit")
+        resolved, missing_repos = self._resolve_known_commit(value)
+        if resolved:
+            return resolved
+        # Not here yet. Implementers publish by pushing to the project's remote
+        # (SYRD-123), so a commit this board has never seen is the ordinary case
+        # for work that has just been published rather than a sign of anything
+        # wrong. The cache is refreshed once, from its own configured remote,
+        # and the question is asked again.
+        if self._refresh_commit_repos():
+            resolved, missing_repos = self._resolve_known_commit(value)
+            if resolved:
+                return resolved
+        if missing_repos and len(missing_repos) == len(self.commit_git_dirs):
+            missing = ", ".join(str(path) for path in missing_repos)
+            raise ValueError(f"commit_hash verification repository not found: {missing}")
+        raise ValueError(
+            f"unknown commit_hash: {value}. It is not in this board's copy of the project "
+            "repository, even after refreshing it -- push the commit to the project remote "
+            "and submit it again."
+        )
+
+    def _resolve_known_commit(self, value: str) -> tuple[str, list[Path]]:
+        """The commit as this board's own copies of the repository resolve it."""
         missing_repos: list[Path] = []
         for commit_git_dir in self.commit_git_dirs:
             try:
@@ -1967,11 +1994,37 @@ SELECT EXISTS (
                 check=False,
             )
             if resolved.returncode == 0 and resolved.stdout.strip():
-                return resolved.stdout.strip()
-        if missing_repos and len(missing_repos) == len(self.commit_git_dirs):
-            missing = ", ".join(str(path) for path in missing_repos)
-            raise ValueError(f"commit_hash verification repository not found: {missing}")
-        raise ValueError(f"unknown commit_hash: {value}")
+                return resolved.stdout.strip(), missing_repos
+        return "", missing_repos
+
+    def _refresh_commit_repos(self) -> bool:
+        """Fetch each verification repository from its own configured remote.
+
+        Bounded and credential-free by construction: the remote is whatever that
+        repository already names -- for a tenant's cache, the project's public
+        URL -- and nothing here is told a remote by a caller, so a submission
+        cannot point this at a repository of its choosing. A fetch that fails or
+        hangs is not an error in itself; it only means the commit stays unknown,
+        which the caller is then told plainly.
+        """
+        refreshed = False
+        for commit_git_dir in self.commit_git_dirs:
+            try:
+                git_args = self._commit_repo_git_args(commit_git_dir)
+            except ValueError:
+                continue
+            try:
+                fetched = subprocess.run(
+                    [*git_args, "fetch", "--quiet", "--prune", "origin"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=COMMIT_REFRESH_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                continue
+            refreshed = refreshed or fetched.returncode == 0
+        return refreshed
 
     def _commit_repo_git_args(self, commit_git_dir: Path) -> list[str]:
         if (commit_git_dir / ".git").exists():

@@ -146,22 +146,39 @@ def test_the_upgrade_hand_off_installs_the_document_for_the_whole_role_set() -> 
             assert f"porter-{role.role}" in expected, role.role
 
 
-def test_fresh_provisioning_installs_the_document_it_writes() -> None:
+def test_fresh_provisioning_grants_a_shared_account_project_nothing() -> None:
+    """A project provisioned today has one account and needs no sudo at all.
+
+    Every role runs as the project account (SYRD-69) and that account holds the
+    project's GitHub credential (SYRD-123), so there is no role account to drive
+    another role's tmux server and nothing that runs as root to publish. The
+    control interface is therefore empty, and an empty document installs
+    nothing rather than installing an empty policy file.
+    """
     plan = provision.build_plan(
         project="otto",
         owner_user=OWNER,
         owner_home=Path("/home") / OWNER,
     )
+    assert not plan.role_accounts, plan.role_accounts
     with tempfile.TemporaryDirectory(prefix="syrd51-fresh.") as tmp:
         workdir = Path(tmp)
         provision.write_artifacts(plan, workdir, enable_owner_linger=False)
         commands = (workdir / "operator-commands.sh").read_text(encoding="utf-8")
         expected = (workdir / plan.role_control_sudoers_name).read_text(encoding="utf-8")
-        assert expected.strip(), "this project has role accounts, so it has a control interface"
-
-        result = _execute(_fragment(commands, "otto"), project="otto", workdir=workdir)
-        assert result.returncode == 0, result.stdout + result.stderr
-        _assert_installed(workdir, "otto", expected)
+        assert not expected.strip(), expected
+        assert provision.role_control_sudoers_install_commands("otto", expected) == []
+        # And nothing anywhere in the packet grants root or names a publisher.
+        assert "NOPASSWD: /usr/local/lib/switchyard" not in commands, commands
+        assert "switchyard-publish-ref" not in commands, commands
+        assert "switchyard-integrate-main" not in commands, commands
+        # The packet says so rather than silently emitting nothing, and there
+        # is no install line for `_fragment` to find.
+        assert "no role control interface" in commands, commands
+        assert not [
+            line for line in commands.splitlines()
+            if "-o root -g root" in line and "role-control" in line
+        ], commands
 
 
 # --- the failure this ticket is about ----------------------------------------
@@ -252,13 +269,14 @@ def test_a_partial_role_set_is_refused_rather_than_installed() -> None:
     assert provision.role_control_sudoers_install_commands("otto", "") == []
     assert provision.role_control_sudoers_install_commands("otto", "   \n") == []
     # With no role accounts -- which is every project since one Unix identity
-    # per project (SYRD-69) -- the document is the publication grant alone: one
-    # root-owned program the project account may run, and no tmux control of
-    # anybody. What it must never be is a document that omits roles it should
-    # have named while still granting control of their sessions.
+    # per project (SYRD-69) -- there is nothing left to grant at all. The
+    # publication grant that used to be the whole of this document is gone with
+    # the hop it served (SYRD-123), and what it must never become is a document
+    # that omits roles it should have named while still granting control of
+    # their sessions.
     shared = provision.render_role_control_sudoers("otto", OWNER, ())
-    assert "switchyard-publish-ref" in shared, shared
-    assert "/usr/bin/tmux" not in shared, shared
+    assert shared.strip() == "", shared
+    assert "NOPASSWD" not in shared, shared
     assert all(account not in shared for _role, account in ROLE_ACCOUNTS), shared
     # A caller cannot forget the role set and silently get one role's document.
     try:

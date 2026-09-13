@@ -709,6 +709,17 @@ def main() -> int:
         and new_commit not in f"{stale.stdout}{stale.stderr}"
     )
 
+    # A tenant that still carries the publication grant, which is what every
+    # host upgraded before SYRD-123 looks like: the run has something real to
+    # take away, and "removed" can be checked rather than assumed.
+    Path(porter_sudoers).parent.mkdir(parents=True, exist_ok=True)
+    Path(porter_sudoers).write_text(
+        "porter-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/porter/switchyard-publish-ref\n",
+        encoding="utf-8",
+    )
+    os.chmod(porter_sudoers, 0o440)
+    report["upgrade_sudoers_present_before"] = Path(porter_sudoers).is_file()
+
     # DRY RUN FIRST, exactly as an operator is told to. It must describe the real
     # run and change nothing at all.
     before_preview = _boundary_state(install_root)

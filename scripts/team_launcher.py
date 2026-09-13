@@ -14711,6 +14711,60 @@ def role_account_migration_instruction(
     return path, []
 
 
+def remove_tenant_publication_boundary(
+    config: ProjectConfig,
+    *,
+    config_path: Path | None = None,
+    dry_run: bool = False,
+    sudoers_root: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Take away the publication hop this tenant was given, on the ordinary upgrade.
+
+    The User restored the project account's write access to the forge, so an
+    implementer publishes by pushing and there is nothing for a root-owned
+    publisher to do (SYRD-123). Leaving it installed would leave a NOPASSWD rule
+    to a privileged program in place while the documentation says there is no
+    privileged gate, and the first of those two is the one that would still be
+    true.
+
+    What goes: the sudo rule, and -- through the retirement list in
+    `role_tooling_staging_commands` -- the staged copies of the programs it
+    named. What stays: the root-owned key and grant under /etc/switchyard, which
+    no role can read and nothing now runs. Deleting a credential is not
+    reversible and this decision has already been reversed once, so it is not
+    this upgrade's to make; with the rule gone there is no path to it.
+    """
+    from scripts.ticket_board.project_provision import publish_sudoers_path
+
+    sudoers_path = Path(publish_sudoers_path(config.project, root=sudoers_root))
+    if dry_run:
+        if sudoers_path.exists():
+            print_func(f"switchyard: would remove {config.project}'s publication sudo rule {sudoers_path}")
+        return []
+    if os.geteuid() != 0:
+        return [f"{sudoers_path} can only be removed by root"]
+    if not sudoers_path.exists():
+        return []
+    removed = runner(
+        ["rm", "-f", str(sudoers_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if getattr(removed, "returncode", 1) != 0:
+        detail = (str(getattr(removed, "stderr", "") or "").strip() or "no output")[:300]
+        return [f"could not remove {sudoers_path}: {detail}"]
+    # Gone, not "the command said so". A grant still on disk is still a grant,
+    # and an upgrade that reports it removed is the one way this can be worse
+    # than leaving it alone.
+    if sudoers_path.exists():
+        return [f"{sudoers_path} is still on disk after removing it"]
+    print_func(
+        f"switchyard: removed {config.project}'s publication sudo rule; implementers publish by "
+        "pushing to the project remote and nothing here runs as root"
+    )
+    return []
+
+
 def install_tenant_publication_boundary(
     config: ProjectConfig,
     *,
@@ -16505,23 +16559,17 @@ def upgrade_project_command(
         )
         if previewed_release is not None:
             trusted_release_root = previewed_release.root
-        for problem in preview_problems or (
-            install_tenant_publication_boundary(
-                config,
-                release=previewed_release,
-                publish_remote=publish_remote,
-                config_path=config_path,
-                dry_run=True,
-                runner=runner,
-                print_func=print_func,
-            )
-            if previewed_release is not None
-            else []
+        for problem in preview_problems or remove_tenant_publication_boundary(
+            config,
+            config_path=config_path,
+            dry_run=True,
+            runner=runner,
+            print_func=print_func,
         ):
             # A preview that hides what it could not work out is not a preview.
-            # This is the one place an operator finds out that the real run
-            # would install nothing privileged, and finding out then is the
-            # whole point of asking.
+            # This is the one place an operator finds out what the real run
+            # would take away, and finding out then is the whole point of
+            # asking.
             print_func(f"warning: switchyard: {problem}")
     elif os.geteuid() == 0:
         legacy_problems = remove_untrusted_role_account_migration(
@@ -16610,31 +16658,26 @@ def upgrade_project_command(
                 detail="; ".join(staging_problems),
             )
             return 1
-        publication_problems = install_tenant_publication_boundary(
+        publication_problems = remove_tenant_publication_boundary(
             config,
-            release=trusted_release,
-            publish_remote=publish_remote,
             config_path=config_path,
             dry_run=False,
             runner=runner,
             print_func=print_func,
         )
         if publication_problems:
-            # Reported, not fatal. Absence is the safe direction here: with no
-            # grant and no key, publication refuses, so the boundary this
-            # installs is still correct when it is missing. Failing the upgrade
-            # would take the board, the schema and the role tooling down with
-            # it, and would leave a tenant that cannot reach its forge unable to
-            # upgrade at all. It is said loudly and recorded, because the one
-            # thing that must not happen is an operator believing it is there.
+            # Reported, not fatal. What is left behind is a sudo rule to a
+            # program that is no longer staged, which grants nothing, so the
+            # tenant is not less safe for the removal having been incomplete --
+            # but an operator must not be told it is gone when it is not, and
+            # the upgrade must not take the board down over it.
             for problem in publication_problems:
                 print_func(f"warning: switchyard: {problem}")
             print_func(
-                f"warning: switchyard: {config.project}'s publication boundary was NOT installed, so "
-                "only the shared project credential can push and every role under that account "
-                "still can. The rest of this upgrade continued."
+                f"warning: switchyard: {config.project}'s publication boundary was NOT fully "
+                "removed. The rest of this upgrade continued."
             )
-            publication_detail = "publication boundary not installed: " + "; ".join(
+            publication_detail = "publication boundary not removed: " + "; ".join(
                 publication_problems
             )
     # The owner's GitHub identity, on every upgrade as well as at provisioning:

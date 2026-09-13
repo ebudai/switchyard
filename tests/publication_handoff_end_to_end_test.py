@@ -207,19 +207,28 @@ def main() -> int:
             assert commit[:12] in complaint, complaint
             assert "not" in complaint and "origin" in complaint, complaint
 
-            # So the implementer asks, with the real CLI and no credential.
+            # So the implementer asks. This is the ESCALATION path now, not the
+            # ordinary one: since SYRD-123 an implementer publishes by pushing
+            # (see direct_candidate_push_test), and the board request survives
+            # for the case where that is not possible -- a credential the forge
+            # refuses, a ref the implementer may not move -- and is answered by
+            # the same privileged publisher this suite drives. The request is
+            # filed through the board client rather than through a wrapper,
+            # because the wrapper is a push now.
+            bundle = Path(owner_home) / f".local/state/switchyard/publish-outbox/cerulean/PGU-1-{commit[:12]}.bundle"
+            bundle.parent.mkdir(parents=True, exist_ok=True)
+            git("branch", "--force", "roles/ops/trunk", commit, cwd=worktree)
+            git("bundle", "create", str(bundle), "roles/ops/trunk", cwd=worktree)
             asked = subprocess.run(
                 [
-                    sys.executable, str(ROOT / "scripts" / "switchyard-request-publication"),
-                    "PGU-1", "--worktree", str(worktree), "--role", "ops",
-                    "--project", "cerulean", "--write-client", write_client,
-                    "--board-url", base,
+                    sys.executable, write_client, "--board-url", base,
+                    "request-publication", "PGU-1", "--ref", "roles/ops/trunk",
+                    "--commit", commit, "--bundle", str(bundle),
                 ],
                 text=True, capture_output=True,
                 env={**board_env, "TICKET_BOARD_CALLER_ROLE": "ops"},
             )
             assert asked.returncode == 0, asked.stdout + asked.stderr
-            assert "asked to publish roles/ops/trunk" in asked.stdout, asked.stdout
 
             waiting = app.publication_requests(state="requested")
             assert len(waiting) == 1, waiting

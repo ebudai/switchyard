@@ -650,6 +650,19 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
     return "\n".join(lines)
 
 
+#: What the publication hop staged, removed by name on every upgrade. Keeping
+#: the list is the only way an upgrade can take a program away: staging refreshes
+#: what the release carries and cannot know about a name nobody mentions any
+#: more (SYRD-123).
+RETIRED_STAGED_EXECUTABLES: tuple[str, ...] = (
+    "switchyard-publish-ref",
+    "switchyard-publish",
+    "switchyard-integrate-main",
+    "switchyard-integrate",
+    "switchyard_publication_authority.py",
+)
+
+
 #: The executables a role account reaches through the shared staging directory.
 #: One list, so what is installed and what is scanned for dependencies cannot
 #: drift apart.
@@ -657,17 +670,13 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     "ticket-board-pane-idle-hook",
     "ticket-board-install-pane-hooks",
     "switchyard-board-skill",
-    "switchyard-publish-ref",
-    # SYRD-93: the two ends of the publication handoff. The implementer's end
-    # needs no credential at all; the control role's end reaches the privileged
-    # publisher above through this tenant's one sudo grant.
+    # SYRD-123: publishing a candidate is a push again. The account every role
+    # runs as holds the project's GitHub credential, so this needs no grant, no
+    # privileged helper and no Director -- it is a careful wrapper around one
+    # `git push`. The old name is staged beside it because panes and habits
+    # still reach for it, and says once what changed.
+    "switchyard-publish-candidate",
     "switchyard-request-publication",
-    "switchyard-publish",
-    # SYRD-93: the other half of the credential cutover. Publication moves role
-    # refs and refuses integration branches outright, so without this the
-    # control role could not merge the work it had just published.
-    "switchyard-integrate-main",
-    "switchyard-integrate",
     "ticket-board-register-runtime",
     # Root-owned and reached only through this tenant's sudo grant.
     "switchyard-tenant-control",
@@ -1242,6 +1251,13 @@ def role_tooling_staging_commands(
         commands.extend(
             stage(f"{release_root}/scripts/{name}", f"{staging}/{name}", "0755")
         )
+    # Taken away, not merely no longer listed. A name dropped from the list
+    # above stops being refreshed and stays on disk forever, so the programs the
+    # publication hop staged are removed by name: leaving a root-owned publisher
+    # staged while saying there is no privileged gate would make the second
+    # statement false on every tenant that ever had one (SYRD-123).
+    for name in RETIRED_STAGED_EXECUTABLES:
+        commands.append(f"sudo rm -f {shell_quote(f'{staging}/{name}')}")
     # The modules those executables import from their own directory. Not
     # executable, but every bit as required: without them the staged copy is a
     # wrapper around an import that fails (SYRD-60).
@@ -1783,44 +1799,26 @@ def render_role_control_sudoers(
     a command the CLI has, so the setup failed before the rule was installed
     (SYRD-51).
     """
-    publish_helper = f"/usr/local/lib/switchyard/{project}/switchyard-publish-ref"
-    integrate_helper = f"/usr/local/lib/switchyard/{project}/switchyard-integrate-main"
-    # SYRD-93: publication runs as root, not as the owner, because the push
-    # credential must be one the project account cannot read -- under one shared
-    # account (SYRD-69) a credential any role can read is a credential every
-    # role can push with. The grant is one program and no arguments of the
-    # operator's choosing; the program decides for itself whether the process
-    # invoking it is the live runtime the board registered for the control role,
-    # so holding this grant is not the same as being allowed to publish.
-    publication = [
-        f"# {project}: publication. The project account may run two root-owned",
-        "# programs, each of which refuses any caller but the control role's registered",
-        "# process: one publishes an implementer's ref and refuses integration branches,",
-        "# the other fast-forwards the integration branch and moves nothing else.",
-        f"{owner_user} ALL=(root) NOPASSWD: {publish_helper}",
-        f"{owner_user} ALL=(root) NOPASSWD: {integrate_helper}",
-    ]
+    # SYRD-123: no publication grants. The project account holds the project's
+    # GitHub credential again, so publishing a candidate is an ordinary push and
+    # there is nothing here for root to do. What used to be granted -- two
+    # root-owned programs the account could run under NOPASSWD -- is not
+    # rendered any more, and an upgrade removes the rule from tenants that have
+    # it. Nothing below grants root; every remaining entry is one tmux.
+    publication: list[str] = []
     if not role_accounts:
-        return "\n".join(publication) + "\n"
+        return ""
     director_account = next(
         (account for role, account in role_accounts if role == "director"),
         "",
     )
     role_targets = ",".join(account for _role, account in role_accounts)
     lines = [
-        *publication,
-        "",
         f"# {project}: role control interface. Each entry grants one command and",
-        "# nothing else, so a holder can drive another account's tmux server or publish a",
-        "# feature ref, and gains no other command and no root.",
+        "# nothing else, so a holder can drive another account's tmux server, and gains",
+        "# no other command and no root.",
         f"{owner_user} ALL=({role_targets}) NOPASSWD: /usr/bin/tmux",
     ]
-    # A project that still has per-role accounts reaches the same publisher the
-    # same way: through the root-owned grant above, which authorizes the process
-    # rather than the account (SYRD-93 replaced the per-role sudo hop).
-    for _role, account in role_accounts:
-        lines.append(f"{account} ALL=(root) NOPASSWD: {publish_helper}")
-        lines.append(f"{account} ALL=(root) NOPASSWD: {integrate_helper}")
     if director_account:
         director_targets = ",".join(
             account for _role, account in role_accounts if account != director_account
@@ -3248,7 +3246,6 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
     q_role_control_sudoers = shell_quote(f"/etc/sudoers.d/{plan.role_control_sudoers_name}")
-    publish_grant = "\n".join(publish_grant_commands(plan))
     github_identity = "\n".join(
         owner_github_identity_commands(
             plan.owner_user,
@@ -3432,13 +3429,12 @@ sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
 sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 {install_role_control_sudoers}
 # The owner's GitHub identity, and the configuration that selects it. Without
-# the selection git offers no key at all and publication fails as though there
-# were none (SYRD-74). Re-runnable: an existing key is left alone.
+# the selection git offers no key at all and every push fails as though there
+# were no credential (SYRD-74). Re-runnable: an existing key is left alone.
+# This is the whole credential story for a new project: the account every role
+# runs as holds it, implementers publish candidates by pushing, and nothing on
+# this host runs as root to do it (SYRD-123).
 {github_identity}
-# The one credential on this host that may push, and the staging the publisher
-# mirrors through. Root owns both: a key the project account can read is a key
-# every role can push with (SYRD-93).
-{publish_grant}
 sudo systemd-tmpfiles --create {q_tmpfiles}
 {postgres_sql_file_command(plan.project + '-database.sql')}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}

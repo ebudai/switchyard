@@ -141,11 +141,20 @@ def _privileged_report() -> dict:
     global _PRIVILEGED_REPORT
     if _PRIVILEGED_REPORT is None:
         with tempfile.TemporaryDirectory(prefix="pub-root.") as tmp:
+            # Inside its namespace this run IS root and /usr/local is its own,
+            # so it must exercise the real installation paths. The redirections
+            # the unprivileged suites set for their own safety would send it
+            # somewhere it is not testing (SYRD-127).
+            environment = {
+                name: value for name, value in os.environ.items()
+                if name not in {"SWITCHYARD_TENANT_CONTROL_ROOT"}
+            }
             proc = subprocess.run(
                 ["unshare", "--user", "--map-auto", "--map-root-user", "--mount",
                  sys.executable, str(PRIVILEGED), tmp, str(ROOT)],
                 capture_output=True,
                 text=True,
+                env=environment,
             )
             assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
             _PRIVILEGED_REPORT = json.loads(proc.stdout.strip().splitlines()[-1])

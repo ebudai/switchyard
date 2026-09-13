@@ -1106,7 +1106,83 @@ def owner_github_selection_commands(
 
 def role_tooling_staging_dir(project: str, *, root: Path | str | None = None) -> str:
     """Where a role account reaches this tenant's root-owned tooling."""
-    return f"{root if root is not None else TENANT_CONTROL_ROOT}/{project}"
+    return f"{root if root is not None else tenant_control_root()}/{project}"
+
+
+#: Overridable for the same reason the publish grant root and the sudoers root
+#: are: a suite has to be able to exercise the real installation path without
+#: writing into /usr/local on the host running it.
+TENANT_CONTROL_ROOT_ENV = "SWITCHYARD_TENANT_CONTROL_ROOT"
+
+
+def tenant_control_root() -> str:
+    import os as _os
+
+    return _os.environ.get(TENANT_CONTROL_ROOT_ENV, "").strip() or TENANT_CONTROL_ROOT
+
+
+def readable_system_unit_path(project: str, *, root: Path | str | None = None) -> str:
+    """Where an unprivileged deployer can read this tenant's reviewed unit.
+
+    The deployer compares the release's production unit against the one systemd
+    has loaded, and refuses to continue when they differ, because daemon-reload
+    is deliberately outside the board's polkit grant. It runs as the project
+    account, and root's own copy of that unit lives in the privileged provision
+    directory, which is root-only -- so on SYRD-126 the deployer read the
+    candidate as ABSENT and refused a release whose unit was in fact installed,
+    correct, and byte-identical.
+
+    The fix is not to open that directory. Root publishes a copy here instead,
+    beside the other root-owned bytes a role account is meant to read, and the
+    handoff names the copy (SYRD-127). A copy can be compared; the installed
+    unit cannot be compared with itself.
+    """
+    return f"{role_tooling_staging_dir(project, root=root)}/{project}-ticket-board.service"
+
+
+def system_unit_proof_commands(
+    project: str, source_token: str, *, staging_root: Path | str | None = None
+) -> list[str]:
+    """Publish the readable copy, or take away a stale one.
+
+    The `else` branch is the half that matters: a tenant with no reviewed unit
+    must leave the deployer with no candidate, so it refuses rather than
+    comparing the release against a copy of some earlier release's unit. Same
+    shape as the role tooling staging for the same reason -- what is published
+    is exactly what exists now.
+
+    `source_token` is placed in the script as written, so a caller passes either
+    a shell-quoted path or an expansion like `"$system_unit_candidate"` -- the
+    operator packet knows the path only at run time.
+    """
+    staging = role_tooling_staging_dir(project, root=staging_root)
+    target = readable_system_unit_path(project, root=staging_root)
+    source = source_token
+    return [
+        f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}",
+        f"if [ -f {source} ]; then",
+        f"    sudo install -m 0444 -o root -g root {source} {shell_quote(target)}",
+        "else",
+        f"    sudo rm -f {shell_quote(target)}",
+        "fi",
+    ]
+
+
+def system_unit_proof_chain(
+    project: str, source_token: str, *, staging_root: Path | str | None = None
+) -> list[str]:
+    """The same publication, as commands that can be `&&`-joined.
+
+    Used where the copy follows an install of the very bytes it copies, so the
+    source cannot be absent and the conditional above would only be noise -- and
+    where the surrounding command is a single chain, which a multi-line `if`
+    cannot be part of.
+    """
+    return [
+        f"sudo install -d -m 0755 -o root -g root {shell_quote(role_tooling_staging_dir(project, root=staging_root))}",
+        f"sudo install -m 0444 -o root -g root {source_token} "
+        f"{shell_quote(readable_system_unit_path(project, root=staging_root))}",
+    ]
 
 
 def _release_marker_commit(root: Path) -> tuple[str, str]:
@@ -3242,6 +3318,13 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_commit_git_dir = shell_quote(plan.commit_git_dir)
     q_deploy_script = shell_quote(f"{plan.source_repo}/scripts/ticket-board-service.sh")
     q_board_unit = shell_quote(f"/etc/systemd/system/{plan.board_unit}")
+    # Published from the artifacts the operator is reviewing, so the deployer
+    # compares the release's unit against the loaded one rather than being sent
+    # into a directory it cannot read (SYRD-127).
+    system_unit_proof = "\n".join(
+        system_unit_proof_commands(plan.project, '"$system_unit_candidate"')
+    )
+    q_readable_system_unit = shell_quote(readable_system_unit_path(plan.project))
     q_canary_unit = shell_quote(f"/etc/systemd/system/{plan.canary_unit}")
     q_tmpfiles = shell_quote(f"/etc/tmpfiles.d/{plan.tmpfiles_name}")
     q_polkit = shell_quote(f"/etc/polkit-1/rules.d/{plan.polkit_name}")
@@ -3408,11 +3491,16 @@ set -euo pipefail
 provision_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 system_unit_candidate="$provision_dir/{plan.board_unit}"
 canary_unit_candidate="$provision_dir/{plan.canary_unit}"
+# The deployer runs as the project account and has to read the reviewed unit to
+# compare it against the one systemd loaded. Root publishes a copy it can reach,
+# rather than the account being sent into a directory root owns (SYRD-127).
+{system_unit_proof}
+readable_system_unit={q_readable_system_unit}
 {service_user_command(plan.service_user)}
 {role_accounts_command(plan)}
 {peer_auth_command(plan)}
 {install_board_root}
-sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
+sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$readable_system_unit" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {grant_board_root}
 {install_asset_frame}
 {grant_home_traversal}

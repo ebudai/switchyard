@@ -89,6 +89,12 @@ TEST_SWITCHYARD_PUBLISH_ROOT = TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent
 os.environ["SWITCHYARD_PUBLISH_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "etc")
 os.environ["SWITCHYARD_PUBLISH_STAGING_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "var")
 os.environ["SWITCHYARD_SUDOERS_ROOT"] = str(TEST_SWITCHYARD_PUBLISH_ROOT / "sudoers.d")
+# And the tenant-readable tree root publishes the reviewed system unit into, for
+# the same reason: the real privileged branch installs there, and without this a
+# suite would write into this host's /usr/local (SYRD-127).
+os.environ["SWITCHYARD_TENANT_CONTROL_ROOT"] = str(
+    TEST_SWITCHYARD_SHARED_INSTALL_ROOT.parent.parent / "tenant-control"
+)
 os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"
 os.environ["KDE_FULL_SESSION"] = ""
 
@@ -472,22 +478,30 @@ class _provisioning_as_root:
     directory redirected somewhere a test may write (SYRD-62).
     """
 
+    #: The two root-owned trees provisioning writes: the private one it installs
+    #: FROM, and the tenant-readable one it publishes TO. Both are redirected,
+    #: because a case that exercises the real root branch must not depend on
+    #: writing to this host's /etc or /usr/local (SYRD-62, SYRD-127).
+    REDIRECTED_ROOTS = ("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", "SWITCHYARD_TENANT_CONTROL_ROOT")
+
     def __init__(self, privileged_root: Path):
         self.privileged_root = privileged_root
 
     def __enter__(self) -> Path:
         self._euid = team_launcher.os.geteuid
-        self._saved = os.environ.get("SWITCHYARD_PRIVILEGED_PROVISION_ROOT")
+        self._saved = {name: os.environ.get(name) for name in self.REDIRECTED_ROOTS}
         os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(self.privileged_root)
+        os.environ["SWITCHYARD_TENANT_CONTROL_ROOT"] = str(self.privileged_root / "tenant-control")
         team_launcher.os.geteuid = lambda: 0
         return self.privileged_root
 
     def __exit__(self, *_exc) -> bool:
         team_launcher.os.geteuid = self._euid
-        if self._saved is None:
-            os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
-        else:
-            os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = self._saved
+        for name, value in self._saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         return False
 
 

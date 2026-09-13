@@ -56,7 +56,10 @@ def test_custom_owner_home_provisions_every_runtime_path() -> None:
     assert f"--directorctl {plan.board_current}/scripts/directorctl" in rendered
     assert f"HOME='{owner_home}'" in rendered
     assert f"TICKET_BOARD_OWNER_HOME='{owner_home}'" in rendered
-    assert 'TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate"' in rendered
+    # The readable copy, not root's own path: the deployer runs as the project
+    # account and cannot traverse the provision directory (SYRD-126, SYRD-127).
+    assert 'TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$readable_system_unit"' in rendered
+    assert f"readable_system_unit='/usr/local/lib/switchyard/{plan.project}/{plan.board_unit}'" in rendered
     assert "/home/agent" not in rendered
     assert "/home/orbit-worker" not in rendered
 

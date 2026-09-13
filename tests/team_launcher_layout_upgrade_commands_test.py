@@ -511,7 +511,11 @@ def test_switchyard_upgrade_reports_tenant_release_update_command() -> None:
     assert f"SOURCE_REPO={source_repo}" in rendered
     assert f"BOARD_ROOT={board_root}" in rendered
     assert "DEPLOY_REF=origin/main" in rendered
-    assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" in rendered
+    # The readable copy root publishes, never root's own path: the deployer
+    # runs as the project account and cannot traverse the provision directory,
+    # which made a present and correct unit read as absent (SYRD-126/127).
+    assert "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=/usr/local/lib/switchyard/otto/otto-ticket-board.service" in rendered
+    assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" not in rendered
     assert "TICKET_BOARD_COMMIT_GIT_DIR=/srv/git/review-cache.git" in rendered
     assert f"{source_repo}/scripts/ticket-board-service.sh deploy-restart" in rendered
     assert updated_plan["source_repo"] == str(source_repo)
@@ -616,7 +620,11 @@ def test_switchyard_upgrade_from_shared_release_prints_exact_cache_export_deploy
         assert 'SOURCE_REPO="$tmpdir"' in rendered
         assert f"BOARD_ROOT={board_root}" in rendered
         assert "DEPLOY_REF=origin/main" in rendered
-        assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" in rendered
+        # The readable copy root publishes, never root's own path: the deployer
+        # runs as the project account and cannot traverse the provision directory,
+        # which made a present and correct unit read as absent (SYRD-126/127).
+        assert "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT=/usr/local/lib/switchyard/otto/otto-ticket-board.service" in rendered
+        assert f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={provision_dir / 'otto-ticket-board.service'}" not in rendered
         assert '"$tmpdir/scripts/ticket-board-service.sh" deploy-restart' in rendered
         assert f"SOURCE_REPO={release}" not in rendered
         assert f"{release}/scripts/ticket-board-service.sh deploy-restart" not in rendered

@@ -125,6 +125,13 @@ def test_the_release_gate_calls_this_migration_sensitive_drift() -> None:
 # --------------------------------------------------------------------------
 
 
+def team_launcher_readable_unit(project: str) -> str:
+    """The tenant-readable copy of the reviewed board unit, as both sides name it."""
+    from scripts.ticket_board.project_provision import readable_system_unit_path
+
+    return readable_system_unit_path(project)
+
+
 def _migrating_tenant(tmp: Path) -> tuple[Path, Path, Path, Path]:
     """A tenant mid-migration: old unit installed, new unit staged.
 
@@ -403,17 +410,41 @@ def test_the_transaction_installs_what_the_operator_sequence_installs() -> None:
 
         printed = team_launcher.tenant_release_unit_install_command(status, PROJECT)
         assert printed, "the operator sequence installs units"
-        printed_units = {
-            Path(word).name
-            for word in shlex.split(printed.replace(" && ", " "))
-            if word.endswith(".service")
-        }
-        performed = {
-            unit for unit, _destination, _ownership in team_launcher.authority_unit_installs(
+        # Compared by DESTINATION rather than by unit name. The reviewed board
+        # unit is installed twice on purpose -- once where systemd loads it and
+        # once where the unprivileged deployer can read it (SYRD-127) -- so a
+        # comparison by name cannot tell the two apart, and it is the set of
+        # files that must not drift anyway.
+        # Read the DESTINATIONS the printed chain installs to -- the last word
+        # of each `install` -- rather than every path in it: the sources are in
+        # there too, and a name taken from either side cannot tell an install
+        # from what it was installed from.
+        printed_destinations = [
+            shlex.split(command)[-1]
+            for command in printed.split(" && ")
+            # `install -d` makes the directory the copy goes in; it installs no
+            # unit and its last word is that directory.
+            if " install " in f" {command} " and " -d " not in f" {command} "
+        ]
+        printed_units = {Path(path).name for path in printed_destinations}
+        performed_destinations = [
+            str(destination)
+            for _unit, destination, _ownership in team_launcher.authority_unit_installs(
                 config, config_path=config_path
             )
-        }
+        ]
+        performed = {Path(path).name for path in performed_destinations}
         assert performed == printed_units, (performed, printed_units)
+        # The board unit is installed twice on purpose -- where systemd loads it
+        # and where the unprivileged deployer can read it -- so the count, not
+        # just the set, has to match, and the second destination has to be the
+        # readable copy on both sides (SYRD-127).
+        assert len(printed_destinations) == len(performed_destinations), (
+            printed_destinations, performed_destinations
+        )
+        readable = team_launcher_readable_unit(PROJECT)
+        assert readable in printed_destinations, printed_destinations
+        assert readable in performed_destinations, performed_destinations
         # Both reload before anything is deployed, and the canary is in both.
         assert f"{PROJECT}-ticket-board-canary.service" in performed, performed
         assert printed.rstrip().endswith("systemctl daemon-reload"), printed

@@ -480,7 +480,7 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
         "sudo -u 'otto-agent' -H env HOME='/home/otto-agent' "
         "TICKET_BOARD_OWNER_HOME='/home/otto-agent' TICKET_BOARD_PROJECT='otto' "
         "TICKET_BOARD_COMMIT_GIT_DIR='/data/git/otto_scheduler.git' "
-        'TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$system_unit_candidate" '
+        'TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$readable_system_unit" '
         f"SOURCE_REPO='{ROOT}' "
         "BOARD_ROOT='/home/otto-agent/otto-ticketboard-live'"
     )

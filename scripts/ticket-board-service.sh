@@ -1219,6 +1219,16 @@ assert_system_unit_reload_not_required_for_release() {
     render_system_unit_for_release "$release_dir" >"$rendered_unit"
     if candidate_path="$(system_unit_candidate_path_for_release "$release_dir")"; then
         subject_label="candidate system unit path: $candidate_path"
+        # A candidate that IS the installed unit cannot disagree with it, so the
+        # comparison below would pass for every release including one whose unit
+        # genuinely differs -- which is the only case this gate exists for. That
+        # is not hypothetical: pointing the handoff at the installed unit is the
+        # obvious way to make the path readable, and it was done once as a
+        # stopgap (SYRD-126). The candidate must be a COPY (SYRD-127).
+        if [[ "$candidate_path" -ef "$installed_unit" ]]; then
+            rm -f "$rendered_unit" "$diff_file"
+            die "candidate system unit $candidate_path is the installed unit $installed_unit, so comparing them proves nothing. Point TICKET_BOARD_PROVISIONED_SYSTEM_UNIT at the release's own reviewed unit -- the readable copy root publishes beside this tenant's staged tooling -- and rerun deploy-restart."
+        fi
     else
         subject_label="release contains no production system unit at expected path: $candidate_path; generic render below is diagnostic only and must not be installed"
     fi

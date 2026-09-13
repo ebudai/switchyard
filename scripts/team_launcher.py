@@ -6779,7 +6779,19 @@ def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> 
     if status.board_socket:
         deploy_env.append(f"BOARD_UNIX_SOCKET={status.board_socket}")
     if status.provisioned_system_unit is not None:
-        deploy_env.append(f"TICKET_BOARD_PROVISIONED_SYSTEM_UNIT={status.provisioned_system_unit}")
+        # The readable copy, never root's own. The deployer runs as the project
+        # account and root's copy lives in the privileged provision directory,
+        # which is root-only: handing over that path made a present, correct,
+        # byte-identical unit read as ABSENT and refused the release (SYRD-126).
+        # The copy is published by the artifacts phase from exactly that file,
+        # so the comparison it feeds is still release-against-installed rather
+        # than a file against itself (SYRD-127).
+        from scripts.ticket_board.project_provision import readable_system_unit_path
+
+        deploy_env.append(
+            "TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="
+            + readable_system_unit_path(project)
+        )
     if status.commit_git_dir:
         deploy_env.append(f"TICKET_BOARD_COMMIT_GIT_DIR={status.commit_git_dir}")
     if status.clone_source_repo is not None:
@@ -6827,6 +6839,8 @@ def tenant_release_listener_command(status: TenantReleaseStatus, project: str, a
 
 
 def tenant_release_unit_install_command(status: TenantReleaseStatus, project: str) -> str:
+    from scripts.ticket_board.project_provision import system_unit_proof_chain
+
     if status.provisioned_system_unit is None:
         return ""
     provision_dir = status.provisioned_system_unit.parent
@@ -6852,6 +6866,11 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
                     str(listener_target),
                 ]
             ),
+            # The same reviewed bytes, published where the unprivileged
+            # deployer can read them. In this chain rather than a step of its
+            # own so the copy cannot exist without the install having happened,
+            # and cannot be stale relative to it (SYRD-127).
+            *system_unit_proof_chain(project, _quote_command([str(board_unit)])),
             _quote_command(["sudo", "systemctl", "daemon-reload"]),
         ]
     )
@@ -17455,7 +17474,9 @@ def install_board_authority_files(
     for unit, destination, ownership in authority_unit_installs(
         config, config_path=config_path
     ):
-        staged = staged_dir / unit
+        # The staged source is the generated unit; a destination that is a copy
+        # of it says so in its name rather than being a second, different file.
+        staged = staged_dir / unit.split(" (", 1)[0]
         if not staged.is_file():
             problems.append(f"{unit} has not been generated under {staged_dir}")
             continue
@@ -17486,15 +17507,37 @@ def authority_unit_installs(
     operator sequence installs cannot drift apart -- the transaction installed
     two of the three, and the deploy it now runs starts the third (SYRD-63).
     """
+    from scripts.ticket_board.project_provision import readable_system_unit_path
+
     owner = config.run_as_user or current_user_name()
     listener = _listener_user_unit(config)
+    board_unit = _board_system_unit(config)
     return (
-        (_board_system_unit(config), _installed_unit_path(_board_system_unit(config)), ["-o", "root", "-g", "root"]),
+        (board_unit, _installed_unit_path(board_unit), ["-o", "root", "-g", "root"]),
         (_canary_system_unit(config), _installed_unit_path(_canary_system_unit(config)), ["-o", "root", "-g", "root"]),
         (
             listener,
             _owner_user_unit_path(config, listener, config_path=config_path),
             ["-o", owner, "-g", owner],
+        ),
+        # The same reviewed bytes again, where the unprivileged deployer can
+        # read them. It runs as the project account and root's copy is in the
+        # privileged provision directory, which is root-only -- so being handed
+        # that path made a present, correct, byte-identical unit read as ABSENT
+        # and refused the release (SYRD-126). In this list rather than a step of
+        # its own, for the reason the list exists: what the identity transaction
+        # installs and what the printed operator sequence installs must not
+        # drift apart, and a stale copy here would be compared against a release
+        # it did not come from (SYRD-127).
+        (
+            # Its own name in this list, not the unit's a second time. Both the
+            # rollback snapshot and the restore key by the first element, so a
+            # repeated name would make the copy overwrite the installed unit's
+            # entry and the rollback would put back the wrong file -- which is
+            # exactly what happened the first time this was written.
+            f"{board_unit} (readable copy)",
+            Path(readable_system_unit_path(config.project)),
+            ["-o", "root", "-g", "root"],
         ),
     )
 

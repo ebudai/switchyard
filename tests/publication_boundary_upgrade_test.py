@@ -326,12 +326,7 @@ def test_privileged_tooling_is_staged_from_the_commit_not_the_worktree() -> None
     bytes must be the commit's.
     """
     helper = ROOT / "scripts" / "switchyard-publish-ref"
-    committed = subprocess.run(
-        ["git", "-C", str(ROOT), "show", f"HEAD:scripts/switchyard-publish-ref"],
-        capture_output=True, check=True,
-    ).stdout
     planted = b"#!/bin/sh\nexec /bin/sh   # a role planted this\n"
-    assert planted != committed
 
     with tempfile.TemporaryDirectory(prefix="pub-staging.") as tmp:
         sys.path.insert(0, str(ROOT / "tests"))
@@ -346,11 +341,23 @@ def test_privileged_tooling_is_staged_from_the_commit_not_the_worktree() -> None
             staged = Path(root) / "tooling" / "porter" / "switchyard-publish-ref"
             assert staged.exists(), sorted(p.name for p in (Path(root) / "tooling" / "porter").iterdir())
             installed = staged.read_bytes()
+            # Which commit the upgrade actually selected, from the marker it
+            # staged beside the tooling -- not this checkout's HEAD, which is a
+            # different commit on any branch that has moved ahead of the ref the
+            # fixture deploys.
+            marker = json.loads(
+                (Path(root) / "tooling" / "porter" / ".switchyard-release.json").read_text()
+            )
         finally:
             helper.write_bytes(original)
 
+    committed = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{marker['commit']}:scripts/switchyard-publish-ref"],
+        capture_output=True, check=True,
+    ).stdout
+    assert planted != committed
     assert installed != planted, "root staged the bytes a role planted in the worktree"
-    assert installed == committed, "the staged helper is not the commit's"
+    assert installed == committed, "the staged helper is not the selected commit's"
 
 
 def test_a_stale_installed_launcher_is_bootstrapped_with_root_owned_code_only() -> None:

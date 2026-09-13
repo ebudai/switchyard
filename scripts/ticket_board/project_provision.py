@@ -931,13 +931,30 @@ def staged_role_tooling_problems(
         if executable and not info.st_mode & 0o111:
             problems.append(f"{path} is not executable")
 
+    def _absent(path: Path, what: str) -> None:
+        """Left behind by a newer release than the one selected."""
+        if path.exists() or path.is_symlink():
+            problems.append(
+                f"{path} is staged but {what} is not in this release; the staged bundle is not "
+                "the one this release would install"
+            )
+
     for name in ROLE_STAGED_EXECUTABLES:
-        _owned(staging / name, name, executable=True)
+        # What the SELECTED release carries, not what the running launcher
+        # knows about. Deliberately selecting an older release is what a
+        # rollback is, and it must not be blocked by tools that release never
+        # had -- while a tool it does not have must not survive in the staged
+        # bundle either (SYRD-93 live acceptance).
+        if (source / "scripts" / name).is_file():
+            _owned(staging / name, name, executable=True)
+        else:
+            _absent(staging / name, name)
     # Derived from the release being staged, not from whatever this process
     # happens to be running out of: a newer release may import a module the
     # running one does not (SYRD-62).
     for module in entry_point_module_dependencies(source_root=source / "scripts"):
-        _owned(staging / f"{module}.py", f"the companion module {module}", executable=False)
+        if (source / "scripts" / f"{module}.py").is_file():
+            _owned(staging / f"{module}.py", f"the companion module {module}", executable=False)
     for tree, what in ((staging / "ticket_board", "the ticket_board package"),
                        (staging / SKILLS_DIR_NAME, f"the canonical {SKILLS_DIR_NAME} tree")):
         if not tree.is_dir():
@@ -976,19 +993,41 @@ def role_tooling_staging_commands(
     """
     staging = role_tooling_staging_dir(project, root=staging_root)
     commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
+
+    def stage(source: str, target: str, mode: str) -> list[str]:
+        """Stage what this release has, and take away what it does not.
+
+        The list of what roles need is the running launcher's, and the release
+        being staged is whichever one was selected -- so the two disagree
+        whenever an older release is deliberately selected, which is exactly
+        what a rollback does. Failing the whole staging step then leaves the way
+        back blocked at the moment it is needed. Instead each file is staged if
+        the release carries it, and removed if it does not, so the staged set is
+        always precisely what the selected release provides (SYRD-93 live
+        acceptance).
+        """
+        return [
+            f"if [ -f {shell_quote(source)} ]; then",
+            f"    sudo install -m {mode} -o root -g root {shell_quote(source)} {shell_quote(target)}",
+            "else",
+            f"    sudo rm -f {shell_quote(target)}",
+            "fi",
+        ]
+
     for name in ROLE_STAGED_EXECUTABLES:
-        commands.append(
-            f"sudo install -m 0755 -o root -g root "
-            f"{shell_quote(f'{release_root}/scripts/{name}')} {shell_quote(f'{staging}/{name}')}"
+        commands.extend(
+            stage(f"{release_root}/scripts/{name}", f"{staging}/{name}", "0755")
         )
     # The modules those executables import from their own directory. Not
     # executable, but every bit as required: without them the staged copy is a
     # wrapper around an import that fails (SYRD-60).
     for module in entry_point_module_dependencies():
-        commands.append(
-            f"sudo install -m 0644 -o root -g root "
-            f"{shell_quote(f'{release_root}/scripts/{module}.py')} "
-            f"{shell_quote(f'{staging}/{module}.py')}"
+        commands.extend(
+            stage(
+                f"{release_root}/scripts/{module}.py",
+                f"{staging}/{module}.py",
+                "0644",
+            )
         )
     # The clients import the ticket_board package from their own directory, so
     # the package is staged beside them. Public code, root-owned, world
@@ -1586,18 +1625,27 @@ def publish_sudoers_path(project: str, *, root: Path | str | None = None) -> Pat
 
 
 def publish_sudoers_document(project: str, owner_user: str) -> str:
-    """The one grant that lets the project account reach the root publisher.
+    """The grants that let the project account reach the root-owned operations.
 
-    One program, no arguments of the operator's choosing. The program decides
-    for itself whether the process invoking it is the live runtime the board
-    registered for the control role, so holding this grant is not the same as
-    being allowed to publish (SYRD-93).
+    Two programs, no arguments of the operator's choosing. Each decides for
+    itself whether the process invoking it is the live runtime the board
+    registered for the control role, so holding these is not the same as being
+    allowed to publish or to integrate.
+
+    The second one is not optional. Publishing a role's ref and refusing `main`
+    is only half a boundary: without a way for the control role to integrate,
+    the credential cutover leaves reviewed work published and unmergeable, which
+    is the deadlock this pair exists to avoid (SYRD-93).
     """
-    helper = f"{TENANT_CONTROL_ROOT}/{project}/switchyard-publish-ref"
+    publisher = f"{TENANT_CONTROL_ROOT}/{project}/switchyard-publish-ref"
+    integrator = f"{TENANT_CONTROL_ROOT}/{project}/switchyard-integrate-main"
     lines = [
-        f"# {project}: publication. The project account may run one root-owned",
-        "# publisher, which refuses any caller but the control role's registered process.",
-        f"{owner_user} ALL=(root) NOPASSWD: {helper}",
+        f"# {project}: publication. The project account may run two root-owned",
+        "# programs, each of which refuses any caller but the control role's registered",
+        "# process: one publishes an implementer's ref and refuses integration branches,",
+        "# the other fast-forwards the integration branch and moves nothing else.",
+        f"{owner_user} ALL=(root) NOPASSWD: {publisher}",
+        f"{owner_user} ALL=(root) NOPASSWD: {integrator}",
     ]
     return "\n".join(lines) + "\n"
 

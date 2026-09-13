@@ -129,6 +129,8 @@ SWITCHYARD_ONBOARDING_DOC_NAMES = (
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
+#: Root's note of what a host was running before an upgrade replaced it.
+RELEASE_ROLLBACK_SCHEMA = "switchyard.release-rollback.v1"
 BOARD_SKILL_NAME = "switchyard-board"
 BOARD_SKILL_INSTALLER_NAME = "switchyard-board-skill"
 
@@ -14117,6 +14119,114 @@ def running_launcher_release(root: Path | None = None) -> SharedSwitchyardReleas
     )
 
 
+def release_rollback_path(project: str) -> Path:
+    """Root's own note of what this host was running before an upgrade."""
+    return privileged_provision_dir(
+        project, root=switchyard_privileged_provision_root()
+    ) / "release-rollback.json"
+
+
+def record_release_rollback(
+    config: ProjectConfig,
+    *,
+    release,
+    staging_root: Path | None = None,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Write down what to come back to, before anything is replaced.
+
+    An upgrade repoints the shared release, restages the tenant's root-owned
+    tooling and rewrites its sudo grant. Each of those is recoverable only if
+    something remembers what was there: otherwise the way back is whatever an
+    operator can reconstruct from timestamps under /opt, at the moment they are
+    least able to reconstruct anything.
+
+    Written before the first replacement and left alone afterwards, so a retry
+    that runs after a partial upgrade still names the release the host was whole
+    on rather than the half-installed one it is on now (SYRD-93 live
+    acceptance).
+    """
+    if dry_run:
+        return []
+    install_root = switchyard_shared_install_root()
+    pointer = install_root / "current"
+    previous_root = ""
+    try:
+        if os.path.islink(pointer):
+            previous_root = os.readlink(pointer)
+    except OSError as exc:
+        return [f"could not read the current release pointer {pointer}: {exc}"]
+    previous = shared_switchyard_release_for_path(Path(previous_root)) if previous_root else None
+    staged = _staged_tooling_dir(config, staging_root)
+    staged_marker = staged / SWITCHYARD_RELEASE_MARKER_NAME
+    staged_commit = ""
+    try:
+        if staged_marker.is_file():
+            staged_commit = str(
+                json.loads(staged_marker.read_text(encoding="utf-8")).get("commit") or ""
+            )
+    except (OSError, ValueError):
+        staged_commit = ""
+    record = {
+        "schema": RELEASE_ROLLBACK_SCHEMA,
+        "project": config.project,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "upgrading_to": release.commit,
+        "previous_release_root": previous_root,
+        "previous_release_commit": previous.marker_commit if previous else "",
+        "previous_staged_commit": staged_commit,
+    }
+    path = release_rollback_path(config.project)
+    if path.is_file():
+        # A retry after a partial upgrade must not overwrite the note taken when
+        # the host was last whole. Only a record of a DIFFERENT upgrade is
+        # replaced.
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+        if str(existing.get("upgrading_to") or "") == release.commit:
+            return []
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_private_json_atomic(path, record)
+        path.chmod(0o644)
+    except OSError as exc:
+        return [f"could not record the rollback for {config.project}: {exc}"]
+    print_func(
+        f"switchyard: recorded the way back for {config.project} in {path}: "
+        + (record["previous_release_commit"] or previous_root or "no previous release")
+    )
+    return []
+
+
+def release_rollback_commands(project: str, *, publish_remote: str = "") -> list[str]:
+    """The exact way back, from root's own note. Empty when there is nothing to say."""
+    path = release_rollback_path(project)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if str(record.get("schema") or "") != RELEASE_ROLLBACK_SCHEMA:
+        return []
+    previous_root = str(record.get("previous_release_root") or "")
+    previous_commit = str(record.get("previous_release_commit") or "")
+    if not previous_root or not previous_commit:
+        return []
+    install_root = switchyard_shared_install_root()
+    pointer = shlex.quote(str(install_root / "current"))
+    remote = publish_remote or "<url>"
+    return [
+        f"sudo ln -sfn {shlex.quote(previous_root)} {pointer}",
+        # The same reviewed path the upgrade took, pointed backwards: it
+        # restages the tenant's tooling and rewrites its grant from the release
+        # being returned to, rather than leaving the two halves disagreeing.
+        f"sudo switchyard upgrade {shlex.quote(project)} --source-repo {shlex.quote(previous_root)} "
+        f"--deploy-ref {shlex.quote(previous_commit)} --publish-remote {shlex.quote(remote)}",
+    ]
+
+
 def trusted_bootstrap_commands(
     source_repo: Path,
     commit: str,
@@ -14205,9 +14315,42 @@ def stale_launcher_problems(
     bootstrap (SYRD-97 review).
     """
     running = running_launcher_release()
+    if os.geteuid() == 0 and switchyard_shared_install_root() == DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT:
+        # Running privileged out of a path root does not control is the same
+        # escalation SYRD-97 refused one level down. There, root was asked to
+        # read a role-writable repository to build a release; here root is
+        # already executing the launcher out of one -- so every privileged step
+        # it is about to take, and every artifact it is about to render, comes
+        # from bytes any role can rewrite. The dry run of an upgrade from a
+        # worktree proposed exactly that and nothing stopped it (SYRD-93 live
+        # acceptance).
+        from scripts.ticket_board.project_provision import untrusted_root_executable_reasons
+
+        # Against uid 0 by name: the identity entitled to have written what root
+        # executes is root, whatever uid happens to be reading this. A
+        # redirected install root is a sandbox by construction, which is why the
+        # check above is scoped to the real one -- the same convention the
+        # privileged provision root already uses.
+        untrusted = untrusted_root_executable_reasons(
+            Path(os.path.realpath(__file__)), owner_uid=0
+        )
+        if untrusted:
+            return [
+                "this command is running as root out of a path root does not control: "
+                + untrusted[0],
+                "nothing privileged was staged. Install the release you want with root-owned "
+                "code only, and run the upgrade from that:",
+                *(
+                    f"  {line}"
+                    for line in trusted_bootstrap_commands(
+                        source_repo, release.commit, project=project, publish_remote=publish_remote
+                    )
+                ),
+            ]
     if running is None:
-        # A checkout, not an installed release. Ordinary for a developer run and
-        # for the bootstrap itself; the wrapper's dispatch is what this is about.
+        # A checkout, not an installed release. Ordinary for a developer run;
+        # the privileged case was refused above, and the wrapper's dispatch is
+        # what the rest of this is about.
         return []
     if running.marker_commit == release.commit:
         return []
@@ -15748,6 +15891,23 @@ def upgrade_project_command(
             )
             return 1
         trusted_release_root = trusted_release.root
+        # Before the first thing is replaced, and only then: a retry after a
+        # partial upgrade keeps the note taken when the host was last whole.
+        rollback_problems = record_release_rollback(
+            config, release=trusted_release, staging_root=tooling_root, print_func=print_func
+        )
+        if rollback_problems:
+            for problem in rollback_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any later phase: {config.project} would be upgraded "
+                "with no recorded way back."
+            )
+            record_upgrade_phase(
+                config, config_path=config_path, phase="artifacts", state="blocked",
+                detail="; ".join(rollback_problems),
+            )
+            return 1
         staging_problems = refresh_staged_role_tooling(
             config,
             release_root=trusted_release.root,

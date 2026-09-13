@@ -926,9 +926,32 @@ def test_role_control_interface_covers_every_control_path_narrowly() -> None:
     # program the project account may run, and no other command and no root
     # shell (SYRD-93).
     assert "/usr/bin/tmux" not in sudoers, sudoers
-    assert sudoers.strip().splitlines()[-1] == (
-        "otto-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/otto/switchyard-publish-ref"
-    ), sudoers
+    granted = [line for line in sudoers.splitlines() if line and not line.startswith("#")]
+    # Two root-owned programs and nothing else: one publishes a role's ref and
+    # refuses integration branches, one fast-forwards the integration branch
+    # and moves nothing else (SYRD-93).
+    assert granted == [
+        "otto-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/otto/switchyard-publish-ref",
+        "otto-agent ALL=(root) NOPASSWD: /usr/local/lib/switchyard/otto/switchyard-integrate-main",
+    ], sudoers
+
+
+def test_both_privileged_publication_programs_are_staged_with_what_they_share() -> None:
+    """A staged entry point that cannot import its sibling is not runnable.
+
+    The two root-owned operations keep their trust rules in one module rather
+    than two copies that drift, and each puts its own directory on sys.path to
+    import it -- so the module has to be staged beside them (SYRD-60, SYRD-93).
+    """
+    from scripts.ticket_board.project_provision import (
+        ROLE_STAGED_EXECUTABLES,
+        entry_point_module_dependencies,
+    )
+
+    assert "switchyard-publish-ref" in ROLE_STAGED_EXECUTABLES
+    assert "switchyard-integrate-main" in ROLE_STAGED_EXECUTABLES
+    assert "switchyard-integrate" in ROLE_STAGED_EXECUTABLES
+    assert "switchyard_publication_authority" in entry_point_module_dependencies()
 
 
 def test_publication_credential_is_root_owned_and_never_regenerated() -> None:

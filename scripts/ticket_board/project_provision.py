@@ -650,6 +650,11 @@ ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     # publisher above through this tenant's one sudo grant.
     "switchyard-request-publication",
     "switchyard-publish",
+    # SYRD-93: the other half of the credential cutover. Publication moves role
+    # refs and refuses integration branches outright, so without this the
+    # control role could not merge the work it had just published.
+    "switchyard-integrate-main",
+    "switchyard-integrate",
     "ticket-board-register-runtime",
     # Root-owned and reached only through this tenant's sudo grant.
     "switchyard-tenant-control",
@@ -1516,6 +1521,7 @@ def render_role_control_sudoers(
     (SYRD-51).
     """
     publish_helper = f"/usr/local/lib/switchyard/{project}/switchyard-publish-ref"
+    integrate_helper = f"/usr/local/lib/switchyard/{project}/switchyard-integrate-main"
     # SYRD-93: publication runs as root, not as the owner, because the push
     # credential must be one the project account cannot read -- under one shared
     # account (SYRD-69) a credential any role can read is a credential every
@@ -1524,9 +1530,12 @@ def render_role_control_sudoers(
     # invoking it is the live runtime the board registered for the control role,
     # so holding this grant is not the same as being allowed to publish.
     publication = [
-        f"# {project}: publication. The project account may run one root-owned",
-        "# publisher, which refuses any caller but the control role's registered process.",
+        f"# {project}: publication. The project account may run two root-owned",
+        "# programs, each of which refuses any caller but the control role's registered",
+        "# process: one publishes an implementer's ref and refuses integration branches,",
+        "# the other fast-forwards the integration branch and moves nothing else.",
         f"{owner_user} ALL=(root) NOPASSWD: {publish_helper}",
+        f"{owner_user} ALL=(root) NOPASSWD: {integrate_helper}",
     ]
     if not role_accounts:
         return "\n".join(publication) + "\n"
@@ -1548,6 +1557,7 @@ def render_role_control_sudoers(
     # rather than the account (SYRD-93 replaced the per-role sudo hop).
     for _role, account in role_accounts:
         lines.append(f"{account} ALL=(root) NOPASSWD: {publish_helper}")
+        lines.append(f"{account} ALL=(root) NOPASSWD: {integrate_helper}")
     if director_account:
         director_targets = ",".join(
             account for _role, account in role_accounts if account != director_account

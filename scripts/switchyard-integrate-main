@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Fast-forward the project's integration branch, for the registered controller.
+
+The credential cutover this project made (SYRD-93) left the shared account's key
+read-only, which is the point: no role can push. It also left the control role
+unable to integrate anything, because the only privileged program on the host
+publishes an implementer's ref from a board request and refuses `main` outright.
+Reviewed work could be published and never merged.
+
+This is the other half, and it is deliberately a different program with a
+different rule. It moves one ref -- the integration branch named in root-owned
+data -- and it moves it only forward:
+
+* WHO. The same kernel-observed pane identity the publisher requires: the live
+  runtime the board registered for the role holding control authority, derived
+  from capabilities and never from a name. A sibling role process under the same
+  uid resolves to its own pane and is refused.
+* FROM WHERE. The caller states the remote tip it prepared against. That exact
+  OID must still be the tip when this runs, and it is sent to the remote as a
+  lease, so a race between the check and the push is refused by the server
+  rather than won by whoever arrives last.
+* TO WHAT. A commit the caller hands over in a bundle it made as itself, which
+  must be a descendant of that tip. Nothing else can be pushed: not a rewrite,
+  not an unrelated history, not another ref, not another remote.
+* WITH WHAT. The root-owned credential, which the project account cannot read.
+
+Afterwards the ref is read back from the remote and the tenant's trusted commit
+cache is refreshed from the root-owned mirror, as the project account, so the
+board can verify commits against an integration branch that actually moved.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import stat
+import sys
+import time
+from pathlib import Path
+
+# Staged flat beside this program, in a directory root owns.
+sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
+
+from switchyard_publication_authority import (  # noqa: E402
+    COMMIT,
+    PROTECTED_REFS,
+    PUBLIC_REF_ATTEMPTS,
+    REF_SEGMENT,
+    RETRY_DELAY_SECONDS,
+    board_unit,
+    fail,
+    git,
+    load_project,
+    publish_grant,
+    remote_ref_commit,
+    remote_url_for,
+    require_control_caller,
+    require_owner_bundle,
+    run_as,
+    ssh_command_for,
+    staging_repository,
+    speaking_as,
+    validate_project,
+)
+
+speaking_as("switchyard-integrate-main")
+
+#: Where the bundle's refs land in the root-owned mirror. Their own namespace,
+#: so a bundle cannot overwrite the mirror's idea of the integration branch
+#: before the checks that decide whether it may.
+CANDIDATE_NAMESPACE = "refs/switchyard-integration-candidate"
+
+
+def integration_ref(grant: dict) -> str:
+    """The one ref this program will move, from root-owned data.
+
+    Not an argument. A caller that could name the ref could name somebody
+    else's, and this program exists precisely because nothing else on the host
+    is allowed to write this one.
+    """
+    name = str(grant.get("integration_ref") or "main").strip()
+    segments = name.split("/")
+    if not name or any(
+        not REF_SEGMENT.fullmatch(segment) or segment.endswith(".lock") for segment in segments
+    ):
+        fail(f"publish grant names an invalid integration ref: {name!r}")
+    # The inverse of the publisher's rule, and the reason these are two
+    # programs: that one may move anything EXCEPT an integration branch, and
+    # this one may move nothing else.
+    if name.casefold() not in PROTECTED_REFS:
+        fail(
+            f"{name} is not an integration branch; this program moves only the branch the "
+            "project integrates into, and role refs are published by switchyard-publish-ref"
+        )
+    return name
+
+
+def bundle_contains(staging: Path, commit: str) -> bool:
+    resolved = git(["-C", str(staging), "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"])
+    return resolved.returncode == 0 and resolved.stdout.strip() == commit
+
+
+def refresh_integration_cache(
+    cache: Path,
+    staging: Path,
+    ref: str,
+    commit: str,
+    *,
+    owner_uid: int,
+    owner_gid: int,
+) -> str | None:
+    """Put the integrated commit in the cache the board verifies against.
+
+    Both names the tenant's own tooling reads: the branch itself and the
+    remote-tracking copy. From the root-owned mirror rather than the remote, as
+    the project account, so no credential is needed and the objects belong to
+    the account that owns the cache.
+    """
+    fetched = run_as(
+        owner_uid,
+        owner_gid,
+        [
+            "git",
+            "--git-dir",
+            str(cache),
+            "fetch",
+            str(staging),
+            f"+refs/heads/{ref}:refs/heads/{ref}",
+            f"+refs/heads/{ref}:refs/remotes/origin/{ref}",
+        ],
+    )
+    if fetched.returncode != 0:
+        return (fetched.stderr or fetched.stdout or "git fetch failed").strip()
+    for name in (f"refs/heads/{ref}", f"refs/remotes/origin/{ref}"):
+        resolved = run_as(
+            owner_uid, owner_gid, ["git", "--git-dir", str(cache), "rev-parse", f"{name}^{{commit}}"]
+        )
+        if resolved.returncode != 0 or resolved.stdout.strip() != commit:
+            return f"the trusted cache resolved {name} to {resolved.stdout.strip() or 'nothing'}, not {commit}"
+    return None
+
+
+def not_integrated(ref: str, commit: str, problem: str) -> int:
+    sys.stderr.write(
+        f"switchyard-integrate-main: {ref} was moved to {commit}, but {problem}.\n"
+        "switchyard-integrate-main: the integration landed on the remote and the trusted cache "
+        "does NOT reflect it, so the board would refuse commits that depend on it. Re-run this "
+        "once the cause is resolved; integrating the same commit again is safe.\n"
+    )
+    return 1
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="switchyard-integrate-main")
+    parser.add_argument("--project", required=True)
+    parser.add_argument(
+        "--expected",
+        required=True,
+        help="the integration branch tip this commit was prepared against, exactly",
+    )
+    parser.add_argument("--commit", required=True, help="the prepared commit to integrate")
+    parser.add_argument(
+        "--bundle",
+        required=True,
+        help="a git bundle, made by the caller, carrying the prepared commit",
+    )
+    args = parser.parse_args(argv[1:])
+
+    project = validate_project(args.project)
+    expected = str(args.expected).strip().lower()
+    commit = str(args.commit).strip().lower()
+    for label, value in (("--expected", expected), ("--commit", commit)):
+        if not COMMIT.fullmatch(value):
+            fail(f"{label} must be a full 40-character commit, not {value!r}")
+
+    unit = board_unit(project)
+    control_role = require_control_caller(unit["board_url"])
+
+    config = load_project(project)
+    grant = publish_grant(project)
+    ref = integration_ref(grant)
+    owner_uid, owner_gid = int(config["owner_uid"]), int(config["owner_gid"])
+    bundle = Path(str(args.bundle)).expanduser()
+    require_owner_bundle(bundle, owner_uid)
+
+    verified = git(["bundle", "verify", str(bundle)])
+    if verified.returncode != 0:
+        sys.stderr.write(verified.stderr)
+        fail("bundle did not verify")
+
+    remote_url = remote_url_for(grant)
+    ssh_command = ssh_command_for(grant)
+    staging = staging_repository(project)
+    fetched = git(
+        ["-C", str(staging), "fetch", str(bundle), f"+refs/heads/*:{CANDIDATE_NAMESPACE}/*"]
+    )
+    if fetched.returncode != 0:
+        sys.stderr.write(fetched.stderr)
+        fail(f"bundle {bundle} carries no branches to integrate")
+    if not bundle_contains(staging, commit):
+        fail(f"bundle {bundle} does not contain {commit}")
+
+    # The tip the caller prepared against has to still be the tip. Read first,
+    # so a stale lease is refused before anything is sent.
+    current = remote_ref_commit(remote_url, ref, ssh_command)
+    if current is None:
+        fail(f"cannot read {ref} from the configured remote")
+    if current != expected:
+        fail(
+            f"{ref} has moved: it is {current or 'absent'}, not the {expected} this commit was "
+            "prepared against. Re-prepare against the current tip and run this again"
+        )
+    if commit == expected:
+        print(json.dumps({
+            "integrated": False, "reason": "already at this commit", "project": project,
+            "ref": ref, "commit": commit, "control_role": control_role,
+        }, sort_keys=True))
+        return 0
+
+    # Forward only. The remote would refuse a non-fast-forward anyway; refusing
+    # here means the refusal names what was wrong instead of surfacing as a
+    # rejected push, and means a forced update is never attempted.
+    pulled = git(
+        ["-C", str(staging), "fetch", remote_url, f"+refs/heads/{ref}:{CANDIDATE_NAMESPACE}/remote"],
+        ssh_command=ssh_command,
+    )
+    if pulled.returncode != 0:
+        sys.stderr.write(pulled.stderr)
+        fail(f"cannot fetch {ref} from the configured remote")
+    ancestry = git(["-C", str(staging), "merge-base", "--is-ancestor", expected, commit])
+    if ancestry.returncode != 0:
+        fail(
+            f"{commit} is not a descendant of {expected}; this integrates by fast-forward only, "
+            "so rebase or merge the current tip into the candidate and try again"
+        )
+
+    # The lease goes to the server too: between the read above and this push,
+    # another integration could land, and only the remote can settle that.
+    pushed = git(
+        [
+            "-C",
+            str(staging),
+            "push",
+            f"--force-with-lease=refs/heads/{ref}:{expected}",
+            remote_url,
+            f"{commit}:refs/heads/{ref}",
+        ],
+        ssh_command=ssh_command,
+    )
+    sys.stdout.write(pushed.stdout)
+    sys.stderr.write(pushed.stderr)
+    if pushed.returncode != 0:
+        fail(
+            f"the remote refused the update of {ref}; it was not moved. If it says stale info, "
+            f"{ref} moved after this run read it, and the candidate must be prepared again"
+        )
+
+    landed = None
+    for attempt in range(PUBLIC_REF_ATTEMPTS):
+        if attempt:
+            time.sleep(RETRY_DELAY_SECONDS)
+        landed = remote_ref_commit(remote_url, ref, ssh_command)
+        if landed == commit:
+            break
+    if landed != commit:
+        return not_integrated(ref, commit, f"the remote reads {landed or 'nothing'} rather than {commit}")
+
+    # The mirror records what the remote now says, and the cache follows it.
+    git(["-C", str(staging), "update-ref", f"refs/heads/{ref}", commit])
+    cache = Path(unit["commit_cache"])
+    try:
+        info = cache.lstat()
+    except OSError as exc:
+        return not_integrated(ref, commit, f"cannot inspect the trusted cache {cache}: {exc.strerror}")
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return not_integrated(ref, commit, f"the trusted cache {cache} is not a real directory")
+    if info.st_uid != owner_uid or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return not_integrated(ref, commit, f"the trusted cache {cache} is not the project account's own")
+    problem = refresh_integration_cache(
+        cache, staging, ref, commit, owner_uid=owner_uid, owner_gid=owner_gid
+    )
+    if problem is not None:
+        return not_integrated(ref, commit, problem)
+
+    print(json.dumps({
+        "integrated": True,
+        "project": project,
+        "ref": ref,
+        "from": expected,
+        "commit": commit,
+        "control_role": control_role,
+        "cache": str(cache),
+    }, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

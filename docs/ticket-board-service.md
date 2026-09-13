@@ -761,6 +761,31 @@ Both halves are idempotent -- re-running a publication pushes the same ref to th
 same commit, and recording the same outcome twice is not an error -- so an
 interrupted handoff is retried rather than unpicked by hand.
 
+### Integrating, after the cutover
+
+Publication moves a role's own ref and refuses `main`, `master`, `trunk` and
+`release` outright. Once the shared account's credential is read-only, that
+leaves the control role able to publish reviewed work and unable to merge it, so
+there is a second root-owned program with the opposite rule:
+`switchyard-integrate-main` moves the integration branch named in the root-owned
+grant and nothing else.
+
+It is the same WHO -- the live pane process the board registered for the role
+holding control authority, derived from capabilities, with no fallback to a name
+-- and the same credential. What it adds is a lease and a direction. The caller
+states the exact tip its candidate was prepared against; that OID must still be
+the tip when the program reads it, the prepared commit must be a descendant of
+it, and the same OID is sent to the remote as `--force-with-lease`, so an
+integration that lands in between is refused by the server rather than
+overwritten. Afterwards the branch is read back and the tenant's trusted commit
+cache is updated, both as the branch and as its remote-tracking copy, so the
+board can verify commits that depend on the merge.
+
+`switchyard-integrate` is the unprivileged half a person runs: it resolves the
+prepared commit, reads the current tip, checks the fast-forward locally for a
+quick answer, bundles the commit, and hands all of it to the privileged program.
+Neither it nor the caller ever holds a push credential.
+
 One limit worth stating: processes sharing a uid can `ptrace` each other unless
 the host restricts it, so the process boundary above is as strong as
 `kernel.yama.ptrace_scope` on that host. It is the same limit the board's own

@@ -705,9 +705,27 @@ pushes the commit the role already made in its own worktree to
 `roles/<role>/<branch leaf>` on the project remote, and prints the exact commit
 to submit. Submission records that commit: the write client checks it is on
 `origin` before it asks, and the board resolves it in its own copy of the
-repository -- refreshing that copy from the project's public URL if it has never
-seen the commit -- so a recorded `commit_hash` is a public commit. Audit fetches
-it into its own separate worktree by that id.
+repository, so a recorded `commit_hash` is a public commit. Audit fetches it
+into its own separate worktree by that id.
+
+**The board's copy is brought up to date by the push, not by the submission.**
+Publishing already needs the network; submitting should not need it again, and
+it must never need somebody to fetch something by hand -- which is what happened
+on SYRD-122, where the public ref was right and the board's copy did not have the
+commit (SYRD-125). So once the remote has confirmed the exact ref, the push
+wrapper asks the board which repositories it verifies against (`/api/client-config`
+reports them, because nothing tells a role pane otherwise) and fetches that one
+ref into each of them from that repository's own remote -- the project's public
+URL, so no credential of the role's is involved and nobody can point the refresh
+elsewhere. It then checks the commit really resolves there rather than trusting
+the fetch. Because the fetch is scoped to the ref and verified afterwards, it
+cannot put a commit in the board's copy that the public ref does not carry.
+
+A refresh that cannot run says so and exits non-zero, naming both halves: the
+ref IS published, and submitting may still be refused. Re-running is safe -- the
+push is a no-op and the refresh is retried. The board keeps its own
+credential-free fetch on a miss as the backstop, so an older board, or a run
+from outside a role pane, still converges.
 
 **A push that fails is the implementer's to retry.** Nothing is recorded, the
 remote is unchanged, and re-running the command after fixing the cause is the

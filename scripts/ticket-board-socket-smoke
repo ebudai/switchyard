@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Prove a freshly deployed board is serving and still refuses a bare claim.
+
+Split out of ticket-board-service.sh, where it lived in a heredoc. That is not
+an aesthetic point: the check asserted it was running outside every pane and
+never established it, the assumption was wrong under Polkit, and a bug in a
+heredoc is a bug nothing can run in isolation. Its decisions are functions and
+it has its own regression suite now (SYRD-136).
+
+Usage: ticket-board-socket-smoke <socket> <timeout-seconds> <release-root>
+"""
+
+import json
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+ORPHAN_WAIT_SECONDS = 2.0
+
+CLAIM_BODY = json.dumps({"role": "director"}).encode("utf-8")
+CLAIM_REQUEST = (
+    b"POST /api/register-caller HTTP/1.1\r\n"
+    b"Host: localhost\r\n"
+    b"Content-Type: application/json\r\n"
+    + ("Content-Length: %d\r\n" % len(CLAIM_BODY)).encode("ascii")
+    + b"Connection: close\r\n\r\n"
+    + CLAIM_BODY
+)
+READ_REQUEST = (
+    b"GET /api/board HTTP/1.1\r\n"
+    b"Host: localhost\r\n"
+    b"Connection: close\r\n\r\n"
+)
+
+
+def send(socket_path, request):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1.0)
+        sock.connect(socket_path)
+        sock.sendall(request)
+        return sock.recv(4096)
+
+
+def status_of(response):
+    return response.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+
+
+def wait_until_serving(socket_path, deadline):
+    """Reachability. A read needs no caller role, so this proves the socket is
+    serving without depending on the authorization path."""
+    last_error = "not attempted"
+    while time.monotonic() < deadline:
+        try:
+            line = status_of(send(socket_path, READ_REQUEST))
+            if " 200 " in line:
+                return None
+            last_error = line
+        except OSError as exc:
+            last_error = str(exc)
+        time.sleep(0.25)
+    return last_error
+
+
+def unregistered_problem(wait_seconds=0.0):
+    """Why this process is not a fair stand-in for a stranger, or None.
+
+    A decision rather than an inline branch, so it can be asked from a test that
+    is itself inside a pane -- which is the condition that has to be detected
+    and the one the old check silently assumed away (SYRD-136).
+    """
+    try:
+        from ticket_board.peer_identity import session_identity
+    except Exception as exc:                        # noqa: BLE001
+        return "resolver-unavailable %s" % exc
+    deadline = time.monotonic() + wait_seconds
+    owned = session_identity(os.getpid())
+    while owned is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+        owned = session_identity(os.getpid())
+    return None if owned is None else "still-owned"
+
+
+def claim_from_orphan(socket_path):
+    """Make the claim from a process with no pane above it, or say why not.
+
+    A deployment authorized through Polkit from a registered role pane is a
+    descendant of that pane, so the board resolves the probe as that role and
+    answers 200 -- correctly, about a process that is not in fact unregistered.
+    The old check read that as an authority failure and rolled a good release
+    back (SYRD-136, SYRD-134 journal attempt 0008).
+    """
+    read_fd, write_fd = os.pipe()
+    first = os.fork()
+    if first == 0:                                  # pragma: no cover - child
+        try:
+            os.close(read_fd)
+            os.setsid()
+            if os.fork() != 0:
+                os._exit(0)                         # orphan the grandchild
+            # Not "wait for ppid 1": systemd makes itself a child subreaper, so
+            # an orphan here is adopted by the user manager and that wait never
+            # ends. What matters is that no pane resolves above this process,
+            # which is the question the board itself asks.
+            problem = unregistered_problem(ORPHAN_WAIT_SECONDS)
+            if problem is not None:
+                os.write(write_fd, problem.encode("utf-8"))
+                os._exit(0)
+            try:
+                os.write(write_fd, status_of(send(socket_path, CLAIM_REQUEST)).encode("utf-8"))
+            except OSError as exc:
+                os.write(write_fd, ("claim-failed %s" % exc).encode("utf-8"))
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    os.waitpid(first, 0)
+    with os.fdopen(read_fd, "rb") as reader:
+        return reader.read().decode("utf-8", errors="replace").strip()
+
+
+#: The statuses that are an authorization refusal and nothing else. A refusal is
+#: the only answer that proves the boundary held; 404 says the endpoint is not
+#: there to refuse anything and 5xx says the board failed to decide, and neither
+#: is evidence about authority. Treating "not 200" as success made a broken
+#: board look like a proven one (SYRD-136 review).
+REFUSAL_STATUSES = frozenset({401, 403})
+
+
+def status_code(answer):
+    """The numeric status in a status line, or None if it does not carry one."""
+    parts = answer.split()
+    if len(parts) < 2 or not parts[0].upper().startswith("HTTP/"):
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def verdict(answer):
+    """(exit status, stream, message) for whatever the orphan reported back."""
+    if answer == "still-owned":
+        return 1, sys.stderr, (
+            "ticket-board socket process-binding check FAILED: this deployment could not reach "
+            "a process outside every pane, so the unregistered-claim check was never actually made"
+        )
+    if not answer or answer.startswith(("claim-failed", "resolver-unavailable")):
+        return 1, sys.stderr, (
+            "ticket-board socket role-binding check failed: %s" % (answer or "no answer")
+        )
+    code = status_code(answer)
+    if code is None:
+        return 1, sys.stderr, (
+            "ticket-board socket role-binding check failed: the board answered something that is "
+            "not an HTTP status line (%s)" % answer
+        )
+    if code == 200:
+        return 1, sys.stderr, (
+            "ticket-board socket process-binding check FAILED: an unregistered process was "
+            "granted director (%s)" % answer
+        )
+    if code not in REFUSAL_STATUSES:
+        return 1, sys.stderr, (
+            "ticket-board socket process-binding check FAILED: the claim was answered %s, which "
+            "is neither a grant nor an authorization refusal, so nothing about the boundary was "
+            "established" % answer
+        )
+    return 0, sys.stdout, (
+        "ticket-board process binding refused an unregistered process as expected (%s); the claim "
+        "was made from a process isolated out of every pane ancestry" % answer
+    )
+
+
+def main(argv):
+    socket_path = argv[1]
+    deadline = time.monotonic() + float(argv[2])
+    sys.path.insert(0, str(Path(argv[3]) / "scripts"))
+    unreachable = wait_until_serving(socket_path, deadline)
+    if unreachable is not None:
+        print("ticket-board Unix socket verification failed for %s: %s" % (socket_path, unreachable),
+              file=sys.stderr)
+        return 1
+    status, stream, message = verdict(claim_from_orphan(socket_path))
+    print(message, file=stream)
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

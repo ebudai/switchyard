@@ -655,7 +655,17 @@ stop_listener_for_upgrade() {
     # exactly the ones that were not -- a failed migration would have left the
     # tenant with no notification delivery at all, which is the outage this
     # ticket exists to stop recreating. So the restart is a trap, not a line.
+    # EXIT alone is not every exit. A bash EXIT trap does not run when the
+    # shell is killed by an untrapped signal, so an operator pressing Ctrl-C
+    # through a Polkit prompt, or a systemd unit stopping mid-deploy, left the
+    # tenant with no notification delivery at all -- the outage this trap
+    # exists to prevent, reached by the one route it did not cover (SYRD-136).
+    # The signal handlers restore and then re-raise with the conventional
+    # status, so the caller still sees what killed it.
     trap restore_listener_after_incomplete_deploy EXIT
+    trap 'restore_listener_after_incomplete_deploy; trap - INT; kill -INT $$' INT
+    trap 'restore_listener_after_incomplete_deploy; trap - TERM; kill -TERM $$' TERM
+    trap 'restore_listener_after_incomplete_deploy; trap - HUP; kill -HUP $$' HUP
     log "stopped $LISTENER_SERVICE_NAME for the duration of the migration"
 }
 
@@ -678,6 +688,9 @@ start_listener_after_upgrade() {
     [[ "$LISTENER_WAS_STOPPED_FOR_DEPLOY" == "1" ]] || return 0
     systemctl_user start "$LISTENER_SERVICE_NAME" || die "could not restart $LISTENER_SERVICE_NAME after deploy"
     LISTENER_WAS_STOPPED_FOR_DEPLOY=0
+    # The flag above is what makes the handlers no-ops from here, so the traps
+    # themselves are left in place: clearing them would only matter if the flag
+    # could be set again, and nothing after this does that.
     log "restarted $LISTENER_SERVICE_NAME on the deployed release"
 }
 
@@ -819,79 +832,7 @@ verify_local_socket_available() {
         log "post-deploy socket verification failed: missing Unix socket $BOARD_UNIX_SOCKET"
         return 1
     fi
-    if ! "$PYTHON_BIN" - "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" "$BOARD_CURRENT_LINK" <<'SMOKEPY'
-import json
-import os
-import socket
-import sys
-import time
-from pathlib import Path
-
-socket_path = sys.argv[1]
-deadline = time.monotonic() + float(sys.argv[2])
-sys.path.insert(0, str(Path(sys.argv[3]) / "scripts"))
-
-
-def send(request):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(1.0)
-        sock.connect(socket_path)
-        sock.sendall(request)
-        return sock.recv(4096)
-
-
-def status_of(response):
-    return response.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
-
-
-# Reachability: a read needs no caller role, so this proves the socket is
-# serving without depending on the authorization path.
-read_request = (
-    b"GET /api/board HTTP/1.1\r\n"
-    b"Host: localhost\r\n"
-    b"Connection: close\r\n\r\n"
-)
-last_error = "not attempted"
-serving = False
-while time.monotonic() < deadline:
-    try:
-        line = status_of(send(read_request))
-        if " 200 " in line:
-            serving = True
-            break
-        last_error = line
-    except OSError as exc:
-        last_error = str(exc)
-    time.sleep(0.25)
-if not serving:
-    print("ticket-board Unix socket verification failed for %s: %s" % (socket_path, last_error), file=sys.stderr)
-    sys.exit(1)
-
-# The deploy process is outside every registered launcher pane. Its uid and a
-# claimed role must never be sufficient authority.
-body = json.dumps({"role": "director"}).encode("utf-8")
-claim = (
-    b"POST /api/register-caller HTTP/1.1\r\n"
-    b"Host: localhost\r\n"
-    b"Content-Type: application/json\r\n"
-    + ("Content-Length: %d\r\n" % len(body)).encode("ascii")
-    + b"Connection: close\r\n\r\n"
-    + body
-)
-try:
-    line = status_of(send(claim))
-except OSError as exc:
-    print("ticket-board socket role-binding check failed: %s" % exc, file=sys.stderr)
-    sys.exit(1)
-if " 200 " in line:
-    print(
-        "ticket-board socket process-binding check FAILED: an unregistered process was "
-        "granted director (%s)" % line,
-        file=sys.stderr,
-    )
-    sys.exit(1)
-print("ticket-board process binding refused an unregistered process as expected (%s)" % line)
-SMOKEPY
+    if ! "$PYTHON_BIN" "$BOARD_CURRENT_LINK/scripts/ticket-board-socket-smoke" "$BOARD_UNIX_SOCKET" "$SMOKE_TIMEOUT_SECONDS" "$BOARD_CURRENT_LINK"
     then
         return 1
     fi

@@ -558,8 +558,16 @@ def assert_deploy_probe_requires_process_bound_authority() -> None:
     import socketserver
     import subprocess
 
+    # The probe is its own program now rather than a heredoc scraped out of the
+    # deploy script. Read it from where the release ships it, and check the
+    # deploy script really runs that file, so this cannot drift into testing a
+    # copy nothing executes (SYRD-136).
+    probe_path = ROOT / "scripts" / "ticket-board-socket-smoke"
     service = (ROOT / "scripts" / "ticket-board-service.sh").read_text(encoding="utf-8")
-    probe = service.split("<<'SMOKEPY'\n", 1)[1].split("\nSMOKEPY", 1)[0]
+    assert "scripts/ticket-board-socket-smoke" in service, (
+        "the deploy script no longer runs the probe this case exercises"
+    )
+    probe = probe_path.read_text(encoding="utf-8")
 
     class PermissiveBoard(http.server.BaseHTTPRequestHandler):
         """A board that grants whatever role it is asked for."""

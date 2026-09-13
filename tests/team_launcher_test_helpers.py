@@ -953,6 +953,7 @@ class FirstRunAuthRunner:
         missing_cli_status_returncode: int = 127,
         invalid_models: dict[tuple[str, str], str] | None = None,
         empty_success_models: set[tuple[str, str]] | None = None,
+        tool_blind_models: set[tuple[str, str]] | None = None,
         model_catalogs: dict[str, list[str]] | None = None,
         unauthenticated_clis: set[str] | None = None,
     ) -> None:
@@ -964,6 +965,13 @@ class FirstRunAuthRunner:
         self.missing_cli_status_returncode = missing_cli_status_returncode
         self.invalid_models = dict(invalid_models or {})
         self.empty_success_models = set(empty_success_models or ())
+        #: Models that answer the prompt without ever reading the file it names.
+        self.tool_blind_models = set(tool_blind_models or ())
+        #: What each model probe was given to work in, and what it found there.
+        #: Recorded because the probe directory is removed when validation
+        #: returns, so this is the only place a case can look afterwards.
+        self.model_probe_cwds: list[str] = []
+        self.model_probe_tokens: list[str] = []
         self.unauthenticated_clis = set(unauthenticated_clis or ())
         self.model_catalogs = {
             "agy": ["gemini-3.7-flash-high", "gemini-3.7-pro"],
@@ -979,13 +987,38 @@ class FirstRunAuthRunner:
                 return token.split("=", 1)[1]
         return ""
 
-    def _model_probe(self, args: list[str], command: list[str], cli: str, model: str) -> subprocess.CompletedProcess[str]:
+    def _model_probe(
+        self,
+        args: list[str],
+        command: list[str],
+        cli: str,
+        model: str,
+        cwd: object = None,
+    ) -> subprocess.CompletedProcess[str]:
+        # Recorded before any outcome, so a case can name the directory the
+        # launcher chose even for a probe that never got as far as reading it.
+        self.model_probe_cwds.append(str(cwd or ""))
         if (cli, model) in self.empty_success_models:
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         reason = self.invalid_models.get((cli, model))
         if reason:
             return subprocess.CompletedProcess(args, 1, stdout="", stderr=reason)
-        return subprocess.CompletedProcess(args, 0, stdout="model-ok\n")
+        if (cli, model) in self.tool_blind_models:
+            # Talks, never acts: the shape the probe exists to catch.
+            self.model_probe_tokens.append("")
+            return subprocess.CompletedProcess(args, 0, stdout="model-ok\n")
+        # A working model reads the file the prompt names, which is why this
+        # reads it from the directory the launcher actually chose rather than
+        # echoing a token the test handed over.
+        token = ""
+        if cwd:
+            probe_file = Path(str(cwd)) / team_launcher.MODEL_PROBE_FILENAME
+            try:
+                token = probe_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                token = ""
+        self.model_probe_tokens.append(token)
+        return subprocess.CompletedProcess(args, 0, stdout=f"model-ok {token}\n".strip() + "\n")
 
     def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         self.call_kwargs.append(dict(kwargs))
@@ -1042,13 +1075,13 @@ class FirstRunAuthRunner:
                 return subprocess.CompletedProcess(args, 0, stdout="".join(f"{model} description\n" for model in catalog))
             return subprocess.CompletedProcess(args, 1, stderr="You are not logged into Antigravity.\n")
         if command and command[0] == "claude" and "-p" in command:
-            return self._model_probe(args, command, "claude", self._model_from_command(command))
+            return self._model_probe(args, command, "claude", self._model_from_command(command), kwargs.get("cwd"))
         if command[:2] == ["codex", "exec"]:
-            return self._model_probe(args, command, "codex", self._model_from_command(command))
+            return self._model_probe(args, command, "codex", self._model_from_command(command), kwargs.get("cwd"))
         if command and command[0] == "agy" and "-p" in command:
-            return self._model_probe(args, command, "agy", self._model_from_command(command))
+            return self._model_probe(args, command, "agy", self._model_from_command(command), kwargs.get("cwd"))
         if command and command[0] == "hermes" and "-z" in command:
-            return self._model_probe(args, command, "hermes", self._model_from_command(command, "-m"))
+            return self._model_probe(args, command, "hermes", self._model_from_command(command, "-m"), kwargs.get("cwd"))
         if command == ["hermes", "config", "check"]:
             if "hermes" in self.missing_clis:
                 return subprocess.CompletedProcess(

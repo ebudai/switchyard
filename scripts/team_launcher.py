@@ -11,6 +11,7 @@ import math
 import os
 import pwd
 import re
+import secrets
 import shutil
 import signal
 import shlex
@@ -9829,7 +9830,25 @@ AGENT_CLI_INSTALL_COMMANDS: dict[str, str] = {
     "hermes": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
 }
 FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
-MODEL_VALIDATION_PROMPT = "Reply with exactly: model-ok"
+#: The file the probe leaves for the model to read, named so that a stale one
+#: found in a temp directory says what made it.
+MODEL_PROBE_FILENAME = "switchyard-model-probe.txt"
+#: Every Switchyard role is a tool-calling agent, so the question the first-run
+#: probe has to answer is whether the configured model can call a tool -- not
+#: whether it can produce prose. The reply must carry a token that exists only
+#: inside a file in the working directory, so a model that answers from the
+#: prompt alone cannot produce it and a tool call that arrives as prose does not
+#: count. `model-ok` stays: an exit 0 carrying no usable content is still a
+#: failed completion (SYRD-111).
+MODEL_VALIDATION_PROMPT = (
+    f"Read the file {MODEL_PROBE_FILENAME} in the current directory and reply with exactly: "
+    "model-ok <the token on its first line>"
+)
+#: What a probe says when the model answered but never read the file.
+MODEL_PROBE_NO_TOOL_CALL_REASON = (
+    "model answered but completed no tool call: the reply did not carry the token from "
+    f"{MODEL_PROBE_FILENAME}"
+)
 
 
 def _missing_cli_install_clause(cli: str, owner_user: str = "") -> str:
@@ -10801,13 +10820,15 @@ def _run_owner_cli_probe(
     owner_home: Path,
     command: Sequence[str],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     args = _owner_command_env_args(owner_user, owner_home, command)
     try:
         return runner(
             args,
-            cwd=str(owner_home),
+            cwd=str(cwd if cwd is not None else owner_home),
             env=_pane_identity_scrubbed_env(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -10897,17 +10918,47 @@ def _cli_auth_status(
     return "unauthenticated"
 
 
-def _model_validation_command(role: RoleConfig) -> list[str] | None:
+class _ModelProbeWorkspace:
+    """A throwaway directory holding one token the model can only read.
+
+    World-readable on purpose: the probe runs as the owner user through sudo and
+    this process may be somebody else, and there is nothing to protect -- the
+    token's whole value is being unguessable for the length of one probe, which
+    is what makes echoing it proof that a tool ran rather than proof that a model
+    can talk.
+    """
+
+    def __init__(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="switchyard-model-probe."))
+        self.token = secrets.token_hex(8)
+        os.chmod(self.root, 0o755)
+        probe_file = self.root / MODEL_PROBE_FILENAME
+        probe_file.write_text(f"{self.token}\n", encoding="utf-8")
+        os.chmod(probe_file, 0o644)
+
+    def remove(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def _model_validation_command(role: RoleConfig, workspace: Path | None = None) -> list[str] | None:
     cli = _role_cli_name(role)
     if not cli or not role.model:
         return None
     model_args = [role.model_arg, role.model] if role.model_arg else []
+    # The flags a live pane uses for this CLI. A probe has nobody to approve a
+    # tool call for it, so without these the reply is a permission prompt rather
+    # than an answer -- and the question under test would go unasked (SYRD-111).
+    tool_args = list(YOLO_ARGS_BY_CLI.get(cli, []))
     if cli == "codex":
-        return [*role.cli, "exec", "--skip-git-repo-check", *model_args, MODEL_VALIDATION_PROMPT]
+        workspace_args = ["-C", str(workspace)] if workspace is not None else []
+        return [
+            *role.cli, "exec", "--skip-git-repo-check", *model_args, *tool_args,
+            *workspace_args, MODEL_VALIDATION_PROMPT,
+        ]
     if cli in {"agy", "claude"}:
-        return [*role.cli, *model_args, "-p", MODEL_VALIDATION_PROMPT]
+        return [*role.cli, *model_args, *tool_args, "-p", MODEL_VALIDATION_PROMPT]
     if cli == "hermes":
-        return [*role.cli, *model_args, "-z", MODEL_VALIDATION_PROMPT]
+        return [*role.cli, *model_args, *tool_args, "-z", MODEL_VALIDATION_PROMPT]
     return None
 
 
@@ -10921,6 +10972,19 @@ def _parse_agy_model_ids(stdout: str) -> list[str]:
         if model_id:
             ids.append(model_id)
     return list(dict.fromkeys(ids))
+
+
+def _tool_call_failure_suggestion(cli: str, model: str) -> str:
+    """What to change when the model talks but cannot act.
+
+    Named separately from the model-list suggestion because the remedy is
+    different in kind: no catalogue entry tells you whether a model can call a
+    tool, so the thing to change is the model itself, not the spelling of it.
+    """
+    return (
+        f"configure a {cli} model that supports tool calling for this role; {model} answered "
+        "the prompt but never read the file it was asked to read"
+    )
 
 
 def _model_failure_suggestion(
@@ -10952,6 +11016,18 @@ def _model_validation_passed(proc: subprocess.CompletedProcess[Any]) -> bool:
     return proc.returncode == 0 and "model-ok" in str(getattr(proc, "stdout", "") or "")
 
 
+def _model_probe_called_a_tool(proc: subprocess.CompletedProcess[Any], token: str) -> bool:
+    """Whether the reply carries something only a tool call could have fetched.
+
+    Read from stdout for the same reason the sentinel is: the prompt names the
+    file, so a CLI that echoes the prompt to stderr must not be able to satisfy
+    this either. The token itself is never in the prompt.
+    """
+    if not token:
+        return True
+    return token in str(getattr(proc, "stdout", "") or "")
+
+
 def validate_role_models(
     roles: Sequence[RoleConfig],
     *,
@@ -10960,36 +11036,52 @@ def validate_role_models(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> list[ModelValidationFailure]:
     failures: list[ModelValidationFailure] = []
-    for role in roles:
-        cli = _role_cli_name(role)
-        command = _model_validation_command(role)
-        if command is None:
-            continue
-        proc = _run_owner_cli_probe(
-            owner_user=owner_user,
-            owner_home=owner_home,
-            command=command,
-            runner=runner,
-        )
-        if _model_validation_passed(proc):
-            continue
-        reason = _proc_failure_reason(proc, f"model probe failed with exit {proc.returncode}")
-        if proc.returncode == 0:
-            reason = "model probe did not confirm model-ok"
-        failures.append(
-            ModelValidationFailure(
-                role=role.role,
-                cli=cli,
-                model=role.model,
-                reason=reason,
-                suggestion=_model_failure_suggestion(
+    workspace = _ModelProbeWorkspace()
+    try:
+        for role in roles:
+            cli = _role_cli_name(role)
+            command = _model_validation_command(role, workspace.root)
+            if command is None:
+                continue
+            proc = _run_owner_cli_probe(
+                owner_user=owner_user,
+                owner_home=owner_home,
+                command=command,
+                runner=runner,
+                cwd=workspace.root,
+            )
+            tool_call_missing = False
+            if _model_validation_passed(proc):
+                if _model_probe_called_a_tool(proc, workspace.token):
+                    continue
+                tool_call_missing = True
+            if tool_call_missing:
+                # Distinct from an unauthenticated CLI, which fails non-zero
+                # with the vendor's own message, and from an unknown model,
+                # which fails the same way with a name in it. This one answered.
+                reason = MODEL_PROBE_NO_TOOL_CALL_REASON
+                suggestion = _tool_call_failure_suggestion(cli, role.model)
+            else:
+                reason = _proc_failure_reason(proc, f"model probe failed with exit {proc.returncode}")
+                if proc.returncode == 0:
+                    reason = "model probe did not confirm model-ok"
+                suggestion = _model_failure_suggestion(
                     cli,
                     owner_user=owner_user,
                     owner_home=owner_home,
                     runner=runner,
-                ),
+                )
+            failures.append(
+                ModelValidationFailure(
+                    role=role.role,
+                    cli=cli,
+                    model=role.model,
+                    reason=reason,
+                    suggestion=suggestion,
+                )
             )
-        )
+    finally:
+        workspace.remove()
     return failures
 
 

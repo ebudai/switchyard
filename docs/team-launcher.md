@@ -1103,6 +1103,17 @@ Each role entry contains:
   `~/.local/bin`, then the stable system path.
 - `model`: optional model selector. The launcher passes it with the role's
   `model_arg` at process launch so the pane starts on its configured model.
+  First run also probes it, and the probe asks the question that matters for an
+  agent rather than whether the model can talk: it leaves a file holding a token
+  that exists nowhere else, asks the model to read that file and reply with the
+  token, and runs the CLI in that directory with the same permission flags a
+  live pane uses, because a probe has nobody to approve a tool call for it. A
+  reply carrying the token cannot have been written without a tool call, so a
+  model that emits tool calls as prose -- or not at all -- fails preflight with
+  a message naming the role and the model, kept distinct from an
+  unauthenticated CLI and from an unknown model name. The `model-ok` sentinel
+  stays: an exit 0 carrying no usable content is still a failed completion
+  (SYRD-111).
 - `model_arg`: optional model flag, defaulting to `--model`.
 - `effort`: optional effort selector. Claude receives it as `--effort <value>`;
   Codex receives it as `-c reasoning_effort=<value>`; Agy omits a separate

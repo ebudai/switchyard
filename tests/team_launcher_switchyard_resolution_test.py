@@ -297,6 +297,10 @@ def test_switchyard_validate_models_command_runs_model_validation_on_demand() ->
             "--skip-git-repo-check",
             "--model",
             "openai/not-a-model",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "-C",
+            runner.model_probe_cwds[0],
             team_launcher.MODEL_VALIDATION_PROMPT,
         ],
     ]

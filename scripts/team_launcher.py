@@ -253,6 +253,28 @@ def viewer_session_for_project(project: str) -> str:
 
 def project_window_title(config: ProjectConfig) -> str:
     return config.project_name.strip() or config.project
+
+
+def role_display_name(role: RoleConfig) -> str:
+    """One role's name as a person reads it, from the slug the project uses."""
+    slug = str(role.role or "").strip()
+    return slug[:1].upper() + slug[1:] if slug else slug
+
+
+def pane_split_title(config: ProjectConfig, role: RoleConfig) -> str:
+    """What one split in the presentation calls itself.
+
+    Both halves of the title, because Konsole gives a window no title of its
+    own: the title bar shows the active split's title, so the project name
+    reaches it only by being in there. A split that named only its role would
+    leave the window reading `App -- Konsole` and the project unnamed
+    (SYRD-122).
+    """
+    project = project_window_title(config)
+    name = role_display_name(role)
+    if not name:
+        return project
+    return f"{project} -- {name}"
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_MODEL_ARG_BY_CLI = {
     "hermes": "-m",
@@ -5077,15 +5099,19 @@ def pane_window_program(script_path: Path) -> Path:
     return Path(script_path).expanduser().resolve(strict=False).with_name(PANE_WINDOW_NAME)
 
 
-def inert_pane_command(program: Path, args: Sequence[str]) -> str:
+def inert_pane_command(program: Path, args: Sequence[str], *, title: str = "") -> str:
     """Wrap a pane's client so its terminal never falls back to a shell.
 
     Konsole runs the tab's program directly; when that program is the attach
     command, a detach returns the tab to whatever shell opened the window. That
     shell belongs to whoever invoked switchyard, so on a privileged invocation
     the pane becomes a root prompt. The wrapper ends inert instead (SYRD-43).
+
+    The wrapper is also where a split's title comes from, because Konsole's
+    layout file has no key for one (SYRD-122).
     """
-    return _quote_command([str(program), *args])
+    title_args = ["--title", title] if title.strip() else []
+    return _quote_command([str(program), *title_args, *args])
 
 
 def failed_role_command(role: RoleConfig, reason: str) -> str:
@@ -5141,9 +5167,17 @@ def materialize_layout(
                     skip_launcher_check=True,
                     run_as_user=role_run_as_user(config, role),
                 ),
+                title=pane_split_title(config, role),
             )
             leaf["WorkingDirectory"] = role.workdir
-        leaf["Title"] = project_window_title(config)
+        # Konsole 26.08.1 does not read this key -- its layout parser knows
+        # Widgets, Orientation, Command, WorkingDirectory, Lines, Columns and
+        # SessionRestoreId, and nothing else -- so the title that reaches the
+        # header is the one the pane program sets for itself. This is kept
+        # written and correct for anything that does read it, and so that a
+        # reader comparing the file with the window is not told two different
+        # things (SYRD-122).
+        leaf["Title"] = pane_split_title(config, role)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return output_path

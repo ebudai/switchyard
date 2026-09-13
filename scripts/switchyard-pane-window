@@ -11,11 +11,32 @@
 # There is deliberately no shell here after the client. The pane says why it
 # ended and then waits, inert, until the tab is closed or the project is
 # relaunched. Typed and pasted input reach nothing.
+#
+# The pane also names itself. Konsole's layout file has no key for a split's
+# title -- its parser reads Widgets, Orientation, Command, WorkingDirectory,
+# Lines, Columns and SessionRestoreId, and nothing else -- so a title written
+# there is silently dropped and every header falls back to the profile's
+# default `%d : %n`, which is the generic cwd-and-program text the presentation
+# was showing. The escape below is how a Konsole split is named from inside it
+# (SYRD-122).
 set -u
+
+title=""
+if [ "$#" -ge 2 ] && [ "$1" = "--title" ]; then
+    title="$2"
+    shift 2
+fi
 
 if [ "$#" -eq 0 ]; then
     printf 'switchyard: switchyard-pane-window needs the pane command to run\n' >&2
     exit 2
+fi
+
+if [ -n "$title" ]; then
+    # Konsole reads this as the tab title format for this split, and a format
+    # with no placeholders in it is literal text: it does not follow the
+    # working directory or the program, so it stays put while the CLI works.
+    printf '\033]30;%s\007' "$title"
 fi
 
 "$@"

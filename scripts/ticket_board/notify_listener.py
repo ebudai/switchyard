@@ -2100,6 +2100,11 @@ WHERE id = %s
 
     def _current_target_role(self, kind: str, state: str, assignee: str) -> str | None:
         cfg = getattr(self, "workflow", None)
+        if cfg and kind == "triage":
+            # Untriaged work is addressed by stage ownership, which is the one
+            # question the ordinary resolver answers with "nobody" (SYRD-120).
+            from .workflow_config import unassigned_stage_owner
+            return unassigned_stage_owner(cfg, state, assignee)
         if cfg and kind != "escalation":
             from .workflow_config import notification_role
             return notification_role(cfg, state, assignee)
@@ -2397,7 +2402,7 @@ SELECT EXISTS (
             and current_assignee == "director"
             and target_role == "director"
         )
-        if kind in {"transition", "idle_reminder", "nudge"} and (
+        if kind in {"transition", "idle_reminder", "nudge", "triage"} and (
             manually_controlled or parked or has_unresolved_blockers
         ) and not required_final_review_handoff:
             # Scheduling flags hold owner work and optional reminders. They do

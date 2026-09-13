@@ -694,6 +694,33 @@ def available_transitions(
     ]
 
 
+def unassigned_stage_owner(cfg: dict[str, Any], state: str, assignee: str) -> str | None:
+    """Who untriaged work in this stage belongs to, or None (SYRD-120).
+
+    The mirror of ticket_board.unassigned_stage_owner, and it has to answer the
+    same way: the board enqueues the handoff, the listener decides at delivery
+    whether it is still the board's meaning, and the read client decides whose
+    queue the ticket appears in. Two of the three disagreeing is how a notice
+    gets delivered to somebody the board would not admit it belongs to.
+
+    Only where the ordinary notification is silent, only for a live stage that
+    announces at all, and only when exactly one role owns it -- choosing between
+    several owners would be this function inventing the assignment whose absence
+    is the entire subject.
+    """
+    if notification_role(cfg, state, assignee) is not None:
+        return None
+    stage = next((s for s in cfg["stages"] if s["name"] == state), None)
+    if not stage or stage["terminal"]:
+        return None
+    if stage["notify"]["kind"] == "none":
+        return None
+    owners = stage["owners"]
+    if len(owners) != 1:
+        return None
+    return owners[0]
+
+
 def notification_role(cfg: dict[str, Any], state: str, assignee: str) -> str | None:
     stage = next((s for s in cfg["stages"] if s["name"] == state), None)
     if not stage:

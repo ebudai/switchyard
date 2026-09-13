@@ -127,12 +127,32 @@ def blockers_payload(ticket: dict[str, Any]) -> dict[str, Any]:
 
 
 def queue_payload(board: dict[str, Any], role: str | None) -> dict[str, list[dict[str, Any]]]:
-    tickets = [ticket for ticket in board_tickets(board) if queue_ticket_matches(ticket)]
-    roles = [role] if role else sorted({str(ticket.get("assignee", "unassigned")) or "unassigned" for ticket in tickets})
+    workflow = board.get("workflow") if isinstance(board.get("workflow"), dict) else None
+    tickets = [ticket for ticket in board_tickets(board) if queue_ticket_matches(ticket, workflow)]
+    owners = {id(ticket): queue_owner(ticket, workflow) for ticket in tickets}
+    roles = [role] if role else sorted({owners[id(ticket)] for ticket in tickets})
     return {
-        current_role: sort_queue_tickets(ticket for ticket in tickets if str(ticket.get("assignee", "unassigned")) == current_role)
+        current_role: sort_queue_tickets(ticket for ticket in tickets if owners[id(ticket)] == current_role)
         for current_role in roles
     }
+
+
+def queue_owner(ticket: dict[str, Any], workflow: dict[str, Any] | None) -> str:
+    """Whose queue this ticket is in.
+
+    The assignee, until there is not one. A ticket nobody has been given, in a
+    stage exactly one role owns, is that role's to triage -- and saying
+    otherwise is how three live tickets came to be drawn in the Director's
+    column while `queue director` reported an empty queue (SYRD-120).
+    """
+    assignee = str(ticket.get("assignee", "unassigned")) or "unassigned"
+    if workflow:
+        from .workflow_config import unassigned_stage_owner
+
+        owner = unassigned_stage_owner(workflow, str(ticket.get("state", "")), assignee)
+        if owner:
+            return owner
+    return assignee
 
 
 def board_payload(board: dict[str, Any], *, include_all: bool) -> dict[str, list[dict[str, Any]]]:
@@ -146,7 +166,8 @@ def board_payload(board: dict[str, Any], *, include_all: bool) -> dict[str, list
 
 
 def director_payload(board: dict[str, Any]) -> list[dict[str, Any]]:
-    return sort_tickets(ticket for ticket in board_tickets(board) if needs_director(ticket))
+    workflow = board.get("workflow") if isinstance(board.get("workflow"), dict) else None
+    return sort_tickets(ticket for ticket in board_tickets(board) if needs_director(ticket, workflow))
 
 
 def board_tickets(board: dict[str, Any]) -> list[dict[str, Any]]:
@@ -156,9 +177,19 @@ def board_tickets(board: dict[str, Any]) -> list[dict[str, Any]]:
     return [ticket for ticket in tickets if isinstance(ticket, dict)]
 
 
-def queue_ticket_matches(ticket: dict[str, Any]) -> bool:
+def queue_ticket_matches(ticket: dict[str, Any], workflow: dict[str, Any] | None = None) -> bool:
     state = str(ticket.get("state", ""))
-    return state in ACTIVE_STATES or state == "backlog"
+    if state in ACTIVE_STATES or state == "backlog":
+        return True
+    # Work in a stage one role owns that has been handed to nobody. Without
+    # this the three live tickets were cards on the board and an empty answer
+    # to `queue director`, which is the disagreement SYRD-120 is about; the
+    # ticket is real work waiting for a real role, so it belongs in that role's
+    # queue rather than in an argument about which stages count as active.
+    if workflow is None:
+        return False
+    assignee = str(ticket.get("assignee", "unassigned")) or "unassigned"
+    return queue_owner(ticket, workflow) != assignee
 
 
 def sort_queue_tickets(tickets: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -166,7 +197,7 @@ def sort_queue_tickets(tickets: Iterable[dict[str, Any]]) -> list[dict[str, Any]
     return sorted(tickets, key=lambda ticket: (state_order.get(str(ticket.get("state", "")), 99), ticket_number(str(ticket.get("id", "")))))
 
 
-def needs_director(ticket: dict[str, Any]) -> bool:
+def needs_director(ticket: dict[str, Any], workflow: dict[str, Any] | None = None) -> bool:
     """Whether the director is the one who has to act on this ticket.
 
     The awaiting_role term is the escalation path a non-director pane uses when
@@ -176,11 +207,22 @@ def needs_director(ticket: dict[str, Any]) -> bool:
     ticket invisible here while ALSO suppressing its nudges for four hours. The
     flag has those two independent consumers -- do not treat either as the only
     one.
+
+    The last term is the same lesson a second time. Every other term asks who
+    the ticket was GIVEN to; on 2026-09-13 three tickets sat in the stage the
+    workflow gives the director to own, with no assignee, and so matched none of
+    them -- visible as cards on the board, absent from this list, and announced
+    to nobody. Work in a stage the director owns that has not been handed to
+    anyone is the director's: that is what triage is.
     """
     state = str(ticket.get("state", ""))
     assignee = str(ticket.get("assignee", ""))
     awaiting = str(ticket.get("awaiting_role", ""))
-    return state == "director_review" or awaiting == "director" or (assignee == "director" and state in ACTIVE_STATES | {"backlog"})
+    if state == "director_review" or awaiting == "director":
+        return True
+    if assignee == "director" and state in ACTIVE_STATES | {"backlog"}:
+        return True
+    return workflow is not None and queue_owner(ticket, workflow) == "director" and assignee != "director"
 
 
 def format_ticket(ticket: dict[str, Any]) -> str:

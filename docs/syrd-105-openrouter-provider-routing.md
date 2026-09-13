@@ -8,14 +8,30 @@ which of them can reach this system and what we could do about them here.
 
 [article]: https://mmoustafa.com/blog/so-you-want-to-use-openrouter/
 
+## Where the responsibility sits
+
+Set by the User after reading the first draft of this note, and it decides most
+of what follows: **choosing and pinning a provider is the runtime's business,
+not Switchyard's.** It belongs in the selected runtime's own provider
+configuration. Switchyard neither passes a provider nor enforces one, and does
+not refuse to start a role because a pin is missing.
+
+The most Switchyard may do is **record a declarative model-to-provider mapping
+for visibility** — a statement of which provider a role is expected to be served
+by, readable beside the model it already declares, carrying no enforcement. A
+reader can then see what was intended and compare it with what the runtime
+actually did.
+
 ## Recommendation
 
-**Do not put Switchyard roles on OpenRouter-routed models yet.** If a specific
-need arises, the only permitted shape is a pinned provider with a probe that
-runs on the deployment host, and the preconditions below are not met today.
+**Do not put Switchyard roles on OpenRouter-routed models yet**, and do not build
+provider machinery here when adoption does come.
 
-The deciding factor is not model quality. It is that Switchyard cannot see a
-completion, so it cannot enforce any of the rules the risk list asks for.
+The deciding factor is not model quality, and it is the same fact that makes the
+boundary above the right one: Switchyard cannot see a completion. It launches
+vendor CLIs and watches terminals, so none of the rules the risk list asks for
+can be enforced at this layer whoever wants them. They belong where the
+completions are.
 
 ## Where OpenRouter can already reach this system
 
@@ -46,11 +62,12 @@ What is **not** true today:
   which is "tried in order when the primary model fails with rate-limit,
   overload, or connection errors").
 
-That last point matters more than it looks. Each role gets its own hermes home
-(`hermes_home_for_role`), so a provider pin or a fallback chain would be
-per-role state that Switchyard does not render, version or check. Two roles
-nominally on the same model could route differently, and nothing here would
-notice.
+That last point matters more than it looks, and it survives the boundary rather
+than arguing with it. Each role gets its own hermes home (`hermes_home_for_role`),
+so a pin or a fallback chain is per-role runtime state. Configuring it is the
+runtime's business; what follows from the per-role split is that two roles
+nominally on the same model can be configured differently, and nobody reading
+this system can currently tell. That is the gap a declarative mapping is for.
 
 ## Why the standard mitigations do not fit at this layer
 
@@ -90,72 +107,83 @@ Three consequences follow, and they are the substance of this spike:
 | HTTP 200 with no content | Yes | Looks like an idle worker; the nudge path fires instead of a failure |
 | Provider-specific reasoning-history rules | Yes | Resume is a first-class Switchyard feature (`--resume <session>`); a provider that rejects replayed traces breaks resumption, not just one turn |
 | Production rate-limit behaviour | Yes | Shared by all roles on one key; one busy role can throttle the others |
-| Pinned providers still regress or withdraw | Yes | A pinned provider that disappears takes the role offline; there is no health gate to notice |
+| Pinned providers still regress or withdraw | Yes | A provider that disappears takes the role offline. Noticing is the runtime's job; from here it looks like a worker that stopped |
 
 The board's authority model is unaffected: role identity is a registered
 process, not a model (SYRD-69), so routing cannot grant or move authority.
 Nothing in the risk list touches publication or integration authority.
 
-## The contract we would require
+## What the runtime has to be doing before a role runs on it
 
-Before any Switchyard role runs on an OpenRouter-routed model, all of these must
-hold. They are written as things that can be checked, not preferences.
+These are conditions on the runtime and its provider configuration, not
+requirements Switchyard imposes or checks. Whoever configures the runtime owns
+them; they are written down here so the decision is made with open eyes rather
+than rediscovered from a stalled pane.
 
-1. **The provider is pinned, and the pin is Switchyard's.** The role's provider
-   comes from project configuration and is passed explicitly, the way the model
-   already is. A provider chosen inside a role's own hermes home is not a pin.
-2. **The resolved provider is observable.** The CLI must report which provider
-   served a turn, and the probe must be able to read it. Without this, a pin is
-   an assertion nobody verifies.
-3. **A structured tool call is proved on the deployment host**, not a sentinel
-   string. Today's check (`validate_role_models`) asks the model to echo
-   `model-ok` and requires it in stdout; it already treats exit 0 without the
-   sentinel as a failure, which is the right instinct, but "it can talk" is not
-   "it can call a tool".
+1. **The provider is pinned where pins belong** — in the runtime's own provider
+   configuration. `hermes` has both the pin (`--provider`, `hermes model`) and an
+   ordered fallback chain (`hermes fallback`), so the mechanism exists; using it
+   is the operator's call. Note that hermes homes are per role here, so a pin set
+   in one role's home says nothing about another's.
+2. **The resolved provider is knowable.** If the runtime cannot say which
+   provider served a turn, a pin is an assertion nobody can check, and the
+   mapping below records an intention nobody can compare against reality.
+3. **The model can actually call a tool.** Every Switchyard role is a
+   tool-calling agent. This one is Switchyard's business, because Switchyard
+   already probes models at first run and the probe is too weak: today's check
+   (`validate_role_models`) asks the model to echo `model-ok` and requires it in
+   stdout. It already treats exit 0 without the sentinel as a failure, which is
+   the right instinct, but "it can talk" is not "it can call a tool". That gap
+   is SYRD-111 and is independent of OpenRouter.
 4. **Resume survives a replayed history**, because Switchyard resumes sessions
-   by id as a matter of course.
-5. **Effort is either honoured or declared unsupported.** A setting that is
-   silently ignored should not be presented as configuration.
-6. **Rate limits are understood as shared.** One key serves every hermes role;
-   the probe must exercise concurrency, not a single call.
-7. **There is a fallback policy Switchyard renders**, or fallback is off. An
-   unmanaged chain in a role's own config is worse than none, because it changes
-   behaviour invisibly.
+   by id as a matter of course. A provider that rejects replayed reasoning traces
+   breaks resumption, not just one turn.
+5. **Effort is honoured or known to be ignored.** `--reasoning <effort>` is
+   passed for hermes; if a provider accepts it and does nothing, the role's depth
+   setting is decorative and nobody is told.
+6. **Rate limits are understood as shared.** One key serves every hermes role, so
+   concurrency is the realistic case and a single call proves little.
 
-Items 1, 2, 3, 6 and 7 are unmet today. That is the reason for the
-recommendation, and each is a specific thing to fix rather than a misgiving.
+Only item 3 is Switchyard's to fix, and it is filed. The rest are the runtime's,
+and none of them are met by default.
 
-## If we ever adopt: the probe
+## What Switchyard should probe, and what it should not
 
-Not a benchmark. A gate that runs where the work runs — on the deployment host,
-as the role account, through the same CLI and flags a real pane uses, because
-the article's rate-limit and routing behaviour differ from a laptop.
+Switchyard already gates a launch on whether each role's model answers at all,
+and that gate should ask the question that matters for an agent: can this model
+**call a tool**, proved on the deployment host, as the role account, through the
+same CLI a real pane uses. A tool call that arrives as prose, or not at all, is a
+failure, and an exit 0 carrying no usable content stays a failure. That is a
+capability question about the configured runtime, it is answerable from where
+Switchyard already stands, and it is the whole of SYRD-111.
 
-It must, per role and per pinned provider: make a call that requires a
-**structured tool call** and fail if the tool call arrives as prose; fail on an
-empty completion rather than counting a 200; record and assert the **resolved
-provider**; run the same prompt at two effort settings and record whether
-anything changed; resume a session carrying a reasoning trace and fail if the
-provider rejects the replay; and run several roles' probes at once, since they
-share a key. Any failure blocks the launch, the way model validation already
-does.
+What Switchyard should **not** grow is a provider health gate: probing providers,
+scoring them, pinning around them or failing over between them. That is the
+routing responsibility the boundary above places outside this system, and
+building a blind version of it here — blind because no completion is visible —
+would be worse than not having one.
 
-The natural home is the existing first-run preflight (`validate_role_models`,
-`_run_owner_cli_probe`), which already runs as the owner, per role, before
-panes start.
+If a mapping is recorded for visibility, the honest thing to compare it against
+is whatever the runtime reports, not something Switchyard infers from a pane.
 
 ## Follow-ups
 
-Filed only for the recommendation above, both small and both guardrails rather
-than adoption work:
+One open, one cancelled by the boundary above:
 
-- **SYRD-110**: refuse to launch a role whose model routes through a
-  provider-routing gateway without an explicit provider pin, instead of starting
-  it and hoping.
-- **SYRD-111**: extend the first-run model probe to require a structured tool
-  call, for every CLI. The sentinel check passes on a model that cannot call
-  tools at all, which is a gap independent of OpenRouter.
+- **SYRD-111**, open: extend the first-run model probe to require a structured
+  tool call, for every CLI. The sentinel check passes on a model that cannot call
+  tools at all, which is a gap independent of OpenRouter and independent of who
+  owns provider selection.
+- **SYRD-110**, cancelled: it would have refused to launch a role whose
+  gateway-routed model carried no provider pin. That is exactly the enforcement
+  the boundary above places outside Switchyard, so it was cancelled rather than
+  deferred. This note originally proposed it; the User's decision replaced it.
 
-Not filed: provider routing, health gates, fallback chains, per-completion
-telemetry. Those belong to an adoption decision that this note recommends
-against for now.
+Not filed, and deliberately: provider routing, health gates, fallback chains and
+per-completion telemetry. Those are the runtime's or they are nobody's, and
+building them here would mean building them blind.
+
+The one thing this note leaves open for Switchyard is the declarative
+model-to-provider mapping. It is worth having when a role is actually routed
+through a gateway, and worth nothing before that, so it should be filed when the
+first such role is proposed rather than built against a hypothetical.

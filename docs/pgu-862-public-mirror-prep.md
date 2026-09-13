@@ -199,8 +199,13 @@ and hook-management code.
   reports it as `switchyard: folder trust <cli>: role <role> at <workdir>; ...`.
 - Codex hook trust can require an explicit `/hooks` approval. The manifest says
   `codex hook trust needs <n> approval(s) ... run /hooks once in any Codex pane...`.
-- Model probes can fail with `model probe failed with exit <code>` or
-  `model probe did not confirm model-ok`.
+- Model probes can fail with `model probe failed with exit <code>`,
+  `model probe did not confirm model-ok`, or `model answered but completed no
+  tool call: the reply did not carry the token from
+  switchyard-model-probe.txt`. The three are kept apart on purpose: the first is
+  usually an unauthenticated CLI or an unknown model name, the second is a
+  completion carrying nothing usable, and the third is a model that can produce
+  prose but cannot call a tool (SYRD-111).
 
 ### Optional TypeScript Board Port
 

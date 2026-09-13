@@ -46,12 +46,22 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
 
     assert report.model_validation_failures == []
     assert messages == []
+    # One probe directory for the whole phase, and every model probe runs in it
+    # rather than in the owner's home: the file the prompt names has to be in
+    # the working directory the CLI is given (SYRD-111).
+    workspace = set(runner.model_probe_cwds)
+    assert len(workspace) == 1, runner.model_probe_cwds
+    probe_dir = workspace.pop()
+    assert probe_dir != str(owner_home), probe_dir
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
-        ["sudo", "-u", "otto-agent", "claude", "--model", "claude-opus-5", "-p", team_launcher.MODEL_VALIDATION_PROMPT],
+        [
+            "sudo", "-u", "otto-agent", "claude", "--model", "claude-opus-5",
+            "--dangerously-skip-permissions", "-p", team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
         [
             "sudo",
             "-u",
@@ -61,13 +71,31 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
             "--skip-git-repo-check",
             "--model",
             "gpt-5.5",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "-C",
+            probe_dir,
             team_launcher.MODEL_VALIDATION_PROMPT,
         ],
-        ["sudo", "-u", "otto-agent", "agy", "--model", "gemini-3.7-flash-high", "-p", team_launcher.MODEL_VALIDATION_PROMPT],
-        ["sudo", "-u", "otto-agent", "hermes", "-m", "z-ai/glm-4.6", "-z", team_launcher.MODEL_VALIDATION_PROMPT],
-        ["sudo", "-u", "otto-agent", "hermes", "-m", "deepseek/deepseek-chat", "-z", team_launcher.MODEL_VALIDATION_PROMPT],
+        [
+            "sudo", "-u", "otto-agent", "agy", "--model", "gemini-3.7-flash-high",
+            "--dangerously-skip-permissions", "-p", team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
+        [
+            "sudo", "-u", "otto-agent", "hermes", "-m", "z-ai/glm-4.6", "--yolo", "-z",
+            team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
+        [
+            "sudo", "-u", "otto-agent", "hermes", "-m", "deepseek/deepseek-chat", "--yolo", "-z",
+            team_launcher.MODEL_VALIDATION_PROMPT,
+        ],
     ]
-    assert {kwargs.get("cwd") for kwargs in runner.call_kwargs} == {str(owner_home)}
+    # Every model answered with a token it could only have read, and every
+    # token was the one this run wrote.
+    assert len(set(runner.model_probe_tokens)) == 1, runner.model_probe_tokens
+    assert all(token for token in runner.model_probe_tokens), runner.model_probe_tokens
+    # The auth probes still run in the owner's home; only the model probes move.
+    assert str(owner_home) in {str(kwargs.get("cwd")) for kwargs in runner.call_kwargs}
 
 def test_model_validation_ignores_stderr_echoed_prompt_sentinel() -> None:
     proc = subprocess.CompletedProcess(
@@ -230,7 +258,10 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
     ]
     assert not any(call[:5] == ["sudo", "-u", "otto-agent", "codex", "exec"] for call in runner.calls)
     assert not any(call[:4] == ["sudo", "-u", "otto-agent", "agy"] and "-p" in call for call in runner.calls)
-    assert ["sudo", "-u", "otto-agent", "hermes", "-m", "openrouter/missing", "-z", team_launcher.MODEL_VALIDATION_PROMPT] in runner.calls
+    assert [
+        "sudo", "-u", "otto-agent", "hermes", "-m", "openrouter/missing", "--yolo", "-z",
+        team_launcher.MODEL_VALIDATION_PROMPT,
+    ] in runner.calls
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",

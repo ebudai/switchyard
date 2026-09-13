@@ -67,6 +67,7 @@ def hold(app, admin: str, ticket: str) -> None:
 
 
 MIGRATION = ROOT / "scripts/ticket_board/migrations/pgu933_syrd107_manual_control_handoff.sql"
+PREVIOUS_MIGRATION = "pgu932_syrd100_control_capabilities.sql"
 
 
 def test_the_upgrade_carries_the_same_behaviour_to_an_existing_board(cluster) -> None:
@@ -79,17 +80,35 @@ def test_the_upgrade_carries_the_same_behaviour_to_an_existing_board(cluster) ->
     db = "manual_control_upgraded"
     admin = t.conninfo(cluster.socket_dir, cluster.port, db)
     t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", db])
-    previous = subprocess.run(
-        ["git", "-C", str(ROOT), "show", "origin/main:scripts/ticket_board/schema.sql"],
-        text=True, capture_output=True, check=True,
-    ).stdout
-    t.psql(admin, previous)
+    def released(path: str) -> str:
+        """One file as it stood in the release before this migration.
+
+        Asked of the previous migration's own commit rather than of
+        origin/main, which stopped describing "before" the moment this release
+        merged -- and a test whose old tenant already carries the fix proves
+        nothing about the upgrade.
+        """
+        adding = subprocess.run(
+            ["git", "-C", str(ROOT), "log", "--format=%H", "--diff-filter=A", "--",
+             f"scripts/ticket_board/migrations/{PREVIOUS_MIGRATION}"],
+            text=True, capture_output=True, check=True,
+        ).stdout.strip().splitlines()
+        assert adding, PREVIOUS_MIGRATION
+        return subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{adding[-1]}:scripts/ticket_board/{path}"],
+            text=True, capture_output=True, check=True,
+        ).stdout
+
+    t.psql(admin, released("schema.sql"))
     try:
         t.create_roles(admin)
     except AssertionError as exc:
         if "already exists" not in str(exc):
             raise
-    t.psql(admin, t.RBAC_PATH.read_text())
+    # That release's grants too, not this branch's: rbac.sql grants on the
+    # functions of the schema beside it, and a tenant running the previous
+    # release does not have this branch's yet.
+    t.psql(admin, released("rbac.sql"))
     frames = cluster.root / f"frames-{db}"
     assets = cluster.root / f"assets-{db}"
     frames.mkdir(exist_ok=True)

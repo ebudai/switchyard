@@ -347,6 +347,13 @@ STYLE = """    :root {
       min-height: 320px;
       display: grid;
       grid-template-rows: auto minmax(180px, 1fr);
+      /* The board's tracks are sized by syncBoardGridColumns. A grid item's
+         automatic minimum size is its content's minimum, so without this one
+         unbreakable token in a card widened the column past its track and the
+         card painted over the next lane (SYRD-104). The column, its body and
+         the card each need the floor, because the chain is only as narrow as
+         its widest link. */
+      min-width: 0;
     }
     .column-head {
       padding: 12px 14px;
@@ -391,8 +398,10 @@ STYLE = """    :root {
     .column-body {
       padding: 12px;
       display: grid;
+      grid-template-columns: minmax(0, 1fr);
       gap: 10px;
       align-content: start;
+      min-width: 0;
     }
     .card {
       border: 1px solid var(--border);
@@ -400,8 +409,14 @@ STYLE = """    :root {
       background: var(--panel-2);
       padding: 12px;
       display: grid;
+      grid-template-columns: minmax(0, 1fr);
       gap: 10px;
       cursor: pointer;
+      min-width: 0;
+      /* Wrapping is what should contain the text, and the rules below do that.
+         This is the guarantee for anything that still cannot wrap -- an image,
+         a future widget -- so a card can never reach outside its own lane. */
+      overflow: hidden;
     }
     .card-blocked {
       border-color: rgba(253, 164, 175, 0.32);
@@ -433,6 +448,7 @@ STYLE = """    :root {
       color: var(--accent);
       font-size: 12px;
       font-weight: 600;
+      overflow-wrap: anywhere;
     }
     .card-title {
       font-size: 14px;
@@ -487,6 +503,8 @@ STYLE = """    :root {
       line-height: 1;
       border: 1px solid var(--border);
       background: rgba(255,255,255,0.04);
+      max-width: 100%;
+      overflow-wrap: anywhere;
     }
     .tag { color: var(--text); }
     .badge.ok { color: var(--ok); border-color: rgba(134,239,172,0.35); }
@@ -914,6 +932,9 @@ STYLE = """    :root {
       border-radius: 8px;
       border: 1px solid var(--border);
       background: rgba(255,255,255,0.03);
+      /* Blocked reasons carry commit hashes, which no ordinary break
+         opportunity will split (SYRD-104). */
+      overflow-wrap: anywhere;
     }
     .card-alert {
       padding: 10px 12px;

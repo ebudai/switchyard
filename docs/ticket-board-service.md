@@ -775,7 +775,18 @@ inside one `bash -c`, so no part of it runs outside the record -- and its output
 still reaches the terminal. What survives is a root-owned attempt directory
 under `/var/lib/switchyard/rollout/<project>/`: `stdout.log`, `stderr.log` and
 `result.json` with the command, the target commit, the operator, both
-timestamps, the exit status and the hash of each captured file. Completed files
+timestamps, the exit status and the hash of each captured file.
+
+**Who ran it comes from whatever elevated the process**, and from nothing else:
+`PKEXEC_UID` when polkit authorized the run, `SUDO_USER` when sudo did, each
+resolved through the account database and recorded with the mechanism that
+asserted it. Polkit is consulted first, because when a run was elevated by
+pkexec that is the mechanism that authorized it and `SUDO_USER` may be left over
+from an outer shell. A value naming no account records as unknown rather than as
+itself, and `USER`, `LOGNAME` and `os.getlogin()` are never consulted -- a record
+that names a human on the strength of a variable any caller can set is worse
+than one that names nobody. Reading only `SUDO_USER` left every polkit-authorized
+run recorded with no operator at all (SYRD-132). Completed files
 are mode 0444 and the tree is root's, so a role reads all of it without sudo and
 can write none of it.
 

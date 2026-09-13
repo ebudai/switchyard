@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import re
 import time
 from dataclasses import dataclass, field
@@ -90,6 +91,53 @@ REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
 #: pattern: everything between the markers is dropped, markers included.
 PRIVATE_KEY_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 PRIVATE_KEY_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+
+
+@dataclass(frozen=True)
+class Operator:
+    """Which human asked for a privileged run, and which mechanism said so.
+
+    Only the two mechanisms that actually elevated this process are consulted.
+    `USER`, `LOGNAME` and `os.getlogin()` are not: they describe whoever
+    happened to set them, and a record that names a human on that basis is
+    worse than one that names nobody.
+
+    Polkit first. `PKEXEC_UID` is what pkexec sets for the invoking user, and
+    when a run was elevated by pkexec that is the mechanism that authorized it
+    -- `SUDO_USER` may still be lying around from an outer shell. Both are
+    resolved through the account database, so a value that names no account
+    records as unknown rather than as itself (SYRD-132).
+    """
+
+    name: str = ""
+    uid: int | None = None
+    source: str = ""
+
+    @property
+    def known(self) -> bool:
+        return bool(self.name)
+
+
+def resolve_operator(environ: dict[str, str] | None = None) -> Operator:
+    """The invoking human, or nobody. Never a guess."""
+    env = os.environ if environ is None else environ
+    raw_uid = str(env.get("PKEXEC_UID", "")).strip()
+    if raw_uid:
+        if not raw_uid.isdigit():
+            return Operator(source="pkexec:unresolved")
+        try:
+            record = pwd.getpwuid(int(raw_uid))
+        except (KeyError, OverflowError, ValueError):
+            return Operator(source="pkexec:unresolved")
+        return Operator(name=record.pw_name, uid=record.pw_uid, source="pkexec")
+    sudo_user = str(env.get("SUDO_USER", "")).strip()
+    if sudo_user:
+        try:
+            record = pwd.getpwnam(sudo_user)
+        except KeyError:
+            return Operator(source="sudo:unresolved")
+        return Operator(name=record.pw_name, uid=record.pw_uid, source="sudo")
+    return Operator()
 
 
 def journal_root() -> Path:
@@ -321,7 +369,9 @@ class Attempt:
         self.project = project
         self.command = list(command)
         self.target_commit = target_commit
-        self.operator = operator or os.environ.get("SUDO_USER", "") or ""
+        # A caller may name the operator explicitly; otherwise it comes from
+        # the mechanism that elevated this process, and from nothing else.
+        self.operator = Operator(name=operator, source="explicit") if operator else resolve_operator()
         self.base = project_journal_dir(project, root=root)
         self.index = self.base / INDEX_NAME
         self.attempt = ""
@@ -351,7 +401,8 @@ class Attempt:
                 "command": self.command,
                 "directory": str(self.directory),
                 "target_commit": self.target_commit,
-                "operator": self.operator,
+                "operator": self.operator.name,
+                "operator_source": self.operator.source,
             },
         )
         self._write_result(status="running", exit_status=None, finished_at="")
@@ -408,7 +459,12 @@ class Attempt:
             "attempt": self.attempt,
             "command": self.command,
             "target_commit": self.target_commit,
-            "operator": self.operator,
+            "operator": self.operator.name,
+            "operator_uid": self.operator.uid,
+            # How that name was established, or why there is none: a reader can
+            # tell "nobody was recorded" from "polkit named a uid this host does
+            # not know" (SYRD-132).
+            "operator_source": self.operator.source,
             "started_at": self.started_at,
             "finished_at": finished_at,
             "status": status,

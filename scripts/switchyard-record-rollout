@@ -62,14 +62,25 @@ def main(argv: list[str]) -> int:
             f"{journal_root()}, which the project account may read and may not write."
         )
 
-    attempt = Attempt(
-        args.project,
-        command,
-        target_commit=args.target_commit,
-        operator=os.environ.get("SUDO_USER", ""),
-    )
+    # Who asked is worked out by the journal, from the mechanism that elevated
+    # this process -- sudo's SUDO_USER or polkit's PKEXEC_UID, each resolved
+    # through the account database. Reading only SUDO_USER left every pkexec run
+    # recorded with no operator at all (SYRD-132).
+    attempt = Attempt(args.project, command, target_commit=args.target_commit)
     directory = attempt.open()
     print(f"{PROGRAM}: recording attempt {attempt.attempt} in {directory}", flush=True)
+    if attempt.operator.known:
+        print(f"{PROGRAM}: operator {attempt.operator.name} (via {attempt.operator.source})", flush=True)
+    else:
+        # Said out loud rather than left blank in a file nobody reads until
+        # afterwards: if attribution matters for this run, now is when it can
+        # still be fixed.
+        print(
+            f"{PROGRAM}: no operator recorded"
+            + (f" ({attempt.operator.source})" if attempt.operator.source else
+               "; neither sudo nor pkexec named one"),
+            flush=True,
+        )
     if args.label:
         attempt.write("stdout", f"# {args.label}\n")
 

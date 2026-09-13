@@ -20568,7 +20568,12 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "rollout-log":
         args = _build_switchyard_rollout_log_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)
-        return rollout_log_command(entry.project, attempt=args.attempt, output=args.output)
+        # The registry entry's slug, which is the tenant's `project` field and
+        # so the key the journal is written under. `entry.project` does not
+        # exist and crashed every invocation of this command (SYRD-132); the
+        # config is deliberately not loaded, because reading a record must keep
+        # working for a tenant whose configuration does not.
+        return rollout_log_command(entry.slug, attempt=args.attempt, output=args.output)
     if argv[0].casefold() == "publication-status":
         args = _build_switchyard_publication_status_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

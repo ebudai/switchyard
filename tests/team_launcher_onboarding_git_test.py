@@ -515,6 +515,10 @@ def test_switchyard_new_validates_models_before_launching_panes() -> None:
             "--skip-git-repo-check",
             "--model",
             "openai/not-a-model",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "-C",
+            runner.model_probe_cwds[0],
             team_launcher.MODEL_VALIDATION_PROMPT,
         ],
     ]

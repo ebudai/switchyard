@@ -145,6 +145,16 @@ SUPERSEDED_BY_AWAITING_ROLE = "superseded_by_awaiting_role"
 #: `pane_child_work`, which is this turn's work and still holds delivery; from
 #: the hook's own busy verdict; and from a human at the composer (SYRD-101).
 STALE_PRIOR_TURN_CHILD_WORK = "stale_prior_turn_child_work"
+#: A serial-focus queue announcement names one implementer and the reservation
+#: holding them. Every reroute while the board stays in the same holding stage
+#: writes another announcement with the same ticket, state and assignee, so the
+#: ordinary currentness check cannot tell the obsolete ones apart: only the
+#: queue identity distinguishes them (SYRD-108).
+SUPERSEDED_QUEUE_NOTICE = "superseded_serial_focus_queue"
+#: `announce_serial_focus_queue` renders a reservation it cannot name as this
+#: text, while `queued_behind_ticket` keeps the empty string. Both spellings are
+#: the same reservation, so neither may read as a change of identity.
+UNNAMED_RESERVATION = "active work"
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -2168,12 +2178,19 @@ WHERE q.id = %s AND q.ticket_id = %s
         kind: str,
         detail: dict[str, Any],
         phase: str,
+        reason: str = SUPERSEDED_BY_AWAITING_ROLE,
     ) -> None:
-        """Remove one superseded reminder, saying exactly why it went."""
+        """Remove one superseded notification, saying exactly why it went.
+
+        The detail is what distinguishes the two supersessions this listener
+        knows about -- a handoff that answered a reminder, and a reroute that
+        replaced a queue announcement -- so it is logged whole rather than
+        summarised into a sentence that only fits one of them.
+        """
         self.logger.info(
-            "Dropping %s notification %s for %s: %s took the handoff at %s, after it was queued at %s",
-            kind, notification_id, ticket_id,
-            detail.get("awaiting_role"), detail.get("awaiting_since_at"), detail.get("queued_at"),
+            "Dropping %s notification %s for %s as %s: %s",
+            kind, notification_id, ticket_id, reason,
+            ", ".join(f"{key}={value}" for key, value in sorted(detail.items())),
         )
         self._trace_notification(
             conn,
@@ -2182,7 +2199,7 @@ WHERE q.id = %s AND q.ticket_id = %s
             target_role=target_role,
             kind=kind,
             event="drop",
-            busy_reason=SUPERSEDED_BY_AWAITING_ROLE,
+            busy_reason=reason,
             detail={**detail, "phase": phase},
         )
         self._trace_notification(
@@ -2192,7 +2209,7 @@ WHERE q.id = %s AND q.ticket_id = %s
             target_role=target_role,
             kind=kind,
             event="listener_discard",
-            detail={"reason": SUPERSEDED_BY_AWAITING_ROLE, "phase": phase},
+            detail={"reason": reason, "phase": phase},
         )
         # Discarded, never acked. This reminder was answered before it could be
         # delivered, and `ack_notification` records delivery accounting:
@@ -2200,8 +2217,84 @@ WHERE q.id = %s AND q.ticket_id = %s
         # idle wave reads as "already reminded" and turns into an escalation to
         # the Director (SYRD-32). Acking here would answer one false escalation
         # by scheduling the next one.
-        self._discard_notification(conn, notification_id, SUPERSEDED_BY_AWAITING_ROLE)
+        self._discard_notification(conn, notification_id, reason)
         self._traced_gate_defer_notifications.discard(notification_id)
+
+    @staticmethod
+    def _queue_identity_key(queued_for: str, reserved_by: str) -> tuple[str, str]:
+        """One spelling of a queue identity, whichever side it was read from.
+
+        The announcement renders a reservation it cannot name as `active work`
+        while the ticket column keeps the empty string, and neither of those is
+        a change of identity. Comparison is on this key; what gets traced is
+        what was actually written, because `PGU-2` is the ticket id and `pgu-2`
+        is not.
+        """
+        reservation = str(reserved_by or "").strip()
+        return (
+            str(queued_for or "").strip().lower(),
+            "" if reservation.lower() == UNNAMED_RESERVATION else reservation.lower(),
+        )
+
+    def _announced_queue_identity(self, payload: str) -> tuple[str, str] | None:
+        """The queue identity an announcement was written for, or None.
+
+        Only a serial-focus announcement carries `queued_for`, so every other
+        notification returns None here and keeps exactly the checks it had.
+        """
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        queued_for = str(parsed.get("queued_for") or "").strip()
+        if not queued_for:
+            return None
+        return queued_for, str(parsed.get("reserved_by") or "").strip()
+
+    def _superseded_queue_notice(self, conn: Any, ticket_id: str, payload: str) -> dict[str, Any] | None:
+        """Whether a queue announcement still describes where the ticket waits.
+
+        `queued_for_assignee` and `queued_behind_ticket` are rewritten by every
+        route the board accepts and cleared by any route that is not held, so
+        they are the live answer to the question the announcement was written
+        to answer. A reroute between enqueue and send leaves the announcement
+        naming an implementer the Director is no longer waiting on, and the
+        instruction in it -- route it again once that reservation clears -- is
+        then wrong in a way the reader cannot see (SYRD-108).
+        """
+        announced = self._announced_queue_identity(payload)
+        if announced is None:
+            return None
+        result = conn.execute(
+            """
+SELECT queued_for_assignee, queued_behind_ticket
+FROM ticket_board.tickets
+WHERE id = %s
+""",
+            (ticket_id,),
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            queued_for, queued_behind = row["queued_for_assignee"], row["queued_behind_ticket"]
+        else:
+            queued_for, queued_behind = row[0], row[1]
+        current = (
+            self._decode_text(queued_for).strip(),
+            self._decode_text(queued_behind).strip(),
+        )
+        if self._queue_identity_key(*current) == self._queue_identity_key(*announced):
+            return None
+        return {
+            "reason": SUPERSEDED_QUEUE_NOTICE,
+            "announced_queued_for": announced[0],
+            "announced_reserved_by": announced[1] or UNNAMED_RESERVATION,
+            "current_queued_for": current[0],
+            "current_reserved_by": current[1] or UNNAMED_RESERVATION,
+        }
 
     def _notification_is_current(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> bool:
         current = self._current_ticket_state(conn, ticket_id)
@@ -2423,6 +2516,14 @@ WHERE (r.definition->>'active')::boolean
                 self._ack_notification(conn, notification_id)
                 self._traced_gate_defer_notifications.discard(notification_id)
                 continue
+            superseded_queue = self._superseded_queue_notice(conn, ticket_id, payload)
+            if superseded_queue is not None:
+                self._drop_superseded_notification(
+                    conn, notification_id=notification_id, ticket_id=ticket_id,
+                    target_role=target_role, kind=kind, detail=superseded_queue,
+                    phase="claim", reason=SUPERSEDED_QUEUE_NOTICE,
+                )
+                continue
             if not self._notification_is_current(conn, ticket_id, target_role, payload):
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
                 self._trace_notification(
@@ -2622,6 +2723,18 @@ WHERE (r.definition->>'active')::boolean
                     conn, notification_id=notification_id, ticket_id=ticket_id,
                     target_role=target_role, kind=kind, detail=superseded,
                     phase="pre_send_recheck",
+                )
+                continue
+            # The same reread, immediately before the send. A queue announcement
+            # waits out the Director's own activity here, and that is exactly
+            # the window a reroute lands in: claiming it while the identity was
+            # still current says nothing about whether it is current now.
+            superseded_queue = self._superseded_queue_notice(conn, ticket_id, payload)
+            if superseded_queue is not None:
+                self._drop_superseded_notification(
+                    conn, notification_id=notification_id, ticket_id=ticket_id,
+                    target_role=target_role, kind=kind, detail=superseded_queue,
+                    phase="pre_send_recheck", reason=SUPERSEDED_QUEUE_NOTICE,
                 )
                 continue
             # Recheck handoffs too, so a resolution during that probe suppresses

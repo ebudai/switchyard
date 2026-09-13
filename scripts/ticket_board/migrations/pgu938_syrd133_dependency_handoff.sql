@@ -23,6 +23,11 @@ BEGIN;
 ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS idle_escalation_key text NOT NULL DEFAULT '';
 
+-- A later migration re-keys this on last activity, which renames the parameter.
+-- Replaying the tail onto a board that already ran that one would otherwise fail
+-- here, because CREATE OR REPLACE cannot rename an input parameter.
+DROP FUNCTION IF EXISTS ticket_board.idle_escalation_identity(text, text, text, timestamptz);
+
 CREATE OR REPLACE FUNCTION ticket_board.idle_escalation_identity(
     p_ticket text,
     p_state text,

@@ -48,7 +48,7 @@ SET document = jsonb_set(document, '{roles}', (
     SELECT jsonb_agg(jsonb_set(role, '{capabilities}',
         (SELECT coalesce(jsonb_agg(c), '[]'::jsonb)
          FROM jsonb_array_elements_text(role->'capabilities') c
-         WHERE c NOT IN ('director_edit', 'request_publication', 'resolve_publication'))) ORDER BY ordinality)
+         WHERE c NOT IN ('director_edit', 'request_publication', 'resolve_publication', 'recover_stalled_ticket'))) ORDER BY ordinality)
     FROM jsonb_array_elements(document->'roles') WITH ORDINALITY AS elements(role, ordinality)
 ))
 WHERE singleton;
@@ -56,7 +56,7 @@ UPDATE ticket_board.workflow_roles
 SET definition = jsonb_set(definition, '{capabilities}',
     (SELECT coalesce(jsonb_agg(c), '[]'::jsonb)
      FROM jsonb_array_elements_text(definition->'capabilities') c
-     WHERE c NOT IN ('director_edit', 'request_publication', 'resolve_publication')));
+     WHERE c NOT IN ('director_edit', 'request_publication', 'resolve_publication', 'recover_stalled_ticket')));
 """
 
 

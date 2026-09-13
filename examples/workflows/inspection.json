@@ -20,7 +20,8 @@
         "crop_attachment",
         "reassign",
         "director_edit",
-        "resolve_publication"
+        "resolve_publication",
+        "recover_stalled_ticket"
       ],
       "runtime": "claude",
       "target": "cerulean-director:0.0",

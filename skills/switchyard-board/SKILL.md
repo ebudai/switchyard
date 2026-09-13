@@ -164,7 +164,10 @@ ticket exactly where it was. When the work produced no commit, the no-code
 submission is the action that ends your turn - see `allow_no_code` in
 `workflow_actions`. The board will eventually tell the director that an active
 ticket's owner went quiet without advancing it, which is a backstop and not a
-workflow: it means somebody has to come and find out what you meant.
+workflow: it means somebody has to come and find out what you meant. Your own
+submission is owner-scoped, so nobody else can take it for you - a director can
+only recover the ticket to its next required gate, and that is a repair, not the
+path.
 
 ## Review sign-offs
 

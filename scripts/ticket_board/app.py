@@ -1735,6 +1735,26 @@ ORDER BY rank;
                 self._pg_call(conn, "SELECT ticket_board.complete_task(%s, %s);", (ticket_id, completion_note))
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def recover_stalled_ticket(self, ticket_id: str, *, reason: str, caller_role: str) -> dict[str, Any]:
+        """Take the transition a stalled ticket's owner did not take.
+
+        Bounded by construction: the database picks the one declared no-code
+        transition the owner could have taken and runs it through the ordinary
+        executor, so no gate, sign-off or blocker is skipped and the work lands
+        at its next required gate rather than anywhere the caller names
+        (SYRD-133).
+        """
+        ticket_id = str(ticket_id).strip().upper()
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.recover_stalled_ticket(%s, %s);",
+                    (ticket_id, str(reason)),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def request_dependency(
         self, ticket_id: str, *, awaiting_role: str, reason: str, caller_role: str
     ) -> dict[str, Any]:

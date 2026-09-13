@@ -769,6 +769,13 @@ class TicketBoardWriteClient:
     def complete_task(self, ticket_id: str, *, text: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "complete_task", {"text": text}, caller_role=caller_role)
 
+    def recover_stalled_ticket(
+        self, ticket_id: str, *, reason: str, caller_role: str | None = None
+    ) -> dict[str, Any]:
+        return self._ticket_action(
+            ticket_id, "recover_stalled_ticket", {"reason": reason}, caller_role=caller_role
+        )
+
     def request_dependency(
         self, ticket_id: str, *, role: str, reason: str, caller_role: str | None = None
     ) -> dict[str, Any]:
@@ -1071,6 +1078,12 @@ def _build_parser() -> argparse.ArgumentParser:
     request_exempt.add_argument("ticket_id")
     request_exempt.add_argument("--reason", required=True)
 
+    recover_stalled = subparsers.add_parser(
+        "recover-stalled-ticket",
+        help="take the transition a stalled ticket's owner did not take, to its next required gate",
+    )
+    recover_stalled.add_argument("ticket_id")
+    recover_stalled.add_argument("--reason", required=True, help="why the recovery is being made")
     request_dependency = subparsers.add_parser(
         "request-dependency",
         help="record why this work is waiting and hand it to the role it waits on, in one action",
@@ -1261,6 +1274,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.start_task(args.ticket_id, text=args.text)
         elif command == "complete_task":
             response = client.complete_task(args.ticket_id, text=args.text)
+        elif command == "recover_stalled_ticket":
+            response = client.recover_stalled_ticket(args.ticket_id, reason=args.reason)
         elif command == "request_dependency":
             response = client.request_dependency(
                 args.ticket_id, role=args.role, reason=args.reason

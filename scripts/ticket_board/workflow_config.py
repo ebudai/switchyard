@@ -49,6 +49,9 @@ CAPABILITIES = {
     # tenant that does not want it simply does not grant it, and the handler
     # decides from the document rather than from a name.
     "director_edit",
+    # SYRD-133: taking the transition a stalled ticket's owner did not take,
+    # bounded to the one declared step that owner could have taken.
+    "recover_stalled_ticket",
 }
 # The control floor: what a declarative document may never take away from the
 # director, and what it may never give. A tenant configures its own pipeline;
@@ -69,6 +72,9 @@ CAPABILITIES = {
 #                              path to an outbound push, so a project without it
 #                              has work that can be committed and never shipped
 #                              (SYRD-93)
+#   recover_stalled_ticket  -> take the transition a stalled ticket's owner did
+#                              not take, to its next required gate and no
+#                              further (SYRD-133)
 #   director_edit           -> the generic edit: the one way to move a field the
 #                              transition table has nothing to say about, which
 #                              is what a Director reworking somebody else's
@@ -86,6 +92,12 @@ DIRECTOR_CONTROL_CAPABILITIES = frozenset(
         "dismiss_notification",
         "director_edit",
         "resolve_publication",
+        # SYRD-133: without it, an owner who reports completion and does not
+        # transition leaves work nobody can move -- their own submission is
+        # owner-scoped, and force_move/override_move are capabilities a document
+        # may not grant at all. A control the document does not grant is not a
+        # control, which is what SYRD-131 discovered at the worst moment.
+        "recover_stalled_ticket",
     }
 )
 # The subset that identifies which role is the controller, for consumers that

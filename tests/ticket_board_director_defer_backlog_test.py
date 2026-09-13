@@ -75,7 +75,7 @@ def before_later_releases(document: dict) -> dict:
     (SYRD-93).
     """
     document = copy.deepcopy(document)
-    later = {"request_publication", "resolve_publication"}
+    later = {"request_publication", "resolve_publication", "recover_stalled_ticket"}
     for role in document.get("roles", []):
         role["capabilities"] = [c for c in role.get("capabilities", []) if c not in later]
     return document

@@ -153,6 +153,14 @@ leave it. Analysis is yours; a ticket sitting there looks like work in progress.
 route it to an implementer for code. An implementer refusing work it was told not to start
 is doing its job — that refusal is a signal you routed wrongly.
 
+**Recover a stalled ticket rather than overriding it.** When an owner reports
+completion or a dependency and does not transition, `recover-stalled-ticket <id>
+--reason "..."` takes the one declared no-code transition that owner could have
+taken: no gate or sign-off is skipped, the work stops at its next required gate,
+and that gate's owner is notified once. It always exists. `force-move` and
+`override-move` are capabilities a document may not grant at all -- on syrd it
+grants neither, and both are refused (SYRD-133).
+
 **Narrate every override.** `force-move` and `override-move` bypass the workflow;
 `edit-fields` bypasses the normal field-specific operations. Each exceptional use needs a
 comment explaining why. Never fake a signoff.

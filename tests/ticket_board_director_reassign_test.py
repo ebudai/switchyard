@@ -341,7 +341,7 @@ def run_checks(app, admin, base, write_token, document):
     # migration reinstalls is the one from its own release, which does not know
     # them either (SYRD-83).
     later = copy.deepcopy(without)
-    later_capabilities = {"director_edit", "request_publication", "resolve_publication"}
+    later_capabilities = {"director_edit", "request_publication", "resolve_publication", "recover_stalled_ticket"}
     for role in later["roles"]:
         role["capabilities"] = [c for c in role["capabilities"] if c not in later_capabilities]
     stale = json.dumps(later)
@@ -387,13 +387,17 @@ def run_checks(app, admin, base, write_token, document):
     # This file reinstalled the validator of its own release, which is what a
     # tenant at that release runs. Finish the upgrade the way the runner does,
     # in order, so what the rest of this exercises is a board on today's code.
-    for name in (
-        "pgu927_syrd82_director_capability_floor.sql",
-        "pgu928_syrd83_director_edit.sql",
-        "pgu929_syrd92_director_defer_backlog.sql",
-        "pgu930_syrd93_publication_requests.sql",
-    ):
-        t.psql(admin, "BEGIN;\n" + (ROOT / "scripts/ticket_board/migrations" / name).read_text() + "\nCOMMIT;")
+    # Everything numbered after this one, not a list that has to be remembered:
+    # a hand-maintained tail silently stops being "today's code" the moment a
+    # migration is added after it, and then today's document fails against the
+    # validator of whatever release the list ended at (SYRD-133).
+    later = sorted(
+        path
+        for path in (ROOT / "scripts/ticket_board/migrations").glob("pgu*.sql")
+        if path.name > "pgu926_syrd77_director_reassign.sql"
+    )
+    for path in later:
+        t.psql(admin, "BEGIN;\n" + path.read_text() + "\nCOMMIT;")
     after = app.workflow_document()
 
     app.apply_workflow(

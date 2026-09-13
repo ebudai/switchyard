@@ -129,6 +129,154 @@ def assignee_of(admin: str, ticket: str) -> str:
     return t.psql(admin, f"SELECT state || '/' || assignee FROM ticket_board.tickets WHERE id = '{ticket}';")
 
 
+def recovery_case(cluster) -> int:
+    """The other half of the same stall: the recovery SYRD-131 did not have.
+
+    Ops finished the work, said so in a comment, and left the ticket in
+    `in_progress/ops`. The owner's own no-code submission is `owner_scoped`, so
+    the Director could not take it for them, and `force_move`/`override_move`
+    are not capabilities this document grants -- the documented last resort did
+    not exist, and the Director had to narrate an override.
+
+    In a database of its own, because the serial-focus redirect decides where a
+    seeded ticket lands from what the rest of the board is holding, and this
+    case is about one ticket and one transition.
+    """
+    import json as _json
+
+    dbname = "syrd133_recovery"
+    admin = t.conninfo(cluster.socket_dir, cluster.port, dbname)
+    t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", dbname])
+    t.psql(admin, t.SCHEMA_PATH.read_text(encoding="utf-8"))
+    try:
+        t.create_roles(admin)
+    except AssertionError as exc:
+        if "already exists" not in str(exc):
+            raise
+    t.psql(admin, t.RBAC_PATH.read_text(encoding="utf-8"))
+
+    workflow = _json.loads((ROOT / "examples/workflows/inspection.json").read_text(encoding="utf-8"))
+    workflow["project"] = "cerulean"
+    workflow.setdefault("reassign", {})
+    workflow.setdefault("remove_stages", [])
+    for role in workflow["roles"]:
+        # The control role needs it -- and one role that is NOT the control role
+        # is given it too, so the case below can tell the capability apart from
+        # the authority. Holding it is not the same as being allowed to use it.
+        if role["name"] in {"director", "audit"} and "recover_stalled_ticket" not in role["capabilities"]:
+            role["capabilities"].append("recover_stalled_ticket")
+    payload = _json.dumps(workflow).replace("'", "''")
+    t.psql(
+        admin,
+        "SET ROLE ticket_board_service;\n"
+        "SELECT set_config('ticket_board.caller_role', 'director', false);\n"
+        "SELECT set_config('ticket_board.project', 'cerulean', false);\n"
+        f"SELECT ticket_board.apply_declared_workflow('{payload}'::jsonb);",
+    )
+
+    def as_director(statement: str) -> str:
+        return t.psql(
+            admin,
+            "SET ROLE ticket_board_service;\n"
+            "SELECT set_config('ticket_board.caller_role', 'director', false);\n"
+            + statement,
+        )
+
+    returned = 0
+    t.seed_postgres_ticket(
+        admin, "PGU-170", title="Finished but not submitted", state="in_progress", assignee="ops"
+    )
+    assert assignee_of(admin, "PGU-170") == "in_progress/ops", assignee_of(admin, "PGU-170")
+    comment_as(admin, "PGU-170", "ops", "All the acceptance checks pass. Done.", ago="5 minutes")
+    clear_queue(admin)
+
+    # The wall the live sequence hit: the owner's own action is not the
+    # Director's to take.
+    refused = ""
+    try:
+        as_director(
+            "SELECT ticket_board.perform_workflow_action('PGU-170', "
+            "'submit_to_audit_without_commit', '{\"reason\": \"done\"}'::jsonb);"
+        )
+    except AssertionError as exc:
+        refused = str(exc)
+    assert "actor cannot perform workflow action" in refused, refused
+    assert assignee_of(admin, "PGU-170") == "in_progress/ops", assignee_of(admin, "PGU-170")
+
+    # The recovery takes exactly that transition, in the Director's name.
+    as_director(
+        "SELECT ticket_board.recover_stalled_ticket('PGU-170', "
+        "'Owner reported completion and did not transition; advancing to the required gate.');"
+    )
+    moved = assignee_of(admin, "PGU-170")
+    # The NEXT REQUIRED gate, which the workflow decides and this does not: the
+    # ticket needs no inspection, so the declared gate skips inspection and the
+    # work lands at audit. The point is that it is a gate and not the end.
+    assert moved == "audit/audit", moved
+    assert not moved.startswith("in_progress/"), moved
+    # Audit is still required and nothing was signed off: the recovery advanced
+    # the work to its next gate, it did not pass it.
+    gates = t.psql(
+        admin,
+        "SELECT needs_audit::text || '/' || audit_signoff::text || '/' || inspector_signoff::text "
+        "FROM ticket_board.tickets WHERE id = 'PGU-170';",
+    )
+    assert gates == "true/false/false", gates
+    # The narration is the Director's, rather than words put in the owner's mouth.
+    narrated = t.psql(
+        admin,
+        "SELECT who FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-170' "
+        "ORDER BY position DESC LIMIT 1;",
+    )
+    assert narrated == "director", narrated
+    # And the gate's owner is told, exactly once.
+    told = [row for row in queued(admin, "PGU-170") if row["kind"] == "transition"]
+    assert len(told) == 1, queued(admin, "PGU-170")
+    assert told[0]["target_role"] == moved.split("/", 1)[1], (told, moved)
+    returned += 1
+
+    # A reason is required; a ticket with nothing to take says so rather than
+    # being moved somewhere by force; and only the control role may do it.
+    t.seed_postgres_ticket(admin, "PGU-171", title="Nothing to recover", state="audit", assignee="audit")
+    for arguments, expected in (
+        ("'PGU-170', '  '", "requires a reason"),
+        ("'PGU-171', 'nothing to take'", "nothing to"),
+    ):
+        failed = ""
+        try:
+            as_director(f"SELECT ticket_board.recover_stalled_ticket({arguments});")
+        except AssertionError as exc:
+            failed = str(exc)
+        assert expected in failed, (arguments, failed)
+    # Capability is not authority. `audit` holds the capability in this document
+    # and is still refused, by the rule that names control rather than a role.
+    not_control = ""
+    try:
+        t.psql(
+            admin,
+            "SET ROLE ticket_board_service;\n"
+            "SELECT set_config('ticket_board.caller_role', 'audit', false);\n"
+            "SELECT ticket_board.recover_stalled_ticket('PGU-170', 'let me out');",
+        )
+    except AssertionError as exc:
+        not_control = str(exc)
+    assert "only the control role may recover a stalled ticket, not audit" in not_control, not_control
+    # And a role without the capability never reaches that rule at all.
+    no_capability = ""
+    try:
+        t.psql(
+            admin,
+            "SET ROLE ticket_board_service;\n"
+            "SELECT set_config('ticket_board.caller_role', 'ops', false);\n"
+            "SELECT ticket_board.recover_stalled_ticket('PGU-170', 'let me out');",
+        )
+    except AssertionError as exc:
+        no_capability = str(exc)
+    assert "ops cannot call recover_stalled_ticket" in no_capability, no_capability
+    returned += 1
+    return returned
+
+
 def main() -> int:
     checks = 0
     with temporary_cluster(prefix="syrd133-dependency-", shutdown="immediate") as cluster:
@@ -231,8 +379,14 @@ def main() -> int:
         assert queued(admin, "PGU-150") == [], queued(admin, "PGU-150")
         checks += 1
 
-        # RE-ARMED when the stall is a different stall. The owner came back and
-        # went idle again: that is a new stall and deserves a new escalation.
+        # RE-ARMED when the stall is a different stall. Not when the listener's
+        # idea of "idle since" wobbles -- it recomputes that every pass -- but
+        # when something actually happened on the ticket and it stalled again.
+        t.psql(
+            admin,
+            "UPDATE ticket_board.ticket_notification_state "
+            "SET last_activity_at = clock_timestamp() WHERE ticket_id = 'PGU-150';",
+        )
         assert run_turn_end(admin, idle_roles=("main",), idle_for="10 seconds") == 1, queued(admin, "PGU-150")
         again = queued(admin, "PGU-150")
         assert [row["target_role"] for row in again] == ["director"], again
@@ -279,6 +433,8 @@ def main() -> int:
         ):
             assert queued(admin, ticket) == [], (why, queued(admin, ticket))
         checks += 1
+
+        checks += recovery_case(cluster)
 
     print(f"dependency_handoff_test: {checks} checks ok")
     return 0

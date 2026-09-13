@@ -87,6 +87,10 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # The same permission as await_role, because it IS await_role plus the
     # sentence that explains it (SYRD-133).
     "request_dependency": CALLER_ROLES - {"user"},
+    # Bounded recovery for a ticket whose owner left it behind. Control
+    # authority is what actually admits it; this is the pre-declarative table
+    # (SYRD-133).
+    "recover_stalled_ticket": {"director"},
     "clear_awaiting_role": CALLER_ROLES - {"user"},
     "inspector_sign_off": {"inspector"},
     "inspector_kick_back": {"inspector"},
@@ -1399,6 +1403,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
         elif operation == "complete_task":
             updated = self.app.complete_task(ticket_id, self.action_comment_text(payload), caller_role=caller)
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "recover_stalled_ticket":
+            updated = self.app.recover_stalled_ticket(
+                ticket_id,
+                reason=str(payload.get("reason", payload.get("text", ""))),
+                caller_role=caller,
+            )
             self.events.notify_change(self.app.store_signature())
             self.send_json({"ticket": updated})
             return

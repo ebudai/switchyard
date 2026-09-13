@@ -303,7 +303,7 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
     # A tenant from before either release: it has neither the capability the
     # floor gained in SYRD-82 nor the one it gained in SYRD-83.
     stale = base_document()
-    later_capabilities = ("reassign", "director_edit", "resolve_publication")
+    later_capabilities = ("reassign", "director_edit", "resolve_publication", "recover_stalled_ticket")
     director_of(stale)["capabilities"] = [
         c for c in director_of(stale)["capabilities"] if c not in later_capabilities
     ]
@@ -311,14 +311,14 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
         role["capabilities"] = [c for c in role["capabilities"] if c != "request_publication"]
     payload = json.dumps(stale)
     assert "$d$" not in payload
+    # The whole ordered tail from the release that introduced the floor, not a
+    # remembered list: the floor grows, and a list that stops at one release
+    # would keep passing while the newest capability never reached anybody
+    # (SYRD-133).
     migrations = [
-        (ROOT / "scripts/ticket_board/migrations" / name).read_text(encoding="utf-8")
-        for name in (
-            "pgu927_syrd82_director_capability_floor.sql",
-            "pgu928_syrd83_director_edit.sql",
-            "pgu929_syrd92_director_defer_backlog.sql",
-            "pgu930_syrd93_publication_requests.sql",
-        )
+        path.read_text(encoding="utf-8")
+        for path in sorted((ROOT / "scripts/ticket_board/migrations").glob("pgu*.sql"))
+        if path.name >= "pgu927_syrd82_director_capability_floor.sql"
     ]
 
     with temporary_cluster(prefix="floor-upgrade-", shutdown="immediate") as cluster:
@@ -327,6 +327,18 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
             ["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", "floor_upgrade"]
         )
         api.psql(conn, SCHEMA_PATH.read_text(encoding="utf-8"))
+        # A real tenant running this tail already has the service and listener
+        # roles, because rbac.sql creates them before any upgrade; migrations in
+        # the tail grant on them by name, without guarding.
+        api.psql(
+            conn,
+            "\n".join(
+                "DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname="
+                f"'{role}') THEN CREATE ROLE {role} LOGIN NOSUPERUSER NOCREATEDB"
+                " NOCREATEROLE NOREPLICATION; END IF; END $r$;"
+                for role in ("ticket_board_service", "ticket_board_listener")
+            ),
+        )
         # Seeded the way a real pre-floor tenant's row already is: written when
         # no validator forbade it, so it is in the table without ever having
         # passed today's rules.

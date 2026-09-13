@@ -82,6 +82,7 @@ around it.
 - `edit_fields`
 - `merge`
 - `reassign`
+- `recover_stalled_ticket`
 - `resolve_publication`
 - `set_blockers`
 - `set_manually_controlled`
@@ -252,7 +253,37 @@ When a pane did not get told:
 4. Re-route rather than re-sending: a transition notifies, and a manual message
    on top of a transition delivers the same thing twice.
 
+## Recovering a stalled ticket
+
+When an active ticket's owner reports the work finished -- or reports a
+dependency -- and does not transition, the ticket stays theirs and stops. Their
+own submission is owner-scoped, so you cannot take it for them.
+
+```bash
+ticket-board-write recover-stalled-ticket <id> --reason "why you are moving it"
+```
+
+It takes the one declared no-code transition that ticket's owner could have
+taken, through the ordinary executor: it cannot skip a gate, a sign-off or a
+blocker, it stops at the next required gate rather than anywhere you name, the
+reason is recorded in your name, and that gate's owner is notified once. If the
+stage offers no such transition, or offers more than one, it refuses and says so
+-- route, reassign or defer instead. This is a repair, not a routing tool.
+
+The board tells you about these on its own: an active ticket whose owner goes
+idle without advancing, blocking or handing off produces one escalation to you
+per stall. Once, not once per wave -- if you see the same stall twice, something
+on the ticket changed in between.
+
 ## Last-resort overrides
+
+**Check what your workflow actually grants before relying on these.** `force-move`
+and `override-move` are capabilities a tenant's document may or may not give the
+control role; on syrd it grants neither, so both are refused outright
+(`director cannot call force_move`). A control you are refused is not a last
+resort. `recover-stalled-ticket` above is the bounded move that always exists,
+and it is the right one for a stalled ticket; reach for the rest only when the
+document grants them and the situation is genuinely outside the workflow.
 
 `force-move` and `override-move` bypass the workflow. `edit-fields` bypasses the
 field-specific operations. `merge` folds one ticket into another. Each is

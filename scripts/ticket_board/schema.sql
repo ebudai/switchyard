@@ -4099,7 +4099,11 @@ RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
     SELECT ARRAY[
         'reassign', 'set_manually_controlled', 'set_blockers',
         'merge', 'edit_fields', 'dismiss_notification', 'director_edit',
-        'resolve_publication'
+        'resolve_publication',
+        -- The control role has to be able to unstick work its owner left
+        -- behind. Without it the documented recovery is a control the document
+        -- does not grant, which is what SYRD-131 ran into (SYRD-133).
+        'recover_stalled_ticket'
     ]::text[];
 $$;
 
@@ -6796,7 +6800,8 @@ BEGIN
            OR EXISTS (SELECT FROM jsonb_array_elements_text(r->'capabilities') c WHERE c NOT IN
                ('create_ticket','file_bug','add_comment','edit_fields','await_role','clear_awaiting_role',
                 'set_blockers','set_manually_controlled','crop_attachment','merge','dismiss_notification',
-                'reassign','director_edit','request_publication','resolve_publication')) THEN
+                'reassign','director_edit','request_publication','resolve_publication',
+                'recover_stalled_ticket')) THEN
             RAISE EXCEPTION 'invalid role policy: %', r->>'name';
         END IF;
         IF (r->>'runtime' IS NULL) <> (r->>'target' IS NULL)
@@ -7088,7 +7093,15 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.enforce_declared_ticket_update(previous ticket_board.tickets, proposed ticket_board.tickets)
 RETURNS ticket_board.tickets LANGUAGE plpgsql AS $$
 DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(proposed); tr jsonb; source_stage jsonb; dest jsonb;
-    action_name text:=current_setting('ticket_board.workflow_action',true); actor text:=ticket_board.current_app_actor(); target text;
+    action_name text:=current_setting('ticket_board.workflow_action',true);
+    -- Whose transition this is. Normally the caller's own; on a recovery the
+    -- executor names the OWNER here, because the step being taken has to be one
+    -- the owner could have taken and this trigger asks exactly that question
+    -- (SYRD-133). Set transaction-locally by the executor immediately before the
+    -- update, in the same way `workflow_action` already is, and cleared after.
+    actor text:=coalesce(
+        nullif(current_setting('ticket_board.workflow_actor',true),''),
+        ticket_board.current_app_actor()); target text;
     reset text; flag record; owners text[]; fallback text; loops int:=0;
     queued_for text; reserved_by text;
 BEGIN
@@ -7280,12 +7293,23 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.perform_workflow_action(id text, action text, payload jsonb DEFAULT '{}'::jsonb)
+-- The executor, with the acting role and the narrating role named rather than
+-- read from the session. `perform_workflow_action` passes the caller as both,
+-- which is every ordinary transition. The recovery path passes the OWNER as the
+-- actor -- because the transition has to be one the owner could have taken --
+-- and the control role as the narrator, so the comment is in the name of
+-- whoever authorized it rather than words put in the owner's mouth (SYRD-133).
+--
+-- Granted to nobody: it takes the actor as an argument, so reaching it would be
+-- reaching past the actor check. Its two callers are SECURITY DEFINER functions
+-- in this schema, and both establish who they are first.
+CREATE OR REPLACE FUNCTION ticket_board.perform_workflow_action_as(
+    p_actor text, p_narrator text, id text, action text, payload jsonb DEFAULT '{}'::jsonb)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=ticket_board,pg_temp AS $$
-DECLARE cfg jsonb:=ticket_board.declared_workflow(); t ticket_board.tickets; tr jsonb; actor text:=ticket_board.current_app_actor(); candidates int; handoff text; source_stage jsonb;
+DECLARE cfg jsonb:=ticket_board.declared_workflow(); t ticket_board.tickets; tr jsonb; actor text:=p_actor; candidates int; handoff text; source_stage jsonb;
 BEGIN
     IF ticket_board.current_actor_role()<>'ticket_board_service' OR actor IS NULL THEN RAISE EXCEPTION 'workflow action requires registered service actor' USING ERRCODE='42501'; END IF;
-    SELECT * INTO STRICT t FROM ticket_board.tickets WHERE tickets.id=perform_workflow_action.id FOR UPDATE;
+    SELECT * INTO STRICT t FROM ticket_board.tickets WHERE tickets.id=perform_workflow_action_as.id FOR UPDATE;
     SELECT count(*) INTO candidates FROM jsonb_array_elements(cfg->'transitions') x WHERE x->>'from'=t.state AND x->>'action'=action
         AND (payload->>'target' IS NULL OR x->>'to'=payload->>'target');
     IF candidates<>1 THEN RAISE EXCEPTION 'unknown or ambiguous workflow action; specify target'; END IF;
@@ -7302,15 +7326,17 @@ BEGIN
     IF (tr->>'require_reason')::boolean AND btrim(coalesce(payload->>'text',payload->>'reason',''))='' THEN RAISE EXCEPTION 'reason required'; END IF;
     IF payload ? 'commit_hash' AND (payload->>'commit_hash') !~ '^[0-9a-fA-F]{7,40}$' THEN RAISE EXCEPTION 'invalid commit hash'; END IF;
     IF btrim(coalesce(payload->>'text',payload->>'reason',''))<>'' THEN
-        PERFORM ticket_board.append_ticket_comment(t.id,actor,coalesce(payload->>'text',payload->>'reason'));
+        PERFORM ticket_board.append_ticket_comment(t.id,coalesce(p_narrator,actor),coalesce(payload->>'text',payload->>'reason'));
     END IF;
     PERFORM set_config('ticket_board.held_review_target','',true);
     PERFORM set_config('ticket_board.workflow_action',action,true);
+    PERFORM set_config('ticket_board.workflow_actor',actor,true);
     UPDATE ticket_board.tickets SET state=tr->>'to',
         assignee=coalesce(nullif(payload->>'assignee',''),assignee),
         commit_hash=coalesce(payload->>'commit_hash',commit_hash)
         WHERE tickets.id=t.id;
     PERFORM set_config('ticket_board.workflow_action','',true);
+    PERFORM set_config('ticket_board.workflow_actor','',true);
     handoff:=nullif(current_setting('ticket_board.held_review_target',true),'');
     PERFORM set_config('ticket_board.held_review_target','',true);
     IF handoff IS NOT NULL THEN
@@ -7320,6 +7346,110 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- The public entry point: the caller acts as themselves and narrates as
+-- themselves, which is every ordinary transition.
+CREATE OR REPLACE FUNCTION ticket_board.perform_workflow_action(id text, action text, payload jsonb DEFAULT '{}'::jsonb)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=ticket_board,pg_temp AS $$
+BEGIN
+    PERFORM ticket_board.perform_workflow_action_as(
+        ticket_board.current_app_actor(), NULL, id, action, payload);
+END;
+$$;
+
+--
+-- SYRD-133: the recovery the Director skill promised and the document did not
+-- grant.
+--
+-- On SYRD-131 Ops finished the work, said so in a comment, and left the ticket
+-- in `in_progress/ops`. The owner's own no-code submission is `owner_scoped`, so
+-- the Director could not take it for them, and `force_move` and `override_move`
+-- were refused outright -- this tenant's document grants neither, so the
+-- documented last resort did not exist. The Director had to narrate an override.
+--
+-- This is the bounded version of that move, and every limit is deliberate:
+--
+-- * it performs a DECLARED transition the owner could have taken, so it cannot
+--   skip a gate, a sign-off or a blocker -- all of those are enforced by the
+--   executor it calls, not reimplemented here;
+-- * exactly one such transition must exist, because choosing between two would
+--   be the board deciding what the owner meant;
+-- * it requires a reason, which is recorded in the control role's own name;
+-- * it advances to that transition's destination and no further, so the next
+--   required gate is where the work lands and that gate's owner is notified by
+--   the ordinary transition notification -- once.
+--
+CREATE OR REPLACE FUNCTION ticket_board.recover_stalled_ticket(
+    p_ticket text,
+    p_reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    caller text;
+    reason text := btrim(coalesce(p_reason, ''));
+    cfg jsonb := ticket_board.declared_workflow();
+    t ticket_board.tickets%ROWTYPE;
+    candidates integer;
+    chosen text;
+BEGIN
+    IF cfg IS NULL THEN
+        RAISE EXCEPTION 'recovery requires a declared workflow; this board has none'
+            USING ERRCODE = '42501';
+    END IF;
+    PERFORM ticket_board.require_actor(ARRAY[]::text[], 'recover_stalled_ticket');
+    caller := ticket_board.current_app_actor();
+    -- Control authority decides, derived from capabilities. A tenant that hands
+    -- the capability to a second role still gets one recoverer, and no rule
+    -- here spells the name `director` (SYRD-49).
+    IF NOT ticket_board.role_controls_project(caller) THEN
+        RAISE EXCEPTION 'only the control role may recover a stalled ticket, not %', caller
+            USING ERRCODE = '42501';
+    END IF;
+    IF reason = '' THEN
+        RAISE EXCEPTION 'recovering a stalled ticket requires a reason';
+    END IF;
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % not found', p_ticket;
+    END IF;
+    SELECT count(*) INTO candidates
+      FROM jsonb_array_elements(cfg->'transitions') x
+     WHERE x->>'from' = t.state
+       AND coalesce((x->>'allow_no_code')::boolean, false)
+       AND x->'actors' ? t.assignee;
+    IF candidates = 0 THEN
+        RAISE EXCEPTION
+            'no no-code transition out of %/% is available to its owner, so there is nothing to '
+            'recover: route, reassign or defer it instead', t.state, t.assignee
+            USING ERRCODE = '42501';
+    END IF;
+    IF candidates > 1 THEN
+        RAISE EXCEPTION
+            '%/% offers % no-code transitions to its owner; recovery will not choose between them',
+            t.state, t.assignee, candidates
+            USING ERRCODE = '42501';
+    END IF;
+    SELECT x->>'action' INTO chosen
+      FROM jsonb_array_elements(cfg->'transitions') x
+     WHERE x->>'from' = t.state
+       AND coalesce((x->>'allow_no_code')::boolean, false)
+       AND x->'actors' ? t.assignee;
+    -- The owner's transition, authorized and narrated by the control role. Every
+    -- gate the owner would have met is met here, because this is the same
+    -- executor taking the same declared step.
+    PERFORM ticket_board.perform_workflow_action_as(
+        t.assignee, caller, t.id, chosen,
+        jsonb_build_object('reason', reason));
+END;
+$$;
+
+REVOKE ALL ON FUNCTION ticket_board.perform_workflow_action_as(text, text, text, text, jsonb) FROM PUBLIC;
+
 
 
 CREATE OR REPLACE FUNCTION ticket_board.enforce_ticket_workflow_update()
@@ -8322,7 +8452,7 @@ BEGIN
                       candidates.id,
                       candidates.state,
                       candidates.assignee,
-                      candidates.idle_since_at
+                      escalated.last_activity_at
                   )
             )
         )
@@ -8373,7 +8503,8 @@ BEGIN
             -- racing cannot both decide they are the first.
             UPDATE ticket_board.ticket_notification_state
                SET idle_escalation_key = ticket_board.idle_escalation_identity(
-                       candidate.id, candidate.state, candidate.assignee, candidate.idle_since_at
+                       candidate.id, candidate.state, candidate.assignee,
+                       ticket_notification_state.last_activity_at
                    )
              WHERE ticket_id = candidate.id;
         END IF;
@@ -8783,11 +8914,18 @@ $$;
 -- Which stall an escalation was about. Identity rather than a flag: the same
 -- ticket can stall again, and a second stall deserves a second escalation
 -- (SYRD-133).
+--
+-- Deliberately NOT the moment the owner's pane went idle, which was the first
+-- version of this. That value is recomputed by the listener on every pass, so
+-- any jitter in it -- a restart, a re-probe, a clock that moved -- reads as a
+-- new stall and the escalation repeats, which is the defect this exists to
+-- stop. What makes a stall a different stall is that something happened on the
+-- ticket since the last one: a new stage, a new owner, or any activity at all.
 CREATE OR REPLACE FUNCTION ticket_board.idle_escalation_identity(
     p_ticket text,
     p_state text,
     p_assignee text,
-    p_idle_since timestamptz
+    p_last_activity timestamptz
 )
 RETURNS text
 LANGUAGE sql
@@ -8795,7 +8933,7 @@ IMMUTABLE
 AS $$
     SELECT coalesce(p_ticket, '') || ':' || coalesce(p_state, '') || ':'
         || coalesce(p_assignee, '') || ':'
-        || coalesce(extract(epoch FROM p_idle_since)::bigint::text, '');
+        || coalesce(extract(epoch FROM p_last_activity)::bigint::text, '');
 $$;
 
 --

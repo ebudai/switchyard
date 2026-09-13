@@ -186,7 +186,7 @@ def before_this_release(document: dict) -> dict:
     for role in document["roles"]:
         role["capabilities"] = [
             c for c in role["capabilities"]
-            if c not in ("request_publication", "resolve_publication")
+            if c not in ("request_publication", "resolve_publication", "recover_stalled_ticket")
         ]
     return document
 

@@ -52,14 +52,6 @@ LEGACY_HOOK_NAME = "pgu-ticket-board-pane-idle-hook"
 DIRECTOR_SKILL_NAME = "switchyard-director"
 
 
-def _skill_instruction(role: str) -> str:
-    """The pointer a role's fresh session receives, taken from the hook itself."""
-    return _load_hook_module()._skill_instruction_for_role(role)
-
-
-BOARD_SKILL_INSTRUCTION = (
-    "Load the switchyard-board skill before reading from or writing to the ticket board."
-)
 PANE_TARGETS = (
     "pgu-director:0.0",
     "pgu-main:0.0",
@@ -884,9 +876,10 @@ def test_session_start_resume_injection_is_scoped_to_resume_sources_and_active_t
                 env=_hook_env(TICKET_BOARD_URL=board_url),
             )
 
-    # A fresh start carries the board-skill pointer and nothing else; the
-    # resume paths are what inject active work.
-    assert json.loads(startup.stdout)["hookSpecificOutput"]["additionalContext"] == BOARD_SKILL_INSTRUCTION
+    # A fresh start with no role onboarding has nothing to say, so it says
+    # nothing at all. It used to carry the board-skill pointer, which is the
+    # repetition SYRD-106 removed; the resume paths still inject active work.
+    assert startup.stdout.strip() == ""
     resume_context = json.loads(resume.stdout)["hookSpecificOutput"]["additionalContext"]
     assert "Your session just resumed." in resume_context
     assert "Your context was just compacted." not in resume_context
@@ -982,10 +975,8 @@ def test_director_onboarding_pointer_is_scoped_to_director_role() -> None:
             env=_hook_env(),
         )
 
-    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert context == _skill_instruction("ops") == BOARD_SKILL_INSTRUCTION
-    assert DIRECTOR_SKILL_NAME not in context
-    assert "onboarding packet" not in context
+    # Nothing to say, so nothing emitted, for an implementer as for anyone.
+    assert proc.stdout.strip() == ""
 
 
 def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
@@ -1014,11 +1005,9 @@ def test_director_onboarding_pointer_is_silent_when_packet_absent() -> None:
             env=_hook_env(),
         )
 
-    context = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
-    # The Director is the one role pointed at the overlay as well.
-    assert context == _skill_instruction("director")
-    assert DIRECTOR_SKILL_NAME in context
-    assert "onboarding packet" not in context
+    # The Director used to be the one role pointed at the overlay as well, and
+    # is now told no more than anybody else: the overlay is in its catalog.
+    assert proc.stdout.strip() == ""
 
 
 def test_clear_session_start_injects_assigned_in_progress_ticket_context() -> None:
@@ -1941,9 +1930,9 @@ def test_gemini_installed_hooks_embed_project_state_and_session_dirs() -> None:
         session = json.loads((session_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
         state = json.loads((state_dir / "otto-inspector_0.0.json").read_text(encoding="utf-8"))
         # agy names no start kind either, and its wrapper passes hook JSON
-        # through, printing "{}" only when the hook stays silent.
-        start_context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert start_context == BOARD_SKILL_INSTRUCTION
+        # through, printing "{}" only when the hook stays silent -- which is now
+        # what a fresh start with no onboarding produces (SYRD-106).
+        assert json.loads(start.stdout) == {}
         assert session["session_id"] == "gemini_otto_session_456"
         assert session["source"] == "gemini.SessionStart"
         assert state["state"] == "idle"
@@ -2002,11 +1991,10 @@ def test_hermes_installed_hooks_embed_project_state_and_session_dirs() -> None:
 
         session = json.loads((session_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
         state = json.loads((state_dir / "otto-bulk_0.0.json").read_text(encoding="utf-8"))
-        # The real Hermes payload names no start kind, and a Hermes pane still
-        # has to be told which skill to load before it touches the board.
-        start_context = json.loads(start.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert start_context == BOARD_SKILL_INSTRUCTION
-        assert "switchyard-board" in start_context
+        # The real Hermes payload names no start kind. A Hermes pane is told
+        # nothing about skills now: its catalog carries them, and the sentence
+        # that used to be injected here was paid for on every start (SYRD-106).
+        assert start.stdout.strip() in ("", "{}"), start.stdout
         assert session["session_id"] == "20260823_140512_b49a1a"
         assert session["source"] == "hermes.on_session_start"
         assert busy_state["state"] == "busy"

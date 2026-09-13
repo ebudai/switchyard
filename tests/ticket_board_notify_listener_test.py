@@ -436,13 +436,14 @@ def hook_gate(tmp_path: Path) -> tuple[PaneHookStateStore, PaneActivityGate]:
 
 
 def _delivered(target: str, message: str) -> tuple[str, str]:
-    """What a pane actually receives for a hand-off: the wording plus its pointer.
+    """What a pane actually receives for a hand-off: the wording, and nothing else.
 
-    The pointer is role-scoped -- a Director is sent to the overlay as well --
-    so the expectation is derived from the target rather than restated.
+    A skill pointer used to be appended here for every transition, and to every
+    role. It is gone: the runtimes install the skill and advertise it through
+    their own catalogs, so a hand-off carries the ticket and the state and
+    leaves the tooling to say what tooling is for (SYRD-106).
     """
-    role = target.split(":", 1)[0].split("-", 1)[1]
-    return target, notify_listener.with_board_skill_instruction(message, kind="transition", role=role)
+    return target, message
 
 
 def test_hook_state_writer_and_gate_idle_before_arrival_delivers_immediately() -> None:

@@ -44,29 +44,7 @@ UUID_RE = re.compile(
 SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 SESSION_START_FRESH_SOURCE = "startup"
-BOARD_SKILL_NAME = "switchyard-board"
-DIRECTOR_SKILL_NAME = "switchyard-director"
 DIRECTOR_ROLE = "director"
-# A pointer, not the skill: every runtime already has the body installed in its
-# own skills directory, and pasting it into each session would crowd out the
-# thing the session was started to do.
-BOARD_SKILL_INSTRUCTION = (
-    f"Load the {BOARD_SKILL_NAME} skill before reading from or writing to the ticket board."
-)
-# The Director overlay is named only to the Director. Every role's home holds
-# the file -- panes share a home -- so this decides which session is told to
-# read it, not which session can. The board refuses privileged operations from
-# any other caller either way.
-DIRECTOR_SKILL_INSTRUCTION = (
-    f"Load the {BOARD_SKILL_NAME} and {DIRECTOR_SKILL_NAME} skills before reading from or "
-    "writing to the ticket board."
-)
-
-
-def _skill_instruction_for_role(role: str) -> str:
-    if role.strip().lower() == DIRECTOR_ROLE:
-        return DIRECTOR_SKILL_INSTRUCTION
-    return BOARD_SKILL_INSTRUCTION
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 ONBOARDING_PACKET_DIR = Path("docs") / "onboarding"
 DIRECTOR_ONBOARDING_GUIDE = ONBOARDING_PACKET_DIR / "switchyard-director-guide.md"
@@ -558,20 +536,21 @@ def _director_onboarding_migrated(environ: dict[str, str]) -> bool:
     }
 
 
-def _with_board_skill_instruction(context: str, role: str = "") -> str:
-    instruction = _skill_instruction_for_role(role)
-    if instruction in context:
-        return context
-    if not context.strip():
-        return instruction
-    return f"{instruction}\n\n{context}"
+def _session_start_context(context: str) -> dict[str, object]:
+    """Wrap what this session is told, and add nothing to it.
 
-
-def _session_start_context(context: str, role: str = "") -> dict[str, object]:
+    The skill pointer used to be prepended here, to every start including a
+    resume, a compact and a clear. Each runtime installs the skill itself and
+    advertises it through its own catalog, whose trigger already names a
+    ticket, so the line taught nothing and was paid for on every hand-off and
+    every recovery. What is left is a formatter: a caller with nothing to say
+    returns None itself rather than asking this to wrap an empty string
+    (SYRD-106).
+    """
     return {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": _with_board_skill_instruction(context, role),
+            "additionalContext": context,
         }
     }
 
@@ -588,8 +567,8 @@ def _session_start_additional_context_output(
     if not role:
         return None
     # A fresh start is the one that knows nothing yet, so it is the one that
-    # always hears about the skill. A resumed or continued session keeps what
-    # it already had; re-injecting there would only crowd its context.
+    # hears its role's onboarding. A resumed or continued session keeps what it
+    # already had, and is told only about work that is actually waiting.
     #
     # Only some runtimes label the kind of start in the payload. Hermes's
     # on_session_start carries a session id and nothing else, so on a
@@ -606,19 +585,14 @@ def _session_start_additional_context_output(
     # interrupting or silently rewriting the one that is running.
     onboarding_prompt = environ.get("TICKET_BOARD_ROLE_ONBOARDING_PROMPT", "").strip()
     if onboarding_prompt and fresh_start:
-        # The skill instruction is prepended by _session_start_context, which also picks
-        # the director overlay, so the role body is passed on its own.
-        return _session_start_context(
-            f"Your {role} session started.\n\n{onboarding_prompt}", role
-        )
+        return _session_start_context(f"Your {role} session started.\n\n{onboarding_prompt}")
     onboarding = environ.get("TICKET_BOARD_ROLE_ONBOARDING", "").strip()
     if onboarding and fresh_start:
         path = Path(onboarding)
         if not path.is_absolute() or not path.is_file():
             raise ValueError(f"configured role onboarding is unavailable: {path}")
         return _session_start_context(
-            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text(),
-            role,
+            f"Your {role} session started. Read your role remit at {path}.\n\n" + path.read_text()
         )
     # Phase-one bridge, gated on the migration marker rather than on the role alone.
     # An unmigrated tenant has no stored onboarding *and* no marker, so the old packet
@@ -629,20 +603,21 @@ def _session_start_additional_context_output(
         cwd = Path.cwd()
         onboarding_root = _onboarding_project_root(environ, cwd)
         if onboarding_root is None:
-            return _session_start_context("", role)
+            return None
         return _session_start_context(
-            _director_startup_onboarding_context(onboarding_root, cwd=cwd), role
+            _director_startup_onboarding_context(onboarding_root, cwd=cwd)
         )
     if session_start_source not in SESSION_START_ACTIVE_WORK_SOURCES:
-        # A fresh role session with nothing else to say is exactly the one that
-        # would otherwise reach for the board unaided.
-        return _session_start_context("", role) if fresh_start else None
+        # A fresh role session with nothing of its own to say now says nothing.
+        # It used to emit the skill pointer alone, which is the repetition this
+        # removes; the runtime already advertises the skill (SYRD-106).
+        return None
     board_url = _default_board_url(environ)
     ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
     if ticket is None:
         return None
     return _session_start_context(
-        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source), role
+        _resume_context_for_ticket(ticket, board_url=board_url, source=session_start_source)
     )
 
 

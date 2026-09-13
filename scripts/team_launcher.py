@@ -191,6 +191,9 @@ SWITCHYARD_COMMANDS = (
     # no push can establish. Its only possible write is the root-owned,
     # non-secret evidence file (SYRD-116).
     "publication-status",
+    # Reads the root-owned record of a privileged provisioning or upgrade run.
+    # A role reads it directly rather than the User pasting output (SYRD-128).
+    "rollout-log",
     "add-role",
     # Records which of the owner's existing keys a tenant publishes with, and
     # rewrites the managed ssh_config block. Both are root's writes (SYRD-100).
@@ -6838,6 +6841,64 @@ def tenant_release_listener_command(status: TenantReleaseStatus, project: str, a
     return _quote_command(command)
 
 
+def _rollout_recorder_path() -> Path | None:
+    """The recorder root should execute, or None when there is not one to run."""
+    installed = switchyard_shared_install_root() / "current" / "scripts" / "switchyard-record-rollout"
+    if installed.is_file():
+        return installed
+    checkout = _repo_root() / "scripts" / "switchyard-record-rollout"
+    return checkout if checkout.is_file() else None
+
+
+def recorded_provisioning_command(project: str, script_name: str) -> str:
+    """How an operator runs the provisioning packet so it records itself."""
+    recorder = _rollout_recorder_path()
+    if recorder is None:
+        return f"bash {shlex.quote(script_name)}"
+    return " ".join(
+        [
+            "sudo",
+            shlex.quote(str(recorder)),
+            shlex.quote(project),
+            "--label",
+            "provisioning",
+            "--",
+            "bash",
+            shlex.quote(script_name),
+        ]
+    )
+
+
+def recorded_rollout_command(
+    status: TenantReleaseStatus, project: str, command: str, *, label: str = ""
+) -> str:
+    """One privileged step, run so that it leaves a record root owns.
+
+    The step itself is unchanged -- it is handed to the recorder rather than
+    rewritten -- so what an operator runs is still exactly what was reviewed,
+    and what survives it is a root-owned attempt directory instead of a log
+    under the account every role shares (SYRD-128).
+    """
+    recorder = str(_repo_root() / "scripts" / "switchyard-record-rollout")
+    installed = switchyard_shared_install_root() / "current" / "scripts" / "switchyard-record-rollout"
+    if installed.is_file():
+        # The installed release's copy, not this checkout's: the operator is
+        # running a release, and root should execute root-owned bytes.
+        recorder = str(installed)
+    prefix = ["sudo", recorder, project]
+    if status.target_sha:
+        prefix += ["--target-commit", status.target_sha]
+    if label:
+        prefix += ["--label", label]
+    # The step goes in whole, through one `bash -c`, because it is a command
+    # LINE: it carries its own quoting and its own `&&` chain, and leaving the
+    # chain outside the recorder would record the first command and run the
+    # rest unrecorded -- which is the opposite of the point.
+    return " ".join(
+        [*(shlex.quote(token) for token in prefix), "--", "bash", "-c", shlex.quote(command)]
+    )
+
+
 def tenant_release_unit_install_command(status: TenantReleaseStatus, project: str) -> str:
     from scripts.ticket_board.project_provision import system_unit_proof_chain
 
@@ -7035,9 +7096,16 @@ def report_tenant_release_upgrade(
                     f"{status.provisioned_system_unit.parent}, which the tenant owns. Run "
                     f"`switchyard upgrade {config.project}` as root to stage a root-owned copy first."
                 )
-            print_func(f"  {unit_install}")
-        print_func(f"  {tenant_release_deploy_command(status, config.project)}")
+            print_func(f"  {recorded_rollout_command(status, config.project, unit_install, label='install units')}")
+        print_func(
+            f"  {recorded_rollout_command(status, config.project, tenant_release_deploy_command(status, config.project), label='deploy-restart')}"
+        )
         print_func(f"  {tenant_release_listener_command(status, config.project, 'start')}")
+        print_func(
+            f"switchyard: each recorded step prints where its record is; read them with "
+            f"`switchyard rollout-log {config.project}` -- the journal is root-owned and every "
+            "role may read it without sudo, so nobody has to paste output (SYRD-128)."
+        )
         print_func(
             "switchyard: panes must be restarted after the release update to pick up hook installer, "
             "hook binary, or pane launcher changes; this command does not restart panes"
@@ -9038,7 +9106,11 @@ def new_project_command(
         print_func("team-launcher: execution plan:")
         print_func(f"  cd {shlex.quote(str(artifact_dir))}")
         print_func("  sudo -v")
-        print_func(f"  bash {shlex.quote(str(commands_path.name))}")
+        print_func(f"  {recorded_provisioning_command(plan.project, commands_path.name)}")
+        print_func(
+            f"team-launcher: that leaves a root-owned record of the run; read it with "
+            f"`switchyard rollout-log {plan.project}` (SYRD-128)"
+        )
         print_func("")
         print_func(commands_path.read_text(encoding="utf-8").rstrip("\n"))
         return 0
@@ -9048,7 +9120,23 @@ def new_project_command(
         stderr = str(getattr(sudo_result, "stderr", "") or "").strip()
         detail = f": {stderr}" if stderr else ""
         raise SystemExit(f"team-launcher: sudo authentication failed{detail}")
-    result = runner(["bash", str(commands_path)], cwd=str(artifact_dir))
+    # Recorded when the recorder is reachable, plain otherwise: provisioning a
+    # project must not depend on the journal, but when it can be recorded it
+    # should be, because this is the run whose evidence matters most and the
+    # one an operator is least likely to still have a terminal for (SYRD-128).
+    recorder = _rollout_recorder_path()
+    if recorder is not None:
+        result = runner(
+            ["sudo", str(recorder), plan.project, "--label", "provisioning",
+             "--", "bash", str(commands_path)],
+            cwd=str(artifact_dir),
+        )
+        print_func(
+            f"team-launcher: the run is recorded; read it with "
+            f"`switchyard rollout-log {plan.project}`"
+        )
+    else:
+        result = runner(["bash", str(commands_path)], cwd=str(artifact_dir))
     if result.returncode != 0:
         raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
     config = load_project_config(plan.project, config_path)
@@ -19336,6 +19424,73 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_rollout_log_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard rollout-log",
+        description=(
+            "Read what a privileged provisioning or upgrade run recorded. The journal is "
+            "root-owned and every role may read it without sudo, which is the point: the "
+            "evidence of a run is not owned by the account that run was about. The chained "
+            "index is an integrity check -- it catches an entry edited, removed or reordered "
+            "without the hashes after it being recomputed -- and not a proof against root, "
+            "which owns the whole file and could recompute them."
+        ),
+    )
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument("--attempt", default="", help="one attempt id, or the latest by default")
+    parser.add_argument(
+        "--output", action="store_true", help="print the captured stdout and stderr as well"
+    )
+    return parser
+
+
+def rollout_log_command(
+    project: str, *, attempt: str = "", output: bool = False, print_func=print
+) -> int:
+    """Show the journal, or one attempt of it. Reads only; needs no privilege."""
+    from scripts.ticket_board.rollout_journal import (
+        RESULT_NAME,
+        attempts,
+        format_attempts,
+        project_journal_dir,
+        verify_index,
+    )
+
+    records = attempts(project)
+    problems = verify_index(project)
+    if not attempt:
+        print_func(format_attempts(project, records, problems))
+        if not records:
+            print_func(
+                f"switchyard: nothing has been recorded for {project} under "
+                f"{project_journal_dir(project)}"
+            )
+            return 0
+        attempt = records[-1]["attempt"]
+        if not output:
+            return 1 if problems else 0
+    selected = next((record for record in records if record["attempt"] == attempt), None)
+    if selected is None:
+        print_func(f"switchyard: {project} has no recorded attempt {attempt}")
+        return 1
+    directory = Path(selected.get("directory") or "")
+    result = directory / RESULT_NAME if directory else None
+    if result is not None and result.is_file():
+        print_func(result.read_text(encoding="utf-8").rstrip())
+    else:
+        print_func(
+            f"switchyard: attempt {attempt} recorded no result; it started at "
+            f"{selected.get('started_at', '?')} and never completed"
+        )
+    if output and directory:
+        for name in ("stdout.log", "stderr.log"):
+            path = directory / name
+            if path.is_file():
+                print_func(f"--- {name} ---")
+                print_func(path.read_text(encoding="utf-8", errors="replace").rstrip())
+    return 1 if problems else 0
+
+
 def _build_switchyard_publication_status_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard publication-status",
@@ -20352,6 +20507,10 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             desktop_policy=args.desktop_policy,
             publish_remote=getattr(args, "publish_remote", ""),
         )
+    if argv[0].casefold() == "rollout-log":
+        args = _build_switchyard_rollout_log_parser().parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        return rollout_log_command(entry.project, attempt=args.attempt, output=args.output)
     if argv[0].casefold() == "publication-status":
         args = _build_switchyard_publication_status_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

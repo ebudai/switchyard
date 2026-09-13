@@ -21,6 +21,15 @@ somewhere it was not meant to go:
   the answer has to be exactly the commit that was sent. Submission records a
   public commit, so "the push reported success" is not the same claim as "the
   public ref is at this commit" and the second one is the one that matters.
+
+And one thing after the push: the board's own copy of the repository is brought
+up to the ref that was just published, so submitting is a local question by the
+time it is asked (SYRD-125). Publishing already needed the network; submission
+should not need it again, and it must not need a human to fetch anything by
+hand, which is what happened on SYRD-122. The board says which repository it
+verifies against and the fetch runs from that repository's own remote, so no
+credential of this role's is involved and the board is still the authority on
+what it will accept.
 """
 
 from __future__ import annotations
@@ -31,6 +40,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import NoReturn
 
@@ -108,6 +119,68 @@ def remote_ref_commit(remote: str, ref: str, *, cwd: Path) -> str:
     return ""
 
 
+def board_commit_repositories(board_url: str) -> tuple[list[str], str]:
+    """Which repositories the board verifies a commit against, from the board.
+
+    A role pane is told its board's address and not its board's internals, and
+    the commit repository is named only in the root-owned unit file. Asking the
+    board keeps one authority for it: if this guessed a path and guessed wrong,
+    the refresh would report success against a repository nobody reads.
+    """
+    if not board_url:
+        # Not a failure. The push is what publishing means, and the board keeps
+        # its own refresh-on-miss for exactly this: a run outside a role pane
+        # should say what it could not do and not claim the publication failed.
+        return [], ""
+    try:
+        with urllib.request.urlopen(board_url.rstrip("/") + "/api/client-config", timeout=10) as response:
+            config = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return [], f"the board at {board_url} could not be asked where it verifies commits ({exc})"
+    repositories = config.get("commit_repositories")
+    if not isinstance(repositories, list) or not all(isinstance(item, str) for item in repositories):
+        # An older board that does not answer this yet. Not a failure: it also
+        # predates this program, and its own refresh-on-miss is the backstop.
+        return [], ""
+    return [item for item in repositories if item.strip()], ""
+
+
+def refresh_board_repositories(
+    board_url: str, ref: str, commit: str, *, worktree: Path
+) -> list[str]:
+    """Bring each board repository up to the ref that was just published.
+
+    From that repository's OWN remote, never one named here: the board's copy is
+    configured against the project's public URL, so the fetch needs no
+    credential and cannot be pointed somewhere else by whoever runs this. One
+    ref, not a full mirror, and the result is checked rather than assumed --
+    a fetch that reports success and leaves the commit unresolvable is exactly
+    the failure this exists to prevent.
+    """
+    repositories, problem = board_commit_repositories(board_url)
+    if problem:
+        return [problem]
+    problems: list[str] = []
+    for repository in repositories:
+        path = Path(repository)
+        if not path.exists():
+            problems.append(f"the board's commit repository {path} is not on this host")
+            continue
+        args = ["--git-dir", str(path)] if not (path / ".git").exists() else ["-C", str(path)]
+        fetched = git(
+            [*args, "fetch", "--quiet", "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"],
+            cwd=worktree,
+        )
+        if fetched.returncode != 0:
+            detail = (fetched.stderr or fetched.stdout or "git fetch failed").strip().splitlines()
+            problems.append(f"{path} could not be refreshed ({detail[-1] if detail else 'no output'})")
+            continue
+        resolved = git([*args, "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}"], cwd=worktree)
+        if resolved.returncode != 0 or resolved.stdout.strip().lower() != commit:
+            problems.append(f"{path} still does not resolve {commit[:12]} after refreshing it")
+    return problems
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=PROGRAM)
     parser.add_argument("ticket_id", nargs="?", default="")
@@ -121,6 +194,12 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="replace a candidate already published at this ref, leased against exactly "
         "what the remote holds right now",
+    )
+    parser.add_argument(
+        "--board-url",
+        default=os.environ.get("TICKET_BOARD_URL", "").strip(),
+        help="board to ask where it verifies commits, so the published commit is "
+        "resolvable there before you submit",
     )
     parser.add_argument("--print-only", action="store_true", help="say what would be pushed")
     args = parser.parse_args(argv[1:])
@@ -189,6 +268,22 @@ def main(argv: list[str]) -> int:
             f"{args.remote}/{ref} reads {public_after[:12] or 'nothing'} rather than the "
             f"{commit[:12]} that was just pushed. Do NOT submit this commit: the board records a "
             "public commit and would refuse it. Re-running this is safe."
+        )
+
+    # Only now, and only for a ref the remote has just confirmed: a cache
+    # holding a commit the public ref does not carry would be the board
+    # believing something untrue.
+    if not args.board_url:
+        sys.stderr.write(
+            f"{PROGRAM}: no board url, so the board's copy of the repository was not refreshed "
+            "here. The board fetches on a miss, so submitting still works; pass --board-url to "
+            "do it now instead.\n"
+        )
+    for problem in refresh_board_repositories(args.board_url, ref, commit, worktree=worktree):
+        fail(
+            f"{ref} IS published at {commit[:12]}, but {problem}. The board verifies a submitted "
+            "commit against its own copy of the repository, so submitting now may be refused. "
+            "Re-running this command is safe -- the push is a no-op and the refresh is retried."
         )
 
     submit_hint = f" --commit {commit}" if not args.ticket_id else (

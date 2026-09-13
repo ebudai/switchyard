@@ -259,7 +259,14 @@ def test_the_pinned_release_survives_the_operator_handoff() -> None:
         assert phase.get("state") == "done", (phase, output)
         assert deploys == [], deploys
         assert sha in output and str(cache) in output, output
-        assert any(
+        # The cache is still what this tenant verifies commit hashes against, and
+        # the deploy still carries it as TICKET_BOARD_COMMIT_GIT_DIR -- which is
+        # why it is still in the output above. It is no longer asked which commit
+        # the release is: the operator named a root-controlled installed release
+        # and its exact SHA, and root's own marker says. Requiring the cache to
+        # know it too is circular for a commit that has not been published, and
+        # it refused a release root had already materialized (SYRD-100 review).
+        assert not any(
             argv[:1] == ["git"] and f"--git-dir={cache}" in argv for argv in seen
         ), seen[:20]
         for argv in seen:
@@ -299,9 +306,18 @@ def test_a_handoff_with_nothing_recorded_still_refuses_to_guess() -> None:
                     tenant.runner(), board_root=board_root, sha=sha, seen=[], deploys=deploys
                 ),
             )
-        assert result == 0, output
+        # Nonzero, because it says so: with nothing recorded there is no cache to
+        # resolve `origin/main` against, the release phase reports that it cannot
+        # produce a safe update, and a command that says that has not succeeded.
+        # It used to print the verdict and exit 0, which is what let a wrapper
+        # report a complete upgrade over a board that had not moved
+        # (SYRD-100 review).
+        assert "cannot produce a safe release update" in output, output
+        assert result != 0, output
         assert deploys == [], deploys
         assert "keeps the release this upgrade was pinned to" not in output, output
+        # And everything before the release phase still happened and is still
+        # reported: refusing to deploy is not refusing to work.
         assert "repatriated porter's resumable role state" in output, output
 
 

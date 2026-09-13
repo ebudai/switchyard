@@ -8,3 +8,10 @@
 /docker/claude-bin/
 __pycache__/
 .claude/settings.local.json
+
+# Packaging output, never source. `switchyard-request-publication` and the
+# trusted bootstrap both write a bundle into the worktree they were run from,
+# and a bundle swept into a commit by `git add -A` is then carried by every
+# later handoff bundle and exported into the root-owned installed release
+# (SYRD-100 review).
+/.switchyard-bootstrap-*.bundle

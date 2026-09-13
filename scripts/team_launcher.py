@@ -187,6 +187,9 @@ SWITCHYARD_COMMANDS = (
     "finish-upgrade",
     "cutover-roles",
     "add-role",
+    # Records which of the owner's existing keys a tenant publishes with, and
+    # rewrites the managed ssh_config block. Both are root's writes (SYRD-100).
+    "set-owner-identity",
     "present",
     "attach",
     "replace-window",
@@ -6637,6 +6640,36 @@ def tenant_release_status(
     current_release, current_sha = _current_tenant_release(board_root)
     clone_source_repo: Path | None = None
     if shared_switchyard_release_for_path(resolved_source_repo) is not None:
+        # Root's own marker first, when the operator named this release and its
+        # exact commit. The release is the content; asking the publication cache
+        # whether it has heard of a commit that has deliberately not been
+        # published yet is a question with only one answer (SYRD-100 review).
+        marked_sha, marker_refusal = installed_release_deploy_target(
+            resolved_source_repo, deploy_ref
+        )
+        if marked_sha or marker_refusal:
+            return TenantReleaseStatus(
+                board_root=board_root,
+                owner_user=owner_user,
+                owner_home=owner_home,
+                provisioned_system_unit=provisioned_system_unit,
+                # Unchanged. The tenant's ordinary provenance cache is what a
+                # commit hash is verified against and it stays exactly what it
+                # was; nothing here seeds it, and the bootstrap repository never
+                # becomes it.
+                commit_git_dir=selected_commit_git_dir,
+                current_release=current_release,
+                current_sha=current_sha,
+                target_sha=marked_sha,
+                deploy_ref=deploy_ref,
+                source_repo=resolved_source_repo,
+                resolve_error=marker_refusal,
+                # None: the release tree is deployed directly, with no archive
+                # step, because it is already the materialized commit.
+                clone_source_repo=None,
+                board_port=str(plan_data.get("port") or "").strip(),
+                board_socket=str(plan_data.get("socket_path") or "").strip(),
+            )
         # The argument, never the tenant's plan. The plan's commit_git_dir is a
         # tenant-writable document and it stays what it has always been -- the
         # list of repositories a commit hash is verified against. Choosing which
@@ -6785,6 +6818,91 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
     )
 
 
+def installed_release_deploy_target(
+    source_repo: Path, deploy_ref: str, *, install_root: Path | None = None
+) -> tuple[str, str]:
+    """The commit an explicitly named installed release deploys, or why not.
+
+    An operator who has just bootstrapped a release names it and its exact SHA:
+    `--source-repo /opt/switchyard/releases/<sha> --deploy-ref <sha>`. The
+    release is root-owned, immutable, and carries root's own marker saying which
+    commit it is. That marker is the deploy target.
+
+    It used to be resolved instead through the tenant's ordinary publication
+    cache, which is circular for the case the bootstrap exists to serve: the
+    whole point of bootstrapping from a bundle is that the commit has not been
+    published yet, so the cache does not have it and never will until it is. The
+    live upgrade refused with `cannot produce a safe release update` for a
+    release root had already materialized and activated (SYRD-100 review).
+
+    Returns (commit, ""), or ("", reason). A reason is a refusal: the caller must
+    not fall back to anything. Only an exact 40-character SHA is answered here --
+    a symbolic ref is somebody asking to resolve a name, which this cannot do and
+    must not guess at -- and it must be the SHA this release says it is.
+    """
+    wanted = (deploy_ref or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", wanted):
+        return "", ""
+    release = shared_switchyard_release_for_path(source_repo, install_root=install_root)
+    if release is None:
+        return "", ""
+    from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+    # The same documented seam the rest of the trusted-release path uses: the
+    # walk starts at "/" on a host, and moves only when the shared install root
+    # has been overridden, because a fixture cannot own "/" (SYRD-97).
+    #
+    # `expect_uid` is root's, stated rather than defaulted. The default is the
+    # caller's own uid, which is right where the caller IS root writing its own
+    # artifacts -- what that helper was built for -- and exactly wrong here. The
+    # question is whether ROOT controls this release, and an unprivileged caller
+    # asking it was told that a root-owned path is not root-controlled because
+    # root owns it. `finish-upgrade` is unprivileged by design and is the command
+    # that most needs this answer, so the branch could never fire where it was
+    # needed most (SYRD-100 review).
+    overridden_root = os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", "").strip()
+    problems = root_controlled_problems(
+        str(source_repo),
+        expect_uid=os.getuid() if overridden_root else 0,
+        base=overridden_root or "/",
+    )
+    if problems:
+        return "", (
+            f"{source_repo} is named as an installed release but is not root-controlled: "
+            + "; ".join(problems)
+        )
+    marked = (release.marker_commit or "").strip().lower()
+    if not marked:
+        return "", (
+            f"{source_repo} carries no release marker, so there is nothing to say which commit it "
+            "is; it is not deployed from"
+        )
+    if marked != wanted:
+        return "", (
+            f"{source_repo} is the installed release for {marked}, but this deploy is pinned at "
+            f"{wanted}. Nothing was deployed: deploying one release while naming another is how a "
+            "board ends up running code nobody selected."
+        )
+    return marked, ""
+
+
+def release_update_blocked(status: "TenantReleaseStatus | None") -> str:
+    """Why no safe release update can be produced, or "" when one can.
+
+    One reading, used both by the report an operator sees and by the exit status
+    the caller returns. Printing `cannot produce a safe release update` and then
+    exiting 0 is what let a bounded wrapper announce REAL UPGRADE COMPLETE over a
+    board that had not moved (SYRD-100 review).
+    """
+    if status is None:
+        return ""
+    if not status.target_sha:
+        return status.resolve_error or f"{status.deploy_ref} did not resolve"
+    if not status.unchanged and status.provisioned_system_unit is None:
+        return "generated board, canary, and listener units are incomplete"
+    return ""
+
+
 def _format_release_sha(sha: str) -> str:
     return sha if sha else "(none)"
 
@@ -6831,18 +6949,17 @@ def report_tenant_release_upgrade(
             f"switchyard: {config.project} deployed board release new: "
             f"(unresolved {status.deploy_ref}: {status.resolve_error})"
         )
+    blocked = release_update_blocked(status)
     if not status.target_sha:
         print_func(
-            f"switchyard: cannot produce a safe release update for {config.project}: "
-            f"{status.resolve_error}"
+            f"switchyard: cannot produce a safe release update for {config.project}: {blocked}"
         )
     elif status.unchanged:
         print_func(f"switchyard: {config.project} deployed board release unchanged; no release deploy needed")
     else:
         if status.provisioned_system_unit is None:
             print_func(
-                f"switchyard: cannot produce a safe release update for {config.project}: generated board, "
-                "canary, and listener units are incomplete"
+                f"switchyard: cannot produce a safe release update for {config.project}: {blocked}"
             )
             return status
         print_func("switchyard: matching-release deployment sequence (keep the listener stopped through migrations):")
@@ -9057,6 +9174,64 @@ def github_identity_status(
     expected_uid = uid_for_user(owner_user)
     problems: list[str] = []
 
+    def _read_no_follow(path: Path, mode: int, what: str) -> str | None:
+        """Validate and read one file through a single descriptor.
+
+        `lstat` then `read_text` is two lookups of one name, and between them a
+        same-UID tenant can replace the name with a symlink. Root then reads,
+        and `github_identity_remedy` prints, whatever it points at -- which for
+        a root-run repair is any file root can read. One open with O_NOFOLLOW,
+        fstat on that descriptor, and the bytes read from it, so what is
+        reported is what was checked (SYRD-100 review).
+
+        Returns the text, or None when it could not be safely read.
+        """
+        relative = Path(str(path).lstrip("/"))
+        dir_fd, problem = _walk_no_follow(Path(path.anchor or "/"), relative)
+        if dir_fd < 0:
+            problems.append(f"{what} {path} cannot be reached safely: {problem}")
+            return None
+        try:
+            try:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.EMLINK):
+                    problems.append(f"{what} {path} is not a regular file")
+                elif exc.errno == errno.ENOENT:
+                    problems.append(f"{what} {path} does not exist")
+                else:
+                    problems.append(f"{what} {path} cannot be read ({exc.strerror})")
+                return None
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    problems.append(f"{what} {path} is not a regular file")
+                    return None
+                if expected_uid is not None and info.st_uid != expected_uid:
+                    problems.append(
+                        f"{what} {path} is owned by uid {info.st_uid} rather than by {owner_user}"
+                    )
+                if stat.S_IMODE(info.st_mode) != mode:
+                    problems.append(
+                        f"{what} {path} is mode {stat.S_IMODE(info.st_mode):04o} rather than "
+                        f"{mode:04o}"
+                    )
+                raw = b""
+                while True:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        break
+                    raw += chunk
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dir_fd)
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            problems.append(f"{what} {path} is not text")
+            return None
+
     def _check(path: Path, mode: int, what: str) -> bool:
         try:
             info = path.lstat()
@@ -9077,35 +9252,31 @@ def github_identity_status(
         return True
 
     _check(key.parent, 0o700, "the owner's ssh directory")
+    # The private half is checked and never read. Nothing here opens it.
     _check(key, 0o600, "the owner's GitHub key")
-    has_public = _check(public, 0o644, "the owner's GitHub public key")
     public_key = ""
     fingerprint = ""
-    if has_public:
-        try:
-            public_key = public.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            problems.append(f"the owner's GitHub public key {public} cannot be read: {exc}")
-        else:
-            proc = runner(
-                ["ssh-keygen", "-l", "-f", str(public)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    public_text = _read_no_follow(public, 0o644, "the owner's GitHub public key")
+    if public_text is not None:
+        public_key = public_text.strip()
+        # Fingerprinted from the bytes that were validated, not by handing the
+        # path back to ssh-keygen to open a second time.
+        proc = runner(
+            ["ssh-keygen", "-l", "-f", "-"],
+            input=public_key + "\n",
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        if getattr(proc, "returncode", 1) == 0:
+            fingerprint = str(getattr(proc, "stdout", "") or "").strip()
+    body = _read_no_follow(config, 0o600, "the owner's ssh configuration")
+    if body is not None:
+        if GITHUB_IDENTITY_BEGIN not in body:
+            problems.append(
+                f"{config} selects no managed identity for {host}; git offers no key and the "
+                "push is refused as if there were none"
             )
-            if proc.returncode == 0:
-                fingerprint = str(proc.stdout or "").strip()
-    if _check(config, 0o600, "the owner's ssh configuration"):
-        try:
-            body = config.read_text(encoding="utf-8")
-        except OSError as exc:
-            problems.append(f"the owner's ssh configuration {config} cannot be read: {exc}")
-        else:
-            if GITHUB_IDENTITY_BEGIN not in body:
-                problems.append(
-                    f"{config} selects no managed identity for {host}; git offers no key and the "
-                    "push is refused as if there were none"
-                )
-            elif str(key) not in body:
-                problems.append(f"{config} selects an identity other than {key} for {host}")
+        elif str(key) not in body:
+            problems.append(f"{config} selects an identity other than {key} for {host}")
 
     authenticated = False
     detail = ""
@@ -9143,6 +9314,422 @@ def github_identity_status(
         fingerprint=fingerprint,
         checked=True,
     )
+
+
+@dataclass(frozen=True)
+class TrustedOwnerIdentity:
+    """Who a tenant's owner is, taken from root's own record and the kernel."""
+
+    owner_user: str
+    owner_home: Path
+    owner_uid: int
+    owner_gid: int
+    problems: tuple[str, ...] = ()
+
+    @property
+    def trusted(self) -> bool:
+        return not self.problems
+
+
+def trusted_owner_identity(project: str) -> TrustedOwnerIdentity:
+    """The owner root will act for, derived from things the tenant cannot write.
+
+    The tenant's configuration and its plan are both writable by the account
+    every role runs as, so neither can say whose SSH state a root command
+    modifies: a role could point `run_as_user` or `owner_home` somewhere else
+    between the operator deciding to run this and the command reading it. Root's
+    own baseline plan lives in a directory only root can write, and passwd is the
+    kernel's. Both are consulted, and they have to agree (SYRD-100 review).
+    """
+    baseline = privileged_baseline_plan_path(project)
+    problems: list[str] = []
+    walk = root_controlled_problems_for(str(baseline))
+    if walk:
+        return TrustedOwnerIdentity("", Path(), -1, -1, tuple(
+            [f"{baseline} is not root-controlled, so it cannot say who this tenant's owner is"] + walk
+        ))
+    try:
+        recorded = json.loads(baseline.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return TrustedOwnerIdentity("", Path(), -1, -1, (f"{baseline} could not be read: {exc}",))
+    if not isinstance(recorded, dict):
+        return TrustedOwnerIdentity("", Path(), -1, -1, (f"{baseline} is not a plan document",))
+    owner_user = str(recorded.get("owner_user") or "").strip()
+    recorded_home = str(recorded.get("owner_home") or "").strip()
+    if not owner_user:
+        problems.append(f"{baseline} records no owner_user")
+    if not recorded_home:
+        problems.append(f"{baseline} records no owner_home")
+    if problems:
+        return TrustedOwnerIdentity("", Path(), -1, -1, tuple(problems))
+    owner_uid = uid_for_user(owner_user)
+    owner_home = home_dir_for_user(owner_user)
+    if owner_uid is None or owner_home is None:
+        return TrustedOwnerIdentity(
+            "", Path(), -1, -1, (f"{owner_user} is not an account on this host",)
+        )
+    # The kernel's answer and root's record have to be the same answer. A
+    # divergence is not something to pick a winner from.
+    if owner_home != Path(recorded_home):
+        return TrustedOwnerIdentity(
+            "", Path(), -1, -1,
+            (
+                f"{baseline} records {owner_user}'s home as {recorded_home}, and this host says "
+                f"{owner_home}. Nothing was changed: which one is right is not this command's "
+                "to decide.",
+            ),
+        )
+    try:
+        owner_gid = int(pwd.getpwuid(owner_uid).pw_gid)
+    except KeyError:
+        owner_gid = owner_uid
+    return TrustedOwnerIdentity(owner_user, owner_home, owner_uid, owner_gid)
+
+
+def expected_privileged_uid() -> int:
+    """Whose files count as root's for the privileged provision directory.
+
+    Root's on a host. When the privileged provision root has been overridden it
+    is the caller's own uid, because that override is the documented seam for
+    exercising these paths without writing to /etc and a fixture cannot own a
+    root-owned file. The same seam the trusted-release checks use (SYRD-97).
+    """
+    return os.getuid() if os.environ.get(PRIVILEGED_PROVISION_ROOT_ENV, "").strip() else 0
+
+
+def root_controlled_problems_for(path: str) -> list[str]:
+    """The whole-path root ownership check, through the documented test seam."""
+    from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+    overridden = os.environ.get(PRIVILEGED_PROVISION_ROOT_ENV, "").strip()
+    return root_controlled_problems(path, base=overridden or "/")
+
+
+@dataclass(frozen=True)
+class PlanDocument:
+    """One plan authority, opened without following anything."""
+
+    path: Path
+    data: dict[str, Any]
+    raw: bytes
+    uid: int
+    gid: int
+    mode: int
+
+
+def read_plan_no_follow(path: Path, *, require_root_owned: bool) -> tuple[PlanDocument | None, str]:
+    """Read one plan authority by fd, refusing symlinks at every component.
+
+    `Path.read_text` on a tenant-controlled directory follows whatever is there.
+    The tenant can replace its plan with a symlink to anything, and root would
+    then read, truncate and re-own the referent instead (SYRD-100 review).
+    """
+    relative = Path(str(path).lstrip("/"))
+    dir_fd, problem = _walk_no_follow(Path(path.anchor or "/"), relative)
+    if dir_fd < 0:
+        return None, f"{path}: {problem}"
+    try:
+        try:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EMLINK):
+                return None, f"{path} is a symlink, so it is not a plan this will read or write"
+            if exc.errno == errno.ENOENT:
+                return None, f"{path} does not exist"
+            return None, f"{path} could not be opened ({exc.strerror})"
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return None, f"{path} is not a regular file"
+            if require_root_owned:
+                expected = expected_privileged_uid()
+                if info.st_uid != expected:
+                    return None, (
+                        f"{path} is owned by uid {info.st_uid} rather than by uid {expected}"
+                    )
+                if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return None, (
+                        f"{path} is mode {stat.S_IMODE(info.st_mode):04o}, which anybody in its "
+                        "group or beyond can write"
+                    )
+            raw = b""
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                raw += chunk
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return None, f"{path} is not readable as a plan document: {exc}"
+    if not isinstance(data, dict):
+        return None, f"{path} is not a plan document"
+    return PlanDocument(path, data, raw, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), ""
+
+
+def write_plan_no_follow(document: PlanDocument, body: bytes) -> str:
+    """Replace one plan authority atomically, inside its own directory.
+
+    Staged beside it and renamed over, so a symlink at the destination is
+    replaced rather than followed, and a reader never sees a half-written plan.
+    Owner and mode are carried from the file that was there, so the tenant's copy
+    stays the tenant's and root's stays root's.
+    """
+    relative = Path(str(document.path).lstrip("/"))
+    dir_fd, problem = _walk_no_follow(Path(document.path.anchor or "/"), relative)
+    if dir_fd < 0:
+        return f"{document.path}: {problem}"
+    staged = f".{document.path.name}.switchyard-new"
+    try:
+        try:
+            fd = os.open(
+                staged,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                document.mode,
+                dir_fd=dir_fd,
+            )
+        except FileExistsError:
+            os.unlink(staged, dir_fd=dir_fd)
+            fd = os.open(
+                staged,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                document.mode,
+                dir_fd=dir_fd,
+            )
+        try:
+            os.write(fd, body)
+            os.fchmod(fd, document.mode)
+            if os.geteuid() == 0:
+                os.fchown(fd, document.uid, document.gid)
+        finally:
+            os.close(fd)
+        os.rename(staged, document.path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except OSError as exc:
+        try:
+            os.unlink(staged, dir_fd=dir_fd)
+        except OSError:
+            pass
+        return f"{document.path} could not be replaced ({exc.strerror})"
+    finally:
+        os.close(dir_fd)
+    return ""
+
+
+def selected_key_problems(owner_home: Path, key_name: str, owner_uid: int) -> list[str]:
+    """Whether both halves of the named key are the owner's own regular files.
+
+    lstat rather than stat, on every component of the pair: a role can point the
+    name at a root-owned file, and a check that follows it would report a
+    perfectly good key that belongs to somebody else entirely. Nothing here
+    opens, reads or changes either half -- selection is not provisioning
+    (SYRD-100 review).
+    """
+    problems: list[str] = []
+    for label, path in (
+        ("private half", owner_home / ".ssh" / key_name),
+        ("public half", owner_home / ".ssh" / f"{key_name}.pub"),
+    ):
+        try:
+            info = os.lstat(path)
+        except OSError:
+            problems.append(f"the {label} {path} does not exist")
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            problems.append(f"the {label} {path} is a symlink, so what it names is not this key")
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            problems.append(f"the {label} {path} is not a regular file")
+            continue
+        if info.st_uid != owner_uid:
+            problems.append(
+                f"the {label} {path} is owned by uid {info.st_uid} rather than by the tenant owner"
+            )
+    return problems
+
+
+def _plan_with_selection(document: PlanDocument, key_name: str, host_alias: str) -> bytes | None:
+    """The plan's own bytes with the selection set, or None when already right.
+
+    Rewritten field for field rather than regenerated: a plan carries decisions
+    this command has no opinion about.
+    """
+    if (
+        str(document.data.get("owner_github_key_name") or "") == key_name
+        and str(document.data.get("owner_github_host_alias") or "") == host_alias
+    ):
+        return None
+    data = dict(document.data)
+    data["owner_github_key_name"] = key_name
+    data["owner_github_host_alias"] = host_alias
+    return (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def set_owner_github_identity_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    key_name: str,
+    host_alias: str = "",
+    host: str = "github.com",
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Record which existing key this tenant publishes with, and select it.
+
+    The supported repair for a tenant whose managed block was pointed at the
+    wrong key. An upgrade will not choose between an owner's keys and will not
+    generate one beside them, so somebody has to say which key is the one, once,
+    and have it recorded where both the tenant and root will read it.
+
+    Everything about this runs as root on paths a tenant controls, so nothing
+    the tenant writes is treated as authority and nothing under the owner's home
+    is written by root. Who the owner is comes from root's own baseline plan and
+    from passwd; the key is validated without following symlinks and is never
+    opened, created or modified; the ssh_config rewrite is performed by the owner
+    as the owner; and both plan authorities are read and validated before either
+    is written (SYRD-100 review).
+    """
+    from scripts.ticket_board.project_provision import (
+        owner_github_key_path,
+        owner_github_selection_commands,
+    )
+
+    project = config.project
+    selected = key_name.strip()
+    alias = host_alias.strip()
+    if not selected or "/" in selected:
+        print_func(
+            f"switchyard: {key_name!r} is not a key file name. Name one of the owner's keys, "
+            "without a path."
+        )
+        return 1
+
+    identity = trusted_owner_identity(project)
+    if not identity.trusted:
+        for problem in identity.problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: refusing to change {project}'s publication identity: root cannot "
+            "establish whose it is. Nothing was changed."
+        )
+        return 1
+    owner, owner_home = identity.owner_user, identity.owner_home
+
+    key_problems = selected_key_problems(owner_home, selected, identity.owner_uid)
+    if key_problems:
+        for problem in key_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: {selected} is not a key pair {owner} owns, so there is nothing to "
+            "select. Nothing was changed, and no key was created."
+        )
+        return 1
+
+    # Both authorities, read and validated before either is written. Root's own
+    # copy must be root's; the tenant's is the tenant's and is replaced rather
+    # than followed.
+    tenant_plan = config_path.parent / "plan.json"
+    root_plan = privileged_baseline_plan_path(project)
+    documents: list[PlanDocument] = []
+    for path, require_root in ((root_plan, True), (tenant_plan, False)):
+        document, problem = read_plan_no_follow(path, require_root_owned=require_root)
+        if document is None:
+            print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: {project}'s publication identity is recorded in two places and both "
+                "have to be writable, or the two disagree afterwards. Nothing was changed."
+            )
+            return 1
+        documents.append(document)
+
+    key = Path(owner_github_key_path(str(owner_home), key_name=selected))
+    if dry_run:
+        print_func(
+            f"switchyard: would record {project}'s publication identity as {selected}"
+            + (f" with host alias {alias}" if alias else "")
+        )
+        for document in documents:
+            pending = _plan_with_selection(document, selected, alias)
+            print_func(
+                f"switchyard:   {document.path} "
+                + ("would be updated" if pending is not None else "already records it")
+            )
+        print_func(
+            f"switchyard: would have {owner} select {key} in {owner_home}/.ssh/config, "
+            "managed block only"
+        )
+        return 0
+
+    if os.geteuid() != 0:
+        print_func(
+            f"switchyard: recording {project}'s publication identity writes root's own plan. Run: "
+            f"sudo switchyard set-owner-identity {project} --key-name {selected}"
+            + (f" --host-alias {alias}" if alias else "")
+        )
+        return 1
+
+    # Written one after the other, with what was there kept so the first can be
+    # put back if the second fails. Two authorities that disagree are worse than
+    # two that are both stale: the next upgrade would read one of them.
+    written: list[PlanDocument] = []
+    for document in documents:
+        body = _plan_with_selection(document, selected, alias)
+        if body is None:
+            print_func(f"switchyard: {document.path} already records {selected}")
+            continue
+        problem = write_plan_no_follow(document, body)
+        if problem:
+            print_func(f"switchyard: {problem}")
+            for done in reversed(written):
+                restored = write_plan_no_follow(done, done.raw)
+                print_func(
+                    f"switchyard: {done.path} "
+                    + (f"could not be put back: {restored}" if restored else "was put back as it was")
+                )
+            print_func(
+                f"switchyard: {project}'s publication identity was not changed, and neither plan "
+                "was left disagreeing with the other."
+            )
+            return 1
+        written.append(document)
+        print_func(f"switchyard: recorded {selected} in {document.path}")
+
+    script = "set -eu\n" + "\n".join(
+        owner_github_selection_commands(
+            owner, str(owner_home), key_name=selected, host=host, host_alias=alias
+        )
+    )
+    applied = runner(["sh", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if getattr(applied, "returncode", 1) != 0:
+        print_func(
+            f"switchyard: could not select {selected} for {owner} (exit {applied.returncode}): "
+            f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
+        )
+        print_func(
+            f"switchyard: both plans record {selected}; {owner_home}/.ssh/config does not yet. "
+            f"Rerun this command, which is safe to repeat."
+        )
+        return 1
+    print_func(f"switchyard: {owner_home}/.ssh/config now selects {key} for {host}")
+
+    status = github_identity_status(owner, owner_home, key_name=selected, host=host, runner=runner)
+    if status.fingerprint:
+        print_func(f"switchyard: fingerprint: {status.fingerprint}")
+    remedy = github_identity_remedy(status, project=project)
+    if remedy:
+        print_func(remedy)
+        print_func(
+            f"switchyard: {selected} is selected and recorded, but it did not authenticate. "
+            "Register its public half with the forge, or select a different key."
+        )
+        return 1
+    print_func(f"switchyard: {owner} can publish to GitHub as {selected}")
+    return 0
 
 
 def github_identity_remedy(status: GithubIdentityStatus, *, project: str = "") -> str:
@@ -15934,13 +16521,47 @@ def upgrade_project_command(
     # reads no private material (SYRD-74).
     owner_home_for_identity = _tenant_owner_home(config, config_path)
     owner_for_identity = config.run_as_user or current_user_name()
-    if not dry_run and os.geteuid() == 0:
-        from scripts.ticket_board.project_provision import owner_github_identity_commands
+    from scripts.ticket_board.project_provision import (
+        owner_github_identity_commands,
+        owner_github_key_path,
+        resolve_owner_github_identity,
+    )
 
+    # Which key this tenant publishes with, before anything is rendered from it.
+    # The renderer defaults to `id_ed25519` when it is not told, and being not
+    # told is how a live upgrade generated that key, pointed the managed block
+    # at it, and left the tenant unable to push with the deploy key it had been
+    # using for weeks (SYRD-100).
+    plan_data = _plan_data_from_config(config, config_path)
+    selected_identity = resolve_owner_github_identity(
+        str(owner_home_for_identity),
+        recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
+        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
+    )
+    if not selected_identity.resolved:
+        # Nothing is rendered, nothing is generated, and the managed block is
+        # left exactly as it is. Choosing among the owner's keys, or making a
+        # new one beside them, is the substitution this must not perform.
+        for problem in selected_identity.problems:
+            print_func(f"warning: switchyard: {problem}")
+        print_func(
+            f"warning: switchyard: {config.project}'s owner GitHub identity was left untouched, "
+            "so publication continues with whatever is already configured."
+        )
+    elif dry_run:
+        print_func(
+            f"switchyard: would keep {owner_for_identity}'s GitHub identity on "
+            f"{owner_github_key_path(str(owner_home_for_identity), key_name=selected_identity.key_name)}, "
+            f"from {selected_identity.source}"
+        )
+    if selected_identity.resolved and not dry_run and os.geteuid() == 0:
         identity_script = "set -eu\n" + "\n".join(
             owner_github_identity_commands(
                 owner_for_identity,
                 str(owner_home_for_identity),
+                key_name=selected_identity.key_name,
+                host=selected_identity.host,
+                host_alias=selected_identity.host_alias,
                 comment=f"{owner_for_identity} switchyard {config.project}",
             )
         )
@@ -15953,16 +16574,24 @@ def upgrade_project_command(
                 f"(exit {applied.returncode}): "
                 f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
             )
-    if not dry_run:
+    if selected_identity.resolved and not dry_run:
+        # Read back against the same key the block selects. Checking the default
+        # while the block names another is a readiness answer about a key nobody
+        # publishes with.
         identity = github_identity_status(
-            owner_for_identity, owner_home_for_identity, runner=runner
+            owner_for_identity,
+            owner_home_for_identity,
+            key_name=selected_identity.key_name,
+            host=selected_identity.host,
+            runner=runner,
         )
         remedy = github_identity_remedy(identity, project=config.project)
         if remedy:
             print_func(remedy)
         else:
             print_func(
-                f"switchyard: {owner_for_identity} can publish to GitHub as its own identity"
+                f"switchyard: {owner_for_identity} can publish to GitHub as its own identity "
+                f"({selected_identity.key_name}, from {selected_identity.source})"
             )
     if not dry_run:
         # Preparation needs the accounts before the active configuration names
@@ -16110,6 +16739,7 @@ def upgrade_project_command(
 
     final_cutover = role_account_cutover(config, runner=runner)
     release_deployed = False
+    release_blocked = ""
     if not final_cutover.is_complete:
         print_func(
             f"switchyard: withholding the {config.project} release deploy instruction until its "
@@ -16117,20 +16747,22 @@ def upgrade_project_command(
             "process-bound authority and must not strand a resumable pane."
         )
     else:
+        release_status = report_tenant_release_upgrade(
+            release_report_config,
+            config_path=config_path,
+            source_repo=effective_source_repo,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            runner=runner,
+            print_func=print_func,
+        )
         release_deployed = record_release_phase_from_status(
             config,
             config_path=config_path,
-            status=report_tenant_release_upgrade(
-                release_report_config,
-                config_path=config_path,
-                source_repo=effective_source_repo,
-                commit_git_dir=commit_git_dir,
-                deploy_ref=deploy_ref,
-                runner=runner,
-                print_func=print_func,
-            ),
+            status=release_status,
             dry_run=dry_run,
         )
+        release_blocked = release_update_blocked(release_status)
 
     if director_state in {"pending", "unknown"}:
         director_action = (
@@ -16162,6 +16794,17 @@ def upgrade_project_command(
     unsafe_windows = unsafe_root_presentation_windows(config, config_path=config_path)
     if unsafe_windows:
         print_func(unsafe_presentation_report(config, unsafe_windows))
+    if release_blocked:
+        # The release this upgrade was asked to deploy could not be. Saying so
+        # and exiting 0 is worse than either on its own: every wrapper that reads
+        # the status reported the upgrade complete over a board that had not
+        # moved, and the operator had to read the transcript to find out
+        # otherwise (SYRD-100 review).
+        print_func(
+            f"switchyard: {config.project}'s release phase did not complete: {release_blocked}. "
+            "Nothing after it is claimed."
+        )
+        return 1
     return 0
 
 
@@ -17318,19 +17961,28 @@ def finish_upgrade_command(
             "deploy instruction is still withheld."
         )
         return 0
-    record_release_phase_from_status(
+    release_status = report_tenant_release_upgrade(
         config,
         config_path=config_path,
-        status=report_tenant_release_upgrade(
-            config,
-            config_path=config_path,
-            source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
-            commit_git_dir=commit_git_dir,
-            deploy_ref=deploy_ref,
-            runner=runner,
-            print_func=print_func,
-        ),
+        source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
+        commit_git_dir=commit_git_dir,
+        deploy_ref=deploy_ref,
+        runner=runner,
+        print_func=print_func,
     )
+    record_release_phase_from_status(config, config_path=config_path, status=release_status)
+    blocked = release_update_blocked(release_status)
+    if blocked:
+        # The same rule as the privileged phase, which this command is the other
+        # half of. Saying the release cannot be produced and exiting 0 is what
+        # let a wrapper report the upgrade complete over a board that had not
+        # moved; applying it to one of the two commands fixed half of that
+        # (SYRD-100 review).
+        print_func(
+            f"switchyard: {config.project}'s release phase did not complete: {blocked}. "
+            "Nothing after it is claimed."
+        )
+        return 1
     return 0
 
 
@@ -19261,6 +19913,38 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         config = _load_switchyard_project_config_for_command(entry, argv)
         return switchyard_seed_role_credentials_command(
             config, role_name=args.role, reseed=args.reseed
+        )
+    if argv[0].casefold() == "set-owner-identity":
+        parser = argparse.ArgumentParser(
+            prog="switchyard set-owner-identity",
+            description=(
+                "Record which of the tenant owner's existing SSH keys this project publishes "
+                "with, and select it for the forge. Creates no key and reads no private material."
+            ),
+        )
+        parser.add_argument("project", help="registered project name or slug")
+        parser.add_argument(
+            "--key-name",
+            required=True,
+            help="file name of an existing key pair in the owner's ~/.ssh, without a path",
+        )
+        parser.add_argument(
+            "--host-alias",
+            default="",
+            help="an additional Host pattern the managed block should answer to",
+        )
+        parser.add_argument("--host", default="github.com", help="forge host, default github.com")
+        parser.add_argument("--dry-run", action="store_true", help="say what would change")
+        args = parser.parse_args(argv[1:])
+        entry = _resolve_switchyard_project(args.project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        return set_owner_github_identity_command(
+            config,
+            config_path=entry.config_path,
+            key_name=args.key_name,
+            host_alias=args.host_alias,
+            host=args.host,
+            dry_run=args.dry_run,
         )
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])

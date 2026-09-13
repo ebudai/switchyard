@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Run one privileged rollout command and leave the evidence where root keeps it.
+
+The operator runs this instead of the bare command. It streams the command's
+output to the terminal exactly as before AND into a root-owned attempt
+directory, records what was run and how it ended, and prints where the record
+is. A role then reads that path directly, so the User is never asked to copy
+and paste a privileged run's output (SYRD-128).
+
+It is deliberately thin: it does not know what a rollout is, only that the
+thing it was handed has an identity, an exit status and output worth keeping.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import selectors
+import signal
+import subprocess
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
+
+try:
+    from ticket_board.rollout_journal import Attempt, journal_root
+except ModuleNotFoundError:  # running from a checkout rather than the staged copy
+    sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent.parent))
+    from scripts.ticket_board.rollout_journal import Attempt, journal_root
+
+PROGRAM = "switchyard-record-rollout"
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"{PROGRAM}: {message}")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog=PROGRAM)
+    parser.add_argument("project")
+    parser.add_argument("--target-commit", default="", help="the release this run is aiming at")
+    parser.add_argument("--label", default="", help="what this step is, for the record")
+    # Split at `--` before argparse sees anything. REMAINDER stops parsing at
+    # the first positional, so with the options after the project name they
+    # would be collected as part of the command and run as one.
+    rest = argv[1:]
+    if "--" not in rest:
+        fail("no command: put it after `--`")
+    boundary = rest.index("--")
+    args = parser.parse_args(rest[:boundary])
+    command = rest[boundary + 1 :]
+    if not command:
+        fail("no command: put it after `--`")
+    if os.geteuid() != 0:
+        # Not a refusal on principle: a record the tenant account can write is
+        # the thing this exists to replace, and writing one would be worse than
+        # writing none.
+        fail(
+            f"this must run as root so the record is root's. The journal lives under "
+            f"{journal_root()}, which the project account may read and may not write."
+        )
+
+    attempt = Attempt(
+        args.project,
+        command,
+        target_commit=args.target_commit,
+        operator=os.environ.get("SUDO_USER", ""),
+    )
+    directory = attempt.open()
+    print(f"{PROGRAM}: recording attempt {attempt.attempt} in {directory}", flush=True)
+    if args.label:
+        attempt.write("stdout", f"# {args.label}\n")
+
+    status, exit_status, detail = "completed", None, ""
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        # Early validation failure: there is no run to record, but there IS an
+        # attempt, and it says why it never started.
+        attempt.close(status="failed", exit_status=127, detail=f"could not start: {exc}")
+        print(f"{PROGRAM}: {command[0]} could not be run: {exc}", file=sys.stderr)
+        print(f"{PROGRAM}: record: {directory}", flush=True)
+        return 127
+
+    def relay(signum, _frame):
+        # The operator's Ctrl-C reaches the child; the record survives it and
+        # says it was interrupted rather than silently ending mid-run.
+        nonlocal status, detail
+        status, detail = "interrupted", f"received signal {signum}"
+        process.send_signal(signum)
+
+    previous = {
+        number: signal.signal(number, relay)
+        for number in (signal.SIGINT, signal.SIGTERM)
+        if hasattr(signal, number.name)
+    }
+    try:
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        open_streams = 2
+        while open_streams:
+            for key, _events in selector.select():
+                chunk = key.fileobj.readline()
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    open_streams -= 1
+                    continue
+                attempt.write(key.data, chunk)
+                target = sys.stdout if key.data == "stdout" else sys.stderr
+                target.write(chunk)
+                target.flush()
+        exit_status = process.wait()
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+    if status != "interrupted":
+        status = "completed" if exit_status == 0 else "failed"
+    attempt.close(status=status, exit_status=exit_status, detail=detail)
+    print(f"{PROGRAM}: {status} (exit {exit_status}); record: {directory}", flush=True)
+    return exit_status if exit_status is not None else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

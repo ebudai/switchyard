@@ -759,6 +759,48 @@ still offers it to an operator who deliberately asks -- and the board's
 publication request and verdict remain available for escalation while no longer
 appearing in any normal handoff.
 
+### What a privileged run leaves behind
+
+A provisioning or upgrade run is the one thing on this host that a role cannot
+do and cannot watch, so its evidence has to outlive the terminal it ran in --
+and must not be owned by the account the run was about. Every role in a project
+runs as one Unix account (SYRD-69), so a log written under that account's home
+is one any role can rewrite or delete afterwards. That is what the first
+operator wrappers did, and it is what `switchyard-record-rollout` replaces
+(SYRD-128).
+
+The operator runs the reviewed step through the recorder rather than instead of
+it: the command is handed over whole -- its quoting and its `&&` chain intact,
+inside one `bash -c`, so no part of it runs outside the record -- and its output
+still reaches the terminal. What survives is a root-owned attempt directory
+under `/var/lib/switchyard/rollout/<project>/`: `stdout.log`, `stderr.log` and
+`result.json` with the command, the target commit, the operator, both
+timestamps, the exit status and the hash of each captured file. Completed files
+are mode 0444 and the tree is root's, so a role reads all of it without sudo and
+can write none of it.
+
+**Attempts, not appends.** Each run gets its own directory. A rerun after a
+failure is a different run with a different outcome, and two runs sharing a log
+is how the first one's success gets read as the second one's.
+
+**Started and finished are both recorded**, chained into one `index.jsonl`. A
+run that is killed outright cannot write its own ending, so it appears as an
+attempt that started and never completed rather than as one that never happened;
+`result.json` still says `running`, which is the truth. Each index line carries
+the hash of the line before it, so an attempt removed or edited from the middle
+breaks the chain and `switchyard rollout-log` says so. Root-ownership alone
+would make tampering require root; the chain makes it visible even then.
+
+**Secrets are redacted as the bytes are written**, never in a pass afterwards --
+a secret written and cleaned up later was still on disk, and on a shared account
+that window is the whole problem. Tokens, passwords, key material, credentials
+in URLs and `Authorization:` headers go; a public key stays legible, because an
+operator has to be able to read the one they are being asked to register.
+
+**Roles read it directly.** `switchyard rollout-log <project>` lists the
+attempts, prints the latest record, optionally prints the captured output, and
+verifies the chain. Nobody has to paste a privileged run's output into a ticket.
+
 ### Integrating into the integration branch
 
 Integration is a workflow responsibility, not a local credential boundary. The

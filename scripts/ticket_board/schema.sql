@@ -438,6 +438,12 @@ ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS awaiting_since_at timestamptz;
 ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS awaiting_notified_since_at timestamptz;
+-- Which serial-focus reservation this ticket has already been woken out of,
+-- as `<queued_for>:<queued_behind>`. The wake is one notification per
+-- reservation identity, and the identity has to outlive a listener restart --
+-- the queue row does not (SYRD-109).
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD COLUMN IF NOT EXISTS serial_focus_wake_key text NOT NULL DEFAULT '';
 ALTER TABLE ticket_board.ticket_notification_state
     DROP CONSTRAINT IF EXISTS ticket_notification_state_awaiting_role_check;
 ALTER TABLE ticket_board.ticket_notification_state
@@ -1790,6 +1796,54 @@ AS $$
        AND NOT coalesce(p_manually_controlled, false)
        AND NOT ticket_board.ticket_has_unresolved_blockers(p_ticket_id)
        AND ticket_board.ticket_current_reserved_ticket(p_assignee, p_ticket_id) IS NOT NULL;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.ticket_serial_focus_reservation_is_current(
+    p_ticket_id text,
+    p_queued_for_assignee text,
+    p_queued_behind_ticket text
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    -- Whether the reservation a queued ticket names is the one still holding
+    -- that implementer. The sibling above infers the hold live from a backlog
+    -- ticket's own assignee; a declarative queue destination is frequently
+    -- analysis/director, so there is no implementer on the row to infer from
+    -- and the durable fields are the only record of what it is waiting for.
+    --
+    -- Every way of not being current answers false -- fields cleared, the named
+    -- ticket finished, cancelled, never existed, or superseded by other work on
+    -- the same implementer. That is the safe direction: a stale identity
+    -- restores ordinary reminders rather than silencing a ticket forever
+    -- (SYRD-109).
+    -- Every operand is made non-null before it is compared. An unguarded
+    -- `reserved_ticket = queued_behind` is NULL, not false, when the
+    -- implementer holds nothing -- and `AND NOT NULL` is NULL, so the callers'
+    -- WHERE clauses would drop exactly the tickets whose wait had just ended.
+    -- The predicate that exists to stop a ticket being silenced forever would
+    -- have been the thing silencing it.
+    SELECT coalesce(btrim(p_queued_for_assignee), '') <> ''
+       AND coalesce(btrim(p_queued_behind_ticket), '') <> ''
+       AND coalesce(
+               ticket_board.ticket_current_reserved_ticket(
+                   btrim(p_queued_for_assignee),
+                   p_ticket_id
+               ),
+               ''
+           ) = btrim(p_queued_behind_ticket)
+       -- A ticket already owned by the implementer it names is not waiting for
+       -- them, whatever the fields say. `ticket_current_reserved_ticket`
+       -- excludes the ticket it is asked about, so without this a marker left
+       -- on a ticket that has since reached its implementer's own lane would
+       -- match some other reservation and silence work somebody is doing.
+       AND NOT EXISTS (
+           SELECT 1
+           FROM ticket_board.tickets held
+           WHERE held.id = p_ticket_id
+             AND btrim(lower(held.assignee)) = btrim(lower(p_queued_for_assignee))
+       );
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.ticket_can_auto_advance_analysis(
@@ -7898,6 +7952,19 @@ BEGIN
                   ns.awaiting_since_at,
                   p_now
               )
+              -- A durable capacity wait is not unattended work. While the
+              -- reservation this ticket names still holds that implementer, the
+              -- director cannot legally route it into that lane, so "advance it
+              -- or hand it off" asks for something the board itself refuses. The
+              -- backlog guard beside this one answers the same question for a
+              -- ticket whose own assignee is the reserved implementer; a
+              -- declarative queue destination is usually analysis/director, so
+              -- only the durable fields know what it is waiting for (SYRD-109).
+              AND NOT ticket_board.ticket_serial_focus_reservation_is_current(
+                  t.id,
+                  t.queued_for_assignee,
+                  t.queued_behind_ticket
+              )
               AND NOT ticket_board.notification_delivery_in_backoff(
                   t.id,
                   ticket_board.nudge_target_role(t.state, t.assignee),
@@ -7966,6 +8033,19 @@ BEGIN
                   LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
                   WHERE tb.ticket_id = t.id
                     AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
+              )
+              -- A durable capacity wait is not unattended work. While the
+              -- reservation this ticket names still holds that implementer, the
+              -- director cannot legally route it into that lane, so "advance it
+              -- or hand it off" asks for something the board itself refuses. The
+              -- backlog guard beside this one answers the same question for a
+              -- ticket whose own assignee is the reserved implementer; a
+              -- declarative queue destination is usually analysis/director, so
+              -- only the durable fields know what it is waiting for (SYRD-109).
+              AND NOT ticket_board.ticket_serial_focus_reservation_is_current(
+                  t.id,
+                  t.queued_for_assignee,
+                  t.queued_behind_ticket
               )
               AND NOT ticket_board.notification_delivery_in_backoff(t.id, 'director', p_now, p_cadence)
         ) AS candidates
@@ -8124,6 +8204,19 @@ BEGIN
                       ns.awaiting_role,
                       ns.awaiting_since_at,
                       p_now
+                  )
+                  -- A durable capacity wait is not unattended work. While the
+                  -- reservation this ticket names still holds that implementer, the
+                  -- director cannot legally route it into that lane, so "advance it
+                  -- or hand it off" asks for something the board itself refuses. The
+                  -- backlog guard beside this one answers the same question for a
+                  -- ticket whose own assignee is the reserved implementer; a
+                  -- declarative queue destination is usually analysis/director, so
+                  -- only the durable fields know what it is waiting for (SYRD-109).
+                  AND NOT ticket_board.ticket_serial_focus_reservation_is_current(
+                      t.id,
+                      t.queued_for_assignee,
+                      t.queued_behind_ticket
                   )
                   AND NOT EXISTS (
                       SELECT 1
@@ -8313,6 +8406,19 @@ BEGIN
                   ns.awaiting_since_at,
                   p_now
               )
+              -- A durable capacity wait is not unattended work. While the
+              -- reservation this ticket names still holds that implementer, the
+              -- director cannot legally route it into that lane, so "advance it
+              -- or hand it off" asks for something the board itself refuses. The
+              -- backlog guard beside this one answers the same question for a
+              -- ticket whose own assignee is the reserved implementer; a
+              -- declarative queue destination is usually analysis/director, so
+              -- only the durable fields know what it is waiting for (SYRD-109).
+              AND NOT ticket_board.ticket_serial_focus_reservation_is_current(
+                  t.id,
+                  t.queued_for_assignee,
+                  t.queued_behind_ticket
+              )
               AND NOT ticket_board.notification_delivery_in_backoff(
                   t.id,
                   ticket_board.nudge_target_role(t.state, t.assignee),
@@ -8388,6 +8494,19 @@ BEGIN
                   LEFT JOIN ticket_board.tickets blocker ON blocker.id = tb.blocker_ticket_id
                   WHERE tb.ticket_id = t.id
                     AND (blocker.id IS NULL OR blocker.state NOT IN ('done', 'cancelled'))
+              )
+              -- A durable capacity wait is not unattended work. While the
+              -- reservation this ticket names still holds that implementer, the
+              -- director cannot legally route it into that lane, so "advance it
+              -- or hand it off" asks for something the board itself refuses. The
+              -- backlog guard beside this one answers the same question for a
+              -- ticket whose own assignee is the reserved implementer; a
+              -- declarative queue destination is usually analysis/director, so
+              -- only the durable fields know what it is waiting for (SYRD-109).
+              AND NOT ticket_board.ticket_serial_focus_reservation_is_current(
+                  t.id,
+                  t.queued_for_assignee,
+                  t.queued_behind_ticket
               )
               AND NOT ticket_board.notification_delivery_in_backoff(t.id, 'director', p_now, p_cadence)
         ) AS candidates
@@ -9321,3 +9440,178 @@ BEGIN
     RETURN updated;
 END;
 $$;
+
+-- SYRD-109: a queued ticket must not be silenced for good.
+--
+-- The reminder suppression above is a live predicate, so ordinary reminders
+-- resume by themselves the moment the named reservation stops holding. That is
+-- correct but slow and unaddressed: the director is the one who has to route
+-- the work, and the next thing they would otherwise see is a generic "advance
+-- it or hand it off" that says nothing about why it was quiet or what changed.
+-- This says the specific thing, once per reservation identity.
+--
+-- The identity is recorded on the ticket's notification state rather than
+-- inferred from the queue, because the queue row is gone the moment it is
+-- acknowledged and a listener restart must not mint a second wake for a
+-- reservation that has already been announced.
+CREATE OR REPLACE FUNCTION ticket_board.serial_focus_available_message(
+    p_ticket_id text,
+    p_title text,
+    p_queued_for text,
+    p_queued_behind text,
+    p_now_reserved text
+)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    -- Two different facts, said differently. "Capacity is available" is only
+    -- true when the implementer holds nothing else; when another ticket has
+    -- taken the reservation, saying so is what lets the director re-queue
+    -- against the right identity instead of routing into a full lane again.
+    SELECT p_ticket_id
+        || CASE WHEN coalesce(p_title, '') <> '' THEN ' -- ' || p_title ELSE '' END
+        || CASE
+            WHEN coalesce(p_now_reserved, '') = '' THEN
+                ' can be routed to ' || p_queued_for || ' now: ' || p_queued_behind
+                || ' no longer holds their serial focus and they hold no other reserved work.'
+            ELSE
+                ' is still queued for ' || p_queued_for || ', but ' || p_queued_behind
+                || ' no longer holds their serial focus -- ' || p_now_reserved
+                || ' does now. Route it again behind ' || p_now_reserved
+                || ', or route it to a free implementer.'
+        END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_serial_focus_queue_wakeups(
+    p_now timestamptz DEFAULT clock_timestamp()
+)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    candidate record;
+    delivered_count integer := 0;
+    now_reserved text;
+    notice text;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('notify_serial_focus_queue_wakeups');
+
+    FOR candidate IN
+        SELECT
+            t.id,
+            t.title,
+            t.state,
+            t.assignee,
+            t.ticket_number,
+            btrim(t.queued_for_assignee) AS queued_for,
+            btrim(t.queued_behind_ticket) AS queued_behind,
+            btrim(t.queued_for_assignee) || ':' || btrim(t.queued_behind_ticket) AS wake_key
+        FROM ticket_board.tickets t
+        JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
+        WHERE btrim(t.queued_for_assignee) <> ''
+          AND btrim(t.queued_behind_ticket) <> ''
+          AND NOT t.manually_controlled
+          -- The wait has genuinely ended. Everything else about this ticket --
+          -- blockers, holds, its own stage -- is the director's to read; the
+          -- one thing they cannot see from the board is that the reservation
+          -- they were told to wait for is over.
+          AND NOT ticket_board.ticket_serial_focus_reservation_is_current(
+              t.id,
+              t.queued_for_assignee,
+              t.queued_behind_ticket
+          )
+          AND ns.serial_focus_wake_key IS DISTINCT FROM
+              (btrim(t.queued_for_assignee) || ':' || btrim(t.queued_behind_ticket))
+          -- Blocked work cannot be routed either, and announcing capacity for
+          -- it would be this ticket's own complaint in a new costume. The
+          -- claim is left unmade, so the hand-off is announced when the
+          -- blocker clears rather than lost -- which is what every other
+          -- generator here does with a blocked ticket.
+          AND NOT ticket_board.ticket_has_unresolved_blockers(t.id)
+        ORDER BY t.ticket_number
+    LOOP
+        now_reserved := ticket_board.ticket_current_reserved_ticket(
+            candidate.queued_for,
+            candidate.id
+        );
+        notice := ticket_board.serial_focus_available_message(
+            candidate.id,
+            candidate.title,
+            candidate.queued_for,
+            candidate.queued_behind,
+            now_reserved
+        );
+        -- Claimed before it is enqueued. enqueue_notification dedupes a row
+        -- that is still waiting, but a delivered row is gone, and this function
+        -- runs on every listener pass: without the claim the same wake would be
+        -- minted again on the next pass after the first was acknowledged.
+        UPDATE ticket_board.ticket_notification_state
+        SET serial_focus_wake_key = candidate.wake_key
+        WHERE ticket_id = candidate.id;
+
+        PERFORM ticket_board.enqueue_notification(
+            candidate.id,
+            'ticket_update',
+            'director',
+            notice,
+            -- `queued_for` and `reserved_by` are the queue announcement's own
+            -- vocabulary, and deliberately so. The listener reads those two
+            -- keys off any notification that carries them and discards it when
+            -- the ticket's queue columns have moved on (SYRD-108). A wake is a
+            -- statement about one reservation identity, so it should be
+            -- discarded on a reroute for exactly that reason -- and naming the
+            -- fields anything else would not avoid the question, it would just
+            -- exempt this notification from an answer it needs. The claim that
+            -- makes a wake once-per-identity is cleared by the same reroute, so
+            -- the new identity gets its own wake when its own wait ends.
+            jsonb_build_object(
+                'kind', 'ticket_update',
+                'id', candidate.id,
+                'state', candidate.state,
+                'assignee', candidate.assignee,
+                'target_role', 'director',
+                'queued_for', candidate.queued_for,
+                'reserved_by', candidate.queued_behind,
+                'now_reserved', coalesce(now_reserved, ''),
+                'message', notice
+            ),
+            'serial-focus-available:' || candidate.id || ':' || candidate.wake_key
+        );
+        delivered_count := delivered_count + 1;
+    END LOOP;
+
+    RETURN delivered_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.reset_serial_focus_wake_key()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- A new queue identity is a new wait, so the claim that announced the old
+    -- one must not silence it. Rerouting to another implementer, re-queueing
+    -- behind a different ticket, and clearing the fields outright all land
+    -- here, which is what makes a reroute's wake condition move with it and a
+    -- cleared queue fall straight back to ordinary reminders (SYRD-109).
+    UPDATE ticket_board.ticket_notification_state
+    SET serial_focus_wake_key = ''
+    WHERE ticket_id = NEW.id
+      AND serial_focus_wake_key <> '';
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tickets_zzzzz_reset_serial_focus_wake_key ON ticket_board.tickets;
+CREATE TRIGGER tickets_zzzzz_reset_serial_focus_wake_key
+AFTER UPDATE ON ticket_board.tickets
+FOR EACH ROW
+WHEN (
+    OLD.queued_for_assignee IS DISTINCT FROM NEW.queued_for_assignee
+    OR OLD.queued_behind_ticket IS DISTINCT FROM NEW.queued_behind_ticket
+)
+EXECUTE FUNCTION ticket_board.reset_serial_focus_wake_key();

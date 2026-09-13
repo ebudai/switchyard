@@ -761,6 +761,27 @@ Both halves are idempotent -- re-running a publication pushes the same ref to th
 same commit, and recording the same outcome twice is not an error -- so an
 interrupted handoff is retried rather than unpicked by hand.
 
+**A published verdict is something the board saw, not something it was told**
+(SYRD-118). Before it records one, the board resolves the requested ref itself,
+in the tenant's trusted commit cache, and refuses the verdict unless
+`refs/remotes/origin/<ref>` is exactly the commit the implementer asked for; what
+it resolved is stored on the request. That namespace is written only by the
+publisher's cache refresh, and only after the push and the read-back above, so
+it is the board's own sight of a completed publication. The local
+`refs/heads/<ref>` beside it is not: filing the request creates that branch, and
+accepting it would prove only that somebody asked. The check is local git
+against the root-configured repositories, so it names no remote, contacts none,
+and stays safe to repeat.
+
+A verdict that cannot be proven records nothing and leaves the request open,
+which is what makes re-running the driver ordinary rather than a repair; the
+refusal says whether the ref is absent, at another commit, or unprovable because
+the board's own cache cannot be read. Rejections are unaffected, needing no push
+to be true. Without this the board could record a publication it could not see:
+publication request 17 was marked published while its ref was on neither GitHub
+nor the cache, and the same board then refused the commit it had just told the
+implementer to submit.
+
 ### Integrating, after the cutover
 
 Publication moves a role's own ref and refuses `main`, `master`, `trunk` and

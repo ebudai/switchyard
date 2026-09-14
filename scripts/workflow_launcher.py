@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from scripts.ticket_board.workflow_config import validate
+from scripts.ticket_board.workflow_config import role_presentation_label, validate
 
 
 def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, Any]:
@@ -46,6 +46,11 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
         role.pop("ephemeral", None)
         if spec.get("ephemeral"):
             role["ephemeral"] = True
+        # SYRD-141: the pane label is computed here, where the document's kind
+        # and any explicit override are both in hand, and written out whole.
+        # The launcher then reads a label rather than re-deriving one, so the
+        # generated file and the window always say the same thing.
+        role["presentation_label"] = role_presentation_label(spec)
         if spec.get("slot") is None:
             role["detached"] = True
         else:

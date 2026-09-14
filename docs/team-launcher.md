@@ -83,9 +83,12 @@ unaffected: it lives on `status-left` and in the `@switchyard_slot` and
 `@switchyard_role` pane options, which is where the viewer reads it for its
 pane borders (SYRD-141).
 
-Each split is the role's: its header is the role's display name alone, set from
-inside the pane with OSC 30, because Konsole's layout parser has no key for a
-split's title. An earlier attempt put the project name in front of every role
+Each split is the role's: its header is that role's presentation label alone,
+set from inside the pane with OSC 30, because Konsole's layout parser has no key
+for a split's title. The label comes from the workflow document through the
+projection and is carried in the generated config as `presentation_label`;
+implementers default to `<Role> Developer`, `ops` is shipped as `Ops`, and a
+document may name any role's label explicitly (SYRD-141). An earlier attempt put the project name in front of every role
 instead, on the understanding that a window had no title of its own; that left
 six headers reading `Switchyard -- <Role>` and the window title still followed
 whichever pane had focus (SYRD-122, SYRD-139). Projects

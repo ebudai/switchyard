@@ -34,6 +34,17 @@ import pwd
 CALLER = pwd.getpwuid(os.getuid()).pw_name
 
 ROLES = ("inspector", "director", "audit", "main", "app", "ops")
+#: What each role's pane is called, as the projection writes it into a
+#: generated config: implementers read `<role> Developer`, and Ops is the
+#: implementer provisioning names differently (SYRD-141).
+ROLE_HEADERS = {
+    "inspector": "Inspector",
+    "director": "Director",
+    "audit": "Audit",
+    "main": "Main Developer",
+    "app": "App Developer",
+    "ops": "Ops",
+}
 
 
 def _config(tmp: Path, *, project: str = "porter", project_name: str = "Porter Team") -> tuple[object, Path]:
@@ -55,6 +66,7 @@ def _config(tmp: Path, *, project: str = "porter", project_name: str = "Porter T
                     {
                         "role": role, "slot": slot, "cli": ["claude"],
                         "target": f"{project}-{role}:0.0", "workdir": str(tmp / "work" / role),
+                        "presentation_label": ROLE_HEADERS[role],
                     }
                     for slot, role in enumerate(ROLES)
                 ],
@@ -67,8 +79,12 @@ def _config(tmp: Path, *, project: str = "porter", project_name: str = "Porter T
 
 
 def _expected_titles(project_name: str = "Porter Team") -> list[str]:
-    """The split titles: the roles, and not the project (SYRD-139)."""
-    return [f"{role[:1].upper()}{role[1:]}" for role in ROLES]
+    """The split titles: what each role is called, and not the project.
+
+    Role names rather than the project (SYRD-139), and the label the role's
+    configuration carries rather than the slug capitalised (SYRD-141).
+    """
+    return [ROLE_HEADERS[role] for role in ROLES]
 
 
 def test_the_owner_half_reports_what_each_slot_is_called() -> None:

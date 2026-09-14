@@ -52,6 +52,19 @@ import time
 from team_launcher_test_helpers import *
 
 ROLE_SLOTS = ("inspector", "director", "audit", "main", "app", "ops")
+#: The six headers the User asked for, written out rather than derived, because
+#: deriving them from the code that produces them would assert nothing. An
+#: implementer reads `<role> Developer`; Ops is the implementer that does not
+#: (SYRD-141).
+ROLE_HEADERS = {
+    "inspector": "Inspector",
+    "director": "Director",
+    "audit": "Audit",
+    "main": "Main Developer",
+    "app": "App Developer",
+    "ops": "Ops",
+}
+EXPECTED_HEADERS = [ROLE_HEADERS[role] for role in ROLE_SLOTS]
 #: What Konsole shows when nothing has named the split: the profile default
 #: `%d : %n`, cwd and program. The live regression, in one string.
 GENERIC_TITLE_MARKER = " : "
@@ -89,6 +102,8 @@ def _project(tmp: Path, *, project: str = "porter", project_name: str = "Porter 
                         "cli": ["claude"],
                         "target": f"{project}-{role}:0.0",
                         "workdir": str(tmp / "work" / role),
+                        # As the projection writes it into a generated config.
+                        "presentation_label": ROLE_HEADERS[role],
                     }
                     for slot, role in enumerate(ROLE_SLOTS)
                 ],
@@ -124,7 +139,7 @@ def test_every_split_is_told_what_to_call_itself() -> None:
     assert len(leaves) == 6, leaves
     for slot, role in enumerate(ROLE_SLOTS):
         argv = shlex.split(leaves[slot]["Command"])
-        expected = f"{role[:1].upper()}{role[1:]}"
+        expected = ROLE_HEADERS[role]
         assert Path(argv[0]).name == team_launcher.PANE_WINDOW_NAME, argv
         # The project names the window; the role names the split. Both cross in
         # the same command, and neither is repeated in the other (SYRD-139).
@@ -133,6 +148,88 @@ def test_every_split_is_told_what_to_call_itself() -> None:
         # The layout's own field says the same thing, so a reader comparing the
         # file against the window is not told two different stories.
         assert leaves[slot]["Title"] == expected, leaves[slot]
+
+
+def _document(**roles: str) -> dict:
+    """A workflow document shaped like the canonical one, plus any overrides."""
+    document = json.loads((ROOT / "examples/workflows/inspection.json").read_text(encoding="utf-8"))
+    document["project"] = "porter"
+    for role in document["roles"]:
+        if role.get("target"):
+            role["target"] = f"porter-{role['name']}:0.0"
+        role.pop("presentation_label", None)
+        if role["name"] in roles:
+            role["presentation_label"] = roles[role["name"]]
+    return document
+
+
+def _projected_labels(document: dict) -> dict[str, str]:
+    from scripts.workflow_launcher import project_roles
+
+    raw = {
+        "project": "porter",
+        "repository": "/tmp/porter",
+        "roles": [
+            {
+                "role": role["name"],
+                "cli": [role["runtime"]],
+                "target": role["target"],
+                "tmux_session": role["target"].split(":")[0],
+            }
+            for role in document["roles"]
+            if role.get("runtime")
+        ],
+    }
+    return {
+        role["role"]: role.get("presentation_label", "")
+        for role in project_roles(raw, document)["roles"]
+    }
+
+
+def test_provisioning_gives_implementers_the_developer_label_and_ops_its_own() -> None:
+    """Acceptance 2 and 3, decided where the role's kind is known.
+
+    The default follows the KIND the document declares, so an implementer
+    invented next week reads `<role> Developer` without anyone editing code --
+    and nothing anywhere lists this tenant's role names to decide it. Ops is
+    the exception provisioning ships, by name, because it IS a name; and a
+    tenant that disagrees with either says so in its own document, which wins
+    over both.
+    """
+    labels = _projected_labels(_document())
+    for role, expected in ROLE_HEADERS.items():
+        assert labels[role] == expected, (role, labels)
+
+    # A tenant's own override beats the implementer default AND the shipped
+    # exception, in both directions.
+    overridden = _projected_labels(_document(main="Main", ops="Ops Developer"))
+    assert overridden["main"] == "Main", overridden
+    assert overridden["ops"] == "Ops Developer", overridden
+
+    # And turning an override off returns the role to the computed default,
+    # rather than leaving last week's answer in the generated file.
+    assert _projected_labels(_document())["main"] == "Main Developer"
+
+
+def test_a_new_implementer_inherits_the_developer_label() -> None:
+    """Future ephemeral implementers, without a code change.
+
+    The role added here does not exist in any shipped document or table; it is
+    declared an implementer and that is the whole of what decides its label.
+    """
+    document = _document()
+    template = next(role for role in document["roles"] if role["name"] == "app")
+    invented = dict(template, name="mefp", label="Mefp", target="porter-mefp:0.0", slot=None)
+    invented.pop("slot", None)
+    document["roles"].append(invented)
+    labels = _projected_labels(document)
+    assert labels["mefp"] == "Mefp Developer", labels
+    # A reviewer added the same way does not inherit it.
+    reviewer = dict(template, name="checker", label="Checker", kind="reviewer",
+                    target="porter-checker:0.0")
+    reviewer.pop("slot", None)
+    document["roles"].append(reviewer)
+    assert _projected_labels(document)["checker"] == "Checker", _projected_labels(document)
 
 
 def test_the_project_names_the_window_and_the_role_names_the_split() -> None:
@@ -155,7 +252,7 @@ def test_the_project_names_the_window_and_the_role_names_the_split() -> None:
 
     windows, splits = command_titles("porter", "Switchyard")
     assert windows == ["Switchyard"] * 6, windows
-    assert splits == [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS], splits
+    assert splits == EXPECTED_HEADERS, splits
     # The regression in one line: no header repeats the project.
     assert not any("Switchyard" in title for title in splits), splits
     assert not any(title.startswith("porter") for title in splits), splits
@@ -393,18 +490,35 @@ def _konsole_reading(
             if all(title and GENERIC_TITLE_MARKER not in title for title in titles):
                 break
             time.sleep(1.0)
-        window_titles: list[str] = []
-        for index in range(1, 7):
-            ask(f"--dest={service}", "/Windows/1",
-                "org.kde.konsole.Window.setCurrentSession", f"int32:{index}")
-            time.sleep(0.8)
+        def window_title() -> str:
             match = re.search(
                 r'variant\s+string "(.*)"',
                 ask(f"--dest={service}", "/konsole/MainWindow_1",
                     "org.freedesktop.DBus.Properties.Get",
                     "string:org.qtproject.Qt.QWidget", "string:windowTitle"),
             )
-            window_titles.append(match.group(1) if match else "")
+            return match.group(1) if match else ""
+
+        window_titles: list[str] = []
+        for index in range(1, 7):
+            ask(f"--dest={service}", "/Windows/1",
+                "org.kde.konsole.Window.setCurrentSession", f"int32:{index}")
+            # Waited for, not slept at. A caption still reading the profile's
+            # `%d : %n` is Konsole not having been told yet -- the split's own
+            # escapes have not been processed -- and reading it then made this
+            # case fail intermittently on a loaded host while the behaviour was
+            # correct. A caption that is settled and says something is read as
+            # said: a wrong title is not generic, so this waits out the
+            # not-yet without waiting out a regression (SYRD-141 audit).
+            deadline = time.time() + settle_seconds
+            seen = window_title()
+            while time.time() < deadline:
+                time.sleep(0.4)
+                current = window_title()
+                if current == seen and current and GENERIC_TITLE_MARKER not in current:
+                    break
+                seen = current
+            window_titles.append(seen)
         return titles, window_titles
     finally:
         if konsole is not None:
@@ -448,7 +562,7 @@ def test_a_real_konsole_shows_the_role_in_every_split_header() -> None:
 
     if not titles or not any(titles):
         return
-    expected = [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS]
+    expected = EXPECTED_HEADERS
     assert titles == expected, titles
     assert not any("Switchyard" in title for title in titles), titles
     # The live regression, stated as the thing that must not come back.
@@ -496,7 +610,7 @@ def test_a_real_konsole_keeps_the_window_title_through_every_focus_change() -> N
 
     if not splits or not any(splits):
         return
-    assert splits == [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS], splits
+    assert splits == EXPECTED_HEADERS, splits
     assert windows == ["Switchyard"] * 6, windows
 
 
@@ -691,7 +805,7 @@ def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
                 leaf["Command"] = team_launcher.inert_pane_command(
                     wrapper,
                     ["tmux", "-L", server, "attach", "-t", sessions[slot]],
-                    title=f"{ROLE_SLOTS[slot][:1].upper()}{ROLE_SLOTS[slot][1:]}",
+                    title=team_launcher.pane_split_title(config, config.roles[slot]),
                     window_title=team_launcher.project_window_title(config),
                 )
                 leaf["WorkingDirectory"] = str(tmp_path)
@@ -722,7 +836,7 @@ def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
 
     if not splits or not any(splits):
         return
-    assert splits == [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS], splits
+    assert splits == EXPECTED_HEADERS, splits
     assert windows == ["Switchyard"] * 6, windows
     # The exact shape the User reported, named so a regression says so.
     assert not any("slot " in window for window in windows), windows

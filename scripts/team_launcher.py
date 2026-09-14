@@ -276,9 +276,12 @@ def pane_split_title(config: ProjectConfig, role: RoleConfig) -> str:
 
     Konsole does distinguish the two. The window title an escape sequence sets
     is separate from a split's title, and the pane wrapper now reports both
-    (SYRD-139). So this is the role's name, which is what the header is for.
+    (SYRD-139). So this is the role's name, which is what the header is for --
+    as the document says it reads, which is not always the slug capitalised:
+    implementers read `<role> Developer` unless their tenant says otherwise
+    (SYRD-141).
     """
-    return role_display_name(role) or project_window_title(config)
+    return role.presentation_label or role_display_name(role) or project_window_title(config)
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_MODEL_ARG_BY_CLI = {
     "hermes": "-m",
@@ -417,6 +420,11 @@ class RoleConfig:
     # the ticket boundary in a running pane, not at launch. It is carried in the
     # generated config so the two descriptions of a role cannot disagree.
     ephemeral: bool = False
+    # SYRD-141: what this role's presentation pane is called. Projected from
+    # the workflow document, where the implementer default and any per-role
+    # override are decided; empty here means a config generated before that
+    # existed, and the role's own name is the answer it had then.
+    presentation_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -1948,6 +1956,7 @@ def _role_from_json(project: str, raw: dict[str, Any], *, base: Path, default_wo
         env={str(key): str(value) for key, value in env_raw.items()},
         run_as_user=str(raw.get("run_as_user") or "").strip(),
         ephemeral=_bool_value(raw.get("ephemeral"), field="ephemeral", role=role),
+        presentation_label=str(raw.get("presentation_label") or "").strip(),
     )
 
 

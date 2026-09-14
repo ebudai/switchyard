@@ -6866,6 +6866,12 @@ BEGIN
         -- a quoted "false" cannot read as a value and behave as its truthiness.
         IF r ? 'ephemeral' AND jsonb_typeof(r->'ephemeral') <> 'boolean' THEN
             RAISE EXCEPTION 'ephemeral must be a boolean: %', r->>'name'; END IF;
+        -- SYRD-141: what a person reads on this role's pane. Optional; a
+        -- non-empty single-line string when present, because a terminal
+        -- renders it and a newline in a title is an instruction, not text.
+        IF r ? 'presentation_label' AND (jsonb_typeof(r->'presentation_label') <> 'string'
+            OR btrim(r->>'presentation_label') = '' OR r->>'presentation_label' LIKE E'%\n%') THEN
+            RAISE EXCEPTION 'presentation_label must be non-empty single-line text: %', r->>'name'; END IF;
     END LOOP;
     IF EXISTS (SELECT x->>'slot' FROM jsonb_array_elements(cfg->'roles') x
        WHERE x->>'slot' IS NOT NULL GROUP BY x->>'slot' HAVING count(*) > 1)

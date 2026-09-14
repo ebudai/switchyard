@@ -159,6 +159,46 @@ def parking_stage_names(cfg: dict[str, Any]) -> set[str]:
     }
 
 
+#: What provisioning calls a role on its pane when the document does not say.
+#:
+#: A suffix by KIND, not a list of role names: the User asked for implementers
+#: to read `<role> Developer`, and an implementer is something the document
+#: declares. So an implementer invented next week inherits it without anyone
+#: editing code, and a reviewer or a system role keeps its plain name.
+PRESENTATION_LABEL_SUFFIX_BY_KIND = {"implementer": " Developer"}
+#: And the exceptions provisioning ships, by name, because they ARE names: Ops
+#: is an implementer whose pane the User wants to read `Ops`. A tenant that
+#: disagrees says so in its own document, which wins over both of these.
+PRESENTATION_LABEL_DEFAULTS = {"ops": "Ops"}
+
+
+def role_display_label(role: dict[str, Any]) -> str:
+    """One role's name as a person reads it, from the slug the project uses."""
+    slug = str(role.get("name") or "").strip()
+    return slug[:1].upper() + slug[1:] if slug else slug
+
+
+def role_presentation_label(role: dict[str, Any]) -> str:
+    """What this role's presentation pane is called (SYRD-141).
+
+    Three answers in order, and only the first of them is the tenant's: an
+    explicit `presentation_label` in the document, then what provisioning
+    configures for a role of that name, then the suffix its kind carries. A
+    role with none of those reads as its own name, which is what every role did
+    before this existed.
+    """
+    explicit = str(role.get("presentation_label") or "").strip()
+    if explicit:
+        return explicit
+    name = str(role.get("name") or "").strip().lower()
+    if name in PRESENTATION_LABEL_DEFAULTS:
+        return PRESENTATION_LABEL_DEFAULTS[name]
+    display = role_display_label(role)
+    if not display:
+        return ""
+    return display + PRESENTATION_LABEL_SUFFIX_BY_KIND.get(str(role.get("kind") or ""), "")
+
+
 def ephemeral_roles(cfg: dict[str, Any]) -> set[str]:
     """Roles that start each ticket with a cleared CLI session (SYRD-135).
 
@@ -272,6 +312,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "onboarding_prompt",
                 "template_role",
                 "ephemeral",
+                "presentation_label",
             },
             "unknown role field",
         )
@@ -350,6 +391,15 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 f"onboarding_prompt must be at most {ONBOARDING_PROMPT_MAX_CHARS} characters: {name}",
             )
             need("\x00" not in prompt, f"onboarding_prompt must not contain NUL: {name}")
+        if "presentation_label" in role:
+            # SYRD-141: what a person reads on this role's pane. Optional,
+            # because the default below is right for most roles; a string when
+            # present, because a terminal renders it.
+            label = role["presentation_label"]
+            need(
+                isinstance(label, str) and bool(label.strip()) and "\n" not in label,
+                f"presentation_label must be non-empty single-line text: {name}",
+            )
         if "ephemeral" in role:
             # SYRD-135: absent means false, and only a real boolean may say
             # otherwise. A string "false" or a 0 would read as a value and

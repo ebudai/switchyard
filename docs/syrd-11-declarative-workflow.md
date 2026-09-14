@@ -18,6 +18,16 @@ Replace its project and absolute onboarding path when creating a tenant.
   `<project>-<role>:0.0`. A template role copies existing trusted local runtime
   arguments; the document itself cannot supply commands or environment values.
   Identity and notification target do not depend on a visible slot.
+- `roles[].presentation_label`: optional non-empty single-line text, and what
+  this role's presentation pane is called (SYRD-141). Absent means the label
+  provisioning computes: a role whose `kind` is `implementer` reads
+  `<Role> Developer`, so an implementer added later inherits it without a code
+  change, and every other kind reads its own name. Provisioning also ships one
+  exception by name -- `ops` reads `Ops` -- because that is a name rather than
+  a rule. An explicit value here wins over both, in either direction. The label
+  is computed once, in the projection, and written into the generated
+  team-launcher config as `presentation_label`, so the document and the window
+  cannot disagree.
 - `roles[].ephemeral`: optional boolean, absent meaning false (SYRD-135). When
   true, the notify listener sends that role's CLI its clear command once before
   the first notification that hands it a given ticket, so the role starts each

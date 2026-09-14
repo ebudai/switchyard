@@ -55,10 +55,28 @@ no project identity and cannot be safely adopted or killed automatically. Visibl
 windows are titled with the project's display name when `project_name` is set in
 the config, and fall back to the project slug otherwise. Viewer mode sets tmux
 `set-titles` and `set-titles-string` on the project-scoped viewer session, so
-the title survives role pane restarts and tmux detach/attach cycles. Konsole
-mode passes the same title with `--qwindowtitle` and writes it into every
-materialized layout leaf's tab `Title`, so the window title stays static instead
-of following whichever role pane has focus. Projects
+the title survives role pane restarts and tmux detach/attach cycles.
+
+Konsole mode names two different things. The window is the project's: the
+display name is passed with `--qwindowtitle` and, because Konsole replaces that
+as soon as a session reports a title, every pane also reports it as the window
+title an escape sequence sets (OSC 2). Konsole shows that instead of the active
+split's title when `ShowWindowTitleOnTitleBar` is on, and because every pane
+reports the same project name the title bar stays put through every focus
+change. That setting is an application preference rather than a profile
+property, so it cannot be passed on the command line: the launch writes a
+`konsolerc` holding it beside the layout file and puts that directory on
+`XDG_CONFIG_DIRS` for the terminal it starts. KConfig reads that beneath the
+user's own configuration, so it answers for a key the user has never set and
+stops answering the moment they set one -- nothing of theirs is edited, and
+their other Konsole windows are unaffected.
+
+Each split is the role's: its header is the role's display name alone, set from
+inside the pane with OSC 30, because Konsole's layout parser has no key for a
+split's title. An earlier attempt put the project name in front of every role
+instead, on the understanding that a window had no title of its own; that left
+six headers reading `Switchyard -- <Role>` and the window title still followed
+whichever pane had focus (SYRD-122, SYRD-139). Projects
 without `run_as_user` use the invoking user's runtime
 pane-state directory and `$HOME/bin` prepended to pane CLI `PATH`; projects
 with `run_as_user` prepend that runtime user's `$HOME/bin`, not the invoking

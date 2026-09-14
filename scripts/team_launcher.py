@@ -265,19 +265,20 @@ def role_display_name(role: RoleConfig) -> str:
 
 
 def pane_split_title(config: ProjectConfig, role: RoleConfig) -> str:
-    """What one split in the presentation calls itself.
+    """What one split in the presentation calls itself: its role, and no more.
 
-    Both halves of the title, because Konsole gives a window no title of its
-    own: the title bar shows the active split's title, so the project name
-    reaches it only by being in there. A split that named only its role would
-    leave the window reading `App -- Konsole` and the project unnamed
-    (SYRD-122).
+    SYRD-122 put the project name in here too, on the understanding that
+    Konsole gives a window no title of its own -- the title bar shows the
+    active split's, so the project reached it only by being inside every split
+    title. That bought the window a name at the price of six headers all
+    beginning `Switchyard -- `, and it did not even hold: the title bar still
+    changed as focus moved, because it was reading whichever split had it.
+
+    Konsole does distinguish the two. The window title an escape sequence sets
+    is separate from a split's title, and the pane wrapper now reports both
+    (SYRD-139). So this is the role's name, which is what the header is for.
     """
-    project = project_window_title(config)
-    name = role_display_name(role)
-    if not name:
-        return project
-    return f"{project} -- {name}"
+    return role_display_name(role) or project_window_title(config)
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 DEFAULT_MODEL_ARG_BY_CLI = {
     "hermes": "-m",
@@ -916,7 +917,63 @@ def gui_privilege_drop_args(gui_user: str, *, euid: int | None = None) -> tuple[
     return ["sudo", "-u", user, "-H", "--"], ""
 
 
-def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, window_title: str = "") -> list[str]:
+#: What Konsole has to be told before a window title can stay put.
+#:
+#: Konsole's caption is the active split's title unless this is on, in which
+#: case it is the window title an escape sequence set -- and every split sets
+#: the same one. The setting is an application preference rather than a profile
+#: property, so it cannot be passed on the command line and it cannot travel in
+#: the layout; it lives in `konsolerc`, which belongs to whoever is running the
+#: terminal.
+#:
+#: So it is supplied as a cascaded default rather than written into anybody's
+#: configuration: KConfig reads `$XDG_CONFIG_DIRS` beneath `$XDG_CONFIG_HOME`,
+#: so a directory of our own on that path answers for a key the user has never
+#: set, and stops answering the moment they set it themselves. Nothing of
+#: theirs is edited, and their Konsole windows are unaffected (SYRD-139).
+KONSOLE_DEFAULTS_NAME = "konsolerc"
+KONSOLE_WINDOW_TITLE_DEFAULTS = "[KonsoleWindow]\nShowWindowTitleOnTitleBar=true\n"
+FALLBACK_XDG_CONFIG_DIRS = "/etc/xdg"
+
+
+def write_konsole_config_defaults(directory: Path, *, model: Path | None = None) -> str:
+    """Put the cascaded default beside the layout it belongs to.
+
+    Beside it deliberately: the account that can read the layout is the account
+    that will read this, so one set of permissions answers for both. The file
+    is given the layout's own owner and mode for the same reason -- on the
+    crossing path root writes both into somebody else's directory, and a
+    default the terminal cannot read is a default that does nothing.
+
+    Returns a refusal rather than raising: a window with a title bar that
+    follows focus is still a usable window, and refusing to open one over a
+    preference file would be the worse failure.
+    """
+    target = directory / KONSOLE_DEFAULTS_NAME
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        target.write_text(KONSOLE_WINDOW_TITLE_DEFAULTS, encoding="utf-8")
+    except OSError as exc:
+        return f"cannot write the Konsole window-title default {target}: {exc}"
+    if model is None or not model.exists():
+        return ""
+    try:
+        stats = model.stat()
+        os.chmod(target, stat.S_IMODE(stats.st_mode))
+        if os.geteuid() == 0:
+            os.chown(target, stats.st_uid, stats.st_gid)
+    except OSError as exc:
+        return f"cannot hand the Konsole window-title default {target} to its reader: {exc}"
+    return ""
+
+
+def konsole_launch_args(
+    layout_path: Path,
+    *,
+    gui_user: str | None = None,
+    window_title: str = "",
+    config_dir: Path | None = None,
+) -> list[str]:
     user = (gui_user if gui_user is not None else default_gui_user()).strip()
     privilege_drop, refusal = gui_privilege_drop_args(user)
     if refusal:
@@ -932,6 +989,12 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
         return _refusal_command(
             "team-launcher: no host Wayland display; run from Eric desktop session"
         )
+    config_dirs = ""
+    if config_dir is not None:
+        existing = "" if privilege_drop else str(os.environ.get("XDG_CONFIG_DIRS") or "")
+        config_dirs = ":".join(
+            part for part in (str(config_dir), existing or FALLBACK_XDG_CONFIG_DIRS) if part
+        )
     if privilege_drop:
         # Crossing from root is an environment boundary, so the environment is
         # emptied rather than filtered. sudo's env_reset is the host's policy,
@@ -940,7 +1003,9 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
         # `env -i` discards all of it and the GUI is given exactly the variables
         # it needs, PATH included so an emptied environment can still resolve a
         # program (SYRD-43).
-        environment = gui_environment_args(user, wayland_display=wayland_display)
+        environment = gui_environment_args(
+            user, wayland_display=wayland_display, config_dirs=config_dirs
+        )
     else:
         # An unprivileged invocation is already the caller's own session; there
         # is no boundary to cross and its desktop integration is its own.
@@ -948,6 +1013,7 @@ def konsole_launch_args(layout_path: Path, *, gui_user: str | None = None, windo
             "env",
             "QT_QPA_PLATFORM=wayland",
             f"WAYLAND_DISPLAY={wayland_display}",
+            *([f"XDG_CONFIG_DIRS={config_dirs}"] if config_dirs else []),
         ]
     args = [
         *privilege_drop,
@@ -976,6 +1042,7 @@ GUI_ENVIRONMENT_ALLOWLIST = (
     "USER",
     "LOGNAME",
     "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_DIRS",
     "QT_QPA_PLATFORM",
     "WAYLAND_DISPLAY",
 )
@@ -987,7 +1054,9 @@ def gui_program_path(program: str) -> str:
     return resolved or program
 
 
-def gui_environment_args(gui_user: str, *, wayland_display: str) -> list[str]:
+def gui_environment_args(
+    gui_user: str, *, wayland_display: str, config_dirs: str = ""
+) -> list[str]:
     """`env -i` plus exactly the variables the desktop process is allowed."""
     values = {
         "PATH": DEFAULT_PANE_BASE_PATH,
@@ -995,6 +1064,10 @@ def gui_environment_args(gui_user: str, *, wayland_display: str) -> list[str]:
         "USER": gui_user,
         "LOGNAME": gui_user,
         "XDG_RUNTIME_DIR": _gui_runtime_dir(gui_user),
+        # Not this process's: root's search path is not the desktop account's,
+        # so what crosses is the one directory this launch supplies plus the
+        # conventional system default.
+        "XDG_CONFIG_DIRS": config_dirs,
         "QT_QPA_PLATFORM": "wayland",
         "WAYLAND_DISPLAY": wayland_display,
     }
@@ -1257,7 +1330,15 @@ def launch_konsole_window(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     process_launcher: Callable[..., Any] | None = None,
 ) -> int:
-    args = konsole_launch_args(layout_path, gui_user=gui_user, window_title=window_title or project)
+    defaults_refusal = write_konsole_config_defaults(layout_path.parent, model=layout_path)
+    if defaults_refusal:
+        print(f"team-launcher: {defaults_refusal}", file=sys.stderr)
+    args = konsole_launch_args(
+        layout_path,
+        gui_user=gui_user,
+        window_title=window_title or project,
+        config_dir=layout_path.parent if not defaults_refusal else None,
+    )
     if args[:2] == ["sh", "-lc"]:
         return runner(args).returncode
     launch_process = process_launcher or subprocess.Popen
@@ -5108,7 +5189,9 @@ def pane_window_program(script_path: Path) -> Path:
     return Path(script_path).expanduser().resolve(strict=False).with_name(PANE_WINDOW_NAME)
 
 
-def inert_pane_command(program: Path, args: Sequence[str], *, title: str = "") -> str:
+def inert_pane_command(
+    program: Path, args: Sequence[str], *, title: str = "", window_title: str = ""
+) -> str:
     """Wrap a pane's client so its terminal never falls back to a shell.
 
     Konsole runs the tab's program directly; when that program is the attach
@@ -5116,18 +5199,31 @@ def inert_pane_command(program: Path, args: Sequence[str], *, title: str = "") -
     shell belongs to whoever invoked switchyard, so on a privileged invocation
     the pane becomes a root prompt. The wrapper ends inert instead (SYRD-43).
 
-    The wrapper is also where a split's title comes from, because Konsole's
-    layout file has no key for one (SYRD-122).
+    The wrapper is also where both titles come from, because Konsole's layout
+    file has no key for either (SYRD-122, SYRD-139): the split's own name, and
+    the window name every split reports identically so the title bar stops
+    following focus.
     """
+    window_args = ["--window-title", window_title] if window_title.strip() else []
     title_args = ["--title", title] if title.strip() else []
-    return _quote_command([str(program), *title_args, *args])
+    return _quote_command([str(program), *window_args, *title_args, *args])
 
 
-def failed_role_command(role: RoleConfig, reason: str) -> str:
+def failed_role_command(role: RoleConfig, reason: str, *, window_title: str = "") -> str:
     message = f"PGU launcher did not start {role.role}: checkout refresh failed: {reason}"
+    # This pane does not go through the wrapper, so it reports the window's name
+    # itself. Without it the caption would fall back to this split's title the
+    # moment somebody clicked the one pane that failed, which is the window
+    # title following focus again -- in the case where a person is most likely
+    # to be clicking around (SYRD-139).
+    naming = (
+        f"printf '\\033]2;%s\\007' {shlex.quote(window_title)}; " if window_title.strip() else ""
+    )
     # `sleep 30` used to hand the tab back to the shell that opened the window.
     # A failed role is exactly when someone reaches for that prompt (SYRD-43).
-    return _quote_command(["sh", "-c", f"printf '%s\\n' {shlex.quote(message)}; exec sleep infinity"])
+    return _quote_command(
+        ["sh", "-c", f"{naming}printf '%s\\n' {shlex.quote(message)}; exec sleep infinity"]
+    )
 
 
 def materialize_layout(
@@ -5160,7 +5256,9 @@ def materialize_layout(
             raise SystemExit(f"role {role.role} slot {role.slot} is outside layout leaf count {len(leaves)}")
         leaf = leaves[role.slot]
         if role.role in failed_roles:
-            leaf["Command"] = failed_role_command(role, failed_roles[role.role])
+            leaf["Command"] = failed_role_command(
+                role, failed_roles[role.role], window_title=project_window_title(config)
+            )
             leaf["WorkingDirectory"] = str(Path.home())
         else:
             leaf["Command"] = inert_pane_command(
@@ -5177,6 +5275,7 @@ def materialize_layout(
                     run_as_user=role_run_as_user(config, role),
                 ),
                 title=pane_split_title(config, role),
+                window_title=project_window_title(config),
             )
             leaf["WorkingDirectory"] = role.workdir
         # Konsole 26.08.1 does not read this key -- its layout parser knows
@@ -5333,7 +5432,12 @@ def presentation_slot_titles(config: ProjectConfig, slot_count: int) -> list[str
 
 
 def render_presentation_handoff(
-    project: str, *, slot_count: int, pane_program: Path, slot_titles: Sequence[str]
+    project: str,
+    *,
+    slot_count: int,
+    pane_program: Path,
+    slot_titles: Sequence[str],
+    window_title: str = "",
 ) -> dict[str, Any]:
     """Everything the caller needs to build its own layout, and nothing else.
 
@@ -5347,6 +5451,12 @@ def render_presentation_handoff(
     The titles are here because the desktop half has no other way to learn
     them: it knows the project's slug and nothing about its roles, which is why
     its window opened with the fallback title (SYRD-130).
+
+    The window's own name crosses for the same reason and is checked the same
+    way. The desktop half could read the project's registered display name for
+    itself, and does for `--qwindowtitle`; but this one is handed to a terminal
+    as an escape sequence, so it travels as a field that both sides validate
+    rather than as something one side looks up unchecked (SYRD-139).
     """
     return {
         "schema": PRESENTATION_HANDOFF_SCHEMA,
@@ -5354,6 +5464,7 @@ def render_presentation_handoff(
         "slot_count": int(slot_count),
         "pane_program": str(pane_program),
         "slot_titles": [str(title) for title in slot_titles],
+        "window_title": str(window_title),
     }
 
 
@@ -5396,12 +5507,20 @@ def validated_presentation_handoff(
         problem = presentation_title_problem(title)
         if problem:
             return {}, f"the presentation handoff is refused: {problem}"
+    window_title = payload.get("window_title", "")
+    if not isinstance(window_title, str):
+        return {}, "the presentation handoff window title is not a string"
+    if window_title:
+        problem = presentation_title_problem(window_title)
+        if problem:
+            return {}, f"the presentation handoff is refused: {problem}"
     return {
         "schema": PRESENTATION_HANDOFF_SCHEMA,
         "project": project,
         "slot_count": slot_count,
         "pane_program": raw_program,
         "slot_titles": [str(title) for title in titles],
+        "window_title": window_title,
     }, ""
 
 
@@ -20347,6 +20466,7 @@ def complete_desktop_presentation(
         gui_user=caller,
         pane_program=Path(handoff["pane_program"]),
         slot_titles=handoff["slot_titles"],
+        window_title=handoff["window_title"] or _registered_project_name(project) or project,
     )
     output = desktop_state_dir(project, caller) / f"{project}-presentation-layout.json"
     refusal = write_desktop_layout(output, layout, gui_user=caller, runner=runner)
@@ -20356,7 +20476,7 @@ def complete_desktop_presentation(
     return launch_konsole_window(
         output,
         project=project,
-        window_title=_registered_project_name(project) or project,
+        window_title=handoff["window_title"] or _registered_project_name(project) or project,
         gui_user=None,
         runner=runner,
         process_launcher=process_launcher,

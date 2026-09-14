@@ -67,7 +67,8 @@ def _config(tmp: Path, *, project: str = "porter", project_name: str = "Porter T
 
 
 def _expected_titles(project_name: str = "Porter Team") -> list[str]:
-    return [f"{project_name} -- {role[:1].upper()}{role[1:]}" for role in ROLES]
+    """The split titles: the roles, and not the project (SYRD-139)."""
+    return [f"{role[:1].upper()}{role[1:]}" for role in ROLES]
 
 
 def test_the_owner_half_reports_what_each_slot_is_called() -> None:
@@ -128,18 +129,23 @@ def test_the_handoff_is_refused_when_the_titles_are_not_checkable() -> None:
             team_launcher.untrusted_root_executable_reasons = accept
             good = team_launcher.render_presentation_handoff(
                 "porter", slot_count=2, pane_program=program,
-                slot_titles=["Porter Team -- Inspector", "Porter Team -- Director"],
+                slot_titles=["Inspector", "Director"], window_title="Porter Team",
             )
             checked, problem = team_launcher.validated_presentation_handoff(good, project="porter")
             assert not problem, problem
-            assert checked["slot_titles"] == ["Porter Team -- Inspector", "Porter Team -- Director"]
+            assert checked["slot_titles"] == ["Inspector", "Director"]
+            assert checked["window_title"] == "Porter Team"
 
             for label, mutated in (
                 ("missing", {key: value for key, value in good.items() if key != "slot_titles"}),
-                ("not a list", {**good, "slot_titles": "Porter Team -- Inspector"}),
-                ("wrong length", {**good, "slot_titles": ["Porter Team -- Inspector"]}),
-                ("control character", {**good, "slot_titles": ["Porter Team -- Inspector", "a\033]0;b\007"]}),
-                ("empty", {**good, "slot_titles": ["Porter Team -- Inspector", "  "]}),
+                ("not a list", {**good, "slot_titles": "Inspector"}),
+                ("wrong length", {**good, "slot_titles": ["Inspector"]}),
+                ("control character", {**good, "slot_titles": ["Inspector", "a\033]0;b\007"]}),
+                ("empty", {**good, "slot_titles": ["Inspector", "  "]}),
+                # The window title is handed to a terminal as an escape too, so
+                # it is checked exactly as hard as the split titles (SYRD-139).
+                ("window title control character", {**good, "window_title": "a\033]0;b\007"}),
+                ("window title not a string", {**good, "window_title": ["Porter Team"]}),
             ):
                 _, refused = team_launcher.validated_presentation_handoff(mutated, project="porter")
                 assert refused, label
@@ -183,6 +189,10 @@ def test_the_owner_half_actually_puts_them_on_the_wire() -> None:
     assert payload["schema"] == team_launcher.PRESENTATION_HANDOFF_SCHEMA, payload
     assert payload["slot_count"] == 6, payload
     assert payload["slot_titles"] == _expected_titles(), payload
+    # And the window's own name, which the desktop half cannot work out for
+    # itself and which it hands to a terminal as an escape sequence, so it
+    # crosses as a checked field rather than a lookup (SYRD-139).
+    assert payload["window_title"] == "Porter Team", payload
 
 
 def test_the_desktop_half_writes_a_layout_that_names_every_role() -> None:
@@ -206,6 +216,7 @@ def test_the_desktop_half_writes_a_layout_that_names_every_role() -> None:
             "slot_count": 6,
             "pane_program": str(program),
             "slot_titles": _expected_titles(),
+            "window_title": "Porter Team",
         }
         handoff_path = tmp_path / "home" / CALLER / ".local" / "state" / "switchyard" / "projects" / "porter" / "porter-presentation-handoff.json"
         handoff_path.parent.mkdir(parents=True)
@@ -224,7 +235,9 @@ def test_the_desktop_half_writes_a_layout_that_names_every_role() -> None:
             team_launcher._gui_home = lambda user: str(home)
             team_launcher.untrusted_root_executable_reasons = lambda *a, **k: []
             team_launcher._tenant_control_grant = lambda project: {"owner": "porter-agent"}
-            team_launcher.launch_konsole_window = lambda *a, **k: launched.append(list(a)) or 0
+            team_launcher.launch_konsole_window = (
+                lambda *a, **k: launched.append([list(a), dict(k)]) or 0
+            )
             status = team_launcher.complete_desktop_presentation(
                 "porter", caller=CALLER, print_func=printed.append,
             )
@@ -247,9 +260,15 @@ def test_the_desktop_half_writes_a_layout_that_names_every_role() -> None:
         argv = shlex.split(leaves[slot]["Command"])
         assert Path(argv[0]).name == team_launcher.PANE_WINDOW_NAME, argv
         # The regression, stated as the thing that must not come back: the
-        # wrapper is told the title before it is told what to run.
-        assert argv[1:3] == ["--title", expected], (slot, argv)
+        # wrapper is told both titles before it is told what to run, the window
+        # gets the project and the split gets the role, and no header repeats
+        # the project name (SYRD-130, SYRD-139).
+        assert argv[1:5] == ["--window-title", "Porter Team", "--title", expected], (slot, argv)
+        assert "Porter Team" not in expected, expected
         assert leaves[slot]["Title"] == expected, leaves[slot]
+    # The window is named on the launch too, so a terminal that never sees the
+    # escape still opens with the project's name rather than a fallback.
+    assert launched and launched[0][1].get("window_title") == "Porter Team", launched
 
 
 def test_the_layout_builder_still_names_slots_with_no_role() -> None:

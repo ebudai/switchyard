@@ -1305,6 +1305,7 @@ def presentation_layout_payload(
     gui_user: str,
     pane_program: Path,
     slot_titles: Sequence[str] = (),
+    window_title: str = "",
 ) -> dict[str, Any]:
     """The Konsole layout for one project's presentation window.
 
@@ -1325,6 +1326,7 @@ def presentation_layout_payload(
             pane_program,
             display_attach_args_for(project, slot, owner=owner, gui_user=gui_user),
             title=title,
+            window_title=window_title,
         )
         # The desktop account's own directory, not this process's. Under a
         # privileged invocation `Path.home()` is root's, and the tab recorded
@@ -1358,6 +1360,7 @@ def _hand_off_desktop_half(
             team_launcher.switchyard_pane_launcher_for(config)
         ),
         slot_titles=team_launcher.presentation_slot_titles(config, int(state["slot_count"])),
+        window_title=team_launcher.project_window_title(config),
     )
     try:
         with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:

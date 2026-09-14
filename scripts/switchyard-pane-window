@@ -19,17 +19,37 @@
 # default `%d : %n`, which is the generic cwd-and-program text the presentation
 # was showing. The escape below is how a Konsole split is named from inside it
 # (SYRD-122).
+#
+# It names two different things, through two different escapes, because Konsole
+# tells them apart and a person reads them in two different places. OSC 30 sets
+# this split's own title: the text in its header, and nothing else's. OSC 2 sets
+# what Konsole calls the window title -- the one an escape sequence sets -- and
+# with `ShowWindowTitleOnTitleBar` every split reporting the same project name
+# leaves the window reading that name whichever split has focus. Putting the
+# project into the split titles instead got the window right only by repeating
+# the project in six headers, and the window still changed as focus moved
+# (SYRD-139).
 set -u
 
 title=""
-if [ "$#" -ge 2 ] && [ "$1" = "--title" ]; then
-    title="$2"
-    shift 2
-fi
+window_title=""
+while [ "$#" -ge 2 ]; do
+    case "$1" in
+        --title) title="$2"; shift 2 ;;
+        --window-title) window_title="$2"; shift 2 ;;
+        *) break ;;
+    esac
+done
 
 if [ "$#" -eq 0 ]; then
     printf 'switchyard: switchyard-pane-window needs the pane command to run\n' >&2
     exit 2
+fi
+
+if [ -n "$window_title" ]; then
+    # The window's name, reported identically by every split, so the title bar
+    # reads the project rather than whichever pane was clicked last.
+    printf '\033]2;%s\007' "$window_title"
 fi
 
 if [ -n "$title" ]; then

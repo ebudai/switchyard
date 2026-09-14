@@ -24,12 +24,27 @@ platform and reads each split's displayed title back over Konsole's own D-Bus
 interface, so it fails if the title stops reaching the header for any reason --
 a Konsole that drops the escape, a wrapper that stops sending it, a layout key
 that never worked.
+
+SYRD-139 corrects what this file used to assert. The reasoning above -- that a
+window has no title of its own, so the project name has to be inside every
+split title -- was wrong twice over: it put `Switchyard -- ` in front of six
+headers, and the window title still changed to whichever pane had focus,
+because that is what Konsole's caption follows. Konsole does tell the two
+apart. A split's title is OSC 30; the window title an escape sequence sets is
+OSC 2, and with `ShowWindowTitleOnTitleBar` the caption reads that instead --
+so every split reporting the same project name leaves the window reading it
+whoever has focus. Headers are now the role alone, and
+`test_a_real_konsole_keeps_the_window_title_through_every_focus_change` moves
+focus across all six splits in a real Konsole and reads the window's own title
+back after each one.
 """
 
 from __future__ import annotations
 
 import contextlib
+import pwd
 import re
+import stat
 import shutil
 import subprocess
 import time
@@ -109,36 +124,81 @@ def test_every_split_is_told_what_to_call_itself() -> None:
     assert len(leaves) == 6, leaves
     for slot, role in enumerate(ROLE_SLOTS):
         argv = shlex.split(leaves[slot]["Command"])
-        expected = f"Porter Team -- {role[:1].upper()}{role[1:]}"
+        expected = f"{role[:1].upper()}{role[1:]}"
         assert Path(argv[0]).name == team_launcher.PANE_WINDOW_NAME, argv
-        assert argv[1:3] == ["--title", expected], (slot, argv)
+        # The project names the window; the role names the split. Both cross in
+        # the same command, and neither is repeated in the other (SYRD-139).
+        assert argv[1:5] == ["--window-title", "Porter Team", "--title", expected], (slot, argv)
+        assert "Porter Team" not in expected, expected
         # The layout's own field says the same thing, so a reader comparing the
         # file against the window is not told two different stories.
         assert leaves[slot]["Title"] == expected, leaves[slot]
 
 
-def test_the_project_name_is_in_every_title_because_the_window_has_none() -> None:
-    """Konsole gives a window no title of its own; it shows the active split's.
+def test_the_project_names_the_window_and_the_role_names_the_split() -> None:
+    """Two names, from two configured facts, and neither borrows the other.
 
-    So the configured project display name has to be inside the split titles or
-    it never reaches the title bar at all.
+    The display name is the project's and reaches the title bar as the window
+    title every split reports; the role's name is the split's and reaches its
+    header. A tenant that configures neither gets its slug and its slugs, which
+    is the honest fallback, and nothing here is spelled for one tenant.
     """
-    with tempfile.TemporaryDirectory(prefix="pgu-presentation-window-title.") as tmp:
-        tmp_path = Path(tmp)
-        config, config_path = _project(tmp_path, project="porter", project_name="Switchyard")
-        leaves = _materialize(tmp_path, config, config_path, script_path=ROOT / "scripts" / "team-launcher")
+    def command_titles(project: str, project_name: str) -> tuple[list[str], list[str]]:
+        with tempfile.TemporaryDirectory(prefix="pgu-presentation-window-title.") as tmp:
+            tmp_path = Path(tmp)
+            config, config_path = _project(tmp_path, project=project, project_name=project_name)
+            leaves = _materialize(
+                tmp_path, config, config_path, script_path=ROOT / "scripts" / "team-launcher"
+            )
+        argvs = [shlex.split(leaf["Command"]) for leaf in leaves]
+        return [argv[2] for argv in argvs], [argv[4] for argv in argvs]
 
-    titles = [shlex.split(leaf["Command"])[2] for leaf in leaves]
-    assert all(title.startswith("Switchyard -- ") for title in titles), titles
-    # And the slug is not what a person is shown when a display name is set.
-    assert not any(title.startswith("porter") for title in titles), titles
+    windows, splits = command_titles("porter", "Switchyard")
+    assert windows == ["Switchyard"] * 6, windows
+    assert splits == [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS], splits
+    # The regression in one line: no header repeats the project.
+    assert not any("Switchyard" in title for title in splits), splits
+    assert not any(title.startswith("porter") for title in splits), splits
 
-    # With no display name configured, the slug is the honest fallback.
-    with tempfile.TemporaryDirectory(prefix="pgu-presentation-slug-title.") as tmp:
+    # With no display name configured, the slug is the honest fallback -- and it
+    # is the WINDOW that falls back to it, not the headers.
+    windows, splits = command_titles("porter", "")
+    assert windows == ["porter"] * 6, windows
+    assert splits[0] == "Inspector", splits
+
+    # Another tenant, another set of roles: nothing here is tenant-specific.
+    assert command_titles("otto", "Otto Works")[0] == ["Otto Works"] * 6
+
+
+def test_a_pane_that_failed_to_start_still_names_the_window() -> None:
+    """The one pane that does not go through the wrapper.
+
+    A failed role's tab runs its own message and waits. If it reports no window
+    title, Konsole falls back to that split's title for the caption the moment
+    somebody clicks it -- the window following focus again, in exactly the
+    situation where a person is clicking around to find out what went wrong.
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-failed-role-title.") as tmp:
         tmp_path = Path(tmp)
-        config, config_path = _project(tmp_path, project="porter", project_name="")
-        leaves = _materialize(tmp_path, config, config_path, script_path=ROOT / "scripts" / "team-launcher")
-    assert shlex.split(leaves[0]["Command"])[2] == "porter -- Inspector", leaves[0]
+        config, config_path = _project(tmp_path, project_name="Switchyard")
+        output = tmp_path / "out.json"
+        original = team_launcher.current_user_name
+        try:
+            team_launcher.current_user_name = lambda: "root"
+            team_launcher.materialize_layout(
+                config, config_path=config_path, mode="attach-or-start",
+                script_path=ROOT / "scripts" / "team-launcher", output_path=output,
+                failed_roles={"ops": "checkout is dirty"},
+            )
+        finally:
+            team_launcher.current_user_name = original
+        leaves = team_launcher._layout_leaves(json.loads(output.read_text(encoding="utf-8")))
+
+    failed = leaves[ROLE_SLOTS.index("ops")]["Command"]
+    assert "checkout is dirty" in failed, failed
+    assert "\\033]2;%s\\007" in failed and "Switchyard" in failed, failed
+    # It is still inert, which is the older rule this must not break (SYRD-43).
+    assert "exec sleep infinity" in failed, failed
 
 
 def _wrapper_output(args: list[str], *, settle: float = 3.0) -> tuple[str, int | None]:
@@ -168,10 +228,21 @@ def _wrapper_output(args: list[str], *, settle: float = 3.0) -> tuple[str, int |
 
 def test_the_wrapper_names_its_split_before_running_anything() -> None:
     """The escape reaches the terminal, and the client still runs after it."""
-    output, _ = _wrapper_output(["--title", "Switchyard -- App", "printf", "ran\n"])
-    assert "\033]30;Switchyard -- App\007" in output, repr(output)
+    output, _ = _wrapper_output(["--window-title", "Switchyard", "--title", "App", "printf", "ran\n"])
+    assert "\033]30;App\007" in output, repr(output)
+    # The window's name, through the escape Konsole reads as the window title
+    # rather than the split's, and before the split's so a terminal that only
+    # understood one of them would still be told which (SYRD-139).
+    assert "\033]2;Switchyard\007" in output, repr(output)
+    assert output.index("\033]2;") < output.index("\033]30;"), repr(output)
     assert "ran" in output, repr(output)
     assert output.index("\033]30;") < output.index("ran"), repr(output)
+
+    # Either title alone is still accepted, and neither invents the other.
+    split_only, _ = _wrapper_output(["--title", "App", "printf", "ran\n"])
+    assert "\033]30;App\007" in split_only and "\033]2;" not in split_only, repr(split_only)
+    window_only, _ = _wrapper_output(["--window-title", "Switchyard", "printf", "ran\n"])
+    assert "\033]2;Switchyard\007" in window_only and "\033]30;" not in window_only, repr(window_only)
 
     # Without a title it behaves exactly as it did before this ticket.
     plain, _ = _wrapper_output(["printf", "ran\n"])
@@ -179,7 +250,7 @@ def test_the_wrapper_names_its_split_before_running_anything() -> None:
     assert "ran" in plain, repr(plain)
 
     # And a command is still required, so a missing one is not read as a title.
-    empty, status = _wrapper_output(["--title", "Switchyard -- App"])
+    empty, status = _wrapper_output(["--window-title", "Switchyard", "--title", "App"])
     assert status == 2, (status, empty)
     assert "needs the pane command" in empty, empty
 
@@ -201,7 +272,20 @@ def test_a_cli_inside_the_pane_cannot_rename_the_split() -> None:
 
 
 def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
-    """Every split's displayed title, read from a real Konsole over D-Bus."""
+    return _konsole_reading(layout, settle_seconds=settle_seconds)[0]
+
+
+def _konsole_reading(
+    layout: Path, *, settle_seconds: float = 30.0, config_dir: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """What a real Konsole shows: every split's title, and the window's own.
+
+    The window titles are read one per focus change, because that is the
+    reported fault -- the caption was correct until a pane was clicked. Focus
+    is moved over Konsole's own interface rather than by clicking, which is the
+    same thing as far as the caption is concerned: it follows the active
+    session either way.
+    """
     # A session bus of this case's own. These suites deliberately point
     # DBUS_SESSION_BUS_ADDRESS away from the tenant's real bus (SYRD-55), so
     # Konsole launched from here has nowhere to register and nothing to answer
@@ -215,10 +299,14 @@ def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
     try:
         address = (bus.stdout.readline() or "").strip()
         if not address:
-            return []
+            return [], []
         environment = dict(os.environ)
         environment["QT_QPA_PLATFORM"] = "offscreen"
         environment["DBUS_SESSION_BUS_ADDRESS"] = address
+        if config_dir is not None:
+            # Exactly what a launched window is given, and nothing else on the
+            # search path: the default has to be doing the work here.
+            environment["XDG_CONFIG_DIRS"] = str(config_dir)
         # A configuration directory of its own, so this never reads or writes
         # the Konsole profiles of whoever is running the suite.
         config_home = layout.parent / "konsole-config"
@@ -247,7 +335,7 @@ def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
             if not service:
                 time.sleep(0.5)
         if not service:
-            return []
+            return [], []
         # The sessions appear as their leaves start; wait for all six rather
         # than reading a half-built window.
         deadline = time.time() + settle_seconds
@@ -264,7 +352,19 @@ def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
             if all(title and GENERIC_TITLE_MARKER not in title for title in titles):
                 break
             time.sleep(1.0)
-        return titles
+        window_titles: list[str] = []
+        for index in range(1, 7):
+            ask(f"--dest={service}", "/Windows/1",
+                "org.kde.konsole.Window.setCurrentSession", f"int32:{index}")
+            time.sleep(0.8)
+            match = re.search(
+                r'variant\s+string "(.*)"',
+                ask(f"--dest={service}", "/konsole/MainWindow_1",
+                    "org.freedesktop.DBus.Properties.Get",
+                    "string:org.qtproject.Qt.QWidget", "string:windowTitle"),
+            )
+            window_titles.append(match.group(1) if match else "")
+        return titles, window_titles
     finally:
         if konsole is not None:
             konsole.terminate()
@@ -307,11 +407,158 @@ def test_a_real_konsole_shows_the_role_in_every_split_header() -> None:
 
     if not titles or not any(titles):
         return
-    expected = [f"Switchyard -- {role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS]
+    expected = [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS]
     assert titles == expected, titles
+    assert not any("Switchyard" in title for title in titles), titles
     # The live regression, stated as the thing that must not come back.
     assert not any(GENERIC_TITLE_MARKER in title for title in titles), titles
     assert not any("switchyard-pane" in title for title in titles), titles
+
+
+def _konsole_fixture(tmp_path: Path, *, project_name: str = "Switchyard") -> Path:
+    """The real wrapper, an inert client, and the generated layout."""
+    launcher_dir = tmp_path / "bin"
+    launcher_dir.mkdir()
+    shutil.copy2(
+        ROOT / "scripts" / team_launcher.PANE_WINDOW_NAME,
+        launcher_dir / team_launcher.PANE_WINDOW_NAME,
+    )
+    stub = launcher_dir / "team-launcher"
+    stub.write_text("#!/bin/sh\nexec sleep 900\n", encoding="utf-8")
+    stub.chmod(0o755)
+    config, config_path = _project(tmp_path, project_name=project_name)
+    leaves = _materialize(tmp_path, config, config_path, script_path=stub)
+    assert len(leaves) == 6, leaves
+    return tmp_path / "out.json"
+
+
+def test_a_real_konsole_keeps_the_window_title_through_every_focus_change() -> None:
+    """The reported regression, against a real Konsole, one focus at a time.
+
+    The User's report was that focusing a pane renamed the whole window. This
+    moves focus through all six splits and reads the window's own title after
+    each move, so it fails if the caption ever follows a split again -- whether
+    because the wrapper stops reporting the window title, because the cascaded
+    default stops reaching Konsole, or because a future Konsole changes which
+    of the two it shows.
+    """
+    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon")):
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-presentation-window.") as tmp:
+        tmp_path = Path(tmp)
+        layout = _konsole_fixture(tmp_path)
+        # The product's own writer, not a copy of its contents here: if the
+        # default it writes stops being the one Konsole needs, this fails.
+        defaults_dir = tmp_path / "konsole-defaults"
+        assert team_launcher.write_konsole_config_defaults(defaults_dir, model=layout) == ""
+        splits, windows = _konsole_reading(layout, config_dir=defaults_dir)
+
+    if not splits or not any(splits):
+        return
+    assert splits == [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS], splits
+    assert windows == ["Switchyard"] * 6, windows
+
+
+def test_without_the_default_konsole_does_exactly_what_was_reported() -> None:
+    """Proof that the default is what holds the title, not something else.
+
+    The same layout, the same wrapper, the same escapes -- and no cascaded
+    Konsole default. The caption follows the focused split, which is the fault
+    as the User saw it. Without this the passing case above could be passing
+    for a reason nobody has identified.
+    """
+    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon")):
+        return
+    with tempfile.TemporaryDirectory(prefix="pgu-presentation-nodefault.") as tmp:
+        tmp_path = Path(tmp)
+        layout = _konsole_fixture(tmp_path)
+        splits, windows = _konsole_reading(layout, config_dir=tmp_path / "empty")
+
+    if not splits or not any(splits):
+        return
+    assert windows == splits, (windows, splits)
+    assert len(set(windows)) == 6, windows
+
+
+def test_the_launch_puts_the_konsole_default_where_konsole_reads_it() -> None:
+    """The default is written beside the layout and named on the search path.
+
+    Beside it because the account that can read one can read the other; on
+    `XDG_CONFIG_DIRS` because that is where KConfig looks for a value the user
+    has not set, and it stops answering the moment they set one themselves.
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-konsole-defaults.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text("{}\n", encoding="utf-8")
+        layout.chmod(0o600)
+        assert team_launcher.write_konsole_config_defaults(tmp_path, model=layout) == ""
+        written = tmp_path / team_launcher.KONSOLE_DEFAULTS_NAME
+        assert written.read_text(encoding="utf-8") == team_launcher.KONSOLE_WINDOW_TITLE_DEFAULTS
+        # Whoever can read the layout can read this, because that is the
+        # account the terminal runs as.
+        assert stat.S_IMODE(written.stat().st_mode) == stat.S_IMODE(layout.stat().st_mode)
+
+        # A real local account, because an unresolvable one refuses before it
+        # builds anything and this case would then assert nothing at all.
+        me = pwd.getpwuid(os.getuid()).pw_name
+        args = [
+            str(value)
+            for value in team_launcher.konsole_launch_args(
+                layout, gui_user=me, window_title="Switchyard", config_dir=tmp_path
+            )
+        ]
+        assert args[:2] != ["sh", "-lc"], args
+        assert any(
+            value.startswith("XDG_CONFIG_DIRS=") and value.split("=", 1)[1].split(":")[0] == str(tmp_path)
+            for value in args
+        ), args
+        assert "--qwindowtitle" in args and "Switchyard" in args, args
+
+
+def test_the_launch_itself_names_the_directory_it_just_wrote() -> None:
+    """The decision `launch_konsole_window` makes, not the one it delegates.
+
+    `konsole_launch_args` will put any directory it is given on the search
+    path; what matters live is that the launch gives it the one it just wrote
+    the default into. A launch that writes the file and then forgets to name it
+    leaves Konsole reading nothing and the window title following focus again,
+    with every other case here still passing (SYRD-139).
+    """
+    with tempfile.TemporaryDirectory(prefix="pgu-konsole-launch.") as tmp:
+        tmp_path = Path(tmp)
+        layout = tmp_path / "layout.json"
+        layout.write_text("{}\n", encoding="utf-8")
+        launched: list[list[str]] = []
+
+        class _Started:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+        original = team_launcher.default_gui_user
+        try:
+            team_launcher.default_gui_user = lambda: pwd.getpwuid(os.getuid()).pw_name
+            status = team_launcher.launch_konsole_window(
+                layout,
+                project="porter",
+                window_title="Switchyard",
+                gui_user=pwd.getpwuid(os.getuid()).pw_name,
+                process_launcher=lambda args, **kwargs: launched.append([str(a) for a in args]) or _Started(),
+            )
+        finally:
+            team_launcher.default_gui_user = original
+
+        assert status == 0, status
+        assert launched, "the launch built no command"
+        args = launched[0]
+        named = [value for value in args if value.startswith("XDG_CONFIG_DIRS=")]
+        assert named, args
+        assert named[0].split("=", 1)[1].split(":")[0] == str(tmp_path), named
+        # And the file it points at is really there, with the setting in it.
+        written = tmp_path / team_launcher.KONSOLE_DEFAULTS_NAME
+        assert written.read_text(encoding="utf-8") == team_launcher.KONSOLE_WINDOW_TITLE_DEFAULTS
 
 
 def main() -> int:

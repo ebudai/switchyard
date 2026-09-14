@@ -825,6 +825,39 @@ def _configure_recovery_hook(
         raise RuntimeError(f"tmux could not configure recovery hook for slot {slot} (exit {proc.returncode})")
 
 
+def display_slot_terminal_title_commands(
+    config: team_launcher.ProjectConfig, session: str
+) -> tuple[list[str], ...]:
+    """What a display slot tells the terminal around it to call the window.
+
+    The project, never the slot. A display slot is a frame around one worker,
+    and its pane is attached to by the terminal the User is looking at -- so
+    whatever this session sends as a terminal title becomes that window's
+    caption. It used to send `<project> slot <n>: <role>`, which is how the
+    Konsole caption came to read `syrd slot 1: director` as soon as a pane was
+    focused: the pane wrapper had already named the window after the project,
+    and tmux overwrote it the moment its client attached (SYRD-141).
+
+    Sent rather than silenced. Turning `set-titles` off would leave whatever
+    was last set standing, which is right today only because the wrapper set it
+    first; sending the project name means every redraw re-asserts it, so a
+    program inside the pane that names the terminal is corrected rather than
+    obeyed.
+
+    The slot's own label is not lost: it is on `status-left` and in the
+    `@switchyard_slot`/`@switchyard_role` pane options, which is where the
+    viewer reads it for its pane borders.
+    """
+    target = _exact_tmux_target(f"{session}:")
+    return (
+        ["tmux", "set-option", "-t", target, "set-titles", "on"],
+        [
+            "tmux", "set-option", "-t", target,
+            "set-titles-string", team_launcher.project_window_title(config),
+        ],
+    )
+
+
 def _configure_display_session(
     config: team_launcher.ProjectConfig,
     slot: int,
@@ -896,11 +929,7 @@ def _configure_display_session(
             "tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"),
             "status-left", f" slot {slot}: {label} ",
         ],
-        ["tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"), "set-titles", "on"],
-        [
-            "tmux", "set-option", "-t", _exact_tmux_target(f"{session}:"),
-            "set-titles-string", f"{config.project} slot {slot}: {label}",
-        ],
+        *display_slot_terminal_title_commands(config, session),
         [
             "tmux", "set-option", "-p", "-t", _exact_tmux_target(f"{session}:0.0"),
             "@switchyard_project", config.project,

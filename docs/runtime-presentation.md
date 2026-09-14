@@ -154,10 +154,16 @@ slots. Each layer is a tmux session, so each one could draw a status line and
 each one could resize the layer below it.
 
 Only the worker draws a status line. Display slots and the viewer both set
-`status off`; the slot label lives in the display session's window title and
-its `@switchyard_slot`/`@switchyard_role` pane options, and the viewer repeats
-it on the pane borders. A client therefore shows one status bar per visible
-worker rather than one per layer.
+`status off`; the slot label lives on the slot's `status-left` and in its
+`@switchyard_slot`/`@switchyard_role` pane options, and the viewer repeats it
+on the pane borders. A client therefore shows one status bar per visible worker
+rather than one per layer.
+
+The slot label is deliberately not what the slot sends the terminal as a title.
+A display slot's client is attached to by the window the User is looking at, so
+whatever it sends as a terminal title becomes that window's caption: sending
+the label made the Konsole caption follow the focused pane. Every session that
+forwards a title forwards the project's window title instead (SYRD-141).
 
 Sizing follows the window an operator is actually looking at:
 

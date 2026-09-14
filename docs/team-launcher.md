@@ -66,10 +66,22 @@ reports the same project name the title bar stays put through every focus
 change. That setting is an application preference rather than a profile
 property, so it cannot be passed on the command line: the launch writes a
 `konsolerc` holding it beside the layout file and puts that directory on
-`XDG_CONFIG_DIRS` for the terminal it starts. KConfig reads that beneath the
-user's own configuration, so it answers for a key the user has never set and
-stops answering the moment they set one -- nothing of theirs is edited, and
-their other Konsole windows are unaffected.
+`XDG_CONFIG_DIRS` for the terminal it starts. The entry is marked immutable
+(`[$i]`), so it wins over a desktop account that has set the preference the
+other way; it is still reached only through the environment given to the
+terminal this launch starts, so nothing of the user's configuration is edited
+and no other Konsole window is affected.
+
+Anything inside a pane that names the terminal has to agree, because whatever
+speaks last is what the caption shows. A display slot is a tmux session with
+`set-titles` on, and it used to send `<project> slot <n>: <role>` -- so the
+moment its client attached it overwrote the name the pane wrapper had just set,
+and the caption read `syrd slot 1: director` as soon as that pane was focused.
+Every session that forwards a title now forwards the project's window title, so
+each redraw re-asserts it rather than replacing it. The slot's own label is
+unaffected: it lives on `status-left` and in the `@switchyard_slot` and
+`@switchyard_role` pane options, which is where the viewer reads it for its
+pane borders (SYRD-141).
 
 Each split is the role's: its header is the role's display name alone, set from
 inside the pane with OSC 30, because Konsole's layout parser has no key for a

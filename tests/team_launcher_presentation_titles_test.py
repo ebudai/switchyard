@@ -255,20 +255,55 @@ def test_the_wrapper_names_its_split_before_running_anything() -> None:
     assert "needs the pane command" in empty, empty
 
 
-def test_a_cli_inside_the_pane_cannot_rename_the_split() -> None:
-    """The stability requirement, asserted where it is actually decided.
+def test_every_session_that_names_the_terminal_names_the_project() -> None:
+    """Where the terminal title is decided, in both files that decide it.
 
-    A CLI's own title escapes are written inside tmux, and tmux forwards them to
-    the terminal only when `set-titles` is on. The launcher turns that on for
-    the viewer session and for nothing else, so a role pane's CLI never reaches
-    Konsole with a title of its own.
+    This case used to read only `team_launcher.py` and conclude that
+    `set-titles` is on for the viewer session "and for nothing else". It is
+    not: `presentation_controller.py` turns it on for every display slot, and
+    the string it sent named the slot and the role. That is how the caption
+    came to read `syrd slot 1: director` while this suite passed -- the claim
+    was true of the file it looked in and false of the system (SYRD-141).
+
+    So both files are read, and what is asserted is the property that matters:
+    every session that forwards a title to the terminal forwards the project's
+    window title, and no `set-titles-string` anywhere is built from a role or a
+    slot.
     """
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    assert "def tmux_viewer_set_titles_args" in source
-    set_titles_calls = [line for line in source.splitlines() if '"set-titles"' in line]
-    assert set_titles_calls, source[:0]
-    for line in set_titles_calls:
-        assert "viewer_session" in line, line
+    sources = {
+        name: (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        for name in ("team_launcher.py", "presentation_controller.py")
+    }
+    assert "def tmux_viewer_set_titles_args" in sources["team_launcher.py"]
+    assert "def display_slot_terminal_title_commands" in sources["presentation_controller.py"]
+
+    enabling = [
+        (name, line)
+        for name, source in sources.items()
+        for line in source.splitlines()
+        if '"set-titles"' in line and "assert" not in line
+    ]
+    assert len(enabling) == 2, enabling
+    # On, not off. Silencing the forwarding would also leave the caption alone
+    # today -- but only because the wrapper happens to have spoken first, and
+    # then anything inside the pane that names the terminal would be obeyed.
+    # Sending the project's name means every redraw corrects it instead.
+    for name, line in enabling:
+        assert '"on"' in line, (name, line)
+
+    strings = [
+        (name, line)
+        for name, source in sources.items()
+        for line in source.splitlines()
+        if '"set-titles-string"' in line
+    ]
+    assert len(strings) == 2, strings
+    for name, line in strings:
+        assert "slot" not in line and "label" not in line and "role" not in line, (name, line)
+    # And the value each of them sends is the project's, by name.
+    for name, source in sources.items():
+        block = source.split('"set-titles-string"', 1)[1][:200]
+        assert "title" in block, (name, block)
 
 
 def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
@@ -276,7 +311,11 @@ def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
 
 
 def _konsole_reading(
-    layout: Path, *, settle_seconds: float = 30.0, config_dir: Path | None = None
+    layout: Path,
+    *,
+    settle_seconds: float = 30.0,
+    config_dir: Path | None = None,
+    config_home: Path | None = None,
 ) -> tuple[list[str], list[str]]:
     """What a real Konsole shows: every split's title, and the window's own.
 
@@ -308,10 +347,12 @@ def _konsole_reading(
             # search path: the default has to be doing the work here.
             environment["XDG_CONFIG_DIRS"] = str(config_dir)
         # A configuration directory of its own, so this never reads or writes
-        # the Konsole profiles of whoever is running the suite.
-        config_home = layout.parent / "konsole-config"
-        config_home.mkdir(parents=True, exist_ok=True)
-        environment["XDG_CONFIG_HOME"] = str(config_home)
+        # the Konsole profiles of whoever is running the suite. A case that
+        # supplies one is modelling a desktop account that already has
+        # preferences of its own.
+        home = config_home if config_home is not None else layout.parent / "konsole-config"
+        home.mkdir(parents=True, exist_ok=True)
+        environment["XDG_CONFIG_HOME"] = str(home)
 
         def ask(*args: str) -> str:
             reply = subprocess.run(
@@ -559,6 +600,132 @@ def test_the_launch_itself_names_the_directory_it_just_wrote() -> None:
         # And the file it points at is really there, with the setting in it.
         written = tmp_path / team_launcher.KONSOLE_DEFAULTS_NAME
         assert written.read_text(encoding="utf-8") == team_launcher.KONSOLE_WINDOW_TITLE_DEFAULTS
+
+
+def _slot_sessions(server: str, config) -> list[str]:
+    """Six display slots, configured by the product's own tmux options.
+
+    The options are not retyped here: `display_slot_terminal_title_commands`
+    is what the presentation runs against a live slot, and running exactly
+    that argv is what makes a mutation of it fail this case.
+    """
+    from scripts import presentation_controller
+
+    sessions = []
+    for slot in range(6):
+        session = f"syrd141-slot-{slot}"
+        _run_isolated_tmux(
+            server,
+            ["new-session", "-d", "-s", session, "-x", "80", "-y", "24", "sh", "-c", "exec sleep 900"],
+            check=True,
+        )
+        _run_isolated_tmux(server, ["set-option", "-t", f"{session}:", "status", "off"], check=True)
+        for args in presentation_controller.display_slot_terminal_title_commands(config, session):
+            assert args[0] == "tmux", args
+            _run_isolated_tmux(server, list(args[1:]), check=True)
+        sessions.append(session)
+    return sessions
+
+
+def test_the_slot_title_command_names_the_tenant_not_the_slot() -> None:
+    """The argv itself, for two tenants and every slot.
+
+    Data-driven both ways: a tenant with a display name sends that, a tenant
+    without one sends its slug, and neither sends anything that varies by slot
+    or role -- which is what made the caption move when focus did.
+    """
+    from scripts import presentation_controller
+
+    for project, project_name, expected in (
+        ("porter", "Switchyard", "Switchyard"),
+        ("otto", "Otto Works", "Otto Works"),
+        ("otto", "", "otto"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="pgu-slot-title.") as tmp:
+            config, _ = _project(Path(tmp), project=project, project_name=project_name)
+            sent = []
+            for slot in range(6):
+                commands = presentation_controller.display_slot_terminal_title_commands(
+                    config, f"{project}-display-{slot}"
+                )
+                assert [args[-2] for args in commands] == ["set-titles", "set-titles-string"], commands
+                assert commands[0][-1] == "on", commands[0]
+                sent.append(commands[1][-1])
+        assert sent == [expected] * 6, (project, project_name, sent)
+
+
+def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
+    """The live regression: the caption read `syrd slot 1: director`.
+
+    SYRD-139's Konsole case passed while the window was still wrong, because
+    its panes ran an inert stub and never started tmux. A display slot sets
+    `set-titles on` with a string naming the slot and the role, so the moment
+    its client attached it overwrote the window title the pane wrapper had just
+    set -- and Konsole's caption, which shows that title, followed the focused
+    pane.
+
+    So this runs tmux. Six isolated display slots carrying the product's own
+    title options, the real wrapper, the real cascaded Konsole default, and a
+    desktop account whose own konsolerc says the opposite -- then focus moves
+    across all six splits and the window title is read after each move. The
+    only thing standing in for production is which tmux socket the panes attach
+    to, which is the isolation every other case in this suite uses.
+    """
+    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon", "tmux")):
+        return
+    server = f"syrd141-{os.getpid()}"
+    _cleanup_dead_isolated_tmux_socket(server)
+    with tempfile.TemporaryDirectory(prefix="pgu-presentation-tmux.") as tmp:
+        tmp_path = Path(tmp)
+        config, _config_path = _project(tmp_path, project_name="Switchyard")
+        wrapper = tmp_path / "bin" / team_launcher.PANE_WINDOW_NAME
+        wrapper.parent.mkdir()
+        shutil.copy2(ROOT / "scripts" / team_launcher.PANE_WINDOW_NAME, wrapper)
+        try:
+            sessions = _slot_sessions(server, config)
+            layout = _six_pane_layout(tmp_path / "layout.json")
+            document = json.loads(layout.read_text(encoding="utf-8"))
+            for slot, leaf in enumerate(team_launcher._layout_leaves(document)):
+                # The product's command builder, so the escapes under test are
+                # the ones a real pane is given.
+                leaf["Command"] = team_launcher.inert_pane_command(
+                    wrapper,
+                    ["tmux", "-L", server, "attach", "-t", sessions[slot]],
+                    title=f"{ROLE_SLOTS[slot][:1].upper()}{ROLE_SLOTS[slot][1:]}",
+                    window_title=team_launcher.project_window_title(config),
+                )
+                leaf["WorkingDirectory"] = str(tmp_path)
+            layout.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+            # The desktop account already prefers the other behaviour. The
+            # presentation has to win for its own window without editing this.
+            user_config = tmp_path / "konsole-config"
+            user_config.mkdir()
+            (user_config / "konsolerc").write_text(
+                "[KonsoleWindow]\nShowWindowTitleOnTitleBar=false\n", encoding="utf-8"
+            )
+            defaults = tmp_path / "konsole-defaults"
+            assert team_launcher.write_konsole_config_defaults(defaults, model=layout) == ""
+
+            splits, windows = _konsole_reading(
+                layout, config_dir=defaults, config_home=user_config
+            )
+            # Their preference is still theirs. Konsole rewrites its own
+            # configuration on exit, so what is asserted is the thing this
+            # change promises: the value it overrode for this window is not
+            # changed in the file it overrode it from.
+            after = (user_config / "konsolerc").read_text(encoding="utf-8")
+            assert "ShowWindowTitleOnTitleBar=false" in after, after
+            assert "[$i]" not in after, after
+        finally:
+            _run_isolated_tmux(server, ["kill-server"], check=False, capture_output=True)
+
+    if not splits or not any(splits):
+        return
+    assert splits == [f"{role[:1].upper()}{role[1:]}" for role in ROLE_SLOTS], splits
+    assert windows == ["Switchyard"] * 6, windows
+    # The exact shape the User reported, named so a regression says so.
+    assert not any("slot " in window for window in windows), windows
 
 
 def main() -> int:

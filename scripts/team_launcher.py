@@ -932,7 +932,15 @@ def gui_privilege_drop_args(gui_user: str, *, euid: int | None = None) -> tuple[
 #: set, and stops answering the moment they set it themselves. Nothing of
 #: theirs is edited, and their Konsole windows are unaffected (SYRD-139).
 KONSOLE_DEFAULTS_NAME = "konsolerc"
-KONSOLE_WINDOW_TITLE_DEFAULTS = "[KonsoleWindow]\nShowWindowTitleOnTitleBar=true\n"
+#: `[$i]` is KConfig's immutability marker. Without it this is only a default:
+#: a desktop account that has ever set this preference the other way keeps its
+#: own answer, and the caption goes back to following whichever split has focus
+#: -- which is what a User with that preference set would still have seen
+#: (SYRD-141). Marked immutable, the value this launch supplies wins for this
+#: process, and only for this process: it is reached through an
+#: `XDG_CONFIG_DIRS` entry given to the terminal this launch starts, so nothing
+#: of the user's is edited and no other Konsole window is affected.
+KONSOLE_WINDOW_TITLE_DEFAULTS = "[KonsoleWindow]\nShowWindowTitleOnTitleBar[$i]=true\n"
 FALLBACK_XDG_CONFIG_DIRS = "/etc/xdg"
 
 

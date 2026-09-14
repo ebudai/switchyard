@@ -46,18 +46,30 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
-if [ -n "$window_title" ]; then
-    # The window's name, reported identically by every split, so the title bar
-    # reads the project rather than whichever pane was clicked last.
-    printf '\033]2;%s\007' "$window_title"
-fi
+name_this_pane() {
+    if [ -n "$window_title" ]; then
+        # The window's name, reported identically by every split, so the title
+        # bar reads the project rather than whichever pane was clicked last.
+        printf '\033]2;%s\007' "$window_title"
+    fi
+    if [ -n "$title" ]; then
+        # Konsole reads this as the tab title format for this split, and a
+        # format with no placeholders in it is literal text: it does not follow
+        # the working directory or the program, so it stays put while the CLI
+        # works.
+        printf '\033]30;%s\007' "$title"
+    fi
+}
 
-if [ -n "$title" ]; then
-    # Konsole reads this as the tab title format for this split, and a format
-    # with no placeholders in it is literal text: it does not follow the
-    # working directory or the program, so it stays put while the CLI works.
-    printf '\033]30;%s\007' "$title"
-fi
+# Said twice, a moment apart. A terminal that is still attaching its emulation
+# when the first bytes arrive can drop them, and it drops whichever escape got
+# there first: the window ended up named after its command line while the split
+# beside it was named correctly, because the second escape survived and the
+# first did not. Repeating costs a fraction of a second once per pane and makes
+# a lost first write stop mattering (SYRD-141).
+name_this_pane
+sleep 0.3
+name_this_pane
 
 "$@"
 status=$?

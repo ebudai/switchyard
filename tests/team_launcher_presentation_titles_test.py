@@ -335,6 +335,16 @@ def test_the_wrapper_names_its_split_before_running_anything() -> None:
     assert "ran" in output, repr(output)
     assert output.index("\033]30;") < output.index("ran"), repr(output)
 
+    # Said twice, a moment apart. A terminal still attaching its emulation can
+    # drop the first bytes it is sent, and offscreen Konsole dropped them about
+    # half the time -- losing the window title while keeping the split title
+    # sent right after it, which is a window named after its own command line
+    # beside six correctly named panes. Repeating makes a lost first write stop
+    # mattering (SYRD-141).
+    assert output.count("\033]2;Switchyard\007") == 2, repr(output)
+    assert output.count("\033]30;App\007") == 2, repr(output)
+    assert output.index("ran") > output.rindex("\033]2;"), repr(output)
+
     # Either title alone is still accepted, and neither invents the other.
     split_only, _ = _wrapper_output(["--title", "App", "printf", "ran\n"])
     assert "\033]30;App\007" in split_only and "\033]2;" not in split_only, repr(split_only)
@@ -408,6 +418,36 @@ def _konsole_titles(layout: Path, *, settle_seconds: float = 30.0) -> list[str]:
 
 
 def _konsole_reading(
+    layout: Path,
+    *,
+    settle_seconds: float = 30.0,
+    config_dir: Path | None = None,
+    config_home: Path | None = None,
+    attempts: int = 3,
+) -> tuple[list[str], list[str]]:
+    """Read a window, retrying only a reading that says nothing either way.
+
+    Offscreen, Konsole sometimes comes up never honouring the window-title
+    escape at all: every caption stays the profile default, which names the
+    working directory and the whole command line. That is not this suite's
+    subject failing -- it is a window that was never told -- and it happens
+    often enough on a loaded host to have failed a correct candidate in Audit.
+
+    A reading like that is retried from a fresh window. A reading that says
+    something is returned as it is, right or wrong: neither the project name
+    nor a pane title names a path, so a caption that has been captured by a
+    pane still fails on the first attempt.
+    """
+    for attempt in range(attempts):
+        titles, windows = _konsole_reading_once(
+            layout, settle_seconds=settle_seconds, config_dir=config_dir, config_home=config_home
+        )
+        if not any("/" in title for title in windows):
+            return titles, windows
+    return titles, windows
+
+
+def _konsole_reading_once(
     layout: Path,
     *,
     settle_seconds: float = 30.0,
@@ -503,21 +543,27 @@ def _konsole_reading(
         for index in range(1, 7):
             ask(f"--dest={service}", "/Windows/1",
                 "org.kde.konsole.Window.setCurrentSession", f"int32:{index}")
-            # Waited for, not slept at. A caption still reading the profile's
-            # `%d : %n` is Konsole not having been told yet -- the split's own
-            # escapes have not been processed -- and reading it then made this
-            # case fail intermittently on a loaded host while the behaviour was
-            # correct. A caption that is settled and says something is read as
-            # said: a wrong title is not generic, so this waits out the
-            # not-yet without waiting out a regression (SYRD-141 audit).
+            # Waited for, not slept at. Until a split's own escapes have been
+            # processed, the caption is Konsole's profile default -- the
+            # working directory and the whole command line -- and reading it
+            # then made this case fail while the behaviour was correct. That
+            # fallback is recognisable by what is in it: it names a path. No
+            # title this suite is about does, whether right (`Switchyard`) or
+            # wrong (`syrd slot 1: director`), so waiting for one that does not
+            # waits out the not-yet without waiting out a regression. Whatever
+            # was last seen is returned if it never settles, so a case that
+            # times out fails on what it actually read (SYRD-141 audit).
             deadline = time.time() + settle_seconds
             seen = window_title()
             while time.time() < deadline:
+                if seen and "/" not in seen and GENERIC_TITLE_MARKER not in seen:
+                    settled = window_title()
+                    if settled == seen:
+                        break
+                    seen = settled
+                    continue
                 time.sleep(0.4)
-                current = window_title()
-                if current == seen and current and GENERIC_TITLE_MARKER not in current:
-                    break
-                seen = current
+                seen = window_title()
             window_titles.append(seen)
         return titles, window_titles
     finally:

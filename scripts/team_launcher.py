@@ -305,6 +305,16 @@ AGY_CREDENTIAL_DIR_NAME = ".gemini/antigravity-cli"
 AGY_CREDENTIAL_TOKEN_NAME = "antigravity-oauth-token"
 # Machine-scoped, so the operator names the account once instead of on every provision.
 DEFAULT_AGY_CREDENTIAL_SETTING_PATH = Path("/etc/switchyard/agy-credential.json")
+# Machine-scoped for the same reason: the desktop owner says once that Switchyard
+# projects may use their session, and every later `switchyard new` reads that
+# instead of asking again. Root-owned, beside the other host settings, because a
+# tenant that could write this could approve its own access (SYRD-143).
+DEFAULT_DESKTOP_APPROVAL_SETTING_PATH = Path("/etc/switchyard/desktop-approval.json")
+DESKTOP_FROM_POLICY_FILE = "policy_file"
+DESKTOP_FROM_HEADLESS_OPTION = "headless_option"
+DESKTOP_FROM_HOST_APPROVAL = "host_approval"
+DESKTOP_FROM_NEW_APPROVAL = "new_approval"
+DESKTOP_FROM_CHOSEN_HEADLESS = "chosen_headless"
 AGY_SOURCE_FROM_HOST = "host_default"
 AGY_SOURCE_FROM_OVERRIDE = "project_override"
 AGY_SOURCE_FROM_OPT_OUT = "opt_out"
@@ -7872,6 +7882,39 @@ def _prompt_text(
     return value or default
 
 
+def _prompt_choice(
+    label: str,
+    *,
+    options: Sequence[tuple[str, str]],
+    default: str,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> str:
+    """Pick one of a named few, by number or by name, with a real default.
+
+    A provisioning question whose answer is a path somebody has to author is a
+    question most people cannot answer; a numbered list of what this host can
+    actually do is one they can. Empty takes the default, which is named in the
+    prompt rather than implied (SYRD-143).
+    """
+    names = [name for name, _description in options]
+    if default not in names:
+        raise ValueError(f"default {default!r} is not one of {names}")
+    for index, (name, description) in enumerate(options, start=1):
+        marker = " [default]" if name == default else ""
+        print_func(f"  {index}) {name}: {description}{marker}")
+    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
+        raw = _read_prompt(f"{label} [{default}]: ", input_func=input_func).strip().lower()
+        if not raw:
+            return default
+        if raw.isdigit() and 1 <= int(raw) <= len(names):
+            return names[int(raw) - 1]
+        if raw in names:
+            return raw
+        print_func("answer with the number or the name of one of the choices above")
+    raise SystemExit(f"switchyard: too many invalid answers for {label}")
+
+
 def _prompt_bool(
     label: str,
     *,
@@ -12379,6 +12422,210 @@ def write_host_agy_credential_source(
     return path
 
 
+def _desktop_approval_setting_path(settings_path: Path | None = None) -> Path:
+    return settings_path or DEFAULT_DESKTOP_APPROVAL_SETTING_PATH
+
+
+def read_host_desktop_approval(settings_path: Path | None = None) -> dict[str, str]:
+    """The desktop owner's standing approval for this host, or nothing.
+
+    Nothing is the safe answer to every way of not being able to read one:
+    absent, unreadable, not an object. A malformed user name is not treated
+    that way -- it is a file somebody edited into a state this will not act on,
+    and continuing quietly would hide it.
+    """
+    path = _desktop_approval_setting_path(settings_path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    gui_user = str(raw.get("gui_user") or "").strip()
+    if not gui_user:
+        return {}
+    if not _is_valid_owner_user_name(gui_user):
+        raise SystemExit(
+            f"switchyard: {path} records gui_user {gui_user!r}, which is not a plain Unix "
+            "user name; fix or remove that file before provisioning"
+        )
+    return {
+        "gui_user": gui_user,
+        "approved_by": str(raw.get("approved_by") or "").strip(),
+        "approved_at": str(raw.get("approved_at") or "").strip(),
+        "reference": str(raw.get("reference") or "").strip(),
+    }
+
+
+def write_host_desktop_approval(
+    gui_user: str,
+    *,
+    settings_path: Path | None = None,
+    confirmed_by: str = "",
+    reference: str = "",
+) -> Path:
+    """Record that this host's desktop owner approves scoped project access."""
+    path = _desktop_approval_setting_path(settings_path)
+    approved_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(
+        path,
+        {
+            "gui_user": gui_user,
+            "approved_by": confirmed_by or gui_user,
+            "approved_at": approved_at,
+            "reference": reference
+            or f"{gui_user} approved Switchyard desktop access on this host at {approved_at}",
+        },
+    )
+    return path
+
+
+def _resolve_desktop_policy(
+    *,
+    desktop_policy: Path | None,
+    headless: bool,
+    gui_user: str,
+    project: str,
+    tenant: str,
+    yes: bool,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+    settings_path: Path | None = None,
+    owner_resolver: Callable[..., str] | None = None,
+    owners_lister: Callable[[], Sequence[str]] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Decide this project's desktop policy, and say where the decision came from.
+
+    Four ways in, in this order, because each one is more explicit than the
+    next: an operator's own policy file, an explicit `--headless`, a standing
+    approval this host has already recorded, and finally asking the person
+    running the command. Nothing infers a grant: the last one is a choice
+    somebody makes, and the one before it is a choice somebody already made and
+    signed (SYRD-143).
+
+    The policy is generated rather than authored because every field except the
+    approval is something provisioning already knows -- this project, this
+    tenant, this desktop, this socket rule -- and asking a desktop user to write
+    them into a JSON file was the interruption this ticket exists to remove.
+    """
+    from scripts.desktop_access import (
+        DesktopAccessError,
+        active_wayland_owners,
+        generated_policy,
+        resolve_gui_owner,
+    )
+
+    if desktop_policy is not None:
+        if headless:
+            raise SystemExit("switchyard: pass either --headless or --desktop-policy, not both")
+        if str(desktop_policy) == "headless":
+            return {"mode": "headless"}, DESKTOP_FROM_HEADLESS_OPTION
+        return _load_json(desktop_policy), DESKTOP_FROM_POLICY_FILE
+    if headless:
+        return {"mode": "headless"}, DESKTOP_FROM_HEADLESS_OPTION
+
+    resolve = owner_resolver or resolve_gui_owner
+    list_owners = owners_lister or active_wayland_owners
+    try:
+        owner = resolve(preferred=gui_user)
+    except DesktopAccessError as exc:
+        # No desktop to grant, or more than one and no way to tell which. The
+        # first is an ordinary headless host and the person can say so; the
+        # second is an ambiguity that must not be resolved by guessing, so it
+        # stops either way rather than being offered as a default.
+        if yes or not _desktop_host_is_headless(list_owners):
+            raise SystemExit(f"switchyard: {exc}") from exc
+        print_func(f"switchyard: {exc}")
+        if _prompt_bool(
+            "Install this project headless (no screenshots or clipboard)",
+            default=True,
+            input_func=input_func,
+        ):
+            return {"mode": "headless"}, DESKTOP_FROM_CHOSEN_HEADLESS
+        raise SystemExit(
+            "switchyard: no desktop was selected and headless was declined; nothing was provisioned"
+        ) from exc
+
+    recorded = read_host_desktop_approval(settings_path)
+    if recorded.get("gui_user") == owner:
+        policy = generated_policy(
+            project=project,
+            tenant=tenant,
+            gui_user=owner,
+            approved_by=recorded.get("approved_by") or owner,
+            reference=recorded.get("reference"),
+        )
+        print_func(
+            f"switchyard: using {owner}'s recorded desktop approval for {project}; "
+            f"screenshots and clipboard are enabled for {tenant}"
+        )
+        return policy, DESKTOP_FROM_HOST_APPROVAL
+    if yes:
+        raise SystemExit(
+            "switchyard: --yes does not grant desktop access, and this host has no recorded "
+            f"approval from {owner}. Run switchyard new interactively once to record one, or "
+            "pass --headless, or supply --desktop-policy FILE."
+        )
+    print_func(
+        f"switchyard: {owner} is signed into this host's desktop. Switchyard can give "
+        f"{project} scoped access to that session, which is what lets a role paste a "
+        "screenshot."
+    )
+    choice = _prompt_choice(
+        "Desktop access",
+        options=(
+            ("desktop", f"screenshots and clipboard through {owner}'s session (recommended)"),
+            ("headless", "no screenshots or clipboard"),
+        ),
+        default="desktop",
+        input_func=input_func,
+        print_func=print_func,
+    )
+    if choice == "headless":
+        return {"mode": "headless"}, DESKTOP_FROM_CHOSEN_HEADLESS
+    try:
+        path = write_host_desktop_approval(owner, settings_path=settings_path, confirmed_by=owner)
+    except OSError as exc:
+        # Root-owned on purpose: an approval a tenant could write is an approval
+        # a tenant could give itself. A run that cannot write it is a run that
+        # was not privileged, which `new` requires anyway.
+        raise SystemExit(
+            f"switchyard: cannot record this host's desktop approval ({exc}); "
+            "re-run as `sudo ./switchyard new`"
+        ) from exc
+    print_func(
+        f"switchyard: recorded {owner}'s desktop approval ({path}); later projects use it "
+        "without asking again"
+    )
+    recorded = read_host_desktop_approval(settings_path)
+    return (
+        generated_policy(
+            project=project,
+            tenant=tenant,
+            gui_user=owner,
+            approved_by=recorded.get("approved_by") or owner,
+            reference=recorded.get("reference"),
+        ),
+        DESKTOP_FROM_NEW_APPROVAL,
+    )
+
+
+def _desktop_host_is_headless(list_owners: Callable[[], Sequence[str]]) -> bool:
+    """Whether the refusal above was "no desktop" rather than "which desktop".
+
+    Asked by looking again rather than by reading the message: an ambiguous
+    host has owners and a headless one has none, and that is the difference
+    that decides whether headless may be offered at all. Offering it on an
+    ambiguous host would turn "which of these desktops" into "never mind then",
+    which is how a project quietly loses the access somebody wanted.
+    """
+    try:
+        return not list(list_owners())
+    except Exception:
+        return True
+
+
 def switchyard_seed_role_credentials_command(
     config: ProjectConfig,
     *,
@@ -14055,6 +14302,9 @@ def switchyard_new_command(
     role_clis: Sequence[tuple[str, str]] | None = None,
     yes: bool = False,
     desktop_policy: Path | None = None,
+    headless: bool = False,
+    desktop_gui_user: str | None = None,
+    desktop_approval_settings_path: Path | None = None,
     allow_existing_owner_user: bool = False,
     agy_credential_source: str | None = None,
     no_agy_credential: bool = False,
@@ -14127,19 +14377,21 @@ def switchyard_new_command(
         input_func=input_func,
         print_func=print_func,
     )
-    if desktop_policy is None:
-        if yes:
-            raise SystemExit("switchyard: --yes does not grant desktop access; provide --desktop-policy FILE (explicit headless or approved Wayland policy)")
-        choice = input_func("Desktop policy file, or 'headless' for no clipboard: ").strip()
-        if choice == "headless":
-            selected_desktop_policy = {"mode": "headless"}
-        elif choice:
-            selected_desktop_policy = _load_json(Path(choice).expanduser())
-        else:
-            raise SystemExit("switchyard: choose a desktop policy before provisioning")
-    else:
-        selected_desktop_policy = {"mode": "headless"} if str(desktop_policy) == "headless" else _load_json(desktop_policy)
+    selected_desktop_policy, desktop_policy_origin = _resolve_desktop_policy(
+        desktop_policy=desktop_policy,
+        headless=headless,
+        gui_user=desktop_gui_user or "",
+        project=resolved_slug,
+        tenant=owner_user,
+        yes=yes,
+        input_func=input_func,
+        print_func=print_func,
+        settings_path=desktop_approval_settings_path,
+    )
     from scripts.desktop_access import validate_policy
+    # Validated whichever way it arrived. A generated policy is checked by the
+    # same rules as one an operator wrote, so there is one description of what
+    # a valid grant is rather than a second, kinder one for our own output.
     selected_desktop_policy = validate_policy(selected_desktop_policy, project=resolved_slug, tenant=owner_user)
     _check_switchyard_registration_available(
         slug=resolved_slug,
@@ -19639,7 +19891,27 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         default=LAYOUT_MODE_AUTO,
         help="window layout mode: auto detects the invoking desktop, separate keeps the KDE/Konsole path, viewer forces the tmux viewer",
     )
-    parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
+    parser.add_argument(
+        "--desktop-policy",
+        type=Path,
+        help=(
+            "advanced: import an explicit policy. headless, or a JSON file recording scoped "
+            "Wayland consent. Ordinary desktop provisioning generates this itself"
+        ),
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="install without screenshot or clipboard access; works with no compositor present",
+    )
+    parser.add_argument(
+        "--desktop-gui-user",
+        default="",
+        help=(
+            "the desktop account this project may use, when more than one is signed in; "
+            "otherwise the single active Wayland session is used"
+        ),
+    )
     parser.add_argument("--workflow-config", type=Path, help="declarative roles/stages JSON for the new project")
     return parser
 
@@ -20679,6 +20951,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             database=args.database,
             yes=args.yes,
             desktop_policy=args.desktop_policy,
+            headless=args.headless,
+            desktop_gui_user=args.desktop_gui_user,
             allow_existing_owner_user=args.allow_existing_owner_user,
             agy_credential_source=args.agy_credential_source,
             no_agy_credential=args.no_agy_credential,

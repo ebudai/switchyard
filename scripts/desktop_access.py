@@ -69,6 +69,103 @@ def validate_policy(raw, *, project: str, tenant: str) -> dict:
     return result
 
 
+#: How a generated policy says where its approval came from, so a reader of the
+#: installed file can find the record rather than taking the word "approved".
+GENERATED_REFERENCE_PREFIX = 'switchyard desktop approval recorded at '
+
+
+def session_ids(runner=None) -> list[str]:
+    """Every logind session id on this host, or none when logind cannot say."""
+    runner = runner or run
+    try:
+        listing = runner(['loginctl', 'list-sessions', '--no-legend'])
+    except (DesktopAccessError, OSError):
+        return []
+    ids = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if fields:
+            ids.append(fields[0])
+    return ids
+
+
+def active_wayland_owners(runner=None) -> list[str]:
+    """The accounts with an active Wayland session, asked of logind.
+
+    Not `SUDO_USER`, and not the invoking account: those say who typed the
+    command, which is a different question from whose compositor is running.
+    The answer is a list because a host can have more than one, and choosing
+    between them is not something provisioning may do quietly (SYRD-143).
+    """
+    runner = runner or run
+    owners: list[str] = []
+    for session in session_ids(runner):
+        try:
+            raw = runner(['loginctl', 'show-session', session, '-p', 'Type', '-p', 'Active', '-p', 'Name'])
+        except (DesktopAccessError, OSError):
+            continue
+        values = dict(line.split('=', 1) for line in raw.splitlines() if '=' in line)
+        name = values.get('Name', '').strip()
+        if values.get('Type') == 'wayland' and values.get('Active') == 'yes' and name and name not in owners:
+            owners.append(name)
+    return owners
+
+
+def resolve_gui_owner(*, preferred: str = '', runner=None) -> str:
+    """The one account whose desktop this project may be granted access to.
+
+    Exactly one, or a refusal that says what to do. A host with no active
+    Wayland session is not a failure of this function -- it is a headless host,
+    and the caller decides what that means -- but a host with several desktops
+    is an ambiguity nobody should resolve by guessing, so it is named and
+    stopped (SYRD-143).
+    """
+    owners = active_wayland_owners(runner)
+    if not owners:
+        raise DesktopAccessError(
+            'No active Wayland session was found on this host. Log into the desktop that '
+            'should own this project, or install headless with --headless.'
+        )
+    if len(owners) == 1:
+        return owners[0]
+    chosen = (preferred or '').strip()
+    if chosen and chosen in owners:
+        return chosen
+    raise DesktopAccessError(
+        'Several accounts have an active Wayland session (' + ', '.join(sorted(owners)) + '). '
+        'Name the one this project may use with --desktop-gui-user USER, or supply an '
+        'explicit policy with --desktop-policy FILE.'
+    )
+
+
+def generated_policy(*, project: str, tenant: str, gui_user: str, approved_by: str,
+                     approved_at: str = '', reference: str = '', wayland_display: str = 'auto') -> dict:
+    """A scoped consent policy for one project, in the shape the validator takes.
+
+    Generated rather than typed, because the fields a person could get wrong
+    here -- which tenant, which desktop, which socket -- are facts provisioning
+    already knows, and the one thing it cannot know is whether the desktop
+    owner agrees. That is what the approval this records is for, and it is
+    written into `consent` exactly as an operator-authored file would be, so
+    what is installed and checked afterwards is one shape, not two.
+    """
+    at = approved_at.strip() or time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    policy = {
+        'mode': 'wayland',
+        'project': project,
+        'tenant_user': tenant,
+        'gui_user': gui_user,
+        'wayland_display': wayland_display or 'auto',
+        'consent': {
+            'approved': True,
+            'by': approved_by or gui_user,
+            'at': at,
+            'reference': reference.strip() or (GENERATED_REFERENCE_PREFIX + at),
+        },
+    }
+    return validate_policy(policy, project=project, tenant=tenant)
+
+
 def digest(policy):
     return hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
 

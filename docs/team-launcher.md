@@ -102,9 +102,15 @@ linger enabled and a `/run/user/<uid>` directory before starting tmux panes. If
 host policy denies that setup, the launcher fails before touching panes and
 prints the `sudo loginctl enable-linger <user>` command an operator must run.
 
-Project startup also requires an explicit desktop policy. Use
-`switchyard new --desktop-policy headless` for no clipboard, or supply a recorded
-Wayland consent file. Existing projects use `switchyard upgrade <project>
+Project startup also requires an explicit desktop policy, and on a desktop
+`switchyard new` generates it: it asks logind which account owns the active
+Wayland session and offers screenshots-and-clipboard (the default) or headless.
+Choosing the desktop records that owner's approval once, root-owned, and later
+projects on the host are provisioned from it without asking. Use
+`switchyard new --headless` for a project with no clipboard, on a host with or
+without a compositor, and `--desktop-gui-user USER` when more than one desktop
+is signed in. `--desktop-policy FILE` remains the advanced import path for an
+explicit policy. Existing projects use `switchyard upgrade <project>
 --desktop-policy ...` before starting new role processes. The same pre-launch
 path installs persistent scoped access and verifies tenant-safe environment;
 see [desktop access](desktop-access.md). Upgrading the policy does not restart

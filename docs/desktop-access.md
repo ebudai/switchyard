@@ -5,17 +5,57 @@ Wayland grant allows the tenant account to act as a client of the selected GUI
 session, with the capabilities its compositor exposes. It is not restricted to
 clipboard operations. Choose it only with consent for that tenant and GUI owner.
 
-For a project without desktop clipboard access:
+## Provisioning on a desktop
 
-```sh
-switchyard new --desktop-policy headless
+`switchyard new` generates the policy. It asks logind which account owns an
+active Wayland session, and offers a choice:
+
+```
+switchyard: desktop-owner is signed into this host's desktop. Switchyard can
+give example scoped access to that session, which is what lets a role paste a
+screenshot.
+  1) desktop: screenshots and clipboard through desktop-owner's session (recommended) [default]
+  2) headless: no screenshots or clipboard
+Desktop access [desktop]:
 ```
 
-An interactive `switchyard new` asks for a policy file or `headless` before
-provisioning. `--yes` does not approve desktop access. Existing unconfigured
-projects remain inspectable through attach/status/upgrade; starting new role
-processes requires choosing a policy. Legacy PGU account names do not confer
-consent on a new tenant.
+Choosing `desktop` records that owner's approval once, in root-owned
+`/etc/switchyard/desktop-approval.json`, and writes a policy scoped to this
+project and this tenant. Later projects on the same host read that record and
+are provisioned without asking again. The generated policy is the same shape an
+operator would have written and is checked by the same validator; nothing is
+installed that a hand-written policy could not have said.
+
+The approval is honoured only for the account logind reports as owning the
+active desktop. A record naming any other account -- including a tenant --
+matches nobody and grants nothing; provisioning asks the human instead. `--yes`
+still never grants desktop access that no approval covers.
+
+The GUI owner comes from logind, not from who ran the command. A host with no
+active Wayland session is headless and is told so; a host with several active
+desktops stops and names them, because choosing between somebody's desktops is
+not a decision provisioning may make quietly:
+
+```sh
+switchyard new --desktop-gui-user desktop-owner
+```
+
+## Headless, and explicit policies
+
+For a project without desktop clipboard access, on a host with or without a
+compositor:
+
+```sh
+switchyard new --headless
+```
+
+`--desktop-policy` remains the advanced import path for an explicit policy or
+for automation, with the same validation and the same tenant/project mismatch
+refusal. `--desktop-policy headless` still means headless. Passing both
+`--headless` and `--desktop-policy` is refused rather than given a precedence
+rule. Existing unconfigured projects remain inspectable through
+attach/status/upgrade; starting new role processes requires a policy. Legacy PGU
+account names do not confer consent on a new tenant.
 
 For approved Wayland access, provide a JSON file:
 

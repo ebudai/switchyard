@@ -33,6 +33,17 @@ only for a path that already has a repo with `HEAD`.
 `docs/onboarding/`, preserving a source-commit header in each copied file.
 Existing files there are left untouched and reported as skipped.
 
+`switchyard new` also decides this project's desktop access, and on a desktop it
+does not ask for a file. It asks logind which account owns the active Wayland
+session and offers a choice: screenshots and clipboard through that session (the
+default), or headless. Choosing the desktop records that owner's approval once
+for the host, so later projects are provisioned from it without asking; the
+generated policy is scoped to this project and this tenant. `--headless` installs
+without screenshots or clipboard and needs no compositor, `--desktop-gui-user
+USER` names the desktop when more than one is signed in, and `--desktop-policy
+FILE` remains the advanced import path. See Switchyard source checkout
+`docs/desktop-access.md`.
+
 During `switchyard new`, the default implementer roles are `main` and `ops`.
 Conventional implementer role names are: `main` for core/domain implementation
 and integration; `ops` for environment, services, tooling, and infrastructure;

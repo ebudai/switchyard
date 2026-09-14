@@ -6871,10 +6871,10 @@ def tenant_release_deploy_command(status: TenantReleaseStatus, project: str) -> 
             + " ".join(shlex.quote(value) for value in deploy_env)
             + ' SOURCE_REPO="$tmpdir" "$tmpdir/scripts/ticket-board-service.sh" deploy-restart'
         )
-        return _quote_command(_owner_command_env_args(status.owner_user, status.owner_home, ["sh", "-c", script]))
+        return _quote_command(_owner_boundary_env_args(status.owner_user, status.owner_home, ["sh", "-c", script]))
     service_script = status.source_repo / "scripts" / "ticket-board-service.sh"
     return _quote_command(
-        _owner_command_env_args(
+        _owner_boundary_env_args(
             status.owner_user,
             status.owner_home,
             ["env", *deploy_env, f"SOURCE_REPO={status.source_repo}", str(service_script), "deploy-restart"],
@@ -6896,7 +6896,10 @@ def tenant_release_listener_command(status: TenantReleaseStatus, project: str, a
         'export XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"; '
         + operation
     )
-    command = _owner_command_env_args(
+    # The same boundary as the deploy: an operator pastes this line into the
+    # same shell, and a `systemctl --user` that lands on root's manager stops
+    # nothing and starts nothing (SYRD-138).
+    command = _owner_boundary_env_args(
         status.owner_user,
         status.owner_home,
         ["sh", "-c", script],
@@ -7149,17 +7152,25 @@ def report_tenant_release_upgrade(
         unit_install = tenant_release_unit_install_command(status, config.project)
         if unit_install:
             privileged_root = switchyard_privileged_provision_root()
-            if not status.provisioned_system_unit.is_relative_to(privileged_root):
-                # Say it rather than let it pass: the source being installed is
-                # in a directory the tenant owns, so it is only as trustworthy
-                # as the tenant. Running `switchyard upgrade` as root stages a
-                # copy root owns and this line goes away (SYRD-39).
+            if status.provisioned_system_unit.is_relative_to(privileged_root):
+                print_func(f"  {recorded_rollout_command(status, config.project, unit_install, label='install units')}")
+            else:
+                # Not printed at all, rather than printed with a warning above
+                # it. This step is executed by root through the recorder, and
+                # its source is a directory the tenant can write: printing it
+                # asks an operator to install a unit file that anyone with the
+                # tenant account could have rewritten between the render and
+                # the run. The warning was already here and was not enough --
+                # on SYRD-137 the step had to be recognised as unsafe and
+                # skipped by hand, against a copy four days stale that would
+                # have stripped the live board's socket-group confinement
+                # (SYRD-138).
                 print_func(
-                    f"switchyard: warning: {config.project} units are being installed from "
-                    f"{status.provisioned_system_unit.parent}, which the tenant owns. Run "
-                    f"`switchyard upgrade {config.project}` as root to stage a root-owned copy first."
+                    f"switchyard: omitting the unit-install step for {config.project}: it would "
+                    f"install from {status.provisioned_system_unit.parent}, which the tenant owns, "
+                    f"and the step runs as root. Run `switchyard upgrade {config.project}` as root "
+                    "to stage a root-owned copy, then re-render this sequence."
                 )
-            print_func(f"  {recorded_rollout_command(status, config.project, unit_install, label='install units')}")
         print_func(
             f"  {recorded_rollout_command(status, config.project, tenant_release_deploy_command(status, config.project), label='deploy-restart')}"
         )
@@ -10992,6 +11003,44 @@ def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
 def _owner_command_env_args(owner_user: str, owner_home: Path, command: Sequence[str]) -> list[str]:
     path = _prepend_paths(DEFAULT_PANE_BASE_PATH, _owner_home_bin_dirs(owner_home))
     return _owner_command_args(owner_user, ["env", f"HOME={owner_home}", f"PATH={path}", *command])
+
+
+#: Decide who runs a printed command when it is run, not when it is printed.
+#:
+#: `_owner_command_args` answers from `current_user_name()`, which is right for
+#: a command this process is about to run itself and wrong for one that is
+#: printed for somebody else to run later. An unprivileged `switchyard upgrade`
+#: printed the tenant deploy with no boundary at all, because the renderer WAS
+#: the tenant owner -- and the operator then ran that line through the rollout
+#: recorder under sudo, so the deploy executed as root, `/run/user/$(id -u)`
+#: resolved to `/run/user/0`, and the migration ran with the tenant's real
+#: notification listener still up. The root-invoked renderer emitted the
+#: boundary and the two disagreed about the same release (SYRD-138).
+#:
+#: Nothing is interpolated into this script: the owner and the command arrive as
+#: positional arguments, so a tenant path containing a space, a quote or a
+#: dollar sign is data rather than syntax.
+OWNER_BOUNDARY_SCRIPT = (
+    'target=$1; shift; '
+    'if [ "$(id -un)" = "$target" ]; then exec "$@"; fi; '
+    'exec sudo -u "$target" "$@"'
+)
+
+
+def _owner_boundary_env_args(owner_user: str, owner_home: Path, command: Sequence[str]) -> list[str]:
+    """The same command, guaranteed to run as `owner_user` whoever starts it."""
+    path = _prepend_paths(DEFAULT_PANE_BASE_PATH, _owner_home_bin_dirs(owner_home))
+    return [
+        "sh",
+        "-c",
+        OWNER_BOUNDARY_SCRIPT,
+        "sh",
+        owner_user,
+        "env",
+        f"HOME={owner_home}",
+        f"PATH={path}",
+        *command,
+    ]
 
 
 def _pane_identity_scrubbed_env(source: Mapping[str, str] | None = None) -> dict[str, str]:

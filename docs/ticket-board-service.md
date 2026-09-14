@@ -201,6 +201,15 @@ When the director wants merged board changes live, use:
 scripts/ticket-board-service.sh deploy-restart
 ```
 
+Run it as the tenant owner. Everything it does to the board and the listener
+goes through that account's own systemd user manager, resolved as
+`/run/user/$(id -u)`, so run as root for a tenant root does not own it would
+address `/run/user/0` -- where the tenant's units do not exist. It refuses that
+rather than proceeding: `stop_listener_for_upgrade` would otherwise find no
+listener to stop, report success, and let the migrations run with the real one
+live. A privileged rollout wraps this command rather than replacing its
+identity (SYRD-138).
+
 That command:
 
 1. fetches the source repo

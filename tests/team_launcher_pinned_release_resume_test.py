@@ -606,8 +606,15 @@ def _systemctl_probe(tmp: Path) -> tuple[Path, Path]:
 
 
 def _run_owner_script(argv: list[str], bin_dir: Path) -> subprocess.CompletedProcess[str]:
-    """Run the script the launcher built, with nothing else on the path."""
-    script = argv[argv.index("-c") + 1]
+    """Run the script the launcher built, with nothing else on the path.
+
+    The LAST `-c`, because a printed command now carries an outer `sh -c` that
+    decides at run time who runs the rest (SYRD-138); the script under test is
+    still the innermost one, and taking the first would run the boundary
+    without the arguments it is given. The boundary itself is exercised, with a
+    real drop, in tenant_deploy_identity_test.
+    """
+    script = argv[max(index for index, value in enumerate(argv) if value == "-c") + 1]
     return subprocess.run(
         ["sh", "-c", script],
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(bin_dir.parent)},

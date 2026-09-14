@@ -942,7 +942,28 @@ launcher comes from `<project>-ticketboard-live/current`, it reports the old
 deployed release, resolves the target release ref (the pinned one, else
 `origin/main`), and
 prints the ordered listener/unit/`deploy-restart` commands an operator can run
-to advance the tenant's `current` symlink. An installed shared release has no
+to advance the tenant's `current` symlink.
+
+Those commands do not depend on who printed them. Each one carries its own
+run-time decision about whose account runs it: if the process executing it is
+already the tenant owner it runs directly, and otherwise it drops to the owner.
+That matters because the sequence is rendered by whoever asks and executed by an
+operator under `sudo`/`pkexec` through the rollout recorder. Deciding at render
+time asked the wrong question -- an unprivileged render emitted the deploy with
+no boundary at all, and the recorder then ran it as root, where
+`ticket-board-service.sh` resolved its user manager as `/run/user/0` and its
+`systemctl --user` calls addressed root's units. The tenant's notification
+listener was never stopped and the migrations ran with it live. Only the journal
+wrapper is privileged; the deploy itself always runs as the configured tenant
+owner, and the script refuses root's user manager for a tenant root does not own
+rather than silently operating on the wrong one (SYRD-138).
+
+The unit-install step is printed only when the units it would install come from
+the root-owned privileged provision directory. Rendered against a tenant-owned
+provision directory it is omitted with an explanation, because that step is
+executed by root and its source is a file the tenant account can rewrite: run
+`switchyard upgrade <project>` as root to stage a root-owned copy, then render
+the sequence again. An installed shared release has no
 implicit source repository: name a fetch cache with `--commit-git-dir`, or with
 `SWITCHYARD_BARE_REPO`, or pass a GitHub checkout with `--source-repo`. The
 first `--commit-git-dir` entry that resolves the deploy ref is the one used;

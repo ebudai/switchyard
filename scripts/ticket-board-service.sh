@@ -123,14 +123,56 @@ require_tenant_paths() {
     fi
 }
 
+# The uid that owns this tenant, read from the kernel rather than from any
+# value the tenant can write. OWNER_HOME first because it is what the deploy is
+# told; BOARD_ROOT second because a deploy always has one.
+tenant_owner_uid() {
+    local path
+    for path in "$OWNER_HOME" "$BOARD_ROOT"; do
+        [[ -n "$path" && -e "$path" ]] || continue
+        stat -c '%u' "$path" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# Whether this process is root while the tenant is somebody else's -- the case
+# where every `systemctl --user` here would address /run/user/0, which holds
+# neither this tenant's board nor its notification listener. An owner that
+# cannot be identified counts: root driving a user manager for a tenant it
+# cannot name is the same mistake with less evidence (SYRD-138).
+root_user_manager_is_wrong_for_tenant() {
+    local owner_uid
+    [[ "$(id -u)" == 0 ]] || return 1
+    owner_uid="$(tenant_owner_uid || true)"
+    [[ "$owner_uid" != 0 ]]
+}
+
+root_user_manager_refusal() {
+    local owner_uid
+    owner_uid="$(tenant_owner_uid || true)"
+    printf 'refusing to drive root'"'"'s user manager for %s: this tenant is owned by uid %s, so /run/user/0 holds neither its board nor its %s. Run this script as the tenant owner; the rollout recorder stays privileged, the deploy does not (SYRD-138).' \
+        "$PROJECT_SLUG" "${owner_uid:-unknown}" "$LISTENER_SERVICE_NAME"
+}
+
+assert_user_manager_identity() {
+    ! root_user_manager_is_wrong_for_tenant || die "$(root_user_manager_refusal)"
+}
+
 runtime_dir() {
-    printf '/run/user/%s\n' "$(id -u)"
+    local uid
+    uid="$(id -u)"
+    # Fails rather than answering, so a caller cannot go on with an empty
+    # runtime directory and end up talking to whatever manager it finds.
+    if [[ "$uid" == 0 ]] && root_user_manager_is_wrong_for_tenant; then
+        return 1
+    fi
+    printf '/run/user/%s\n' "$uid"
 }
 
 ensure_user_manager() {
     local user runtime
     user="$(id -un)"
-    runtime="$(runtime_dir)"
+    runtime="$(runtime_dir)" || die "$(root_user_manager_refusal)"
     loginctl enable-linger "$user" >/dev/null 2>&1 || true
     for _ in $(seq 1 50); do
         [[ -d "$runtime" && -S "$runtime/bus" ]] && return 0
@@ -141,7 +183,7 @@ ensure_user_manager() {
 
 systemctl_user() {
     local runtime
-    runtime="$(runtime_dir)"
+    runtime="$(runtime_dir)" || die "$(root_user_manager_refusal)"
     XDG_RUNTIME_DIR="$runtime" \
     DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
         systemctl --user "$@"
@@ -319,7 +361,7 @@ resolved_service_scope() {
 
 quiesce_user_shadow_unit() {
     local runtime
-    runtime="$(runtime_dir)"
+    runtime="$(runtime_dir)" || die "$(root_user_manager_refusal)"
     if [[ ! -d "$runtime" || ! -S "$runtime/bus" ]]; then
         return
     fi
@@ -1215,6 +1257,10 @@ deploy_service() {
 
 deploy_restart_service() {
     local deployed_sha export_result release_dir previous_release scope
+    # Before the release is exported, not after: a root-run deploy writes
+    # root-owned files into the tenant's release tree on its way to a user
+    # manager it should never have reached.
+    assert_user_manager_identity
     if ! export_result="$(deploy_export_release)"; then
         return 1
     fi

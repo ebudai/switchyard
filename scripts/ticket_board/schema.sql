@@ -1638,6 +1638,21 @@ BEGIN
 END;
 $$;
 
+-- SYRD-148: which unresolved blockers stand between a ticket and a handoff.
+-- Returned as text so the refusal names them: "this is blocked" sends the
+-- reader back to the board, "blocked by SYRD-147" sends them to the ticket
+-- that has to move first.
+CREATE OR REPLACE FUNCTION ticket_board.unresolved_blocker_list(p_ticket_id text)
+RETURNS text
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT string_agg(b.blocker_ticket_id, ', ' ORDER BY b.position)
+    FROM ticket_board.ticket_blockers b
+    WHERE b.ticket_id = p_ticket_id AND NOT b.resolved;
+$$;
+
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_awaiting_role_is_active(
     p_awaiting_role text,
     p_awaiting_since_at timestamptz,
@@ -1670,6 +1685,15 @@ BEGIN
     IF t.state NOT IN ('in_progress', 'inspection', 'audit')
        OR ns.awaiting_role = '' OR ns.awaiting_since_at IS NULL
        OR ns.awaiting_notified_since_at = ns.awaiting_since_at THEN
+        RETURN;
+    END IF;
+    -- SYRD-148: a handoff says a named role can act now. While a blocker is
+    -- unresolved that is false, and the whole schedule below -- four
+    -- notifications ending in an escalation to the Director -- would be false
+    -- with it. The write boundary refuses to create such a wait; this is the
+    -- delivery side of the same rule, and it is what catches a wait that was
+    -- legitimate when it was made and was overtaken by a blocker.
+    IF ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
         RETURN;
     END IF;
     FOR step IN 1..4 LOOP
@@ -1716,6 +1740,16 @@ BEGIN
     END IF;
     IF normalized_role = ticket_board.current_app_actor() THEN
         RAISE EXCEPTION 'awaiting_role cannot be the caller role: %', normalized_role;
+    END IF;
+    -- SYRD-148: an awaiting-role handoff is an actionable instruction to
+    -- somebody else. A ticket whose own dependency has not resolved cannot
+    -- give one: the named role would be told to act on work that cannot
+    -- proceed, and after thirty minutes the Director would be told they had
+    -- ignored it. Refused rather than accepted quietly, and the blockers are
+    -- named so the caller knows what has to move first.
+    IF ticket_board.ticket_has_unresolved_blockers(set_awaiting_role.id) THEN
+        RAISE EXCEPTION 'unresolved blocker prevents an awaiting-role handoff: %',
+            ticket_board.unresolved_blocker_list(set_awaiting_role.id);
     END IF;
     -- Lock in ticket -> notification-state order, as ticket activity triggers do.
     PERFORM 1 FROM ticket_board.tickets t
@@ -4709,6 +4743,20 @@ BEGIN
     UPDATE ticket_board.tickets
     SET blocked_reason = normalized_reason
     WHERE tickets.id = p_ticket_id;
+
+    -- SYRD-148: a wait made before the blocker is not made true by it. Cleared
+    -- here rather than beside the callers, so it happens in the same write that
+    -- creates the blocker and no reader can see the pair disagree; and cleared
+    -- rather than left for the delivery side to skip, because the wait is also
+    -- what suppresses nudges and what the board shows the Director.
+    IF ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
+        UPDATE ticket_board.ticket_notification_state
+        SET awaiting_role = '',
+            awaiting_since_at = NULL,
+            awaiting_notified_since_at = NULL
+        WHERE ticket_id = p_ticket_id
+          AND (awaiting_role <> '' OR awaiting_since_at IS NOT NULL);
+    END IF;
 
     PERFORM ticket_board.refresh_ticket_source_json(p_ticket_id);
 END;
@@ -8956,6 +9004,12 @@ BEGIN
        OR ns.awaiting_notified_since_at = ns.awaiting_since_at THEN
         RETURN;
     END IF;
+    -- SYRD-148: the same rule as the legacy definition above. This is the one
+    -- a board with a declared workflow actually runs, and it overrides that
+    -- one, so a guard added only there is a guard this board never reaches.
+    IF ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
+        RETURN;
+    END IF;
     FOR step IN 1..4 LOOP
         recipient := CASE WHEN step = 4 THEN 'director' ELSE ns.awaiting_role END;
         PERFORM ticket_board.enqueue_notification(
@@ -9070,6 +9124,16 @@ BEGIN
     END IF;
     IF normalized_role = ticket_board.current_app_actor() THEN
         RAISE EXCEPTION 'awaiting_role cannot be the caller role: %', normalized_role;
+    END IF;
+    -- SYRD-148: an awaiting-role handoff is an actionable instruction to
+    -- somebody else. A ticket whose own dependency has not resolved cannot
+    -- give one: the named role would be told to act on work that cannot
+    -- proceed, and after thirty minutes the Director would be told they had
+    -- ignored it. Refused rather than accepted quietly, and the blockers are
+    -- named so the caller knows what has to move first.
+    IF ticket_board.ticket_has_unresolved_blockers(set_awaiting_role.id) THEN
+        RAISE EXCEPTION 'unresolved blocker prevents an awaiting-role handoff: %',
+            ticket_board.unresolved_blocker_list(set_awaiting_role.id);
     END IF;
     -- Lock in ticket -> notification-state order, as ticket activity triggers do.
     PERFORM 1 FROM ticket_board.tickets t

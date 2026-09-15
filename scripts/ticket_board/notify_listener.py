@@ -2550,6 +2550,14 @@ WHERE id = %s
             expected_target = "director" if parsed.get("step") == 4 else parsed.get("awaiting_role")
             if target_role != expected_target:
                 return False
+            # A handoff tells a named role to act now, and a ticket whose own
+            # dependency has not resolved cannot say that. The board refuses to
+            # create such a wait and clears one a later blocker overtakes, so
+            # this is the third place the same rule is checked rather than the
+            # first: the queue row may have been written before any of that,
+            # and `has_unresolved_blockers` is already read here (SYRD-148).
+            if has_unresolved_blockers:
+                return False
             row = conn.execute(
                 """
 SELECT EXISTS (

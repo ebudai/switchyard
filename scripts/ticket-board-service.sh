@@ -586,7 +586,12 @@ ensure_release_root_serviceable() {
     release_root_is_serviceable "$root" && return 0
     chmod g+rx "$root" 2>/dev/null || true
     release_root_is_serviceable "$root" && return 0
-    die "release root $root is mode $(stat -c '%a' "$root" 2>/dev/null || echo unknown) and $BOARD_CANARY_USER cannot traverse it. Raising the mask was not enough, so it carries no ACL entry for that account. Run: setfacl -m u:$BOARD_CANARY_USER:r-x $root"
+    # Named, not instructed: the supported repair is re-running this project's
+    # provisioning, which grants the board tree before it exports anything into
+    # it and is idempotent on a tree that already has the entry. Telling a
+    # person to run setfacl by hand asks them to do the thing provisioning is
+    # for, on a path they should not have to know (SYRD-145).
+    die "release root $root is mode $(stat -c '%a' "$root" 2>/dev/null || echo unknown) and $BOARD_CANARY_USER cannot traverse it: the board tree carries no ACL entry for that account, and raising the mask was not enough. Re-run this project's provisioning (switchyard upgrade $PROJECT_SLUG as root, then its operator packet) to grant the board tree before deploying into it."
 }
 
 deploy_export_release() {

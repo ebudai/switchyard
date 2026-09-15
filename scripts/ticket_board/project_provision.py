@@ -3500,11 +3500,20 @@ readable_system_unit={q_readable_system_unit}
 {role_accounts_command(plan)}
 {peer_auth_command(plan)}
 {install_board_root}
-sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$readable_system_unit" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {grant_board_root}
 {install_asset_frame}
 {grant_home_traversal}
 {effective_grant_asset_frame}
+# The deploy exports an immutable release into the board root and then starts a
+# canary AS THE SERVICE ACCOUNT, so every grant that account needs is made
+# above it rather than below. It used to run first: on a host where the tree
+# already carried the grants the deploy succeeded and the grants below it were
+# a no-op, and on a fresh one the export landed at 0750 with no named entry and
+# no default to inherit, the canary could not traverse its own release, and the
+# packet died before reaching the line that would have fixed it. The default
+# ACL set above is what carries the grant into releases that do not exist yet
+# (SYRD-145).
+sudo -u {q_owner_user} -H env HOME={q_owner_home} TICKET_BOARD_OWNER_HOME={q_owner_home} TICKET_BOARD_PROJECT={shell_quote(plan.project)} TICKET_BOARD_COMMIT_GIT_DIR={q_commit_git_dir} TICKET_BOARD_PROVISIONED_SYSTEM_UNIT="$readable_system_unit" SOURCE_REPO={q_source_repo} BOARD_ROOT={q_board_root} DEPLOY_REF=origin/main TICKET_BOARD_SKIP_MIGRATIONS=1 {q_deploy_script} deploy
 {install_board_env_parent}
 if ! sudo -u {q_owner_user} test -s {q_board_env_file}; then
     report_token="$(/usr/bin/python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"

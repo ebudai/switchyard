@@ -13,6 +13,20 @@ DEPLOY_ROOT="$TMPDIR_T/live"
 UNIT_DIR="$TMPDIR_T/unit"
 mkdir -p "$UNIT_DIR"
 
+# A board root as provisioning leaves one: the service account can traverse and
+# read it, and the default ACL carries that into every release exported later.
+# Deploying into a tree that was never granted is not a shape production has --
+# it is the state a fresh host is in before provisioning runs, and a deploy
+# there is the failure SYRD-145 fixes by granting first. Without this the suite
+# tested a deploy nobody performs.
+grant_board_tree() {
+    local root="$1"
+    mkdir -p "$root"
+    setfacl -R -m "u:${BOARD_CANARY_USER:-boardsvc}:rx" "$root"
+    find "$root" -type d -exec setfacl -m "d:u:${BOARD_CANARY_USER:-boardsvc}:rx" {} +
+}
+grant_board_tree "$DEPLOY_ROOT"
+
 git init "$SOURCE_REPO" >/dev/null
 git -C "$SOURCE_REPO" config user.name Test
 git -C "$SOURCE_REPO" config user.email test@example.com
@@ -62,6 +76,7 @@ fi
 
 SWITCHYARD_RELEASE_SOURCE="$TMPDIR_T/switchyard-release"
 RELEASE_DEPLOY_ROOT="$TMPDIR_T/release-live"
+grant_board_tree "$RELEASE_DEPLOY_ROOT"
 mkdir -p "$SWITCHYARD_RELEASE_SOURCE"
 git -C "$SOURCE_REPO" archive "$deployed_sha" | tar -x -C "$SWITCHYARD_RELEASE_SOURCE"
 printf '{"commit":"%s"}\n' "$deployed_sha" >"$SWITCHYARD_RELEASE_SOURCE/.switchyard-release.json"
@@ -150,6 +165,7 @@ OWNER_ORIGIN="$OWNER_DEPLOY_TMP/origin.git"
 OWNER_SOURCE="$OWNER_DEPLOY_TMP/source"
 OWNER_UPDATER="$OWNER_DEPLOY_TMP/updater"
 OWNER_DEPLOY_ROOT="$OWNER_DEPLOY_TMP/live"
+grant_board_tree "$OWNER_DEPLOY_ROOT"
 mkdir -p "$OWNER_DEPLOY_TMP"
 git init --bare "$OWNER_ORIGIN" >/dev/null
 git -C "$OWNER_ORIGIN" symbolic-ref HEAD refs/heads/main

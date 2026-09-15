@@ -67,6 +67,25 @@ The output directory contains:
   implementer set instead.
 - `operator-commands.sh`: ordered privileged commands to review and run.
 
+The order in that script is part of what it does. Every grant the board service
+account needs is made before the board is deployed, because the deploy exports
+an immutable release into the board tree and then starts a canary as that
+account: a release exported into a tree the account cannot enter is one the
+canary cannot serve. The grant on the board root carries a default ACL, which is
+what reaches releases that do not exist yet, so a deploy months later inherits
+it at creation without anything walking the tree again. Granting after the
+deploy looked equivalent on every host that had already been provisioned, where
+the tree carried the entries and the deploy succeeded; on a fresh host the
+deploy was the first thing to touch the tree, failed, and stopped the script
+before the grant it needed (SYRD-145).
+
+The script is re-runnable, which is how an interrupted provision is completed:
+accounts and groups are created only when `getent` does not find them,
+directories are installed rather than recreated, the ACL grants are `setfacl
+-m` additions that leave unrelated entries alone, and a release that is already
+exported is not exported again. Completing a partial run neither deletes nor
+duplicates an account, a repository, a credential or a journal.
+
 The provisioner intentionally renders first. It does not mutate the live PGU
 board, restart panes, create databases, or install units unless an operator runs
 the generated commands during an approved window.

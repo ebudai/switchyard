@@ -634,10 +634,17 @@ def role_accounts_command(plan: ProjectBoardProvision) -> str:
         f"    sudo groupadd -r {q_group}",
         "fi",
         # The board service must be able to hand the socket to the group, and
-        # the tenant owner keeps its existing operational access.
+        # the tenant owner keeps its existing operational access. This group is
+        # the SOCKET and nothing else; repositories are granted to the group
+        # below, which the service is deliberately not in (SYRD-157).
         f"sudo gpasswd -a {q_service} {q_group} >/dev/null",
         f"sudo gpasswd -a {q_owner} {q_group} >/dev/null",
     ]
+    lines.extend(
+        repository_group_commands(
+            plan.project, [plan.owner_user, *(account for _role, account in plan.role_accounts)]
+        )
+    )
     for role, account in plan.role_accounts:
         q_account = shell_quote(account)
         q_home = shell_quote(role_account_home(plan, role))
@@ -1696,12 +1703,146 @@ def tenant_source_confinement_commands(
     ]
 
 
+#: Mode for a repository copy under a tenant home. Same reasoning as
+#: TENANT_SOURCE_MODE: the group is the tenant's own, and what reaches inside
+#: reaches by a named entry that says so.
+REPOSITORY_COPY_MODE = "0750"
+
+
+def repository_group_name(project: str) -> str:
+    """The group that may read and write this project's repositories.
+
+    Deliberately not the socket group. The socket group exists so role accounts
+    can talk to the board, and the board service must be in it to hand the
+    socket over; a repository granted to that group is therefore a repository
+    granted to the board service (SYRD-157).
+    """
+    return f"{project}-repo"
+
+
+def repository_group_commands(project: str, accounts: Sequence[str]) -> list[str]:
+    """Create the repository group and put exactly the git-using accounts in it.
+
+    The board service is not one of them and must never be added: that is the
+    whole distinction this group exists to make. Idempotent -- an existing group
+    is left alone and `gpasswd -a` on an existing member changes nothing.
+    """
+    group = shell_quote(repository_group_name(project))
+    lines = [
+        f"if ! getent group {group} >/dev/null 2>&1; then",
+        f"    sudo groupadd -r {group}",
+        "fi",
+    ]
+    for account in accounts:
+        if not account:
+            continue
+        lines.append(f"sudo gpasswd -a {shell_quote(account)} {group} >/dev/null")
+    return lines
+
+
+def commit_store_read_commands(
+    *, owner_home: str, service_user: str, commit_git_dir: str
+) -> list[str]:
+    """Let the board service resolve commits, and nothing more than that.
+
+    The board validates a commit hash against a real repository, so the service
+    account genuinely needs to READ one -- `TICKET_BOARD_COMMIT_GIT_DIR`. What
+    it does not need is write, and what it must not have is every other
+    repository the tenant keeps. So the grant is named, read-only, and points at
+    the configured store alone: `rX` rather than `rwX`, with a default entry so
+    the objects git writes later are readable too, and `--x` on the directories
+    above it because a grant on a directory nobody can reach is not a grant.
+
+    A store outside the owner home is not ours to re-mode or traverse-grant, and
+    yields nothing here (SYRD-157).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(commit_git_dir, what="the commit store")
+    _refuse_prefix_coincidence(owner_home, commit_git_dir)
+    if not _is_within(owner_home, commit_git_dir) or commit_git_dir.rstrip("/") == owner_home.rstrip("/"):
+        return []
+    principal = f"u:{service_user}"
+    commands = owner_home_traversal_commands(owner_home, principal)
+    for directory in _interior_directories(owner_home, commit_git_dir):
+        command = f"sudo setfacl -m {principal}:--x {shell_quote(directory)}"
+        if command not in commands:
+            commands.append(command)
+    quoted = shell_quote(commit_git_dir)
+    commands.append(f"sudo setfacl -R -m {principal}:rX {quoted}")
+    commands.append(f"sudo setfacl -R -m d:{principal}:rX {quoted}")
+    return commands
+
+
+#: Mode for a repository copy that a group must still WRITE through an ACL.
+#: `chmod` recomputes the ACL mask from the group bits, so a repository closed
+#: to 0750 has its `rwx` group entry clipped to `r-x` the moment it is closed.
+#: The group bits here belong to the tenant's own group, so the extra bit grants
+#: nobody anything; what it does is keep the mask from taking away a grant that
+#: was deliberately made.
+WRITABLE_REPOSITORY_COPY_MODE = "0770"
+
+#: Directories between the home and a repository. Not tightened here: they hold
+#: things other than repositories, several accounts already reach through them
+#: by name, and the repository below is what this is about. They are named only
+#: so they exist and belong to the tenant rather than to root.
+INTERIOR_DIRECTORY_MODE = "0755"
+
+
+def repository_copy_confinement_commands(
+    *, owner_user: str, owner_home: str, repositories: Sequence[str], mode: str = ""
+) -> list[str]:
+    """Close a tenant's repository copies to everything but the tenant.
+
+    World-readable is how the board service reached repositories nobody granted
+    it: a checkout at 0755 under a home it may traverse is readable by anything
+    that may traverse the home. Closing them is what makes the named grant above
+    the ONLY way in, which is what lets the same evidence answer both halves --
+    the selected store is readable by the service, and the copies beside it are
+    not (SYRD-157).
+
+    Directories only, and only inside the owner home; a repository kept
+    elsewhere is not this tenant's tree to re-mode.
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    quoted_owner = shell_quote(owner_user)
+    resolved_mode = mode or REPOSITORY_COPY_MODE
+    commands: list[str] = []
+
+    def add(directory: str, directory_mode: str) -> None:
+        command = (
+            f"sudo install -d -m {directory_mode} -o {quoted_owner} -g {quoted_owner} "
+            f"{shell_quote(directory)}"
+        )
+        if command not in commands:
+            commands.append(command)
+
+    for repository in repositories:
+        if not repository:
+            continue
+        _refuse_unnormalized(repository, what="a repository copy")
+        _refuse_prefix_coincidence(owner_home, repository)
+        if not _is_within(owner_home, repository):
+            continue
+        if repository.rstrip("/") == owner_home.rstrip("/"):
+            continue
+        # The directories above it, at the mode they already have on a
+        # provisioned host, but named so they EXIST and belong to the tenant.
+        # A grant is made on each of them next, and setfacl on a path that is
+        # not there yet fails -- which on a fresh tenant is the whole packet
+        # dying three lines before it would have created the repository.
+        for interior in _interior_directories(owner_home, repository):
+            add(interior, INTERIOR_DIRECTORY_MODE)
+        add(repository, resolved_mode)
+    return commands
+
+
 def role_worktree_access_commands(
     *,
     owner_home: str,
-    roles_group: str,
+    repository_group: str,
     worktree_base: str,
     control_repository: str,
+    retired_groups: Sequence[str] = (),
 ) -> list[str]:
     """Make each role's own worktree and its git metadata reachable.
 
@@ -1710,11 +1851,24 @@ def role_worktree_access_commands(
     owner's control repository, which the role must also read and write to
     record a commit. Neither grant exposes the owner's credentials, which stay
     0700 and are not named here (SYRD-49).
+
+    The grantee is the REPOSITORY group, which exists for nothing else. It used
+    to be the socket group, and that was the defect SYRD-157 exists to fix: the
+    board service is a member of the socket group -- it has to be, to hand the
+    socket to the roles -- so granting repositories to that group handed the
+    service read and write over the tenant's git repository, with a default
+    entry so every object created later inherited it too. Two authorities, one
+    group, and membership needed for the first silently conferred the second.
+
+    `retired_groups` are grants this function used to make and must now take
+    away. Removal is by entry, not by rewriting the ACL, so anything else the
+    tenant has is left alone; `setfacl -x` on an entry that is already gone
+    succeeds, which is what makes a repair safe to re-run.
     """
     _refuse_unnormalized(owner_home, what="the owner home")
     _refuse_unnormalized(worktree_base, what="the worktree base")
     _refuse_unnormalized(control_repository, what="the control repository")
-    group = f"g:{roles_group}"
+    group = f"g:{repository_group}"
     interior = _interior_directories(owner_home, worktree_base)
     # Every component between the home and the control repository, so the
     # gitdir a linked worktree points at can be opened at all.
@@ -1734,6 +1888,18 @@ def role_worktree_access_commands(
     # creates later inherit the same access.
     commands.append(f"sudo setfacl -R -m {group}:rwX {shell_quote(control_repository)}")
     commands.append(f"sudo setfacl -R -m d:{group}:rwX {shell_quote(control_repository)}")
+    for retired in retired_groups:
+        if not retired or retired == repository_group:
+            continue
+        stale = f"g:{retired}"
+        # Only on the repository, and deliberately not on the traversal entries
+        # above it. Traversal conveys no repository authority once the tree
+        # itself grants that group nothing and is not world-readable, and a role
+        # pane that is RUNNING keeps the supplementary groups it started with --
+        # taking traversal away underneath it would break live work to tidy up
+        # an entry that is not the one doing harm.
+        commands.append(f"sudo setfacl -R -x d:{stale} {shell_quote(control_repository)}")
+        commands.append(f"sudo setfacl -R -x {stale} {shell_quote(control_repository)}")
     return commands
 
 
@@ -1907,13 +2073,21 @@ def role_account_commands(
     resolved_owner_home = owner_home or f"/home/{owner_user}"
     if control_repository:
         # A role added later needs the same reachability as one provisioned with
-        # the project: owning the leaf is not reaching it (SYRD-49).
+        # the project: owning the leaf is not reaching it (SYRD-49). Through the
+        # repository group, which the new account joins here and the board
+        # service is not in (SYRD-157).
+        lines.extend(
+            repository_group_commands(
+                project, [owner_user, account, *(a for _role, a in role_accounts)]
+            )
+        )
         lines.extend(
             role_worktree_access_commands(
                 owner_home=resolved_owner_home,
-                roles_group=group,
+                repository_group=repository_group_name(project),
                 worktree_base=worktree_base or str(PurePosixPath(worktree).parent) if worktree else resolved_owner_home,
                 control_repository=control_repository,
+                retired_groups=(group,),
             )
         )
     control = role_control_sudoers_install_commands(
@@ -3580,6 +3754,36 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
             "from the generated configuration's own location"
         )
     )
+    # The commit store the board will resolve against, closed and then granted
+    # to the service by name, read-only. Closed first, because `chmod`
+    # recomputes the ACL mask and would clip a grant made before it. `install
+    # -d` also guarantees the directory exists, so the grant cannot fail on a
+    # fresh tenant whose bare repository has not been cloned yet -- git clones
+    # into an existing empty directory quite happily (SYRD-157).
+    commit_stores = [
+        entry for entry in str(plan.commit_git_dir).split(os.pathsep) if entry.strip()
+    ]
+    repository_boundary_lines: list[str] = list(
+        repository_copy_confinement_commands(
+            owner_user=plan.owner_user,
+            owner_home=plan.owner_home,
+            repositories=commit_stores,
+            mode=WRITABLE_REPOSITORY_COPY_MODE,
+        )
+    )
+    if plan.board_service_traversal:
+        for store in commit_stores:
+            repository_boundary_lines.extend(
+                commit_store_read_commands(
+                    owner_home=plan.owner_home,
+                    service_user=plan.service_user,
+                    commit_git_dir=store,
+                )
+            )
+    repository_boundary = "\n".join(repository_boundary_lines) or (
+        f"# the commit store {plan.commit_git_dir} is outside {plan.owner_home}; "
+        "this tenant grants the board service nothing there"
+    )
     if enable_owner_linger:
         owner_linger_step = f"sudo loginctl enable-linger {q_owner_user}"
         owner_bus_error = (
@@ -3612,6 +3816,7 @@ readable_system_unit={q_readable_system_unit}
 {grant_board_root}
 {install_asset_frame}
 {confine_source_tree}
+{repository_boundary}
 {grant_home_traversal}
 {effective_grant_asset_frame}
 # The deploy exports an immutable release into the board root and then starts a

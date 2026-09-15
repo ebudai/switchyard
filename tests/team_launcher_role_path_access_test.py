@@ -211,7 +211,7 @@ def role_and_director_access(owner: str) -> None:
         _apply(
             role_worktree_access_commands(
                 owner_home=str(home),
-                roles_group=pwd.getpwnam(role_account).pw_name,  # a group of one, for this case
+                repository_group=pwd.getpwnam(role_account).pw_name,  # a group of one, for this case
                 worktree_base=str(worktree_base),
                 control_repository=str(control),
             )
@@ -346,7 +346,7 @@ def test_containment_is_by_component_not_by_prefix() -> None:
 
     inside = role_worktree_access_commands(
         owner_home="/home/foo",
-        roles_group="porter-roles",
+        repository_group="porter-repo",
         worktree_base="/home/foo/porter-worktrees",
         control_repository="/home/foo/.local/state/switchyard/projects/porter/control.git",
     )
@@ -355,7 +355,7 @@ def test_containment_is_by_component_not_by_prefix() -> None:
     for builder in (
         lambda: role_worktree_access_commands(
             owner_home="/home/foo",
-            roles_group="porter-roles",
+            repository_group="porter-repo",
             worktree_base="/home/foo/porter-worktrees",
             control_repository="/home/foobar/.local/state/porter/control.git",
         ),
@@ -405,19 +405,19 @@ def test_a_dot_dot_escape_is_refused_for_both_grants() -> None:
         # The role grant, through each path it derives a command from.
         lambda: role_worktree_access_commands(
             owner_home="/home/foo",
-            roles_group="porter-roles",
+            repository_group="porter-repo",
             worktree_base="/home/foo/porter-worktrees",
             control_repository="/home/foo/../foobar/.local/state/porter/control.git",
         ),
         lambda: role_worktree_access_commands(
             owner_home="/home/foo",
-            roles_group="porter-roles",
+            repository_group="porter-repo",
             worktree_base="/home/foo/../foobar/porter-worktrees",
             control_repository="/home/foo/.local/state/porter/control.git",
         ),
         lambda: role_worktree_access_commands(
             owner_home="/home/bar/../foo",
-            roles_group="porter-roles",
+            repository_group="porter-repo",
             worktree_base="/home/foo/porter-worktrees",
             control_repository="/home/foo/.local/state/porter/control.git",
         ),
@@ -443,7 +443,7 @@ def test_a_dot_dot_escape_is_refused_for_both_grants() -> None:
         # A relative path names no directory a privileged command can be sure of.
         lambda: role_worktree_access_commands(
             owner_home="home/foo",
-            roles_group="porter-roles",
+            repository_group="porter-repo",
             worktree_base="home/foo/porter-worktrees",
             control_repository="home/foo/.local/state/porter/control.git",
         ),
@@ -459,7 +459,7 @@ def test_a_dot_dot_escape_is_refused_for_both_grants() -> None:
     # `.` and repeated separators name the same directory and are not an escape.
     ordinary = role_worktree_access_commands(
         owner_home="/home/foo",
-        roles_group="porter-roles",
+        repository_group="porter-repo",
         worktree_base="/home/foo/./porter-worktrees",
         control_repository="/home/foo//.local/state/porter/control.git",
     )

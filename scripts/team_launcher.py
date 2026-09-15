@@ -15819,6 +15819,7 @@ def role_path_access_commands(config: ProjectConfig) -> list[str]:
     """ACL grants that make each role's own worktree and git metadata reachable."""
     from scripts.ticket_board.project_provision import (
         PathContainmentError,
+        repository_group_name,
         role_worktree_access_commands,
         roles_group_name,
     )
@@ -15835,9 +15836,13 @@ def role_path_access_commands(config: ProjectConfig) -> list[str]:
     try:
         return role_worktree_access_commands(
             owner_home=owner_home,
-            roles_group=roles_group_name(config.project),
+            repository_group=repository_group_name(config.project),
             worktree_base=worktree_base,
             control_repository=str(control.expanduser()),
+            # The grant this used to make, taken back off the repository it was
+            # made on. The socket group keeps the socket and loses the git
+            # repository it was never meant to carry (SYRD-157).
+            retired_groups=(roles_group_name(config.project),),
         )
     except PathContainmentError as exc:
         # A refusal, not a crash: the artifact goes to an operator who runs it
@@ -15848,6 +15853,108 @@ def role_path_access_commands(config: ProjectConfig) -> list[str]:
             file=sys.stderr,
         )
         return []
+
+
+def configured_commit_store_paths(project: str, owner_home: Path) -> list[str]:
+    """The repositories this tenant's board actually resolves commits against.
+
+    Read from the installed unit rather than assumed, because the two tenants
+    this has to repair disagree: a freshly provisioned one resolves against its
+    own `control.git`, and syrd resolves against a separate source cache the
+    deploy selected. Granting the default on a host that selected something else
+    would leave the board unable to verify a commit and hand the service a
+    repository it does not use -- both halves wrong at once. The default is the
+    fallback for a tenant whose unit is not installed yet (SYRD-157).
+    """
+    from scripts.ticket_board.commit_repos import default_commit_git_dirs
+
+    unit = Path("/etc/systemd/system") / f"{project}-ticket-board.service"
+    raw = ""
+    try:
+        for line in unit.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "Environment":
+                name, has_value, setting = value.strip().partition("=")
+                if has_value and name.strip() == "TICKET_BOARD_COMMIT_GIT_DIR":
+                    raw = setting.strip().strip('"')
+    except OSError:
+        raw = ""
+    if raw:
+        return [entry for entry in raw.split(os.pathsep) if entry.strip()]
+    return [str(path) for path in default_commit_git_dirs(project, owner_home=owner_home)]
+
+
+def commit_store_read_commands_for(config: ProjectConfig) -> list[str]:
+    """Read-only commit resolution for the board service, on the selected store."""
+    from scripts.ticket_board.project_provision import (
+        DEFAULT_SERVICE_USER,
+        PathContainmentError,
+        commit_store_read_commands,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    owner_home = Path(str(home_dir_for_user(owner) or Path("/home") / owner))
+    commands: list[str] = []
+    for store in configured_commit_store_paths(config.project, owner_home):
+        try:
+            commands.extend(
+                commit_store_read_commands(
+                    owner_home=str(owner_home),
+                    service_user=DEFAULT_SERVICE_USER,
+                    commit_git_dir=store,
+                )
+            )
+        except PathContainmentError as exc:
+            print(
+                f"switchyard: no commit-store grant for {config.project}: {exc}",
+                file=sys.stderr,
+            )
+    return commands
+
+
+def repository_copy_confinement_commands_for(config: ProjectConfig) -> list[str]:
+    """Close every repository copy under the tenant home that is not already closed."""
+    from scripts.ticket_board.project_provision import (
+        PathContainmentError,
+        WRITABLE_REPOSITORY_COPY_MODE,
+        repository_copy_confinement_commands,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    owner_home = Path(str(home_dir_for_user(owner) or Path("/home") / owner))
+    read_only: list[str] = [
+        str(config.worktree_base) if config.worktree_base else "",
+        *configured_commit_store_paths(config.project, owner_home),
+    ]
+    control = str(config.control_repository.expanduser()) if config.control_repository else ""
+    commands: list[str] = []
+    try:
+        commands.extend(
+            repository_copy_confinement_commands(
+                owner_user=owner,
+                owner_home=str(owner_home),
+                repositories=[path for path in read_only if path and path != control],
+            )
+        )
+        if control:
+            # The one the roles WRITE, so it keeps group bits: closing it to
+            # 0750 would recompute the ACL mask and clip the grant that makes a
+            # role able to record a commit at all.
+            commands.extend(
+                repository_copy_confinement_commands(
+                    owner_user=owner,
+                    owner_home=str(owner_home),
+                    repositories=[control],
+                    mode=WRITABLE_REPOSITORY_COPY_MODE,
+                )
+            )
+    except PathContainmentError as exc:
+        print(
+            f"switchyard: no repository confinement for {config.project}: {exc}",
+            file=sys.stderr,
+        )
+        return []
+    return commands
 
 
 def director_control_access_commands_for(
@@ -15986,6 +16093,7 @@ def render_role_account_migration(
     from scripts.ticket_board.project_provision import (
         DEFAULT_SERVICE_USER,
         render_role_control_sudoers,
+        repository_group_commands,
         role_control_sudoers_install_commands,
         role_runtime_commands,
         role_tooling_staging_commands,
@@ -16003,9 +16111,21 @@ def render_role_account_migration(
         f"if ! getent group {shell_quote(group)} >/dev/null 2>&1; then",
         f"    sudo groupadd -r {shell_quote(group)}",
         "fi",
+        # The board service is in the socket group and has to be: that is how
+        # the socket reaches the roles. It is deliberately NOT in the repository
+        # group created next, which is the whole point of having two (SYRD-157).
         f"sudo gpasswd -a {shell_quote(DEFAULT_SERVICE_USER)} {shell_quote(group)} >/dev/null",
         f"sudo gpasswd -a {shell_quote(owner)} {shell_quote(group)} >/dev/null",
     ]
+    # Created before the grants below, not with the memberships after them:
+    # setfacl refuses a group principal the host does not know, and the grants
+    # name this group while the accounts that join it may not exist yet.
+    lines.extend(repository_group_commands(config.project, [owner]))
+    # Closed BEFORE anything is granted on it, and not the other way round:
+    # `chmod` recomputes the ACL mask from the group bits, so confining a
+    # repository after granting it would clip the grant that was just made
+    # (SYRD-157).
+    lines.extend(repository_copy_confinement_commands_for(config))
     # From the pinned shared release, not the tenant's deployed board: the
     # deployed one is the release being replaced (SYRD-45).
     lines.extend(
@@ -16060,7 +16180,21 @@ def render_role_account_migration(
                 worktree="",
             )
         )
-    # Now that the accounts exist, the grants that name one. The control role is
+    # Now that the accounts exist, put them in the repository group -- and only
+    # them. Membership is what carries git access now, so the list is exactly
+    # the accounts that use git: the owner and the roles, never the board
+    # service (SYRD-157).
+    repository_members = [owner]
+    for role in config.roles:
+        account = role.run_as_user or role_account_name(config.project, role.role)
+        if account and account != owner and account not in repository_members:
+            repository_members.append(account)
+    lines.extend(account_existence_guard([a for a in repository_members if a != owner]))
+    lines.extend(repository_group_commands(config.project, repository_members))
+    # The board service resolves commits against one repository and is granted
+    # read on that one alone, by name, with no write anywhere (SYRD-157).
+    lines.extend(commit_store_read_commands_for(config))
+    # Now the grants that name a role account. The control role is
     # whichever role the workflow gives the control capabilities, so this is
     # derived from the configuration rather than from a role name (SYRD-49), and
     # it is here rather than above because setfacl rejects a principal the host

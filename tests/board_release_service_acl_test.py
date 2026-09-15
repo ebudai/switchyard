@@ -115,6 +115,13 @@ def build_tree(tmp: Path, plan) -> tuple[Path, Path]:
         directory.chmod(0o775)
     board.mkdir()
     board.chmod(0o755)
+    # The commit store and the directories above it, which the packet installs
+    # before it grants the service read on them (SYRD-157). Created here for the
+    # same reason the board root is: this walk runs the packet's grant lines,
+    # and a grant lands on a path provisioning has already made.
+    for store in str(plan.commit_git_dir).split(os.pathsep):
+        if store.strip():
+            Path(store).mkdir(parents=True, exist_ok=True)
     return home, board
 
 

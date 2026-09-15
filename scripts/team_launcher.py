@@ -12027,8 +12027,38 @@ def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: st
     return [
         ["id", "-u", owner_user],
         ["useradd", "-m", "-s", shell_path, owner_user],
-        ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(project_dir)],
+        _owner_project_install_command(owner_user, str(project_dir)),
     ]
+
+
+def _owner_project_install_command(owner_user: str, directory: str) -> list[str]:
+    from scripts.ticket_board.project_provision import TENANT_SOURCE_MODE
+
+    return ["install", "-d", "-m", TENANT_SOURCE_MODE, "-o", owner_user, "-g", owner_user, directory]
+
+
+def _owner_project_install_commands(
+    owner_user: str, project_dir: Path, *, owner_home: Path | None = None
+) -> list[list[str]]:
+    """One install(1) per directory of the tenant's tree, not just the leaf.
+
+    `install -d` creates every missing component of a path but applies `-m`,
+    `-o` and `-g` only to the last one. Intermediates get the caller's umask and
+    the caller's ownership, and here the caller is root -- which is how a tenant
+    ends up with a root-owned 0755 `Projects` above a checkout owned by the
+    tenant, and how a service account granted nothing but traversal on the home
+    could still read the source below it (SYRD-156).
+    """
+    from scripts.ticket_board.project_provision import owned_ancestor_dirs
+
+    directories: list[str] = []
+    if owner_home is not None:
+        directories = list(
+            owned_ancestor_dirs(str(owner_home), str(project_dir), include_target=True)
+        )
+    if not directories:
+        directories = [str(project_dir)]
+    return [_owner_project_install_command(owner_user, directory) for directory in directories]
 
 
 def _non_login_shell_path() -> str:
@@ -12194,11 +12224,14 @@ def _ensure_owner_user_and_project_dir(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     shell: str = "fish",
+    owner_home: Path | None = None,
 ) -> OwnerUserProvisionResult:
     existed = project_dir.exists()
     _precheck_project_path_before_mutating(owner_user, project_dir)
     id_args = ["id", "-u", owner_user]
-    install_args = ["install", "-d", "-m", "0755", "-o", owner_user, "-g", owner_user, str(project_dir)]
+    install_commands = _owner_project_install_commands(
+        owner_user, project_dir, owner_home=owner_home
+    )
     id_result = runner(id_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     created_user = False
     linger_enabled = False
@@ -12220,10 +12253,22 @@ def _ensure_owner_user_and_project_dir(
             "switchyard refuses to modify an existing owner user"
         )
     if not existed:
-        install_result = runner(install_args)
-        if install_result.returncode != 0:
-            raise SystemExit(f"switchyard: failed to create project directory {project_dir}")
-        project_dir.mkdir(parents=True, exist_ok=True)
+        for install_args in install_commands:
+            install_result = runner(install_args)
+            if install_result.returncode != 0:
+                raise SystemExit(f"switchyard: failed to create project directory {install_args[-1]}")
+        # Each named directory at its own mode rather than one `parents=True`
+        # over the whole path, which would leave everything it created at the
+        # caller's umask -- root's -- and reopen what naming them just closed
+        # (SYRD-156). The mode comes from the same argv, so there is one place
+        # to change it. Anything ABOVE the first named directory is still
+        # created the old way: for a checkout inside the owner home there is
+        # nothing above it but the home itself, and for one outside the home
+        # this is not the tenant tree being confined.
+        for install_args in install_commands:
+            path = Path(install_args[-1])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.mkdir(mode=int(install_args[3], 8), exist_ok=True)
     _verify_project_path_writable_by_owner(owner_user, project_dir, runner=runner)
     return OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled, shell_path=shell_path)
 
@@ -15223,6 +15268,7 @@ def switchyard_new_command(
         project_dir,
         runner=runner,
         shell=owner_shell,
+        owner_home=home_base / owner_user,
     )
     if owner_result.created:
         created_shell = owner_result.shell_path or owner_shell
@@ -15780,6 +15826,23 @@ def render_role_account_migration(
     # before any account exists. Named-user grants are not, and are emitted
     # after the loop below (SYRD-53).
     lines.extend(role_path_access_commands(config))
+    # Close the tenant's own tree before anything else is granted a way through
+    # the home. This is the repair half of SYRD-156: an existing tenant has
+    # `Projects` root-owned at 0755 above a checkout the tenant owns at 0755,
+    # and every principal granted traversal -- the board service included, since
+    # it is a member of the roles group added at the top of this artifact --
+    # could read the source. Naming each directory moves the parent back to the
+    # tenant and closes both; re-running changes nothing.
+    if config.repository is not None:
+        from scripts.ticket_board.project_provision import tenant_source_confinement_commands
+
+        lines.extend(
+            tenant_source_confinement_commands(
+                owner_user=owner,
+                owner_home=f"/home/{owner}",
+                source_repo=str(config.repository),
+            )
+        )
     for role in config.roles:
         # Canonical rather than configured: this artifact is what CREATES the
         # accounts, so it has to be renderable before the configuration names

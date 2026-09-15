@@ -1632,6 +1632,53 @@ def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
     return [f"sudo setfacl -m {principal}:--x {shell_quote(owner_home)}"]
 
 
+#: The tenant's own tree, closed to everything but the tenant. Not 0700: the
+#: group is the tenant's own group, which is the tenant, so the extra bit grants
+#: nobody anything today and keeps the directory conventional for an owner who
+#: later adds a member deliberately.
+TENANT_SOURCE_MODE = "0750"
+
+
+def tenant_source_confinement_commands(
+    *, owner_user: str, owner_home: str, source_repo: str
+) -> list[str]:
+    """Close the tenant's source tree to everything that may walk through the home.
+
+    The owner home is 0710 with named `--x` entries, so a principal that must
+    reach one thing beneath it can walk past everything else: the board service
+    reaching its release, the control role reaching its configuration. Traversal
+    was meant to be the entire grant. It was not, because the tree below was
+    left world-readable -- `Projects` and the checkout inside it were created
+    0755 -- so anything holding traversal could list and read the tenant's
+    source. `sudo -u boardsvc test -r /home/<tenant>/Projects/<project>`
+    succeeded for exactly that reason, and no ACL was involved: the named entry
+    grants `--x` under an `--x` mask and cannot grant read. The mode bits did
+    it (SYRD-156).
+
+    `install -d` is why the parent was the worse half. Given a path it creates
+    every missing component, but it applies `-m`, `-o` and `-g` only to the
+    LAST one; intermediates get the caller's umask, and the caller is root.
+    That is how a tenant ends up with `Projects` owned by root at 0755 above a
+    checkout owned by the tenant. Every directory is named here rather than
+    left to be created on the way past, which also makes this a repair: run
+    against a tenant already in that shape it moves the parent back to the
+    tenant and closes it.
+
+    A checkout kept outside the owner home is not the tenant tree this is about
+    and is not ours to re-mode, so it yields nothing.
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(source_repo, what="the project checkout")
+    _refuse_prefix_coincidence(owner_home, source_repo)
+    directories = owned_ancestor_dirs(owner_home, source_repo, include_target=True)
+    quoted_owner = shell_quote(owner_user)
+    return [
+        f"sudo install -d -m {TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
+        f"{shell_quote(directory)}"
+        for directory in directories
+    ]
+
+
 def role_worktree_access_commands(
     *,
     owner_home: str,
@@ -3492,6 +3539,20 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
             "or the board health check will fail."
         )
         effective_grant_asset_frame = ""
+    # Before the traversal grant rather than after it: the tenant tree is closed
+    # first, and only then is anything allowed to walk through the home. On a
+    # tenant already provisioned this is the repair, and re-running it changes
+    # nothing (SYRD-156).
+    confine_source_tree = "\n".join(
+        tenant_source_confinement_commands(
+            owner_user=plan.owner_user,
+            owner_home=plan.owner_home,
+            source_repo=plan.source_repo,
+        )
+    ) or (
+        f"# the checkout {plan.source_repo} is outside {plan.owner_home}; "
+        "it is not this tenant's tree to confine"
+    )
     if enable_owner_linger:
         owner_linger_step = f"sudo loginctl enable-linger {q_owner_user}"
         owner_bus_error = (
@@ -3523,6 +3584,7 @@ readable_system_unit={q_readable_system_unit}
 {install_board_root}
 {grant_board_root}
 {install_asset_frame}
+{confine_source_tree}
 {grant_home_traversal}
 {effective_grant_asset_frame}
 # The deploy exports an immutable release into the board root and then starts a

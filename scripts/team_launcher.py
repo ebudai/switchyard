@@ -14143,6 +14143,122 @@ def verified_tenant_config(
     return None, None, problems
 
 
+def approved_desktop_policy(
+    plan: "ProjectBoardProvision",
+    config: ProjectConfig,
+    *,
+    approval_path: Path | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """The desktop policy root will install for a tenant it is recovering.
+
+    The GUI owner comes from this host's approval record, which is root-owned
+    for the reason the comment on `write_host_desktop_approval` gives: an
+    approval a tenant could write is an approval a tenant could give itself.
+    The tenant's own configuration is writable by the account every role runs
+    as, so it may say that this project already has a policy and it may carry
+    the attribution of the consent that was recorded for it -- but it may not
+    name a different desktop, and it cannot conjure an approval this host has
+    never recorded.
+
+    Returns no policy at all when there is nothing to install: a headless
+    tenant, or a host whose desktop owner never approved anything and whose
+    tenant is not asking for access either (SYRD-158).
+    """
+    from scripts import desktop_access as desktop
+
+    declared = config.desktop_access
+    tenant = config.run_as_user or plan.owner_user
+    if isinstance(declared, dict) and declared.get("mode") == "headless":
+        return None, []
+    recorded = read_host_desktop_approval(approval_path)
+    gui_user = str(recorded.get("gui_user") or "").strip()
+    if declared is None and not gui_user:
+        return None, []
+    if not gui_user:
+        return None, [
+            f"{plan.project} asks for desktop access, and this host has no recorded desktop "
+            f"approval to grant it from. Record one through `switchyard new` on this host, or "
+            f"set this project headless; a tenant's own configuration does not authorize a "
+            f"grant to somebody else's session."
+        ]
+    if declared is not None:
+        try:
+            policy = desktop.validate_policy(declared, project=plan.project, tenant=tenant)
+        except desktop.DesktopAccessError as exc:
+            return None, [f"{plan.project}'s recorded desktop policy is not usable: {exc}"]
+        if policy["gui_user"] != gui_user:
+            return None, [
+                f"{plan.project}'s configuration asks for {policy['gui_user']}'s desktop, and "
+                f"this host's approval record names {gui_user}. Which desktop a tenant may reach "
+                "is not the tenant's to answer; nothing was changed."
+            ]
+        return policy, []
+    # Nothing declared, and an approval that covers this host: generate the same
+    # policy provisioning would have, from the record rather than from a prompt.
+    try:
+        policy = desktop.generated_policy(
+            project=plan.project,
+            tenant=tenant,
+            gui_user=gui_user,
+            approved_by=recorded.get("approved_by") or gui_user,
+            approved_at=recorded.get("approved_at") or "",
+            reference=recorded.get("reference") or "",
+        )
+    except desktop.DesktopAccessError as exc:
+        return None, [f"this host's desktop approval cannot be used for {plan.project}: {exc}"]
+    return policy, []
+
+
+def install_recovered_desktop_access(
+    plan: "ProjectBoardProvision",
+    config: ProjectConfig,
+    config_path: Path,
+    *,
+    source_release: Path | None = None,
+    approval_path: Path | None = None,
+    installer: Callable[..., ProjectConfig] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> tuple[ProjectConfig | None, bool]:
+    """Complete the desktop install the interrupted `switchyard new` never did.
+
+    `switchyard new` installs the scoped grant and then verifies it; a launch
+    only ever verifies. So a recovery that went straight to launching asked the
+    tenant to prove access it had never been given, and stopped on a receipt
+    that nothing had written -- with the approved policy sitting intact on
+    disk. The install is the supported one, with its own rollback: what it
+    cannot complete it puts back.
+    """
+    policy, objections = approved_desktop_policy(plan, config, approval_path=approval_path)
+    if objections:
+        for objection in objections:
+            print_func(f"switchyard: {objection}")
+        return None, False
+    if policy is None:
+        return config, True
+    helper = None
+    if source_release is not None:
+        candidate = Path(source_release) / "scripts" / "desktop_access.py"
+        if candidate.is_file():
+            helper = candidate
+    configure = installer or configure_project_desktop
+    try:
+        configured = configure(
+            replace(config, desktop_access=policy),
+            config_path=config_path,
+            helper=helper,
+            runner=runner,
+        )
+    except (SystemExit, OSError) as exc:
+        print_func(f"switchyard: {plan.project}'s desktop access could not be installed: {exc}")
+        return None, False
+    print_func(
+        f"switchyard: {plan.project} has scoped access to {policy['gui_user']}'s desktop "
+        f"session for {policy['tenant_user']}"
+    )
+    return configured, True
+
+
 def recovery_readiness_problems(
     plan: "ProjectBoardProvision",
     config: ProjectConfig,
@@ -14216,6 +14332,9 @@ def _finish_provision_after_packet(
     config_dir: Path | None,
     config_path: Path | None,
     completion: PacketCompletion,
+    source_release: Path | None = None,
+    desktop_approval_path: Path | None = None,
+    desktop_installer: Callable[..., ProjectConfig] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     launcher_script: Path | None = None,
     start_roles: bool = True,
@@ -14270,6 +14389,29 @@ def _finish_provision_after_packet(
         print_func(f"switchyard: registered {slug} at {registry_path} from {verified}")
 
     if start_roles:
+        # Before the launch, because the launch only ever verifies. The
+        # interrupted `switchyard new` never reached the install, so a recovery
+        # that went straight to launching asked the tenant to prove access that
+        # had never been granted (SYRD-158).
+        configured, ready = install_recovered_desktop_access(
+            plan,
+            config,
+            verified,
+            source_release=source_release,
+            approval_path=desktop_approval_path,
+            installer=desktop_installer,
+            runner=runner,
+            print_func=print_func,
+        )
+        if not ready or configured is None:
+            print_func(
+                f"switchyard: {slug} is registered, but its roles were not started: the "
+                "desktop access they need is not installed. Address what is named above and "
+                f"run `sudo switchyard resume-provision {slug}` again -- the phases already "
+                "done are not repeated."
+            )
+            return 1
+        config = configured
         launched = launch_project(
             config,
             config_path=verified,
@@ -14328,6 +14470,8 @@ def switchyard_resume_provision_command(
     launcher_script: Path | None = None,
     start_roles: bool = True,
     completion_reader: Callable[["ProjectBoardProvision"], PacketCompletion] | None = None,
+    desktop_approval_path: Path | None = None,
+    desktop_installer: Callable[..., ProjectConfig] | None = None,
     process_commands: Sequence[str] | None = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
     print_func: Callable[[str], None] = print,
@@ -14477,6 +14621,9 @@ def switchyard_resume_provision_command(
         config_dir=config_dir,
         config_path=config_path,
         completion=completion,
+        source_release=selected,
+        desktop_approval_path=desktop_approval_path,
+        desktop_installer=desktop_installer,
         runner=runner,
         launcher_script=launcher_script,
         start_roles=start_roles,

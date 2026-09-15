@@ -293,6 +293,11 @@ def privileged_cases() -> int:
                         registry_dir=registry,
                         euid_getter=lambda: 0,
                         completion_reader=lambda _plan: packet,
+                        # Never the host's: whether this host has a recorded
+                        # desktop approval decides whether the continuation
+                        # installs desktop access, and that is not something
+                        # these cases are asking about (SYRD-158).
+                        desktop_approval_path=root / "no-desktop-approval.json",
                         process_commands=kwargs.pop("process_commands", commands),
                         session_statuses=kwargs.pop("session_statuses", statuses),
                         print_func=said.append,

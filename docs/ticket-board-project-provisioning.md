@@ -153,10 +153,25 @@ retry:
    cannot regenerate, so once verified the path is recorded beside the plan and
    re-verified on every later read; `--config <path>` names it for a checkout
    that has moved.
-3. **It starts the roles through the ordinary launcher path** -- the same
+3. **It installs the desktop access the roles need, before anything verifies
+   it.** `switchyard new` installs the scoped Wayland grant and then checks it;
+   a launch only ever checks. So a recovery that went straight to launching
+   asked the tenant to prove access nobody had given it, and stopped on a
+   readiness receipt that nothing had written -- with the approved policy
+   sitting intact on disk (SYRD-158). The policy installed is the one this
+   host's root-owned approval record covers: the tenant's own configuration
+   may carry the grant and the attribution of the consent recorded for it, but
+   it may not name a different desktop, and it cannot conjure an approval this
+   host never recorded. Either of those is refused, and no grant is made. A
+   headless tenant installs nothing. The install itself is the supported one,
+   with its own rollback: what it cannot complete it puts back, the persistent
+   GUI-owner service reapplies the grant after a reboot or a recreated socket,
+   and adding this tenant's entry leaves every other tenant's exactly where it
+   was.
+4. **It starts the roles through the ordinary launcher path** -- the same
    `launch_project` that `switchyard new` and `switchyard <slug>` use, which
    starts each role as the project owner when the caller is somebody else.
-4. **It proves the result before calling it done**: the project is registered
+5. **It proves the result before calling it done**: the project is registered
    and the entry points at the verified configuration, the board and listener
    are running, every configured role has a live pane, and every role has
    registered a runtime session with the board. Anything missing is named, and

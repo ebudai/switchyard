@@ -185,6 +185,10 @@ SWITCHYARD_COMMANDS = (
     "new",
     "register",
     "upgrade",
+    # Rebuilds root's artifacts for a project whose `switchyard new` stopped
+    # before it was registered, so the installation that already exists can be
+    # finished instead of started again (SYRD-147).
+    "resume-provision",
     "finish-upgrade",
     "cutover-roles",
     # Reports the publication-key cutover, and on request checks the one thing
@@ -13767,6 +13771,211 @@ def _register_switchyard_project(
     return registry_path
 
 
+def partial_provision_record(slug: str) -> Path | None:
+    """Root's own record of a project whose provisioning did not finish.
+
+    The one place a partial installation can be recognised from. The tenant's
+    own directory cannot answer this -- it is writable by the account every
+    role runs as, and a project that never reached registration has no registry
+    entry to check either (SYRD-147).
+    """
+    baseline = privileged_baseline_plan_path(slug)
+    try:
+        info = os.stat(baseline, follow_symlinks=False)
+    except OSError:
+        return None
+    return baseline if stat.S_ISREG(info.st_mode) else None
+
+
+def _resume_provision_hint(slug: str) -> str:
+    """What to say about a project that is not registered but was started."""
+    if partial_provision_record(slug) is None:
+        return ""
+    return (
+        f"switchyard: {slug!r} is not registered, but root holds a provisioning record for it: "
+        f"its `switchyard new` stopped before registration. Resume it with "
+        f"`sudo switchyard resume-provision {slug}`."
+    )
+
+
+def switchyard_resume_provision_command(
+    slug: str,
+    *,
+    source_repo: Path | None = None,
+    registry_dir: Path | None = None,
+    config_dir: Path | None = None,
+    enable_owner_linger: bool = True,
+    euid_getter: Callable[[], int] = os.geteuid,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Rebuild a partly provisioned project's root artifacts so it can finish.
+
+    A `switchyard new` that fails before it registers the project leaves a real
+    installation nobody can name: the account, its repository, its credentials,
+    its desktop policy, its journal and its exported release all exist, and
+    every supported command answers `unknown project`. The recovery cannot be
+    to run the packet that failed -- it was rendered by the release that had
+    the defect -- nor to register a tenant nobody has checked.
+
+    So this reads root's own record, checks it against the kernel, rebuilds
+    every artifact root installs from the release named here, and hands back
+    the ordinary operator packet to run. It changes nothing the tenant owns, it
+    starts nothing, and it is re-runnable: the phases themselves are idempotent
+    and the packet is regenerated rather than patched (SYRD-147).
+    """
+    slug = _validate_project_slug(slug)
+    registry = (registry_dir or switchyard_registry_dir()) / f"{slug}.json"
+    if registry.exists():
+        print_func(
+            f"switchyard: {slug} is already registered at {registry}. Resuming is for a project "
+            f"that never got that far; use `switchyard upgrade {slug}` instead. Nothing was changed."
+        )
+        return 1
+
+    baseline = privileged_baseline_plan_path(slug)
+    if partial_provision_record(slug) is None:
+        print_func(
+            f"switchyard: root holds no provisioning record for {slug} at {baseline}, so there "
+            "is nothing to resume. A project that was never provisioned is started with "
+            "`sudo switchyard new`."
+        )
+        return 1
+    # Before anything that can only be evaluated as root. Every check below
+    # walks a path that must belong to root, and asking an unprivileged caller
+    # to read those answers produces a refusal about uids rather than the one
+    # thing they need to do differently.
+    if euid_getter() != 0:
+        print_func(
+            f"switchyard: resuming {slug} reads root's own provisioning record and rewrites "
+            f"root's artifacts. Run: sudo switchyard resume-provision {slug}"
+            + (f" --source-repo {source_repo}" if source_repo is not None else "")
+        )
+        return 1
+    document, problem = read_plan_no_follow(baseline, require_root_owned=True)
+    if document is None:
+        print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: root holds no usable provisioning record for {slug}, so there is "
+            "nothing to resume from. Nothing was changed."
+        )
+        return 1
+    recorded_project = str(document.data.get("project") or "").strip()
+    if recorded_project != slug:
+        print_func(
+            f"switchyard: {baseline} records project {recorded_project!r}, not {slug!r}. "
+            "Which one it belongs to is not this command's to decide; nothing was changed."
+        )
+        return 1
+
+    identity = trusted_owner_identity(slug)
+    if not identity.trusted:
+        for objection in identity.problems:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to resume {slug}: root cannot establish whose installation "
+            "this is. Nothing was changed."
+        )
+        return 1
+
+    selected, release_problem = _resume_source_release(source_repo)
+    if release_problem:
+        print_func(f"switchyard: {release_problem}")
+        print_func(f"switchyard: refusing to resume {slug} from an unverified release. Nothing was changed.")
+        return 1
+
+    plan, divergence = _resume_plan_from_record(document, identity, source_repo=selected)
+    if divergence:
+        for objection in divergence:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to resume {slug}: rebuilding it would change what root "
+            "installs. Nothing was changed."
+        )
+        return 1
+
+    recorded_release = str(document.data.get("source_repo") or "").strip()
+    rendered = render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
+    installed = install_privileged_artifacts(plan, rendered)
+    if recorded_release and recorded_release != str(selected):
+        print_func(
+            f"switchyard: {slug} was provisioned from {recorded_release}; its artifacts are "
+            f"rebuilt from {selected}"
+        )
+    print_func(f"switchyard: regenerated {slug}'s root-owned artifacts in {installed}")
+    print_func(
+        f"switchyard: run {installed}/operator-commands.sh through the ordinary operator path "
+        "to finish the remaining phases. Every phase in it is re-runnable, so the work already "
+        "done is left alone."
+    )
+    print_func(
+        f"switchyard: if it stops again, fix what it names and run "
+        f"`sudo switchyard resume-provision {slug}` again -- resuming is the supported retry."
+    )
+    return 0
+
+
+def _default_board_service_user() -> str:
+    from scripts.ticket_board.project_provision import DEFAULT_SERVICE_USER
+
+    return DEFAULT_SERVICE_USER
+
+
+def _resume_source_release(source_repo: Path | None) -> tuple[Path, str]:
+    """The release the rebuilt artifacts come from, and why it may not be used.
+
+    Root-controlled or nothing: these bytes become the units, the SQL and the
+    operator packet root installs, so a release a tenant could write is a
+    release a tenant could provision itself from.
+    """
+    selected = (source_repo or (switchyard_shared_install_root() / "current")).expanduser()
+    try:
+        resolved = selected.resolve(strict=True)
+    except OSError as exc:
+        return selected, f"{selected} is not a release directory on this host ({exc.strerror})"
+    if not (resolved / "scripts" / "team_launcher.py").is_file():
+        return resolved, f"{resolved} does not look like a Switchyard release"
+    walk = root_controlled_problems_for(str(resolved))
+    if walk:
+        return resolved, "; ".join(
+            [f"{resolved} is not root-controlled, so it is not an audited release"] + walk
+        )
+    return resolved, ""
+
+
+def _resume_plan_from_record(
+    document: "PlanDocument", identity: "TrustedOwnerIdentity", *, source_repo: Path
+) -> tuple[Any, list[str]]:
+    """Rebuild the plan from what root recorded, and say what that would change.
+
+    The identity comes from the kernel-checked record rather than from the
+    document's own fields, and everything root regenerates is compared against
+    what was provisioned: a rebuild that would quietly move an account, a home,
+    a board root or a unit name is refused rather than reconciled, which is the
+    same rule an upgrade follows.
+    """
+    from scripts.ticket_board.project_provision import build_plan
+
+    recorded = document.data
+    plan = build_plan(
+        project=str(recorded.get("project") or ""),
+        project_name=str(recorded.get("project_name") or "") or None,
+        owner_user=identity.owner_user,
+        owner_home=identity.owner_home,
+        port=int(recorded["port"]) if str(recorded.get("port") or "").strip() else None,
+        database=str(recorded.get("database") or "") or None,
+        service_user=str(recorded.get("service_user") or "") or _default_board_service_user(),
+        source_repo=source_repo,
+        commit_git_dir=str(recorded.get("commit_git_dir") or "") or None,
+        implementer_roles=_validated_role_names(recorded.get("implementer_roles"), "implementer_roles", []) or None,
+        ticket_prefix=str(recorded.get("ticket_prefix") or "") or None,
+        board_service_traversal=bool(recorded.get("board_service_traversal", True)),
+        control_user=str(recorded.get("control_user") or ""),
+        audit_roles=_validated_role_names(recorded.get("audit_roles"), "audit_roles", []) or None,
+        workflow=recorded.get("workflow") or None,
+    )
+    return plan, _regenerated_field_divergence(plan, recorded)
+
+
 def switchyard_register_command(
     config_path: Path,
     *,
@@ -14262,6 +14471,14 @@ def _resolve_switchyard_project(
                 f"switchyard: {words[0]!r} is a project; did you mean `switchyard {first_matches[0].slug}`? "
                 "A bare project name starts or attaches it."
             )
+    # A project that never reached registration is unknown to every ordinary
+    # command, and the installation is still there: the account, its
+    # repository, its journal and its exported release. Saying only "unknown"
+    # sent a live recovery looking for a workaround, so the one supported way
+    # back is named here, where the failure is (SYRD-147).
+    hint = _resume_provision_hint(selection.strip())
+    if hint:
+        raise SystemExit(hint)
     raise SystemExit(f"switchyard: unknown project {selection!r}")
 
 
@@ -19916,6 +20133,26 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_resume_provision_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard resume-provision",
+        description=(
+            "Rebuild root's artifacts for a project whose provisioning stopped before it was "
+            "registered, so the existing installation can be finished rather than repeated."
+        ),
+    )
+    parser.add_argument("project", help="the project slug root holds a provisioning record for")
+    parser.add_argument(
+        "--source-repo",
+        type=Path,
+        help=(
+            "the audited release to rebuild the artifacts from; defaults to the installed "
+            "shared release"
+        ),
+    )
+    return parser
+
+
 def _build_switchyard_register_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard register", description="Register an existing Switchyard project config.")
     parser.add_argument("config_path", type=Path, help="path to the project's generated launcher config JSON")
@@ -21017,6 +21254,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)
+    if argv[0].casefold() == "resume-provision":
+        args = _build_switchyard_resume_provision_parser().parse_args(argv[1:])
+        return switchyard_resume_provision_command(
+            args.project, source_repo=args.source_repo
+        )
     if argv[0].casefold() == "upgrade":
         args = _build_switchyard_upgrade_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

@@ -79,6 +79,36 @@ the tree carried the entries and the deploy succeeded; on a fresh host the
 deploy was the first thing to touch the tree, failed, and stopped the script
 before the grant it needed (SYRD-145).
 
+## Resuming a provision that stopped
+
+A `switchyard new` that fails before it writes `/etc/switchyard/projects/<slug>.json`
+leaves a real installation that no ordinary command can name: the account, its
+repository, its credentials, its desktop policy, its rollout journal and its
+exported board release all exist, and every command that resolves a project
+through the registry answers `unknown project`. That failure now names the way
+back, and the way back is:
+
+```sh
+sudo switchyard resume-provision <slug> [--source-repo /opt/switchyard/releases/<commit>]
+```
+
+It reads root's own provisioning record -- `/etc/switchyard/provision/<slug>/plan.json`,
+walked component by component and required to belong to root -- and checks the
+identity it names against the kernel rather than believing it. The tenant's own
+copy is never consulted: it is writable by the account every role runs as. From
+that record it rebuilds every artifact root installs, from the release named on
+the command line or the installed shared release, and leaves the ordinary
+operator packet to run. It refuses rather than reconciling: a project that is
+already registered (use `upgrade`), a record that names a different project, an
+owner the kernel does not know or whose home disagrees with the record, a
+release that is not root-controlled, and any rebuild that would change a value
+root regenerates -- an account, a home, a board root, a unit name.
+
+Rebuilding rather than re-running matters: the preserved packet was rendered by
+the release that failed, so re-running it would repeat the defect it failed on.
+Nothing the tenant owns is touched, nothing is started, and running it twice
+produces the same artifacts.
+
 The script is re-runnable, which is how an interrupted provision is completed:
 accounts and groups are created only when `getent` does not find them,
 directories are installed rather than recreated, the ACL grants are `setfacl

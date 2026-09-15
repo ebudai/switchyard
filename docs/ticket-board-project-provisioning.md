@@ -102,25 +102,71 @@ through the registry answers `unknown project`. That failure now names the way
 back, and the way back is:
 
 ```sh
-sudo switchyard resume-provision <slug> [--source-repo /opt/switchyard/releases/<commit>]
+sudo switchyard resume-provision <slug> [--source-repo /opt/switchyard/releases/<commit>] [--config <path>]
 ```
 
 It reads root's own provisioning record -- `/etc/switchyard/provision/<slug>/plan.json`,
 walked component by component and required to belong to root -- and checks the
 identity it names against the kernel rather than believing it. The tenant's own
-copy is never consulted: it is writable by the account every role runs as. From
-that record it rebuilds every artifact root installs, from the release named on
-the command line or the installed shared release, and leaves the ordinary
-operator packet to run. It refuses rather than reconciling: a project that is
-already registered (use `upgrade`), a record that names a different project, an
-owner the kernel does not know or whose home disagrees with the record, a
-release that is not root-controlled, and any rebuild that would change a value
-root regenerates -- an account, a home, a board root, a unit name.
+copy is never consulted for what root installs: it is writable by the account
+every role runs as. From that record it rebuilds every artifact root installs,
+from the release named on the command line or the installed shared release, and
+hands back the ordinary operator packet to run. It refuses rather than
+reconciling: a record that names a different project, an owner the kernel does
+not know or whose home disagrees with the record, a release that is not
+root-controlled, and any rebuild that would change a value root regenerates --
+an account, a home, a board root, a unit name.
 
 Rebuilding rather than re-running matters: the preserved packet was rendered by
 the release that failed, so re-running it would repeat the defect it failed on.
-Nothing the tenant owns is touched, nothing is started, and running it twice
-produces the same artifacts.
+Nothing the tenant owns is touched and running it twice produces the same
+artifacts.
+
+### What happens after the packet
+
+Running the packet is not the end of a `switchyard new`. Registering the
+project and starting its roles belonged to the process that had already exited,
+so a recovery that ran the packet perfectly still left a project with a live
+board that no ordinary command could name and no role sessions at all --
+testing journal 0011, where `/etc/switchyard/projects/testing.json` was absent
+and the owner uid had no tmux server (SYRD-155).
+
+So the same command continues past the packet, and the same command is the
+retry:
+
+1. **It reads whether the packet finished**, from what the packet installs --
+   the board unit, the tmpfiles configuration, the polkit rule, the listener
+   unit in the owner's home, an exported release, a running board and listener,
+   and a board that answers. Not from a marker: a marker says a script reached
+   its last line, and what the rest of the recovery depends on is whether those
+   things are there. While any of them is missing it names them, points at the
+   packet, and **exits non-zero** -- a recovery that has finished nothing does
+   not report success.
+2. **It verifies the generated configuration before registering it.** The
+   registry entry is a pointer, and following it decides which account runs the
+   roles, which board they talk to and which tree they work in. So the
+   configuration is read without following symlinks, required to belong to the
+   project owner and to be unwritable by anybody else, and checked field by
+   field against root's record -- project, owner, ticket prefix, board socket
+   and port, and the roles it declares. A configuration that disagrees is
+   refused, not reconciled. Where the checkout lives is the one thing root
+   cannot regenerate, so once verified the path is recorded beside the plan and
+   re-verified on every later read; `--config <path>` names it for a checkout
+   that has moved.
+3. **It starts the roles through the ordinary launcher path** -- the same
+   `launch_project` that `switchyard new` and `switchyard <slug>` use, which
+   starts each role as the project owner when the caller is somebody else.
+4. **It proves the result before calling it done**: the project is registered
+   and the entry points at the verified configuration, the board and listener
+   are running, every configured role has a live pane, and every role has
+   registered a runtime session with the board. Anything missing is named, and
+   the status is non-zero.
+
+Every phase is derived from the world rather than from a progress file, so an
+interrupted recovery is finished by running the command again: a project
+already registered is not registered twice, roles already running are attached
+to rather than started again, and a registration that succeeded before a launch
+that failed still stands.
 
 The script is re-runnable, which is how an interrupted provision is completed:
 accounts and groups are created only when `getent` does not find them,

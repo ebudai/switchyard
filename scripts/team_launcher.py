@@ -185,9 +185,11 @@ SWITCHYARD_COMMANDS = (
     "new",
     "register",
     "upgrade",
-    # Rebuilds root's artifacts for a project whose `switchyard new` stopped
-    # before it was registered, so the installation that already exists can be
-    # finished instead of started again (SYRD-147).
+    # Finishes a project whose `switchyard new` stopped before it was
+    # registered, so the installation that already exists can be completed
+    # instead of started again: root's artifacts first (SYRD-147), then the
+    # registration and role startup the interrupted process never reached
+    # (SYRD-155).
     "resume-provision",
     "finish-upgrade",
     "cutover-roles",
@@ -9828,7 +9830,9 @@ class PlanDocument:
     mode: int
 
 
-def read_plan_no_follow(path: Path, *, require_root_owned: bool) -> tuple[PlanDocument | None, str]:
+def read_plan_no_follow(
+    path: Path, *, require_root_owned: bool, require_owner_uids: Sequence[int] | None = None
+) -> tuple[PlanDocument | None, str]:
     """Read one plan authority by fd, refusing symlinks at every component.
 
     `Path.read_text` on a tenant-controlled directory follows whatever is there.
@@ -9852,6 +9856,23 @@ def read_plan_no_follow(path: Path, *, require_root_owned: bool) -> tuple[PlanDo
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 return None, f"{path} is not a regular file"
+            if require_owner_uids is not None:
+                # Root reads a tenant's own document here, so the question is
+                # not whether root owns it but whether it belongs to somebody
+                # entitled to have written it -- the account root is acting for,
+                # or root -- and whether anybody else can rewrite it between
+                # this read and the decision made from it (SYRD-155).
+                if info.st_uid not in set(require_owner_uids):
+                    expected = ", ".join(str(uid) for uid in require_owner_uids)
+                    return None, (
+                        f"{path} is owned by uid {info.st_uid} rather than by uid {expected}, "
+                        "so it is not a document this project's owner or root wrote"
+                    )
+                if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return None, (
+                        f"{path} is mode {stat.S_IMODE(info.st_mode):04o}, which anybody in its "
+                        "group or beyond can write"
+                    )
             if require_root_owned:
                 expected = expected_privileged_uid()
                 if info.st_uid != expected:
@@ -13806,14 +13827,464 @@ def _resume_provision_hint(slug: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Finishing a provision whose privileged packet has already run (SYRD-155).
+#
+# The packet is the privileged half of `switchyard new`, and it is the half an
+# operator runs by hand during a recovery. Everything after it -- registering
+# the project and starting its roles -- belonged to the `switchyard new`
+# process that had already exited, so a recovery that ran the packet perfectly
+# still left the project unregistered, unnamed by every ordinary command, and
+# with no sessions at all. That is what testing journal 0011 produced.
+#
+# So the recovery continues past the packet. It reads what the packet actually
+# did rather than assuming it, it registers the generated tenant configuration
+# only after checking it against root's own record, and it starts the roles
+# through `launch_project` -- the same path `switchyard new` and `switchyard
+# <slug>` use, which already delegates role sessions to the project owner when
+# the caller is somebody else. Every phase is derived from the world rather
+# than from a progress file, so an interrupted run resumes by being run again.
+# ---------------------------------------------------------------------------
+
+#: Written beside root's plan record once root has verified which generated
+#: configuration belongs to this project. It is the one fact about the tenant
+#: that root cannot regenerate: the operator chooses where the project checkout
+#: lives, so the path to its configuration is not derivable from the plan.
+#: It is re-verified on every read and never believed on its own.
+TENANT_CONFIG_RECORD_NAME = "tenant-config.json"
+
+
+@dataclass(frozen=True)
+class PacketCompletion:
+    """What the privileged packet has left undone, if anything."""
+
+    problems: tuple[str, ...] = ()
+
+    @property
+    def done(self) -> bool:
+        return not self.problems
+
+
+def _owner_user_unit_args(plan: "ProjectBoardProvision", *args: str) -> list[str]:
+    """Drive the owner's user manager the way the packet itself drives it."""
+    uid = uid_for_user(plan.owner_user)
+    runtime_dir = f"/run/user/{uid}"
+    return [
+        "sudo", "-u", plan.owner_user, "env",
+        f"XDG_RUNTIME_DIR={runtime_dir}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime_dir}/bus",
+        *args,
+    ]
+
+
+def _system_unit_is_active(unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
+    result = runner(
+        ["systemctl", "is-active", "--quiet", unit],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return getattr(result, "returncode", 1) == 0
+
+
+def _owner_unit_is_active(
+    plan: "ProjectBoardProvision", unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]
+) -> bool:
+    result = runner(
+        _owner_user_unit_args(plan, "systemctl", "--user", "is-active", "--quiet", unit),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return getattr(result, "returncode", 1) == 0
+
+
+def _board_answers(plan: "ProjectBoardProvision", *, opener: Callable[[str], Any]) -> bool:
+    try:
+        with opener(f"http://127.0.0.1:{plan.port}/api/board"):
+            return True
+    except Exception:  # noqa: BLE001 - any failure to read is "not answering"
+        return False
+
+
+def privileged_packet_completion(
+    plan: "ProjectBoardProvision",
+    *,
+    exists: Callable[[Path], bool] = lambda path: path.exists(),
+    system_unit_active: Callable[[str], bool] | None = None,
+    owner_unit_active: Callable[[str], bool] | None = None,
+    board_answers: Callable[[], bool] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    opener: Callable[[str], Any] | None = None,
+) -> PacketCompletion:
+    """Whether the privileged packet has finished, read from what it installs.
+
+    Not from a marker the packet could have written: a marker says a script
+    reached its last line, and what the continuation needs to know is whether
+    the things the rest of the recovery depends on are actually there. Each
+    problem names the step of the packet that would have produced it, because
+    the answer to an incomplete packet is to run it again and read what it
+    says.
+    """
+    system_active = system_unit_active or (lambda unit: _system_unit_is_active(unit, runner=runner))
+    owner_active = owner_unit_active or (lambda unit: _owner_unit_is_active(plan, unit, runner=runner))
+    answers = board_answers or (lambda: _board_answers(plan, opener=opener or _open_board_url))
+
+    problems: list[str] = []
+    for path, description in (
+        (Path("/etc/systemd/system") / plan.board_unit, f"the board unit {plan.board_unit} is not installed"),
+        (Path("/etc/tmpfiles.d") / plan.tmpfiles_name, f"the tmpfiles configuration {plan.tmpfiles_name} is not installed"),
+        (Path("/etc/polkit-1/rules.d") / plan.polkit_name, f"the polkit rule {plan.polkit_name} is not installed"),
+        (
+            Path(plan.owner_home) / ".config" / "systemd" / "user" / plan.listener_unit,
+            f"the listener unit {plan.listener_unit} is not installed for {plan.owner_user}",
+        ),
+        (
+            Path(plan.board_current) / "scripts" / "ticket-board.py",
+            f"no board release is exported at {plan.board_current}",
+        ),
+    ):
+        if not exists(path):
+            problems.append(f"{description} ({path})")
+    if not system_active(plan.board_unit):
+        problems.append(f"the board service {plan.board_unit} is not running")
+    if not owner_active(plan.listener_unit):
+        problems.append(
+            f"the notify listener {plan.listener_unit} is not running for {plan.owner_user}"
+        )
+    if not answers():
+        problems.append(f"the board does not answer on port {plan.port}")
+    return PacketCompletion(tuple(problems))
+
+
+def tenant_config_record_path(slug: str) -> Path:
+    return privileged_baseline_plan_path(slug).with_name(TENANT_CONFIG_RECORD_NAME)
+
+
+def recorded_tenant_config_path(slug: str) -> Path | None:
+    """The configuration path root verified last time, if it verified one."""
+    document, _problem = read_plan_no_follow(tenant_config_record_path(slug), require_root_owned=True)
+    if document is None:
+        return None
+    recorded = str(document.data.get("config_path") or "").strip()
+    return Path(recorded) if recorded else None
+
+
+def record_tenant_config_path(slug: str, config_path: Path) -> Path:
+    """Remember a verified configuration path where only root can rewrite it."""
+    path = tenant_config_record_path(slug)
+    payload = (
+        json.dumps({"config_path": str(config_path), "project": slug}, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    staged = path.with_name(f".{path.name}.new")
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(descriptor, payload)
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o644)
+    finally:
+        os.close(descriptor)
+    staged.replace(path)
+    return path
+
+
+def _tenant_config_candidates(
+    plan: "ProjectBoardProvision", slug: str, *, explicit: Path | None, recorded: Path | None
+) -> list[Path]:
+    """Where the generated configuration for this project could be.
+
+    An explicit path or a path root has already verified is the whole answer.
+    Otherwise the conventional layout is tried -- and only tried: whatever is
+    found there still has to survive every check below before root registers
+    it.
+    """
+    if explicit is not None:
+        return [explicit.expanduser()]
+    if recorded is not None:
+        return [recorded]
+    home = Path(plan.owner_home)
+    names = [name for name in (plan.project_name, slug) if name]
+    seen: list[Path] = []
+    for name in names:
+        candidate = home / "Projects" / name / ".switchyard" / "provision" / f"{slug}.json"
+        if candidate not in seen:
+            seen.append(candidate)
+    return seen
+
+
+def tenant_config_conflicts(plan: "ProjectBoardProvision", config: ProjectConfig) -> list[str]:
+    """Where a generated configuration disagrees with what root provisioned.
+
+    The registry entry is a pointer, and every ordinary command follows it to
+    decide which account to act as, which board to talk to and which tree to
+    work in. A configuration that says something else is not a configuration
+    root may register, however it came to say it: the difference is the whole
+    question, and reconciling it would be root adopting a tenant's answer.
+    """
+    owner_home = Path(plan.owner_home)
+    conflicts: list[str] = []
+
+    def disagree(what: str, found: Any, recorded: Any) -> None:
+        conflicts.append(f"{what}: the configuration says {found!r}, root provisioned {recorded!r}")
+
+    if config.project != plan.project:
+        disagree("project", config.project, plan.project)
+    if (config.run_as_user or "") != plan.owner_user:
+        disagree("run_as_user", config.run_as_user, plan.owner_user)
+    if config.ticket_prefix != plan.ticket_prefix:
+        disagree("ticket_prefix", config.ticket_prefix, plan.ticket_prefix)
+    if str(config.board_socket) != plan.socket_path:
+        disagree("board_socket", str(config.board_socket), plan.socket_path)
+    if f":{plan.port}" not in config.board_url:
+        disagree("board_url", config.board_url, f"port {plan.port}")
+    # control_repository is not compared here: loading the configuration already
+    # refuses one that is not under the managed control directory of the account
+    # it names, and the account it names is checked above. Comparing it again
+    # would be a second, weaker version of a boundary that is already enforced.
+    for what, path in (("repository", config.repository), ("session_dir", config.session_dir)):
+        if path is None:
+            continue
+        resolved = Path(path).expanduser()
+        if not (resolved == owner_home or resolved.is_relative_to(owner_home)):
+            conflicts.append(
+                f"{what}: the configuration points at {resolved}, which is outside "
+                f"{plan.owner_user}'s home {owner_home}"
+            )
+    permitted = set(plan.caller_roles)
+    unknown = sorted({role.role for role in config.roles} - permitted)
+    if unknown:
+        conflicts.append(
+            "roles: the configuration declares "
+            + ", ".join(unknown)
+            + ", which root did not provision for this project"
+        )
+    return conflicts
+
+
+def verified_tenant_config(
+    plan: "ProjectBoardProvision",
+    slug: str,
+    *,
+    explicit: Path | None = None,
+    owner_uid: int | None = None,
+) -> tuple[Path | None, ProjectConfig | None, list[str]]:
+    """The generated configuration root is willing to register, or why not.
+
+    Owned by the project owner or by root: `switchyard new` writes this
+    directory as whichever of the two ran it, and a file root wrote is not a
+    file the tenant could have. Anything else -- another account, or a mode
+    that lets a group or the world rewrite it -- is not a document root will
+    point the registry at.
+    """
+    recorded = recorded_tenant_config_path(slug)
+    candidates = _tenant_config_candidates(plan, slug, explicit=explicit, recorded=recorded)
+    permitted = sorted({expected_privileged_uid(), *( (owner_uid,) if owner_uid is not None else () )})
+    problems: list[str] = []
+    for candidate in candidates:
+        document, problem = read_plan_no_follow(
+            candidate, require_root_owned=False, require_owner_uids=permitted
+        )
+        if document is None:
+            problems.append(problem)
+            continue
+        try:
+            config = load_project_config(slug, candidate)
+        except (SystemExit, OSError, json.JSONDecodeError) as exc:
+            problems.append(f"{candidate} is not a usable launcher configuration: {exc}")
+            continue
+        conflicts = tenant_config_conflicts(plan, config)
+        if conflicts:
+            return None, None, [
+                f"{candidate} is not the configuration root provisioned for {slug}:",
+                *conflicts,
+            ]
+        return candidate, config, []
+    return None, None, problems
+
+
+def recovery_readiness_problems(
+    plan: "ProjectBoardProvision",
+    config: ProjectConfig,
+    config_path: Path,
+    *,
+    registry_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    process_commands: Sequence[str] | None = None,
+    session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
+    completion: PacketCompletion | None = None,
+) -> list[str]:
+    """Everything that must be true before a recovery may be called finished.
+
+    Recovery is not "the commands returned zero". It is that the project can
+    be named, that its board and listener are up, that every role it declares
+    has a session, and that those sessions registered themselves with the
+    board. Each of those is read back rather than inferred, because the whole
+    reason this ticket exists is a recovery that reported success with none of
+    them true.
+    """
+    problems: list[str] = []
+    entry = _load_json(registry_path) if registry_path.exists() else None
+    if not isinstance(entry, dict):
+        problems.append(f"{plan.project} is not registered at {registry_path}")
+    else:
+        if str(entry.get("slug") or "") != plan.project:
+            problems.append(
+                f"{registry_path} registers slug {entry.get('slug')!r}, not {plan.project!r}"
+            )
+        registered_at = str(entry.get("config_path") or "")
+        if registered_at != str(config_path):
+            problems.append(
+                f"{registry_path} points at {registered_at!r} rather than the verified "
+                f"configuration {config_path}"
+            )
+    problems.extend(
+        (completion or privileged_packet_completion(plan, runner=runner)).problems
+    )
+    commands = (
+        list(process_commands)
+        if process_commands is not None
+        else _list_process_command_lines(runner=runner)
+    )
+    for role in config.roles:
+        if not _role_has_pane_process(role, commands):
+            problems.append(f"{role.role} has no running pane ({role.target})")
+    statuses = (
+        list(session_statuses)
+        if session_statuses is not None
+        else launch_session_record_statuses(
+            config,
+            config.roles,
+            timeout_seconds=LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
+            poll_seconds=LAUNCH_SESSION_RECORD_POLL_SECONDS,
+        )
+    )
+    found = {status.role for status in statuses if status.found}
+    for role in config.roles:
+        if role.role not in found:
+            problems.append(
+                f"{role.role} has not registered a runtime session with the board"
+            )
+    return problems
+
+
+def _finish_provision_after_packet(
+    slug: str,
+    plan: "ProjectBoardProvision",
+    *,
+    registry_dir: Path | None,
+    config_dir: Path | None,
+    config_path: Path | None,
+    completion: PacketCompletion,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    launcher_script: Path | None = None,
+    start_roles: bool = True,
+    process_commands: Sequence[str] | None = None,
+    session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Register the project and start its roles, and say what is still missing.
+
+    The phases run in this order because each depends on the last, and each is
+    skipped when the world already shows it done: a project registered by an
+    interrupted earlier run is not registered again, and roles already running
+    are attached to rather than started twice. That is what makes running this
+    command again the supported retry rather than a second recovery.
+    """
+    owner_uid = uid_for_user(plan.owner_user)
+    verified, config, problems = verified_tenant_config(
+        plan, slug, explicit=config_path, owner_uid=owner_uid
+    )
+    if config is None or verified is None:
+        for objection in problems:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to register {slug} from a configuration root has not "
+            f"verified. Nothing was changed. If its checkout is not where it was generated, "
+            f"name the configuration: `sudo switchyard resume-provision {slug} --config <path>`."
+        )
+        return 1
+    record_tenant_config_path(slug, verified)
+
+    registry_path = (registry_dir or switchyard_registry_dir()) / f"{slug}.json"
+    if registry_path.exists():
+        entry = _load_json(registry_path)
+        registered_at = str((entry or {}).get("config_path") or "")
+        if registered_at != str(verified):
+            print_func(
+                f"switchyard: {slug} is already registered at {registry_path}, pointing at "
+                f"{registered_at!r} rather than the configuration root verified ({verified}). "
+                "Which of those is this project is not this command's to decide; nothing was "
+                "changed."
+            )
+            return 1
+        print_func(f"switchyard: {slug} is already registered at {registry_path}")
+    else:
+        try:
+            registry_path = _register_switchyard_project(
+                verified, config_dir=config_dir, registry_dir=registry_dir
+            )
+        except SystemExit as exc:
+            print_func(f"switchyard: {exc}")
+            return 1
+        print_func(f"switchyard: registered {slug} at {registry_path} from {verified}")
+
+    if start_roles:
+        launched = launch_project(
+            config,
+            config_path=verified,
+            mode="start",
+            script_path=launcher_script or Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
+            runner=runner,
+            layout_output=_owner_state_layout_output_path(slug, owner_home=Path(plan.owner_home)),
+            assign_layout_owner=True,
+            print_func=print_func,
+        )
+        if launched != 0:
+            print_func(
+                f"switchyard: {slug} is registered, but starting its roles did not succeed. "
+                f"Fix what the launcher named above and run `sudo switchyard resume-provision "
+                f"{slug}` again -- the phases already done are not repeated."
+            )
+            return 1
+
+    remaining = recovery_readiness_problems(
+        plan,
+        config,
+        verified,
+        registry_path=registry_path,
+        runner=runner,
+        process_commands=process_commands,
+        session_statuses=session_statuses,
+        completion=completion,
+    )
+    if remaining:
+        for objection in remaining:
+            print_func(f"switchyard: {slug} is not finished: {objection}")
+        print_func(
+            f"switchyard: run `sudo switchyard resume-provision {slug}` again once that is "
+            "addressed -- resuming is the supported retry, and it continues from wherever "
+            "this stopped."
+        )
+        return 1
+    print_func(
+        f"switchyard: {slug} is registered at {registry_path}, its board and listener are "
+        f"running, and all {len(config.roles)} configured role(s) have live sessions "
+        "registered with the board."
+    )
+    return 0
+
+
 def switchyard_resume_provision_command(
     slug: str,
     *,
     source_repo: Path | None = None,
     registry_dir: Path | None = None,
     config_dir: Path | None = None,
+    config_path: Path | None = None,
     enable_owner_linger: bool = True,
     euid_getter: Callable[[], int] = os.geteuid,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    launcher_script: Path | None = None,
+    start_roles: bool = True,
+    completion_reader: Callable[["ProjectBoardProvision"], PacketCompletion] | None = None,
+    process_commands: Sequence[str] | None = None,
+    session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     """Rebuild a partly provisioned project's root artifacts so it can finish.
@@ -13827,27 +14298,41 @@ def switchyard_resume_provision_command(
 
     So this reads root's own record, checks it against the kernel, rebuilds
     every artifact root installs from the release named here, and hands back
-    the ordinary operator packet to run. It changes nothing the tenant owns, it
-    starts nothing, and it is re-runnable: the phases themselves are idempotent
-    and the packet is regenerated rather than patched (SYRD-147).
+    the ordinary operator packet to run. It changes nothing the tenant owns and
+    it is re-runnable: the phases themselves are idempotent and the packet is
+    regenerated rather than patched (SYRD-147).
+
+    Running that packet is not the end of a `switchyard new`, though, and a
+    recovery that stopped there left a project with a live board that no
+    ordinary command could name and no role sessions at all. So this continues
+    past the packet: it reads whether the packet actually finished, registers
+    the generated configuration once root has checked it against its own
+    record, and starts the configured roles through the ordinary launcher
+    path. It reports success only when all of that is true, so an interrupted
+    recovery is finished by running this again (SYRD-155).
     """
     slug = _validate_project_slug(slug)
     registry = (registry_dir or switchyard_registry_dir()) / f"{slug}.json"
-    if registry.exists():
-        print_func(
-            f"switchyard: {slug} is already registered at {registry}. Resuming is for a project "
-            f"that never got that far; use `switchyard upgrade {slug}` instead. Nothing was changed."
-        )
-        return 1
-
     baseline = privileged_baseline_plan_path(slug)
     if partial_provision_record(slug) is None:
+        if registry.exists():
+            print_func(
+                f"switchyard: {slug} is registered at {registry} and root holds no provisioning "
+                f"record to resume from; use `switchyard upgrade {slug}` instead. Nothing was "
+                "changed."
+            )
+            return 1
         print_func(
             f"switchyard: root holds no provisioning record for {slug} at {baseline}, so there "
             "is nothing to resume. A project that was never provisioned is started with "
             "`sudo switchyard new`."
         )
         return 1
+    # A registry entry no longer ends this. A recovery that registered the
+    # project and was then interrupted before its roles started is exactly the
+    # state this command has to be able to continue from, and refusing it here
+    # would leave running the remaining phases to nobody (SYRD-155).
+    already_registered = registry.exists()
     # Before anything that can only be evaluated as root. Every check below
     # walks a path that must belong to root, and asking an unprivileged caller
     # to read those answers produces a refusal about uids rather than the one
@@ -13902,24 +14387,58 @@ def switchyard_resume_provision_command(
         return 1
 
     recorded_release = str(document.data.get("source_repo") or "").strip()
-    rendered = render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
-    installed = install_privileged_artifacts(plan, rendered)
-    if recorded_release and recorded_release != str(selected):
+    installed = baseline.parent
+    if already_registered:
+        # Rebuilding what root installs for a project that is already running is
+        # `switchyard upgrade`, and doing it here would make a retry of the
+        # remaining phases into a silent artifact change.
         print_func(
-            f"switchyard: {slug} was provisioned from {recorded_release}; its artifacts are "
-            f"rebuilt from {selected}"
+            f"switchyard: {slug} is registered at {registry}; its root-owned artifacts are left "
+            f"as they are (`switchyard upgrade {slug}` refreshes them)."
         )
-    print_func(f"switchyard: regenerated {slug}'s root-owned artifacts in {installed}")
-    print_func(
-        f"switchyard: run {installed}/operator-commands.sh through the ordinary operator path "
-        "to finish the remaining phases. Every phase in it is re-runnable, so the work already "
-        "done is left alone."
+    else:
+        rendered = render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
+        installed = install_privileged_artifacts(plan, rendered)
+        if recorded_release and recorded_release != str(selected):
+            print_func(
+                f"switchyard: {slug} was provisioned from {recorded_release}; its artifacts are "
+                f"rebuilt from {selected}"
+            )
+        print_func(f"switchyard: regenerated {slug}'s root-owned artifacts in {installed}")
+
+    completion = (
+        completion_reader(plan)
+        if completion_reader is not None
+        else privileged_packet_completion(plan, runner=runner)
     )
-    print_func(
-        f"switchyard: if it stops again, fix what it names and run "
-        f"`sudo switchyard resume-provision {slug}` again -- resuming is the supported retry."
+    if not completion.done:
+        for objection in completion.problems:
+            print_func(f"switchyard: {slug} has not finished its privileged packet: {objection}")
+        print_func(
+            f"switchyard: run {installed}/operator-commands.sh through the ordinary operator "
+            "path to finish those phases. Every phase in it is re-runnable, so the work already "
+            "done is left alone."
+        )
+        print_func(
+            f"switchyard: then run `sudo switchyard resume-provision {slug}` again -- it "
+            "continues from there, registers the project and starts its roles."
+        )
+        return 1
+
+    return _finish_provision_after_packet(
+        slug,
+        plan,
+        registry_dir=registry_dir,
+        config_dir=config_dir,
+        config_path=config_path,
+        completion=completion,
+        runner=runner,
+        launcher_script=launcher_script,
+        start_roles=start_roles,
+        process_commands=process_commands,
+        session_statuses=session_statuses,
+        print_func=print_func,
     )
-    return 0
 
 
 def _default_board_service_user() -> str:
@@ -20145,8 +20664,10 @@ def _build_switchyard_resume_provision_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard resume-provision",
         description=(
-            "Rebuild root's artifacts for a project whose provisioning stopped before it was "
-            "registered, so the existing installation can be finished rather than repeated."
+            "Finish a project whose provisioning stopped before it was registered: rebuild "
+            "root's artifacts from an audited release, hand back the operator packet while it "
+            "is unfinished, then register the generated configuration and start the configured "
+            "roles. Re-runnable -- it continues from wherever the last attempt stopped."
         ),
     )
     parser.add_argument("project", help="the project slug root holds a provisioning record for")
@@ -20156,6 +20677,15 @@ def _build_switchyard_resume_provision_parser() -> argparse.ArgumentParser:
         help=(
             "the audited release to rebuild the artifacts from; defaults to the installed "
             "shared release"
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        dest="config_path",
+        help=(
+            "the generated launcher configuration to register, for a project whose checkout "
+            "is not where it was generated; it is checked against root's record either way"
         ),
     )
     return parser
@@ -21265,7 +21795,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "resume-provision":
         args = _build_switchyard_resume_provision_parser().parse_args(argv[1:])
         return switchyard_resume_provision_command(
-            args.project, source_repo=args.source_repo
+            args.project, source_repo=args.source_repo, config_path=args.config_path
         )
     if argv[0].casefold() == "upgrade":
         args = _build_switchyard_upgrade_parser().parse_args(argv[1:])

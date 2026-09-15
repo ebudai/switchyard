@@ -119,12 +119,19 @@ def test_resuming_says_what_to_run_rather_than_failing_on_uids() -> None:
         assert not any("uid" in line for line in said), said
 
 
-def test_a_registered_project_is_sent_to_upgrade_instead() -> None:
-    """Resuming is for a project that never got that far, and says so."""
+def test_a_registered_project_with_nothing_to_resume_is_sent_to_upgrade() -> None:
+    """Resuming is for a project whose provisioning did not finish.
+
+    A registered project root holds no record for is not mid-recovery: rebuilding
+    what root installs for it is `switchyard upgrade`. A registered project root
+    does hold a record for is the other thing -- a recovery that registered it and
+    was interrupted before its roles started -- and that one is continued rather
+    than refused, which is why the registry entry alone no longer ends this
+    (SYRD-155).
+    """
     with tempfile.TemporaryDirectory(prefix="syrd147-registered.") as tmp:
         provision = Path(tmp) / "provision"
-        (provision / SLUG).mkdir(parents=True)
-        (provision / SLUG / "plan.json").write_text(json.dumps({"project": SLUG}), encoding="utf-8")
+        provision.mkdir(parents=True)
         registry = Path(tmp) / "registry"
         registry.mkdir()
         (registry / f"{SLUG}.json").write_text("{}", encoding="utf-8")
@@ -238,8 +245,16 @@ def privileged_cases() -> int:
         assert baseline.is_file() and os.stat(baseline).st_uid == 0, baseline
         assert not (registry / f"{SLUG}.json").exists()
 
+        # These cases are about rebuilding root's artifacts, which happens
+        # before the packet has run. What the packet has done is read from the
+        # host -- units, a deployed release, a listening board -- so it is
+        # answered here instead, and the answer is the one this half is about:
+        # not yet. Continuing past it is SYRD-155's own suite.
+        unfinished = launcher.PacketCompletion(("the board service is not running",))
+
         def resume(**kwargs):
             said: list[str] = []
+            kwargs.setdefault("completion_reader", lambda _plan: unfinished)
             status = launcher.switchyard_resume_provision_command(
                 SLUG, registry_dir=registry, euid_getter=lambda: 0,
                 print_func=said.append, **kwargs,
@@ -267,7 +282,10 @@ def privileged_cases() -> int:
         }
         with owner_patches(home):
             status, said = resume(source_repo=release)
-        assert status == 0, said
+        # Not zero: the packet has not run, so the recovery is not finished, and
+        # saying otherwise is what let a resumed provision look complete while it
+        # was still unregistered and unstarted (SYRD-155).
+        assert status == 1, said
         assert grants_precede_deploy(packet), packet.read_text(encoding="utf-8")[:400]
         assert any("operator-commands.sh" in line for line in said), said
         assert any("re-runnable" in line for line in said), said
@@ -285,7 +303,7 @@ def privileged_cases() -> int:
         snapshot = {p.name: p.read_bytes() for p in installed.iterdir() if p.is_file()}
         with owner_patches(home):
             status, _said = resume(source_repo=release)
-        assert status == 0
+        assert status == 1
         assert {p.name: p.read_bytes() for p in installed.iterdir() if p.is_file()} == snapshot
         checks += 1
 

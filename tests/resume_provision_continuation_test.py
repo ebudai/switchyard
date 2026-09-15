@@ -316,6 +316,21 @@ def privileged_cases() -> int:
         assert not launches, launches
         checks += 1
 
+        # 1a. The packet it just regenerated closes this tenant's own checkout.
+        #     Root learns where that is from where the generated configuration
+        #     is, which is the repair path for a tenant provisioned before the
+        #     plan recorded it -- and the packet used to be handed the release
+        #     instead, so it confined nothing at all (SYRD-156).
+        regenerated = (installed / "operator-commands.sh").read_text(encoding="utf-8")
+        checkout = config_path.parent.parent.parent
+        assert (
+            f"sudo install -d -m 0750 -o '{TENANT}' -g '{TENANT}' '{checkout}'" in regenerated
+        ), regenerated[:600]
+        assert "is not this tenant's tree to confine" not in regenerated, regenerated[:600]
+        recorded_plan = json.loads((installed / "plan.json").read_text(encoding="utf-8"))
+        assert recorded_plan["project_repository"] == str(checkout), recorded_plan
+        checks += 1
+
         # 2. Packet succeeded, the `switchyard new` process long gone: this is
         #    the state journal 0011 left. Running the command finishes it.
         status, said = resume()

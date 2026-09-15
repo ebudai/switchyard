@@ -109,6 +109,14 @@ class ProjectBoardProvision:
     #: managed block instead of being defaulted away (SYRD-100).
     owner_github_key_name: str = ""
     owner_github_host_alias: str = ""
+    #: The tenant's own project checkout, when this plan knows it. `source_repo`
+    #: is the RELEASE the artifacts are rendered from -- on a provisioned host
+    #: `/opt/switchyard/releases/<sha>` -- and passing that where the tenant's
+    #: tree was meant produced a packet that confined nothing, because the
+    #: release is not under the owner's home. Empty means no supported path has
+    #: told this plan where the checkout is, and the packet says so rather than
+    #: guessing at one (SYRD-156).
+    project_repository: str = ""
     workflow: dict | None = None
 
 
@@ -336,6 +344,10 @@ def build_plan(
     #: names it (SYRD-100).
     owner_github_key_name: str = "",
     owner_github_host_alias: str = "",
+    #: The tenant's project checkout, when the caller knows it. Not defaulted to
+    #: a conventional path: a guess that is wrong closes and creates a directory
+    #: nobody asked for, and a guess that is right hides that nothing told us.
+    project_repository: Path | str | None = None,
 ) -> ProjectBoardProvision:
     project = _validate_project(project)
     resolved_project_name = _validate_project_name(project_name or ("PGU" if project == "pgu" else project))
@@ -478,6 +490,7 @@ def build_plan(
         board_root=str(resolved_board_root),
         board_current=str(board_current),
         source_repo=str(resolved_source_repo),
+        project_repository=str(project_repository) if project_repository else "",
         workflow=workflow,
         commit_git_dir=resolved_commit_git_dir,
         asset_dir=str(resolved_asset_dir),
@@ -1640,7 +1653,7 @@ TENANT_SOURCE_MODE = "0750"
 
 
 def tenant_source_confinement_commands(
-    *, owner_user: str, owner_home: str, source_repo: str
+    *, owner_user: str, owner_home: str, checkout: str
 ) -> list[str]:
     """Close the tenant's source tree to everything that may walk through the home.
 
@@ -1665,12 +1678,16 @@ def tenant_source_confinement_commands(
     tenant and closes it.
 
     A checkout kept outside the owner home is not the tenant tree this is about
-    and is not ours to re-mode, so it yields nothing.
+    and is not ours to re-mode, so it yields nothing. The argument is named
+    `checkout` rather than `source_repo` because the packet passed the RELEASE
+    it renders from -- which is outside every home -- and this answered
+    truthfully that there was nothing to confine while confining nothing
+    (SYRD-156 reopened).
     """
     _refuse_unnormalized(owner_home, what="the owner home")
-    _refuse_unnormalized(source_repo, what="the project checkout")
-    _refuse_prefix_coincidence(owner_home, source_repo)
-    directories = owned_ancestor_dirs(owner_home, source_repo, include_target=True)
+    _refuse_unnormalized(checkout, what="the project checkout")
+    _refuse_prefix_coincidence(owner_home, checkout)
+    directories = owned_ancestor_dirs(owner_home, checkout, include_target=True)
     quoted_owner = shell_quote(owner_user)
     return [
         f"sudo install -d -m {TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
@@ -3543,15 +3560,25 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     # first, and only then is anything allowed to walk through the home. On a
     # tenant already provisioned this is the repair, and re-running it changes
     # nothing (SYRD-156).
-    confine_source_tree = "\n".join(
-        tenant_source_confinement_commands(
-            owner_user=plan.owner_user,
-            owner_home=plan.owner_home,
-            source_repo=plan.source_repo,
+    confine_source_tree = (
+        "\n".join(
+            tenant_source_confinement_commands(
+                owner_user=plan.owner_user,
+                owner_home=plan.owner_home,
+                checkout=plan.project_repository,
+            )
         )
+        if plan.project_repository
+        else ""
     ) or (
-        f"# the checkout {plan.source_repo} is outside {plan.owner_home}; "
+        f"# the checkout {plan.project_repository} is outside {plan.owner_home}; "
         "it is not this tenant's tree to confine"
+        if plan.project_repository
+        else (
+            "# this plan does not record where this tenant's checkout is, so there is nothing "
+            "to confine here; `switchyard upgrade` and `switchyard resume-provision` record it "
+            "from the generated configuration's own location"
+        )
     )
     if enable_owner_linger:
         owner_linger_step = f"sudo loginctl enable-linger {q_owner_user}"

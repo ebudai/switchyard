@@ -6222,7 +6222,12 @@ def refresh_generated_project_runtime_artifacts(
     # The tenant's own view of its generated files, rendered from the tenant's
     # own plan. Nothing root installs comes from here.
     tenant_rendered = render_privileged_artifacts(
-        _for_current_identities(replace(tenant_plan, **replacements)), enable_owner_linger=False
+        _for_current_identities(
+            plan_with_tenant_checkout(
+                replace(tenant_plan, **replacements), config_path=config_path
+            )
+        ),
+        enable_owner_linger=False,
     )
     for name in sorted(tenant_rendered):
         if _tenant_copy_is_current(provision_dir / name, tenant_rendered[name]):
@@ -6276,6 +6281,10 @@ def refresh_generated_project_runtime_artifacts(
         )
     if replacements:
         plan = replace(plan, **replacements)
+    # Where this tenant's checkout is, taken from where its configuration is.
+    # An upgrade is one of the two supported repairs for a tenant provisioned
+    # before the plan recorded it (SYRD-156).
+    plan = plan_with_tenant_checkout(plan, config_path=config_path)
     rendered = render_privileged_artifacts(_for_current_identities(plan))
     privileged_changed = sorted(
         name
@@ -6558,6 +6567,28 @@ def _privileged_baseline_plan(
         source_repo=source_repo,
         operator_commit_git_dir=operator_commit_git_dir,
     )
+
+
+def plan_with_tenant_checkout(
+    plan: ProjectBoardProvision, *, config_path: Path | None
+) -> ProjectBoardProvision:
+    """Record where this tenant's checkout is, from where its configuration is.
+
+    Structural rather than declared: the generated configuration lives at
+    `<checkout>/.switchyard/provision/<slug>.json`, so the checkout is the
+    directory that contains it. A path read out of the configuration's own
+    fields would be a path the account every role runs as can choose, and this
+    one decides which directories root re-modes and re-owns (SYRD-156).
+    """
+    if config_path is None:
+        return plan
+    checkout = _project_dir_from_generated_config_path(config_path)
+    if checkout is None:
+        return plan
+    recorded = str(checkout)
+    if plan.project_repository == recorded:
+        return plan
+    return replace(plan, project_repository=recorded)
 
 
 def plan_for_current_identities(
@@ -9266,6 +9297,10 @@ def new_project_command(
         port=port,
         database=database,
         source_repo=effective_source_repo,
+        # The tenant's own checkout, which is not the release the artifacts are
+        # rendered from. Passing the release where this was meant is what made
+        # the packet confine nothing (SYRD-156).
+        project_repository=effective_repository,
         commit_git_dir=commit_git_dir,
         ticket_prefix=ticket_prefix,
         implementer_roles=implementer_roles,
@@ -14575,6 +14610,18 @@ def switchyard_resume_provision_command(
         )
         return 1
 
+    # Where this tenant's checkout is, before anything is rendered from this
+    # plan: the packet closes that tree, and a packet rendered without it
+    # confines nothing. Taken from the location of the generated configuration
+    # root has verified, so it is structural rather than declared. A tenant
+    # whose configuration cannot be verified yet simply has no checkout
+    # recorded, and the packet says so (SYRD-156).
+    verified_config, _verified, _config_problems = verified_tenant_config(
+        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user)
+    )
+    if verified_config is not None:
+        plan = plan_with_tenant_checkout(plan, config_path=verified_config)
+
     recorded_release = str(document.data.get("source_repo") or "").strip()
     installed = baseline.parent
     if already_registered:
@@ -15987,7 +16034,7 @@ def render_role_account_migration(
             tenant_source_confinement_commands(
                 owner_user=owner,
                 owner_home=f"/home/{owner}",
-                source_repo=str(config.repository),
+                checkout=str(config.repository),
             )
         )
     for role in config.roles:

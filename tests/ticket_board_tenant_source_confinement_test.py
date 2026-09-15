@@ -37,6 +37,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from scripts.ticket_board.project_provision import (  # noqa: E402
     TENANT_SOURCE_MODE,
     build_plan,
@@ -98,13 +101,22 @@ def in_namespace(scenario: str, payload: dict | None = None) -> dict:
 # ------------------------------------------------------------------- plans --
 
 
+#: What a provisioned host renders its artifacts FROM: a root-owned release,
+#: outside every tenant home. It is not the tenant's checkout, and the two were
+#: conflated -- `source_repo` was passed where the checkout was meant, so the
+#: packet asked to confine a directory outside the home and confined nothing
+#: (SYRD-156 reopened). The fixture keeps them different on purpose.
+RELEASE = Path("/opt/switchyard/releases/1755eec4832a7a32c96b26ea3d0ac18a7da661c7")
+
+
 def plan_for(home: Path, *, checkout: Path | None = None):
     return build_plan(
         project=PROJECT,
         owner_user=str(OWNER_UID),
         owner_home=home,
         service_user=str(SERVICE_UID),
-        source_repo=checkout if checkout is not None else home / "Projects" / PROJECT,
+        source_repo=RELEASE,
+        project_repository=checkout if checkout is not None else home / "Projects" / PROJECT,
     )
 
 
@@ -417,7 +429,7 @@ def test_every_directory_is_named_rather_than_created_on_the_way_past() -> None:
     commands = tenant_source_confinement_commands(
         owner_user="tenant",
         owner_home="/home/tenant",
-        source_repo="/home/tenant/Projects/demo",
+        checkout="/home/tenant/Projects/demo",
     )
     assert commands == [
         "sudo install -d -m 0750 -o 'tenant' -g 'tenant' '/home/tenant/Projects'",
@@ -426,7 +438,7 @@ def test_every_directory_is_named_rather_than_created_on_the_way_past() -> None:
     deeper = tenant_source_confinement_commands(
         owner_user="tenant",
         owner_home="/home/tenant",
-        source_repo="/home/tenant/a/b/c",
+        checkout="/home/tenant/a/b/c",
     )
     assert [line.rsplit(" ", 1)[-1] for line in deeper] == [
         "'/home/tenant/a'",
@@ -446,7 +458,7 @@ def test_a_path_that_only_shares_the_home_prefix_is_refused_rather_than_ignored(
         tenant_source_confinement_commands(
             owner_user="tenant",
             owner_home="/home/tenant",
-            source_repo="/home/tenant-old/Projects/demo",
+            checkout="/home/tenant-old/Projects/demo",
         )
     except ValueError as exc:
         assert "/home/tenant-old/Projects/demo" in str(exc), exc
@@ -459,13 +471,13 @@ def test_a_path_that_only_shares_the_home_prefix_is_refused_rather_than_ignored(
     for bad in ("/home/tenant/../other", "home/tenant"):
         try:
             tenant_source_confinement_commands(
-                owner_user="tenant", owner_home=bad, source_repo=f"{bad}/Projects/demo"
+                owner_user="tenant", owner_home=bad, checkout=f"{bad}/Projects/demo"
             )
         except ValueError:
             continue
         raise AssertionError(f"the owner home {bad!r} was accepted unnormalized")
     assert tenant_source_confinement_commands(
-        owner_user="tenant", owner_home="/home/tenant/", source_repo="/home/tenant/Projects/demo"
+        owner_user="tenant", owner_home="/home/tenant/", checkout="/home/tenant/Projects/demo"
     ), "a trailing slash is not an escape and must not stop provisioning"
 
 
@@ -500,7 +512,7 @@ def test_the_repair_artifact_carries_the_same_commands() -> None:
     for command in tenant_source_confinement_commands(
         owner_user="tenant",
         owner_home="/home/tenant",
-        source_repo="/home/tenant/Projects/demo",
+        checkout="/home/tenant/Projects/demo",
     ):
         assert command in artifact, (command, artifact)
 
@@ -536,6 +548,173 @@ def _repair_config():
     object.__setattr__(config, "roles", ())
     object.__setattr__(config, "worktree_base", Path("/home/tenant/worktrees"))
     return config
+
+
+# ------------------------------------------- the packet a live host renders --
+
+
+LIVE_TENANT = "testing-agent"
+LIVE_HOME = "/home/testing-agent"
+LIVE_CHECKOUT = "/home/testing-agent/Projects/testing"
+
+
+def live_plan(**overrides):
+    """The testing tenant as root's own record describes it.
+
+    Real paths on purpose. The first fix rendered correctly against a fixture
+    whose checkout was passed in as `source_repo`, and shipped a packet that
+    named `/opt/switchyard/releases/<sha>` -- outside every home, so nothing
+    was confined and `sudo -u boardsvc test -r /home/testing-agent/Projects/testing`
+    still succeeded on the live host. A rendered packet for the live shape is
+    the thing that was never checked.
+    """
+    from scripts.ticket_board.project_provision import build_plan
+
+    arguments = {
+        "project": "testing",
+        "owner_user": LIVE_TENANT,
+        "owner_home": Path(LIVE_HOME),
+        "service_user": "boardsvc",
+        "source_repo": RELEASE,
+        "project_repository": Path(LIVE_CHECKOUT),
+    }
+    arguments.update(overrides)
+    return build_plan(**arguments)
+
+
+def test_the_live_packet_confines_the_checkout_and_never_the_release() -> None:
+    """The rendered packet for the tenant this regression is about."""
+    packet = render_operator_commands(live_plan())
+    confine_projects = (
+        f"sudo install -d -m 0750 -o '{LIVE_TENANT}' -g '{LIVE_TENANT}' '{LIVE_HOME}/Projects'"
+    )
+    confine_checkout = (
+        f"sudo install -d -m 0750 -o '{LIVE_TENANT}' -g '{LIVE_TENANT}' '{LIVE_CHECKOUT}'"
+    )
+    assert confine_projects in packet, packet[:400]
+    assert confine_checkout in packet, packet[:400]
+    # The release is what the artifacts are rendered FROM. It is root's, it is
+    # outside every home, and nothing here may re-mode or re-own it.
+    assert f"-o '{LIVE_TENANT}' -g '{LIVE_TENANT}' '{RELEASE}'" not in packet, packet
+    assert "is not this tenant's tree to confine" not in packet, packet
+    assert "does not record where this tenant's checkout is" not in packet, packet
+
+    # Closed before anything is allowed to walk through the home, or the
+    # traversal grant opens a tree that is still 0755.
+    lines = packet.splitlines()
+    traversal = next(
+        index for index, line in enumerate(lines)
+        if "setfacl" in line and "boardsvc:--x" in line and f"'{LIVE_HOME}'" in line
+    )
+    confinement = max(index for index, line in enumerate(lines) if line.strip() == confine_checkout)
+    assert confinement < traversal, (confinement, traversal, lines[confinement:traversal + 1])
+
+
+def test_the_packet_never_calls_the_release_this_tenant_s_checkout() -> None:
+    """The reopened defect, asked of the tree that has it.
+
+    Nothing here is new API. A plan is built the way a provisioned host builds
+    one -- artifacts rendered from a root-owned release under
+    `/opt/switchyard/releases` -- and the only claim is that the packet does
+    not describe that release as the tenant's checkout. It did, and the helper
+    then answered honestly that there was nothing under the home to confine,
+    which is how a packet that confined nothing looked finished.
+    """
+    from scripts.ticket_board.project_provision import build_plan
+
+    packet = render_operator_commands(
+        build_plan(
+            project="testing",
+            owner_user=LIVE_TENANT,
+            owner_home=Path(LIVE_HOME),
+            service_user="boardsvc",
+            source_repo=RELEASE,
+        )
+    )
+    offending = [line for line in packet.splitlines() if f"the checkout {RELEASE}" in line]
+    assert not offending, (
+        "the packet called the release it renders from this tenant's checkout, so it "
+        "confined nothing: " + "; ".join(offending)
+    )
+
+
+def test_a_plan_with_no_checkout_recorded_confines_nothing_and_says_so() -> None:
+    """The failure mode, stated so it cannot come back quietly.
+
+    A plan that does not know where the checkout is used to be handed the
+    release instead, and the helper answered honestly -- the release is outside
+    the home, so there was nothing to confine -- while the packet looked like it
+    had done its job. Nothing is confined here either, but the packet says which
+    of the two situations it is in, and the supported repairs are named.
+    """
+    packet = render_operator_commands(live_plan(project_repository=None))
+    assert "does not record where this tenant's checkout is" in packet, packet
+    assert "resume-provision" in packet and "upgrade" in packet, packet
+    assert f"-g '{LIVE_TENANT}' '{LIVE_CHECKOUT}'" not in packet, packet
+    assert str(RELEASE) not in [
+        line.strip().split()[-1].strip("'")
+        for line in packet.splitlines()
+        if line.strip().startswith("sudo install -d")
+    ], packet
+
+
+def test_the_checkout_is_taken_from_where_the_configuration_lives() -> None:
+    """Structural, not declared: a field the tenant writes cannot choose it."""
+    from scripts import team_launcher as launcher
+
+    plan = live_plan(project_repository=None)
+    assert plan.project_repository == ""
+    config_path = Path(LIVE_CHECKOUT) / ".switchyard" / "provision" / "testing.json"
+    recorded = launcher.plan_with_tenant_checkout(plan, config_path=config_path)
+    assert recorded.project_repository == LIVE_CHECKOUT
+    # A configuration somewhere else entirely is not a checkout this can name.
+    elsewhere = launcher.plan_with_tenant_checkout(plan, config_path=Path("/tmp/loose.json"))
+    assert elsewhere.project_repository == ""
+    assert launcher.plan_with_tenant_checkout(plan, config_path=None).project_repository == ""
+
+
+def test_a_fresh_project_renders_a_packet_that_confines_its_own_checkout() -> None:
+    """Through `switchyard new` itself, which is where the value comes from."""
+    from contextlib import redirect_stdout
+    from io import StringIO
+
+    from team_launcher_test_helpers import FakeRunner
+
+    from scripts import team_launcher as launcher
+
+    with tempfile.TemporaryDirectory(prefix="syrd156-new.") as tmp:
+        tmp_path = Path(tmp)
+        output_dir = tmp_path / "out"
+        source_repo = tmp_path / "source-repo"
+        project_repo = tmp_path / "home" / "Projects" / "porter"
+        source_repo.mkdir()
+        project_repo.mkdir(parents=True)
+        owner = launcher.current_user_name()
+        printed = StringIO()
+        with redirect_stdout(printed):
+            assert (
+                launcher.new_project_command(
+                    "porter",
+                    owner_user=owner,
+                    source_repo=source_repo,
+                    repository=project_repo,
+                    output_dir=output_dir,
+                    runner=FakeRunner(),
+                    port_in_use=lambda _port: False,
+                    socket_exists=lambda _path: False,
+                )
+                == 0
+            )
+        plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
+        packet = (output_dir / "operator-commands.sh").read_text(encoding="utf-8")
+
+    assert plan["project_repository"] == str(project_repo), plan["project_repository"]
+    assert plan["source_repo"] == str(source_repo)
+    # The checkout here is outside the owner's real home, so there is nothing
+    # under that home to close -- and the packet says which case it is rather
+    # than looking like it confined something.
+    assert "is not this tenant's tree to confine" in packet, packet
+    assert str(project_repo) in packet, packet
 
 
 def main() -> int:

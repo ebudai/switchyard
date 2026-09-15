@@ -67,6 +67,29 @@ The output directory contains:
   implementer set instead.
 - `operator-commands.sh`: ordered privileged commands to review and run.
 
+The script closes the tenant's own source tree before it grants anything a
+way through the home. The home is 0710 and a principal that must reach one
+thing beneath it -- the board service reaching its release -- gets a named
+`--x` entry; traversal was meant to be the whole grant, but everything created
+beneath the home was 0755, so traversal implied read and
+`sudo -u boardsvc test -r /home/<tenant>/Projects/<project>` succeeded through
+ordinary mode bits with no ACL involved. Every directory between the home and
+the checkout is now named at 0750 owned by the tenant rather than left to
+`install -d` to create on the way past -- which is also why the parent was the
+worse half, since `install -d` applies `-m`, `-o` and `-g` only to the last
+component and the intermediate takes root's umask (SYRD-156).
+
+Which directory that is comes from the plan's `project_repository`, and it is
+not `source_repo`: `source_repo` is the audited RELEASE the artifacts are
+rendered from, which on a provisioned host is `/opt/switchyard/releases/<sha>`
+and is outside every tenant home. Passing it where the checkout was meant
+produced a packet that confined nothing while looking finished. `switchyard
+new` records the checkout it creates; `switchyard upgrade` and `switchyard
+resume-provision` record it from the location of the generated configuration --
+`<checkout>/.switchyard/provision/<slug>.json` -- which is structural rather
+than a field the tenant could choose. A plan that records no checkout confines
+nothing and says so, naming those two repairs.
+
 The order in that script is part of what it does. Every grant the board service
 account needs is made before the board is deployed, because the deploy exports
 an immutable release into the board tree and then starts a canary as that

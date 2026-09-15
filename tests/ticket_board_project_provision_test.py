@@ -133,12 +133,12 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     )
     assert peer_auth_command in combined
     assert combined.index("sudo useradd -r -M -d /nonexistent") < combined.index("--apply-peer-auth")
-    assert combined.index("--apply-peer-auth") < combined.index("sudo cat 'stellaris-database.sql'")
+    assert combined.index("--apply-peer-auth") < combined.index("sudo cat \"$provision_dir\"/'stellaris-database.sql'")
     assert combined.index("--apply-peer-auth") < combined.index("curl -fsS http://127.0.0.1:8871/api/board")
-    assert "sudo cat 'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
+    assert "sudo cat \"$provision_dir\"/'stellaris-workflow.sql' | sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f -" in combined
     assert combined.index("ticket_board/schema.sql") < combined.index("scripts/ticket-board-migrate")
-    assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat 'stellaris-workflow.sql'")
-    assert combined.index("sudo cat 'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
+    assert combined.index("scripts/ticket-board-migrate") < combined.index("sudo cat \"$provision_dir\"/'stellaris-workflow.sql'")
+    assert combined.index("sudo cat \"$provision_dir\"/'stellaris-workflow.sql'") < combined.index("ticket_board/rbac.sql")
     assert "Seed the default project workflow for stellaris" in combined
     assert "('draft', 'Draft', 0, ARRAY['designer']::text[]" in combined
     assert "('analysis', 'Triage', 1, ARRAY['director']::text[]" in combined
@@ -439,7 +439,7 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
         line for line in commands.splitlines() if line.startswith("sudo ")
     )
     assert (
-        "sudo cat 'stellaris-database.sql' | "
+        "sudo cat \"$provision_dir\"/'stellaris-database.sql' | "
         "sudo -u postgres psql -X -v ON_ERROR_STOP=1 -f -"
     ) in commands
     assert (
@@ -454,7 +454,7 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
         "'/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket-board-migrate'"
     ) in commands
     assert (
-        "sudo cat 'stellaris-workflow.sql' | "
+        "sudo cat \"$provision_dir\"/'stellaris-workflow.sql' | "
         "sudo -u postgres psql -X -v ON_ERROR_STOP=1 "
         "'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' "
         "-f -"
@@ -498,7 +498,7 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
     )
     listener_install = (
         "sudo install -m 0644 -o 'otto-agent' -g 'otto-agent' "
-        "'otto-ticket-board-notify-listener.service' "
+        "\"$provision_dir\"/'otto-ticket-board-notify-listener.service' "
         "'/home/otto-agent/.config/systemd/user/otto-ticket-board-notify-listener.service'"
     )
 

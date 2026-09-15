@@ -79,6 +79,19 @@ the tree carried the entries and the deploy succeeded; on a fresh host the
 deploy was the first thing to touch the tree, failed, and stopped the script
 before the grant it needed (SYRD-145).
 
+The script is run by its own absolute path, from anywhere, and it is not
+preceded by a `cd`. Each artifact that ships beside it is addressed from
+`$provision_dir` -- the directory the script itself is in, computed from
+`BASH_SOURCE` on its first line -- so the packet root installs under
+`/etc/switchyard/provision/<slug>/` reads root's own artifacts wherever the
+operator happens to be standing. It used to name most of them by bare file
+name, which is resolved against the caller's working directory: run from a
+journal, a Polkit transaction or another project's checkout, a root-owned
+packet looked for root's artifacts in an unrelated directory and stopped at
+`install: cannot stat <slug>-ticket-board.conf`. An instruction that told
+somebody to change directory first is what made that dependency look like a
+convention rather than the defect it was (SYRD-149).
+
 ## Resuming a provision that stopped
 
 A `switchyard new` that fails before it writes `/etc/switchyard/projects/<slug>.json`

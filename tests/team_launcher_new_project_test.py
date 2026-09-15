@@ -131,7 +131,12 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert "TICKET_BOARD_COMMIT_GIT_DIR='/srv/git/review-cache.git'" in commands
     assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
     assert "  sudo -v\n" in rendered
-    assert "  bash operator-commands.sh\n" in rendered
+    # By absolute path, with nothing telling an operator to change directory
+    # first: the packet finds its own companions, and an instruction that
+    # depended on the cwd is what journal attempt 0007 tripped over (SYRD-149).
+    packet = output_dir / "operator-commands.sh"
+    assert f"bash {packet}\n" in rendered, rendered
+    assert "\n  cd " not in rendered, rendered
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
     assert launch_plan["project"] == "porter"
     assert launch_plan["mode"] == "attach-or-start"

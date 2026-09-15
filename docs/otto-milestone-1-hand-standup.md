@@ -127,8 +127,7 @@ scripts/ticket-board-provision-project \
   --owner-user otto-agent \
   --output-dir "$PROVISION_DIR"
 
-cd "$PROVISION_DIR"
-bash operator-commands.sh
+bash "$PROVISION_DIR/operator-commands.sh"
 ```
 
 The generated `operator-commands.sh` performs the privileged work:

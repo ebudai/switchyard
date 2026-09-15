@@ -555,8 +555,28 @@ def sql_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def postgres_sql_file_command(sql_file: str, *, database_url: str = "") -> str:
-    command = "sudo cat " + shell_quote(sql_file)
+#: How the operator packet names a file that ships beside it.
+#:
+#: The packet is installed root-owned and run by absolute path -- from a
+#: journal, from a Polkit transaction, from whatever directory the operator
+#: happened to be in. A bare file name is resolved against that directory, so
+#: `install -m 0644 testing-ticket-board.conf ...` looked up a root-owned
+#: artifact in the caller's cwd and failed there, which is what journal attempt
+#: 0007 recorded. `$provision_dir` is the packet's own directory, computed from
+#: `BASH_SOURCE` at the top, so a companion is addressed from the packet rather
+#: than from whoever started it (SYRD-149).
+PACKET_PROVISION_DIR = '"$provision_dir"'
+
+
+def packet_companion(name: str) -> str:
+    """One artifact that ships beside the packet, addressed from the packet."""
+    if name.startswith("/"):
+        raise SystemExit(f"a packet companion is a file name beside the packet, not a path: {name}")
+    return f"{PACKET_PROVISION_DIR}/{shell_quote(name)}"
+
+
+def postgres_sql_file_command(sql_file: str, *, database_url: str = "", companion: bool = False) -> str:
+    command = "sudo cat " + (packet_companion(sql_file) if companion else shell_quote(sql_file))
     command += " | sudo -u postgres psql -X -v ON_ERROR_STOP=1"
     if database_url:
         command += " " + shell_quote(database_url)
@@ -3342,7 +3362,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         # visudo -c first: a malformed sudoers file can lock the host out of
         # sudo entirely, so it is validated before it is installed.
         install_role_control_sudoers = (
-            f"sudo install -m 0440 -o root -g root {shell_quote(plan.role_control_sudoers_name)} "
+            f"sudo install -m 0440 -o root -g root {packet_companion(plan.role_control_sudoers_name)} "
             f"{q_role_control_sudoers}.staged\n"
             f"sudo visudo -c -f {q_role_control_sudoers}.staged\n"
             f"sudo mv {q_role_control_sudoers}.staged {q_role_control_sudoers}"
@@ -3360,9 +3380,9 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         install_tenant_control = "\n".join(
             [
                 f"sudo install -d -m 0755 -o root -g root {shell_quote(TENANT_CONTROL_ROOT + '/' + plan.project)}",
-                f"sudo install -m 0644 -o root -g root {shell_quote(tenant_control_grant_name(plan.project))} "
+                f"sudo install -m 0644 -o root -g root {packet_companion(tenant_control_grant_name(plan.project))} "
                 f"{shell_quote(tenant_control_grant_path(plan.project))}",
-                f"sudo install -m 0440 -o root -g root {shell_quote(plan.tenant_control_sudoers_name)} "
+                f"sudo install -m 0440 -o root -g root {packet_companion(plan.tenant_control_sudoers_name)} "
                 f"{q_tenant_control_sudoers}.staged",
                 f"sudo visudo -c -f {q_tenant_control_sudoers}.staged",
                 f"sudo mv {q_tenant_control_sudoers}.staged {q_tenant_control_sudoers}",
@@ -3393,6 +3413,7 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         workflow_seed_command = postgres_sql_file_command(
             plan.project + "-workflow.sql",
             database_url=plan.admin_database_url,
+            companion=True,
         )
         workflow_seed_command += "\n"
     install_board_root = owned_directory_command(
@@ -3522,8 +3543,8 @@ if ! sudo -u {q_owner_user} test -s {q_board_env_file}; then
 fi
 sudo install -m 0644 "$system_unit_candidate" {q_board_unit}
 sudo install -m 0644 "$canary_unit_candidate" {q_canary_unit}
-sudo install -m 0644 {shell_quote(plan.tmpfiles_name)} {q_tmpfiles}
-sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
+sudo install -m 0644 {packet_companion(plan.tmpfiles_name)} {q_tmpfiles}
+sudo install -m 0644 {packet_companion(plan.polkit_name)} {q_polkit}
 {install_role_control_sudoers}
 # The owner's GitHub identity, and the configuration that selects it. Without
 # the selection git offers no key at all and every push fails as though there
@@ -3533,7 +3554,7 @@ sudo install -m 0644 {shell_quote(plan.polkit_name)} {q_polkit}
 # this host runs as root to do it (SYRD-123).
 {github_identity}
 sudo systemd-tmpfiles --create {q_tmpfiles}
-{postgres_sql_file_command(plan.project + '-database.sql')}
+{postgres_sql_file_command(plan.project + '-database.sql', companion=True)}
 {postgres_sql_file_command(plan.board_current + '/scripts/ticket_board/schema.sql', database_url=plan.admin_database_url)}
 sudo env TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} {shell_quote(plan.board_current + '/scripts/ticket-board-migrate')}
 {workflow_seed_command.rstrip()}
@@ -3541,7 +3562,7 @@ sudo env TICKET_BOARD_ADMIN_DATABASE_URL={shell_quote(plan.admin_database_url)} 
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
 {install_listener_unit_parent}
-sudo install -m 0644 -o {q_owner_user} -g {q_owner_user} {shell_quote(plan.listener_unit)} {q_listener_unit}
+sudo install -m 0644 -o {q_owner_user} -g {q_owner_user} {packet_companion(plan.listener_unit)} {q_listener_unit}
 {owner_linger_step}
 owner_uid="$(id -u {q_owner_user})"
 owner_runtime_dir="/run/user/$owner_uid"

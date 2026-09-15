@@ -7067,7 +7067,12 @@ def _rollout_recorder_path() -> Path | None:
 
 
 def recorded_provisioning_command(project: str, script_name: str) -> str:
-    """How an operator runs the provisioning packet so it records itself."""
+    """How an operator runs the provisioning packet so it records itself.
+
+    `script_name` is a path, and callers pass an absolute one: the packet is run
+    from a journal, a Polkit transaction or whatever directory the operator was
+    in, and none of those is a promise about the cwd (SYRD-149).
+    """
     recorder = _rollout_recorder_path()
     if recorder is None:
         return f"bash {shlex.quote(script_name)}"
@@ -9361,9 +9366,13 @@ def new_project_command(
         print_func(f"team-launcher: dry-run for {plan.project}; artifacts in {artifact_dir}")
         print_func(f"team-launcher: launcher config {config_path}")
         print_func("team-launcher: execution plan:")
-        print_func(f"  cd {shlex.quote(str(artifact_dir))}")
         print_func("  sudo -v")
-        print_func(f"  {recorded_provisioning_command(plan.project, commands_path.name)}")
+        # By absolute path, and with no `cd` in front of it. The packet resolves
+        # the artifacts beside it from its own location, so the directory an
+        # operator happens to be in is not part of the instruction -- and an
+        # instruction that told them to change directory first is what taught
+        # everyone the packet needed one (SYRD-149).
+        print_func(f"  {recorded_provisioning_command(plan.project, str(commands_path))}")
         print_func(
             f"team-launcher: that leaves a root-owned record of the run; read it with "
             f"`switchyard rollout-log {plan.project}` (SYRD-128)"
@@ -9386,14 +9395,13 @@ def new_project_command(
         result = runner(
             ["sudo", str(recorder), plan.project, "--label", "provisioning",
              "--", "bash", str(commands_path)],
-            cwd=str(artifact_dir),
         )
         print_func(
             f"team-launcher: the run is recorded; read it with "
             f"`switchyard rollout-log {plan.project}`"
         )
     else:
-        result = runner(["bash", str(commands_path)], cwd=str(artifact_dir))
+        result = runner(["bash", str(commands_path)])
     if result.returncode != 0:
         raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
     config = load_project_config(plan.project, config_path)

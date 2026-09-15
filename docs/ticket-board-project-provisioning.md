@@ -115,6 +115,21 @@ packet looked for root's artifacts in an unrelated directory and stopped at
 somebody to change directory first is what made that dependency look like a
 convention rather than the defect it was (SYRD-149).
 
+The database phases are re-runnable for the same reason, and one of them had
+to be taught it. `schema.sql` seeds the built-in workflow -- eleven stages and
+the moves between them -- and a provisioned project then replaces those rows
+with its own and narrows `workflow_stages_name_check` to the stage names it
+declares. Replaying the base file over such a board tried to insert `backlog`,
+a name that board no longer admits, and the supported recovery died there
+(SYRD-160). The seed now establishes a workflow for a board that has none and
+leaves a configured board alone; changes to the built-in workflow reach boards
+that already have one through migrations, which is how `dat` was added. The
+constraint itself is untouched -- a board that has narrowed it still refuses
+`backlog`, which is what makes the replay safe rather than merely quiet. The
+same guard closes the silent half: where a project's stage names happen to
+match built-in ones, the seed's `ON CONFLICT DO UPDATE` used to reset that
+board's labels and owner_roles without raising anything at all.
+
 ## Resuming a provision that stopped
 
 A `switchyard new` that fails before it writes `/etc/switchyard/projects/<slug>.json`

@@ -311,6 +311,26 @@ CREATE TABLE IF NOT EXISTS ticket_board.workflow_transition_rbac_shadow_log (
     owner_scoped boolean NOT NULL
 );
 
+-- The built-in workflow is the DEFAULT for a board that does not have one yet,
+-- not an authority over a board that does. A provisioned project replaces these
+-- rows with its own and narrows workflow_stages_name_check to the stage names it
+-- declares, so replaying this file on such a board tried to insert 'backlog' --
+-- a name that board no longer admits -- and the supported recovery died on
+-- `new row for relation "workflow_stages" violates check constraint
+-- "workflow_stages_name_check"` (SYRD-160). The constraint was right. The seed
+-- was wrong to assert itself over a configured board, and where the names did
+-- happen to match it would have silently reset that board's labels and
+-- owner_roles to the built-in ones -- the same defect without an error message.
+--
+-- So it seeds an empty board and leaves a configured one alone. Changes to the
+-- built-in workflow reach boards that already have it through migrations, which
+-- is how 'dat' was added, and that is also what lets those boards keep the
+-- constraint as tight as they declared it.
+DO $seed_builtin_stages$
+BEGIN
+IF EXISTS (SELECT 1 FROM ticket_board.workflow_stages) THEN
+    RETURN;
+END IF;
 INSERT INTO ticket_board.workflow_stages (
     name,
     display_label,
@@ -340,7 +360,18 @@ SET display_label = EXCLUDED.display_label,
     gate_skip_to = EXCLUDED.gate_skip_to,
     exit_signoff_field = EXCLUDED.exit_signoff_field,
     is_terminal = EXCLUDED.is_terminal;
+END
+$seed_builtin_stages$;
 
+-- Guarded for the same reason, and on its own table, because a board's
+-- transitions are its own the moment it has any: replaying the built-in set
+-- would reinstate moves a configured board deliberately does not offer, and
+-- most of them name a stage such a board may not have at all.
+DO $seed_builtin_transitions$
+BEGIN
+IF EXISTS (SELECT 1 FROM ticket_board.workflow_transitions) THEN
+    RETURN;
+END IF;
 INSERT INTO ticket_board.workflow_transitions (from_stage, to_stage, action_name, allowed_roles, owner_scoped, director_override)
 VALUES
     ('draft', 'analysis', 'release_draft', ARRAY['director', 'user']::text[], false, false),
@@ -406,6 +437,8 @@ ON CONFLICT (from_stage, to_stage, action_name) DO UPDATE
 SET allowed_roles = EXCLUDED.allowed_roles,
     owner_scoped = EXCLUDED.owner_scoped,
     director_override = EXCLUDED.director_override;
+END
+$seed_builtin_transitions$;
 
 CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
     ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,

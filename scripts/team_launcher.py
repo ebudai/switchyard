@@ -14189,6 +14189,37 @@ def tenant_config_record_path(slug: str) -> Path:
     return privileged_baseline_plan_path(slug).with_name(TENANT_CONFIG_RECORD_NAME)
 
 
+def registered_tenant_config_path(slug: str, *, registry_dir: Path | None = None) -> Path | None:
+    """The configuration path this host's registry names for a project.
+
+    `switchyard new` writes this entry, and every ordinary command follows it to
+    decide which account to act as and which tree to work in -- so when it
+    exists it is the answer to "where is this project's configuration", and
+    guessing instead is how `adopt-workflow syrd` came to look for
+    `Projects/Switchyard/...` and `Projects/syrd/...` on a host whose registry
+    already named `Projects/switchyard/...`. Neither guess exists, and the
+    command refused before touching anything (SYRD-167).
+
+    Read the way every other root-owned record here is read: the entry has to be
+    root's, reached through a path of root-owned directories, and not a symlink.
+    A registry a tenant could rewrite would be a tenant choosing which document
+    root adopts, so this returns a POINTER and nothing more -- what it points at
+    is put through exactly the same ownership, mode, symlink and
+    agrees-with-the-plan checks as a path typed by hand.
+    """
+    entry = (registry_dir or switchyard_registry_dir()) / f"{slug}.json"
+    document, _problem = read_plan_no_follow(entry, require_root_owned=True)
+    if document is None:
+        return None
+    recorded = str(document.data.get("config_path") or "").strip()
+    if not recorded:
+        return None
+    candidate = Path(recorded)
+    # Relative would be resolved against whatever directory the command happens
+    # to be run from, which is not a promise anybody made (SYRD-149).
+    return candidate if candidate.is_absolute() else None
+
+
 def recorded_tenant_config_path(slug: str) -> Path | None:
     """The configuration path root verified last time, if it verified one."""
     document, _problem = read_plan_no_follow(tenant_config_record_path(slug), require_root_owned=True)
@@ -14217,19 +14248,31 @@ def record_tenant_config_path(slug: str, config_path: Path) -> Path:
 
 
 def _tenant_config_candidates(
-    plan: "ProjectBoardProvision", slug: str, *, explicit: Path | None, recorded: Path | None
+    plan: "ProjectBoardProvision",
+    slug: str,
+    *,
+    explicit: Path | None,
+    recorded: Path | None,
+    registered: Path | None = None,
 ) -> list[Path]:
     """Where the generated configuration for this project could be.
 
-    An explicit path or a path root has already verified is the whole answer.
-    Otherwise the conventional layout is tried -- and only tried: whatever is
-    found there still has to survive every check below before root registers
-    it.
+    An explicit path, or a path root has already verified, is the whole answer.
+    Then the registry, which is a RECORD of where this project's configuration
+    is rather than a guess about where it might be -- and is the only one of
+    the three that a host with a checkout named unlike its slug can answer
+    correctly (SYRD-167).
+
+    Only then the conventional layout, and only tried: whatever is found by any
+    of these still has to survive every check below before root registers it.
+    Being named by the registry buys a candidate a look, not a pass.
     """
     if explicit is not None:
         return [explicit.expanduser()]
     if recorded is not None:
         return [recorded]
+    if registered is not None:
+        return [registered]
     home = Path(plan.owner_home)
     names = [name for name in (plan.project_name, slug) if name]
     seen: list[Path] = []
@@ -14295,6 +14338,7 @@ def verified_tenant_config(
     *,
     explicit: Path | None = None,
     owner_uid: int | None = None,
+    registry_dir: Path | None = None,
 ) -> tuple[Path | None, ProjectConfig | None, list[str]]:
     """The generated configuration root is willing to register, or why not.
 
@@ -14305,7 +14349,10 @@ def verified_tenant_config(
     point the registry at.
     """
     recorded = recorded_tenant_config_path(slug)
-    candidates = _tenant_config_candidates(plan, slug, explicit=explicit, recorded=recorded)
+    registered = registered_tenant_config_path(slug, registry_dir=registry_dir)
+    candidates = _tenant_config_candidates(
+        plan, slug, explicit=explicit, recorded=recorded, registered=registered
+    )
     permitted = sorted({expected_privileged_uid(), *( (owner_uid,) if owner_uid is not None else () )})
     problems: list[str] = []
     for candidate in candidates:
@@ -15096,7 +15143,8 @@ def switchyard_adopt_workflow_command(
         )
         return 1
     verified, config, config_problems = verified_tenant_config(
-        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user)
+        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user),
+        registry_dir=registry_dir,
     )
     if config is None or verified is None:
         for objection in config_problems:

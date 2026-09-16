@@ -481,7 +481,11 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
             print_func=messages.append,
         )
 
-    assert report == team_launcher.FirstRunAuthReport({}, [])
+    # This run is what made codex usable, so the report says which roles were
+    # configured for it: a runtime already up when that happened started before
+    # the credentials existed and has to be restarted, not presented (SYRD-191).
+    assert report == team_launcher.FirstRunAuthReport({}, [], authenticated_now={"codex": ["ops"]})
+    assert report.roles_awaiting_restart == ("ops",)
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",

@@ -5108,6 +5108,62 @@ def _running_project_roles(
     return running_roles
 
 
+def _drop_roles_started_before_their_login(
+    config: ProjectConfig,
+    running_roles: Sequence[RoleConfig],
+    *,
+    restart_roles: Sequence[str],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None] = print,
+) -> list[RoleConfig]:
+    """Roles that may be presented as they are, rather than started again.
+
+    A provider login performed in this run cannot reach a runtime that was
+    already up: the process read its credentials when it started, and it
+    started before there were any. Live on the testing tenant, both logins
+    succeeded as the owner at 16:23 and the five panes the User was shown had
+    been running since the previous day, each sitting on its provider's own
+    sign-in or onboarding screen. Presenting them is what made two successful
+    logins look like five failed ones.
+
+    So such a role is not "already running" for the purposes of this launch. Its
+    session is ended and started again, which is the ordinary path a role that
+    was not running takes, and the new process reads the credentials that now
+    exist (SYRD-191).
+    """
+    wanted = {name for name in restart_roles if name}
+    if not wanted:
+        return list(running_roles)
+    keep: list[RoleConfig] = []
+    restarted: list[str] = []
+    for role in running_roles:
+        if role.role not in wanted:
+            keep.append(role)
+            continue
+        restarted.append(role.role)
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        result = role_runner(
+            tmux_kill_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if getattr(result, "returncode", 1) != 0:
+            # It could not be ended, so it will not be started either: say so
+            # rather than reporting a restart that did not happen.
+            print_func(
+                f"team-launcher: {role.role} is running from before this run's "
+                f"{_role_cli_name(role)} login and its session could not be ended; it will keep "
+                "showing that provider's sign-in screen until it is restarted"
+            )
+            keep.append(role)
+            restarted.pop()
+    if restarted:
+        print_func(
+            "team-launcher: restarting "
+            + ", ".join(sorted(restarted))
+            + ": their runtimes started before this run's provider login and cannot have it"
+        )
+    return keep
+
+
 def _prepare_project_worktrees_for_launch(
     config: ProjectConfig,
     *,
@@ -7848,6 +7904,10 @@ def launch_project(
     allow_stale_launcher: bool = False,
     no_launcher_self_deploy: bool = False,
     report_session_records: bool = False,
+    #: Roles whose provider was authenticated during this run. Their runtimes
+    #: started before that login and are sitting on the provider's own sign-in
+    #: screen, so they are restarted rather than presented (SYRD-191).
+    restart_roles: Sequence[str] = (),
     session_record_timeout: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
@@ -7924,6 +7984,13 @@ def launch_project(
         )
         if mode == "attach-or-start":
             running_roles = _running_project_roles(config, runner=runner)
+            running_roles = _drop_roles_started_before_their_login(
+                config,
+                running_roles,
+                restart_roles=restart_roles,
+                runner=runner,
+                print_func=print_func,
+            )
         ensure_configured_runtime_user(config, runner=runner)
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         ensure_generated_project_pane_hooks(
@@ -9902,6 +9969,23 @@ class FirstRunAuthReport:
     owner_user: str = ""
     owner_shell_issue: OwnerShellIssue | None = None
     github_identity: "GithubIdentityStatus | None" = None
+    #: The CLIs this run logged in, and the roles configured to use each of
+    #: them. A runtime that was already up when the login happened started
+    #: before the provider state existed and cannot have picked it up: it is
+    #: sitting on the provider's own sign-in screen, and presenting it is how
+    #: five panes asked the User to authenticate again after two successful
+    #: logins (SYRD-191).
+    authenticated_now: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def roles_awaiting_restart(self) -> tuple[str, ...]:
+        """Roles whose runtime predates the login this run performed."""
+        names: list[str] = []
+        for roles in self.authenticated_now.values():
+            for role in roles:
+                if role not in names:
+                    names.append(role)
+        return tuple(names)
 
     @property
     def has_warnings(self) -> bool:
@@ -12233,6 +12317,7 @@ def run_first_run_auth_phase(
     print_first_run_setup_manifest(manifest, print_func=print_func)
     missing_cli_roles.update(manifest.missing_cli_roles)
 
+    authenticated_now: dict[str, list[str]] = {}
     for step in manifest.login_steps:
         login_command = list(step.command)
         _run_owner_cli_interactive(
@@ -12247,6 +12332,10 @@ def run_first_run_auth_phase(
             missing_cli_roles[step.cli] = list(step.roles)
         elif auth_status != "authenticated":
             unauthenticated[step.cli] = list(step.roles)
+        else:
+            # This run is what made that provider usable. Every role configured
+            # for it that is already running started before it (SYRD-191).
+            authenticated_now[step.cli] = list(step.roles)
 
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:
@@ -12281,6 +12370,7 @@ def run_first_run_auth_phase(
         if missing_cli_roles or manifest.stale_codex_hook_trust or manifest.owner_shell_issue
         else "",
         owner_shell_issue=manifest.owner_shell_issue,
+        authenticated_now=authenticated_now,
     )
 
 
@@ -24597,6 +24687,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         mode="start",
         script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         report_session_records=True,
+        restart_roles=first_run_auth_report.roles_awaiting_restart,
     )
     if launch_result != 0:
         return launch_result

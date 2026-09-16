@@ -12090,8 +12090,37 @@ def _provider_account_setup_complete(cli: str, *, owner_home: Path) -> bool:
 
 def _provider_setup_reason(cli: str) -> str:
     if cli == "claude":
-        return "this account has not completed Claude's own first run (theme and welcome)"
+        return (
+            "this account has not completed Claude's own first run (theme, then sign-in); "
+            "measured on this host, that flow asks to sign in again even when the account "
+            "already holds valid credentials, and it is what every pane opens until it is done"
+        )
     return f"{cli} has not completed its first run for this account"
+
+
+#: What an operator is told before a foreground step takes their terminal. Said
+#: before it starts, because afterwards the CLI owns the screen (SYRD-191).
+def _provider_setup_instruction(cli: str, owner_user: str) -> str:
+    if cli == "claude":
+        return (
+            f"switchyard: {cli} will now run in this terminal as {owner_user}. Choose a theme, "
+            "complete the sign-in it asks for even though credentials exist -- this flow does not "
+            "consult them -- and then type /exit to hand the terminal back. It is asked once for "
+            "the account, not once per role, and no pane will ask again."
+        )
+    return (
+        f"switchyard: {cli} will now run in this terminal as {owner_user}. Complete what it asks, "
+        "then exit it to hand the terminal back."
+    )
+
+
+def _folder_trust_instruction(cli: str, workdir: Path, roles: Sequence[str]) -> str:
+    covered = ", ".join(roles)
+    return (
+        f"switchyard: {cli} will now run in {workdir} as this project's owner so it can be "
+        f"trusted once for {covered}. Answer the trust prompt, then type /exit to hand the "
+        "terminal back."
+    )
 
 
 def _claude_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
@@ -12449,6 +12478,7 @@ def run_first_run_auth_phase(
     # never answers a security prompt on the owner's behalf (SYRD-191).
     incomplete_setup: list[tuple[str, list[str]]] = []
     for step in manifest.provider_setup_steps:
+        print_func(_provider_setup_instruction(step.cli, effective_owner))
         _run_owner_cli_interactive(
             owner_user=effective_owner,
             owner_home=effective_home,
@@ -12461,6 +12491,7 @@ def run_first_run_auth_phase(
 
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:
+        print_func(_folder_trust_instruction(step.cli, step.workdir, step.roles or (step.role,)))
         _run_owner_cli_interactive(
             owner_user=effective_owner,
             owner_home=effective_home,

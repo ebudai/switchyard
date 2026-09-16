@@ -87,6 +87,33 @@ ran and did not complete is reported, naming the roles whose panes will open it,
 rather than left to be discovered there. The manifest counts and names every one
 of these interactive steps before the first one runs.
 
+## What completing Claude's first run actually costs
+
+Measured on this host rather than assumed, with a scratch HOME holding a valid
+credential and a `.claude.json` in the live tenant's exact shape -- an
+`oauthAccount`, an empty `projects` map, no onboarding marker:
+
+- `claude auth status --json` reports `loggedIn: true`;
+- an interactive `claude` opens its welcome flow: first the theme chooser, then
+  an **OAuth sign-in**, which it asks for anyway;
+- the same account with `hasCompletedOnboarding` recorded opens neither -- it
+  goes straight to the per-directory trust prompt, and after that to a normal
+  prompt.
+
+So an account in that state cannot be brought to a ready prompt without one
+sign-in, by any path Switchyard controls. The marker lives in the provider's own
+file, and writing it would be manufacturing the state the vendor uses to decide
+whether to ask -- which this code will not do. `~/.claude/settings.json` does
+not substitute: a theme recorded there leaves the welcome flow in place.
+
+What that means for the manifest is simply that it must not promise otherwise.
+The provider setup step says, before it takes the terminal, that the flow will
+ask for a sign-in even though credentials exist, that it is asked once for the
+account rather than once per role, and that `/exit` hands the terminal back.
+Each folder-trust step says the same about the prompt it will show. The
+monochrome terminal the first run appears in is part of the same state: the
+theme is what that flow sets, so it is unset until it has been completed once.
+
 ## Deploying this, and repairing the testing tenant
 
 The rollout is the standard journaled path and stays Director/User-controlled:
@@ -97,9 +124,10 @@ The rollout is the standard journaled path and stays Director/User-controlled:
 2. Install the audited release with `install-switchyard --apply` pinned to that
    commit, through Polkit and the recorder, as SYRD-184 did.
 3. Rerun `switchyard testing` **as the tenant owner**. The foreground phase
-   completes Claude's account setup and each worktree's trust; no login is
-   needed, because the credentials from 2026-09-16 16:23 are still valid and
-   the manifest will offer no login step.
+   offers no login step -- the credentials from 2026-09-16 16:23 are still
+   valid -- and then runs Claude's own first run once for the account, which
+   asks for a sign-in regardless, as measured above; then one trust prompt per
+   distinct worktree. The manifest says all of this before any of it starts.
 4. The same run restarts exactly the five stale role sessions, because their
    runtimes started before those credentials existed. Nothing else is touched:
    no deploy, no units, no board restart.

@@ -145,7 +145,12 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
     ]
     assert call_kwargs[1].get("cwd") == str(tmp_path / "worktrees" / "research")
-    assert first_messages == [
+    assert first_messages[-1] == (
+        f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'research'} as this "
+        "project's owner so it can be trusted once for research. Answer the trust prompt, then "
+        "type /exit to hand the terminal back."
+    )
+    assert first_messages[:-1] == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "0 login step(s), 0 provider setup step(s), 1 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         f"switchyard: folder trust claude: role research at {tmp_path / 'worktrees' / 'research'}; "
@@ -201,6 +206,12 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
         ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
     ]
     printed = [value for kind, value in events if kind == "print"]
+    # The manifest is printed in full first; each foreground step then says what
+    # it is about to do with the terminal, immediately before taking it.
+    instructions = [line for line in printed if "will now run in" in line]
+    assert len(instructions) == 4, instructions
+    assert all("/exit" in line for line in instructions), instructions
+    printed = [line for line in printed if "will now run in" not in line]
     assert printed == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "3 login step(s), 1 provider setup step(s), 3 folder trust step(s), "
@@ -210,8 +221,10 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
         "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
         "switchyard: provider setup claude: roles director, research; this account has not "
-        "completed Claude's own first run (theme and welcome); interactive first run of claude "
-        "as otto-agent, once for every role that uses it",
+        "completed Claude's own first run (theme, then sign-in); measured on this host, that "
+        "flow asks to sign in again even when the account already holds valid credentials, and "
+        "it is what every pane opens until it is done; interactive first run of claude as "
+        "otto-agent, once for every role that uses it",
         f"switchyard: folder trust claude: role director at {tmp_path / 'worktrees' / 'director'}; "
         "recurs per project/workdir even when the owner user is reused; "
         "interactive repository trust today, not account login",
@@ -231,8 +244,31 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
         for index, (_kind, value) in enumerate(events)
         if isinstance(value, list) and value[-3:] == ["claude", "auth", "login"]
     )
-    last_manifest_print_index = max(index for index, (kind, _value) in enumerate(events) if kind == "print")
+    # The MANIFEST is printed in full before anything interactive starts, which
+    # is what lets an operator see every step they are about to be asked for.
+    # The per-step instructions come later by design: each one is said
+    # immediately before that step takes the terminal (SYRD-191).
+    last_manifest_print_index = max(
+        index
+        for index, (kind, value) in enumerate(events)
+        if kind == "print" and "will now run in" not in str(value)
+    )
     assert last_manifest_print_index < first_interactive_index
+    # And each step that takes the terminal for an interactive flow -- the
+    # provider's own first run, and each worktree's trust -- is announced
+    # immediately before it, not after. A login needs no such notice: it
+    # returns on its own when the sign-in completes.
+    first_instruction_index = min(
+        index
+        for index, (kind, value) in enumerate(events)
+        if kind == "print" and "will now run in" in str(value)
+    )
+    first_terminal_taking_index = next(
+        index
+        for index, (_kind, value) in enumerate(events)
+        if isinstance(value, list) and value[-1:] == ["claude"]
+    )
+    assert first_instruction_index < first_terminal_taking_index
 
 def test_first_run_trust_matches_configured_symlink_path_without_reprompting() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-trust-path.") as tmp:

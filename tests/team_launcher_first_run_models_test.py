@@ -366,8 +366,10 @@ def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_r
         "interactive account setup running codex login as otto-agent",
         "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
         "switchyard: provider setup claude: roles designer, director; this account has not "
-        "completed Claude's own first run (theme and welcome); interactive first run of claude "
-        "as otto-agent, once for every role that uses it",
+        "completed Claude's own first run (theme, then sign-in); measured on this host, that "
+        "flow asks to sign in again even when the account already holds valid credentials, and "
+        "it is what every pane opens until it is done; interactive first run of claude as "
+        "otto-agent, once for every role that uses it",
         "switchyard: folder trust claude: role designer at "
         f"{tmp_path / 'worktrees' / 'designer'}; recurs per project/workdir even when the owner "
         "user is reused; interactive repository trust today, not account login",
@@ -377,6 +379,21 @@ def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_r
         "switchyard: folder trust agy: role inspector at "
         f"{tmp_path / 'worktrees' / 'inspector'}; recurs per project/workdir even when the owner "
         "user is reused; interactive repository trust today, not account login",
+        # Each foreground step says what it is about to do with the terminal,
+        # and how to hand it back, before it takes it (SYRD-191).
+        "switchyard: claude will now run in this terminal as otto-agent. Choose a theme, "
+        "complete the sign-in it asks for even though credentials exist -- this flow does not "
+        "consult them -- and then type /exit to hand the terminal back. It is asked once for "
+        "the account, not once per role, and no pane will ask again.",
+        f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'designer'} as this "
+        "project's owner so it can be trusted once for designer. Answer the trust prompt, then "
+        "type /exit to hand the terminal back.",
+        f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'director'} as this "
+        "project's owner so it can be trusted once for director. Answer the trust prompt, then "
+        "type /exit to hand the terminal back.",
+        f"switchyard: agy will now run in {tmp_path / 'worktrees' / 'inspector'} as this "
+        "project's owner so it can be trusted once for inspector. Answer the trust prompt, then "
+        "type /exit to hand the terminal back.",
     ]
 
 def test_first_run_auth_phase_handles_hermes_model_setup() -> None:

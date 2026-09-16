@@ -307,6 +307,158 @@ def test_roles_that_share_a_worktree_share_one_trust_action() -> None:
     )
 
 
+def test_the_setup_step_says_it_will_ask_for_a_sign_in() -> None:
+    """Measured on this host, not assumed: completing Claude's first run signs in again.
+
+    With a valid `.claude/.credentials.json` and a `.claude.json` carrying an
+    `oauthAccount` but no onboarding marker -- the live testing tenant's exact
+    shape -- `claude auth status --json` reports `loggedIn: true`, and an
+    interactive `claude` runs its welcome flow: theme, then an OAuth sign-in it
+    asks for anyway. That is the vendor's flow and Switchyard cannot suppress
+    it without writing the marker itself, which it will not do.
+
+    So the manifest must not promise a run with no login in it. It says what
+    the step costs, before the step takes the terminal.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-honest.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"claude", "codex"})
+        messages: list[str] = []
+        team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=messages.append,
+        )
+
+    advertised = [line for line in messages if "provider setup claude" in line]
+    check(advertised, f"the step is advertised: {messages}")
+    check(
+        "sign in again even when the account already holds valid credentials" in advertised[0],
+        f"and says a sign-in is part of it: {advertised[0]}",
+    )
+    instruction = [line for line in messages if "will now run in this terminal" in line]
+    check(instruction, f"the operator is told before it takes the terminal: {messages}")
+    check("/exit" in instruction[0], f"and told how to hand it back: {instruction[0]}")
+    check(
+        "once for the account, not once per role" in instruction[0],
+        f"and what it buys: {instruction[0]}",
+    )
+    trust_instructions = [line for line in messages if "so it can be trusted once for" in line]
+    check(len(trust_instructions) == 3, f"each trust step says the same: {trust_instructions}")
+    check(all("/exit" in line for line in trust_instructions), "including how to leave it")
+
+
+class MeasuredClaudeRunner(FirstRunAuthRunner):
+    """A Claude that behaves the way the real one was measured to behave.
+
+    `claude auth status --json` answers from the credential file. An
+    interactive `claude` answers from `.claude.json`: with no onboarding marker
+    it runs the welcome flow -- theme, then a sign-in it asks for even though
+    the credential is valid -- and with the marker it goes straight to the
+    per-directory trust prompt. Both halves were measured on this host against
+    the real CLI before this was written (SYRD-191).
+    """
+
+    def __init__(self, owner_home: Path, *, completes_setup: bool) -> None:
+        super().__init__()
+        self.owner_home = owner_home
+        self.completes_setup = completes_setup
+        self.login_seen.update({"claude", "codex"})
+        self.signed_in_again = 0
+        self.trusted: list[str] = []
+
+    def __call__(self, args, **kwargs):
+        command = [str(part) for part in args]
+        if command[-1:] == ["claude"]:
+            marked = json.loads((self.owner_home / ".claude.json").read_text()) \
+                if (self.owner_home / ".claude.json").is_file() else {}
+            if not marked.get("hasCompletedOnboarding"):
+                # The welcome flow. It signs in again regardless of the
+                # credential, and only then records anything.
+                self.signed_in_again += 1
+                if self.completes_setup:
+                    marked["hasCompletedOnboarding"] = True
+                    marked["theme"] = "dark"
+                    (self.owner_home / ".claude.json").write_text(json.dumps(marked), encoding="utf-8")
+            else:
+                # Past the welcome flow, an interactive run in an untrusted
+                # directory asks the trust question and records the answer.
+                cwd = str(kwargs.get("cwd") or "")
+                self.trusted.append(cwd)
+                marked.setdefault("projects", {})[cwd] = {"hasTrustDialogAccepted": True}
+                (self.owner_home / ".claude.json").write_text(json.dumps(marked), encoding="utf-8")
+        return super().__call__(args, **kwargs)
+
+
+def test_the_measured_vendor_flow_is_reported_rather_than_promised_away() -> None:
+    """The live failure, in the shape it really has.
+
+    The rollout plan claimed the preserved credential would make the run
+    login-free. It did not: the welcome flow asks anyway. This asserts the
+    product says so, and that once the account has been through it once,
+    nothing asks again.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-measured.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        # The tenant's exact shape: a valid credential, an account record with
+        # no onboarding marker, nothing trusted.
+        (owner_home / ".claude").mkdir()
+        (owner_home / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
+        (owner_home / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {"emailAddress": "someone@example.test"}, "projects": {}}),
+            encoding="utf-8",
+        )
+        runner = MeasuredClaudeRunner(owner_home, completes_setup=True)
+        messages: list[str] = []
+        first = team_launcher.run_first_run_auth_phase(
+            config, owner_user="otto-agent", owner_home=owner_home,
+            runner=runner, print_func=messages.append,
+        )
+        second_messages: list[str] = []
+        second = team_launcher.run_first_run_auth_phase(
+            config, owner_user="otto-agent", owner_home=owner_home,
+            runner=runner, print_func=second_messages.append,
+        )
+
+    check(
+        first.authenticated_now == {},
+        f"no login step is offered -- the credential is valid: {first.authenticated_now}",
+    )
+    check(runner.signed_in_again == 1, f"and the welcome flow signs in anyway, once: {runner.signed_in_again}")
+    check(
+        any("asks to sign in again even when the account already holds valid credentials" in line
+            for line in messages),
+        f"which the manifest said in advance: {messages}",
+    )
+    check(first.incomplete_provider_setup == [], "the account finished it, so nothing is outstanding")
+    check(
+        [line for line in second_messages if line.startswith("switchyard: provider setup ")] == [],
+        f"and the second run asks for no setup at all: {second_messages}",
+    )
+    check(
+        [line for line in second_messages if line.startswith("switchyard: folder trust ")] == [],
+        f"nor for any trust: {second_messages}",
+    )
+    check(not second_messages or "0 login step(s), 0 provider setup step(s), 0 folder trust step(s)"
+          in second_messages[0], f"the manifest is empty: {second_messages[:1]}")
+    check(runner.signed_in_again == 1, "no second sign-in")
+    check(
+        sorted(runner.trusted) == sorted(str(Path(role.workdir)) for role in config.roles
+                                         if role.cli[:1] == ["claude"]),
+        f"the trust prompts ran in each Claude worktree: {runner.trusted}",
+    )
+    check(second.untrusted_roles == [], f"and nothing is left untrusted: {second.untrusted_roles}")
+
+
 class SessionRunner:
     """A tmux that records what was asked of it, through whatever runs it.
 

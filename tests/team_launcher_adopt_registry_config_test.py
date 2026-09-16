@@ -81,7 +81,7 @@ def owner_patches(home: Path):
     stack.enter_context(
         patch.object(
             launcher.pwd, "getpwuid",
-            side_effect=lambda value: SimpleNamespace(pw_gid=value) if value == TENANT_UID else real(value),
+            side_effect=lambda value: SimpleNamespace(pw_gid=value, pw_name=TENANT) if value == TENANT_UID else real(value),
         )
     )
     return stack

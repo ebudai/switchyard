@@ -14748,6 +14748,7 @@ def recovery_readiness_problems(
     registry_path: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     process_commands: Sequence[str] | None = None,
+    pane_liveness_states: "Sequence[PaneLiveness] | None" = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
     completion: PacketCompletion | None = None,
     registration: RuntimeRegistrationWait | None = None,
@@ -14782,19 +14783,37 @@ def recovery_readiness_problems(
     problems.extend(
         (completion or privileged_packet_completion(plan, runner=runner)).problems
     )
-    commands = (
-        list(process_commands)
-        if process_commands is not None
-        else _list_process_command_lines(runner=runner)
-    )
-    for role in config.roles:
-        if not _role_has_pane_process(role, commands):
-            problems.append(f"{role.role} has no running pane ({role.target})")
+    # Liveness comes from the owner's own tmux server and the board's runtime
+    # assignments, not from argv. The marker this used to search for belongs to
+    # the env wrapper that started the pane, and a long-running CLI has exec'd
+    # past it -- which reported six live panes absent (SYRD-169).
+    if pane_liveness_states is not None:
+        states = list(pane_liveness_states)
+    else:
+        tmux_targets, tmux_problem = owner_tmux_targets(config, runner=runner)
+        assignments, assignment_problem = read_runtime_assignment_details(config)
+        if tmux_problem:
+            problems.append(tmux_problem)
+        if assignment_problem:
+            problems.append(assignment_problem)
+        owner_uid = uid_for_user(config.run_as_user)
+        states = [
+            pane_liveness(
+                config, role,
+                tmux_targets=tmux_targets,
+                assignments=assignments,
+                owner_uid=owner_uid,
+            )
+            for role in config.roles
+        ]
+    for state in states:
+        if not state.live:
+            problems.append(f"{state.role} has no running pane: {state.why}")
     # Registration is the pane's own asynchronous work, and this readiness check
     # runs immediately after the launch that started those panes. Sampling once
     # asked before the answer existed, and reported a healthy project as a failed
     # recovery an operator was told to retry by hand (SYRD-162).
-    live = {role.role for role in config.roles if _role_has_pane_process(role, commands)}
+    live = {state.role for state in states if state.live}
     waited = (
         registration
         if registration is not None
@@ -14844,6 +14863,7 @@ def _finish_provision_after_packet(
     launcher_script: Path | None = None,
     start_roles: bool = True,
     process_commands: Sequence[str] | None = None,
+    pane_liveness_states: "Sequence[PaneLiveness] | None" = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
     registration: RuntimeRegistrationWait | None = None,
     runtime_wait_seconds: float = RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
@@ -14944,6 +14964,7 @@ def _finish_provision_after_packet(
         registry_path=registry_path,
         runner=runner,
         process_commands=process_commands,
+        pane_liveness_states=pane_liveness_states,
         session_statuses=session_statuses,
         completion=completion,
         registration=registration,
@@ -15372,6 +15393,7 @@ def switchyard_resume_provision_command(
     desktop_approval_path: Path | None = None,
     desktop_installer: Callable[..., ProjectConfig] | None = None,
     process_commands: Sequence[str] | None = None,
+    pane_liveness_states: "Sequence[PaneLiveness] | None" = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
     registration: RuntimeRegistrationWait | None = None,
     runtime_wait_seconds: float = RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
@@ -15541,6 +15563,7 @@ def switchyard_resume_provision_command(
         launcher_script=launcher_script,
         start_roles=start_roles,
         process_commands=process_commands,
+        pane_liveness_states=pane_liveness_states,
         session_statuses=session_statuses,
         registration=registration,
         runtime_wait_seconds=runtime_wait_seconds,
@@ -15656,6 +15679,178 @@ def _list_process_command_lines(
         reason = _proc_failure_reason(proc, f"ps failed with exit {proc.returncode}")
         raise SystemExit(f"switchyard: failed to inspect processes: {reason}")
     return [line for line in str(proc.stdout or "").splitlines() if line.strip()]
+
+
+@dataclass(frozen=True)
+class PaneLiveness:
+    """What root could establish about one role's pane, and how."""
+
+    role: str
+    live: bool
+    why: str
+
+
+def read_runtime_assignment_details(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[dict[str, dict], str]:
+    """The board's runtime assignments in full, not just which roles have one.
+
+    The rows carry what a liveness proof needs and an argv search cannot give:
+    the pane target the role actually registered, the pid that registered it,
+    that process's start time, and the uid it ran as (SYRD-169).
+    """
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/runtime-assignments")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        if response.status != 200:
+            return {}, f"the board answered HTTP {response.status} for its runtime assignments"
+        payload = json.loads(body)
+    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
+        return {}, f"the board's runtime assignments could not be read: {exc}"
+    if not isinstance(payload, dict) or payload.get("project") != config.project:
+        return {}, "the runtime assignment response belongs to another project"
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, dict):
+        return {}, "the runtime assignment response has no assignments object"
+    return {
+        str(name): assignment
+        for name, assignment in assignments.items()
+        if isinstance(assignment, dict)
+    }, ""
+
+
+def process_start_ticks(pid: int, *, proc_root: Path = Path("/proc")) -> int | None:
+    """Field 22 of /proc/<pid>/stat: when this process began, in clock ticks.
+
+    Read from the field after the comm, which is parenthesised and may itself
+    contain spaces and parentheses, so the split is on the LAST `)` rather than
+    on whitespace.
+    """
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    _pid, _sep, rest = raw.partition(" ")
+    tail = rest[rest.rfind(")") + 1 :].split() if ")" in rest else rest.split()
+    # After the comm and the state character, field 22 overall is index 19 here.
+    try:
+        return int(tail[19])
+    except (IndexError, ValueError):
+        return None
+
+
+def process_owner_uid(pid: int, *, proc_root: Path = Path("/proc")) -> int | None:
+    try:
+        return (proc_root / str(pid)).stat().st_uid
+    except OSError:
+        return None
+
+
+def owner_tmux_targets(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[set[str], str]:
+    """Every pane the TENANT OWNER's tmux server holds, asked as that account.
+
+    Root has its own tmux server and it is not the one the project runs in, so
+    asking tmux as root answers about the wrong server -- confidently, and with
+    an empty list. The question is dispatched to the owner the way every other
+    owner-side step here is dispatched (SYRD-169).
+    """
+    args = ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"]
+    if current_user_name() != config.run_as_user:
+        args = ["sudo", "-u", config.run_as_user, "-H", *args]
+    try:
+        done = runner(args, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        return set(), f"the owner's tmux server could not be asked: {exc}"
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        return set(), (
+            "the owner's tmux server could not be asked: "
+            + (detail[-1] if detail else f"exit {done.returncode}")
+        )
+    return {line.strip() for line in (done.stdout or "").splitlines() if line.strip()}, ""
+
+
+def pane_liveness(
+    config: ProjectConfig,
+    role: RoleConfig,
+    *,
+    tmux_targets: set[str],
+    assignments: dict[str, dict],
+    owner_uid: int | None,
+    proc_root: Path = Path("/proc"),
+) -> PaneLiveness:
+    """Whether this role's pane is really running, without reading its argv.
+
+    The old proof searched `ps -eo args` for `TICKET_BOARD_PANE_TARGET=<target>`.
+    That marker is in the argv of the ENV WRAPPER that started the pane, and a
+    long-running CLI has exec'd past it -- so six live panes, with six live tmux
+    sessions and six process-bound board registrations naming their original
+    pids, were reported absent (journal 0074).
+
+    What is durable instead: the owner's own tmux server holds the target, and
+    -- when the board has an assignment for the role -- that assignment names
+    THIS target and a process that is still the one that registered it, checked
+    by pid, start time and uid against /proc rather than by trusting the row.
+
+    Fail-closed in every direction that matters. No tmux target is not live. An
+    assignment for another target, a pid that is gone, a pid that has been
+    reused (start time differs), or a process running as somebody other than the
+    tenant owner all mean not live, even though a tmux pane exists -- because
+    then the board's record and the machine disagree, and a recovery must not
+    call that finished. A role with NO assignment yet is live on the tmux
+    evidence alone: that is a pane which has started and not registered, which
+    is exactly what the registration wait after this exists to find out about.
+    """
+    if role.target not in tmux_targets:
+        return PaneLiveness(role.role, False, f"no pane {role.target} in {config.run_as_user}'s tmux server")
+    assignment = assignments.get(role.role)
+    if not isinstance(assignment, dict):
+        return PaneLiveness(role.role, True, f"tmux holds {role.target}; the board has no assignment yet")
+    recorded_target = str(assignment.get("actual_target") or "").strip()
+    if recorded_target != role.target:
+        return PaneLiveness(
+            role.role, False,
+            f"the board assigns {role.role} to {recorded_target or 'nothing'}, not {role.target}",
+        )
+    try:
+        pid = int(assignment.get("process_pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if pid <= 0:
+        return PaneLiveness(role.role, False, f"the board's assignment for {role.role} names no process")
+    started = process_start_ticks(pid, proc_root=proc_root)
+    if started is None:
+        return PaneLiveness(role.role, False, f"the process {pid} the board assigned {role.role} is gone")
+    recorded_start = assignment.get("process_start_time")
+    if recorded_start is not None and int(recorded_start) != started:
+        return PaneLiveness(
+            role.role, False,
+            f"process {pid} started at {started}, not {int(recorded_start)}: the pid has been reused",
+        )
+    actual_uid = process_owner_uid(pid, proc_root=proc_root)
+    expected_uid = owner_uid if owner_uid is not None else assignment.get("process_uid")
+    if expected_uid is not None and actual_uid is not None and int(expected_uid) != int(actual_uid):
+        return PaneLiveness(
+            role.role, False,
+            f"process {pid} runs as uid {actual_uid}, not {config.run_as_user}'s {int(expected_uid)}",
+        )
+    return PaneLiveness(role.role, True, f"tmux holds {role.target} and pid {pid} still registered it")
 
 
 def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) -> bool:
@@ -15988,6 +16183,7 @@ def switchyard_status_command(
         config_dir=config_dir,
         registry_dir=registry_dir,
         process_commands=process_commands,
+        pane_liveness_states=pane_liveness_states,
         runner=runner,
     )
     if project:

@@ -223,7 +223,7 @@ def owner_patches(home: Path, *, uid: int = OWNER_UID):
     stack.enter_context(
         patch.object(
             launcher.pwd, "getpwuid",
-            side_effect=lambda value: SimpleNamespace(pw_gid=uid) if value == uid else real(value),
+            side_effect=lambda value: SimpleNamespace(pw_gid=uid, pw_name=TENANT) if value == uid else real(value),
         )
     )
     return stack
@@ -306,6 +306,15 @@ def privileged_cases() -> int:
                             "registration", launcher.RuntimeRegistrationWait()
                         ),
                         process_commands=kwargs.pop("process_commands", commands),
+                        # Liveness is no longer read from argv: the marker these
+                        # fake command lines carry is the one a long-running pane
+                        # execs past, so what "these panes are up" means is stated
+                        # in the vocabulary the verifier now uses (SYRD-169).
+                        pane_liveness_states=kwargs.pop(
+                            "pane_liveness_states",
+                            [launcher.PaneLiveness(role.role, True, "fixture: pane up")
+                             for role in config.roles],
+                        ),
                         session_statuses=kwargs.pop("session_statuses", statuses),
                         print_func=said.append,
                         **kwargs,
@@ -372,6 +381,12 @@ def privileged_cases() -> int:
         #    the role rather than reporting success.
         status, said = resume(
             process_commands=[],
+            # Absence stated the way liveness is now established: no tmux pane
+            # for the role at all (SYRD-169).
+            pane_liveness_states=[
+                launcher.PaneLiveness(role.role, False, f"no pane {role.target} in the owner's tmux server")
+                for role in config.roles
+            ],
             session_statuses=[],
             registration=launcher.RuntimeRegistrationWait(
                 exited=tuple(role.role for role in config.roles)

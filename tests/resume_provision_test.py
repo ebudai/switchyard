@@ -216,7 +216,10 @@ def owner_patches(home: Path):
     stack.enter_context(
         patch.object(
             launcher.pwd, "getpwuid",
-            side_effect=lambda uid: SimpleNamespace(pw_gid=TENANT_UID) if uid == TENANT_UID else real(uid),
+            # pw_name as well as pw_gid: liveness asks who this process is
+            # running as before it decides whether to dispatch to the owner
+            # (SYRD-169), and a shim that answers half the question raises.
+            side_effect=lambda uid: SimpleNamespace(pw_gid=TENANT_UID, pw_name=TENANT) if uid == TENANT_UID else real(uid),
         )
     )
     return stack

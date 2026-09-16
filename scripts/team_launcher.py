@@ -8623,6 +8623,12 @@ def write_new_project_launcher_artifacts(
         + "\n",
         encoding="utf-8",
     )
+    # Not group-writable, because the configuration decides which account every
+    # role runs as and which board they talk to, and root refuses to register a
+    # document anybody in its group could rewrite. Some were written 0660, and
+    # on the tenant this was written for that made the registered configuration
+    # unadoptable by the ordinary command (SYRD-167).
+    config_path.chmod(config_path.stat().st_mode & ~(stat.S_IWGRP | stat.S_IWOTH))
     if plan.workflow:
         projected = _load_json(config_path)
         visible_role_count = max(1, 1 + max((role.get("slot", -1) for role in projected["roles"]), default=-1))
@@ -14189,6 +14195,84 @@ def tenant_config_record_path(slug: str) -> Path:
     return privileged_baseline_plan_path(slug).with_name(TENANT_CONFIG_RECORD_NAME)
 
 
+def normalize_tenant_config_mode(path: Path, *, permitted_uids: "list[int]") -> list[str]:
+    """Take group and world write off a configuration root is about to verify.
+
+    `switchyard new` wrote some of these 0660, and the verifier refuses a
+    document anybody in its group could rewrite -- correctly, because that is
+    the whole reason it reads the mode. On the tenant this was written for, that
+    left the registered configuration unadoptable by the ordinary command and
+    the strict check was the thing standing in the way (SYRD-167).
+
+    So the mode is repaired rather than the check relaxed, and only the two bits
+    that break the invariant are taken off: nothing else about the file is
+    touched, and a file that is already compliant is not written to at all.
+
+    Everything here happens on ONE descriptor. Opened `O_NOFOLLOW`, checked with
+    `fstat` on that descriptor and changed with `fchmod` on the same one, so a
+    path that becomes a symlink -- or a different file -- between the check and
+    the change is not what gets chmodded. Ownership is checked first for the
+    same reason the reader checks it: root repairing a file the tenant does not
+    own would be root repairing somebody else's file.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        return [f"{path} could not be opened to check its mode: {exc.strerror or exc}"]
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return [f"{path} is not a regular file"]
+        if info.st_uid not in permitted_uids:
+            # Left alone deliberately: the reader refuses it a moment later and
+            # says whose it is, which is the more useful answer.
+            return []
+        offending = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        if not offending:
+            return []
+        try:
+            os.fchmod(descriptor, stat.S_IMODE(info.st_mode) & ~(stat.S_IWGRP | stat.S_IWOTH))
+        except OSError as exc:
+            return [
+                f"{path} is mode {stat.S_IMODE(info.st_mode):04o} and could not be tightened: "
+                f"{exc.strerror or exc}"
+            ]
+        return []
+    finally:
+        os.close(descriptor)
+
+
+def registered_tenant_config_path(slug: str, *, registry_dir: Path | None = None) -> Path | None:
+    """The configuration path this host's registry names for a project.
+
+    `switchyard new` writes this entry, and every ordinary command follows it to
+    decide which account to act as and which tree to work in -- so when it
+    exists it is the answer to "where is this project's configuration", and
+    guessing instead is how `adopt-workflow syrd` came to look for
+    `Projects/Switchyard/...` and `Projects/syrd/...` on a host whose registry
+    already named `Projects/switchyard/...`. Neither guess exists, and the
+    command refused before touching anything (SYRD-167).
+
+    Read the way every other root-owned record here is read: the entry has to be
+    root's, reached through a path of root-owned directories, and not a symlink.
+    A registry a tenant could rewrite would be a tenant choosing which document
+    root adopts, so this returns a POINTER and nothing more -- what it points at
+    is put through exactly the same ownership, mode, symlink and
+    agrees-with-the-plan checks as a path typed by hand.
+    """
+    entry = (registry_dir or switchyard_registry_dir()) / f"{slug}.json"
+    document, _problem = read_plan_no_follow(entry, require_root_owned=True)
+    if document is None:
+        return None
+    recorded = str(document.data.get("config_path") or "").strip()
+    if not recorded:
+        return None
+    candidate = Path(recorded)
+    # Relative would be resolved against whatever directory the command happens
+    # to be run from, which is not a promise anybody made (SYRD-149).
+    return candidate if candidate.is_absolute() else None
+
+
 def recorded_tenant_config_path(slug: str) -> Path | None:
     """The configuration path root verified last time, if it verified one."""
     document, _problem = read_plan_no_follow(tenant_config_record_path(slug), require_root_owned=True)
@@ -14217,19 +14301,31 @@ def record_tenant_config_path(slug: str, config_path: Path) -> Path:
 
 
 def _tenant_config_candidates(
-    plan: "ProjectBoardProvision", slug: str, *, explicit: Path | None, recorded: Path | None
+    plan: "ProjectBoardProvision",
+    slug: str,
+    *,
+    explicit: Path | None,
+    recorded: Path | None,
+    registered: Path | None = None,
 ) -> list[Path]:
     """Where the generated configuration for this project could be.
 
-    An explicit path or a path root has already verified is the whole answer.
-    Otherwise the conventional layout is tried -- and only tried: whatever is
-    found there still has to survive every check below before root registers
-    it.
+    An explicit path, or a path root has already verified, is the whole answer.
+    Then the registry, which is a RECORD of where this project's configuration
+    is rather than a guess about where it might be -- and is the only one of
+    the three that a host with a checkout named unlike its slug can answer
+    correctly (SYRD-167).
+
+    Only then the conventional layout, and only tried: whatever is found by any
+    of these still has to survive every check below before root registers it.
+    Being named by the registry buys a candidate a look, not a pass.
     """
     if explicit is not None:
         return [explicit.expanduser()]
     if recorded is not None:
         return [recorded]
+    if registered is not None:
+        return [registered]
     home = Path(plan.owner_home)
     names = [name for name in (plan.project_name, slug) if name]
     seen: list[Path] = []
@@ -14240,7 +14336,33 @@ def _tenant_config_candidates(
     return seen
 
 
-def tenant_config_conflicts(plan: "ProjectBoardProvision", config: ProjectConfig) -> list[str]:
+def board_declared_role_names(document: dict | None) -> set[str]:
+    """The roles the running board's own declared workflow names.
+
+    Root-owned authority in the sense that matters here: the board's copy can
+    only have been installed through the write API, and it is what decides every
+    transition and capability right now. It is read over the board's own socket,
+    and only once everything else about the configuration has already been shown
+    to agree with what root provisioned -- so the socket being asked is the one
+    root recorded, not one a configuration nominated for itself (SYRD-167).
+    """
+    if not isinstance(document, dict):
+        return set()
+    names: set[str] = set()
+    for role in document.get("roles") or ():
+        if isinstance(role, dict):
+            name = str(role.get("name") or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def tenant_config_conflicts(
+    plan: "ProjectBoardProvision",
+    config: ProjectConfig,
+    *,
+    corroborated_roles: "set[str] | frozenset[str] | tuple[str, ...]" = (),
+) -> list[str]:
     """Where a generated configuration disagrees with what root provisioned.
 
     The registry entry is a pointer, and every ordinary command follows it to
@@ -14278,13 +14400,22 @@ def tenant_config_conflicts(plan: "ProjectBoardProvision", config: ProjectConfig
                 f"{what}: the configuration points at {resolved}, which is outside "
                 f"{plan.owner_user}'s home {owner_home}"
             )
-    permitted = set(plan.caller_roles)
+    # A project provisioned before a role existed has a baseline that predates
+    # it, and syrd is exactly that: its configuration and the board it is
+    # running both name `inspector`, and root's old record does not. Refusing
+    # that is refusing the tenant for having been provisioned earlier, and
+    # deleting the check would be trusting the tenant's own JSON about which
+    # roles exist. So an added role is ESTABLISHED instead: it counts when the
+    # board's own declared workflow names it too, which is a second source the
+    # tenant cannot write (SYRD-167).
+    permitted = set(plan.caller_roles) | set(corroborated_roles)
     unknown = sorted({role.role for role in config.roles} - permitted)
     if unknown:
         conflicts.append(
             "roles: the configuration declares "
             + ", ".join(unknown)
-            + ", which root did not provision for this project"
+            + ", which root did not provision for this project and the board's declared "
+            "workflow does not name either"
         )
     return conflicts
 
@@ -14295,6 +14426,8 @@ def verified_tenant_config(
     *,
     explicit: Path | None = None,
     owner_uid: int | None = None,
+    registry_dir: Path | None = None,
+    board_reader: "Callable[[ProjectConfig], tuple[dict | None, str]] | None" = None,
 ) -> tuple[Path | None, ProjectConfig | None, list[str]]:
     """The generated configuration root is willing to register, or why not.
 
@@ -14305,10 +14438,17 @@ def verified_tenant_config(
     point the registry at.
     """
     recorded = recorded_tenant_config_path(slug)
-    candidates = _tenant_config_candidates(plan, slug, explicit=explicit, recorded=recorded)
+    registered = registered_tenant_config_path(slug, registry_dir=registry_dir)
+    candidates = _tenant_config_candidates(
+        plan, slug, explicit=explicit, recorded=recorded, registered=registered
+    )
     permitted = sorted({expected_privileged_uid(), *( (owner_uid,) if owner_uid is not None else () )})
     problems: list[str] = []
     for candidate in candidates:
+        # Before the reader, not instead of it: the mode is repaired where root
+        # may repair it, and then the same strict check runs unchanged
+        # (SYRD-167).
+        problems.extend(normalize_tenant_config_mode(candidate, permitted_uids=permitted))
         document, problem = read_plan_no_follow(
             candidate, require_root_owned=False, require_owner_uids=permitted
         )
@@ -14321,6 +14461,18 @@ def verified_tenant_config(
             problems.append(f"{candidate} is not a usable launcher configuration: {exc}")
             continue
         conflicts = tenant_config_conflicts(plan, config)
+        if conflicts and board_reader is not None and all(
+            line.startswith("roles: ") for line in conflicts
+        ):
+            # Only when everything ELSE already agrees. The board is asked over
+            # the socket the configuration names, and that name having been
+            # shown to match the one root provisioned is precisely what the
+            # absence of any other conflict means here -- so a configuration
+            # cannot nominate the authority that corroborates it (SYRD-167).
+            document, _board_problem = board_reader(config)
+            conflicts = tenant_config_conflicts(
+                plan, config, corroborated_roles=board_declared_role_names(document)
+            )
         if conflicts:
             return None, None, [
                 f"{candidate} is not the configuration root provisioned for {slug}:",
@@ -15096,7 +15248,9 @@ def switchyard_adopt_workflow_command(
         )
         return 1
     verified, config, config_problems = verified_tenant_config(
-        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user)
+        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user),
+        registry_dir=registry_dir,
+        board_reader=board_reader or read_board_declared_workflow,
     )
     if config is None or verified is None:
         for objection in config_problems:

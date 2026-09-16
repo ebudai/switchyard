@@ -1218,16 +1218,33 @@ assert_system_unit_reload_not_required_for_release() {
             die "candidate system unit $candidate_path is the installed unit $installed_unit, so comparing them proves nothing. Point TICKET_BOARD_PROVISIONED_SYSTEM_UNIT at the release's own reviewed unit -- the readable copy root publishes beside this tenant's staged tooling -- and rerun deploy-restart."
         fi
     else
+        # No production unit in the release, so there is nothing of the
+        # release's to compare the installed unit against. The generic render
+        # below is a template render for this project -- it is equal to the
+        # installed unit whenever the host has not changed, WHETHER OR NOT the
+        # release contains a unit -- so letting the comparison decide means a
+        # release that ships no unit passes the gate by coincidence. That is the
+        # same vacuity SYRD-127 closed for a candidate that IS the installed
+        # unit, reached through the other branch of that very `if`: the gate
+        # exists for a release whose unit differs, and here there is no release
+        # unit to differ (SYRD-173).
+        #
+        # So this fails closed here, before the comparison, and the render is
+        # kept only to show an operator what the template would have said.
         subject_label="release contains no production system unit at expected path: $candidate_path; generic render below is diagnostic only and must not be installed"
+        diff -u --label "installed:$installed_unit" --label "$subject_label" "$installed_unit" "$rendered_unit" >"$diff_file" || true
+        report_system_unit_drift "$installed_unit" "$subject_label" "$diff_file"
+        rm -f "$rendered_unit" "$diff_file"
+        die "release $release_dir contains no production system unit at expected path $candidate_path; the generic render above is diagnostic only and must not be installed, and comparing it against the installed unit proves nothing about this release. Add the production unit to the release or ask an operator to install an operator-reviewed production unit and run systemctl daemon-reload, then rerun deploy-restart."
     fi
     if ! cmp -s "$rendered_unit" "$installed_unit"; then
         diff -u --label "installed:$installed_unit" --label "$subject_label" "$installed_unit" "$rendered_unit" >"$diff_file" || true
         report_system_unit_drift "$installed_unit" "$subject_label" "$diff_file"
         rm -f "$rendered_unit" "$diff_file"
-        if [[ -f "$candidate_path" ]]; then
-            die "candidate system unit for $release_dir differs from installed $installed_unit; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to install the candidate unit from $candidate_path and run systemctl daemon-reload, then rerun deploy-restart."
-        fi
-        die "release $release_dir contains no production system unit at expected path $candidate_path; the generic render above is diagnostic only and must not be installed. Add the production unit to the release or ask an operator to install an operator-reviewed production unit and run systemctl daemon-reload, then rerun deploy-restart."
+        # Reached only with a candidate: the branch above dies when there is
+        # none, so there is no second "no production unit" message here and no
+        # path on which its absence is merely reported.
+        die "candidate system unit for $release_dir differs from installed $installed_unit; daemon-reload is required but is intentionally outside the board deploy polkit grant. Ask an operator to install the candidate unit from $candidate_path and run systemctl daemon-reload, then rerun deploy-restart."
     fi
     rm -f "$rendered_unit" "$diff_file"
     if system_unit_needs_daemon_reload; then

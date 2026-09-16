@@ -8102,10 +8102,13 @@ def launch_project(
         )
         if mode == "attach-or-start":
             running_roles = _running_project_roles(config, runner=runner)
-            running_roles = _drop_roles_with_stale_provider_runtime(
+            reconcile_home = owner_home or _owner_home_for_auth(
+                config.run_as_user or current_user_name()
+            )
+            running_roles, unreconciled_roles = _drop_roles_with_stale_provider_runtime(
                 config,
                 running_roles,
-                owner_home=owner_home or _owner_home_for_auth(config.run_as_user or current_user_name()),
+                owner_home=reconcile_home,
                 runner=runner,
                 print_func=print_func,
             )
@@ -11976,7 +11979,13 @@ def _run_owner_cli_until(
     is_complete: Callable[[], bool],
     watching: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
-    popen: Callable[..., Any] = subprocess.Popen,
+    #: How the live step is started, resolved when it runs rather than bound
+    #: when this was defined, so a caller can watch it.
+    popen: Callable[..., Any] | None = None,
+    #: The adjustment the desktop branch makes to every command it runs. The
+    #: bounded path starts the process itself, so it has to make the same one
+    #: or a tenant with a desktop policy would lose it (SYRD-191).
+    transform: Callable[[list[str], dict[str, Any]], tuple[list[str], dict[str, Any]]] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
@@ -11994,20 +12003,16 @@ def _run_owner_cli_until(
     completion read back afterwards: that is the shape tests drive, and it is
     also the honest fallback for anything that cannot be watched.
     """
+    args = _owner_command_env_args(owner_user, owner_home, command)
+    kwargs: dict[str, Any] = {"cwd": str(cwd), "env": _pane_identity_scrubbed_env()}
+    if transform is not None:
+        args, kwargs = transform(args, kwargs)
     if runner is not None:
-        runner(
-            _owner_command_env_args(owner_user, owner_home, command),
-            cwd=str(cwd),
-            env=_pane_identity_scrubbed_env(),
-        )
+        runner(args, **kwargs)
         return is_complete()
     if is_complete():
         return True
-    process = popen(
-        _owner_command_env_args(owner_user, owner_home, command),
-        cwd=str(cwd),
-        env=_pane_identity_scrubbed_env(),
-    )
+    process = (popen or subprocess.Popen)(args, **kwargs)
     deadline = monotonic() + timeout_seconds
     try:
         while True:
@@ -12709,14 +12714,24 @@ def run_first_run_auth_phase(
     owner_user: str | None = None,
     owner_home: Path | None = None,
     validate_models: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    #: A caller driving these steps itself passes its own runner -- that is how
+    #: the suites exercise them. None means the live path: probes run through
+    #: `subprocess.run`, and the foreground steps are bounded rather than fired
+    #: and forgotten. A sentinel rather than a default of `subprocess.run`,
+    #: because the desktop branch below rebinds this name and comparing against
+    #: it afterwards said "injected" on every tenant with a pane (SYRD-191).
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
+    injected_runner = runner
+    runner = runner or subprocess.run
+    foreground_transform: Callable[..., Any] | None = None
     if config.desktop_access is not None:
         config = prepare_project_desktop(config, runner=runner)
         desktop_env = {k:v for k,v in config.roles[0].env.items() if k in DESKTOP_ENV_KEYS}
         base_runner = runner
-        def runner(args, **kwargs):
+
+        def desktop_transform(args, kwargs):
             args = list(args)
             if "env" in args:
                 position = args.index("env") + 1
@@ -12725,13 +12740,14 @@ def run_first_run_auth_phase(
             for key in DESKTOP_ENV_KEYS:
                 environment.pop(key, None)
             environment.update(desktop_env)
-            kwargs["env"] = environment
+            kwargs = {**kwargs, "env": environment}
+            return args, kwargs
+
+        foreground_transform = desktop_transform
+
+        def runner(args, **kwargs):
+            args, kwargs = desktop_transform(args, kwargs)
             return base_runner(args, **kwargs)
-    # A caller that passed its own runner is driving these steps itself -- that
-    # is how the suites exercise them. The live path has none, and its foreground
-    # steps are bounded: watched, and ended the moment the state they exist to
-    # record appears (SYRD-191).
-    injected_runner = None if runner is subprocess.run else runner
     effective_owner = (owner_user or config.run_as_user or current_user_name()).strip()
     if not effective_owner:
         return FirstRunAuthReport({}, [])
@@ -12785,6 +12801,7 @@ def run_first_run_auth_phase(
             ),
             watching=f"{step.cli} to record its own first run for {effective_owner}",
             runner=injected_runner,
+            transform=foreground_transform,
             print_func=print_func,
         )
         if not completed:
@@ -12803,6 +12820,7 @@ def run_first_run_auth_phase(
             ),
             watching=f"{step.cli} to record trust for {step.workdir}",
             runner=injected_runner,
+            transform=foreground_transform,
             print_func=print_func,
         )
         if not trusted:

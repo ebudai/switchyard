@@ -96,6 +96,25 @@ ran and did not complete is reported, naming the roles whose panes will open it,
 rather than left to be discovered there. The manifest counts and names every one
 of these interactive steps before the first one runs.
 
+## Driving the launch, not just its parts
+
+The reconciliation above returns two things -- the roles to present, and the
+ones whose stale session could not be ended -- and the launch read that pair as
+if it were the list of roles. Every helper had a test; the call site had none,
+because the suite exercised the helpers directly and nothing drove
+`launch_project`. Live, that stopped five role runtimes and then raised
+`AttributeError: 'list' object has no attribute 'role'` before starting any of
+them. The suite now drives `launch_project` end to end for an ordinary start,
+which reproduces that exactly when the unpacking is removed.
+
+The same run proved a second thing worth keeping: the phase rebinds its runner
+when the project declares desktop access, so deciding "did a caller inject a
+runner?" by reading that name afterwards answered yes for every tenant with a
+pane -- and the bounded, watched foreground step would never have run live. The
+question is now answered by the argument itself, `None` meaning the live path,
+and the desktop adjustment is a transformation both paths apply rather than
+something hidden inside one of them.
+
 ## What completing Claude's first run actually costs
 
 Measured on this host rather than assumed, with a scratch HOME holding a valid

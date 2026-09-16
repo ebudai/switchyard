@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -794,6 +795,222 @@ def test_a_session_that_cannot_be_ended_keeps_its_old_record() -> None:
         team_launcher.recorded_provider_state_generation(config, kept[0]) == "",
         "its record is left alone, so the next launch reconciles it again",
     )
+
+
+def test_a_tenant_with_a_desktop_policy_still_gets_bounded_steps() -> None:
+    """The live path must watch and bound, on every tenant that has a pane.
+
+    The phase rebinds its runner when the project declares desktop access, so
+    deciding "was a runner injected?" by looking at that name afterwards said
+    yes for every such tenant -- and every tenant with a visible role is one.
+    Whether a runner was injected is now answered by the argument itself.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-desktop.") as tmp:
+        tmp_path = Path(tmp)
+        config, _config_path, owner_home = launchable_tenant(tmp_path)
+        check(config.desktop_access is not None, "the fixture declares desktop access")
+        (owner_home / ".claude").mkdir(parents=True, exist_ok=True)
+        (owner_home / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
+        started: list[list[str]] = []
+
+        class BoundedProcess:
+            def __init__(self, args, **kwargs):
+                started.append([str(part) for part in args])
+                self.args = args
+                self._polls = 0
+
+            def poll(self):
+                self._polls += 1
+                return None if self._polls < 3 else 0
+
+            def terminate(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                return None
+
+        def probe(args, **kwargs):
+            command = [str(part) for part in args]
+            if command[-3:] == ["auth", "status", "--json"]:
+                return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"loggedIn": True}))
+            if command[-2:] == ["login", "status"]:
+                return subprocess.CompletedProcess(command, 0, stdout="Logged in\n")
+            if command[-2:-1] == ["-c"] and command[-1].startswith("command -v "):
+                tool = command[-1].split()[-1]
+                return subprocess.CompletedProcess(command, 0, stdout=f"/usr/bin/{tool}\n")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with patch.object(team_launcher.subprocess, "run", probe), patch.object(
+            team_launcher.subprocess, "Popen", BoundedProcess
+        ):
+            team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user=team_launcher.current_user_name(),
+                owner_home=owner_home,
+                print_func=lambda _line: None,
+            )
+
+    check(started, "the foreground step was started as a process this run can watch")
+    check(
+        all(command[-1] == "claude" for command in started),
+        f"and it is the provider's own first run: {started}",
+    )
+
+
+def launchable_tenant(tmp_path: Path):
+    """A project `launch_project` will actually run through.
+
+    Small on purpose, and shaped like the live tenant where it matters: a
+    headless desktop policy, a session directory inside the fixture, and two
+    roles on different providers.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    layout = tmp_path / "layout.json"
+    layout.write_text(
+        json.dumps(
+            {
+                "Orientation": "Horizontal",
+                "Widgets": [
+                    {"Command": "", "SessionRestoreId": index, "WorkingDirectory": ""}
+                    for index in range(2)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    roles = []
+    for index, (role, cli) in enumerate((("designer", "claude"), ("main", "codex"))):
+        workdir = home / "testing-worktrees" / role
+        workdir.mkdir(parents=True)
+        roles.append(
+            {
+                "role": role,
+                "slot": index,
+                "target": f"testing-{role}:0.0",
+                "tmux_session": f"testing-{role}",
+                "workdir": str(workdir),
+                "cli": [cli],
+                "yolo": True,
+            }
+        )
+    config_path = tmp_path / "testing.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "project": "testing",
+                "ticket_prefix": "TESTING",
+                "layout": str(layout),
+                "repository": str(repository),
+                "worktree_base": str(home / "testing-worktrees"),
+                "run_as_user": team_launcher.current_user_name(),
+                "session_dir": str(home / ".local" / "state" / "testing-ticket-board" / "pane-sessions"),
+                "board_url": "http://127.0.0.1:25310",
+                "board_socket": "/run/testing-ticket-board/ticket-board.sock",
+                "desktop_access": {"mode": "headless"},
+                "role_state_isolation": False,
+                "roles": roles,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return team_launcher.load_project_config("testing", config_path), config_path, home
+
+
+def test_an_ordinary_launch_reconciles_running_roles_end_to_end() -> None:
+    """Driven through `launch_project`, because that is where it broke.
+
+    The helpers above were right and the call site was not: the reconciliation
+    returns what to keep AND what it could not end, and the launch was reading
+    the pair as a list of roles. It stopped five live runtimes and then raised
+    `AttributeError: 'list' object has no attribute 'role'` before starting
+    anything -- on the User's machine, because nothing here drove the path that
+    calls it (SYRD-191).
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-launch.") as tmp:
+        tmp_path = Path(tmp)
+        config, config_path, home = launchable_tenant(tmp_path)
+        calls: list[list[str]] = []
+
+        live = {role.target: role.cli[0] for role in config.roles}
+
+        def runner(args, **kwargs):
+            command = [str(part) for part in args]
+            calls.append(command)
+            # A tmux that reports every role's pane as running its own CLI, so
+            # the launch takes the "already running" path this is about.
+            if "display-message" in command:
+                target = command[command.index("-t") + 1] if "-t" in command else ""
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=f"{live.get(target, 'fish')}\n", stderr=""
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        said: list[str] = []
+        result = team_launcher.launch_project(
+            config,
+            config_path=config_path,
+            mode="start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            runner=runner,
+            owner_home=home,
+            print_func=said.append,
+            konsole_process_launcher=lambda *args, **kwargs: None,
+        )
+
+        check(result == 0, f"the launch completes: {result} {said}")
+        check(
+            any(
+                "kill-session" in " ".join(command) and role.tmux_session in command
+                for command in calls
+                for role in config.roles
+            ),
+            f"the role runtimes with no recorded generation are ended: {calls[-6:]}",
+        )
+        check(
+            any("restarting" in line and "older provider state" in line for line in said),
+            f"and the reason is reported: {said}",
+        )
+        recorded = {
+            role.role: team_launcher.recorded_provider_state_generation(config, role)
+            for role in config.roles
+        }
+        check(
+            all(recorded.values()),
+            f"every role that came up records what it was started against: {recorded}",
+        )
+        # And a second ordinary launch leaves them alone: exactly once.
+        calls.clear()
+        again: list[str] = []
+        result = team_launcher.launch_project(
+            config,
+            config_path=config_path,
+            mode="start",
+            script_path=ROOT / "scripts" / "team-launcher",
+            runner=runner,
+            owner_home=home,
+            print_func=again.append,
+            konsole_process_launcher=lambda *args, **kwargs: None,
+        )
+        check(result == 0, f"the second launch completes too: {result}")
+        check(
+            not any(
+                "kill-session" in " ".join(command) and role.tmux_session in command
+                for command in calls
+                for role in config.roles
+            ),
+            "and ends no role session, because nothing is stale any more",
+        )
+        check(
+            not any("restarting" in line for line in again),
+            f"nor says it restarted anything: {again}",
+        )
 
 
 def main() -> int:

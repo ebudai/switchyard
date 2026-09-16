@@ -93,6 +93,7 @@ Commands:
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
   cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
+  worker-pool      report what bringing a project's declared worker pool up would change
   present          map persistent role sessions into stable display slots at runtime
   attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker
@@ -109,7 +110,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, release-status, add-role, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, release-status, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
 ```
 
 <!-- switchyard-help:end -->

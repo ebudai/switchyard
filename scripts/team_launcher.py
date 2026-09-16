@@ -217,6 +217,9 @@ SWITCHYARD_COMMANDS = (
     # only write is root's own journal entry (SYRD-117).
     "release-status",
     "add-role",
+    # Reports what a declared pool of interchangeable workers would change, and
+    # what would stop it. Reads only (SYRD-37).
+    "worker-pool",
     # Records which of the owner's existing keys a tenant publishes with, and
     # rewrites the managed ssh_config block. Both are root's writes (SYRD-100).
     "set-owner-identity",
@@ -480,6 +483,285 @@ class ProjectConfig:
     roles: list[RoleConfig]
     desktop_access: dict[str, Any] | None = None
     role_state_isolation: bool = False
+    #: A pool of interchangeable workers this project may run, declared once
+    #: rather than written out as N roles. None means the project has none,
+    #: which is every project that has not asked for one (SYRD-37).
+    worker_pool: "WorkerPool | None" = None
+
+
+#: What a pool worker's identity looks like: the pool's name, a separator, and
+#: a number from 1. Written down once because the board, the panes, the
+#: worktrees and the notification targets all have to agree on it.
+WORKER_POOL_MEMBER_SEPARATOR = "-"
+#: A pool is a project's declaration, so the only limits here are the ones the
+#: rest of the system really has: a name that can be a role, a Unix account and
+#: a tmux session, and a size somebody could plausibly run.
+WORKER_POOL_MAX_SIZE = 64
+
+
+@dataclass(frozen=True)
+class WorkerPool:
+    """A set of interchangeable workers a project may run on demand.
+
+    Declared as one object -- a name, a runtime, a size -- rather than as N
+    role entries, because they differ only by number and a project that writes
+    them out by hand has eight places to keep in step. Nothing here is specific
+    to any project, runtime or size: those are what a tenant declares (SYRD-37).
+    """
+
+    name: str
+    runtime: str
+    size: int
+    #: What the workers are for, in the board's vocabulary. Kept because the
+    #: board decides what a role may do from its kind, not from its name.
+    kind: str = "implementer"
+    #: Whether a worker occupies a presentation slot whenever it runs. A pool
+    #: larger than the window can show is the ordinary case, so the default is
+    #: that workers are attached on demand rather than permanently.
+    presentation: str = "on-demand"
+    #: Each worker starts its ticket with a cleared session unless a project
+    #: says otherwise; that is what makes a pool worker interchangeable rather
+    #: than an implementer with a long memory (SYRD-135).
+    ephemeral: bool = True
+
+    @property
+    def members(self) -> tuple[str, ...]:
+        return tuple(
+            f"{self.name}{WORKER_POOL_MEMBER_SEPARATOR}{index}"
+            for index in range(1, self.size + 1)
+        )
+
+
+def parse_worker_pool(raw: Any, *, path: Path | str = "") -> WorkerPool | None:
+    """Read a project's declared pool, refusing anything it could not run."""
+    if raw in (None, {}):
+        return None
+    where = f"{path} " if path else ""
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{where}worker_pool must be an object")
+    name = str(raw.get("name") or "").strip()
+    runtime = str(raw.get("runtime") or "").strip()
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", name):
+        raise SystemExit(
+            f"{where}worker_pool name must be lowercase letters, digits and dashes: {name!r}"
+        )
+    if not runtime:
+        raise SystemExit(f"{where}worker_pool runtime is required; it is the CLI each worker runs")
+    try:
+        size = int(raw.get("size"))
+    except (TypeError, ValueError):
+        raise SystemExit(f"{where}worker_pool size must be a whole number") from None
+    if not 1 <= size <= WORKER_POOL_MAX_SIZE:
+        raise SystemExit(
+            f"{where}worker_pool size must be between 1 and {WORKER_POOL_MAX_SIZE}: {size}"
+        )
+    presentation = str(raw.get("presentation") or "on-demand").strip()
+    if presentation not in {"on-demand", "attached"}:
+        raise SystemExit(
+            f"{where}worker_pool presentation must be on-demand or attached: {presentation!r}"
+        )
+    unknown = set(raw) - {"name", "runtime", "size", "kind", "presentation", "ephemeral"}
+    if unknown:
+        raise SystemExit(f"{where}worker_pool has unknown field(s): {', '.join(sorted(unknown))}")
+    return WorkerPool(
+        name=name,
+        runtime=runtime,
+        size=size,
+        kind=str(raw.get("kind") or "implementer").strip() or "implementer",
+        presentation=presentation,
+        ephemeral=raw.get("ephemeral") is not False,
+    )
+
+
+@dataclass(frozen=True)
+class WorkerPoolFinding:
+    """One thing an operator has to know before a pool is brought up.
+
+    `blocking` separates "this would stop the upgrade" from "this is what would
+    change": a preflight that mixes them makes an operator read every line to
+    find the one that matters.
+    """
+
+    blocking: bool
+    subject: str
+    detail: str
+
+
+def worker_pool_member_role(config: ProjectConfig, member: str) -> RoleConfig | None:
+    return next((role for role in config.roles if role.role == member), None)
+
+
+def worker_pool_preflight(
+    config: ProjectConfig,
+    *,
+    owner_home: Path | None = None,
+    board_workflow: Mapping[str, Any] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[WorkerPoolFinding]:
+    """What bringing this project's declared pool up would change, and what stops it.
+
+    Reads only: the configuration, the owner's home, and the board's own
+    account of which roles it knows. Nothing here creates a role, an account, a
+    worktree or a session -- an operator is owed the whole list before any of
+    that, and a preflight that mutates is not one (SYRD-37).
+    """
+    pool = config.worker_pool
+    findings: list[WorkerPoolFinding] = []
+    if pool is None:
+        return [
+            WorkerPoolFinding(False, config.project, "declares no worker pool; nothing to prepare")
+        ]
+    home = owner_home or _owner_home_for_auth(config.run_as_user or current_user_name())
+
+    existing = {role.role for role in config.roles}
+    collisions = sorted(set(pool.members) & existing)
+    already = [member for member in collisions if _is_pool_member_role(config, member, pool)]
+    conflicting = [member for member in collisions if member not in already]
+    if conflicting:
+        findings.append(
+            WorkerPoolFinding(
+                True,
+                "role names",
+                f"{', '.join(conflicting)} already exist and are not {pool.runtime} pool workers; "
+                "a pool must not take over a role somebody else declared",
+            )
+        )
+    findings.append(
+        WorkerPoolFinding(
+            False,
+            "pool",
+            f"{pool.name}: {pool.size} {pool.runtime} worker(s) "
+            f"{pool.members[0]}..{pool.members[-1]}, {pool.kind}, "
+            f"{'ephemeral' if pool.ephemeral else 'persistent'} sessions, "
+            f"{pool.presentation} presentation",
+        )
+    )
+    missing = [member for member in pool.members if member not in existing]
+    findings.append(
+        WorkerPoolFinding(
+            False,
+            "configuration",
+            f"{len(missing)} worker role(s) would be added to {config.project}: "
+            + (", ".join(missing) if missing else "none, every worker is already declared"),
+        )
+    )
+
+    # The runtime has to exist for the account the panes run as, not for
+    # whoever is reading this report.
+    owner = config.run_as_user or current_user_name()
+    if not _owner_cli_is_installed(pool.runtime, owner_user=owner, owner_home=home, runner=runner):
+        findings.append(
+            WorkerPoolFinding(
+                True,
+                "runtime",
+                f"{pool.runtime} is not installed for owner user {owner}; "
+                f"{_missing_cli_install_clause(pool.runtime, owner)}",
+            )
+        )
+    else:
+        status = _cli_auth_status(pool.runtime, owner_user=owner, owner_home=home, runner=runner)
+        if status != "authenticated":
+            findings.append(
+                WorkerPoolFinding(
+                    True,
+                    "runtime",
+                    f"{pool.runtime} is installed but reports {status} for {owner}; every worker "
+                    "would open its provider's first run instead of a prompt",
+                )
+            )
+
+    # The board is where a worker's identity has to exist for work to be routed
+    # to it and for notifications to reach it.
+    known = _board_known_roles(board_workflow)
+    if known is None:
+        findings.append(
+            WorkerPoolFinding(
+                True,
+                "board",
+                f"{config.project}'s board runs the built-in workflow, which names its roles in "
+                "the schema: each worker needs registering through the supported add-role path "
+                "before the board will route work to it or notify it",
+            )
+        )
+    else:
+        unregistered = [member for member in pool.members if member not in known]
+        findings.append(
+            WorkerPoolFinding(
+                bool(unregistered),
+                "board",
+                f"{len(unregistered)} worker identit(ies) are not in the declared workflow: "
+                + (", ".join(unregistered) if unregistered else "every worker is already a role"),
+            )
+        )
+
+    # Presentation: a pool larger than the window can show is ordinary, and
+    # saying so is what stops somebody expecting eight panes.
+    visible = [role for role in config.roles if not role.detached]
+    if pool.presentation == "attached":
+        findings.append(
+            WorkerPoolFinding(
+                False,
+                "presentation",
+                f"every worker would hold a pane: {len(visible)} visible role(s) today plus "
+                f"{pool.size} workers",
+            )
+        )
+    else:
+        findings.append(
+            WorkerPoolFinding(
+                False,
+                "presentation",
+                f"workers run without a permanent pane; the {len(visible)} visible role(s) "
+                "already configured are unchanged, and a worker is attached when somebody "
+                "asks to watch it",
+            )
+        )
+
+    findings.append(
+        WorkerPoolFinding(
+            False,
+            "not done here",
+            "this reports only. No role, account, worktree, board registration or session is "
+            "created, and no existing role, ticket or credential is touched",
+        )
+    )
+    return findings
+
+
+def _is_pool_member_role(config: ProjectConfig, member: str, pool: WorkerPool) -> bool:
+    role = worker_pool_member_role(config, member)
+    return role is not None and _role_cli_name(role) == pool.runtime
+
+
+def _board_known_roles(board_workflow: Mapping[str, Any] | None) -> set[str] | None:
+    """Which roles the board's declared workflow names, or None if it has no document."""
+    if not board_workflow:
+        return None
+    document = board_workflow.get("document") if "document" in board_workflow else board_workflow
+    if not isinstance(document, Mapping):
+        return None
+    roles = document.get("roles")
+    if not isinstance(roles, list):
+        return None
+    return {str(role.get("name") or "") for role in roles if isinstance(role, Mapping)}
+
+
+def format_worker_pool_preflight(
+    config: ProjectConfig, findings: Sequence[WorkerPoolFinding]
+) -> list[str]:
+    blocking = [finding for finding in findings if finding.blocking]
+    lines = [
+        f"switchyard: worker pool preflight for {config.project}: "
+        f"{len(blocking)} blocker(s), {len(findings) - len(blocking)} change(s) reported"
+    ]
+    for finding in findings:
+        marker = "BLOCKER" if finding.blocking else "would"
+        lines.append(f"  {marker:<8} {finding.subject}: {finding.detail}")
+    if blocking:
+        lines.append(
+            "switchyard: nothing was changed. Clear the blocker(s) above and run this again."
+        )
+    return lines
 
 
 @dataclass(frozen=True)
@@ -2273,6 +2555,7 @@ def load_project_config(project: str, config_path: Path | None = None) -> Projec
         roles=roles,
         desktop_access=config.get("desktop_access"),
         role_state_isolation=bool(config.get("role_state_isolation", False)),
+        worker_pool=parse_worker_pool(config.get("worker_pool"), path=path),
     )
     boundary_error = _control_repository_boundary_error(parsed_config, require_existing_user=False)
     if boundary_error is not None:
@@ -24621,6 +24904,62 @@ def switchyard_release_status_command(
     for line in format_release_alignment(alignment):
         print_func(line)
     return 1 if alignment.close_refusals() or alignment.diverged else 0
+def switchyard_worker_pool_command(
+    project: str,
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    board_reader: Callable[[ProjectConfig], Mapping[str, Any] | None] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Report what bringing a project's declared worker pool up would change.
+
+    Preflight only, and deliberately the whole command for now: an operator
+    asked to upgrade a tenant with eight new workers in it is owed the list
+    before anything moves (SYRD-37).
+    """
+    entry = _resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
+    config = load_project_config(entry.slug, entry.config_path)
+    read_board = board_reader or _read_board_workflow_document
+    findings = worker_pool_preflight(config, board_workflow=read_board(config), runner=runner)
+    for line in format_worker_pool_preflight(config, findings):
+        print_func(line)
+    return 1 if any(finding.blocking for finding in findings) else 0
+
+
+def _read_board_workflow_document(config: ProjectConfig) -> Mapping[str, Any] | None:
+    """The board's own account of its workflow, or None when it has no document.
+
+    Asked of the running board rather than of a file, because what matters is
+    which roles it will actually route work to.
+    """
+    import urllib.request
+
+    url = str(config.board_url or "").strip()
+    if not url:
+        return None
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/workflow", timeout=10) as response:
+            if response.status != 200:
+                return None
+            document = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _build_switchyard_worker_pool_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard worker-pool",
+        description=(
+            "Report what bringing a project's declared pool of interchangeable workers up "
+            "would change, and what would stop it. Reads only: no role, account, worktree, "
+            "board registration or session is created, and nothing existing is touched."
+        ),
+    )
+    parser.add_argument("project", help="project name or slug")
+    return parser
 
 
 def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
@@ -24990,6 +25329,7 @@ Commands:
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
   cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
+  worker-pool      report what bringing a project's declared worker pool up would change
   present          map persistent role sessions into stable display slots at runtime
   attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker
@@ -25533,6 +25873,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "release-status":
         args = _build_switchyard_release_status_parser().parse_args(argv[1:])
         return switchyard_release_status_command(args.project, close=args.close)
+    if argv[0].casefold() == "worker-pool":
+        args = _build_switchyard_worker_pool_parser().parse_args(argv[1:])
+        return switchyard_worker_pool_command(args.project)
     if argv[0].casefold() == "add-role":
         args = _build_switchyard_add_role_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

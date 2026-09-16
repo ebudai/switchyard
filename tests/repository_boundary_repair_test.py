@@ -458,15 +458,29 @@ def readiness(plan) -> list[str]:
     The registry and configuration are deliberately not there: this is about
     which objections readiness raises, and an open boundary has to be one of
     them however the rest of the recovery looks.
+
+    Pane liveness is supplied as empty rather than left to be discovered, and
+    the runner refuses anything but `getfacl`. Discovering it would send
+    readiness to the host's tmux through `sudo -u <another account>`, which on a
+    clean machine is an interactive password prompt and not a test result. The
+    refusal is the point as much as the quiet: asking whether a boundary is open
+    must read ACLs and nothing else -- no tmux, no board socket, no sudo.
     """
     from runtime_registration_wait_test import config
+
+    def only_reading_acls(args, **kwargs):
+        program = Path(str(args[0])).name if isinstance(args, (list, tuple)) else str(args)
+        assert program == "getfacl", f"readiness reached the host for {args!r}"
+        return subprocess.run(args, **kwargs)
 
     return launcher.recovery_readiness_problems(
         plan,
         config(),
         Path("/nonexistent/config.json"),
         registry_path=Path("/nonexistent/registry.json"),
+        runner=only_reading_acls,
         process_commands=[],
+        pane_liveness_states=(),
         completion=launcher.PacketCompletion(),
         registration=launcher.RuntimeRegistrationWait(),
         print_func=lambda _line: None,

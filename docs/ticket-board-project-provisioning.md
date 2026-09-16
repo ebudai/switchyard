@@ -206,6 +206,14 @@ retry:
    GUI-owner service reapplies the grant after a reboot or a recreated socket,
    and adding this tenant's entry leaves every other tenant's exactly where it
    was.
+   Role startup also has to tell an empty commit store from a repository. The
+   confinement work creates every managed directory -- the project checkout and
+   the commit store among them -- before anything is granted on it, so by the
+   time the launcher runs, `commit_git_dir` exists and is empty. Reading mere
+   existence as an initialised bare repository is what produced `fatal: not in
+   a git directory` in testing journal 0027; the three cases are now told
+   apart, and an empty placeholder is cloned into as the owner while data at
+   that path is refused without being deleted or written over (SYRD-161).
 4. **It starts the roles through the ordinary launcher path** -- the same
    `launch_project` that `switchyard new` and `switchyard <slug>` use, which
    starts each role as the project owner when the caller is somebody else.

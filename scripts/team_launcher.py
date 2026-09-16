@@ -4071,6 +4071,55 @@ def warn_before_role_worktree_refresh(
     return None
 
 
+#: What is at the control repository path. Existence was taken for
+#: initialisation, and that stopped being true the moment provisioning started
+#: creating this directory ahead of time (SYRD-161).
+CONTROL_REPOSITORY_MISSING = "missing"
+CONTROL_REPOSITORY_READY = "repository"
+CONTROL_REPOSITORY_EMPTY = "empty"
+CONTROL_REPOSITORY_OCCUPIED = "occupied"
+#: Not an answer, and deliberately not "occupied": a caller who cannot look
+#: inside the path has no evidence about what is there, and refusing on that
+#: would turn "I cannot see" into "somebody's data is here". It is handled like
+#: an absent path, which is what the check that existed before this did with an
+#: unreadable one, and git then says what is actually wrong.
+CONTROL_REPOSITORY_UNREADABLE = "unreadable"
+
+
+def control_repository_state(path: Path) -> str:
+    """Tell a repository, a placeholder and somebody else's data apart.
+
+    `switchyard new` and the operator packet now create the commit store as an
+    owner-owned directory before anything clones into it, so that it exists to
+    be confined and granted on. A check for mere existence then read that empty
+    directory as an initialised bare repository, skipped the clone, and ran
+    `git config` against it: `fatal: not in a git directory`, exit 128, and a
+    resumed provision that could not start its roles.
+
+    The three answers are different actions. A repository is used. An empty
+    directory is the placeholder provisioning left and is cloned into. Anything
+    else is somebody's data at a path this project was pointed at, and nothing
+    here will delete or write over it.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return CONTROL_REPOSITORY_MISSING
+    except OSError:
+        return CONTROL_REPOSITORY_UNREADABLE
+    if not stat.S_ISDIR(info.st_mode):
+        return CONTROL_REPOSITORY_OCCUPIED
+    # Git's own test for a repository directory, asked of the filesystem rather
+    # than by running git: a bare repository has these three.
+    if (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir():
+        return CONTROL_REPOSITORY_READY
+    try:
+        occupied = any(path.iterdir())
+    except OSError:
+        return CONTROL_REPOSITORY_UNREADABLE
+    return CONTROL_REPOSITORY_OCCUPIED if occupied else CONTROL_REPOSITORY_EMPTY
+
+
 def ensure_control_repository(
     config: ProjectConfig,
     *,
@@ -4085,7 +4134,19 @@ def ensure_control_repository(
     if mkdir_proc.returncode != 0:
         reason = _proc_failure_reason(mkdir_proc, f"mkdir failed with exit {mkdir_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    if not config.control_repository.exists():
+    state = control_repository_state(config.control_repository)
+    if state == CONTROL_REPOSITORY_OCCUPIED:
+        reason = (
+            f"{config.control_repository} exists, is not a Git repository, and is not empty. "
+            "Nothing here will delete it or write over it: move it aside, or point this "
+            "project's commit store at another path, and start again."
+        )
+        return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    if state in (
+        CONTROL_REPOSITORY_MISSING,
+        CONTROL_REPOSITORY_EMPTY,
+        CONTROL_REPOSITORY_UNREADABLE,
+    ):
         clone_proc = run_owner_correct_git(
             git_clone_control_repository_args(config),
             runner=runner,

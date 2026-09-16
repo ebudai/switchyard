@@ -185,6 +185,9 @@ SWITCHYARD_COMMANDS = (
     "new",
     "register",
     "upgrade",
+    # Applies the reviewed repository boundary to a tenant that is already
+    # running, and nothing else in the packet (SYRD-175).
+    "repair-boundary",
     # Records, shows or withdraws this host's standing desktop approval. The
     # record existed and had one writer, behind an interactive prompt; this is
     # the front door onto it (SYRD-174).
@@ -15081,6 +15084,13 @@ def recovery_readiness_problems(
     problems.extend(
         (completion or privileged_packet_completion(plan, runner=runner)).problems
     )
+    # A tenant whose repository boundary is open is not a finished recovery, and
+    # saying it is would be the last place this could be missed (SYRD-175).
+    for objection in repository_boundary_problems(plan, runner=runner):
+        problems.append(
+            f"{objection} -- repair it with `pkexec switchyard repair-boundary "
+            f"{plan.project} --apply`"
+        )
     # Liveness comes from the owner's own tmux server and the board's runtime
     # assignments, not from argv. The marker this used to search for belongs to
     # the env wrapper that started the pane, and a long-running CLI has exec'd
@@ -15470,6 +15480,267 @@ def write_workflow_record(slug: str, document: Mapping[str, Any]) -> Path:
         os.close(descriptor)
     staged.replace(path)
     return path
+
+
+def _acl_entries(path: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> list[str]:
+    done = runner(
+        ["getfacl", "-cpn", str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+    )
+    if getattr(done, "returncode", 1) != 0:
+        return []
+    return [
+        line for line in str(getattr(done, "stdout", "") or "").splitlines()
+        if line and not line.startswith("#")
+    ]
+
+
+def repository_boundary_problems(
+    plan: "ProjectBoardProvision",
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[str]:
+    """What is still open on this tenant's repository surfaces.
+
+    Two things reach a tenant's worktrees, and they are independent: the mode
+    bits, and a named entry to the socket group the board service must be in.
+    Both are asked about here, of the filesystem rather than of a plan, because
+    the question is what this host grants right now (SYRD-171, SYRD-175).
+    """
+    from scripts.ticket_board.project_provision import (
+        roles_group_name,
+        tenant_control_repository,
+        tenant_worktree_base,
+    )
+
+    problems: list[str] = []
+    base = Path(tenant_worktree_base(plan))
+    control = Path(tenant_control_repository(plan))
+    socket_group = roles_group_name(plan.project)
+    # `getfacl -n` answers in gids, so the group is resolved to one. A group
+    # this host does not have grants nothing and is nothing to detect -- which
+    # is the same thing the packet's own `getent group` guard concludes.
+    try:
+        socket_gid: int | None = grp.getgrnam(socket_group).gr_gid
+    except KeyError:
+        socket_gid = None
+    stale = tuple(
+        prefix
+        for gid in ((socket_gid,) if socket_gid is not None else ())
+        for prefix in (f"group:{gid}:", f"default:group:{gid}:")
+    )
+
+    if base.is_dir():
+        mode = stat.S_IMODE(base.stat().st_mode)
+        if mode & 0o007:
+            problems.append(f"{base} is mode {mode:04o}, which anybody on this host can enter")
+        open_children = sorted(
+            child.name
+            for child in base.iterdir()
+            if child.is_dir() and stat.S_IMODE(child.stat().st_mode) & 0o007
+        )
+        if open_children:
+            shown = ", ".join(open_children[:3])
+            more = f" and {len(open_children) - 3} more" if len(open_children) > 3 else ""
+            problems.append(
+                f"{len(open_children)} worktree(s) under {base} are world-readable: {shown}{more}"
+            )
+        if stale and any(line.startswith(stale) for line in _acl_entries(base, runner=runner)):
+            problems.append(
+                f"{base} still grants {socket_group}, which is the board socket's group"
+            )
+    if control.is_dir() and stale:
+        if any(line.startswith(stale) for line in _acl_entries(control, runner=runner)):
+            problems.append(
+                f"{control} still grants {socket_group} -- the group the board service is in"
+            )
+    return problems
+
+
+def switchyard_repair_boundary_command(
+    slug: str,
+    *,
+    apply: bool = False,
+    euid_getter: Callable[[], int] = os.geteuid,
+    operator_resolver: Callable[[], Any] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    boundary_reader: Callable[["ProjectBoardProvision"], list[str]] | None = None,
+    journal: Any | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Apply the reviewed repository boundary to a tenant that is already running.
+
+    The generated packet carries this repair, and running the packet is not an
+    option for a tenant that is serving: it deploys a release, replays the
+    schema, seeds a workflow, installs and reloads units and starts sessions.
+    A healthy tenant needs none of that and must not have it.
+
+    So the phase is lifted out of root's own installed packet, between the
+    markers the packet writes around it, and every line is checked against the
+    shapes a boundary phase is made of before anything runs. Nothing is
+    re-rendered here and nothing is read from the tenant: the commands are the
+    bytes root installed, and the paths in them are root's (SYRD-175).
+    """
+    from scripts.ticket_board.project_provision import (
+        repository_boundary_phase,
+        repository_boundary_statements,
+    )
+    from scripts.ticket_board.rollout_journal import Attempt, resolve_operator
+
+    slug = _validate_project_slug(slug)
+    said: list[str] = []
+
+    def say(line: str) -> None:
+        said.append(line)
+        print_func(line)
+
+    if euid_getter() != 0:
+        print_func(
+            f"switchyard: repairing {slug}'s repository boundary changes ACLs and modes on "
+            f"root-owned surfaces. Run: pkexec switchyard repair-boundary {slug}"
+            + (" --apply" if apply else "")
+        )
+        return 1
+    operator = (operator_resolver or resolve_operator)()
+    if getattr(operator, "source", "") != "pkexec" or not getattr(operator, "known", False):
+        print_func(
+            f"switchyard: this repair is an operator's decision and has to be authorized as "
+            f"one. This run was elevated by "
+            f"{getattr(operator, 'source', None) or 'nothing that names a person'}, so there "
+            f"is nobody to record it against. Run: pkexec switchyard repair-boundary {slug}"
+        )
+        return 1
+
+    baseline = privileged_baseline_plan_path(slug)
+    if partial_provision_record(slug) is None:
+        print_func(
+            f"switchyard: root holds no provisioning record for {slug} at {baseline}, so there "
+            "is no boundary of its to repair."
+        )
+        return 1
+    document, problem = read_plan_no_follow(baseline, require_root_owned=True)
+    if document is None:
+        print_func(f"switchyard: {problem}")
+        return 1
+    identity = trusted_owner_identity(slug)
+    if not identity.trusted:
+        for objection in identity.problems:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to repair {slug}: root cannot establish whose installation "
+            "this is. Nothing was changed."
+        )
+        return 1
+    recorded_release = str(document.data.get("source_repo") or "").strip()
+    selected = Path(recorded_release) if recorded_release else None
+    if selected is None:
+        selected, release_problem = _resume_source_release(None)
+        if release_problem:
+            print_func(f"switchyard: {release_problem}")
+            return 1
+    plan, divergence = _resume_plan_from_record(document, identity, source_repo=selected)
+    if divergence:
+        for objection in divergence:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to repair {slug}: root cannot rebuild its plan without "
+            "changing what it installs. Nothing was changed."
+        )
+        return 1
+
+    packet_path = baseline.with_name("operator-commands.sh")
+    walk = root_controlled_problems_for(str(packet_path))
+    if walk:
+        for objection in walk:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to take a repair from a packet root does not control. "
+            "Nothing was changed."
+        )
+        return 1
+    try:
+        packet = packet_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print_func(f"switchyard: {packet_path} could not be read: {exc}")
+        return 1
+    phase, phase_problem = repository_boundary_phase(packet)
+    if phase_problem or not phase:
+        print_func(f"switchyard: {phase_problem or 'that packet carries no boundary phase'}")
+        print_func(
+            f"switchyard: {packet_path} is not a packet this can repair from. Regenerate it "
+            f"with `sudo switchyard upgrade {slug}` (or `resume-provision {slug}` for a tenant "
+            "that never finished) and run this again. Nothing was changed."
+        )
+        return 1
+
+    detect = boundary_reader or (lambda p: repository_boundary_problems(p, runner=runner))
+    open_before = detect(plan)
+    if not open_before:
+        print_func(f"switchyard: {slug}'s repository boundary is already closed; nothing to do.")
+        return 0
+
+    attempt = journal or Attempt(
+        slug,
+        ["switchyard", "repair-boundary", slug, *(["--apply"] if apply else [])],
+        operator=str(getattr(operator, "name", "") or ""),
+    )
+    attempt.operator = operator
+    attempt.open()
+    status, exit_status, detail = "failed", 1, ""
+    try:
+        say(f"switchyard: {slug}'s repository boundary is open:")
+        for objection in open_before:
+            say(f"    {objection}")
+        say(f"switchyard: the repair, taken from {packet_path}:")
+        for line in phase:
+            say(f"    {line}")
+        if not apply:
+            say(
+                f"switchyard: dry run; nothing was changed. Apply it with "
+                f"`pkexec switchyard repair-boundary {slug} --apply`."
+            )
+            status, exit_status, detail = "completed", 0, "dry-run"
+            return 0
+
+        for statement in repository_boundary_statements(phase):
+            script = "\n".join(statement)
+            done = runner(["sh", "-c", script], stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True)
+            output = (str(getattr(done, "stdout", "") or "") + str(getattr(done, "stderr", "") or "")).strip()
+            if output:
+                say(f"    {output}")
+            if getattr(done, "returncode", 1) != 0:
+                say(f"switchyard: {statement[0].strip()} failed with exit {done.returncode}.")
+                say(
+                    "switchyard: the repair stopped there. What ran before it stands; running "
+                    "this again resumes from what is still open."
+                )
+                detail = "failed mid-phase"
+                return 1
+
+        open_after = detect(plan)
+        if open_after:
+            for objection in open_after:
+                say(f"switchyard: still open after the repair: {objection}")
+            say(
+                "switchyard: the repair ran and the boundary is not closed, so this does not "
+                "report success."
+            )
+            detail = "still open"
+            return 1
+        say(
+            f"switchyard: {slug}'s repository boundary is closed "
+            f"(repaired by {operator.name} via {operator.source})"
+        )
+        say(
+            "switchyard: nothing else was touched -- no deploy, no schema, no units, no "
+            "sessions. The board service keeps its socket group, its commit store and its "
+            "board release."
+        )
+        status, exit_status, detail = "completed", 0, "repaired"
+        return 0
+    finally:
+        attempt.write("stdout", "\n".join(said) + "\n")
+        attempt.close(status=status, exit_status=exit_status, detail=detail)
 
 
 def switchyard_adopt_workflow_command(
@@ -22624,6 +22895,27 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_repair_boundary_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard repair-boundary",
+        description=(
+            "Apply the reviewed repository and worktree authority boundary to a registered "
+            "tenant. The commands are lifted from root's own installed packet, between the "
+            "markers it writes around that phase, so what runs is what root installed and "
+            "nothing else in the packet runs at all -- no deploy, no schema or workflow seed, "
+            "no RBAC, no unit installation or reload, no session startup. Writes nothing "
+            "without --apply, needs Polkit, and is kept in the rollout journal."
+        ),
+    )
+    parser.add_argument("project", help="the registered project to repair")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="run the repair; without it this reports what is open and changes nothing",
+    )
+    return parser
+
+
 def _build_switchyard_approve_desktop_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard approve-desktop",
@@ -23355,6 +23647,7 @@ Commands:
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
+  repair-boundary  apply the reviewed repository boundary to a registered tenant
   approve-desktop  record, show or withdraw this host's standing desktop approval
   adopt-workflow   record an existing project's declared workflow as root's own copy
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
@@ -23826,6 +24119,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)
+    if argv[0].casefold() == "repair-boundary":
+        args = _build_switchyard_repair_boundary_parser().parse_args(argv[1:])
+        return switchyard_repair_boundary_command(args.project, apply=args.apply)
     if argv[0].casefold() == "approve-desktop":
         args = _build_switchyard_approve_desktop_parser().parse_args(argv[1:])
         return switchyard_approve_desktop_command(

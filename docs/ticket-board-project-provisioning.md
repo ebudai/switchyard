@@ -253,6 +253,41 @@ itself is never touched: the board service stays in it, and its named read
 grants on the commit store and the board release are independent of it and
 untouched (SYRD-171).
 
+A tenant that is already registered cannot receive that repair by being
+provisioned again. `upgrade` regenerates the artifacts and runs the unit and
+deploy steps without applying the packet; `resume-provision` reads an active
+board, a live listener and an exported release as a finished recovery and never
+looks at the boundary. The only path that applied it was the whole
+first-provisioning packet -- which deploys a release, replays the schema, seeds
+a workflow, applies RBAC, installs and reloads units and starts sessions. For a
+tenant that is serving that is not a repair, so `switchyard repair-boundary
+<project>` exists to apply exactly the boundary and nothing else (SYRD-175).
+
+It is run through Polkit -- `pkexec switchyard repair-boundary <project>
+[--apply]` -- and refuses a run that only `sudo` elevated, because what it
+changes is an operator's decision and has to be recorded against a person. What
+it runs is not re-rendered here and nothing is read from the tenant: the phase
+is lifted out of root's own installed packet in
+`/etc/switchyard/provision/<project>/operator-commands.sh`, between the
+`# >>> switchyard repository boundary` markers the packet writes around it, and
+every line is checked against the shapes a boundary phase is made of before
+anything runs. A packet root does not exclusively control, or one generated
+before the phase existed, is a refusal naming `switchyard upgrade` rather than a
+repair from a document somebody else could have written. The guarded blocks are
+run whole, the way the shell would group them, so `if getent group ...; then`
+still decides whether the retirement runs at all.
+
+Without `--apply` it prints what is open and the exact lines it would run and
+changes nothing. With it, each statement runs, the boundary is detected again
+afterwards, and a boundary that is still open is reported as a failure -- this
+command cannot report success over an open boundary. Everything is written to
+the rollout journal under the operator Polkit named. Nothing else is touched:
+no deploy, no schema, no workflow seed, no RBAC, no unit installation or reload,
+no role registration and no session startup, so PIDs, release pointers, runtime
+assignments and panes are exactly as they were. The same detection is part of
+recovery readiness, where an open boundary is an objection that names this
+command, so a recovery cannot report itself finished over one.
+
 The one phase of the packet that is not a repair is the initial workflow seed.
 It deletes the stages and transitions a board has and installs the project's
 own, which is what a board being brought up needs and the last thing a running

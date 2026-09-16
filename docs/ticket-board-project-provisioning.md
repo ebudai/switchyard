@@ -160,6 +160,19 @@ the release that failed, so re-running it would repeat the defect it failed on.
 Nothing the tenant owns is touched and running it twice produces the same
 artifacts.
 
+A project that declares its own workflow has that document recorded where only
+root can write it -- `workflow.json`, beside root's plan record, carrying a
+digest of what it holds -- when root first generates that project's artifacts.
+Regeneration consults that copy and no other. The tenant's configuration
+carries the document too, and it is never read here: it decides which roles
+exist and what each of them may call, so a copy the account every role runs as
+can write is a copy that account could grant itself with. A record that exists
+and cannot be used -- a digest that does not match, a mode anybody else could
+write through, a document the validator rejects -- is a refusal rather than a
+reason to fall back. A project that declares a workflow root holds no record of
+seeds nothing at all: not the declared one, which root cannot vouch for, and
+not the default one, which is somebody else's (SYRD-165).
+
 The one phase of the packet that is not a repair is the initial workflow seed.
 It deletes the stages and transitions a board has and installs the project's
 own, which is what a board being brought up needs and the last thing a running

@@ -3222,8 +3222,26 @@ ALTER TABLE ticket_board.ticket_notification_queue
 
 def render_workflow_sql(plan: ProjectBoardProvision, *, schema_sql: str | None = None) -> str:
     if plan.workflow is not None:
-        document = json.dumps(plan.workflow).replace("'", "''")
+        # Canonical, so the same workflow renders the same bytes however it
+        # reached this plan -- generated here, read back from root's record, or
+        # migrated through a plan document. An artifact that changed spelling
+        # on every regeneration would look like a change to every check that
+        # compares what root installed with what root would install (SYRD-165).
+        document = json.dumps(plan.workflow, sort_keys=True).replace("'", "''")
         return "BEGIN;\nSET LOCAL ROLE ticket_board_service;\nSELECT set_config('ticket_board.project','" + plan.project + "',true);\nSELECT set_config('ticket_board.caller_role','director',true);\nSELECT ticket_board.apply_declared_workflow('" + document + "'::jsonb);\nCOMMIT;\n"
+    if plan.workflow_seed == UNVERIFIED_DECLARED_WORKFLOW:
+        return f"""-- {plan.project} declares its own workflow, and root holds no verified copy of it.
+--
+-- Root will not seed a workflow it cannot vouch for, and it will not seed the
+-- default one in its place: that would replace this project's roles, stages,
+-- transitions and labels with somebody else's on any board not yet carrying
+-- them. The board keeps what it is running, and this phase does nothing.
+--
+-- Root records a project's declared workflow when it first generates that
+-- project's artifacts. A project provisioned before root kept one has no such
+-- record, and re-provisioning through `switchyard new` is what writes it
+-- (SYRD-165).
+"""
     if plan.workflow_seed == "pgu-full":
         return f"""-- {plan.project} keeps the full workflow seeded by schema.sql.
 -- No per-project workflow override is applied.
@@ -3925,6 +3943,87 @@ def tenant_control_grant_name(project: str) -> str:
     return f"{project}-control-grant.json"
 
 
+#: Root's own copy of a project's declared workflow, written beside its plan.
+#: The document decides which roles exist, what each may call, and every stage
+#: and transition the board will accept -- which is to say it decides authority.
+#: A copy of it that the account every role runs as can write is a copy that
+#: account can grant itself with, so root keeps one where only root can, and
+#: regeneration reads that and nothing else (SYRD-165).
+WORKFLOW_RECORD_NAME = "workflow.json"
+
+#: What a plan says when this project declares a workflow and root holds no
+#: verified copy of it. Root will not seed a workflow it cannot vouch for, and
+#: it will not quietly seed the default one in its place: the board keeps what
+#: it is running, and the packet says so.
+UNVERIFIED_DECLARED_WORKFLOW = "declared-unverified"
+
+
+def workflow_document_digest(document: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def render_workflow_record(plan: ProjectBoardProvision) -> str:
+    """The declared workflow, as root records it for itself."""
+    if plan.workflow is None:
+        raise SystemExit("a workflow record is only written for a declared workflow")
+    return (
+        json.dumps(
+            {
+                "project": plan.project,
+                "digest": workflow_document_digest(plan.workflow),
+                "document": plan.workflow,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def workflow_record_document(
+    raw: Mapping[str, object] | None, *, project: str
+) -> tuple[dict | None, str]:
+    """The document a workflow record carries, or why it may not be used.
+
+    Every answer but a complete, self-consistent record for this project is a
+    refusal. A record whose digest does not match the document it carries has
+    been edited by something that did not write it, and the whole point of
+    keeping it here is that nothing else should have.
+    """
+    if raw is None:
+        return None, f"root holds no recorded workflow for {project}"
+    if not isinstance(raw, Mapping):
+        return None, f"root's workflow record for {project} is not a document"
+    recorded_project = str(raw.get("project") or "").strip()
+    if recorded_project != project:
+        return None, (
+            f"root's workflow record names project {recorded_project!r}, not {project!r}"
+        )
+    document = raw.get("document")
+    if not isinstance(document, dict):
+        return None, f"root's workflow record for {project} carries no document"
+    recorded_digest = str(raw.get("digest") or "").strip()
+    actual = workflow_document_digest(document)
+    if recorded_digest != actual:
+        return None, (
+            f"root's workflow record for {project} does not match its own digest "
+            f"({recorded_digest or 'none recorded'} vs {actual}); it was changed by "
+            "something that did not write it"
+        )
+    try:
+        try:
+            from .workflow_config import validate
+        except ImportError:  # pragma: no cover - direct script execution
+            from workflow_config import validate
+
+        validated = validate(document, project=project)
+    except (ValueError, SystemExit) as exc:
+        return None, f"root's recorded workflow for {project} is not usable: {exc}"
+    return validated, ""
+
+
 def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
     """Generated files root installs or executes, in the order write_artifacts emits them."""
     return (
@@ -3939,6 +4038,7 @@ def privileged_artifact_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
         f"{plan.project}-database.sql",
         f"{plan.project}-workflow.sql",
         "operator-commands.sh",
+        *((WORKFLOW_RECORD_NAME,) if plan.workflow is not None else ()),
     )
 
 
@@ -3973,6 +4073,11 @@ def write_artifacts(plan: ProjectBoardProvision, output_dir: Path, *, enable_own
         ),
         f"{plan.project}-database.sql": render_database_sql(plan),
         f"{plan.project}-workflow.sql": render_workflow_sql(plan),
+        **(
+            {WORKFLOW_RECORD_NAME: render_workflow_record(plan)}
+            if plan.workflow is not None
+            else {}
+        ),
         "operator-commands.sh": render_operator_commands(plan, enable_owner_linger=enable_owner_linger),
     }
     for name, text in files.items():

@@ -6495,6 +6495,39 @@ def _regenerated_field_divergence(
     return diverged
 
 
+def workflow_record_path(project: str) -> Path:
+    from scripts.ticket_board.project_provision import WORKFLOW_RECORD_NAME
+
+    return privileged_baseline_plan_path(project).with_name(WORKFLOW_RECORD_NAME)
+
+
+def recorded_declared_workflow(project: str) -> tuple[dict | None, str]:
+    """The declared workflow root holds for this project, or why it holds none.
+
+    Root's own copy, read the way root reads its other authorities: by fd,
+    refusing a symlink at every component, and required to belong to root and
+    to be unwritable by anybody else. The tenant's configuration carries this
+    document too, and that copy is not consulted here -- it decides which roles
+    exist and what each of them may call, so a copy the account every role runs
+    as can write is a copy that account could grant itself with (SYRD-165).
+    """
+    from scripts.ticket_board.project_provision import workflow_record_document
+
+    path = workflow_record_path(project)
+    try:
+        # Absence and unusability are different answers, and asked separately
+        # rather than read out of the wording of a refusal.
+        path.lstat()
+    except FileNotFoundError:
+        return None, f"root holds no recorded workflow for {project}"
+    except OSError as exc:
+        return None, f"root's workflow record for {project} could not be read: {exc}"
+    document, problem = read_plan_no_follow(path, require_root_owned=True)
+    if document is None:
+        return None, problem
+    return workflow_record_document(document.data, project=project)
+
+
 def reconstruct_privileged_baseline(
     project: str,
     provision_dir: Path,
@@ -6597,7 +6630,53 @@ def reconstruct_privileged_baseline(
         plan,
         role_worktrees=tuple((role, str(worktree_base / role)) for role, _account in plan.role_accounts),
     )
+    plan, workflow_problem = plan_workflow_from_root(
+        plan, declares_workflow=tenant_data.get("workflow") is not None
+    )
+    if workflow_problem:
+        return None, f"switchyard: {workflow_problem}"
     return plan, ""
+
+
+def plan_workflow_from_root(
+    plan: ProjectBoardProvision,
+    *,
+    root_plan_document: Mapping[str, Any] | None = None,
+    declares_workflow: bool = False,
+) -> tuple[ProjectBoardProvision, str]:
+    """Put root's own recorded workflow on a plan root is rebuilding.
+
+    A rebuilt baseline used to carry no workflow document at all, so a project
+    that declares one was regenerated as though it declared none -- and the
+    packet then carried the DEFAULT seed. On an established board that seeds
+    nothing (SYRD-164), but a fresh or interrupted board with no tickets would
+    have been given somebody else's roles, stages and transitions instead of
+    its own (SYRD-165).
+
+    Only sources root owns are consulted: its recorded workflow first, and then
+    -- for a project provisioned before root kept one -- the document on root's
+    own plan record, which regeneration then writes back as a record. A record
+    that exists and cannot be used is a refusal rather than a reason to fall
+    back, because falling back is what an edit to it would be for.
+
+    When root has neither and the project declares a workflow, that is not
+    permission to adopt the tenant's copy and not permission to seed the
+    default either: the plan is marked as one root cannot vouch for, and the
+    workflow phase of its packet does nothing at all.
+    """
+    from scripts.ticket_board.project_provision import UNVERIFIED_DECLARED_WORKFLOW
+
+    document, problem = recorded_declared_workflow(plan.project)
+    if document is not None:
+        return replace(plan, workflow=document), ""
+    if "holds no recorded workflow" not in problem:
+        return plan, problem
+    if root_plan_document is not None:
+        return replace(plan, workflow=dict(root_plan_document)), ""
+    if not declares_workflow:
+        # This project declares no workflow; the default seed is its own.
+        return plan, ""
+    return replace(plan, workflow=None, workflow_seed=UNVERIFIED_DECLARED_WORKFLOW), ""
 
 
 def _privileged_baseline_plan(
@@ -14965,9 +15044,16 @@ def _resume_plan_from_record(
         board_service_traversal=bool(recorded.get("board_service_traversal", True)),
         control_user=str(recorded.get("control_user") or ""),
         audit_roles=_validated_role_names(recorded.get("audit_roles"), "audit_roles", []) or None,
-        workflow=recorded.get("workflow") or None,
     )
-    return plan, _regenerated_field_divergence(plan, recorded)
+    plan, workflow_problem = plan_workflow_from_root(
+        plan,
+        root_plan_document=recorded.get("workflow") or None,
+        declares_workflow=recorded.get("workflow") is not None,
+    )
+    divergence = _regenerated_field_divergence(plan, recorded)
+    if workflow_problem:
+        divergence = [workflow_problem, *divergence]
+    return plan, divergence
 
 
 def switchyard_register_command(

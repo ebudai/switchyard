@@ -15729,6 +15729,25 @@ def repository_boundary_problems(
         mode = stat.S_IMODE(base.stat().st_mode)
         if mode & 0o007:
             problems.append(f"{base} is mode {mode:04o}, which anybody on this host can enter")
+        # What the base will do to the NEXT worktree, not only what it did to
+        # the last one. Without a default entry closing `other`, every tree a
+        # role pane or an implementer creates here is made with the ordinary
+        # umask and is world-readable -- which is how a base repaired at syrd
+        # journal 0090 was carrying two open ticket worktrees by 0092
+        # (SYRD-181).
+        entries = _acl_entries(base, runner=runner)
+        inherited = [line for line in entries if line.startswith("default:other::")]
+        if not inherited:
+            problems.append(
+                f"{base} grants no inherited closure, so every worktree created under it "
+                "from now on will be world-readable"
+            )
+        elif any(line.split(":")[-1].strip("-") for line in inherited):
+            granted = ", ".join(sorted(line.split(":")[-1] for line in inherited))
+            problems.append(
+                f"{base} passes {granted} to everything created under it, so new worktrees "
+                "are readable beyond the tenant"
+            )
         open_children = sorted(
             child.name
             for child in base.iterdir()

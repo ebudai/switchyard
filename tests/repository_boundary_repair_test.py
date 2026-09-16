@@ -572,6 +572,11 @@ def privileged_cases() -> int:
         for path in (correct, correct_base, correct_base / "main"):
             os.chown(path, OWNER_UID, OWNER_UID)
             os.chmod(path, 0o750)
+        # Correct now includes what the base passes on: a base that closes its
+        # own trees and lets the next one be created world-readable is not
+        # closed, it is closed until somebody runs `git worktree add`
+        # (SYRD-181).
+        run(["setfacl", "-m", provisioning().INHERITED_WORKTREE_CLOSURE, str(correct_base)])
         other = build_plan(
             project="other",
             owner_user=str(OWNER_UID),

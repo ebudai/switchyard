@@ -1658,6 +1658,12 @@ def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
 #: later adds a member deliberately.
 TENANT_SOURCE_MODE = "0750"
 
+#: What every directory created under a tenant's worktree base inherits. The
+#: same access the base itself has -- the tenant reads and writes, the tenant's
+#: own group may traverse, and nobody else exists -- installed as a DEFAULT so
+#: the kernel applies it to trees nothing in this product creates (SYRD-181).
+INHERITED_WORKTREE_CLOSURE = "d:u::rwx,d:g::r-x,d:o::---"
+
 
 def tenant_source_confinement_commands(
     *, owner_user: str, owner_home: str, checkout: str
@@ -1893,6 +1899,22 @@ def tenant_worktree_confinement_commands(
     commands.append(
         f"    sudo find {shell_quote(worktree_base)} -mindepth 1 -maxdepth 1 -type d "
         "-exec chmod o-rwx {} +"
+    )
+    # And what the base does to the NEXT tree, not only to the ones already in
+    # it. The sweep closes what is there; the next `git worktree add` -- a role
+    # pane being created, or an implementer starting a ticket -- makes a
+    # directory with the ordinary umask and reopens the boundary. Live on syrd:
+    # the base was repaired at journal 0090 and two later ticket worktrees
+    # stood at 0755 by 0092.
+    #
+    # A default ACL is the only thing that holds without the creator
+    # cooperating: the kernel intersects it with whatever mode the caller asks
+    # for, so anything created here is closed to the world whoever creates it
+    # and however. Inside the same guard as the sweep, for the same reason: a
+    # partial run must not die on a base that has not been made yet (SYRD-181).
+    commands.append(
+        f"    sudo setfacl -m {shell_quote(INHERITED_WORKTREE_CLOSURE)} "
+        f"{shell_quote(worktree_base)}"
     )
     commands.append("fi")
     return commands

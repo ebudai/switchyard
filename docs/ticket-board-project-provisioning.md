@@ -283,6 +283,30 @@ itself is never touched: the board service stays in it, and its named read
 grants on the commit store and the board release are independent of it and
 untouched (SYRD-171).
 
+Closing the trees that exist is only half of it. A worktree base accumulates a
+directory per ticket, created by `git worktree add` -- by a role pane being set
+up, or by an implementer starting a ticket -- and a new directory is made with
+the ordinary umask, 0755. syrd's base was repaired at rollout journal 0090 with
+zero world-readable trees, and by 0092 two later ticket worktrees stood at 0755
+again. Nothing had undone the repair; the repair had simply never spoken about
+directories that did not exist when it ran.
+
+So the base carries a default ACL -- `d:u::rwx,d:g::r-x,d:o::---`, its own
+access made inheritable -- and the kernel intersects that with whatever mode a
+creator asks for. Anything made under the base is closed to the world whoever
+makes it and however: git, the launcher, an implementer's own command, a script
+nobody has written yet. It grants nobody anything new, because every entry is
+the file's own owner, group and world rather than a named principal, and it is
+installed inside the same `if [ -d ... ]` guard as the sweep, for the same
+reason: a partial run must not fail on a base that has not been made yet.
+
+The detection asks about it too, so an open base is reported before the next
+worktree rather than after it: a base with no inherited closure, or one that
+passes anything to `other`, is an open boundary even when every tree currently
+in it is closed. `switchyard repair-boundary <project> --apply` installs it and
+sweeps the trees already there in the same run, which is the supported repair
+for a tenant like syrd that has both problems at once (SYRD-181).
+
 A tenant that is already registered cannot receive that repair by being
 provisioned again. `upgrade` regenerates the artifacts and runs the unit and
 deploy steps without applying the packet; `resume-provision` reads an active

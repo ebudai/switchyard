@@ -2600,11 +2600,27 @@ SELECT EXISTS (
             and current_assignee == "director"
             and target_role == "director"
         )
-        if kind in {"transition", "idle_reminder", "nudge", "triage"} and (
+        # Scheduling flags hold owner work and optional reminders. They do
+        # not undo a completed handoff to the Director's final review.
+        if kind in {"idle_reminder", "nudge", "triage"} and (
             manually_controlled or parked or has_unresolved_blockers
         ) and not required_final_review_handoff:
-            # Scheduling flags hold owner work and optional reminders. They do
-            # not undo a completed handoff to the Director's final review.
+            return False
+        # ... and manual control does not undo any other handoff either. A
+        # transition notification exists only because somebody OTHER than the
+        # recipient moved this ticket into a stage that role owns: both of
+        # those were decided when the row was enqueued, and a held ticket
+        # enqueues one precisely when the work changes hands (SYRD-107).
+        # Dropping it here undid that fix for every held ticket. Live on
+        # SYRD-146: submitted commit-exempt to inspection, Inspector assigned,
+        # the listener running with its original PID, and nothing ever sent --
+        # the Director had put the rollout under manual control while the
+        # handoff was still queued, and every retry threw it away as stale
+        # (SYRD-178). Parked and blocked still stop it: neither says the work
+        # can be done now.
+        if kind == "transition" and (
+            parked or has_unresolved_blockers
+        ) and not required_final_review_handoff:
             return False
 
         current_target_role = self._current_target_role(kind, current_state, current_assignee)

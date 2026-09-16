@@ -298,6 +298,13 @@ def privileged_cases() -> int:
                         # installs desktop access, and that is not something
                         # these cases are asking about (SYRD-158).
                         desktop_approval_path=root / "no-desktop-approval.json",
+                        # Runtime registration is asynchronous and belongs to
+                        # the panes; these cases are about the phases around it,
+                        # so what the board would eventually say is answered
+                        # here rather than waited for (SYRD-162).
+                        registration=kwargs.pop(
+                            "registration", launcher.RuntimeRegistrationWait()
+                        ),
                         process_commands=kwargs.pop("process_commands", commands),
                         session_statuses=kwargs.pop("session_statuses", statuses),
                         print_func=said.append,
@@ -363,10 +370,16 @@ def privileged_cases() -> int:
         # 5. Readiness is proven, not assumed: a role with no pane and no
         #    session record is a recovery that is not finished, and it names
         #    the role rather than reporting success.
-        status, said = resume(process_commands=[], session_statuses=[])
+        status, said = resume(
+            process_commands=[],
+            session_statuses=[],
+            registration=launcher.RuntimeRegistrationWait(
+                exited=tuple(role.role for role in config.roles)
+            ),
+        )
         assert status == 1, said
         assert any("has no running pane" in line for line in said), said
-        assert any("has not registered a runtime session" in line for line in said), said
+        assert any("will not register a runtime" in line for line in said), said
         assert any("resume-provision" in line and "again" in line for line in said), said
         assert entry.exists(), "a registration already made is not undone by an unready launch"
         checks += 1

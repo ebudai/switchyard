@@ -350,6 +350,10 @@ def privileged_cases() -> int:
                         euid_getter=lambda: 0,
                         completion_reader=lambda _plan: launcher.PacketCompletion(()),
                         desktop_approval_path=record if approval_path is None else approval_path,
+                        # Runtime registration is the panes' own asynchronous
+                        # work; these cases are about the desktop install that
+                        # precedes them (SYRD-162).
+                        registration=launcher.RuntimeRegistrationWait(),
                         desktop_installer=installer,
                         process_commands=kwargs.pop("process_commands", commands),
                         session_statuses=kwargs.pop("session_statuses", statuses),

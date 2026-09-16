@@ -48,6 +48,11 @@ def runtime_assignment_config(
     config: team_launcher.ProjectConfig,
     *,
     opener: Callable[[str], Any] | None = None,
+    wait_seconds: float = 0.0,
+    poll_seconds: float = team_launcher.RUNTIME_REGISTRATION_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    print_func: Callable[[str], None] | None = None,
 ) -> team_launcher.ProjectConfig:
     """Resolve every shared-account worker from the board's current assignment.
 
@@ -55,9 +60,45 @@ def runtime_assignment_config(
     routing evidence.  A replacement pane may use a recovery target, so display
     attachment must consume the same atomic row as notifications and write
     authority instead of reconstructing a conventional tmux name (SYRD-69).
+
+    `wait_seconds` is for the one caller that has just started the panes it is
+    asking about. Registration is the pane's own asynchronous work, so a launch
+    that sampled once refused its own startup: testing journal 0032 stopped on
+    a single role that registered seconds later. Waiting is bounded and
+    announced, and every refusal below -- a foreign target, a runtime that does
+    not match the projection -- still happens on the first reading, because
+    those are not races (SYRD-162).
     """
     if not config.role_state_isolation:
         return config
+    deadline = monotonic() + max(0.0, wait_seconds)
+    announced = False
+    while True:
+        resolved, missing = _resolved_runtime_assignments(config, opener=opener)
+        if not missing:
+            return team_launcher.replace(config, roles=resolved)
+        if monotonic() >= deadline:
+            raise SystemExit(
+                "switchyard: no live runtime assignment for configured role(s): "
+                + ", ".join(sorted(missing))
+            )
+        if not announced:
+            announced = True
+            if print_func is not None:
+                print_func(
+                    f"switchyard: waiting up to {wait_seconds:g}s for "
+                    + ", ".join(sorted(missing))
+                    + " to register a runtime with the board"
+                )
+        sleep(poll_seconds)
+
+
+def _resolved_runtime_assignments(
+    config: team_launcher.ProjectConfig,
+    *,
+    opener: Callable[[str], Any] | None = None,
+) -> tuple[list[team_launcher.RoleConfig], list[str]]:
+    """One reading: the roles resolved from it, and the ones it does not name."""
     url = f"{config.board_url.rstrip('/')}/api/runtime-assignments"
     open_url = opener or (lambda target: urllib_request.urlopen(target, timeout=3))
     try:
@@ -100,12 +141,7 @@ def runtime_assignment_config(
                 role, target=target, tmux_session=target.split(":", 1)[0]
             )
         )
-    if missing:
-        raise SystemExit(
-            "switchyard: no live runtime assignment for configured role(s): "
-            + ", ".join(sorted(missing))
-        )
-    return team_launcher.replace(config, roles=resolved)
+    return resolved, missing
 
 
 def display_session_name(project: str, slot: int) -> str:
@@ -1506,9 +1542,13 @@ def launch_presentation(
     state_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     process_launcher: Callable[..., Any] | None = None,
+    assignment_wait_seconds: float = 0.0,
+    print_func: Callable[[str], None] | None = None,
 ) -> int:
     """Restore saved slots during ordinary project launch without changing workers."""
-    config = runtime_assignment_config(config)
+    config = runtime_assignment_config(
+        config, wait_seconds=assignment_wait_seconds, print_func=print_func
+    )
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
     owner_runner = _tmux_runner(config, runner)

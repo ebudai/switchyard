@@ -217,7 +217,20 @@ retry:
 4. **It starts the roles through the ordinary launcher path** -- the same
    `launch_project` that `switchyard new` and `switchyard <slug>` use, which
    starts each role as the project owner when the caller is somebody else.
-5. **It proves the result before calling it done**: the project is registered
+5. **It waits, within a bound, for what its own startup set in motion.**
+   Registering a runtime is the pane's own asynchronous work -- the role's CLI
+   starts, `ticket-board-register-runtime` announces it, the board records the
+   row -- so a readiness check that sampled the instant the launcher returned
+   was asking before the answer existed, and told an operator that a successful
+   recovery had failed (testing journals 0032 and 0037, SYRD-162). Both places
+   that ask now poll for up to 90 seconds, say once what they are waiting for,
+   name exactly the roles still missing if the bound passes, and stop
+   immediately for a session that has actually exited, because that one will
+   not register however long anyone waits. Nothing restarts a pane or clears a
+   session to make the answer arrive, and every identity check on an assignment
+   -- a foreign target, a runtime that does not match the projection -- still
+   refuses on the first reading, because those are not races.
+6. **It proves the result before calling it done**: the project is registered
    and the entry points at the verified configuration, the board and listener
    are running, every configured role has a live pane, and every role has
    registered a runtime session with the board. Anything missing is named, and

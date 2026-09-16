@@ -1208,7 +1208,7 @@ def run_team_launcher_tests(module_globals: dict[str, object], *, first: tuple[s
         team_launcher.process_authority_board_compatibility = lambda _config: (
             True, "simulated process-authority board"
         )
-        presentation_controller.runtime_assignment_config = lambda config: config
+        presentation_controller.runtime_assignment_config = lambda config, **_kwargs: config
         run_module_tests(module_globals, first=first)
     finally:
         team_launcher.process_authority_board_compatibility = original_authority_probe

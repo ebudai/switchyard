@@ -1504,7 +1504,7 @@ def test_fresh_project_launches_without_a_role_account_handoff() -> None:
         team_launcher.process_authority_board_compatibility = lambda _config: (
             True, "simulated provisioned process-authority board"
         )
-        presentation_controller.runtime_assignment_config = lambda config: config
+        presentation_controller.runtime_assignment_config = lambda config, **_kwargs: config
         with tempfile.TemporaryDirectory(prefix="switchyard-deferred-launch.") as tmp:
             tmp_path = Path(tmp)
             source_repo = tmp_path / "source-repo"

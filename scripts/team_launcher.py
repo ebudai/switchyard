@@ -7866,6 +7866,11 @@ def launch_project(
                 layout=LAYOUT_MODE_VIEWER,
                 state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
                 runner=runner,
+                # The panes this is about were started a moment ago, and their
+                # runtime registration is their own asynchronous work. Sampling
+                # once refused a launch that had in fact succeeded (SYRD-162).
+                assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
+                print_func=print_func,
             )
         elif launchable_viewer_roles:
             launch_result = launch_tmux_viewer_session(
@@ -7919,6 +7924,9 @@ def launch_project(
                 state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
                 runner=runner,
                 process_launcher=konsole_process_launcher,
+                # Same race, same bound: these workers were started above.
+                assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
+                print_func=print_func,
             )
         else:
             launch_result = launch_konsole_window(
@@ -14355,6 +14363,132 @@ def install_recovered_desktop_access(
     return configured, True
 
 
+#: How long a role that has just been started may take to register its runtime
+#: with the board before anything calls it missing. Registration is the pane's
+#: own asynchronous work -- the role's CLI starts, `ticket-board-register-runtime`
+#: announces it, and the board records the assignment -- so a check that samples
+#: the moment the launcher returns is asking before the answer exists. Testing
+#: journal 0032 failed on one role that registered seconds later, and 0037 on
+#: all five (SYRD-162).
+RUNTIME_REGISTRATION_TIMEOUT_SECONDS = 90.0
+RUNTIME_REGISTRATION_POLL_SECONDS = 2.0
+
+
+def read_runtime_assignments(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[set[str], str]:
+    """Which roles the running board currently holds a runtime assignment for.
+
+    Read over the board's own socket, and from the same atomic rows write
+    authority and notifications use, so this is the board's answer rather than
+    an inference from what the launcher just did.
+    """
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/runtime-assignments")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        if response.status != 200:
+            return set(), f"the board answered HTTP {response.status} for its runtime assignments"
+        payload = json.loads(body)
+    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
+        return set(), f"the board's runtime assignments could not be read: {exc}"
+    if not isinstance(payload, dict) or payload.get("project") != config.project:
+        return set(), "the runtime assignment response belongs to another project"
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, dict):
+        return set(), "the runtime assignment response has no assignments object"
+    return {
+        str(name)
+        for name, assignment in assignments.items()
+        if isinstance(assignment, dict) and str(assignment.get("actual_target") or "").strip()
+    }, ""
+
+
+@dataclass(frozen=True)
+class RuntimeRegistrationWait:
+    """What a bounded wait for runtime registration ended up finding."""
+
+    missing: tuple[str, ...] = ()
+    exited: tuple[str, ...] = ()
+    problem: str = ""
+    waited_seconds: float = 0.0
+
+    @property
+    def registered(self) -> bool:
+        return not self.missing and not self.exited and not self.problem
+
+
+def await_runtime_registration(
+    config: ProjectConfig,
+    roles: Sequence[RoleConfig] | None = None,
+    *,
+    read: Callable[[], tuple[set[str], str]] | None = None,
+    alive: Callable[[RoleConfig], bool] | None = None,
+    timeout_seconds: float = RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
+    poll_seconds: float = RUNTIME_REGISTRATION_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    print_func: Callable[[str], None] = print,
+) -> RuntimeRegistrationWait:
+    """Wait, within a bound, for configured roles to register their runtimes.
+
+    Bounded so a role that never registers is still an answer; observable so
+    the wait is not silence; and short-circuited on a session that has exited,
+    because a pane that is gone will not register no matter how long anyone
+    waits and saying so immediately is more useful than the full timeout.
+
+    Nothing here restarts, clears or re-registers anything. The registration
+    belongs to the pane, and this only decides when to stop asking.
+    """
+    selected = tuple(roles if roles is not None else config.roles)
+    if not selected:
+        return RuntimeRegistrationWait()
+    reader = read or (lambda: read_runtime_assignments(config))
+    started = monotonic()
+    deadline = started + max(0.0, timeout_seconds)
+    announced = False
+    while True:
+        registered, problem = reader()
+        missing = [role for role in selected if role.role not in registered]
+        if not missing and not problem:
+            return RuntimeRegistrationWait(waited_seconds=monotonic() - started)
+        exited = [role for role in missing if alive is not None and not alive(role)]
+        if exited:
+            # Promptly: the answer will not change, and the operator needs the
+            # name of the session that died rather than a minute of waiting.
+            return RuntimeRegistrationWait(
+                missing=tuple(role.role for role in missing if role not in exited),
+                exited=tuple(role.role for role in exited),
+                problem=problem,
+                waited_seconds=monotonic() - started,
+            )
+        if monotonic() >= deadline:
+            return RuntimeRegistrationWait(
+                missing=tuple(role.role for role in missing),
+                problem=problem,
+                waited_seconds=monotonic() - started,
+            )
+        if not announced:
+            announced = True
+            print_func(
+                f"switchyard: waiting up to {timeout_seconds:g}s for "
+                + ", ".join(role.role for role in missing)
+                + " to register a runtime with the board"
+            )
+        sleep(poll_seconds)
+
+
 def recovery_readiness_problems(
     plan: "ProjectBoardProvision",
     config: ProjectConfig,
@@ -14365,6 +14499,10 @@ def recovery_readiness_problems(
     process_commands: Sequence[str] | None = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
     completion: PacketCompletion | None = None,
+    registration: RuntimeRegistrationWait | None = None,
+    runtime_wait_roles: Sequence[RoleConfig] | None = None,
+    runtime_wait_seconds: float = RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
+    print_func: Callable[[str], None] = print,
 ) -> list[str]:
     """Everything that must be true before a recovery may be called finished.
 
@@ -14401,22 +14539,42 @@ def recovery_readiness_problems(
     for role in config.roles:
         if not _role_has_pane_process(role, commands):
             problems.append(f"{role.role} has no running pane ({role.target})")
-    statuses = (
-        list(session_statuses)
-        if session_statuses is not None
-        else launch_session_record_statuses(
+    # Registration is the pane's own asynchronous work, and this readiness check
+    # runs immediately after the launch that started those panes. Sampling once
+    # asked before the answer existed, and reported a healthy project as a failed
+    # recovery an operator was told to retry by hand (SYRD-162).
+    live = {role.role for role in config.roles if _role_has_pane_process(role, commands)}
+    waited = (
+        registration
+        if registration is not None
+        else await_runtime_registration(
             config,
-            config.roles,
-            timeout_seconds=LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
-            poll_seconds=LAUNCH_SESSION_RECORD_POLL_SECONDS,
+            runtime_wait_roles or config.roles,
+            alive=lambda role: role.role in live,
+            timeout_seconds=runtime_wait_seconds,
+            print_func=print_func,
         )
     )
-    found = {status.role for status in statuses if status.found}
-    for role in config.roles:
-        if role.role not in found:
-            problems.append(
-                f"{role.role} has not registered a runtime session with the board"
-            )
+    for role in waited.exited:
+        problems.append(
+            f"{role} has no running session, so it will not register a runtime"
+        )
+    for role in waited.missing:
+        problems.append(
+            f"{role} did not register a runtime with the board within "
+            f"{runtime_wait_seconds:g}s"
+        )
+    if waited.problem:
+        problems.append(waited.problem)
+    if session_statuses is not None:
+        # The session records, when a caller supplies them: a second reading of
+        # the same registration, from the tenant's own session directory.
+        found = {status.role for status in session_statuses if status.found}
+        for role in config.roles:
+            if role.role not in found and role.role not in waited.missing and role.role not in waited.exited:
+                problems.append(
+                    f"{role.role} has not registered a runtime session with the board"
+                )
     return problems
 
 
@@ -14436,6 +14594,8 @@ def _finish_provision_after_packet(
     start_roles: bool = True,
     process_commands: Sequence[str] | None = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
+    registration: RuntimeRegistrationWait | None = None,
+    runtime_wait_seconds: float = RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
     print_func: Callable[[str], None] = print,
 ) -> int:
     """Register the project and start its roles, and say what is still missing.
@@ -14535,6 +14695,9 @@ def _finish_provision_after_packet(
         process_commands=process_commands,
         session_statuses=session_statuses,
         completion=completion,
+        registration=registration,
+        runtime_wait_seconds=runtime_wait_seconds,
+        print_func=print_func,
     )
     if remaining:
         for objection in remaining:
@@ -14570,6 +14733,8 @@ def switchyard_resume_provision_command(
     desktop_installer: Callable[..., ProjectConfig] | None = None,
     process_commands: Sequence[str] | None = None,
     session_statuses: Sequence[LaunchSessionRecordStatus] | None = None,
+    registration: RuntimeRegistrationWait | None = None,
+    runtime_wait_seconds: float = RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
     print_func: Callable[[str], None] = print,
 ) -> int:
     """Rebuild a partly provisioned project's root artifacts so it can finish.
@@ -14737,6 +14902,8 @@ def switchyard_resume_provision_command(
         start_roles=start_roles,
         process_commands=process_commands,
         session_statuses=session_statuses,
+        registration=registration,
+        runtime_wait_seconds=runtime_wait_seconds,
         print_func=print_func,
     )
 

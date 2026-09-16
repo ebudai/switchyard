@@ -156,7 +156,7 @@ def test_the_session_comes_from_the_registered_assignment() -> None:
         tenant = _Tenant(live={"porter-director", "porter-app-r2"})
 
         stub = presentation_controller.runtime_assignment_config
-        presentation_controller.runtime_assignment_config = lambda cfg: (
+        presentation_controller.runtime_assignment_config = lambda cfg, **_kwargs: (
             _REAL_RUNTIME_ASSIGNMENT_CONFIG(cfg, opener=lambda _url: _JsonResponse(payload))
         )
         try:

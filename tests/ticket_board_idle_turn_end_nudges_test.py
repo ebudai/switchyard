@@ -78,7 +78,7 @@ def _main_body() -> int:
             """
 GRANT USAGE ON SCHEMA ticket_board TO ticket_board_listener;
 GRANT SELECT ON ALL TABLES IN SCHEMA ticket_board TO ticket_board_listener;
-GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz, interval, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.discard_notification(bigint, text) TO ticket_board_listener;
 
@@ -150,7 +150,9 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
         'inspector', (now_at - interval '5 seconds')::text,
         'research', (now_at - interval '5 seconds')::text
     ),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -236,7 +238,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('director', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -312,7 +316,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('director', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -345,7 +351,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('director', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -397,7 +405,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('main', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -457,7 +467,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('director', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -522,7 +534,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('director', (now_at - interval '4 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -558,7 +572,9 @@ LIMIT 1;
 SET ROLE ticket_board_listener;
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('app', (clock_timestamp() - interval '5 seconds')::text),
-    clock_timestamp()
+    clock_timestamp(),
+    interval '0 seconds',
+    '{}'::jsonb
 )::text;
 RESET ROLE;
 """,
@@ -601,7 +617,9 @@ RESET ROLE;
 SET ROLE ticket_board_listener;
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('app', (clock_timestamp() - interval '4 seconds')::text),
-    clock_timestamp()
+    clock_timestamp(),
+    interval '0 seconds',
+    '{}'::jsonb
 )::text;
 RESET ROLE;
 """,
@@ -685,7 +703,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('ops', (now_at - interval '1 second')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -740,7 +760,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('ops', (now_at - interval '1 second')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -810,7 +832,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('ops', (now_at - interval '1 second')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 RESET ROLE;
@@ -858,7 +882,11 @@ WHERE id = 'PGU-9001';
 UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '10 minutes',
     last_activity_at = clock_timestamp() - interval '10 minutes',
-    idle_reminder_count = 1
+    idle_reminder_count = 1,
+    -- When that reminder was delivered, not only that it was. An escalation
+    -- claims the owner was reminded and has had time to act, so it now waits
+    -- for a delivery timestamp and the grace after it (SYRD-163).
+    last_idle_reminder_at = clock_timestamp() - interval '10 minutes'
 WHERE ticket_id = 'PGU-9001';
 INSERT INTO ticket_board.notification_trace (
     ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event,
@@ -953,7 +981,9 @@ DELETE FROM ticket_board.ticket_notification_queue;
                     """
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('inspector', (clock_timestamp() - make_interval(mins => %s))::text),
-    clock_timestamp()
+    clock_timestamp(),
+    interval '0 seconds',
+    '{}'::jsonb
 )
 """,
                     (minutes_ago,),

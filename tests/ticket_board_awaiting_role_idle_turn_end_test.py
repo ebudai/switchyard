@@ -134,7 +134,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('ops', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 """,
@@ -180,7 +182,9 @@ WITH params AS (
 )
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('ops', (now_at - interval '5 seconds')::text),
-    now_at
+    now_at,
+    interval '0 seconds',
+    '{}'::jsonb
 )
 FROM params;
 """,

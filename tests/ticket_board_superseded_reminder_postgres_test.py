@@ -87,7 +87,12 @@ DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{ticket_id
 UPDATE ticket_board.ticket_notification_state
 SET entered_current_state_at = clock_timestamp() - interval '1 hour',
     last_activity_at = clock_timestamp() - interval '1 hour',
-    idle_reminder_count = {idle_reminders}
+    idle_reminder_count = {idle_reminders},
+    -- And WHEN it was delivered. An escalation now waits for the grace after a
+    -- delivered reminder, so a fixture that records only the count is
+    -- describing a reminder nobody has had time to act on (SYRD-163).
+    last_idle_reminder_at = CASE WHEN {idle_reminders} > 0
+        THEN clock_timestamp() - interval '30 minutes' ELSE NULL END
 WHERE ticket_id = '{ticket_id}';
 """)
 
@@ -96,7 +101,9 @@ WHERE ticket_id = '{ticket_id}';
         psql(self.listener, f"""
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('{owner_role}', (clock_timestamp() - interval '30 minutes')::text),
-    clock_timestamp()
+    clock_timestamp(),
+    interval '0 seconds',
+    '{{}}'::jsonb
 );
 """)
 

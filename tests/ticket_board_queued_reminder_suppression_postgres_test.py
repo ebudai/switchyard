@@ -125,7 +125,9 @@ ON CONFLICT DO NOTHING;
         psql(self.listener, f"""
 SELECT ticket_board.notify_idle_turn_end_nudges(
     jsonb_build_object('{role}', (clock_timestamp() - interval '30 minutes')::text),
-    clock_timestamp()
+    clock_timestamp(),
+    interval '0 seconds',
+    '{{}}'::jsonb
 );
 """)
 

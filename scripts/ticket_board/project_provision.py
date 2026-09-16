@@ -3287,43 +3287,68 @@ def render_workflow_sql(plan: ProjectBoardProvision, *, schema_sql: str | None =
     )
     return f"""-- Seed the default project workflow for {plan.project}.
 -- Run after schema.sql/migrations and before rbac.sql on a newly provisioned board.
+--
+-- This phase is the INITIAL seed, and it is the one phase of the operator
+-- packet that is not a repair. It deletes the stages and transitions the board
+-- has and installs this project's, which is right for a board being brought
+-- up and wrong for one that is running: its tickets sit in those stages, its
+-- roles hold runtime assignments against them, and its history refers to
+-- transitions by name.
+--
+-- The packet as a whole is re-runnable, so a supported upgrade of a registered
+-- tenant reaches this file too. It used to run unconditionally and stop the
+-- whole rollout on the guard below -- `project workflow seed must run before
+-- tickets exist` -- which is how an existing tenant became unupgradable
+-- (SYRD-164, syrd rollout journal 0050). The boundary is explicit now: an
+-- established board is left exactly as it is, and the run continues to the
+-- phases that ARE repairs.
+--
+-- The guard itself is untouched and still here. Nothing in the supported path
+-- reaches it any more, and that is the point: it is what stands between a
+-- live board and this file if anything ever does.
 BEGIN;
 
 DO $$
 BEGIN
+    IF EXISTS (SELECT 1 FROM ticket_board.tickets)
+        OR EXISTS (SELECT 1 FROM ticket_board.workflow_configuration WHERE singleton)
+    THEN
+        RAISE NOTICE 'workflow already established for {plan.project}; leaving its stages, transitions, tickets and runtime assignments as they are';
+        RETURN;
+    END IF;
     IF EXISTS (SELECT 1 FROM ticket_board.tickets) THEN
         RAISE EXCEPTION 'project workflow seed must run before tickets exist';
     END IF;
-END;
-$$;
 
-DELETE FROM ticket_board.workflow_transitions;
-UPDATE ticket_board.workflow_stages SET gate_skip_to = NULL WHERE gate_skip_to IS NOT NULL;
-DELETE FROM ticket_board.workflow_stages;
+    DELETE FROM ticket_board.workflow_transitions;
+    UPDATE ticket_board.workflow_stages SET gate_skip_to = NULL WHERE gate_skip_to IS NOT NULL;
+    DELETE FROM ticket_board.workflow_stages;
 
 {render_project_role_constraint_sql(plan)}
 
-INSERT INTO ticket_board.workflow_stages (
-    name,
-    display_label,
-    rank,
-    owner_roles,
-    entry_gate_field,
-    gate_skip_to,
-    exit_signoff_field,
-    is_terminal
-) VALUES
+    INSERT INTO ticket_board.workflow_stages (
+        name,
+        display_label,
+        rank,
+        owner_roles,
+        entry_gate_field,
+        gate_skip_to,
+        exit_signoff_field,
+        is_terminal
+    ) VALUES
 {stage_rows};
 
-INSERT INTO ticket_board.workflow_transitions (
-    from_stage,
-    to_stage,
-    action_name,
-    allowed_roles,
-    owner_scoped,
-    director_override
-) VALUES
+    INSERT INTO ticket_board.workflow_transitions (
+        from_stage,
+        to_stage,
+        action_name,
+        allowed_roles,
+        owner_scoped,
+        director_override
+    ) VALUES
 {transition_rows};
+END;
+$$;
 
 COMMIT;
 """

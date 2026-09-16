@@ -160,6 +160,20 @@ the release that failed, so re-running it would repeat the defect it failed on.
 Nothing the tenant owns is touched and running it twice produces the same
 artifacts.
 
+The one phase of the packet that is not a repair is the initial workflow seed.
+It deletes the stages and transitions a board has and installs the project's
+own, which is what a board being brought up needs and the last thing a running
+one does -- its tickets sit in those stages, its roles hold runtime assignments
+against them, and its history names transitions by name. Running it
+unconditionally is how a supported upgrade of a registered tenant stopped on
+`project workflow seed must run before tickets exist` (syrd rollout journal
+0050, SYRD-164). The boundary is explicit: a board with tickets, or one
+carrying a declared workflow document, is established, and the seed leaves it
+exactly as it is while the rest of the packet -- units, ACLs, database,
+migrations -- applies as the repairs they are. The guard that refuses a
+destructive seed on a live board is untouched and still in the file; the
+supported path simply no longer reaches it.
+
 ### What happens after the packet
 
 Running the packet is not the end of a `switchyard new`. Registering the

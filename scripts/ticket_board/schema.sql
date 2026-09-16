@@ -2359,7 +2359,21 @@ BEGIN
             'actor', actor,
             'change_summary', change_summary
         ),
-        'ticket_update:' || p_ticket_id || ':' || pg_current_xact_id()::text
+        -- SYRD-159: the wake is identified by what it is about -- this ticket,
+        -- this role -- not by the transaction that happened to raise it. Keyed
+        -- on pg_current_xact_id(), one user-visible change delivered as two
+        -- writes (set the blockers, then say why) minted two rows with two keys
+        -- and woke the assignee twice for one thing to read. The queue already
+        -- knows how to collapse: ON CONFLICT refreshes the pending row's message
+        -- and re-arms it, and a delivered row is deleted by ack_notification, so
+        -- a stable key means "at most one unread wake per ticket per role" and
+        -- the next change after delivery still mints its own.
+        --
+        -- The role belongs in the key for a second reason: without it, two
+        -- notifications raised in one transaction for two different roles
+        -- collide, and ON CONFLICT ... SET target_role = EXCLUDED.target_role
+        -- would silently retarget the first role's wake to the second.
+        'ticket_update:' || p_ticket_id || ':' || target_role
     );
 END;
 $$;

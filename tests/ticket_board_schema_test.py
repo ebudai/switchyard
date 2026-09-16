@@ -676,6 +676,22 @@ def main() -> int:
     # bodies are the schema's bodies -- for the executor and the recovery command
     # as much as for the two new functions, because a partial upgrade would leave
     # an approval recorded by one half and never paid by the other.
+    # SYRD-159: the dedupe key is the whole fix, so the migration that carries
+    # it to a live board must carry the same function body the schema declares.
+    ticket_update_dedupe_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu945_syrd159_ticket_update_dedupe.sql"
+    ).read_text(encoding="utf-8")
+    assert "ticket_update:' || p_ticket_id || ':' || target_role" in ticket_update_dedupe_migration_text
+    # The old key construction, not the word: the comment above the fix names
+    # pg_current_xact_id() deliberately, to say what it stopped doing.
+    assert "|| pg_current_xact_id()::text" not in ticket_update_dedupe_migration_text
+    assert "|| pg_current_xact_id()::text" not in extract_function(
+        schema, "notify_ticket_owner_in_place_change"
+    )
+    assert extract_function(schema, "notify_ticket_owner_in_place_change") == extract_function(
+        ticket_update_dedupe_migration_text,
+        "notify_ticket_owner_in_place_change",
+    )
     held_review_reconcile_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu944_syrd180_held_review_reconcile.sql"
     ).read_text(encoding="utf-8")

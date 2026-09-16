@@ -340,7 +340,10 @@ def test_a_scoped_status_reports_only_that_project() -> None:
                 config_dir=root / "none",
                 registry_dir=registry,
                 project=project,
-                process_commands=[],
+                # No pane in the owner's tmux server: liveness is read from
+                # there and from the board now, not from argv (SYRD-170).
+                owner_tmux_reader=lambda _config: (set(), ""),
+                assignments_reader=lambda _config: ({}, ""),
                 runner=lambda *a, **k: subprocess.CompletedProcess([], 0, "", ""),
                 print_func=printed.append,
             )

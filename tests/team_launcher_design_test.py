@@ -306,12 +306,11 @@ def test_switchyard_status_lists_registered_projects_from_process_snapshot() -> 
             switchyard_status_command(
                 config_dir=config_dir,
                 registry_dir=registry_dir,
-                process_commands=[
-                    "fish -c env TICKET_BOARD_PANE_TARGET=pgu-director:0.0 claude",
-                    "fish -c env TICKET_BOARD_PANE_TARGET=pgu-ops:0.0 codex",
-                    "fish -c env TICKET_BOARD_PANE_TARGET=otto-main:0.0 codex",
-                    "python3 /service/ticket-board.py --project otto",
-                ],
+                # Liveness is read from the owner's tmux server and the board
+                # now, not from argv, so these say which panes that server
+                # holds rather than which command lines exist (SYRD-170).
+                owner_tmux_reader=lambda _config: ({"pgu-director:0.0", "pgu-ops:0.0", "otto-main:0.0"}, ""),
+                assignments_reader=lambda _config: ({}, ""),
                 source_repo=tmp_path / "missing-source",
                 switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
@@ -369,7 +368,8 @@ def test_switchyard_status_json_reports_same_project_facts() -> None:
                 config_dir=config_dir,
                 registry_dir=registry_dir,
                 json_output=True,
-                process_commands=["fish -c env TICKET_BOARD_PANE_TARGET=atlas-director:0.0 claude"],
+                owner_tmux_reader=lambda _config: ({"atlas-director:0.0"}, ""),
+                assignments_reader=lambda _config: ({}, ""),
                 source_repo=tmp_path / "missing-source",
                 switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
@@ -425,7 +425,8 @@ def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
             switchyard_status_command(
                 config_dir=config_dir,
                 registry_dir=registry_dir,
-                process_commands=["fish -c env TICKET_BOARD_PANE_TARGET=private-director:0.0 claude"],
+                owner_tmux_reader=lambda _config: ({"private-director:0.0"}, ""),
+                assignments_reader=lambda _config: ({}, ""),
                 source_repo=tmp_path / "missing-source",
                 switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
@@ -480,10 +481,16 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target
             switchyard_status_command(
                 config_dir=config_dir,
                 registry_dir=registry_dir,
-                process_commands=[
-                    "tmux new-session -d -s atlas-research -c /repo env TICKET_BOARD_PANE_TARGET=atlas-research:0.0 claude",
-                    "tmux: server (/tmp/tmux-1001/default) for atlas",
-                ],
+                # Liveness is read from the owner's tmux server and the board
+                # now, not from argv, so these say which panes that server
+                # holds rather than which command lines exist (SYRD-170).
+                # This case used to prove that a TMUX SERVER's own argv
+                # mentioning a pane target did not count as a live pane. Argv is
+                # not read any more, so the trap cannot be sprung -- what
+                # remains, and is asserted here, is that a role whose pane the
+                # owner's tmux server does not list is not counted (SYRD-170).
+                owner_tmux_reader=lambda _config: (set(), ""),
+                assignments_reader=lambda _config: ({}, ""),
                 source_repo=tmp_path / "missing-source",
                 switchyard_install_path=tmp_path / "missing-switchyard",
                 print_func=lines.append,
@@ -496,7 +503,7 @@ def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target
         "Atlas  atlas  stopped  0/1    atlas-viewer",
     ]
 
-def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
+def test_switchyard_status_default_probe_asks_the_owners_tmux_server() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-probe.") as tmp:
         tmp_path = Path(tmp)
         registry_dir = tmp_path / "registry"
@@ -536,9 +543,12 @@ def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
             calls.append(list(args))
-            assert args[0] == "ps", args
-            stdout = "fish -c env TICKET_BOARD_PANE_TARGET=atlas-director:0.0 claude\n"
-            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+            # The default probe asks the OWNER's tmux server, bounded and
+            # without a password prompt. It used to ask `ps` and read argv,
+            # which is what reported a long-running pane as stopped (SYRD-170).
+            assert "tmux" in args, args
+            assert kwargs.get("timeout"), kwargs
+            return subprocess.CompletedProcess(args, 0, stdout="atlas-director:0.0\n", stderr="")
 
         lines: list[str] = []
         assert (
@@ -553,7 +563,14 @@ def test_switchyard_status_default_probe_uses_ps_without_root_or_tmux() -> None:
             == 0
         )
 
-    assert calls == [["ps", "-eo", "args=", "--no-headers"]]
+    assert calls, calls
+    probe = calls[0]
+    assert probe[0] in ("tmux", "sudo"), probe
+    if probe[0] == "sudo":
+        # Non-interactive, and as the tenant -- never root's own tmux server.
+        assert "-n" in probe and "-u" in probe, probe
+        assert "root" not in probe, probe
+    assert "list-panes" in probe, probe
     assert lines[-1].strip().endswith("running  1/1    atlas-viewer")
 
 def test_switchyard_status_reports_runtime_copy_staleness_without_fetching() -> None:
@@ -647,7 +664,8 @@ def test_switchyard_status_reports_runtime_copy_staleness_without_fetching() -> 
             switchyard_status_command(
                 config_dir=config_dir,
                 registry_dir=registry_dir,
-                process_commands=[],
+                owner_tmux_reader=lambda _config: (set(), ""),
+                assignments_reader=lambda _config: ({}, ""),
                 source_repo=source_repo,
                 switchyard_install_path=installed_wrapper,
                 print_func=lines.append,

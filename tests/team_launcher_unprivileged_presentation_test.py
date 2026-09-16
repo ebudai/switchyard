@@ -342,7 +342,10 @@ def test_status_names_a_root_window_instead_of_reporting_the_project_attached() 
             team_launcher.switchyard_status_command(
                 config_dir=empty_config_dir,
                 registry_dir=registry_dir,
-                process_commands=[],
+                # No pane in the owner's tmux server: liveness is read from
+                # there and from the board now, not from argv (SYRD-170).
+                owner_tmux_reader=lambda _config: (set(), ""),
+                assignments_reader=lambda _config: ({}, ""),
                 runner=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", ""),
                 print_func=printed.append,
             )

@@ -15762,6 +15762,8 @@ def owner_tmux_targets(
     config: ProjectConfig,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    timeout_seconds: float | None = None,
+    interactive: bool = True,
 ) -> tuple[set[str], str]:
     """Every pane the TENANT OWNER's tmux server holds, asked as that account.
 
@@ -15769,12 +15771,25 @@ def owner_tmux_targets(
     asking tmux as root answers about the wrong server -- confidently, and with
     an empty list. The question is dispatched to the owner the way every other
     owner-side step here is dispatched (SYRD-169).
+
+    `switchyard list` asks the same question about several tenants in a row, as
+    whoever happened to type it, so it asks with `interactive=False` and a
+    deadline: `sudo -n` fails instead of prompting for a password nobody is
+    there to type, and a tenant whose tmux server does not answer becomes one
+    unknown row rather than a hung listing (SYRD-170).
     """
     args = ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"]
     if current_user_name() != config.run_as_user:
-        args = ["sudo", "-u", config.run_as_user, "-H", *args]
+        args = ["sudo", *([] if interactive else ["-n"]), "-u", config.run_as_user, "-H", *args]
     try:
-        done = runner(args, capture_output=True, text=True, check=False)
+        done = runner(
+            args, capture_output=True, text=True, check=False,
+            **({"timeout": timeout_seconds} if timeout_seconds else {}),
+        )
+    except subprocess.TimeoutExpired:
+        return set(), (
+            f"the owner's tmux server did not answer within {timeout_seconds:g}s"
+        )
     except OSError as exc:
         return set(), f"the owner's tmux server could not be asked: {exc}"
     if done.returncode != 0:
@@ -16099,14 +16114,25 @@ def warn_if_artifact_source_checkout_is_stale(
         )
 
 
+#: How long one tenant's tmux server has to answer before its row is unknown.
+#: A listing walks every registered project, so the cost of an unreachable one
+#: has to be bounded rather than merely unlikely (SYRD-170).
+STATUS_PROBE_TIMEOUT_SECONDS = 3.0
+
+
 def switchyard_project_statuses(
     *,
     config_dir: Path | None = None,
     registry_dir: Path | None = None,
-    process_commands: Sequence[str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    probe_timeout_seconds: float = STATUS_PROBE_TIMEOUT_SECONDS,
+    # The two SOURCES a status rests on, injectable so a case can say what a
+    # tenant's tmux server and board answer without saying what the verdict
+    # should be. The verdict is still computed by the same `pane_liveness` the
+    # privileged path uses (SYRD-170).
+    owner_tmux_reader: "Callable[[ProjectConfig], tuple[set[str], str]] | None" = None,
+    assignments_reader: "Callable[[ProjectConfig], tuple[dict[str, dict], str]] | None" = None,
 ) -> list[SwitchyardProjectStatus]:
-    commands = list(process_commands) if process_commands is not None else _list_process_command_lines(runner=runner)
     statuses: list[SwitchyardProjectStatus] = []
     for entry in _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
         try:
@@ -16125,7 +16151,53 @@ def switchyard_project_statuses(
                 )
             )
             continue
-        panes_up = sum(1 for role in config.roles if _role_has_pane_process(role, commands))
+        # The same proof privileged recovery uses, not a second weaker one: the
+        # owner's own tmux server, and the board's runtime assignments checked
+        # against /proc by pid, start time and uid. The argv search this
+        # replaced could not see a pane whose CLI had exec'd past its env
+        # wrapper, so a healthy long-running project read as stopped (SYRD-170).
+        #
+        # Bounded and unprivileged: one tmux call and one board call per tenant,
+        # both with a deadline, `sudo -n` so nothing waits for a password, and a
+        # tenant that cannot answer becomes ONE unknown row rather than an
+        # exception that ends the listing.
+        tmux_targets, tmux_problem = (
+            owner_tmux_reader(config)
+            if owner_tmux_reader is not None
+            else owner_tmux_targets(
+                config, runner=runner, timeout_seconds=probe_timeout_seconds, interactive=False
+            )
+        )
+        assignments, assignment_problem = (
+            assignments_reader(config)
+            if assignments_reader is not None
+            else read_runtime_assignment_details(config)
+        )
+        if tmux_problem:
+            statuses.append(
+                SwitchyardProjectStatus(
+                    name=entry.name,
+                    slug=entry.slug,
+                    state="unknown",
+                    panes_up=None,
+                    panes_total=len(config.roles),
+                    config_path=entry.config_path,
+                    viewer_session=viewer_session_for_project(config.project),
+                    error=tmux_problem,
+                )
+            )
+            continue
+        owner_uid = uid_for_user(config.run_as_user)
+        panes_up = sum(
+            1
+            for role in config.roles
+            if pane_liveness(
+                config, role,
+                tmux_targets=tmux_targets,
+                assignments=assignments,
+                owner_uid=owner_uid,
+            ).live
+        )
         root_windows = unsafe_root_presentation_windows(config, config_path=entry.config_path)
         statuses.append(
             SwitchyardProjectStatus(
@@ -16137,6 +16209,11 @@ def switchyard_project_statuses(
                 config_path=entry.config_path,
                 viewer_session=viewer_session_for_project(config.project),
                 root_windows=tuple(window.pid for window in root_windows),
+                # The board being unreachable does not make the panes absent --
+                # tmux still saw them -- but it does mean this row rests on one
+                # source instead of two, and saying so is cheaper than a reader
+                # guessing why the count looks the way it does.
+                error=assignment_problem or "",
             )
         )
     return statuses
@@ -16172,19 +16249,20 @@ def switchyard_status_command(
     registry_dir: Path | None = None,
     json_output: bool = False,
     project: str = "",
-    process_commands: Sequence[str] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     source_repo: Path | None = None,
     switchyard_install_path: Path | None = None,
+    owner_tmux_reader: "Callable[[ProjectConfig], tuple[set[str], str]] | None" = None,
+    assignments_reader: "Callable[[ProjectConfig], tuple[dict[str, dict], str]] | None" = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     configs: list[ProjectConfig] = []
     statuses = switchyard_project_statuses(
         config_dir=config_dir,
         registry_dir=registry_dir,
-        process_commands=process_commands,
-        pane_liveness_states=pane_liveness_states,
         runner=runner,
+        owner_tmux_reader=owner_tmux_reader,
+        assignments_reader=assignments_reader,
     )
     if project:
         statuses = [status for status in statuses if status.slug == project]

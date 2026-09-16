@@ -381,19 +381,20 @@ def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_r
         "user is reused; interactive repository trust today, not account login",
         # Each foreground step says what it is about to do with the terminal,
         # and how to hand it back, before it takes it (SYRD-191).
-        "switchyard: claude will now run in this terminal as otto-agent. Choose a theme, "
-        "complete the sign-in it asks for even though credentials exist -- this flow does not "
-        "consult them -- and then type /exit to hand the terminal back. It is asked once for "
-        "the account, not once per role, and no pane will ask again.",
+        "switchyard: claude will now run in this terminal as otto-agent. Answer its own "
+        "prompts -- a theme, then the sign-in it asks for even though credentials exist, "
+        "because that flow does not consult them. The terminal comes back on its own as soon "
+        "as it is recorded; you do not have to exit anything. It is asked once for the "
+        "account, not once per role, and no pane will ask again.",
         f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'designer'} as this "
-        "project's owner so it can be trusted once for designer. Answer the trust prompt, then "
-        "type /exit to hand the terminal back.",
+        "project's owner so it can be trusted once for designer. Answer the trust "
+        "prompt; the terminal comes back on its own once the answer is recorded.",
         f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'director'} as this "
-        "project's owner so it can be trusted once for director. Answer the trust prompt, then "
-        "type /exit to hand the terminal back.",
+        "project's owner so it can be trusted once for director. Answer the trust "
+        "prompt; the terminal comes back on its own once the answer is recorded.",
         f"switchyard: agy will now run in {tmp_path / 'worktrees' / 'inspector'} as this "
-        "project's owner so it can be trusted once for inspector. Answer the trust prompt, then "
-        "type /exit to hand the terminal back.",
+        "project's owner so it can be trusted once for inspector. Answer the trust "
+        "prompt; the terminal comes back on its own once the answer is recorded.",
     ]
 
 def test_first_run_auth_phase_handles_hermes_model_setup() -> None:

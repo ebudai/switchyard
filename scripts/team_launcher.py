@@ -5108,60 +5108,173 @@ def _running_project_roles(
     return running_roles
 
 
-def _drop_roles_started_before_their_login(
+#: What a role's runtime was started against, recorded beside its resumable
+#: state so the answer survives this process (SYRD-191).
+PROVIDER_STATE_RECORD_NAME = "provider-state.json"
+
+
+def provider_state_generation(cli: str, *, owner_home: Path) -> str:
+    """A digest of the provider state a runtime has to have been started after.
+
+    Deliberately made of decisions, not of bytes or timestamps: whether the
+    account holds a credential at all, whether its own first run is complete,
+    and which directories it trusts. A token refresh rewrites `auth.json` and
+    moves its mtime without changing any of those, so it produces the same
+    generation and restarts nobody -- which is the trap an mtime trigger falls
+    into. Completing a first run, or trusting a worktree, changes it once.
+    """
+    facts: dict[str, Any] = {"cli": cli}
+    for artifact in ROLE_CREDENTIAL_ARTIFACTS.get(cli, ()):  # existence, never contents
+        facts[artifact.relative_path] = (owner_home / artifact.relative_path).exists()
+    if cli in FIRST_RUN_SETUP_CLIS:
+        facts["account_setup"] = _provider_account_setup_complete(cli, owner_home=owner_home)
+    if cli == "claude":
+        config = _read_json_object(owner_home / ".claude.json")
+        projects = config.get("projects")
+        facts["trusted"] = sorted(
+            path
+            for path, entry in (projects or {}).items()
+            if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+        ) if isinstance(projects, dict) else []
+    if cli == "agy":
+        settings = _read_json_object(owner_home / ".gemini" / "antigravity-cli" / "settings.json")
+        trusted = settings.get("trustedWorkspaces")
+        facts["trusted"] = sorted(str(path) for path in trusted) if isinstance(trusted, list) else []
+    return hashlib.sha256(
+        json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _provider_state_record_path(config: ProjectConfig, role: RoleConfig) -> Path:
+    # Named for the role as well as placed under its store: a tenant that has
+    # not crossed to per-role session directories keeps every role's record in
+    # one directory, and a shared file would answer for all of them.
+    return (
+        role_session_dir(config, role).expanduser() / f"{role.role}.{PROVIDER_STATE_RECORD_NAME}"
+    )
+
+
+def recorded_provider_state_generation(config: ProjectConfig, role: RoleConfig) -> str:
+    record = _read_json_object(_provider_state_record_path(config, role))
+    return str(record.get("generation") or "")
+
+
+def record_provider_state_generation(config: ProjectConfig, role: RoleConfig, generation: str) -> None:
+    """Remember what this role's runtime was started against.
+
+    Written after the restart rather than before it, so a run that fails to
+    restart leaves the role still marked stale and the next ordinary launch
+    tries again.
+    """
+    path = _provider_state_record_path(config, role)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(
+            path,
+            {
+                "schema": "switchyard.provider-state.v1",
+                "cli": _role_cli_name(role),
+                "generation": generation,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except OSError as exc:
+        print(
+            f"team-launcher: could not record {role.role}'s provider state generation: {exc}",
+            file=sys.stderr,
+        )
+
+
+def roles_with_stale_provider_runtime(
     config: ProjectConfig,
     running_roles: Sequence[RoleConfig],
     *,
-    restart_roles: Sequence[str],
+    owner_home: Path,
+) -> list[RoleConfig]:
+    """Running roles whose runtime predates the provider state it needs.
+
+    A process reads its provider state once, when it starts. Anything recorded
+    afterwards -- a login, an account's first run, a worktree's trust -- is
+    invisible to it, and it goes on showing whatever it was showing. Live on the
+    testing tenant, five sessions from the previous day were presented after two
+    logins and a completed setup, every one of them still on a first-run screen.
+
+    A role with no record at all counts as stale: nothing says its runtime was
+    started against the state that exists now, and one restart settles it.
+    """
+    stale: list[RoleConfig] = []
+    for role in running_roles:
+        cli = _role_cli_name(role)
+        if not cli:
+            continue
+        if recorded_provider_state_generation(config, role) != provider_state_generation(
+            cli, owner_home=owner_home
+        ):
+            stale.append(role)
+    return stale
+
+
+def _drop_roles_with_stale_provider_runtime(
+    config: ProjectConfig,
+    running_roles: Sequence[RoleConfig],
+    *,
+    owner_home: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     print_func: Callable[[str], None] = print,
 ) -> list[RoleConfig]:
     """Roles that may be presented as they are, rather than started again.
 
-    A provider login performed in this run cannot reach a runtime that was
-    already up: the process read its credentials when it started, and it
-    started before there were any. Live on the testing tenant, both logins
-    succeeded as the owner at 16:23 and the five panes the User was shown had
-    been running since the previous day, each sitting on its provider's own
-    sign-in or onboarding screen. Presenting them is what made two successful
-    logins look like five failed ones.
+    A process reads its provider state once, when it starts, so a login, an
+    account's first run or a worktree's trust recorded afterwards never reaches
+    a runtime that was already up. Live on the testing tenant: two logins and a
+    completed setup, and five sessions from the previous day presented as they
+    were, each still on a first-run screen.
 
-    So such a role is not "already running" for the purposes of this launch. Its
-    session is ended and started again, which is the ordinary path a role that
-    was not running takes, and the new process reads the credentials that now
-    exist (SYRD-191).
+    Staleness is decided by comparing each role's recorded generation with the
+    one the account carries now, so it does not depend on this run having
+    performed a login -- the failing case had none -- and a token refresh, which
+    changes no decision, changes no generation and restarts nobody. A role with
+    no record is stale by definition: nothing says what its runtime was started
+    against, and one restart settles it (SYRD-191).
     """
-    wanted = {name for name in restart_roles if name}
-    if not wanted:
-        return list(running_roles)
+    stale = roles_with_stale_provider_runtime(config, running_roles, owner_home=owner_home)
+    if not stale:
+        return list(running_roles), set()
+    wanted = {role.role for role in stale}
     keep: list[RoleConfig] = []
     restarted: list[str] = []
+    unreconciled: set[str] = set()
     for role in running_roles:
         if role.role not in wanted:
             keep.append(role)
             continue
-        restarted.append(role.role)
         role_runner = role_process_runner_for(config, role, runner=runner)
         result = role_runner(
             tmux_kill_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         if getattr(result, "returncode", 1) != 0:
             # It could not be ended, so it will not be started either: say so
-            # rather than reporting a restart that did not happen.
+            # rather than reporting a restart that did not happen, and leave the
+            # record alone so the next launch tries again.
             print_func(
-                f"team-launcher: {role.role} is running from before this run's "
-                f"{_role_cli_name(role)} login and its session could not be ended; it will keep "
-                "showing that provider's sign-in screen until it is restarted"
+                f"team-launcher: {role.role} is running against older "
+                f"{_role_cli_name(role)} state and its session could not be ended; it will keep "
+                "showing whatever it was showing until it is restarted"
             )
             keep.append(role)
-            restarted.pop()
+            unreconciled.add(role.role)
+            continue
+        # The record is NOT updated here: it is written after the launch, for
+        # roles that actually came up. A restart that ends a session and then
+        # fails to start one must leave the role stale.
+        restarted.append(role.role)
     if restarted:
         print_func(
             "team-launcher: restarting "
             + ", ".join(sorted(restarted))
-            + ": their runtimes started before this run's provider login and cannot have it"
+            + ": their runtimes started against older provider state than this account now has"
         )
-    return keep
+    return keep, unreconciled
 
 
 def _prepare_project_worktrees_for_launch(
@@ -7904,10 +8017,10 @@ def launch_project(
     allow_stale_launcher: bool = False,
     no_launcher_self_deploy: bool = False,
     report_session_records: bool = False,
-    #: Roles whose provider was authenticated during this run. Their runtimes
-    #: started before that login and are sitting on the provider's own sign-in
-    #: screen, so they are restarted rather than presented (SYRD-191).
-    restart_roles: Sequence[str] = (),
+    #: Where the tenant's provider state lives, when the caller knows it. The
+    #: reconciliation below compares each running role's runtime against it
+    #: (SYRD-191).
+    owner_home: Path | None = None,
     session_record_timeout: float = LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
     session_record_poll: float = LAUNCH_SESSION_RECORD_POLL_SECONDS,
     layout_mode: str = LAYOUT_MODE_AUTO,
@@ -7972,6 +8085,11 @@ def launch_project(
         pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
     failed_roles: dict[str, str] = {}
     running_roles: list[RoleConfig] = []
+    reconcile_home: Path | None = None
+    #: Roles still carrying an older provider state than the account has,
+    #: because their session could not be ended. Their record is deliberately
+    #: not updated, so the next ordinary launch tries again (SYRD-191).
+    unreconciled_roles: set[str] = set()
     if not dry_run:
         ensure_launcher_checkout_current(
             config,
@@ -7984,10 +8102,10 @@ def launch_project(
         )
         if mode == "attach-or-start":
             running_roles = _running_project_roles(config, runner=runner)
-            running_roles = _drop_roles_started_before_their_login(
+            running_roles = _drop_roles_with_stale_provider_runtime(
                 config,
                 running_roles,
-                restart_roles=restart_roles,
+                owner_home=owner_home or _owner_home_for_auth(config.run_as_user or current_user_name()),
                 runner=runner,
                 print_func=print_func,
             )
@@ -8291,6 +8409,20 @@ def launch_project(
             print_func(
                 f"switchyard: opened a new window attached to running {plural}: {attached_names}; "
                 "the previous window may be closed if no longer needed"
+            )
+    # What each role's runtime has now been started against. Written after the
+    # launch, for every role that actually came up: a role whose start failed,
+    # or whose stale session could not be ended, keeps its old record so the
+    # next ordinary launch reconciles it instead of forgetting (SYRD-191).
+    if mode == "attach-or-start" and reconcile_home is not None:
+        for role in config.roles:
+            if role.role in failed_roles or role.role in unreconciled_roles:
+                continue
+            cli = _role_cli_name(role)
+            if not cli:
+                continue
+            record_provider_state_generation(
+                config, role, provider_state_generation(cli, owner_home=reconcile_home)
             )
     if report_session_records:
         report_launch_session_records(
@@ -11706,9 +11838,34 @@ def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
     return ["sudo", "-u", owner_user, *command]
 
 
+#: What a terminal needs to keep looking like itself across the owner boundary.
+#: `sudo` resets the environment, and a CLI that cannot see TERM or COLORTERM
+#: draws its first run in monochrome -- which is what the User was shown
+#: (SYRD-191).
+TERMINAL_PRESENTATION_ENV_KEYS = ("TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION")
+
+
+def _terminal_presentation_env(source: Mapping[str, str] | None = None) -> list[str]:
+    environ = os.environ if source is None else source
+    return [
+        f"{key}={environ[key]}"
+        for key in TERMINAL_PRESENTATION_ENV_KEYS
+        if str(environ.get(key) or "").strip()
+    ]
+
+
 def _owner_command_env_args(owner_user: str, owner_home: Path, command: Sequence[str]) -> list[str]:
     path = _prepend_paths(DEFAULT_PANE_BASE_PATH, _owner_home_bin_dirs(owner_home))
-    return _owner_command_args(owner_user, ["env", f"HOME={owner_home}", f"PATH={path}", *command])
+    return _owner_command_args(
+        owner_user,
+        [
+            "env",
+            f"HOME={owner_home}",
+            f"PATH={path}",
+            *_terminal_presentation_env(),
+            *command,
+        ],
+    )
 
 
 #: Decide who runs a printed command when it is run, not when it is printed.
@@ -11794,6 +11951,77 @@ def _run_owner_cli_probe(
         )
     except OSError as exc:
         return subprocess.CompletedProcess(args, 127, stdout="", stderr=str(exc))
+
+
+#: How often a bounded foreground step looks to see whether the thing it was
+#: opened for has been recorded, and how long it waits in total. The CLI keeps
+#: running after it commits the state -- it goes on to its normal prompt -- so
+#: something has to notice and hand the terminal back (SYRD-191).
+FOREGROUND_COMPLETION_POLL_SECONDS = 0.5
+FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 1800.0
+
+
+def _run_owner_cli_until(
+    *,
+    owner_user: str,
+    owner_home: Path,
+    cwd: Path,
+    command: Sequence[str],
+    is_complete: Callable[[], bool],
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    popen: Callable[..., Any] = subprocess.Popen,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+) -> bool:
+    """Run one interactive step and take the terminal back when it is done.
+
+    The User answers the provider's own prompts and nothing else. Asking them to
+    type `/exit` afterwards -- once for the account and again for every
+    worktree -- is not a first run, it is a chore, so the step is bounded here
+    instead: the state the step exists to record is watched, and the moment it
+    appears the CLI is ended and the phase moves on.
+
+    A runner may be injected, in which case the step is simply run and its
+    completion read back afterwards: that is the shape tests drive, and it is
+    also the honest fallback for anything that cannot be watched.
+    """
+    if runner is not None:
+        runner(
+            _owner_command_env_args(owner_user, owner_home, command),
+            cwd=str(cwd),
+            env=_pane_identity_scrubbed_env(),
+        )
+        return is_complete()
+    if is_complete():
+        return True
+    process = popen(
+        _owner_command_env_args(owner_user, owner_home, command),
+        cwd=str(cwd),
+        env=_pane_identity_scrubbed_env(),
+    )
+    deadline = monotonic() + timeout_seconds
+    try:
+        while True:
+            if process.poll() is not None:
+                # The person closed it themselves, which is always allowed.
+                return is_complete()
+            if is_complete():
+                # Recorded. Give the CLI a moment to finish writing before the
+                # terminal is taken back from it.
+                sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                break
+            if monotonic() >= deadline:
+                break
+            sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except Exception:
+                process.kill()
+    return is_complete()
 
 
 def _run_owner_cli_interactive(
@@ -12103,14 +12331,15 @@ def _provider_setup_reason(cli: str) -> str:
 def _provider_setup_instruction(cli: str, owner_user: str) -> str:
     if cli == "claude":
         return (
-            f"switchyard: {cli} will now run in this terminal as {owner_user}. Choose a theme, "
-            "complete the sign-in it asks for even though credentials exist -- this flow does not "
-            "consult them -- and then type /exit to hand the terminal back. It is asked once for "
-            "the account, not once per role, and no pane will ask again."
+            f"switchyard: {cli} will now run in this terminal as {owner_user}. Answer its own "
+            "prompts -- a theme, then the sign-in it asks for even though credentials exist, "
+            "because that flow does not consult them. The terminal comes back on its own as soon "
+            "as it is recorded; you do not have to exit anything. It is asked once for the "
+            "account, not once per role, and no pane will ask again."
         )
     return (
-        f"switchyard: {cli} will now run in this terminal as {owner_user}. Complete what it asks, "
-        "then exit it to hand the terminal back."
+        f"switchyard: {cli} will now run in this terminal as {owner_user}. Complete what it asks; "
+        "the terminal comes back on its own once it is recorded."
     )
 
 
@@ -12118,8 +12347,8 @@ def _folder_trust_instruction(cli: str, workdir: Path, roles: Sequence[str]) -> 
     covered = ", ".join(roles)
     return (
         f"switchyard: {cli} will now run in {workdir} as this project's owner so it can be "
-        f"trusted once for {covered}. Answer the trust prompt, then type /exit to hand the "
-        "terminal back."
+        f"trusted once for {covered}. Answer the trust prompt; the terminal comes back on its "
+        "own once the answer is recorded."
     )
 
 
@@ -12436,6 +12665,11 @@ def run_first_run_auth_phase(
             environment.update(desktop_env)
             kwargs["env"] = environment
             return base_runner(args, **kwargs)
+    # A caller that passed its own runner is driving these steps itself -- that
+    # is how the suites exercise them. The live path has none, and its foreground
+    # steps are bounded: watched, and ended the moment the state they exist to
+    # record appears (SYRD-191).
+    injected_runner = None if runner is subprocess.run else runner
     effective_owner = (owner_user or config.run_as_user or current_user_name()).strip()
     if not effective_owner:
         return FirstRunAuthReport({}, [])
@@ -12479,27 +12713,33 @@ def run_first_run_auth_phase(
     incomplete_setup: list[tuple[str, list[str]]] = []
     for step in manifest.provider_setup_steps:
         print_func(_provider_setup_instruction(step.cli, effective_owner))
-        _run_owner_cli_interactive(
+        completed = _run_owner_cli_until(
             owner_user=effective_owner,
             owner_home=effective_home,
             cwd=effective_home,
             command=list(step.command),
-            runner=runner,
+            is_complete=lambda cli=step.cli: _provider_account_setup_complete(
+                cli, owner_home=effective_home
+            ),
+            runner=injected_runner,
         )
-        if not _provider_account_setup_complete(step.cli, owner_home=effective_home):
+        if not completed:
             incomplete_setup.append((step.cli, list(step.roles)))
 
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:
         print_func(_folder_trust_instruction(step.cli, step.workdir, step.roles or (step.role,)))
-        _run_owner_cli_interactive(
+        trusted = _run_owner_cli_until(
             owner_user=effective_owner,
             owner_home=effective_home,
             cwd=step.workdir,
             command=list(step.command),
-            runner=runner,
+            is_complete=lambda cli=step.cli, workdir=step.workdir: _workdir_is_trusted(
+                cli, owner_home=effective_home, workdir=workdir
+            ),
+            runner=injected_runner,
         )
-        if not _workdir_is_trusted(step.cli, owner_home=effective_home, workdir=step.workdir):
+        if not trusted:
             for role in step.roles or (step.role,):
                 untrusted.append((step.cli, role, str(step.workdir)))
 
@@ -24847,7 +25087,6 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         mode="start",
         script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
         report_session_records=True,
-        restart_roles=first_run_auth_report.roles_awaiting_restart,
     )
     if launch_result != 0:
         return launch_result

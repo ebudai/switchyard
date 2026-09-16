@@ -25,21 +25,30 @@ Each had run its CLI once, at that moment, with no credentials on the host, and
 had been sitting on that provider's sign-in or onboarding screen ever since.
 Two successful logins looked like five failed ones.
 
-So the first-run report now carries which providers **this run** authenticated,
-and the roles configured for each of them. A role in that set is not "already
-running" for the purposes of this launch: its session is ended and started
-again, which is the ordinary path a role that was not running takes, and the new
-process reads the credentials that now exist. The roles come from the declared
-role/provider data the login step is built from, never from a list of names.
+So each role's runtime is reconciled against a **provider state generation**.
+The generation is a digest of decisions rather than of bytes: whether the
+account holds that provider's credential at all, whether its own first run is
+complete, and which directories it trusts. Each role records the generation its
+runtime was started against, beside its resumable state, and a launch restarts
+exactly the roles whose record differs from what the account carries now.
 
-The signal is deliberately the login this run performed, not the credential
-file's mtime. Codex rewrites `auth.json` whenever it refreshes a token, and a
-rule of "the runtime started before the credentials changed" would restart every
-live pane a few hours into a working day. A refresh produces no login step, so
-it restarts nothing.
+That is deliberately not keyed to a login. The live failure performed no login
+-- the credential was already valid -- and was still five stale runtimes; a rule
+that watched logins would have missed it exactly as the first attempt did. Nor
+is it keyed to the credential file's mtime: Codex rewrites `auth.json` whenever
+it refreshes a token, which changes no decision, so it produces the same
+generation and restarts nobody. Completing an account's first run, or trusting a
+worktree, changes it once, and the roles that could not have seen that change
+are restarted once.
 
-A session that cannot be ended is kept and reported, naming what it will keep
-showing, rather than counted as restarted.
+A role with no record is stale by definition -- nothing says what its runtime was
+started against -- which is what makes an ordinary `switchyard <project>` repair
+a tenant carrying sessions from before any of this existed.
+
+The record is written after the launch, for roles that actually came up. A role
+whose start failed, or whose stale session could not be ended, keeps its old
+record and is named in the output, so the next ordinary launch reconciles it
+instead of forgetting.
 
 ## What this does not cover
 
@@ -108,11 +117,19 @@ not substitute: a theme recorded there leaves the welcome flow in place.
 
 What that means for the manifest is simply that it must not promise otherwise.
 The provider setup step says, before it takes the terminal, that the flow will
-ask for a sign-in even though credentials exist, that it is asked once for the
-account rather than once per role, and that `/exit` hands the terminal back.
-Each folder-trust step says the same about the prompt it will show. The
-monochrome terminal the first run appears in is part of the same state: the
-theme is what that flow sets, so it is unset until it has been completed once.
+ask for a sign-in even though credentials exist, and that it is asked once for
+the account rather than once per role.
+
+The User answers the provider's own prompts and nothing else. Each foreground
+step is bounded: the state it exists to record is watched while the CLI runs,
+and the moment it appears the CLI is ended and the phase moves on. Nobody is
+asked to type `/exit`, once for the account and again for every worktree --
+that is a chore, not a first run.
+
+The terminal keeps its presentation across the owner boundary. `sudo` resets
+the environment, and a CLI that cannot see `TERM` or `COLORTERM` draws itself in
+monochrome, which is what the User was shown; those variables are now forwarded
+explicitly, and nothing else is.
 
 ## Deploying this, and repairing the testing tenant
 

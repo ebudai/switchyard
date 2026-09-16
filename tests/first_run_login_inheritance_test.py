@@ -69,9 +69,16 @@ def check(condition: bool, detail: str) -> None:
 
 
 def uat_config(tmp_path: Path):
-    return load_project_config(
-        "otto", _write_first_run_auth_config(tmp_path, roles=UAT_ROLES)
-    )
+    """The UAT tenant's shape, with its state kept inside the fixture.
+
+    `session_dir` is pointed at the temporary tree because the roles' provider
+    state records live under it, and a test must not write into a real home.
+    """
+    config_path = _write_first_run_auth_config(tmp_path, roles=UAT_ROLES)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["session_dir"] = str(tmp_path / "state" / "pane-sessions")
+    config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return load_project_config("otto", config_path)
 
 
 def test_one_login_per_provider_covers_every_role_that_uses_it() -> None:
@@ -344,14 +351,26 @@ def test_the_setup_step_says_it_will_ask_for_a_sign_in() -> None:
     )
     instruction = [line for line in messages if "will now run in this terminal" in line]
     check(instruction, f"the operator is told before it takes the terminal: {messages}")
-    check("/exit" in instruction[0], f"and told how to hand it back: {instruction[0]}")
+    check(
+        "comes back on its own" in instruction[0] and "do not have to exit" in instruction[0],
+        f"and told the terminal returns by itself: {instruction[0]}",
+    )
     check(
         "once for the account, not once per role" in instruction[0],
         f"and what it buys: {instruction[0]}",
     )
     trust_instructions = [line for line in messages if "so it can be trusted once for" in line]
     check(len(trust_instructions) == 3, f"each trust step says the same: {trust_instructions}")
-    check(all("/exit" in line for line in trust_instructions), "including how to leave it")
+    check(
+        all("comes back on its own" in line for line in trust_instructions),
+        "including that the terminal returns by itself",
+    )
+    # The User answers the provider's own prompts and nothing else: no step
+    # asks them to type anything to hand the terminal back.
+    check(
+        not any("/exit" in line for line in messages),
+        f"nothing asks the User to exit anything: {[m for m in messages if '/exit' in m]}",
+    )
 
 
 class MeasuredClaudeRunner(FirstRunAuthRunner):
@@ -486,90 +505,181 @@ class SessionRunner:
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 
-def test_a_runtime_that_predates_the_login_is_restarted_not_presented() -> None:
-    """The live sequence: five roles up since yesterday, two logins today."""
+def test_the_terminal_keeps_its_presentation_across_the_owner_boundary() -> None:
+    """sudo resets the environment; a CLI with no TERM draws in monochrome.
+
+    The User saw exactly that in the foreground setup. The variables that say
+    what the terminal is are forwarded explicitly, and nothing else is.
+    """
+    forwarded = team_launcher._terminal_presentation_env(
+        {"TERM": "xterm-256color", "COLORTERM": "truecolor", "ANTHROPIC_API_KEY": "secret"}
+    )
+    check(forwarded == ["TERM=xterm-256color", "COLORTERM=truecolor"], f"forwarded: {forwarded}")
+    check(
+        not any("API_KEY" in entry for entry in forwarded),
+        "and nothing that is not about presentation travels with it",
+    )
+    empty = team_launcher._terminal_presentation_env({"TERM": "", "COLORTERM": "  "})
+    check(empty == [], f"an unset variable is not forwarded as empty: {empty}")
+
+    args = team_launcher._owner_command_env_args(
+        "otto-agent", Path("/home/otto-agent"), ["claude"]
+    )
+    check("env" in args, f"the command still crosses the boundary through env: {args}")
+    check(
+        args.index("env") < args.index("claude"),
+        "with the variables set before the program runs",
+    )
+
+
+def running(config, *, roles: tuple[str, ...] | None = None):
+    return [role for role in config.roles if roles is None or role.role in roles]
+
+
+def reconcile(config, owner_home: Path, runner: "SessionRunner", said: list[str]):
+    return team_launcher._drop_roles_with_stale_provider_runtime(
+        config, list(config.roles), owner_home=owner_home, runner=runner, print_func=said.append
+    )
+
+
+def test_a_runtime_started_against_older_state_is_restarted_not_presented() -> None:
+    """The live sequence, decided the way it has to be decided.
+
+    The failing UAT performed no login -- the credential was already valid --
+    so nothing keyed to a login could have noticed. What was true is that five
+    runtimes had been started against provider state older than the account's.
+    """
     with tempfile.TemporaryDirectory(prefix="syrd191-restart.") as tmp:
-        config = uat_config(Path(tmp))
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        (owner_home / ".claude").mkdir()
+        (owner_home / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
         runner = SessionRunner()
         said: list[str] = []
-        kept = team_launcher._drop_roles_started_before_their_login(
-            config,
-            list(config.roles),
-            restart_roles=("designer", "director", "audit", "main", "ops"),
-            runner=runner,
-            print_func=said.append,
-        )
+        kept, unreconciled = reconcile(config, owner_home, runner, said)
 
-    check(kept == [], f"not one of them is presented as it is: {[role.role for role in kept]}")
+    check(kept == [], f"not one of them is presented as it is: {[r.role for r in kept]}")
+    check(unreconciled == set(), f"and each was actually ended: {unreconciled}")
     check(
         sorted(runner.killed) == sorted(f"otto-{role}" for role, _cli in UAT_ROLES),
-        f"each stale session is ended so the launch starts it again: {runner.killed}",
+        f"every stale session ends so the launch starts it again: {runner.killed}",
     )
     check(
-        any("restarting" in line and "provider login" in line for line in said),
+        any("restarting" in line and "older provider state" in line for line in said),
         f"and the reason is said out loud: {said}",
     )
 
 
-def test_roles_whose_provider_was_not_logged_in_are_left_alone() -> None:
-    with tempfile.TemporaryDirectory(prefix="syrd191-narrow.") as tmp:
-        config = uat_config(Path(tmp))
+def test_a_runtime_started_against_the_current_state_is_left_alone() -> None:
+    """Exactly once: a role that has already been reconciled is not touched."""
+    with tempfile.TemporaryDirectory(prefix="syrd191-once.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        (owner_home / ".claude").mkdir()
+        (owner_home / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
+        for role in config.roles:
+            team_launcher.record_provider_state_generation(
+                config,
+                role,
+                team_launcher.provider_state_generation(
+                    role.cli[0], owner_home=owner_home
+                ),
+            )
         runner = SessionRunner()
-        kept = team_launcher._drop_roles_started_before_their_login(
-            config,
-            list(config.roles),
-            restart_roles=("main", "ops"),  # only codex was logged in this run
-            runner=runner,
-            print_func=lambda _line: None,
+        said: list[str] = []
+        kept, unreconciled = reconcile(config, owner_home, runner, said)
+
+    check(len(kept) == len(config.roles), "every role is presented as it is")
+    check(runner.killed == [] and said == [], f"nothing is ended or said: {runner.killed} {said}")
+    check(unreconciled == set(), "and nothing is left outstanding")
+
+
+def test_a_token_refresh_changes_no_generation_and_restarts_nobody() -> None:
+    """The trap an mtime trigger falls into, avoided by construction.
+
+    Codex rewrites `auth.json` whenever it refreshes a token. Nothing about
+    that changes whether the account holds a credential, has completed its own
+    first run, or trusts a directory -- so it changes no decision, no
+    generation, and no running pane.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-refresh.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        (owner_home / ".codex").mkdir(parents=True)
+        credential = owner_home / ".codex" / "auth.json"
+        credential.write_text(json.dumps({"auth_mode": "chatgpt"}) + "\n", encoding="utf-8")
+        before = team_launcher.provider_state_generation("codex", owner_home=owner_home)
+        for role in config.roles:
+            team_launcher.record_provider_state_generation(config, role, team_launcher.provider_state_generation(role.cli[0], owner_home=owner_home))
+        credential.write_text(
+            json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "new"}, "last_refresh": "later"}) + "\n",
+            encoding="utf-8",
         )
+        after = team_launcher.provider_state_generation("codex", owner_home=owner_home)
+        runner = SessionRunner()
+        said: list[str] = []
+        kept, _unreconciled = reconcile(config, owner_home, runner, said)
 
-    check(
-        [role.role for role in kept] == ["designer", "director", "audit"],
-        f"the Claude roles keep running: {[role.role for role in kept]}",
-    )
-    check(sorted(runner.killed) == ["otto-main", "otto-ops"], f"only the Codex ones end: {runner.killed}")
+    check(before == after, "a refreshed credential is the same generation")
+    check(runner.killed == [], f"so nothing is restarted: {runner.killed}")
+    check(len(kept) == len(config.roles), "and every pane keeps working")
 
 
-def test_a_session_that_cannot_be_ended_is_reported_rather_than_claimed() -> None:
-    """Partial failure is loud, and the ticket is not left looking repaired."""
+def test_completing_setup_or_trust_changes_the_generation() -> None:
+    """Any state change that a runtime cannot have seen makes it stale."""
+    with tempfile.TemporaryDirectory(prefix="syrd191-generation.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        (owner_home / ".claude").mkdir(parents=True)
+        (owner_home / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
+        (owner_home / ".claude.json").write_text(json.dumps({"projects": {}}), encoding="utf-8")
+        credentials_only = team_launcher.provider_state_generation("claude", owner_home=owner_home)
+        (owner_home / ".claude.json").write_text(
+            json.dumps({"hasCompletedOnboarding": True, "projects": {}}), encoding="utf-8"
+        )
+        after_setup = team_launcher.provider_state_generation("claude", owner_home=owner_home)
+        (owner_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "hasCompletedOnboarding": True,
+                    "projects": {str(tmp_path / "worktrees" / "designer"): {"hasTrustDialogAccepted": True}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        after_trust = team_launcher.provider_state_generation("claude", owner_home=owner_home)
+
+    check(credentials_only != after_setup, "completing the account's first run changes it")
+    check(after_setup != after_trust, "and so does trusting a worktree")
+
+
+def test_a_session_that_cannot_be_ended_keeps_its_old_record() -> None:
+    """Partial failure is loud, and the next launch tries again."""
     with tempfile.TemporaryDirectory(prefix="syrd191-stuck.") as tmp:
-        config = uat_config(Path(tmp))
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
         runner = SessionRunner(unkillable={"otto-audit"})
         said: list[str] = []
-        kept = team_launcher._drop_roles_started_before_their_login(
-            config,
-            list(config.roles),
-            restart_roles=tuple(role for role, _cli in UAT_ROLES),
-            runner=runner,
-            print_func=said.append,
-        )
+        kept, unreconciled = reconcile(config, owner_home, runner, said)
 
     check([role.role for role in kept] == ["audit"], f"the one that survived is kept: {kept}")
+    check(unreconciled == {"audit"}, f"and is named as unreconciled: {unreconciled}")
     check(
         any("could not be ended" in line and "audit" in line for line in said),
-        f"and named, with what it will keep showing: {said}",
+        f"with what it will keep showing: {said}",
     )
     check(
-        all("audit" not in line for line in said if "restarting" in line),
-        f"it is not counted among the restarted: {said}",
+        team_launcher.recorded_provider_state_generation(config, kept[0]) == "",
+        "its record is left alone, so the next launch reconciles it again",
     )
-
-
-def test_nothing_restarts_when_no_login_happened() -> None:
-    with tempfile.TemporaryDirectory(prefix="syrd191-quiet.") as tmp:
-        config = uat_config(Path(tmp))
-        runner = SessionRunner()
-        said: list[str] = []
-        kept = team_launcher._drop_roles_started_before_their_login(
-            config,
-            list(config.roles),
-            restart_roles=(),
-            runner=runner,
-            print_func=said.append,
-        )
-
-    check(len(kept) == len(config.roles), "every running role is presented as it is")
-    check(runner.killed == [] and said == [], f"and nothing is ended or said: {runner.killed} {said}")
 
 
 def main() -> int:

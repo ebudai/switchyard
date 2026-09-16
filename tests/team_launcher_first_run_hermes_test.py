@@ -147,8 +147,8 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
     assert call_kwargs[1].get("cwd") == str(tmp_path / "worktrees" / "research")
     assert first_messages[-1] == (
         f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'research'} as this "
-        "project's owner so it can be trusted once for research. Answer the trust prompt, then "
-        "type /exit to hand the terminal back."
+        "project's owner so it can be trusted once for research. Answer the trust prompt; the "
+        "terminal comes back on its own once the answer is recorded."
     )
     assert first_messages[:-1] == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
@@ -210,7 +210,9 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
     # it is about to do with the terminal, immediately before taking it.
     instructions = [line for line in printed if "will now run in" in line]
     assert len(instructions) == 4, instructions
-    assert all("/exit" in line for line in instructions), instructions
+    # The User answers the provider's own prompts and nothing else.
+    assert all("comes back on its own" in line for line in instructions), instructions
+    assert not any("/exit" in line for line in instructions), instructions
     printed = [line for line in printed if "will now run in" not in line]
     assert printed == [
         "switchyard: first-run setup manifest for owner user otto-agent: "

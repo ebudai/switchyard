@@ -576,6 +576,10 @@ def test_first_run_auth_reports_profile_only_cli_missing_with_real_shell_probe()
             *team_launcher._env_unset_prefix(team_launcher.DESKTOP_ENV_KEYS),
             f"HOME={owner_home}",
             f"PATH={owner_home / 'bin'}:{owner_home / '.local' / 'bin'}:{sandbox_bin}",
+            # TERM and friends are forwarded so the CLI can still draw itself;
+            # taken from the product rather than spelled out, because which of
+            # them exist depends on the terminal this runs in (SYRD-191).
+            *team_launcher._terminal_presentation_env(),
             "codex",
             "login",
             "status",
@@ -585,6 +589,10 @@ def test_first_run_auth_reports_profile_only_cli_missing_with_real_shell_probe()
             *team_launcher._env_unset_prefix(team_launcher.DESKTOP_ENV_KEYS),
             f"HOME={owner_home}",
             f"PATH={owner_home / 'bin'}:{owner_home / '.local' / 'bin'}:{sandbox_bin}",
+            # TERM and friends are forwarded so the CLI can still draw itself;
+            # taken from the product rather than spelled out, because which of
+            # them exist depends on the terminal this runs in (SYRD-191).
+            *team_launcher._terminal_presentation_env(),
             "sh",
             "-c",
             "command -v codex",

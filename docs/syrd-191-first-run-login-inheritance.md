@@ -58,3 +58,53 @@ on the reasoning that a visible pane is somewhere the dialog can be answered.
 Whether Switchyard should collect it for visible roles too -- asking the owner
 once, before any pane exists, instead of leaving one dialog per pane -- is a
 change to that decision and belongs to whoever owns it, not to this fix.
+
+## The provider's own first run, before any pane
+
+A provider login is not the whole of a provider's first run. Claude keeps two
+separate things in the owner's home: the credentials, and whether the account
+has been through its own setup -- the theme and welcome flow -- recorded in
+`.claude.json` beside a `projects` map of the directories it trusts. The live
+tenant held valid credentials with `projects: {}` and no recorded theme, so
+every pane opened setup or a trust dialog instead of a prompt.
+
+The first-run phase therefore collects, in the foreground, before any role is
+launched or presented:
+
+1. one **login** per provider, covering every role configured for it;
+2. one **provider setup** step per provider whose account-wide first run is
+   unfinished, covering every role that uses it -- asked once, not once per
+   role;
+3. one **folder trust** action per distinct worktree that is not yet trusted,
+   for every configured role rather than only detached ones, naming all the
+   roles it covers.
+
+Each is driven by declared role/provider/worktree data. Already-complete state
+is skipped, and skipped again on the next run. Switchyard asks the CLI to run
+its own setup and then reads the account state back; it never writes that state
+itself and never answers a security prompt on the owner's behalf. A step that
+ran and did not complete is reported, naming the roles whose panes will open it,
+rather than left to be discovered there. The manifest counts and names every one
+of these interactive steps before the first one runs.
+
+## Deploying this, and repairing the testing tenant
+
+The rollout is the standard journaled path and stays Director/User-controlled:
+
+1. `pkexec .../switchyard-record-rollout testing --label "SYRD-191 pre-state"
+   --target-commit <sha> -- <read-only report>` -- the five role sessions, their
+   pane pids and start times, and the owner's provider state.
+2. Install the audited release with `install-switchyard --apply` pinned to that
+   commit, through Polkit and the recorder, as SYRD-184 did.
+3. Rerun `switchyard testing` **as the tenant owner**. The foreground phase
+   completes Claude's account setup and each worktree's trust; no login is
+   needed, because the credentials from 2026-09-16 16:23 are still valid and
+   the manifest will offer no login step.
+4. The same run restarts exactly the five stale role sessions, because their
+   runtimes started before those credentials existed. Nothing else is touched:
+   no deploy, no units, no board restart.
+5. Prove it: each pane's process started after the run, and each reaches a ready
+   prompt with no sign-in or onboarding on screen.
+
+Step 3 is the only interactive part and it asks the owner once per provider and
+once per worktree -- never once per pane, and never per role account.

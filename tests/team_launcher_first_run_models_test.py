@@ -33,6 +33,10 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
         )
         runner = FirstRunAuthRunner()
         runner.login_seen.update({"agy", "claude", "codex", "hermes"})
+        # This case is about model validation; the provider's own first run and
+        # its per-worktree trust are recorded as already done, each having
+        # its own case (SYRD-191).
+        _mark_first_run_setup_complete(owner_home, config)
         messages: list[str] = []
 
         report = team_launcher.run_first_run_auth_phase(
@@ -264,7 +268,7 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
     ] in runner.calls
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
+        "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
         "switchyard: missing CLI agy (affected roles: inspector): install agy for owner user "
         "otto-agent with: curl -fsSL https://antigravity.google/cli/install.sh | bash",
         "switchyard: install each one for owner user otto-agent; panes run as that user, so a CLI "
@@ -272,7 +276,16 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
     ]
 
-def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktree_trust() -> None:
+def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_role() -> None:
+    """One login and one first run per provider, one trust action per worktree.
+
+    This used to assert that a VISIBLE role's worktree trust was skipped, on
+    the reasoning that its pane is somewhere the dialog can be answered. The
+    User answered it five times instead, after two successful logins, and the
+    Director's decision on SYRD-191 reversed it: the provider's required setup
+    and every distinct worktree's trust are collected in the foreground, before
+    any role is launched or presented.
+    """
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
         tmp_path = Path(tmp)
         owner_home = tmp_path / "home" / "otto-agent"
@@ -302,7 +315,18 @@ def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktr
         )
 
     assert report.unauthenticated_roles == {}
-    assert report.untrusted_roles == []
+    # The fake CLI records nothing, so setup and trust are still outstanding
+    # afterwards -- and that is said rather than left for the panes to show.
+    assert report.incomplete_provider_setup == [("claude", ["designer", "director"])]
+    assert sorted(report.untrusted_roles) == [
+        ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
+        ("claude", "designer", str(tmp_path / "worktrees" / "designer")),
+        ("claude", "director", str(tmp_path / "worktrees" / "director")),
+    ]
+    # Login for each provider, then Claude's own first run once for both of its
+    # roles, then one trust action per distinct worktree -- three of them, for
+    # two Claude roles and one agy role, and none for Codex, which takes no
+    # directory trust.
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v claude"],
@@ -316,18 +340,43 @@ def test_first_run_auth_phase_sequences_distinct_logins_and_skips_visible_worktr
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "agy"],
     ]
-    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs] == [str(owner_home)] * 12
+    # Each trust action runs in the worktree it is about; everything before it
+    # runs in the owner's home.
+    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs][-3:] == [
+        str(tmp_path / "worktrees" / "designer"),
+        str(tmp_path / "worktrees" / "director"),
+        str(tmp_path / "worktrees" / "inspector"),
+    ]
+    # Nothing was written on the account's behalf: Switchyard asks the CLI to
+    # run its own setup and looks again, and never manufactures the answer.
     assert not (owner_home / ".claude.json").exists()
     assert not (owner_home / ".gemini" / "antigravity-cli" / "settings.json").exists()
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "3 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "3 login step(s), 1 provider setup step(s), 3 folder trust step(s), "
+        "0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login claude: roles designer, director; "
         "interactive account setup running claude auth login as otto-agent",
         "switchyard: login codex: roles ops, main; "
         "interactive account setup running codex login as otto-agent",
         "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
+        "switchyard: provider setup claude: roles designer, director; this account has not "
+        "completed Claude's own first run (theme and welcome); interactive first run of claude "
+        "as otto-agent, once for every role that uses it",
+        "switchyard: folder trust claude: role designer at "
+        f"{tmp_path / 'worktrees' / 'designer'}; recurs per project/workdir even when the owner "
+        "user is reused; interactive repository trust today, not account login",
+        "switchyard: folder trust claude: role director at "
+        f"{tmp_path / 'worktrees' / 'director'}; recurs per project/workdir even when the owner "
+        "user is reused; interactive repository trust today, not account login",
+        "switchyard: folder trust agy: role inspector at "
+        f"{tmp_path / 'worktrees' / 'inspector'}; recurs per project/workdir even when the owner "
+        "user is reused; interactive repository trust today, not account login",
     ]
 
 def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
@@ -365,7 +414,7 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
     ]
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
     ]
 

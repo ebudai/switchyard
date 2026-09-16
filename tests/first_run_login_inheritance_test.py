@@ -44,6 +44,7 @@ if str(ROOT / "tests") not in sys.path:
 
 from team_launcher_test_helpers import (  # noqa: E402
     FirstRunAuthRunner,
+    _mark_first_run_setup_complete,
     _write_first_run_auth_config,
     load_project_config,
     team_launcher,
@@ -159,6 +160,151 @@ def test_a_token_refresh_is_not_a_login() -> None:
         credential.write_text(json.dumps({"auth_mode": "chatgpt", "refreshed": True}) + "\n", encoding="utf-8")
 
     check(report.roles_awaiting_restart == (), "a refreshed credential restarts nobody")
+
+
+def test_the_provider_first_run_is_asked_once_for_every_role_that_uses_it() -> None:
+    """Acceptance: shared onboarding is collected once, not once per role.
+
+    Claude's theme and welcome flow belong to the owner's account. Three roles
+    use Claude on the UAT tenant, and the live `.claude.json` carried a valid
+    `oauthAccount` with neither `hasCompletedOnboarding` nor a `theme` -- so
+    every one of those panes opened it.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-setup.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"claude", "codex"})
+        manifest = team_launcher.build_first_run_setup_manifest(
+            config, owner_user="otto-agent", owner_home=owner_home, runner=runner
+        )
+
+    setup = manifest.provider_setup_steps
+    check(len(setup) == 1, f"one step, not one per role: {setup}")
+    check(setup[0].cli == "claude", f"and only for the provider that needs it: {setup[0].cli}")
+    check(
+        setup[0].roles == ("designer", "director", "audit"),
+        f"named for every role that uses it: {setup[0].roles}",
+    )
+    check(
+        all(step.cli != "codex" for step in setup),
+        "a provider with no account-wide first run is not asked for one",
+    )
+
+
+def test_an_account_that_has_already_done_it_is_asked_for_nothing() -> None:
+    """Acceptance: already-complete state is skipped, and stays skipped."""
+    with tempfile.TemporaryDirectory(prefix="syrd191-idempotent.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        _mark_first_run_setup_complete(owner_home, config)
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"claude", "codex"})
+        first = team_launcher.build_first_run_setup_manifest(
+            config, owner_user="otto-agent", owner_home=owner_home, runner=runner
+        )
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=lambda _line: None,
+        )
+        second = team_launcher.build_first_run_setup_manifest(
+            config, owner_user="otto-agent", owner_home=owner_home, runner=runner
+        )
+
+    check(first.provider_setup_steps == [] and first.folder_trust_steps == [],
+          f"nothing is offered: {first.provider_setup_steps} {first.folder_trust_steps}")
+    check(not first.has_steps, "and the manifest is silent")
+    check(report.incomplete_provider_setup == [] and report.untrusted_roles == [],
+          f"the phase reports nothing outstanding: {report}")
+    check(second.provider_setup_steps == [] and second.folder_trust_steps == [],
+          "and running it again asks for nothing either")
+
+
+def test_a_first_run_that_did_not_complete_is_reported_not_assumed() -> None:
+    """Switchyard asks the CLI to run its setup and then looks again.
+
+    It never writes that state itself and never answers a security prompt on
+    the owner's behalf, so "the step ran" is not "the step worked": if the
+    account still has not completed it, every pane using that provider will
+    open it, and that is said here rather than discovered there.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-unfinished.") as tmp:
+        tmp_path = Path(tmp)
+        config = uat_config(tmp_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        runner = FirstRunAuthRunner()
+        runner.login_seen.update({"claude", "codex"})
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=lambda _line: None,
+        )
+        warnings: list[str] = []
+        team_launcher.report_first_run_auth_warnings(report, print_func=warnings.append)
+
+    check(
+        report.incomplete_provider_setup == [("claude", ["designer", "director", "audit"])],
+        f"the provider and its roles are named: {report.incomplete_provider_setup}",
+    )
+    check(report.has_warnings, "and the report counts as one worth printing")
+    check(
+        any("first run is still not complete" in line and "designer, director, audit" in line
+            for line in warnings),
+        f"the warning says which panes will open it: {warnings}",
+    )
+    check(
+        not (owner_home / ".claude.json").exists(),
+        "and nothing was written into the account's state to make it look done",
+    )
+
+
+def test_roles_that_share_a_worktree_share_one_trust_action() -> None:
+    """Acceptance: one trust action per distinct required worktree."""
+    with tempfile.TemporaryDirectory(prefix="syrd191-shared-tree.") as tmp:
+        tmp_path = Path(tmp)
+        config_path = _write_first_run_auth_config(
+            tmp_path, roles=[("designer", "claude"), ("director", "claude"), ("audit", "claude")]
+        )
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        # The one workdir roles may legitimately share is the project
+        # repository itself, which is what the loader allows and what a tenant
+        # with several roles reading one checkout really looks like.
+        shared = raw["repository"]
+        for role in raw["roles"]:
+            if role["role"] in {"designer", "director"}:
+                role["workdir"] = shared
+        config_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+        config = load_project_config("otto", config_path)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        runner = FirstRunAuthRunner()
+        runner.login_seen.add("claude")
+        manifest = team_launcher.build_first_run_setup_manifest(
+            config, owner_user="otto-agent", owner_home=owner_home, runner=runner
+        )
+
+    trust = manifest.folder_trust_steps
+    check(len(trust) == 2, f"two distinct worktrees, two actions: {[str(s.workdir) for s in trust]}")
+    check(
+        trust[0].roles == ("designer", "director"),
+        f"and the shared one names both roles it covers: {trust[0].roles}",
+    )
+    check(trust[1].roles == ("audit",), f"the separate tree keeps its own: {trust[1].roles}")
+    printed = team_launcher._format_first_run_setup_manifest(manifest)
+    check(
+        any("roles designer, director" in line and "folder trust" in line for line in printed),
+        f"the manifest advertises it as one step for two roles: {printed}",
+    )
 
 
 class SessionRunner:

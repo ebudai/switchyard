@@ -26,6 +26,12 @@ def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> No
         owner_home.joinpath(".claude.json").write_text(
             json.dumps(
                 {
+                    # Claude records its own first run beside the trust map, and
+                    # a tenant that has "already passed" carries both: without
+                    # it the manifest correctly offers the setup step this case
+                    # asserts is absent (SYRD-191).
+                    "hasCompletedOnboarding": True,
+                    "theme": "dark",
                     "projects": {
                         str(Path(role.workdir).resolve(strict=False)): {"hasTrustDialogAccepted": True}
                         for role in config.roles
@@ -97,6 +103,10 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         )
         runner = FirstRunAuthRunner()
         runner.login_seen.update({"agy", "claude", "codex"})
+        # This case is about Codex hook approvals, so the Claude and agy first
+        # run and their per-worktree trust are recorded as already done: they
+        # are separate steps with their own cases (SYRD-191).
+        _mark_first_run_setup_complete(owner_home, config)
         messages: list[str] = []
 
         report = team_launcher.run_first_run_auth_phase(
@@ -126,7 +136,7 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
     ]
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "0 login step(s), 0 folder trust step(s), 2 codex hook approval(s), 0 missing CLI(s)",
+        "0 login step(s), 0 provider setup step(s), 0 folder trust step(s), 2 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: manual security approval: "
         "codex hook trust needs 2 approvals for owner user otto-agent; "
         "run /hooks once in any Codex pane as that owner. "
@@ -258,6 +268,11 @@ def test_first_run_auth_phase_accepts_fresh_installer_seeded_codex_hook_trust() 
         runner.login_seen.update({"agy", "claude", "codex"})
         messages: list[str] = []
 
+        # This case is about Codex hook approvals; the provider's own first run and
+        # its per-worktree trust are recorded as already done, each having
+        # its own case (SYRD-191).
+        _mark_first_run_setup_complete(owner_home, config)
+
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -314,6 +329,12 @@ def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
         owner_home.joinpath(".claude.json").write_text(
             json.dumps(
                 {
+                    # Claude records its own first run beside the trust map, and
+                    # a tenant that has "already passed" carries both: without
+                    # it the manifest correctly offers the setup step this case
+                    # asserts is absent (SYRD-191).
+                    "hasCompletedOnboarding": True,
+                    "theme": "dark",
                     "projects": {
                         str(Path(role.workdir).resolve(strict=False)): {"hasTrustDialogAccepted": True}
                         for role in config.roles
@@ -391,7 +412,7 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
         assert report.owner_user == "otto-agent", status_returncode
         assert messages == [
             "switchyard: first-run setup manifest for owner user otto-agent: "
-            "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
+            "0 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
             "switchyard: missing CLI agy (affected roles: inspector): install agy for owner user "
             "otto-agent with: curl -fsSL https://antigravity.google/cli/install.sh | bash",
             "switchyard: install each one for owner user otto-agent; panes run as that user, so a CLI "
@@ -488,7 +509,7 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
     assert report.roles_awaiting_restart == ("ops",)
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
     ]
     assert 127 not in runner.returncodes
@@ -571,7 +592,7 @@ def test_first_run_auth_reports_profile_only_cli_missing_with_real_shell_probe()
     ]
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
+        "0 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 1 missing CLI(s)",
         "switchyard: missing CLI codex (affected roles: ops): install codex for owner user "
         "otto-agent with: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
         "switchyard: install each one for owner user otto-agent; panes run as that user, so a CLI "
@@ -618,7 +639,7 @@ def test_first_run_auth_phase_reports_broken_existing_owner_shell_without_mutati
     assert report.owner_user == "otto-agent"
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s), "
+        "0 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s), "
         "1 owner shell issue(s)",
         f"switchyard: owner shell for otto-agent is not executable: {broken_shell}; "
         "repair with `sudo usermod -s /bin/bash otto-agent`",

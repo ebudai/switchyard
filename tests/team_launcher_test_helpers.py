@@ -949,6 +949,52 @@ def _write_first_run_auth_config(
         (tmp_path / "worktrees" / role).mkdir(parents=True, exist_ok=True)
     return config_path
 
+def _mark_first_run_setup_complete(
+    owner_home: Path, config, *, clis: set[str] | None = None, trust: bool = True
+) -> None:
+    """Record what a tenant that has already been through first run carries.
+
+    Claude keeps two separate things in the owner's home: whether the account
+    has completed its own first run, and which directories it trusts. A fixture
+    that means "there is nothing left to ask" has to carry both, or the manifest
+    correctly offers the steps it is asserting are absent (SYRD-191).
+    """
+    wanted = clis or {"claude", "agy"}
+    owner_home.mkdir(parents=True, exist_ok=True)
+    claude_roles = [role for role in config.roles if role.cli[:1] == ["claude"]]
+    if "claude" in wanted:
+        owner_home.joinpath(".claude.json").write_text(
+            json.dumps(
+                {
+                    "hasCompletedOnboarding": True,
+                    "theme": "dark",
+                    "projects": {
+                        str(Path(role.workdir).resolve(strict=False)): {"hasTrustDialogAccepted": True}
+                        for role in (claude_roles if trust else ())
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    if "agy" in wanted:
+        settings = owner_home / ".gemini" / "antigravity-cli" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(
+            json.dumps(
+                {
+                    "trustedWorkspaces": [
+                        str(Path(role.workdir).resolve(strict=False))
+                        for role in (config.roles if trust else ())
+                        if role.cli[:1] == ["agy"]
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
 def _mark_first_run_roles_detached(config_path: Path, *role_names: str) -> None:
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     detached = set(role_names)

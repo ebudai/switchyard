@@ -9976,6 +9976,10 @@ class FirstRunAuthReport:
     #: five panes asked the User to authenticate again after two successful
     #: logins (SYRD-191).
     authenticated_now: dict[str, list[str]] = field(default_factory=dict)
+    #: Providers whose account-wide first run was offered and is still not
+    #: finished. Their roles will open it in the pane, so this is said rather
+    #: than left to be discovered there.
+    incomplete_provider_setup: list[tuple[str, list[str]]] = field(default_factory=list)
 
     @property
     def roles_awaiting_restart(self) -> tuple[str, ...]:
@@ -9991,6 +9995,7 @@ class FirstRunAuthReport:
     def has_warnings(self) -> bool:
         return bool(
             self.unauthenticated_roles
+            or self.incomplete_provider_setup
             or self.untrusted_roles
             or self.stale_codex_hook_trust
             or self.missing_cli_roles
@@ -10662,11 +10667,32 @@ class FirstRunAuthLoginStep:
 
 
 @dataclass(frozen=True)
+class FirstRunProviderSetupStep:
+    """One provider's account-wide first run, collected once for every role.
+
+    Distinct from a login: the account can hold valid credentials and still
+    open a theme or welcome flow the first time the CLI runs interactively,
+    because that state lives beside the credentials rather than in them. It is
+    the owner's, not a role's, so it is asked once however many roles use that
+    provider (SYRD-191).
+    """
+
+    cli: str
+    roles: tuple[str, ...]
+    command: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
 class FirstRunFolderTrustStep:
     cli: str
     role: str
     workdir: Path
     command: tuple[str, ...]
+    #: Every role that shares this worktree. Trust is directory-scoped, so one
+    #: action covers all of them and the manifest says so rather than listing
+    #: the same directory once per role.
+    roles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -10677,11 +10703,13 @@ class FirstRunSetupManifest:
     stale_codex_hook_trust: list[CodexHookTrustMismatch]
     missing_cli_roles: dict[str, list[str]]
     owner_shell_issue: OwnerShellIssue | None = None
+    provider_setup_steps: list[FirstRunProviderSetupStep] = field(default_factory=list)
 
     @property
     def has_steps(self) -> bool:
         return bool(
             self.login_steps
+            or self.provider_setup_steps
             or self.folder_trust_steps
             or self.stale_codex_hook_trust
             or self.missing_cli_roles
@@ -12032,6 +12060,40 @@ def _read_toml_object(path: Path) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+#: How each provider records that its account-wide first run is finished. Read
+#: rather than written: Switchyard asks the CLI to run its own setup and then
+#: looks again, and never manufactures the answer (SYRD-191).
+FIRST_RUN_SETUP_CLIS = frozenset({"claude"})
+
+
+def _claude_account_setup_complete(owner_home: Path) -> bool:
+    """Whether Claude's own first run has been completed for this account.
+
+    Credentials and setup are separate: the live testing tenant held a valid
+    `.claude/.credentials.json` beside a `.claude.json` carrying an
+    `oauthAccount` and neither `hasCompletedOnboarding` nor a `theme`, and every
+    pane opened the theme flow instead of a prompt.
+    """
+    config = _read_json_object(owner_home / ".claude.json")
+    if not config:
+        return False
+    if config.get("hasCompletedOnboarding") is True:
+        return True
+    return bool(str(config.get("theme") or "").strip())
+
+
+def _provider_account_setup_complete(cli: str, *, owner_home: Path) -> bool:
+    if cli == "claude":
+        return _claude_account_setup_complete(owner_home)
+    return True
+
+
+def _provider_setup_reason(cli: str) -> str:
+    if cli == "claude":
+        return "this account has not completed Claude's own first run (theme and welcome)"
+    return f"{cli} has not completed its first run for this account"
+
+
 def _claude_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
     config = _read_json_object(owner_home / ".claude.json")
     projects = config.get("projects")
@@ -12165,22 +12227,53 @@ def build_first_run_setup_manifest(
             )
         )
 
-    folder_trust_steps: list[FirstRunFolderTrustStep] = []
-    for role in config.roles:
-        if not role.detached:
+    # One step per provider whose account-wide first run is unfinished, however
+    # many roles use it: the theme and welcome flow belong to the owner's
+    # account, not to a role, and asking once is what keeps three Claude panes
+    # from each opening it (SYRD-191).
+    provider_setup_steps: list[FirstRunProviderSetupStep] = []
+    for cli, roles in roles_by_cli.items():
+        if cli not in FIRST_RUN_SETUP_CLIS or cli in missing_cli_roles:
             continue
+        if _provider_account_setup_complete(cli, owner_home=owner_home):
+            continue
+        provider_setup_steps.append(
+            FirstRunProviderSetupStep(
+                cli=cli,
+                roles=tuple(_role_names(roles)),
+                command=tuple(FIRST_RUN_AUTH_LOGIN_COMMANDS.get(cli, [cli])[:1]),
+                reason=_provider_setup_reason(cli),
+            )
+        )
+
+    # Every configured role, not only the detached ones, and one action per
+    # distinct worktree rather than one per role: trust is directory-scoped, so
+    # roles that share a tree share the answer. A visible pane that has never
+    # been trusted opens the provider's dialog instead of the ready prompt the
+    # User was promised, which is what three Claude panes did (SYRD-191).
+    folder_trust_steps: list[FirstRunFolderTrustStep] = []
+    trust_index: dict[tuple[str, str], int] = {}
+    for role in config.roles:
         cli = _role_cli_name(role)
-        if cli not in FIRST_RUN_TRUST_CLIS:
+        if cli not in FIRST_RUN_TRUST_CLIS or cli in missing_cli_roles:
             continue
         workdir = Path(role.workdir)
         if _workdir_is_trusted(cli, owner_home=owner_home, workdir=workdir):
             continue
+        key = (cli, str(workdir.expanduser().resolve(strict=False)))
+        existing = trust_index.get(key)
+        if existing is not None:
+            shared = folder_trust_steps[existing]
+            folder_trust_steps[existing] = replace(shared, roles=(*shared.roles, role.role))
+            continue
+        trust_index[key] = len(folder_trust_steps)
         folder_trust_steps.append(
             FirstRunFolderTrustStep(
                 cli=cli,
                 role=role.role,
                 workdir=workdir,
                 command=tuple(_first_run_trust_command(role)),
+                roles=(role.role,),
             )
         )
 
@@ -12191,6 +12284,7 @@ def build_first_run_setup_manifest(
         stale_codex_hook_trust=stale_codex_hook_trust_for_roles(config.roles, owner_home=owner_home),
         missing_cli_roles=missing_cli_roles,
         owner_shell_issue=_owner_shell_issue(owner_user),
+        provider_setup_steps=provider_setup_steps,
     )
 
 
@@ -12202,9 +12296,13 @@ def _format_first_run_setup_manifest(manifest: FirstRunSetupManifest) -> list[st
     folder_trust_count = len(manifest.folder_trust_steps)
     hook_trust_count = len(manifest.stale_codex_hook_trust)
     owner_shell_issue_count = 1 if manifest.owner_shell_issue else 0
+    provider_setup_count = len(manifest.provider_setup_steps)
+    # Every interactive step is counted, because the manifest is what an
+    # operator reads to know what they are about to be asked (SYRD-191).
     summary = (
         f"switchyard: first-run setup manifest for owner user {manifest.owner_user}: "
-        f"{login_count} login step(s), {folder_trust_count} folder trust step(s), "
+        f"{login_count} login step(s), {provider_setup_count} provider setup step(s), "
+        f"{folder_trust_count} folder trust step(s), "
         f"{hook_trust_count} codex hook approval(s), {missing_cli_count} missing CLI(s)"
     )
     if owner_shell_issue_count:
@@ -12230,9 +12328,17 @@ def _format_first_run_setup_manifest(manifest: FirstRunSetupManifest) -> list[st
             f"switchyard: login {step.cli}: roles {', '.join(step.roles)}; "
             f"interactive account setup running {shlex.join(step.command)} as {manifest.owner_user}"
         )
-    for step in manifest.folder_trust_steps:
+    for step in manifest.provider_setup_steps:
         lines.append(
-            f"switchyard: folder trust {step.cli}: role {step.role} at {step.workdir}; "
+            f"switchyard: provider setup {step.cli}: roles {', '.join(step.roles)}; {step.reason}; "
+            f"interactive first run of {shlex.join(step.command)} as {manifest.owner_user}, once "
+            "for every role that uses it"
+        )
+    for step in manifest.folder_trust_steps:
+        covered = ", ".join(step.roles or (step.role,))
+        lines.append(
+            f"switchyard: folder trust {step.cli}: role{'s' if len(step.roles or (step.role,)) > 1 else ''} "
+            f"{covered} at {step.workdir}; "
             "recurs per project/workdir even when the owner user is reused; "
             "interactive repository trust today, not account login"
         )
@@ -12337,6 +12443,22 @@ def run_first_run_auth_phase(
             # for it that is already running started before it (SYRD-191).
             authenticated_now[step.cli] = list(step.roles)
 
+    # The provider's own first run, once per provider, before any role is
+    # launched or presented. Switchyard asks the CLI to run its setup and then
+    # looks at the account state again; it never writes that state itself and
+    # never answers a security prompt on the owner's behalf (SYRD-191).
+    incomplete_setup: list[tuple[str, list[str]]] = []
+    for step in manifest.provider_setup_steps:
+        _run_owner_cli_interactive(
+            owner_user=effective_owner,
+            owner_home=effective_home,
+            cwd=effective_home,
+            command=list(step.command),
+            runner=runner,
+        )
+        if not _provider_account_setup_complete(step.cli, owner_home=effective_home):
+            incomplete_setup.append((step.cli, list(step.roles)))
+
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:
         _run_owner_cli_interactive(
@@ -12347,7 +12469,8 @@ def run_first_run_auth_phase(
             runner=runner,
         )
         if not _workdir_is_trusted(step.cli, owner_home=effective_home, workdir=step.workdir):
-            untrusted.append((step.cli, step.role, str(step.workdir)))
+            for role in step.roles or (step.role,):
+                untrusted.append((step.cli, role, str(step.workdir)))
 
     model_validation_failures: list[ModelValidationFailure] = []
     if validate_models:
@@ -12371,6 +12494,7 @@ def run_first_run_auth_phase(
         else "",
         owner_shell_issue=manifest.owner_shell_issue,
         authenticated_now=authenticated_now,
+        incomplete_provider_setup=incomplete_setup,
     )
 
 
@@ -12395,6 +12519,11 @@ def report_first_run_auth_warnings(
     for cli, roles in report.unauthenticated_roles.items():
         print_func(
             f"warning: switchyard: {cli} is still unauthenticated; affected roles: {', '.join(roles)}"
+        )
+    for cli, roles in report.incomplete_provider_setup:
+        print_func(
+            f"warning: switchyard: {cli}'s own first run is still not complete{owner_detail}; "
+            f"affected roles: {', '.join(roles)}; each of their panes will open it instead of a prompt"
         )
     for cli, role, workdir in report.untrusted_roles:
         print_func(f"warning: switchyard: {cli} workspace still untrusted for {role}: {workdir}")

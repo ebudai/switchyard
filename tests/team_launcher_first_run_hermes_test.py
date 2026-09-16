@@ -65,7 +65,7 @@ def test_first_run_auth_phase_reports_hermes_without_resolved_api_key_as_unauthe
     ]
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "1 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
     ]
 
@@ -113,6 +113,9 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
                 return subprocess.CompletedProcess(args, 0)
             return subprocess.CompletedProcess(args, 1, stderr="unexpected command\n")
 
+        # The account's own first run is complete; no directory is trusted yet.
+        # This case is about collecting that trust and keeping it (SYRD-191).
+        _mark_first_run_setup_complete(owner_home, config, clis={"claude"}, trust=False)
         first_messages: list[str] = []
         first_report = team_launcher.run_first_run_auth_phase(
             config,
@@ -144,7 +147,7 @@ def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches(
     assert call_kwargs[1].get("cwd") == str(tmp_path / "worktrees" / "research")
     assert first_messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "0 login step(s), 1 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
+        "0 login step(s), 0 provider setup step(s), 1 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         f"switchyard: folder trust claude: role research at {tmp_path / 'worktrees' / 'research'}; "
         "recurs per project/workdir even when the owner user is reused; "
         "interactive repository trust today, not account login",
@@ -189,16 +192,33 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
         )
 
     assert report.unauthenticated_roles == {}
-    assert report.untrusted_roles == [("claude", "research", str(tmp_path / "worktrees" / "research"))]
+    # Every configured role's worktree, visible or detached, and one action for
+    # each: this is the manifest an operator reads to know what they are about
+    # to be asked, so it has to name all of it (SYRD-191).
+    assert report.untrusted_roles == [
+        ("claude", "director", str(tmp_path / "worktrees" / "director")),
+        ("claude", "research", str(tmp_path / "worktrees" / "research")),
+        ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
+    ]
     printed = [value for kind, value in events if kind == "print"]
     assert printed == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "3 login step(s), 1 folder trust step(s), 2 codex hook approval(s), 0 missing CLI(s)",
+        "3 login step(s), 1 provider setup step(s), 3 folder trust step(s), "
+        "2 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login claude: roles director, research; "
         "interactive account setup running claude auth login as otto-agent",
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
         "switchyard: login agy: roles inspector; interactive account setup running agy as otto-agent",
+        "switchyard: provider setup claude: roles director, research; this account has not "
+        "completed Claude's own first run (theme and welcome); interactive first run of claude "
+        "as otto-agent, once for every role that uses it",
+        f"switchyard: folder trust claude: role director at {tmp_path / 'worktrees' / 'director'}; "
+        "recurs per project/workdir even when the owner user is reused; "
+        "interactive repository trust today, not account login",
         f"switchyard: folder trust claude: role research at {tmp_path / 'worktrees' / 'research'}; "
+        "recurs per project/workdir even when the owner user is reused; "
+        "interactive repository trust today, not account login",
+        f"switchyard: folder trust agy: role inspector at {tmp_path / 'worktrees' / 'inspector'}; "
         "recurs per project/workdir even when the owner user is reused; "
         "interactive repository trust today, not account login",
         "switchyard: manual security approval: "
@@ -231,7 +251,17 @@ def test_first_run_trust_matches_configured_symlink_path_without_reprompting() -
         config_path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
         config = load_project_config("otto", config_path)
         owner_home.joinpath(".claude.json").write_text(
-            json.dumps({"projects": {str(link): {"hasTrustDialogAccepted": True}}}) + "\n",
+            # Claude's own first run is recorded beside the trust map, and this
+            # case is about the trust map matching a symlinked workdir without
+            # asking again (SYRD-191).
+            json.dumps(
+                {
+                    "hasCompletedOnboarding": True,
+                    "theme": "dark",
+                    "projects": {str(link): {"hasTrustDialogAccepted": True}},
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
         runner = FirstRunAuthRunner()

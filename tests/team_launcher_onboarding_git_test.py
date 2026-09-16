@@ -671,7 +671,7 @@ def test_switchyard_new_missing_owner_clis_stops_before_launching_panes() -> Non
     assert any(
         line == (
             "switchyard: first-run setup manifest for owner user test-agent: "
-            "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 2 missing CLI(s)"
+            "0 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 2 missing CLI(s)"
         )
         for line in output
     )
@@ -826,7 +826,7 @@ def test_switchyard_new_reports_existing_owner_with_broken_shell_without_repairi
     assert any(
         line == (
             "switchyard: first-run setup manifest for owner user test-agent: "
-            "0 login step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s), "
+            "0 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s), "
             "1 owner shell issue(s)"
         )
         for line in output

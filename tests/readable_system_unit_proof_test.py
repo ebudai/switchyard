@@ -99,6 +99,36 @@ def run_gate(
     )
 
 
+#: The gate's own generic render, asked of the real function. A test cannot
+#: compute it: it is rendered from the project's template for this release, and
+#: the whole point of SYRD-173 is that it EQUALS the installed unit whenever the
+#: host has not changed -- whether or not the release contains a unit.
+RENDER_HARNESS = r"""
+set -uo pipefail
+source "$SERVICE_SCRIPT"
+system_unit_file_path() { printf '%s\n' "$INSTALLED_UNIT"; }
+system_unit_needs_daemon_reload() { return 1; }
+log() { :; }
+render_system_unit_for_release "$RELEASE_DIR"
+"""
+
+
+def generic_render(*, release_dir: Path, installed: Path) -> str:
+    done = subprocess.run(
+        ["bash", "-c", RENDER_HARNESS], text=True, capture_output=True,
+        env={
+            **os.environ,
+            "SERVICE_SCRIPT": str(SERVICE_SCRIPT),
+            "INSTALLED_UNIT": str(installed),
+            "RELEASE_DIR": str(release_dir),
+            "TICKET_BOARD_PROJECT": PROJECT,
+            "PROJECT_SLUG": PROJECT,
+        },
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
 def make_tree(tmp: Path) -> tuple[Path, Path, Path]:
     """A root-only provisioning directory, a readable copy, and the installed unit."""
     provision = tmp / "etc-switchyard" / "provision" / PROJECT
@@ -207,6 +237,47 @@ def main() -> int:
             assert absent.returncode != 0, absent.stdout
             assert "contains no production system unit" in output, output
             assert "diagnostic only and must not be installed" in output, output
+            checks += 1
+
+            # 7. SYRD-173: THE PASSING PATH, which is the one that needed the
+            #    assertion. Case 6 refuses through the MISMATCH branch, and
+            #    would stay green under the bug. Here the release still contains
+            #    no production unit, and the installed unit is byte-identical to
+            #    the generic render -- not an exotic coincidence, because both
+            #    come from the same template for the same project and nothing
+            #    about the host has changed. `cmp` then succeeds, the whole
+            #    mismatch body is skipped, and the gate used to RETURN SUCCESS
+            #    having never read a unit belonging to the release.
+            installed.write_text(
+                generic_render(release_dir=release_dir, installed=installed), encoding="utf-8"
+            )
+            identical = run_gate(candidate=readable, installed=installed, release_dir=release_dir)
+            output = identical.stdout + identical.stderr
+            assert identical.returncode != 0, (
+                "a release with no production unit passed the gate because the generic "
+                f"render happened to match what is installed: {output}"
+            )
+            assert "GATE PASSED" not in identical.stdout, identical.stdout
+            assert "contains no production system unit" in output, output
+            assert "proves nothing about this release" in output, output
+            # And refused FOR that reason. A gate that fell through to the
+            # comparison and refused because a deleted temporary file could not
+            # be read would look identical from the outside while proving
+            # nothing -- so the wrong refusal is named here too.
+            assert "differs from installed" not in output, output
+            # The render is still shown, because an operator needs to see what
+            # the template would have said -- it is just not evidence.
+            assert "diagnostic only and must not be installed" in output, output
+            checks += 1
+
+            # And with a candidate present again, an identical unit still
+            # passes: the fix refuses a MISSING unit, not a matching one.
+            readable.write_text(installed.read_text(encoding="utf-8"), encoding="utf-8")
+            still_passes = run_gate(
+                candidate=readable, installed=installed, release_dir=release_dir
+            )
+            assert still_passes.returncode == 0, still_passes.stdout + still_passes.stderr
+            assert "GATE PASSED" in still_passes.stdout, still_passes.stdout
             checks += 1
         finally:
             # Leave the tree removable.

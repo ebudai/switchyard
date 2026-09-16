@@ -222,11 +222,17 @@ def privileged_cases() -> int:
         def board_names(*roles):
             return lambda _config: ({"roles": [{"name": name} for name in roles]}, "")
 
+        # The conflict check on its own, with corroboration explicitly off: an
+        # added role is a conflict until something establishes it. (Asking for
+        # the default here would be asking a different question -- since
+        # SYRD-168 the default consults the board, which is the point of that
+        # ticket.)
         with owner_patches(home):
             found, config, problems = launcher.verified_tenant_config(
-                plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry
+                plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry,
+                corroborate_roles=False,
             )
-        check(found is None, f"without corroboration the added role is still refused: {found}")
+        check(found is None, f"unestablished, the added role is still refused: {found}")
         check(any("inspector" in line for line in problems), f"and named: {problems}")
 
         with owner_patches(home):
@@ -278,6 +284,57 @@ def privileged_cases() -> int:
         check(asked == [], f"and the board it nominated was never asked: {asked}")
         # Back to what provisioning wrote, so the cases after this one are about
         # what they say they are about.
+        config_path.write_text(as_provisioned, encoding="utf-8")
+
+        # SYRD-168: THE SAME CORROBORATION ON EVERY PRIVILEGED PATH. SYRD-167
+        # wired the reader into adoption alone, so `resume-provision` called
+        # this same verifier without one and refused `inspector` on a tenant
+        # whose configuration, board workflow and live runtime assignments all
+        # name it (journal 0068). The default is what fixes that: a caller no
+        # longer has to remember.
+        config_path.write_text(json.dumps(legacy, indent=2), encoding="utf-8")
+        with owner_patches(home):
+            with patch.object(launcher, "read_board_declared_workflow",
+                              board_names("director", "app", "inspector")):
+                found, _config, problems = launcher.verified_tenant_config(
+                    plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry
+                )
+        check(found == config_path,
+              f"a caller that passes no reader still corroborates: {found} {problems}")
+
+        # Fail-closed by default, not open: the same call with a board that does
+        # not name the role, and with a board that cannot be reached at all.
+        with owner_patches(home):
+            with patch.object(launcher, "read_board_declared_workflow", board_names("director", "app")):
+                found, _config, problems = launcher.verified_tenant_config(
+                    plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry
+                )
+        check(found is None, f"the default does not establish an unnamed role: {found}")
+        with owner_patches(home):
+            with patch.object(launcher, "read_board_declared_workflow",
+                              lambda _config: (None, "board unreachable")):
+                found, _config, problems = launcher.verified_tenant_config(
+                    plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry
+                )
+        check(found is None, f"an unreachable board corroborates nothing by default: {found}")
+
+        # And the ordering survives the default: a configuration that also
+        # disagrees about its socket never reaches the board it nominated.
+        default_asked: list[str] = []
+
+        def recording_default(_config):
+            default_asked.append("asked")
+            return ({"roles": [{"name": "inspector"}]}, "")
+
+        moved_socket = dict(legacy, board_socket="/tmp/somebody-elses.sock")
+        config_path.write_text(json.dumps(moved_socket, indent=2), encoding="utf-8")
+        with owner_patches(home):
+            with patch.object(launcher, "read_board_declared_workflow", recording_default):
+                found, _config, problems = launcher.verified_tenant_config(
+                    plan, SLUG, owner_uid=TENANT_UID, registry_dir=registry
+                )
+        check(found is None and default_asked == [],
+              f"nominated authority is not asked, default or not: {found} {default_asked}")
         config_path.write_text(as_provisioned, encoding="utf-8")
 
         # 3. A MOVED CHECKOUT. The registry still names where it used to be, so

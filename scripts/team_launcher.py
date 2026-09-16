@@ -14428,6 +14428,7 @@ def verified_tenant_config(
     owner_uid: int | None = None,
     registry_dir: Path | None = None,
     board_reader: "Callable[[ProjectConfig], tuple[dict | None, str]] | None" = None,
+    corroborate_roles: bool = True,
 ) -> tuple[Path | None, ProjectConfig | None, list[str]]:
     """The generated configuration root is willing to register, or why not.
 
@@ -14436,6 +14437,18 @@ def verified_tenant_config(
     file the tenant could have. Anything else -- another account, or a mode
     that lets a group or the world rewrite it -- is not a document root will
     point the registry at.
+
+    Legacy-role corroboration is the DEFAULT rather than something a caller
+    remembers to ask for. SYRD-167 added it and wired it into adoption alone, so
+    `resume-provision` called this same verifier without a reader and refused
+    `inspector` on a tenant where the configuration, the board's declared
+    workflow and the live runtime assignments all name it (journal 0068). A
+    safety property that every privileged path needs and one path supplies is a
+    property that path has, not one the verifier has (SYRD-168).
+
+    It stays fail-closed: the reader is consulted only when every other
+    comparison already agrees, an unreachable board corroborates nothing, and a
+    role the running board does not name is still refused.
     """
     recorded = recorded_tenant_config_path(slug)
     registered = registered_tenant_config_path(slug, registry_dir=registry_dir)
@@ -14461,7 +14474,10 @@ def verified_tenant_config(
             problems.append(f"{candidate} is not a usable launcher configuration: {exc}")
             continue
         conflicts = tenant_config_conflicts(plan, config)
-        if conflicts and board_reader is not None and all(
+        reader = board_reader if board_reader is not None else (
+            read_board_declared_workflow if corroborate_roles else None
+        )
+        if conflicts and reader is not None and all(
             line.startswith("roles: ") for line in conflicts
         ):
             # Only when everything ELSE already agrees. The board is asked over
@@ -14469,7 +14485,7 @@ def verified_tenant_config(
             # shown to match the one root provisioned is precisely what the
             # absence of any other conflict means here -- so a configuration
             # cannot nominate the authority that corroborates it (SYRD-167).
-            document, _board_problem = board_reader(config)
+            document, _board_problem = reader(config)
             conflicts = tenant_config_conflicts(
                 plan, config, corroborated_roles=board_declared_role_names(document)
             )

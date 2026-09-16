@@ -160,6 +160,36 @@ the release that failed, so re-running it would repeat the defect it failed on.
 Nothing the tenant owns is touched and running it twice produces the same
 artifacts.
 
+### Approving this host's desktop, without a prompt
+
+A project's scoped Wayland policy is generated from this host's standing
+desktop approval, kept root-owned 0600 at `/etc/switchyard/desktop-approval.json`
+because an approval a tenant could write is an approval a tenant could give
+itself. Until now the only thing that wrote it was the `switchyard new` prompt,
+so pre-authorizing a host for unattended provisioning meant calling into the
+library or hand-writing root's JSON -- both of them the thing everything else
+here avoids.
+
+    pkexec switchyard approve-desktop --gui-user USER --reference '<why>'
+    switchyard approve-desktop --show
+    pkexec switchyard approve-desktop --revoke --reference '<why>'
+
+Approving and revoking need root and need a person: `approved_by` comes from
+the mechanism that elevated the run -- `PKEXEC_UID`, then `SUDO_USER` -- and
+never from a flag, so the record cannot be made to name somebody who did not
+ask for it. `--reference` is required, because an approval nobody can
+attribute is worse than none. The GUI user is inferred only when exactly one
+account is signed in; several, or none, and it must be named. The record is
+read by fd with no symlink at any component and required to belong to root,
+written the same way and left 0600, and one that cannot be read is never
+written over. Revoking keeps the record with nobody approved in it, carrying
+who withdrew it and why, so a withdrawal is evidence rather than an absence --
+and every reader already answers "no approval" for that shape.
+
+This is a standing host-level grant and is not `--desktop-policy`, which
+supplies a policy for one launch. It grants nothing by itself: each project
+still gets its own scoped policy, installed by its own GUI owner (SYRD-174).
+
 ### Adopting an existing project's declared workflow
 
 A project provisioned before root kept that record has its declared workflow in

@@ -87,6 +87,7 @@ Commands:
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
+  approve-desktop  record, show or withdraw this host's standing desktop approval
   adopt-workflow   record an existing project's declared workflow as root's own copy
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
   cutover-roles    legacy compatibility command (new runtimes use the project account)
@@ -106,7 +107,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, adopt-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, add-role, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, approve-desktop, adopt-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, add-role, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, teardown, status, validate-models.
 ```
 
 <!-- switchyard-help:end -->

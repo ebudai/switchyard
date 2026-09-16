@@ -187,6 +187,26 @@ def test_a_run_nobody_authorized_is_refused() -> None:
         assert any("authorized as one" in line for line in said), said
 
 
+def test_a_plan_that_names_no_tenant_is_not_read_as_a_closed_boundary() -> None:
+    """Readiness must not take silence for proof.
+
+    `recovery_readiness_problems` is called with whatever plan its caller has,
+    and one that carries only a slug names no worktree base and no home. The
+    check cannot run on it -- and "it did not run" is not "it is closed", which
+    is the whole failure this ticket exists to stop. It says so instead, and
+    readiness carries that objection like any other.
+    """
+    objections = launcher.repository_boundary_problems(SimpleNamespace(project="syrd"))
+    assert objections, "a plan that names nothing was read as a closed boundary"
+    assert all("was not checked" in objection for objection in objections), objections
+    assert all("owner_home" in objection for objection in objections), objections
+
+    problems = readiness(SimpleNamespace(project="syrd"))
+    carried = [line for line in problems if "was not checked" in line]
+    assert carried, problems
+    assert all("repair-boundary" in line for line in carried), carried
+
+
 def test_the_command_is_discoverable_and_says_what_it_does_not_do() -> None:
     assert "repair-boundary" in launcher.SWITCHYARD_COMMANDS
     assert "repair-boundary" in launcher.switchyard_help_text()

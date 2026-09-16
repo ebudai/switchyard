@@ -15512,6 +15512,18 @@ def repository_boundary_problems(
         tenant_worktree_base,
     )
 
+    # The surfaces are derived from the plan, so a plan that does not describe a
+    # tenant cannot be read as one that is closed. Readiness asking about a plan
+    # like that is told it was not checked rather than told it is fine: silence
+    # here is exactly the way an open boundary got past a recovery before
+    # (SYRD-175, audit of bdd2c17).
+    named = [field for field in ("project", "owner_home", "role_worktrees") if not hasattr(plan, field)]
+    if named:
+        return [
+            f"{getattr(plan, 'project', 'this project')}'s repository boundary was not "
+            f"checked: the plan it was asked about names no {', no '.join(named)}"
+        ]
+
     problems: list[str] = []
     base = Path(tenant_worktree_base(plan))
     control = Path(tenant_control_repository(plan))

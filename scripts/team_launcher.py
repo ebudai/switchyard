@@ -17888,6 +17888,92 @@ def release_rollback_commands(project: str, *, publish_remote: str = "") -> list
     ]
 
 
+#: The label an install attempt carries in the rollout journal.
+INSTALL_ROLLOUT_LABEL = "install"
+#: What a first install records once root-owned machinery exists to record with.
+INSTALL_BOUNDARY_ROLLOUT_LABEL = "install-boundary"
+
+
+def installed_rollout_recorder() -> Path | None:
+    """The recorder root already has, or None when this host has none yet.
+
+    Deliberately NOT `_rollout_recorder_path`, which falls back to the
+    checkout's copy. That fallback is right for a step whose surrounding release
+    is already installed and running; it is wrong for the step that installs
+    one, because on a first install the checkout is precisely the unverified,
+    tenant-writable tree this whole design exists to keep root out of. A host
+    with no installed recorder has nothing trustworthy to record with, and
+    saying so is better than executing an untrusted recorder and calling the
+    result a root-owned record (SYRD-172).
+    """
+    installed = switchyard_shared_install_root() / "current" / "scripts" / "switchyard-record-rollout"
+    return installed if installed.is_file() else None
+
+
+def recorded_install_command(
+    privileged_lines: "Sequence[str]",
+    *,
+    project: str,
+    commit: str,
+    recorder: Path,
+    label: str = INSTALL_ROLLOUT_LABEL,
+) -> str:
+    """The whole bootstrap chain as ONE recorded attempt.
+
+    The install is the step that puts new root-executed code on the host, and
+    the only one whose input -- the bundle -- was produced by an unprivileged
+    account. Everything the journal records afterwards runs FROM what this step
+    installed, so a journal that begins after it cannot answer which release was
+    installed, by whom, or from which bundle (SYRD-172).
+
+    In whole, through one `bash -c`, for the reason `recorded_rollout_command`
+    gives about the steps already wrapped: the chain carries its own `&&`, and
+    leaving part of it outside the recorder would record the first command and
+    run the rest unrecorded. `set -euo pipefail` in front so a failure anywhere
+    ends the chain -- a half-installed release must be a FAILED attempt with no
+    unrecorded suffix, not a successful one that stopped early.
+    """
+    for line in privileged_lines:
+        if "switchyard-record-rollout" in line:
+            raise ValueError(
+                "refusing to wrap a chain that already records itself: "
+                "nested attempts make the journal describe one install twice"
+            )
+    chain = "set -euo pipefail\n" + "\n".join(privileged_lines)
+    prefix = ["sudo", str(recorder), project]
+    if commit:
+        prefix += ["--target-commit", commit]
+    if label:
+        prefix += ["--label", label]
+    return " ".join(
+        [*(shlex.quote(token) for token in prefix), "--", "bash", "-c", shlex.quote(chain)]
+    )
+
+
+def install_boundary_command(
+    *, project: str, commit: str, recorder: Path, release_root: Path, pointer: Path
+) -> str:
+    """What a FIRST install can record, once there is something to record with.
+
+    There is an irreducible gap on a host with no installed release: the bytes
+    that would record the install do not exist until the install has put them
+    there. The gap is not papered over by running the checkout's recorder --
+    that would be root executing the tenant-writable tree this design refuses --
+    so the boundary is recorded immediately AFTER, by the root-owned recorder the
+    install itself just installed, and what it records is a verification rather
+    than a claim: that `current` resolves to the release directory for this exact
+    commit (SYRD-172).
+    """
+    verification = (
+        f"test \"$(readlink -f {shlex.quote(str(pointer))})\" = {shlex.quote(str(release_root))}"
+    )
+    prefix = ["sudo", str(recorder), project, "--target-commit", commit,
+              "--label", INSTALL_BOUNDARY_ROLLOUT_LABEL]
+    return " ".join(
+        [*(shlex.quote(token) for token in prefix), "--", "bash", "-c", shlex.quote(verification)]
+    )
+
+
 def trusted_bootstrap_commands(
     source_repo: Path,
     commit: str,
@@ -17934,11 +18020,13 @@ def trusted_bootstrap_commands(
     # Nothing root runs reads the checkout, so `no-replace` here is the
     # operator's own protection rather than the boundary.
     no_replace = "env GIT_NO_REPLACE_OBJECTS=1"
-    return [
-        f"sudo install -d -m 0755 -o root -g root {shlex.quote(str(bootstrap))}",
+    unprivileged = [
         # Unprivileged, in the operator's own repository, as themselves.
         f"{no_replace} git -C {repo} update-ref {q_ref} {sha}",
         f"{no_replace} git -C {repo} bundle create {q_bundle} {q_ref}",
+    ]
+    privileged = [
+        f"sudo install -d -m 0755 -o root -g root {shlex.quote(str(bootstrap))}",
         # Root, in a repository root creates, reading only that bundle.
         f"sudo {no_replace} git init -q {q_src}",
         f"sudo {no_replace} git -C {q_src} -c fetch.fsckObjects=true fetch --no-tags "
@@ -17948,12 +18036,50 @@ def trusted_bootstrap_commands(
         f"sudo {no_replace} git -C {q_src} checkout -q --detach {sha}",
         f"sudo {no_replace} SWITCHYARD_SOURCE_REPO={q_src} SWITCHYARD_SOURCE_REF={sha} "
         f"{installer} --apply",
-        # Repointing `current` is not enough. The root-owned upgrade source record
-        # still pins whatever was selected last, and the next upgrade recovers it
-        # and goes straight back. This is what durably re-selects the reviewed
-        # release, and it is the first command that runs the reviewed code.
+    ]
+    # Repointing `current` is not enough. The root-owned upgrade source record
+    # still pins whatever was selected last, and the next upgrade recovers it
+    # and goes straight back. This is what durably re-selects the reviewed
+    # release, and it is the first command that runs the reviewed code.
+    select = (
         f"sudo switchyard upgrade {shlex.quote(project or '<project>')} --source-repo {release} "
-        f"--deploy-ref {sha} --publish-remote {shlex.quote(publish_remote or '<url>')}",
+        f"--deploy-ref {sha} --publish-remote {shlex.quote(publish_remote or '<url>')}"
+    )
+    recorder = installed_rollout_recorder()
+    if recorder is not None and project and commit:
+        # AN UPGRADE. Root already holds a recorder it installed, so the step
+        # that installs the next release leaves an attempt of its own: operator,
+        # pkexec, target commit, exit status and output hashes, like every other
+        # privileged step (SYRD-172).
+        return [
+            *unprivileged,
+            recorded_install_command(privileged, project=project, commit=commit, recorder=recorder),
+            select,
+        ]
+    if not project or not commit:
+        # Rendered as guidance rather than for a particular host and release;
+        # there is nothing to name in a record.
+        return [*unprivileged, *privileged, select]
+    # A FIRST INSTALL, and the gap is stated rather than hidden. There is no
+    # root-owned recorder on this host yet, and the checkout's copy is the
+    # tenant-writable tree root refuses to execute -- so these lines run
+    # unrecorded, and the boundary is recorded immediately afterwards by the
+    # recorder this install itself installs, against what actually landed.
+    boundary = install_boundary_command(
+        project=project, commit=commit,
+        recorder=install_root / "current" / "scripts" / "switchyard-record-rollout",
+        release_root=install_root / "releases" / commit,
+        pointer=install_root / "current",
+    )
+    return [
+        *unprivileged,
+        f"# First install on this host: {install_root}/current does not exist yet, so there is no",
+        "# root-owned switchyard-record-rollout to record the next four lines with. They run",
+        "# unrecorded -- deliberately, rather than executing the recorder out of an unverified",
+        "# checkout -- and the line after them records the boundary against what landed.",
+        *privileged,
+        boundary,
+        select,
     ]
 
 

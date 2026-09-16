@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,18 @@ def installed_release_stub(install_root: Path, log: Path) -> None:
         encoding="utf-8",
     )
     (current / "scripts" / "install-switchyard").chmod(0o755)
+    # An installed release also carries the rollout recorder, and since SYRD-172
+    # the bootstrap is handed to it: the step that installs the next release
+    # leaves an attempt like every other privileged step. The stub records the
+    # chain it was given and runs it, which is what the real one does.
+    recorder = current / "scripts" / "switchyard-record-rollout"
+    recorder.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in --) shift; break;; *) shift;; esac; done\n"
+        'exec "$@"\n',
+        encoding="utf-8",
+    )
+    recorder.chmod(0o755)
     pointer = install_root / "current"
     if pointer.exists() or pointer.is_symlink():
         pointer.unlink()
@@ -94,10 +107,26 @@ def bootstrap_sequence(repo: Path, commit: str, install_root: Path) -> list[str]
             continue
         if line.startswith("sudo "):
             line = line[len("sudo ") :]
-        # Ownership is what root does with the bytes, not which bytes it reads,
-        # and this runs as an ordinary user.
-        line = line.replace(" -o root -g root", "")
-        runnable.append(line)
+        # Since SYRD-172 the privileged half arrives as ONE recorded command:
+        # `<recorder> demo --target-commit <sha> --label install -- bash -c
+        # '<chain>'`. These cases are about WHICH BYTES root reads and about
+        # finishing an interrupted bootstrap, step by step, so the chain is
+        # expanded back into its steps here. That the chain is recorded, as one
+        # attempt, with a failure anywhere failing the install, is covered by
+        # team_launcher_recorded_install_test rather than restated here.
+        if "switchyard-record-rollout" in line and " -- bash -c " in line:
+            chain = shlex.split(line)[-1]
+            steps = [
+                step[len("sudo ") :] if step.startswith("sudo ") else step
+                for step in chain.splitlines()
+                if step.strip() and not step.startswith("set -")
+            ]
+        else:
+            steps = [line]
+        for step in steps:
+            # Ownership is what root does with the bytes, not which bytes it
+            # reads, and this runs as an ordinary user.
+            runnable.append(step.replace(" -o root -g root", ""))
     return runnable
 
 

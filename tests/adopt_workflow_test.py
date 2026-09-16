@@ -229,7 +229,9 @@ def privileged_cases() -> int:
         assert record.is_file(), record
         info = os.stat(record)
         assert info.st_uid == 0, info.st_uid
-        assert stat.S_IMODE(info.st_mode) == 0o644, oct(info.st_mode)
+        # Root's own record of who this tenant's roles are and what they may
+        # call is not something the accounts it describes get to read (SYRD-176).
+        assert stat.S_IMODE(info.st_mode) == 0o600, oct(info.st_mode)
         stored, stored_problem = launcher.recorded_declared_workflow(SLUG)
         assert stored is not None, stored_problem
         assert stored == declared

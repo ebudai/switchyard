@@ -26,7 +26,7 @@ import tomllib
 import unicodedata
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from scripts.ticket_board.project_provision import (
     DEFAULT_PRIVILEGED_PROVISION_ROOT,
@@ -6363,16 +6363,31 @@ def refresh_generated_project_runtime_artifacts(
         for name, body in rendered.items()
         if not (target / name).is_file() or (target / name).read_bytes() != body
     )
+    # The directory's mode is not one of the rendered bytes, so a tenant whose
+    # artifacts are already current would never have been repaired by the branch
+    # below -- which is exactly the state syrd was found in. It is asked about
+    # and repaired on its own, before anything is compared (SYRD-176).
+    privacy = privileged_provision_privacy_problems(config.project)
+    repaired: list[str] = []
+    if not dry_run and target.is_dir():
+        repaired = ensure_privileged_provision_dir(target)
+        repaired += close_privileged_artifacts(target, rendered)
+    privacy_note = ("; " + "; ".join(repaired)) if repaired else ""
+    if privacy and dry_run:
+        privacy_note = "; " + "; ".join(f"would repair: {objection}" for objection in privacy)
     if not changed and not privileged_changed:
         return LauncherUpgradeResult(
-            False,
-            f"switchyard: {config.project} generated runtime artifacts are already current" + migration_note,
+            bool(repaired),
+            f"switchyard: {config.project} generated runtime artifacts are already current"
+            + privacy_note
+            + migration_note,
         )
     if dry_run:
         return LauncherUpgradeResult(
             False,
             f"switchyard: {config.project} generated runtime artifacts can be refreshed: "
             + ", ".join(sorted({*changed, *privileged_changed}))
+            + privacy_note
             + migration_note,
         )
     if privileged_changed:
@@ -6389,6 +6404,7 @@ def refresh_generated_project_runtime_artifacts(
         parts.append(f"tenant copies: {', '.join(changed)}")
     if privileged_changed:
         parts.append(f"root installs {', '.join(privileged_changed)} from {target}")
+    parts.extend(repaired)
     message = f"switchyard: refreshed {config.project} generated runtime artifacts; " + "; ".join(parts)
     message += migration_note
     if added_roles:
@@ -6844,6 +6860,139 @@ def render_privileged_artifacts(
         }
 
 
+#: A tenant's root-owned provisioning directory, and what is in it. Together
+#: the plan, the operator packet, the database and workflow SQL, the workflow
+#: record and the publication remote describe the whole authority model of a
+#: tenant -- which accounts exist, what each may call, where the board's socket
+#: and database are. None of that is a secret root shares with the accounts it
+#: is about, so the directory is root's alone and the files inside it are too:
+#: a mode that leans on the directory is one chmod away from being nothing
+#: (SYRD-176, syrd rollout journal 0084).
+PRIVILEGED_PROVISION_DIR_MODE = 0o700
+PRIVILEGED_ARTIFACT_MODE = 0o600
+PRIVILEGED_EXECUTABLE_ARTIFACT_MODE = 0o700
+
+
+def privileged_artifact_mode(name: str) -> int:
+    """The least a root-owned artifact needs to be what its consumer runs.
+
+    Root executes the packets and the migration script and reads everything
+    else; nobody else does either, so nothing here is readable beyond root.
+    """
+    return PRIVILEGED_EXECUTABLE_ARTIFACT_MODE if name.endswith(".sh") else PRIVILEGED_ARTIFACT_MODE
+
+
+def ensure_privileged_provision_dir(target: Path, *, root: Path | None = None) -> list[str]:
+    """Create or repair a tenant's root-only provisioning directory.
+
+    Returns what it had to repair, so a caller can tell an operator what
+    changed. Every writer under this directory goes through here, because the
+    invariant is only as good as the last thing that created the directory --
+    it was documented as root-only while one of these writers chmod'd it 0755
+    on every run (SYRD-176).
+
+    Refusals are loud. A directory that is a symlink, or that belongs to
+    somebody other than root, is not one root may publish a plan into: closing
+    it would be closing whatever it points at, and writing to it would be
+    writing where its owner can read and replace what root then installs.
+    """
+    base = Path(root) if root is not None else switchyard_privileged_provision_root()
+    owner = expected_privileged_uid()
+    repaired: list[str] = []
+    for directory in (*reversed(target.parents), target):
+        private = directory == target
+        if not (private or directory.is_relative_to(base)):
+            continue
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            directory.mkdir(mode=PRIVILEGED_PROVISION_DIR_MODE if private else 0o755)
+            info = directory.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise SystemExit(
+                f"switchyard: {directory} is a symlink, so it is not a directory root will "
+                f"publish {target.name}'s provisioning artifacts into. Nothing was written."
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            raise SystemExit(
+                f"switchyard: {directory} is not a directory, so root's provisioning artifacts "
+                "have nowhere to go. Nothing was written."
+            )
+        if info.st_uid != owner:
+            raise SystemExit(
+                f"switchyard: {directory} is owned by uid {info.st_uid} rather than by root, so "
+                "what root publishes there would be its owner's to read and replace. Nothing "
+                "was written."
+            )
+        wanted = PRIVILEGED_PROVISION_DIR_MODE if private else 0o755
+        if stat.S_IMODE(info.st_mode) != wanted:
+            if private:
+                repaired.append(
+                    f"closed {directory} to root only (was mode "
+                    f"{stat.S_IMODE(info.st_mode):04o})"
+                )
+            directory.chmod(wanted)
+        try:
+            os.chown(directory, 0, 0)
+        except OSError:
+            # Attempted, not relied on. What decides whether root publishes here
+            # is the ownership check above, which reads the directory back --
+            # and through the documented provision-root seam "root" is the
+            # caller's own uid, which it cannot chown away from itself.
+            pass
+    return repaired
+
+
+def close_privileged_artifacts(target: Path, names: Iterable[str]) -> list[str]:
+    """Bring the artifacts root regenerates down to the least mode they need.
+
+    Only the names the current render owns. A tenant's directory also holds an
+    operator's own scripts from years of rollouts, and closing the directory is
+    not a licence to rewrite what is in it (SYRD-176).
+    """
+    closed: list[str] = []
+    for name in sorted(names):
+        path = target / name
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            continue
+        wanted = privileged_artifact_mode(name)
+        if stat.S_IMODE(info.st_mode) != wanted:
+            path.chmod(wanted)
+            closed.append(name)
+    return [f"closed {len(closed)} artifact(s) in {target}: {', '.join(closed)}"] if closed else []
+
+
+def privileged_provision_privacy_problems(
+    project: str, *, root: Path | None = None
+) -> list[str]:
+    """What a tenant's root-owned provisioning directory still gives away.
+
+    Asked of the filesystem, so it answers for a directory an earlier version
+    opened rather than for what the current code would have created.
+    """
+    target = privileged_provision_dir(project, root=root or switchyard_privileged_provision_root())
+    try:
+        info = target.lstat()
+    except OSError:
+        return []
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return [f"{target} is not a directory root owns"]
+    problems: list[str] = []
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o077:
+        problems.append(
+            f"{target} is mode {mode:04o}, so {project}'s plan, operator packet, SQL and "
+            "publication record are readable beyond root"
+        )
+    if info.st_uid != expected_privileged_uid():
+        problems.append(f"{target} is owned by uid {info.st_uid} rather than by root")
+    return problems
+
+
 def install_privileged_artifacts(
     plan: ProjectBoardProvision,
     rendered: dict[str, bytes],
@@ -6857,21 +7006,21 @@ def install_privileged_artifacts(
     there: these bytes come straight from the render above. Each file is written
     beside its target and renamed, so an operator never reads a half-written
     unit (SYRD-39).
+
+    "Only root can reach" is enforced here rather than described: the directory
+    is closed to root alone and each artifact is written at the least its
+    consumer needs, which for all of them is root and nobody else (SYRD-176).
     """
-    target = privileged_provision_dir(plan.project, root=privileged_root or switchyard_privileged_provision_root())
-    for directory in (*reversed(target.parents), target):
-        if not directory.exists():
-            directory.mkdir(mode=0o755)
-        if directory.is_relative_to(privileged_root or switchyard_privileged_provision_root()) or directory == target:
-            os.chown(directory, 0, 0)
-            directory.chmod(0o755)
+    base = privileged_root or switchyard_privileged_provision_root()
+    target = privileged_provision_dir(plan.project, root=base)
+    ensure_privileged_provision_dir(target, root=base)
     for name, body in rendered.items():
         staged = target / f".{name}.new"
         descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.write(descriptor, body)
             os.fchown(descriptor, 0, 0)
-            os.fchmod(descriptor, 0o755 if name.endswith(".sh") else 0o644)
+            os.fchmod(descriptor, privileged_artifact_mode(name))
         finally:
             os.close(descriptor)
         staged.replace(target / name)
@@ -14589,12 +14738,13 @@ def record_tenant_config_path(slug: str, config_path: Path) -> Path:
     payload = (
         json.dumps({"config_path": str(config_path), "project": slug}, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
+    ensure_privileged_provision_dir(path.parent)
     staged = path.with_name(f".{path.name}.new")
     descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
         os.write(descriptor, payload)
         os.fchown(descriptor, 0, 0)
-        os.fchmod(descriptor, 0o644)
+        os.fchmod(descriptor, privileged_artifact_mode(path.name))
     finally:
         os.close(descriptor)
     staged.replace(path)
@@ -15470,12 +15620,13 @@ def write_workflow_record(slug: str, document: Mapping[str, Any]) -> Path:
         )
         + "\n"
     ).encode("utf-8")
+    ensure_privileged_provision_dir(path.parent)
     staged = path.with_name(f".{path.name}.new")
     descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
         os.write(descriptor, payload)
         os.fchown(descriptor, expected_privileged_uid(), 0)
-        os.fchmod(descriptor, 0o644)
+        os.fchmod(descriptor, privileged_artifact_mode(path.name))
     finally:
         os.close(descriptor)
     staged.replace(path)
@@ -16101,6 +16252,10 @@ def switchyard_resume_provision_command(
             f"switchyard: {slug} is registered at {registry}; its root-owned artifacts are left "
             f"as they are (`switchyard upgrade {slug}` refreshes them)."
         )
+        # Leaving the artifacts alone is not leaving the directory open. What is
+        # in them is unchanged; who can read them is not a rebuild (SYRD-176).
+        for repair in ensure_privileged_provision_dir(installed):
+            print_func(f"switchyard: {repair}")
     else:
         rendered = render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
         installed = install_privileged_artifacts(plan, rendered)
@@ -18156,15 +18311,12 @@ def publish_role_account_migration(
     target = privileged_provision_dir(config.project, root=switchyard_privileged_provision_root())
     path = target / name
     try:
-        for directory in (*reversed(target.parents), target):
-            if not directory.exists():
-                directory.mkdir(mode=0o755)
-        target.chmod(0o755)
+        ensure_privileged_provision_dir(target)
         staged = target / f".{name}.new"
         descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.write(descriptor, body)
-            os.fchmod(descriptor, 0o755)
+            os.fchmod(descriptor, privileged_artifact_mode(name))
             try:
                 os.chown(target, 0, 0)
                 os.fchown(descriptor, 0, 0)
@@ -18193,6 +18345,25 @@ def publish_role_account_migration(
     return path, []
 
 
+def _privileged_directory_is_closed(directory: Path) -> bool:
+    """Whether this is root's directory, closed, that this caller cannot read.
+
+    `Path.exists()` inside it answers False either way, and the difference
+    matters: one is something to publish, the other is something published
+    (SYRD-176).
+    """
+    try:
+        info = directory.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == expected_privileged_uid()
+        and not stat.S_IMODE(info.st_mode) & 0o077
+        and not os.access(directory, os.R_OK | os.X_OK)
+    )
+
+
 def role_account_migration_instruction(
     config: ProjectConfig,
     *,
@@ -18206,6 +18377,17 @@ def role_account_migration_instruction(
     """
     path = trusted_role_account_migration_path(config)
     if not path.exists():
+        # Root's provisioning directory is root's to read, so an unprivileged
+        # caller cannot tell a script that is not there from one it may not
+        # look at. Saying "not published" for the second would send an operator
+        # to regenerate something that is already waiting for them, so the two
+        # are told apart by what can be seen: the directory itself (SYRD-176).
+        if os.geteuid() != 0 and _privileged_directory_is_closed(path.parent):
+            return None, [
+                f"{path.parent} is root's and closed, so this caller cannot tell whether "
+                f"{path.name} is published there, and must not name a script it could not "
+                "check"
+            ]
         return None, [
             f"{path} has not been published yet; run `switchyard upgrade {config.project}` as root"
         ]
@@ -18431,9 +18613,9 @@ def record_release_rollback(
         if str(existing.get("upgrading_to") or "") == release.commit:
             return []
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_privileged_provision_dir(path.parent)
         _write_private_json_atomic(path, record)
-        path.chmod(0o644)
+        path.chmod(privileged_artifact_mode(path.name))
     except OSError as exc:
         return [f"could not record the rollback for {config.project}: {exc}"]
     print_func(
@@ -18973,14 +19155,12 @@ def write_pending_identities(config: ProjectConfig) -> dict[str, dict[str, str]]
         "roles": identities,
     }
     try:
-        for directory in (*reversed(path.parent.parents), path.parent):
-            if not directory.exists():
-                directory.mkdir(mode=0o755)
+        ensure_privileged_provision_dir(path.parent)
         staged = path.with_name(f".{path.name}.new")
-        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.write(descriptor, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-            os.fchmod(descriptor, 0o644)
+            os.fchmod(descriptor, privileged_artifact_mode(path.name))
             try:
                 os.fchown(descriptor, 0, 0)
             except OSError:
@@ -19262,14 +19442,12 @@ def privileged_upgrade_source_path(config: ProjectConfig) -> Path:
 def _write_privileged_json(path: Path, payload: Mapping[str, Any]) -> str:
     """Write root's own copy of a record, atomically. Returns a problem or ""."""
     try:
-        for directory in (*reversed(path.parent.parents), path.parent):
-            if not directory.exists():
-                directory.mkdir(mode=0o755)
+        ensure_privileged_provision_dir(path.parent)
         staged = path.with_name(f".{path.name}.new")
-        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.write(descriptor, (json.dumps(dict(payload), indent=2, sort_keys=True) + "\n").encode("utf-8"))
-            os.fchmod(descriptor, 0o644)
+            os.fchmod(descriptor, privileged_artifact_mode(path.name))
             try:
                 os.fchown(descriptor, 0, 0)
             except OSError:
@@ -19445,14 +19623,12 @@ def record_upgrade_phase(
         trusted["phases"][phase] = entry
         path = privileged_upgrade_journal_path(config)
         try:
-            for directory in (*reversed(path.parent.parents), path.parent):
-                if not directory.exists():
-                    directory.mkdir(mode=0o755)
+            ensure_privileged_provision_dir(path.parent)
             staged = path.with_name(f".{path.name}.new")
-            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
             try:
                 os.write(descriptor, (json.dumps(trusted, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-                os.fchmod(descriptor, 0o644)
+                os.fchmod(descriptor, privileged_artifact_mode(path.name))
                 try:
                     os.fchown(descriptor, 0, 0)
                     os.chown(path.parent, 0, 0)

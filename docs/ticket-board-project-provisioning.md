@@ -102,6 +102,36 @@ the tree carried the entries and the deploy succeeded; on a fresh host the
 deploy was the first thing to touch the tree, failed, and stopped the script
 before the grant it needed (SYRD-145).
 
+That directory is root's alone. `/etc/switchyard/provision/<slug>` is mode
+0700 root:root, and the artifacts inside it are 0600 -- 0700 for the packets
+root executes. Between them the plan, the operator packet, the database and
+workflow SQL, the workflow record and the publication remote describe the whole
+authority model of a tenant: which accounts exist, what each role may call,
+where the socket and the database are. None of that is something root shares
+with the accounts it is about, and the board service account is one of them.
+
+It was documented as root-only and was not. `install_privileged_artifacts`
+chmod'd the directory 0755 on every run, and during SYRD-146 (syrd rollout
+journal 0084) that turned syrd's directory from 0700 to 0755 and left every
+artifact in it world-readable. The testing tenant stayed closed only because
+the last writer to touch it happened to be one that closes the directory --
+which writer ran last is not an access policy. Every writer now goes through
+one place, `ensure_privileged_provision_dir`, which creates the directory
+closed, repairs one that is open, and refuses outright a directory that is a
+symlink or that belongs to somebody other than root: closing the first would be
+closing whatever it points at, and writing to the second would be writing where
+its owner can read and replace what root then installs.
+
+The repair is part of the supported paths rather than a chmod an operator is
+told to run. `switchyard upgrade` asks about the directory before it compares
+any bytes -- a tenant whose artifacts are already current, which is exactly the
+state syrd was found in, would otherwise never reach the writer that repairs it
+-- closes it, closes the artifacts that render owns, and says what it changed.
+`resume-provision` closes it even on the branch that deliberately leaves the
+artifacts alone: what is in them is unchanged, and who can read them is not a
+rebuild. Neither touches anything else in the directory, because a tenant's
+directory also holds an operator's own scripts from years of rollouts (SYRD-176).
+
 The script is run by its own absolute path, from anywhere, and it is not
 preceded by a `cd`. Each artifact that ships beside it is addressed from
 `$provision_dir` -- the directory the script itself is in, computed from

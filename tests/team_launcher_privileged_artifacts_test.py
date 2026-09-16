@@ -124,6 +124,34 @@ def privileged_refresh(owner: str) -> None:
                 edit_tenant_plan(plan_path, **tamper)
             return refresh()
 
+        def refuses_without_raising(field: str, **tamper: object) -> None:
+            """A refusal, not a traceback, however the renderer says no.
+
+            SYRD-171 taught the renderer to refuse a path that only shares a
+            prefix, and it refuses by RAISING. For `owner_home: "/"` every path
+            in the plan is such a path, so a supported command -- `switchyard
+            upgrade <project>` -- died with PathContainmentError instead of
+            giving the careful message every other tampered field gets. It also
+            stopped this suite at its third case, so the twenty after it had not
+            run since (SYRD-177).
+
+            The distinction this case exists for is invisible in the outcome
+            alone: an exception escaping `refresh()` would fail `refuses` too,
+            with a traceback that looks like a broken test rather than a broken
+            command. So the exception is caught here and named.
+            """
+            try:
+                outcome, _said = rebuild_baseline(**tamper)
+            except Exception as exc:  # noqa: BLE001 - the point is that NOTHING escapes
+                raise AssertionError(
+                    f"{field}: a tampered plan made a supported upgrade raise "
+                    f"{type(exc).__name__}: {exc}. It has to refuse instead."
+                ) from exc
+            assert outcome.changed is False, (field, outcome)
+            assert "cannot establish a root-owned baseline" in outcome.message, (field, outcome.message)
+            assert field in outcome.message, (field, outcome.message)
+            assert not mirror.exists(), field
+
         def refuses(field: str, **tamper: object) -> None:
             """A recorded value root regenerates is never silently replaced.
 
@@ -139,7 +167,10 @@ def privileged_refresh(owner: str) -> None:
 
         refuses("service_user", service_user="root")
         refuses("board_current", board_current="/tmp/tenant-controlled-release")
-        refuses("owner_home", owner_home="/")
+        # The root of a filesystem contains everything and is inside nothing, so
+        # every derived path in the plan fails containment at once. This is the
+        # SYRD-177 regression and it is asserted through the stricter helper.
+        refuses_without_raising("owner_home", owner_home="/")
         refuses("board_root", board_root="/srv/porter-live")
         refuses("asset_dir", asset_dir="/srv/porter-assets")
         refuses("frame_dir", frame_dir="/srv/porter-frames")

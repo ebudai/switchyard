@@ -6208,6 +6208,18 @@ def installed_controller(project: str, owner_user: str) -> str:
     return resolve_control_user(project, owner_user=owner_user)
 
 
+def _path_containment_error() -> type[Exception]:
+    """The renderer's containment refusal, imported where it is caught.
+
+    Locally, like every other use of this module here: the import at the top of
+    the file is a curated list and this is an exception type used in one place
+    (SYRD-177).
+    """
+    from scripts.ticket_board.project_provision import PathContainmentError
+
+    return PathContainmentError
+
+
 def refresh_generated_project_runtime_artifacts(
     config: ProjectConfig,
     *,
@@ -6293,14 +6305,35 @@ def refresh_generated_project_runtime_artifacts(
     )
     # The tenant's own view of its generated files, rendered from the tenant's
     # own plan. Nothing root installs comes from here.
-    tenant_rendered = render_privileged_artifacts(
-        _for_current_identities(
-            plan_with_tenant_checkout(
-                replace(tenant_plan, **replacements), config_path=config_path
-            )
-        ),
-        enable_owner_linger=False,
-    )
+    #
+    # And the plan is the tenant's, so it can say anything. The path containment
+    # checks in the renderer are exactly right to refuse `owner_home: "/"` --
+    # every path under it "only shares its prefix" -- but they refuse by raising,
+    # and this is a supported command. Raising here turned
+    # `switchyard upgrade <project>` into a traceback for a tampered document
+    # instead of the careful refusal every other tampered field gets, and it
+    # killed a suite whose remaining twenty cases had not run since (SYRD-177).
+    try:
+        tenant_rendered = render_privileged_artifacts(
+            _for_current_identities(
+                plan_with_tenant_checkout(
+                    replace(tenant_plan, **replacements), config_path=config_path
+                )
+            ),
+            enable_owner_linger=False,
+        )
+    except _path_containment_error() as exc:
+        # Named by FIELD, like every other refusal here. The containment checks
+        # answer in paths -- "//porter-worktrees is not inside /" -- and an
+        # operator reading that has to work backwards to the one value in the
+        # document that produced it. Every path in a rendered plan is derived
+        # from owner_home, so that is the field this class of refusal is about.
+        return LauncherUpgradeResult(
+            False,
+            f"switchyard: cannot establish a root-owned baseline for {config.project} from "
+            f"{tenant_plan_path}: owner_home {tenant_plan.owner_home!r} cannot contain the paths "
+            f"this plan derives from it: {exc}. Re-provision the project so root generates its own.",
+        )
     for name in sorted(tenant_rendered):
         if _tenant_copy_is_current(provision_dir / name, tenant_rendered[name]):
             continue

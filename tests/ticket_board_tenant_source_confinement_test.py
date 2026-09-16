@@ -130,6 +130,11 @@ def tenant_tree_lines(plan) -> list[str]:
     home = str(plan.owner_home)
     wanted: list[str] = []
     for line in render_operator_commands(plan).splitlines():
+        # Top-level lines only: an indented one is inside a guard the packet
+        # put there, and running it without the guard asks a question the
+        # packet does not ask (SYRD-171).
+        if line != line.lstrip():
+            continue
         stripped = line.strip()
         if not stripped.startswith(("sudo install -d", "sudo setfacl", "sudo find")):
             continue

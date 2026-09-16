@@ -1836,6 +1836,160 @@ def repository_copy_confinement_commands(
     return commands
 
 
+def tenant_worktree_confinement_commands(
+    *,
+    owner_user: str,
+    owner_home: str,
+    worktree_base: str,
+    worktrees: Sequence[str] = (),
+) -> list[str]:
+    """Close a tenant's worktree base, and every tree inside it, to the world.
+
+    `Projects` was closed by SYRD-156 and `syrd-worktrees` beside it was not,
+    which left 163 directories at 0755 holding the same source across every
+    role and every historical ticket. Anything with traversal on the base could
+    read all of it -- and traversal was exactly what the socket group's named
+    entry conveyed.
+
+    The base and each directory between it and the home are named, at 0750
+    owned by the tenant, the same way the checkout is. The trees already inside
+    are closed by a sweep rather than by name: the plan knows the roles it
+    declares, and a base accumulates a worktree per ticket that no plan
+    mentions. Closing the base alone would be enough to make them unreachable,
+    and closing them too is what makes that true of a base somebody later
+    reopens (SYRD-171).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    _refuse_unnormalized(worktree_base, what="the worktree base")
+    _refuse_prefix_coincidence(owner_home, worktree_base)
+    directories = owned_ancestor_dirs(owner_home, worktree_base, include_target=True)
+    if not directories:
+        return []
+    quoted_owner = shell_quote(owner_user)
+    commands = [
+        f"sudo install -d -m {TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
+        f"{shell_quote(directory)}"
+        for directory in directories
+    ]
+    for worktree in worktrees:
+        if not worktree:
+            continue
+        _refuse_unnormalized(worktree, what="a role worktree")
+        if not _is_within(worktree_base, worktree):
+            continue
+        command = (
+            f"sudo install -d -m {TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
+            f"{shell_quote(worktree)}"
+        )
+        if command not in commands:
+            commands.append(command)
+    # Everything already in the base, including the ticket worktrees no plan
+    # names. `o-rwx` rather than a mode: this takes the world away and leaves
+    # whatever else the tenant has arranged alone.
+    # Guarded on the base existing: the line above creates it, so in a whole
+    # packet run it always does, and a partial or interrupted run must not die
+    # on a directory that has not been made yet.
+    commands.append(f"if [ -d {shell_quote(worktree_base)} ]; then")
+    commands.append(
+        f"    sudo find {shell_quote(worktree_base)} -mindepth 1 -maxdepth 1 -type d "
+        "-exec chmod o-rwx {} +"
+    )
+    commands.append("fi")
+    return commands
+
+
+def tenant_worktree_base(plan: ProjectBoardProvision) -> str:
+    """Where this tenant's role worktrees live.
+
+    Taken from the worktrees the plan records when they agree on a parent, and
+    otherwise from the convention the launcher creates them under. Either way
+    it is derived here rather than read from the tenant's configuration, which
+    the account every role runs as can write.
+    """
+    recorded = {
+        str(PurePosixPath(path).parent)
+        for _role, path in plan.role_worktrees
+        if path
+    }
+    if len(recorded) == 1:
+        return recorded.pop()
+    return f"{plan.owner_home}/{plan.project}-worktrees"
+
+
+def tenant_control_repository(plan: ProjectBoardProvision) -> str:
+    """This tenant's control repository, by the convention the product enforces.
+
+    Loading a configuration already refuses a control repository outside the
+    managed directory under the owner's home, so the path is not a free choice
+    and does not have to be read from a document to be known.
+    """
+    return (
+        f"{plan.owner_home}/.local/state/switchyard/projects/{plan.project}/control.git"
+    )
+
+
+def socket_group_retirement_commands(
+    *,
+    owner_user: str,
+    owner_home: str,
+    socket_group: str,
+    worktree_base: str,
+    control_repository: str,
+) -> list[str]:
+    """Take the socket group off the surfaces it was never meant to reach.
+
+    The socket group exists so role accounts can talk to the board, and the
+    board service must be in it to hand the socket over. A grant to that group
+    is therefore a grant to the board service -- which is why SYRD-157 moved
+    repositories to a group of their own. What that change did not do is take
+    the old grants away from a tenant that already had them: the only caller
+    that retires anything is the add-role path, and a shared-account tenant
+    never reaches it.
+
+    So on syrd the socket group still held `--x` on the worktree base and
+    `rwX` with a default entry on the control repository, verbatim the grant
+    the repository group exists to avoid (SYRD-171).
+
+    Removal is by entry -- `setfacl -x` -- so every other entry the tenant has
+    is left exactly as it is, and an entry that is already gone removes
+    successfully, which is what makes this safe to re-run. The group itself is
+    not touched: `boardsvc` stays in it, because the socket is what it is for.
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    group = (socket_group or "").strip()
+    if not group or group == owner_user:
+        # A plan that records the owner's own name here has no socket group to
+        # retire, and removing the owner's group from the owner's tree is not a
+        # boundary -- it is a mistake with the same shape.
+        return []
+    stale = f"g:{group}"
+    removals: list[str] = []
+    # The base carries the entry itself and its children carried none, so this
+    # is not recursive there: a sweep of every tree under it would be a great
+    # deal of work to remove entries that are not there. The control repository
+    # IS recursive, because its grant came with a default entry and every object
+    # git has written since inherited it.
+    for surface, recursive in ((worktree_base, False), (control_repository, True)):
+        if not surface:
+            continue
+        _refuse_unnormalized(surface, what="a repository surface")
+        if not _is_within(owner_home, surface):
+            continue
+        scope = "-R " if recursive else ""
+        removals.append(f"    sudo setfacl {scope}-x d:{stale} {shell_quote(surface)}")
+        removals.append(f"    sudo setfacl {scope}-x {stale} {shell_quote(surface)}")
+    if not removals:
+        return []
+    # Guarded on the group existing at all. Removing an entry that is already
+    # gone succeeds; naming a group this host does not have is an `Invalid
+    # argument` and would stop the packet on a tenant that never had one.
+    return [
+        f"if getent group {shell_quote(group)} >/dev/null 2>&1; then",
+        *removals,
+        "fi",
+    ]
+
+
 def role_worktree_access_commands(
     *,
     owner_home: str,
@@ -3825,6 +3979,45 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
                     commit_git_dir=store,
                 )
             )
+    # The worktree base, which SYRD-156 closed one directory over and this did
+    # not: closed first, then the repository group granted for a tenant whose
+    # roles have their own accounts, and only then the socket group retired --
+    # so nothing loses access in the gap between taking one grant away and
+    # making the one that replaces it (SYRD-171).
+    worktree_base = tenant_worktree_base(plan)
+    control_repository = tenant_control_repository(plan)
+    repository_boundary_lines.extend(
+        tenant_worktree_confinement_commands(
+            owner_user=plan.owner_user,
+            owner_home=plan.owner_home,
+            worktree_base=worktree_base,
+            worktrees=[path for _role, path in plan.role_worktrees],
+        )
+    )
+    if plan.role_accounts:
+        repository_boundary_lines.extend(
+            repository_group_commands(
+                plan.project,
+                [plan.owner_user, *(account for _role, account in plan.role_accounts)],
+            )
+        )
+        repository_boundary_lines.extend(
+            role_worktree_access_commands(
+                owner_home=plan.owner_home,
+                repository_group=repository_group_name(plan.project),
+                worktree_base=worktree_base,
+                control_repository=control_repository,
+            )
+        )
+    repository_boundary_lines.extend(
+        socket_group_retirement_commands(
+            owner_user=plan.owner_user,
+            owner_home=plan.owner_home,
+            socket_group=roles_group_name(plan.project),
+            worktree_base=worktree_base,
+            control_repository=control_repository,
+        )
+    )
     repository_boundary = "\n".join(repository_boundary_lines) or (
         f"# the commit store {plan.commit_git_dir} is outside {plan.owner_home}; "
         "this tenant grants the board service nothing there"

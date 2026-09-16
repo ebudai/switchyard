@@ -82,6 +82,11 @@ def board_tree_grants(lines: list[str], board_root: str, owner_home: str) -> lis
     """
     wanted = []
     for line in lines:
+        # Top-level lines only. An indented one is inside a guard -- `if getent
+        # group ...`, `if [ -d ... ]` -- and lifting it out of that guard runs
+        # it in a situation the packet was careful not to (SYRD-171).
+        if line != line.lstrip():
+            continue
         stripped = line.strip()
         if not stripped.startswith("sudo setfacl") and not stripped.startswith("sudo find"):
             continue

@@ -201,6 +201,28 @@ reason to fall back. A project that declares a workflow root holds no record of
 seeds nothing at all: not the declared one, which root cannot vouch for, and
 not the default one, which is somebody else's (SYRD-165).
 
+The worktree base is closed the same way the checkout is, and the socket group
+is retired from it. Two independent things reached that tree: `other::r-x` on a
+base created 0755, and a named entry to the SOCKET group -- which the board
+service is in, because that group exists so role accounts can reach the board
+socket and the service must be able to hand it over. Closing either alone left
+the other, and the 163 directories under the base owned no ACL of their own, so
+traversal into it was read access to the whole source tree across every role and
+every ticket. Beside it the control repository still carried that group's `rwX`
+with a default entry, so every object git wrote inherited it -- the grant
+`repository_group_name()` exists to avoid.
+
+So the packet closes the base and every tree in it, grants the repository group
+for a tenant whose roles have their own accounts, and only then retires the
+socket group from the base and the control repository. That order is the safety:
+nothing loses access in the gap between taking one grant away and making the one
+that replaces it. Removal is by entry, so everything else the tenant has is left
+alone and re-running changes nothing, and it is guarded on the group existing so
+a tenant that never had one is not stopped by an `Invalid argument`. The group
+itself is never touched: the board service stays in it, and its named read
+grants on the commit store and the board release are independent of it and
+untouched (SYRD-171).
+
 The one phase of the packet that is not a repair is the initial workflow seed.
 It deletes the stages and transitions a board has and installs the project's
 own, which is what a board being brought up needs and the last thing a running

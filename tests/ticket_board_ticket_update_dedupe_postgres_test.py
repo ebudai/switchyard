@@ -88,6 +88,16 @@ def main() -> int:
                 f"FROM ticket_board.ticket_notification_queue "
                 f"WHERE ticket_id='{ticket}' AND kind='ticket_update'"))
 
+        def as_listener(statement: str) -> str:
+            """Run one statement as the listener, returning just its result.
+
+            psql echoes a command tag for SET and RESET even with -tA, so the
+            role switching would otherwise arrive as part of the answer.
+            """
+            raw = fixture.psql(admin, f"SET ROLE ticket_board_listener;\n{statement}\nRESET ROLE;")
+            return "\n".join(line for line in raw.splitlines()
+                              if line.strip() not in {"SET", "RESET"}).strip()
+
         def clear(ticket: str) -> None:
             fixture.psql(admin, f"DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id='{ticket}';")
 
@@ -132,8 +142,7 @@ def main() -> int:
             # Acknowledged as the listener, because that is the only role the
             # board lets reconcile a notification -- acking as anyone else would
             # be testing a path production does not have.
-            fixture.psql(admin, "SET ROLE ticket_board_listener;\n"
-                                f"SELECT ticket_board.ack_notification({delivered});\nRESET ROLE;")
+            as_listener(f"SELECT ticket_board.ack_notification({delivered});")
             check(wakes("PGU-1") == [], "an acknowledged wake leaves the queue")
             act("PGU-1", "add_comment", "director", text="A later, separate change.")
             after_ack = wakes("PGU-1")
@@ -158,6 +167,67 @@ END $$;""")
                   f"each addressed to its own role: {both}")
             check(len({row["key"] for row in both}) == 2,
                   f"because the keys differ by role: {both}")
+
+            # 4b. THE LOST UPDATE THE COLLAPSE MAKES POSSIBLE. Collapsing onto
+            #     a pending row means a row can be refreshed WHILE it is being
+            #     delivered. Removing it by id alone would then delete the
+            #     refreshed payload as the acknowledgement of the payload it
+            #     replaced -- a duplicate wake traded for a silent loss, which
+            #     is a worse bug than the one this ticket is about.
+            # The whole queue, because claim_notification takes the oldest due
+            # row on the board and this case is about which row comes back.
+            fixture.psql(admin, "DELETE FROM ticket_board.ticket_notification_queue;")
+            # A and B are told apart by what they say changed, because the wake's
+            # message is about the ticket, not about the comment's text.
+            act("PGU-1", "add_comment", "director", text="A, the delivered change.")
+            claimed = json.loads(as_listener("""SELECT jsonb_build_object('id', notification_id, 'message', message)::text
+FROM ticket_board.claim_notification();"""))
+            recorded = sql("SELECT revision || ' ' || coalesce(claimed_revision::text,'-') "
+                           f"FROM ticket_board.ticket_notification_queue WHERE id={claimed['id']}")
+            check(recorded.split()[0] == recorded.split()[1],
+                  f"the claim records the version it is delivering: {recorded}")
+            check("new comment" in claimed["message"], f"and delivers payload A: {claimed['message']}")
+
+            # B arrives while A is in flight, onto the same ticket and role.
+            act("PGU-1", "edit_fields", "director", implementation="B, arrived mid-delivery")
+            pending = wakes("PGU-1")
+            check(len(pending) == 1 and pending[0]["id"] == claimed["id"],
+                  f"it collapses onto the same row, as it should: {pending}")
+            check(pending[0]["claimed"] is False,
+                  f"re-armed, because it has something new to say: {pending}")
+
+            as_listener(f"""SELECT ticket_board.ack_notification({claimed['id']});""")
+            check(True, "the delivered snapshot is acknowledged")
+            survived = wakes("PGU-1")
+            check(len(survived) == 1,
+                  f"and B is still queued rather than deleted by A's acknowledgement: {survived}")
+            check("implementation" in survived[0]["message"],
+                  f"carrying B's payload, not A's: {survived[0]['message']}")
+            check(survived[0]["claimed"] is False, f"and claimable again: {survived}")
+
+            # B delivers exactly once: one claim returns it, its own ack removes
+            # it, and a second claim finds nothing.
+            claimed_b = json.loads(as_listener("""SELECT jsonb_build_object('id', notification_id, 'message', message)::text
+FROM ticket_board.claim_notification();"""))
+            check("implementation" in claimed_b["message"], f"B is delivered: {claimed_b['message']}")
+            bumped = sql("SELECT revision = claimed_revision FROM "
+                         f"ticket_board.ticket_notification_queue WHERE id={claimed_b['id']}")
+            check(bumped == "t", f"delivering B records B's version: {bumped}")
+            as_listener(f"""SELECT ticket_board.ack_notification({claimed_b['id']});""")
+            check(wakes("PGU-1") == [], "and the queue is empty: delivered exactly once")
+            again = as_listener("""SELECT count(*) FROM ticket_board.claim_notification();""")
+            check(again == "0", f"a further claim finds nothing to deliver: {again}")
+
+            # A discard is a removal too, and carries the same guard.
+            fixture.psql(admin, "DELETE FROM ticket_board.ticket_notification_queue;")
+            act("PGU-1", "add_comment", "director", text="C, about to be discarded.")
+            claimed_c = json.loads(as_listener("""SELECT jsonb_build_object('id', notification_id)::text
+FROM ticket_board.claim_notification();"""))
+            act("PGU-1", "edit_fields", "director", implementation="D, arrived before the discard")
+            as_listener(f"""SELECT ticket_board.discard_notification({claimed_c['id']}, 'suppressed');""")
+            kept = wakes("PGU-1")
+            check(len(kept) == 1 and "implementation" in kept[0]["message"],
+                  f"and D survives a discard aimed at C: {kept}")
 
             # 5. THE AWAITING-ROLE LADDER IS NOT TOUCHED. Its rungs are supposed
             #    to be several rows with keys differing by a trailing :N, on a
@@ -219,6 +289,61 @@ END $$;""")
             #    it without reconstructing it from five cases.
             check(after_second[0]["key"] == "ticket_update:PGU-1:ops",
                   f"the key is the ticket and the role, not the transaction: {after_second[0]['key']}")
+
+            # 8. THE UPGRADE PATH, on a database built from the release the
+            #    live Board is running. The baseline commit is PINNED rather
+            #    than read from origin/main: main becomes the fixed schema the
+            #    moment this lands, and a "before" database built from the
+            #    "after" schema proves nothing while still passing.
+            baseline = "2b42336e24e9017859ca36b407bd3eebfcbe9537"
+            upgrade_db = "ticket_update_dedupe_upgrade"
+            upgrade_admin = fixture.conninfo(cluster.socket_dir, cluster.port, upgrade_db)
+            fixture.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port),
+                         "-U", "postgres", upgrade_db])
+            show = lambda path: fixture.run(["git", "show", f"{baseline}:{path}"]).stdout
+            before_schema = show("scripts/ticket_board/schema.sql")
+            check("revision bigint NOT NULL DEFAULT 1" not in before_schema,
+                  "the released schema has no revision column, so this is a real upgrade")
+            fixture.psql(upgrade_admin, before_schema)
+            fixture.psql(upgrade_admin, show("scripts/ticket_board/rbac.sql"))
+            for migration in ("pgu945_syrd159_ticket_update_dedupe.sql",
+                              "pgu946_syrd159_versioned_delivery.sql"):
+                text = (ROOT / "scripts" / "ticket_board" / "migrations" / migration).read_text()
+                fixture.psql(upgrade_admin, text)
+                fixture.psql(upgrade_admin, text)
+            check(True, "both migrations apply to the released schema, twice each")
+
+            def upgraded_listener(statement: str) -> str:
+                raw = fixture.psql(upgrade_admin,
+                                   f"SET ROLE ticket_board_listener;\n{statement}\nRESET ROLE;")
+                return "\n".join(line for line in raw.splitlines()
+                                  if line.strip() not in {"SET", "RESET"}).strip()
+
+            fixture.seed_postgres_ticket(upgrade_admin, "PGU-90", title="After the upgrade",
+                                         state="in_progress", assignee="ops", commit_exempt=True)
+            fixture.psql(upgrade_admin, "DELETE FROM ticket_board.ticket_notification_queue;")
+            notify = """
+DO $$
+BEGIN
+    PERFORM set_config('ticket_board.caller_role', 'director', true);
+    PERFORM ticket_board.notify_ticket_owner_in_place_change('PGU-90', %s);
+END $$;"""
+            fixture.psql(upgrade_admin, notify % "'new comment'")
+            fixture.psql(upgrade_admin, notify % "'blockers'")
+            check(fixture.psql(upgrade_admin,
+                  "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+                  "WHERE ticket_id='PGU-90' AND kind='ticket_update'").strip() == "1",
+                  "upgraded: two changes collapse onto one unread wake")
+            claimed_u = json.loads(upgraded_listener(
+                "SELECT jsonb_build_object('id', notification_id)::text "
+                "FROM ticket_board.claim_notification();"))
+            fixture.psql(upgrade_admin, notify % "'assignee'")
+            upgraded_listener(f"SELECT ticket_board.ack_notification({claimed_u['id']});")
+            check(True, "upgraded: the superseded snapshot is acknowledged")
+            check(fixture.psql(upgrade_admin,
+                  "SELECT count(*) FROM ticket_board.ticket_notification_queue "
+                  "WHERE ticket_id='PGU-90'").strip() == "1",
+                  "upgraded: and the newer payload is still queued, not lost")
 
             print(f"ticket_board_ticket_update_dedupe_postgres_test: {CHECKS} checks ok")
         finally:

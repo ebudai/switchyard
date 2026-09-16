@@ -692,6 +692,33 @@ def main() -> int:
         ticket_update_dedupe_migration_text,
         "notify_ticket_owner_in_place_change",
     )
+    # SYRD-159 second half: the versioned delivery. No function changes shape
+    # here, on purpose -- a changed return type would break every historical
+    # migration that recreates claim_notification -- so what the migration must
+    # carry is the two columns and the four function bodies.
+    versioned_delivery_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu946_syrd159_versioned_delivery.sql"
+    ).read_text(encoding="utf-8")
+    for column in ("revision bigint NOT NULL DEFAULT 1", "claimed_revision bigint"):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in versioned_delivery_migration_text, column
+        assert column in schema, column
+    assert "DROP FUNCTION" not in versioned_delivery_migration_text
+    for function_name in (
+        "enqueue_notification",
+        "claim_notification",
+        "notification_delivery_superseded",
+        "ack_notification",
+        "discard_notification",
+    ):
+        assert extract_function(schema, function_name) == extract_function(
+            versioned_delivery_migration_text,
+            function_name,
+        ), function_name
+    # Both removal paths must ask the one guard, or the rule drifts between them.
+    for caller in ("ack_notification", "discard_notification"):
+        assert "ticket_board.notification_delivery_superseded(" in extract_function(
+            schema, caller
+        ), caller
     held_review_reconcile_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu944_syrd180_held_review_reconcile.sql"
     ).read_text(encoding="utf-8")

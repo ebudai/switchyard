@@ -535,6 +535,20 @@ ALTER TABLE ticket_board.ticket_notification_queue
     ADD COLUMN IF NOT EXISTS dead_lettered_at timestamptz;
 ALTER TABLE ticket_board.ticket_notification_queue
     ADD COLUMN IF NOT EXISTS terminal_reason text;
+-- SYRD-159: which version of this row exists, and which version a listener took
+-- to deliver. A collapsing dedupe key means a pending row can be refreshed while
+-- it is being delivered -- that is what the collapse is for -- so removing it by
+-- id alone deletes the refreshed payload as the acknowledgement of the payload
+-- it replaced, and the update that arrived mid-flight is never sent to anybody.
+-- The claim records what it took; removal refuses when the row has moved on.
+--
+-- Recorded by the claim rather than carried by the caller, so no function
+-- changes shape: a listener cannot be wrong about what it delivered, and every
+-- historical migration that recreates these functions still applies.
+ALTER TABLE ticket_board.ticket_notification_queue
+    ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
+ALTER TABLE ticket_board.ticket_notification_queue
+    ADD COLUMN IF NOT EXISTS claimed_revision bigint;
 
 ALTER TABLE ticket_board.ticket_notification_queue
     DROP CONSTRAINT IF EXISTS ticket_notification_queue_target_role_check;
@@ -2507,6 +2521,10 @@ BEGIN
     SET payload = EXCLUDED.payload,
         target_role = EXCLUDED.target_role,
         message = EXCLUDED.message,
+        -- A refreshed row is a different thing to deliver, so it is a new
+        -- version, and the claim that is delivering the old one can no longer
+        -- remove it (SYRD-159).
+        revision = ticket_board.ticket_notification_queue.revision + 1,
         claimed_at = NULL,
         next_attempt_at = EXCLUDED.next_attempt_at,
         last_error = NULL,
@@ -2565,6 +2583,10 @@ BEGIN
     claimed AS (
         UPDATE ticket_board.ticket_notification_queue q
         SET claimed_at = p_now,
+            -- What this delivery is of. Set in the same statement that takes
+            -- the claim, so nothing can slip between choosing the row and
+            -- recording which version of it left (SYRD-159).
+            claimed_revision = q.revision,
             attempts = q.attempts + 1,
             updated_at = p_now
         FROM candidate
@@ -2747,6 +2769,53 @@ BEGIN
 END;
 $$;
 
+-- SYRD-159: one place that decides whether a removal is still removing what was
+-- delivered. A collapsing dedupe key means a pending row can be refreshed while
+-- a listener is delivering it -- that is what the collapse is for -- so removing
+-- it by id alone would delete a payload nobody has been told about. Both removal
+-- paths ask this, so the rule cannot drift between them, and both stop rather
+-- than re-arming: the enqueue that superseded the row already cleared its claim
+-- and made it due, and clearing it a second time could steal a claim a later
+-- pass has legitimately taken, which is how one update becomes two deliveries.
+--
+-- True means "stop": the row has moved on, or it is already gone.
+CREATE OR REPLACE FUNCTION ticket_board.notification_delivery_superseded(
+    p_notification_id bigint,
+    p_event text
+)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    current_revision bigint;
+    delivered_revision bigint;
+BEGIN
+    SELECT q.revision, q.claimed_revision INTO current_revision, delivered_revision
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN true;
+    END IF;
+    IF delivered_revision IS NULL OR delivered_revision = current_revision THEN
+        RETURN false;
+    END IF;
+    PERFORM ticket_board.record_notification_trace(
+        q.ticket_id, q.id, q.target_role, q.kind, p_event,
+        NULL, NULL, NULL,
+        jsonb_build_object('attempts', q.attempts, 'payload', q.payload,
+                           'delivered_revision', delivered_revision,
+                           'current_revision', current_revision)
+    )
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id;
+    RETURN true;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ack_notification(p_notification_id bigint)
 RETURNS void
 LANGUAGE plpgsql
@@ -2756,6 +2825,9 @@ SET search_path = ticket_board, pg_temp
 AS $$
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('ack_notification');
+    IF ticket_board.notification_delivery_superseded(p_notification_id, 'ack_superseded') THEN
+        RETURN;
+    END IF;
     UPDATE ticket_board.ticket_notification_state ns
     SET idle_reminder_count = CASE
             WHEN q.kind = 'idle_reminder' THEN ns.idle_reminder_count + 1
@@ -2806,6 +2878,9 @@ BEGIN
     PERFORM ticket_board.require_ticket_board_listener('discard_notification');
     IF btrim(coalesce(p_reason, '')) = '' THEN
         RAISE EXCEPTION 'discard_notification requires a non-empty reason';
+    END IF;
+    IF ticket_board.notification_delivery_superseded(p_notification_id, 'discard_superseded') THEN
+        RETURN;
     END IF;
 
     -- Removes a queued notification that was never delivered, WITHOUT the

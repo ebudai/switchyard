@@ -160,6 +160,34 @@ the release that failed, so re-running it would repeat the defect it failed on.
 Nothing the tenant owns is touched and running it twice produces the same
 artifacts.
 
+### Adopting an existing project's declared workflow
+
+A project provisioned before root kept that record has its declared workflow in
+one place only: the tenant's own generated plan, writable by the account every
+role runs as. Its packets seed nothing rather than seeding the default workflow
+over it, which is safe and stuck. `pkexec switchyard adopt-workflow <slug>` is
+how it stops being stuck, and it is deliberately not automatic:
+
+- the document is read the way root reads anything it did not write -- by fd,
+  refusing a symlink at every component, required to belong to the project
+  owner or root and to be unwritable by anybody else -- and validated the way
+  provisioning validates it;
+- it is checked against the workflow the running board is actually enforcing,
+  read over the board's own socket. Every line where the two differ is printed,
+  and a difference is a refusal. `--despite-board '<why>'` is the narrated
+  recovery for a board that lost its configuration, and the reason is recorded
+  with everything else;
+- the run has to be authorized by a person through Polkit. Root alone is not
+  authorization: a script that inherited root has nobody to record the decision
+  against, and the decision is the point;
+- nothing is written without `--apply`, and what was shown and decided goes
+  into the rollout journal either way;
+- the record is written atomically, root-owned and 0644, and read back before
+  the command says it adopted anything.
+
+Afterwards `switchyard upgrade` and `switchyard resume-provision` regenerate
+that project's declared workflow from root's copy, byte for byte (SYRD-166).
+
 A project that declares its own workflow has that document recorded where only
 root can write it -- `workflow.json`, beside root's plan record, carrying a
 digest of what it holds -- when root first generates that project's artifacts.

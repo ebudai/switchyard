@@ -3239,8 +3239,10 @@ def render_workflow_sql(plan: ProjectBoardProvision, *, schema_sql: str | None =
 --
 -- Root records a project's declared workflow when it first generates that
 -- project's artifacts. A project provisioned before root kept one has no such
--- record, and re-provisioning through `switchyard new` is what writes it
--- (SYRD-165).
+-- record (SYRD-165), and `pkexec switchyard adopt-workflow {plan.project}` is
+-- how an operator gives it one: it shows the document, its digest and the
+-- workflow the running board is enforcing, refuses if those disagree, and
+-- keeps the decision in the rollout journal (SYRD-166).
 """
     if plan.workflow_seed == "pgu-full":
         return f"""-- {plan.project} keeps the full workflow seeded by schema.sql.

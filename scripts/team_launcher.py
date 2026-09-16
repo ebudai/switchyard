@@ -185,6 +185,10 @@ SWITCHYARD_COMMANDS = (
     "new",
     "register",
     "upgrade",
+    # Records an existing tenant's declared workflow as root's own, once, with
+    # an operator authorizing it through Polkit and the whole decision in the
+    # rollout journal (SYRD-166).
+    "adopt-workflow",
     # Finishes a project whose `switchyard new` stopped before it was
     # registered, so the installation that already exists can be completed
     # instead of started again: root's artifacts first (SYRD-147), then the
@@ -14795,6 +14799,393 @@ def _finish_provision_after_packet(
     return 0
 
 
+def read_board_declared_workflow(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[dict | None, str]:
+    """The workflow document the running board is enforcing, over its own socket.
+
+    Asked of the board rather than of any file, because this is the thing an
+    adoption has to agree with: the board's copy is what decides every
+    transition and capability right now, and it can only have been installed
+    through the write API's own authority (SYRD-166).
+    """
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/workflow")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        if response.status != 200:
+            return None, f"the board answered HTTP {response.status} for its workflow"
+        payload = json.loads(body)
+    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
+        return None, f"the board's workflow could not be read: {exc}"
+    if not isinstance(payload, dict):
+        return None, "the board's workflow response is not a document"
+    document = payload.get("document")
+    if document is None:
+        return None, "the board is running no declared workflow"
+    if not isinstance(document, dict):
+        return None, "the board's workflow response carries no document"
+    return document, ""
+
+
+@dataclass(frozen=True)
+class WorkflowAdoption:
+    """What an adoption proposes, and what the board says about it."""
+
+    document: dict | None = None
+    digest: str = ""
+    source: Path | None = None
+    board_digest: str = ""
+    difference: tuple[str, ...] = ()
+    problems: tuple[str, ...] = ()
+
+    @property
+    def adoptable(self) -> bool:
+        return self.document is not None and not self.problems and not self.difference
+
+
+def _canonical_workflow(document: Mapping[str, Any]) -> str:
+    return json.dumps(document, indent=2, sort_keys=True)
+
+
+def _workflow_difference(proposed: Mapping[str, Any], live: Mapping[str, Any]) -> list[str]:
+    """Where the two documents disagree, named rather than counted."""
+    from difflib import unified_diff
+
+    return [
+        line
+        for line in unified_diff(
+            _canonical_workflow(live).splitlines(),
+            _canonical_workflow(proposed).splitlines(),
+            fromfile="the board's declared workflow",
+            tofile="the document proposed for adoption",
+            lineterm="",
+        )
+    ]
+
+
+def propose_workflow_adoption(
+    slug: str,
+    plan: "ProjectBoardProvision",
+    config: ProjectConfig,
+    config_path: Path,
+    *,
+    owner_uid: int | None = None,
+    board_reader: Callable[[ProjectConfig], tuple[dict | None, str]] | None = None,
+) -> WorkflowAdoption:
+    """What root would record for this project, and everything against it.
+
+    The document comes from the tenant's own generated plan, which is exactly
+    the file root refuses to trust on its own -- so it is read the way root
+    reads anything it did not write (by fd, no symlink at any component, owned
+    by the project owner or root, unwritable by anybody else), validated the
+    way provisioning validates it, and then checked against the workflow the
+    board is actually running. Two independent things have to say the same
+    thing before an operator is asked to authorize anything.
+    """
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    problems: list[str] = []
+    tenant_plan_path = config_path.parent / "plan.json"
+    permitted = sorted({expected_privileged_uid(), *((owner_uid,) if owner_uid is not None else ())})
+    document_holder, problem = read_plan_no_follow(
+        tenant_plan_path, require_root_owned=False, require_owner_uids=permitted
+    )
+    if document_holder is None:
+        return WorkflowAdoption(source=tenant_plan_path, problems=(problem,))
+    declared = document_holder.data.get("workflow")
+    if declared is None:
+        return WorkflowAdoption(
+            source=tenant_plan_path,
+            problems=(f"{tenant_plan_path} declares no workflow, so there is nothing to adopt",),
+        )
+    if not isinstance(declared, dict):
+        return WorkflowAdoption(
+            source=tenant_plan_path,
+            problems=(f"{tenant_plan_path} carries a workflow that is not a document",),
+        )
+    recorded_project = str(declared.get("project") or "").strip()
+    if recorded_project and recorded_project != slug:
+        return WorkflowAdoption(
+            source=tenant_plan_path,
+            problems=(
+                f"{tenant_plan_path} carries a workflow for project {recorded_project!r}, "
+                f"not {slug!r}",
+            ),
+        )
+    try:
+        try:
+            from scripts.ticket_board.workflow_config import validate
+        except ImportError:  # pragma: no cover - direct execution
+            from ticket_board.workflow_config import validate
+
+        validated = validate(declared, project=slug)
+    except (ValueError, SystemExit) as exc:
+        return WorkflowAdoption(
+            source=tenant_plan_path,
+            problems=(f"{tenant_plan_path} carries a workflow this release will not accept: {exc}",),
+        )
+
+    digest = workflow_document_digest(validated)
+    reader = board_reader or read_board_declared_workflow
+    live, board_problem = reader(config)
+    if live is None:
+        problems.append(board_problem)
+        return WorkflowAdoption(
+            document=validated, digest=digest, source=tenant_plan_path, problems=tuple(problems)
+        )
+    board_digest = workflow_document_digest(live)
+    difference = [] if board_digest == digest else _workflow_difference(validated, live)
+    return WorkflowAdoption(
+        document=validated,
+        digest=digest,
+        source=tenant_plan_path,
+        board_digest=board_digest,
+        difference=tuple(difference),
+    )
+
+
+def write_workflow_record(slug: str, document: Mapping[str, Any]) -> Path:
+    """Publish root's copy of a declared workflow where only root can rewrite it."""
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    path = workflow_record_path(slug)
+    payload = (
+        json.dumps(
+            {
+                "project": slug,
+                "digest": workflow_document_digest(document),
+                "document": document,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    staged = path.with_name(f".{path.name}.new")
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(descriptor, payload)
+        os.fchown(descriptor, expected_privileged_uid(), 0)
+        os.fchmod(descriptor, 0o644)
+    finally:
+        os.close(descriptor)
+    staged.replace(path)
+    return path
+
+
+def switchyard_adopt_workflow_command(
+    slug: str,
+    *,
+    apply: bool = False,
+    despite_board: str = "",
+    registry_dir: Path | None = None,
+    config_path: Path | None = None,
+    euid_getter: Callable[[], int] = os.geteuid,
+    operator_resolver: Callable[[], Any] | None = None,
+    board_reader: Callable[[ProjectConfig], tuple[dict | None, str]] | None = None,
+    journal: Any | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Record an existing tenant's declared workflow as root's own, on purpose.
+
+    A project provisioned before root kept this record has its declared
+    workflow in one place only: a file the account every role runs as can
+    write. Root will not adopt that on its own -- the document decides which
+    roles exist and what each of them may call -- so adoption is an operator's
+    decision, taken once, with everything it rests on put in front of them
+    first: the exact document, its digest, the digest the running board holds,
+    and every line where the two differ.
+
+    What makes it safe is not any one of those. It is that the tenant's file
+    and the running board have to agree, that a human authorized the run
+    through Polkit rather than a script having inherited root, and that what
+    was shown and decided is in the rollout journal afterwards (SYRD-166).
+    """
+    from scripts.ticket_board.rollout_journal import Attempt, resolve_operator
+
+    slug = _validate_project_slug(slug)
+    said: list[str] = []
+
+    def say(line: str) -> None:
+        said.append(line)
+        print_func(line)
+
+    if euid_getter() != 0:
+        print_func(
+            f"switchyard: adopting {slug}'s declared workflow writes root's own copy of it. "
+            f"Run it the way privileged switchyard steps are run on this host: "
+            f"pkexec switchyard adopt-workflow {slug}"
+        )
+        return 1
+    operator = (operator_resolver or resolve_operator)()
+    if getattr(operator, "source", "") != "pkexec" or not getattr(operator, "known", False):
+        print_func(
+            f"switchyard: adopting a declared workflow is an operator's decision and has to be "
+            f"authorized as one. This run was elevated by "
+            f"{getattr(operator, 'source', None) or 'nothing that names a person'}, so there is "
+            f"nobody to record it against. Run: pkexec switchyard adopt-workflow {slug}"
+        )
+        return 1
+
+    baseline = privileged_baseline_plan_path(slug)
+    if partial_provision_record(slug) is None:
+        print_func(
+            f"switchyard: root holds no provisioning record for {slug} at {baseline}, so there "
+            "is no project here to adopt a workflow for."
+        )
+        return 1
+    document, problem = read_plan_no_follow(baseline, require_root_owned=True)
+    if document is None:
+        print_func(f"switchyard: {problem}")
+        return 1
+    identity = trusted_owner_identity(slug)
+    if not identity.trusted:
+        for objection in identity.problems:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to adopt a workflow for {slug}: root cannot establish whose "
+            "installation this is. Nothing was changed."
+        )
+        return 1
+
+    existing, existing_problem = recorded_declared_workflow(slug)
+    if existing is not None:
+        print_func(
+            f"switchyard: root already holds {slug}'s declared workflow at "
+            f"{workflow_record_path(slug)}. Nothing was changed."
+        )
+        return 0
+    if "holds no recorded workflow" not in existing_problem:
+        print_func(f"switchyard: {existing_problem}")
+        print_func(
+            f"switchyard: refusing to replace a record this cannot read. Nothing was changed."
+        )
+        return 1
+
+    # The release root recorded for this project, not a freshly selected one.
+    # Adoption installs nothing, so it needs a plan to check the tenant's
+    # configuration against rather than an audited release to render from --
+    # and the recorded one is what that configuration was generated beside.
+    recorded_release = str(document.data.get("source_repo") or "").strip()
+    if recorded_release:
+        selected = Path(recorded_release)
+    else:
+        selected, release_problem = _resume_source_release(None)
+        if release_problem:
+            print_func(f"switchyard: {release_problem}")
+            return 1
+    plan, divergence = _resume_plan_from_record(document, identity, source_repo=selected)
+    if divergence:
+        for objection in divergence:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to adopt a workflow for {slug}: root cannot rebuild its plan "
+            "without changing what it installs. Nothing was changed."
+        )
+        return 1
+    verified, config, config_problems = verified_tenant_config(
+        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user)
+    )
+    if config is None or verified is None:
+        for objection in config_problems:
+            print_func(f"switchyard: {objection}")
+        print_func(
+            f"switchyard: refusing to adopt a workflow for {slug} from a configuration root has "
+            "not verified. Nothing was changed."
+        )
+        return 1
+
+    attempt = journal or Attempt(
+        slug,
+        ["switchyard", "adopt-workflow", slug, *(["--apply"] if apply else [])],
+        operator=operator.name,
+    )
+    # The person this command verified, and the mechanism that named them, are
+    # what the record should carry -- rather than the journal deriving it a
+    # second time from an environment that has already been checked here.
+    attempt.operator = operator
+    attempt.open()
+    status, exit_status, detail = "failed", 1, ""
+    try:
+        proposal = propose_workflow_adoption(
+            slug, plan, config, verified,
+            owner_uid=uid_for_user(plan.owner_user),
+            board_reader=board_reader,
+        )
+        say(f"switchyard: {slug} declared workflow proposed from {proposal.source}")
+        if proposal.document is not None:
+            say(f"switchyard: proposed digest {proposal.digest}")
+            say(f"switchyard: the board holds {proposal.board_digest or 'no declared workflow'}")
+            say("switchyard: the document being proposed:")
+            for line in _canonical_workflow(proposal.document).splitlines():
+                say(f"    {line}")
+        for objection in proposal.problems:
+            say(f"switchyard: {objection}")
+        if proposal.difference:
+            say(
+                "switchyard: the proposed document and the workflow the board is running are "
+                "not the same:"
+            )
+            for line in proposal.difference:
+                say(f"    {line}")
+
+        if proposal.document is None or (proposal.problems and not despite_board):
+            say(f"switchyard: refusing to adopt a workflow for {slug}. Nothing was changed.")
+            detail = "refused"
+            return 1
+        if (proposal.difference or proposal.problems) and not despite_board:
+            say(
+                f"switchyard: refusing to adopt a workflow the board is not running. If this "
+                f"difference is the recovery -- a board that lost its configuration, say -- run "
+                f"it again with --despite-board '<why>' and that reason is recorded here with "
+                f"everything above."
+            )
+            detail = "refused: board disagreement"
+            return 1
+        if despite_board and (proposal.difference or proposal.problems):
+            say(f"switchyard: adopting despite the board, on this reason: {despite_board}")
+        if not apply:
+            say(
+                f"switchyard: dry run; nothing was written. Adopt it with "
+                f"`pkexec switchyard adopt-workflow {slug} --apply`."
+            )
+            status, exit_status, detail = "completed", 0, "dry-run"
+            return 0
+
+        recorded_path = write_workflow_record(slug, proposal.document)
+        stored, stored_problem = recorded_declared_workflow(slug)
+        if stored is None:
+            say(f"switchyard: {stored_problem}")
+            say(f"switchyard: the record at {recorded_path} did not read back. Nothing is adopted.")
+            detail = "record did not read back"
+            return 1
+        say(
+            f"switchyard: recorded {slug}'s declared workflow at {recorded_path} "
+            f"(digest {proposal.digest}, adopted by {operator.name})"
+        )
+        say(
+            f"switchyard: `switchyard upgrade {slug}` and `switchyard resume-provision {slug}` "
+            "now regenerate this project's declared workflow from root's own copy."
+        )
+        status, exit_status, detail = "completed", 0, "adopted"
+        return 0
+    finally:
+        attempt.write("stdout", "\n".join(said) + "\n")
+        attempt.close(status=status, exit_status=exit_status, detail=detail)
+
+
 def switchyard_resume_provision_command(
     slug: str,
     *,
@@ -21365,6 +21756,40 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_adopt_workflow_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard adopt-workflow",
+        description=(
+            "Record an existing project's declared workflow as root's own copy. Shows the "
+            "document, its digest, the digest the running board holds and every difference "
+            "between them, and writes nothing without --apply. The run has to be authorized "
+            "through Polkit and is kept in the rollout journal."
+        ),
+    )
+    parser.add_argument("project", help="the project slug root holds a provisioning record for")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the record; without it this shows what would be adopted and changes nothing",
+    )
+    parser.add_argument(
+        "--despite-board",
+        default="",
+        metavar="REASON",
+        help=(
+            "adopt a document the running board is not enforcing, for a board that lost its "
+            "configuration; the reason is recorded with everything else"
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        dest="config_path",
+        help="the generated launcher configuration, for a checkout that has moved",
+    )
+    return parser
+
+
 def _build_switchyard_resume_provision_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard resume-provision",
@@ -22028,6 +22453,7 @@ Commands:
   new              create and provision a new project
   register         register an existing project config
   upgrade          update generated project artifacts and report release drift
+  adopt-workflow   record an existing project's declared workflow as root's own copy
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
   cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
@@ -22497,6 +22923,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if argv[0].casefold() == "register":
         args = _build_switchyard_register_parser().parse_args(argv[1:])
         return switchyard_register_command(args.config_path)
+    if argv[0].casefold() == "adopt-workflow":
+        args = _build_switchyard_adopt_workflow_parser().parse_args(argv[1:])
+        return switchyard_adopt_workflow_command(
+            args.project,
+            apply=args.apply,
+            despite_board=args.despite_board,
+            config_path=args.config_path,
+        )
     if argv[0].casefold() == "resume-provision":
         args = _build_switchyard_resume_provision_parser().parse_args(argv[1:])
         return switchyard_resume_provision_command(

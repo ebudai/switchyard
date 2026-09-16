@@ -191,7 +191,8 @@ def test_a_plan_root_cannot_vouch_for_seeds_nothing() -> None:
         assert DEFAULT_SEED_MARKER not in seed, seed[:400]
         assert DECLARED_SEED_MARKER not in seed, seed[:400]
         assert "root holds no verified copy" in seed, seed[:400]
-        assert "switchyard new" in seed, seed[:400]
+        # And it names the supported way to give root a copy (SYRD-166).
+        assert "adopt-workflow" in seed, seed[:400]
 
 
 # --------------------------------------------------------------------------

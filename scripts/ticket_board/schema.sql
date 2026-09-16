@@ -6102,6 +6102,16 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION 'inspection ticket not found: %', id;
     END IF;
+    -- Held: the move this approval earned is deferred, so it is recorded and
+    -- paid when the hold is released. The legacy trigger re-evaluates audit and
+    -- user review on the next unheld write but never inspection, so without this
+    -- the one stage with a declared inspector is the one that strands (SYRD-180).
+    IF held THEN
+        INSERT INTO ticket_board.ticket_deferred_review(ticket_id,action_name,actor,to_stage)
+        VALUES(inspector_sign_off.id,'inspector_sign_off',actor,'audit')
+        ON CONFLICT (ticket_id) DO UPDATE SET action_name=EXCLUDED.action_name,
+            actor=EXCLUDED.actor,to_stage=EXCLUDED.to_stage,deferred_at=clock_timestamp();
+    END IF;
     PERFORM ticket_board.touch_ticket(id);
     IF NOT coalesce(was_approved,false) THEN
         PERFORM ticket_board.notify_held_review_completion(id,'inspection');
@@ -6337,6 +6347,94 @@ BEGIN
 END;
 $$;
 
+-- SYRD-180: a review approval given while a ticket is manually controlled.
+--
+-- The hold is meant to DEFER a reviewer's decision, not to consume it. The
+-- declared executor already computes the transition the approval earned, and
+-- then throws it away to keep the deliberate stage/owner hold. This table is
+-- where it is kept instead, so releasing the hold can replay exactly that one
+-- transition, taken by the role that earned it, rather than a destination
+-- re-derived later from a parallel table that could disagree.
+CREATE TABLE IF NOT EXISTS ticket_board.ticket_deferred_review (
+    ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    action_name text NOT NULL,
+    actor text NOT NULL,
+    to_stage text NOT NULL,
+    deferred_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+-- What a released hold still owes, by name. NULL when nothing is owed, which is
+-- the normal case: only an approval taken under a hold records anything here.
+CREATE OR REPLACE FUNCTION ticket_board.pending_held_review(p_ticket_id text)
+RETURNS text
+LANGUAGE sql
+STABLE
+-- Definer, like every other reader of an internal table: the deferral store is
+-- written only by the functions above and carries no role grants of its own, so
+-- a caller's answer must not depend on whether this board was built from the
+-- schema or reached this state through the migration.
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT d.action_name
+    FROM ticket_board.ticket_deferred_review d
+    WHERE d.ticket_id = p_ticket_id;
+$$;
+
+-- Pay it. Exactly once, because the row is deleted with the move; and only when
+-- the move is still the one the workflow allows from where the ticket now is.
+CREATE OR REPLACE FUNCTION ticket_board.reconcile_released_hold(p_ticket_id text)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    deferred ticket_board.ticket_deferred_review;
+    held boolean;
+    current_state text;
+BEGIN
+    SELECT * INTO deferred FROM ticket_board.ticket_deferred_review d
+    WHERE d.ticket_id = p_ticket_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    SELECT t.manually_controlled, t.state INTO held, current_state
+    FROM ticket_board.tickets t WHERE t.id = p_ticket_id FOR UPDATE;
+    IF held THEN
+        RETURN NULL;
+    END IF;
+    -- The ticket may have been moved by hand while it was held -- a director
+    -- edit, an override, a return. The deferred step is then no longer a step
+    -- this ticket can take, and replaying it would either fail or move it
+    -- somewhere nobody chose. Drop it rather than carry it.
+    IF NOT ticket_board.workflow_transition_allowed_config(current_state, deferred.to_stage) THEN
+        DELETE FROM ticket_board.ticket_deferred_review d WHERE d.ticket_id = p_ticket_id;
+        RETURN NULL;
+    END IF;
+    -- A blocked ticket is not promoted by releasing a hold, and its approval is
+    -- not spent either: it stays owed until the blocker clears, which is what
+    -- the workflow does with every other forward promotion (SYRD-148).
+    IF ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
+        RETURN NULL;
+    END IF;
+    -- Taken by the role that earned it, through the same seam a recovery uses,
+    -- so the transition is authorized, gated, assigned and notified by the one
+    -- implementation that does that -- not by a second copy of it here.
+    PERFORM set_config('ticket_board.workflow_action', deferred.action_name, true);
+    PERFORM set_config('ticket_board.workflow_actor', deferred.actor, true);
+    UPDATE ticket_board.tickets
+    SET state = deferred.to_stage
+    WHERE tickets.id = p_ticket_id
+      AND tickets.state = current_state;
+    PERFORM set_config('ticket_board.workflow_action', '', true);
+    PERFORM set_config('ticket_board.workflow_actor', '', true);
+    DELETE FROM ticket_board.ticket_deferred_review d WHERE d.ticket_id = p_ticket_id;
+    RETURN deferred.action_name;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.set_manually_controlled(
     id text,
     manually_controlled boolean
@@ -6358,6 +6456,12 @@ BEGIN
         RAISE EXCEPTION 'ticket not found: %', id;
     END IF;
     PERFORM ticket_board.touch_ticket(id);
+    -- Releasing the hold pays what the hold deferred, and pays it once: the
+    -- record is retired with the move, so a second release finds nothing owed
+    -- (SYRD-180).
+    IF NOT set_manually_controlled.manually_controlled THEN
+        PERFORM ticket_board.reconcile_released_hold(id);
+    END IF;
 END;
 $$;
 
@@ -7442,7 +7546,18 @@ BEGIN
         -- Record the decision but retain the deliberate stage/owner hold. The
         -- executor creates the durable handoff after activity triggers finish.
         PERFORM set_config('ticket_board.held_review_target',coalesce(nullif(ticket_board.transition_target_role(target,proposed.assignee),actor),'director'),true);
+        -- And keep the transition the approval earned, instead of discarding it
+        -- with the stage. A hold defers a decision; releasing it replays this
+        -- exact step, as this actor, once (SYRD-180).
+        INSERT INTO ticket_board.ticket_deferred_review(ticket_id,action_name,actor,to_stage)
+        VALUES(previous.id,action_name,actor,tr->>'to')
+        ON CONFLICT (ticket_id) DO UPDATE SET action_name=EXCLUDED.action_name,
+            actor=EXCLUDED.actor,to_stage=EXCLUDED.to_stage,deferred_at=clock_timestamp();
         target:=previous.state; proposed.assignee:=previous.assignee;
+    ELSE
+        -- A move that actually happens leaves nothing owed, including the move
+        -- that pays a deferral: nothing may be replayed twice.
+        DELETE FROM ticket_board.ticket_deferred_review WHERE ticket_id=previous.id;
     END IF;
     doc:=doc||jsonb_build_object('state',target,'assignee',proposed.assignee);
     proposed:=jsonb_populate_record(proposed,doc);
@@ -7596,6 +7711,7 @@ DECLARE
     t ticket_board.tickets%ROWTYPE;
     candidates integer;
     chosen text;
+    pending text;
 BEGIN
     IF cfg IS NULL THEN
         RAISE EXCEPTION 'recovery requires a declared workflow; this board has none'
@@ -7616,6 +7732,33 @@ BEGIN
     SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'ticket % not found', p_ticket;
+    END IF;
+    -- A completed review that a hold deferred is not a stalled owner. Recovery
+    -- takes the one declared step the owner could have taken (SYRD-133); here
+    -- that is the step they DID take, so pay it rather than asking the reviewer
+    -- to sign off a second time -- and when it cannot be paid yet, refuse naming
+    -- what is actually in the way, without consuming the approval. Sending the
+    -- Director to route/reassign/defer was the advice SYRD-146 followed into a
+    -- dead end (SYRD-180).
+    pending := ticket_board.pending_held_review(t.id);
+    IF pending IS NOT NULL THEN
+        IF t.manually_controlled THEN
+            RAISE EXCEPTION
+                '%/% has already recorded %; it is waiting on its hold, not on its owner. '
+                'Release the hold to finish it: set_manually_controlled(''%'', false)',
+                t.state, t.assignee, pending, t.id
+                USING ERRCODE = '42501';
+        END IF;
+        IF ticket_board.ticket_has_unresolved_blockers(t.id) THEN
+            RAISE EXCEPTION
+                '%/% has already recorded %; it is waiting on an unresolved blocker, not on its '
+                'owner. Resolve the blocker and recovery finishes it', t.state, t.assignee, pending
+                USING ERRCODE = '42501';
+        END IF;
+        IF ticket_board.reconcile_released_hold(t.id) IS NOT NULL THEN
+            PERFORM ticket_board.append_ticket_comment(t.id, caller, reason);
+            RETURN;
+        END IF;
     END IF;
     SELECT count(*) INTO candidates
       FROM jsonb_array_elements(cfg->'transitions') x

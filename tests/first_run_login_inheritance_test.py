@@ -505,6 +505,120 @@ class SessionRunner:
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 
+def test_trust_is_read_where_the_cli_really_records_it() -> None:
+    """Measured against Claude 2.1.270 on the live tenant.
+
+    Its five role worktrees are linked worktrees of one repository, none of
+    them named in `projects`, and every one opens at a ready prompt -- because
+    the trust is recorded once, for the repository they belong to:
+
+        /home/testing-agent/.local/state/switchyard/projects/testing/control.git
+            hasTrustDialogAccepted = True
+
+    Reading only the worktree path called that untrusted, scheduled a step the
+    CLI never prompts for, and left the watcher waiting for a key nobody was
+    going to write.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd191-trust.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home"
+        owner_home.mkdir()
+        repository = tmp_path / "state" / "control.git"
+        (repository / "worktrees" / "designer").mkdir(parents=True)
+        worktree = tmp_path / "worktrees" / "designer"
+        worktree.mkdir(parents=True)
+        # Exactly what git leaves in a linked worktree.
+        (worktree / ".git").write_text(
+            f"gitdir: {repository / 'worktrees' / 'designer'}\n", encoding="utf-8"
+        )
+        untrusted = tmp_path / "worktrees" / "elsewhere"
+        untrusted.mkdir()
+
+        (owner_home / ".claude.json").write_text(
+            json.dumps({"projects": {str(repository): {"hasTrustDialogAccepted": True}}}),
+            encoding="utf-8",
+        )
+        check(
+            team_launcher._workdir_is_trusted("claude", owner_home=owner_home, workdir=worktree),
+            "a linked worktree inherits the repository's trust",
+        )
+        check(
+            not team_launcher._workdir_is_trusted(
+                "claude", owner_home=owner_home, workdir=untrusted
+            ),
+            "and a directory belonging to nothing trusted does not",
+        )
+        check(
+            team_launcher._git_common_dir_for(worktree) == repository,
+            f"the repository is read from the worktree's own .git file: "
+            f"{team_launcher._git_common_dir_for(worktree)}",
+        )
+        # The worktree's own path still counts when that is what was recorded.
+        (owner_home / ".claude.json").write_text(
+            json.dumps({"projects": {str(untrusted): {"hasTrustDialogAccepted": True}}}),
+            encoding="utf-8",
+        )
+        check(
+            team_launcher._workdir_is_trusted("claude", owner_home=owner_home, workdir=untrusted),
+            "a directory trusted by its own path is still trusted",
+        )
+
+
+def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> None:
+    """The second half of the live failure: the watcher waited for nothing.
+
+    With the reader corrected the step would not have been scheduled at all,
+    but a disagreement between this code and a CLI must never look like a hang.
+    """
+    said: list[str] = []
+    ended = {"terminated": False}
+
+    class NeverFinishes:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            ended["terminated"] = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            ended["terminated"] = True
+
+    clock = {"now": 0.0}
+
+    completed = team_launcher._run_owner_cli_until(
+        owner_user="otto-agent",
+        owner_home=Path("/home/otto-agent"),
+        cwd=Path("/home/otto-agent"),
+        command=["claude"],
+        is_complete=lambda: False,
+        watching="claude to record trust for /home/otto-agent/worktrees/designer",
+        popen=lambda *args, **kwargs: NeverFinishes(),
+        sleep=lambda seconds: clock.__setitem__("now", clock["now"] + 30),
+        monotonic=lambda: clock["now"],
+        timeout_seconds=60,
+        print_func=said.append,
+    )
+
+    check(completed is False, "it reports the step as outstanding")
+    check(ended["terminated"], "and ends the CLI rather than leaving it holding the terminal")
+    check(any("gave up waiting" in line for line in said), f"loudly: {said}")
+    check(
+        any("record trust for /home/otto-agent/worktrees/designer" in line for line in said),
+        f"naming what it was waiting for: {said}",
+    )
+    check(
+        any("reading the wrong state" in line for line in said),
+        f"and naming the likely cause, which is a defect here: {said}",
+    )
+    check(
+        team_launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS <= 900,
+        "the default bound is minutes, not half an hour",
+    )
+
+
 def test_the_terminal_keeps_its_presentation_across_the_owner_boundary() -> None:
     """sudo resets the environment; a CLI with no TERM draws in monochrome.
 

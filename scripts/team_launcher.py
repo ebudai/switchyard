@@ -11958,7 +11958,13 @@ def _run_owner_cli_probe(
 #: running after it commits the state -- it goes on to its normal prompt -- so
 #: something has to notice and hand the terminal back (SYRD-191).
 FOREGROUND_COMPLETION_POLL_SECONDS = 0.5
-FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 1800.0
+#: Long enough for a person to answer a prompt, including an OAuth round trip in
+#: a browser; short enough that a step nothing will ever record ends in minutes
+#: with an explanation rather than looking like a hang. Live on the testing
+#: tenant it was the second case: a trust step was scheduled for a worktree
+#: Claude already trusted, so it opened at a ready prompt and the watcher waited
+#: for a key that was never going to be written (SYRD-191).
+FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 600.0
 
 
 def _run_owner_cli_until(
@@ -11968,11 +11974,13 @@ def _run_owner_cli_until(
     cwd: Path,
     command: Sequence[str],
     is_complete: Callable[[], bool],
+    watching: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     popen: Callable[..., Any] = subprocess.Popen,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+    print_func: Callable[[str], None] = print,
 ) -> bool:
     """Run one interactive step and take the terminal back when it is done.
 
@@ -12012,6 +12020,17 @@ def _run_owner_cli_until(
                 sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
                 break
             if monotonic() >= deadline:
+                # Loud, and specific about what did not happen. A step that
+                # cannot complete is a disagreement between this code and the
+                # CLI about where the answer is kept, and silence about it is
+                # what made one look like a hang.
+                print_func(
+                    f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
+                    "The CLI was ended and the run continues; the step is reported as "
+                    "outstanding below. If the CLI showed no prompt at all, it already "
+                    "considers this done and Switchyard is reading the wrong state -- say so, "
+                    "because that is a defect here and not something to answer again."
+                )
                 break
             sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
     finally:
@@ -12373,9 +12392,52 @@ def _agy_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
     return any(str(path) in candidates for path in trusted)
 
 
+def _git_common_dir_for(workdir: Path) -> Path | None:
+    """The repository a directory belongs to, read without running git.
+
+    A linked worktree's `.git` is a file holding `gitdir: <common>/worktrees/
+    <name>`; a plain checkout's is the repository directory itself. Read rather
+    than shelled out to, because this answers a question about somebody else's
+    tree and has no business executing anything in it.
+    """
+    marker = workdir.expanduser() / ".git"
+    try:
+        if marker.is_dir():
+            return marker.resolve(strict=False)
+        text = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    gitdir = Path(text.split(":", 1)[1].strip()).expanduser()
+    if not gitdir.is_absolute():
+        gitdir = (workdir.expanduser() / gitdir).resolve(strict=False)
+    parts = gitdir.parts
+    if len(parts) >= 2 and parts[-2] == "worktrees":
+        gitdir = Path(*parts[:-2])
+    return gitdir
+
+
 def _trust_path_candidates(workdir: Path) -> list[str]:
+    """Every path Claude might have recorded this directory's trust under.
+
+    Measured against Claude 2.1.270 on the live testing tenant: five role
+    worktrees, none of them named in `projects`, all opening straight at a
+    ready prompt -- because trust is recorded once for the REPOSITORY they are
+    linked to, which is the only entry there beside the home:
+
+        /home/testing-agent/.local/state/switchyard/projects/testing/control.git
+            hasTrustDialogAccepted = True
+
+    Reading only the worktree path said "untrusted", scheduled a trust step
+    Claude never prompts for, and left the bounded watcher waiting for a key
+    that was never going to appear (SYRD-191).
+    """
     expanded = workdir.expanduser()
     candidates = [str(expanded), str(expanded.resolve(strict=False))]
+    common = _git_common_dir_for(expanded)
+    if common is not None:
+        candidates.extend([str(common), str(common.resolve(strict=False))])
     return list(dict.fromkeys(candidates))
 
 
@@ -12721,7 +12783,9 @@ def run_first_run_auth_phase(
             is_complete=lambda cli=step.cli: _provider_account_setup_complete(
                 cli, owner_home=effective_home
             ),
+            watching=f"{step.cli} to record its own first run for {effective_owner}",
             runner=injected_runner,
+            print_func=print_func,
         )
         if not completed:
             incomplete_setup.append((step.cli, list(step.roles)))
@@ -12737,7 +12801,9 @@ def run_first_run_auth_phase(
             is_complete=lambda cli=step.cli, workdir=step.workdir: _workdir_is_trusted(
                 cli, owner_home=effective_home, workdir=workdir
             ),
+            watching=f"{step.cli} to record trust for {step.workdir}",
             runner=injected_runner,
+            print_func=print_func,
         )
         if not trusted:
             for role in step.roles or (step.role,):

@@ -126,6 +126,21 @@ and the moment it appears the CLI is ended and the phase moves on. Nobody is
 asked to type `/exit`, once for the account and again for every worktree --
 that is a chore, not a first run.
 
+Trust is read where the CLI really keeps it. Claude 2.1.270 records it once per
+**repository**, not per directory: the live tenant's five role worktrees are
+linked worktrees of one `control.git`, none of them appears in `projects`, and
+every one opens at a ready prompt because that repository is the trusted entry.
+Reading only the worktree path called them untrusted, scheduled a step the CLI
+never prompts for, and left the watcher waiting for a key nobody was going to
+write. The repository is read from the worktree's own `.git` file rather than by
+running git in somebody else's tree, and a directory trusted under its own path
+still counts.
+
+A step that cannot complete ends loudly. The wait is bounded in minutes, and on
+expiry it says what it was waiting for, that the CLI was ended and the run
+continues, and that a prompt which never appeared means Switchyard is reading
+the wrong state -- a defect here, not something for the User to answer again.
+
 The terminal keeps its presentation across the owner boundary. `sudo` resets
 the environment, and a CLI that cannot see `TERM` or `COLORTERM` draws itself in
 monochrome, which is what the User was shown; those variables are now forwarded

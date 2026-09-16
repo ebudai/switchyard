@@ -157,9 +157,13 @@ is doing its job — that refusal is a signal you routed wrongly.
 completion or a dependency and does not transition, `recover-stalled-ticket <id>
 --reason "..."` takes the one declared no-code transition that owner could have
 taken: no gate or sign-off is skipped, the work stops at its next required gate,
-and that gate's owner is notified once. It always exists. `force-move` and
-`override-move` are capabilities a document may not grant at all -- on syrd it
-grants neither, and both are refused (SYRD-133).
+and that gate's owner is notified once. It always exists, and for a review whose
+sign-off was given under a hold it is the command that pays it. `force-move` and
+`override-move` are not capabilities a document can grant -- granting them would
+be declaring the workflow's own bypass -- so they are admitted by control-role
+identity instead: the role holding `merge`, `set-blockers` and
+`set-manually-controlled` is the controller and may use them (SYRD-49, SYRD-78,
+SYRD-180).
 
 **Narrate every override.** `force-move` and `override-move` bypass the workflow;
 `edit-fields` bypasses the normal field-specific operations. Each exceptional use needs a

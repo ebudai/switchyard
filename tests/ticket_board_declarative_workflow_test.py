@@ -611,7 +611,14 @@ def main():
                 app.update_ticket(
                     "PGU-2", {"manually_controlled": False}, caller_role="director"
                 )
-                assert act("PGU-2", "verify_accept", "verifier")["state"] == "audit"
+                # SYRD-180: this used to ask the verifier to accept a SECOND time
+                # after the hold came off, because the first acceptance had been
+                # consumed into the flag and the transition it earned discarded.
+                # The hold defers that transition now, so releasing it pays it --
+                # and repeating a decision that has already been taken is no
+                # longer a step this ticket has.
+                assert app.get_ticket("PGU-2")["state"] == "audit", app.get_ticket("PGU-2")
+                assert app.get_ticket("PGU-2")["assignee"] == "audit"
             finally:
                 server.shutdown()
                 server.server_close()

@@ -672,6 +672,27 @@ def main() -> int:
         turn_end_activity_migration_text,
         "notify_idle_turn_end_nudges",
     )
+    # SYRD-180: the migration is the only way this reaches a live board, so its
+    # bodies are the schema's bodies -- for the executor and the recovery command
+    # as much as for the two new functions, because a partial upgrade would leave
+    # an approval recorded by one half and never paid by the other.
+    held_review_reconcile_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu944_syrd180_held_review_reconcile.sql"
+    ).read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS ticket_board.ticket_deferred_review" in held_review_reconcile_migration_text
+    assert "ticket_deferred_review" in schema
+    for function_name in (
+        "pending_held_review",
+        "reconcile_released_hold",
+        "set_manually_controlled",
+        "inspector_sign_off",
+        "enforce_declared_ticket_update",
+        "recover_stalled_ticket",
+    ):
+        assert extract_function(schema, function_name) == extract_function(
+            held_review_reconcile_migration_text,
+            function_name,
+        ), function_name
     awaiting_role_comment_touch_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu915_awaiting_role_ignores_comment_touch.sql"
     ).read_text(encoding="utf-8")

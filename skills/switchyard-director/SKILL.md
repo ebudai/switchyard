@@ -277,13 +277,14 @@ on the ticket changed in between.
 
 ## Last-resort overrides
 
-**Check what your workflow actually grants before relying on these.** `force-move`
-and `override-move` are capabilities a tenant's document may or may not give the
-control role; on syrd it grants neither, so both are refused outright
-(`director cannot call force_move`). A control you are refused is not a last
-resort. `recover-stalled-ticket` above is the bounded move that always exists,
-and it is the right one for a stalled ticket; reach for the rest only when the
-document grants them and the situation is genuinely outside the workflow.
+**Reach for the bounded move first.** `force-move` and `override-move` are not
+capabilities a document can grant -- a document that granted them would be
+declaring its own bypass -- so they are admitted by control-role identity
+instead: the role holding `merge`, `set-blockers` and `set-manually-controlled`
+may use them, whatever that role is called. `recover-stalled-ticket` above is
+still the right move for a stalled ticket, including one whose reviewer signed
+off while it was held; use these only when the situation is genuinely outside
+the workflow.
 
 `force-move` and `override-move` bypass the workflow. `edit-fields` bypasses the
 field-specific operations. `merge` folds one ticket into another. Each is

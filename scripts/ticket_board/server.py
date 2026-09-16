@@ -33,6 +33,7 @@ from .app import TicketBoardApp, iso_now, project_slug
 from .frontend import render_html
 from .runtime_paths import directorctl_path
 from .peer_identity import SessionIdentity, session_identity, session_is_live
+from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
@@ -111,6 +112,13 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "merge": {"director"},
     "dismiss_notification": {"director"},
 }
+
+#: The two operations that exist to move a ticket the declared workflow will
+#: not. A document may not grant them as capabilities -- that would be declaring
+#: its own bypass -- so the database admits them by control-role identity
+#: instead (SYRD-49, SYRD-78). This layer has to ask the same question, or it
+#: refuses an operation it advertises and the database would accept (SYRD-180).
+CONTROL_OVERRIDE_OPERATIONS = {"force_move", "override_move"}
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.
 #: This map is the legacy, pre-declarative admission table, so these two
@@ -1024,6 +1032,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 if any(t["action"] == operation for t in available_transitions(cfg, ticket, caller_role)):
                     return
             if operation not in role["capabilities"]:
+                if operation in CONTROL_OVERRIDE_OPERATIONS and (
+                    DIRECTOR_IDENTIFYING_CAPABILITIES <= set(role["capabilities"])
+                ):
+                    # The control role, found by what it can do rather than by
+                    # its name. The database makes the same determination and
+                    # is still the authority; refusing here only meant the one
+                    # documented escape hatch was unusable on every declared
+                    # board (SYRD-180).
+                    return
                 raise PermissionError(f"{caller_role} cannot call {operation}")
             return
         if operation in PUBLICATION_OPERATIONS:
@@ -1349,7 +1366,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.events.notify_change(self.app.store_signature())
             self.send_json(result)
             return
-        elif operation in {"force_move", "override_move"}:
+        elif operation in CONTROL_OVERRIDE_OPERATIONS:
             updated = self.app.force_move_ticket(
                 ticket_id,
                 str(payload.get("state", payload.get("new_state", ""))),

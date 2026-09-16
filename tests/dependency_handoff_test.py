@@ -46,7 +46,7 @@ import ticket_board_write_api_test as t  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 LISTENER_GRANTS = """
-GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz)
+GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz, interval, jsonb)
     TO ticket_board_listener;
 """
 
@@ -61,7 +61,7 @@ def run_turn_end(admin: str, *, idle_roles: tuple[str, ...] = ("ops",), idle_for
         f"""
 SET ROLE ticket_board_listener;
 WITH params AS (SELECT clock_timestamp() AS now_at)
-SELECT ticket_board.notify_idle_turn_end_nudges(jsonb_build_object({roles}), now_at) FROM params;
+SELECT ticket_board.notify_idle_turn_end_nudges(jsonb_build_object({roles}), now_at, interval '0 seconds', '{{}}'::jsonb) FROM params;
 RESET ROLE;
 """,
     )
@@ -355,7 +355,8 @@ def main() -> int:
         # Delivered and acknowledged, as the live one was at 14:56.
         t.psql(
             admin,
-            "UPDATE ticket_board.ticket_notification_state SET idle_reminder_count = 1 "
+            "UPDATE ticket_board.ticket_notification_state SET idle_reminder_count = 1, "
+            "last_idle_reminder_at = clock_timestamp() - interval '10 minutes' "
             "WHERE ticket_id = 'PGU-150';",
         )
         clear_queue(admin)

@@ -2152,15 +2152,28 @@ SELECT ticket_board.record_notification_trace(
             idle_since = self._present_fresh_idle_since_by_role()
         if not idle_since:
             return 0
+        # The same two inputs the stall generator beside this one has taken
+        # since SYRD-58. A turn ending says the previous turn finished, not that
+        # the role stopped working: between the turns of one review the pane is
+        # idle by every measure this path had, which is how Audit was told it
+        # had not advanced a ticket it had just been handed, and escalated to
+        # the Director a turn later (SYRD-163).
+        work_observed_at = self._work_observed_at_for_roles(sorted(idle_since))
         try:
             result = conn.execute(
                 """
 SELECT ticket_board.notify_idle_turn_end_nudges(
     %s::jsonb,
-    clock_timestamp()
+    clock_timestamp(),
+    %s::interval,
+    %s::jsonb
 )
 """,
-                (json.dumps(idle_since, sort_keys=True),),
+                (
+                    json.dumps(idle_since, sort_keys=True),
+                    f"{self.idle_stall_grace_seconds:g} seconds",
+                    json.dumps(work_observed_at, sort_keys=True),
+                ),
             )
             row = result.fetchone()
         except Exception as exc:

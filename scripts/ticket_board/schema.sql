@@ -451,6 +451,11 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
     last_nudged_at timestamptz,
     nudge_count integer NOT NULL DEFAULT 0 CHECK (nudge_count >= 0),
     idle_reminder_count integer NOT NULL DEFAULT 0 CHECK (idle_reminder_count >= 0),
+    -- WHEN the last idle reminder was delivered, beside how many there were.
+    -- The count alone cannot say whether the owner has had any time to act on
+    -- it, and an escalation that says "was reminded ... and still hasn't
+    -- advanced" is a claim about elapsed time (SYRD-163).
+    last_idle_reminder_at timestamptz,
     awaiting_role text NOT NULL DEFAULT ''
         CHECK (
             awaiting_role = ''
@@ -465,6 +470,8 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
 );
 ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS last_implementer_assignee text NOT NULL DEFAULT '';
+ALTER TABLE ticket_board.ticket_notification_state
+    ADD COLUMN IF NOT EXISTS last_idle_reminder_at timestamptz;
 ALTER TABLE ticket_board.ticket_notification_state
     ADD COLUMN IF NOT EXISTS awaiting_role text NOT NULL DEFAULT '';
 ALTER TABLE ticket_board.ticket_notification_state
@@ -2740,6 +2747,10 @@ BEGIN
             WHEN q.kind = 'idle_reminder' THEN ns.idle_reminder_count + 1
             ELSE ns.idle_reminder_count
         END,
+        last_idle_reminder_at = CASE
+            WHEN q.kind = 'idle_reminder' THEN clock_timestamp()
+            ELSE ns.last_idle_reminder_at
+        END,
         last_transition_notified_at = CASE
             WHEN q.kind = 'transition' THEN clock_timestamp()
             ELSE ns.last_transition_notified_at
@@ -3323,9 +3334,16 @@ AS $$
         || ') and still hasn''t advanced it -- may be stuck.';
 $$;
 
+-- The 2-argument form is dropped rather than overloaded: a defaulted extra
+-- argument would make every existing call ambiguous, and the listener is
+-- updated in the same change (SYRD-163).
+DROP FUNCTION IF EXISTS ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz);
+
 CREATE OR REPLACE FUNCTION ticket_board.notify_idle_turn_end_nudges(
     p_idle_since_by_role jsonb,
-    p_now timestamptz DEFAULT clock_timestamp()
+    p_now timestamptz,
+    p_active_grace interval,
+    p_work_observed_at jsonb
 )
 RETURNS integer
 LANGUAGE plpgsql
@@ -3453,10 +3471,29 @@ BEGIN
                   AND trace.event = 'send'
                   AND trace.ticket_state_at_event = notification_scope.state
             ) sent ON true
+            -- A turn ending is not a stall. A review takes several turns, and
+            -- between two of them the pane is idle by every measure this
+            -- generator had: the hook says idle and the live gate agrees,
+            -- because at that instant nothing is running. Audit was told it
+            -- had not advanced SYRD-162 seconds after being handed it, and the
+            -- next turn boundary escalated that to the Director as "may be
+            -- stuck" -- inside a minute, while the review was happening
+            -- (SYRD-163).
+            --
+            -- So the clock a reminder is measured against starts at the LAST
+            -- OBSERVED WORK as well as at the stage and the idle hook, and the
+            -- role has to have been quiet for the grace period before any of
+            -- this is due. Same rule for every role: the stall generator
+            -- beside this one has taken both inputs since SYRD-58, and the
+            -- asymmetry is what let this through.
             WHERE greatest(
                     notification_scope.entered_current_state_at,
-                    notification_scope.idle_since_at
-                  ) <= p_now
+                    notification_scope.idle_since_at,
+                    coalesce(
+                        (p_work_observed_at ->> notification_scope.owner_role)::timestamptz,
+                        '-infinity'::timestamptz
+                    )
+                  ) + p_active_grace <= p_now
               AND notification_scope.owner_role IS NOT NULL
         ) AS candidates
         WHERE (candidates.state <> 'in_progress' OR candidates.in_progress_rank = 1)
@@ -3466,6 +3503,24 @@ BEGIN
             WHERE q.ticket_id = candidates.id
               AND q.target_role = candidates.target_role
               AND q.kind NOT IN ('idle_reminder', 'escalation')
+        )
+          -- "was reminded about X and still hasn't advanced it" has to be TRUE
+          -- when it is said. The counter alone could not make it true: a
+          -- reminder that was enqueued and never delivered still incremented
+          -- it, and two turn boundaries a few seconds apart still reached it.
+          -- So an escalation waits for a reminder that was actually SENT to
+          -- that owner, in this stage, and for the grace period to pass
+          -- afterwards -- which is the time the reminder was asking for
+          -- (SYRD-163).
+          AND (
+            candidates.kind <> 'escalation'
+            OR EXISTS (
+                SELECT 1
+                FROM ticket_board.ticket_notification_state reminded
+                WHERE reminded.ticket_id = candidates.id
+                  AND reminded.last_idle_reminder_at IS NOT NULL
+                  AND reminded.last_idle_reminder_at + p_active_grace <= p_now
+            )
         )
         ORDER BY candidates.target_role, candidates.priority, candidates.ticket_number
     LOOP
@@ -8423,9 +8478,16 @@ BEGIN
 END;
 $$;
 
+-- The 2-argument form is dropped rather than overloaded: a defaulted extra
+-- argument would make every existing call ambiguous, and the listener is
+-- updated in the same change (SYRD-163).
+DROP FUNCTION IF EXISTS ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz);
+
 CREATE OR REPLACE FUNCTION ticket_board.notify_idle_turn_end_nudges(
     p_idle_since_by_role jsonb,
-    p_now timestamptz DEFAULT clock_timestamp()
+    p_now timestamptz,
+    p_active_grace interval,
+    p_work_observed_at jsonb
 )
 RETURNS integer
 LANGUAGE plpgsql
@@ -8566,10 +8628,29 @@ BEGIN
                   AND trace.event = 'send'
                   AND trace.ticket_state_at_event = notification_scope.state
             ) sent ON true
+            -- A turn ending is not a stall. A review takes several turns, and
+            -- between two of them the pane is idle by every measure this
+            -- generator had: the hook says idle and the live gate agrees,
+            -- because at that instant nothing is running. Audit was told it
+            -- had not advanced SYRD-162 seconds after being handed it, and the
+            -- next turn boundary escalated that to the Director as "may be
+            -- stuck" -- inside a minute, while the review was happening
+            -- (SYRD-163).
+            --
+            -- So the clock a reminder is measured against starts at the LAST
+            -- OBSERVED WORK as well as at the stage and the idle hook, and the
+            -- role has to have been quiet for the grace period before any of
+            -- this is due. Same rule for every role: the stall generator
+            -- beside this one has taken both inputs since SYRD-58, and the
+            -- asymmetry is what let this through.
             WHERE greatest(
                     notification_scope.entered_current_state_at,
-                    notification_scope.idle_since_at
-                  ) <= p_now
+                    notification_scope.idle_since_at,
+                    coalesce(
+                        (p_work_observed_at ->> notification_scope.owner_role)::timestamptz,
+                        '-infinity'::timestamptz
+                    )
+                  ) + p_active_grace <= p_now
               AND notification_scope.owner_role IS NOT NULL
         ) AS candidates
         WHERE (candidates.state <> 'in_progress' OR candidates.in_progress_rank = 1)
@@ -8579,6 +8660,24 @@ BEGIN
             WHERE q.ticket_id = candidates.id
               AND q.target_role = candidates.target_role
               AND q.kind NOT IN ('idle_reminder', 'escalation')
+        )
+          -- "was reminded about X and still hasn't advanced it" has to be TRUE
+          -- when it is said. The counter alone could not make it true: a
+          -- reminder that was enqueued and never delivered still incremented
+          -- it, and two turn boundaries a few seconds apart still reached it.
+          -- So an escalation waits for a reminder that was actually SENT to
+          -- that owner, in this stage, and for the grace period to pass
+          -- afterwards -- which is the time the reminder was asking for
+          -- (SYRD-163).
+          AND (
+            candidates.kind <> 'escalation'
+            OR EXISTS (
+                SELECT 1
+                FROM ticket_board.ticket_notification_state reminded
+                WHERE reminded.ticket_id = candidates.id
+                  AND reminded.last_idle_reminder_at IS NOT NULL
+                  AND reminded.last_idle_reminder_at + p_active_grace <= p_now
+            )
         )
           -- One escalation per stall, not one per wave. The dedupe key holds
           -- only while the queue row does; once the director acknowledges it,

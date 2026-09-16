@@ -657,8 +657,19 @@ def main() -> int:
     assert "ticket_board.ticket_awaiting_role_is_active" in idle_turn_end_awaiting_role_migration
     assert "ns.awaiting_role" in idle_turn_end_awaiting_role_migration
     assert "ns.awaiting_since_at" in idle_turn_end_awaiting_role_migration
+    # Parity is against the migration that last DEFINED this function, which is
+    # now SYRD-163's: pgu916 above is still the migration that introduced the
+    # awaiting-role guard, and its content assertions still hold, but the body
+    # it shipped no longer matches a schema that has since grown the activity
+    # grace and the observed-work term.
+    turn_end_activity_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu943_syrd163_turn_end_activity.sql"
+    ).read_text(encoding="utf-8")
+    assert "ticket_board.ticket_awaiting_role_is_active" in turn_end_activity_migration_text
+    assert "p_work_observed_at" in turn_end_activity_migration_text
+    assert "last_idle_reminder_at" in turn_end_activity_migration_text
     assert extract_function(schema, "notify_idle_turn_end_nudges") == extract_function(
-        idle_turn_end_awaiting_role_migration_text,
+        turn_end_activity_migration_text,
         "notify_idle_turn_end_nudges",
     )
     awaiting_role_comment_touch_migration_text = (

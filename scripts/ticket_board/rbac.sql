@@ -98,6 +98,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.start_task(text, text) TO ticket_board_se
 GRANT EXECUTE ON FUNCTION ticket_board.complete_task(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_awaiting_role(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.request_dependency(text, text, text) TO ticket_board_service;
+-- Atomic like request_dependency above it, and the owner's alone: the
+-- function itself refuses a caller that does not own the ticket.
+GRANT EXECUTE ON FUNCTION ticket_board.grant_turn_continuation(text, text, text, interval) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.recover_stalled_ticket(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.clear_awaiting_role(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.audit_sign_off(text, text) TO ticket_board_service;
@@ -137,6 +140,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.role_session_clear_pending(text, text) TO
 GRANT EXECUTE ON FUNCTION ticket_board.record_role_session_clear(text, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_stall_nudges(jsonb, timestamptz, interval, interval, integer, jsonb) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timestamptz, interval, jsonb) TO ticket_board_listener;
+-- SYRD-194: the unresolved-turn guard beside the reminder generator, and the
+-- lease it consults. The listener reads leases and retires them; it never
+-- grants one, because a continuation is the owner's statement, not the
+-- listener's.
+GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.consume_turn_continuation(text, text) TO ticket_board_listener;
+GRANT SELECT ON ticket_board.turn_continuation_lease TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_serial_focus_queue_wakeups(timestamptz) TO ticket_board_listener;
 -- The delivery currency check (_notification_is_current -> _current_ticket_state)
 -- calls ticket_has_unresolved_blockers; the listener role must be able to run it,

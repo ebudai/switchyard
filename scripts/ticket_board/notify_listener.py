@@ -2152,6 +2152,59 @@ SELECT ticket_board.record_notification_trace(
             self._consumed_present_idle_since_by_role[role] = idle_since
         return fresh_idle_since
 
+    def _process_unresolved_turn_end(self, conn: Any, idle_since: dict[str, str]) -> int:
+        """SYRD-194: tell the Director when an owner stopped without resolving.
+
+        The turn identity is the confirmed turn-end boundary itself. This
+        listener already dedupes on exactly that value -- a role appears in
+        `idle_since` once per completed turn and not again until the next one --
+        so the identity a lease is scoped to needs no separate minting in the
+        hook, and cannot disagree with the boundary that produced it.
+
+        Leases are consumed first, naming THIS turn: a lease taken for this
+        boundary survives and suppresses, and one taken for any earlier boundary
+        is retired, because the next turn it promised has now arrived. That is
+        what keeps "I am continuing" a statement about the next turn rather than
+        an indefinite flag.
+
+        Independent of the reminder generator beside it, and run before it, so a
+        Director handoff never depends on the reminder path having anything to
+        say (SYRD-193).
+        """
+        if not idle_since:
+            return 0
+        for role, turn_id in sorted(idle_since.items()):
+            try:
+                conn.execute(
+                    "SELECT ticket_board.consume_turn_continuation(%s, %s)",
+                    (role, turn_id),
+                )
+            except Exception as exc:  # pragma: no cover - logged, never fatal
+                self.logger.warning(
+                    "Failed to consume continuation lease for %s: %s", role, exc
+                )
+        try:
+            result = conn.execute(
+                "SELECT ticket_board.notify_unresolved_turn_end(%s::jsonb, clock_timestamp())",
+                (json.dumps(idle_since, sort_keys=True),),
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to enqueue unresolved turn-end handoffs: %s", exc)
+            return 0
+        if row is None:
+            return 0
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        try:
+            enqueued = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if enqueued:
+            self.logger.info(
+                "Enqueued %s unresolved turn-end Director handoffs", enqueued
+            )
+        return enqueued
+
     def process_idle_turn_end_nudges(self, conn: Any) -> int:
         idle_since = self._fresh_turn_end_idle_since_by_role()
         if idle_since:
@@ -2196,6 +2249,11 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
             return 0
         if enqueued:
             self.logger.info("Enqueued %s idle turn-end ticket nudges", enqueued)
+        # After the reminder path, never conditional on it, so the generator
+        # above decides on exactly the inputs it always had. An owner that
+        # stopped without resolving is reported whether or not a reminder was
+        # due, and whether or not one was enqueued (SYRD-194).
+        self._process_unresolved_turn_end(conn, idle_since)
         return enqueued
 
     def process_serial_focus_queue_wakeups(self, conn: Any) -> int:

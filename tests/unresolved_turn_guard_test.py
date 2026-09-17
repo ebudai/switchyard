@@ -203,6 +203,33 @@ def main() -> int:
         t.psql(admin, "DELETE FROM ticket_board.ticket_blockers WHERE ticket_id='PGU-1';")
         checks += 1
 
+        # 7b. The Director is owed one notification about a ticket, not one per
+        #     generator. If something is already queued for them about it -- an
+        #     escalation from the reminder path, most often -- this stays quiet.
+        #     Found by ticket_board_idle_turn_end_nudges_test: without this, an
+        #     unresolved_turn row for the same ticket sat beside the escalation
+        #     and the reminder suite's "one escalation per stall" count broke.
+        drain(admin)
+        # Inserted directly as the owning connection: the listener role may read
+        # the queue and run the gated generators, but not enqueue by hand.
+        t.psql(
+            admin,
+            "INSERT INTO ticket_board.ticket_notification_queue "
+            "(ticket_id, kind, target_role, message, payload, dedupe_key) "
+            "VALUES ('PGU-1', 'escalation', 'director', 'already told', "
+            "'{}'::jsonb, 'already-told:PGU-1');",
+        )
+        assert guard(admin, turn="turn-already-told") == 0
+        assert [q for q in queued(admin, "PGU-1") if q.startswith("unresolved_turn")] == []
+        drain(admin)
+        checks += 2
+
+        # ... and once that is delivered and gone, a later unresolved turn is
+        # reported again: the suppression is about the same breath, not forever.
+        assert guard(admin, turn="turn-after-told") == 1
+        drain(admin)
+        checks += 1
+
         # 8. A role whose turn did not end is not judged at all.
         drain(admin)
         assert guard(admin, role="audit", turn="turn-9") == 0

@@ -3619,7 +3619,7 @@ BEGIN
             FROM ticket_board.ticket_notification_queue q
             WHERE q.ticket_id = candidates.id
               AND q.target_role = candidates.target_role
-              AND q.kind NOT IN ('idle_reminder', 'escalation', 'unresolved_turn')
+              AND q.kind NOT IN ('idle_reminder', 'escalation')
         )
           -- "was reminded about X and still hasn't advanced it" has to be TRUE
           -- when it is said. The counter alone could not make it true: a
@@ -11009,5 +11009,3 @@ BEGIN
     RETURN enqueued;
 END;
 $$;
-
-

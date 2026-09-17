@@ -211,6 +211,11 @@ SWITCHYARD_COMMANDS = (
     # Reads the root-owned record of a privileged provisioning or upgrade run.
     # A role reads it directly rather than the User pasting output (SYRD-128).
     "rollout-log",
+    # Compares the shared release, the tenant's deployed board, the live build
+    # and both upgrade journals, and -- only as root, and only after re-proving
+    # the deployment from the running board -- closes the release phase. Its
+    # only write is root's own journal entry (SYRD-117).
+    "release-status",
     "add-role",
     # Records which of the owner's existing keys a tenant publishes with, and
     # rewrites the managed ssh_config block. Both are root's writes (SYRD-100).
@@ -7865,6 +7870,14 @@ def report_tenant_release_upgrade(
             f"  {recorded_rollout_command(status, config.project, tenant_release_deploy_command(status, config.project), label='deploy-restart')}"
         )
         print_func(f"  {tenant_release_listener_command(status, config.project, 'start')}")
+        # The step that closes the phase, in the sequence, recorded like the
+        # rest. It runs last because it re-proves the end state -- the listener
+        # is back, the board is serving the release its own link names -- and a
+        # close that ran before the listener was restored would be closing over
+        # a system the deploy had not finished putting back (SYRD-117).
+        print_func(
+            f"  {recorded_rollout_command(status, config.project, _quote_command(['switchyard', 'release-status', config.project, '--close']), label='close release')}"
+        )
         print_func(
             f"switchyard: each recorded step prints where its record is; read them with "
             f"`switchyard rollout-log {config.project}` -- the journal is root-owned and every "
@@ -20029,6 +20042,14 @@ def privileged_upgrade_journal_path(config: ProjectConfig) -> Path:
     ) / "upgrade.json"
 
 
+#: Where an unprivileged command's account of a phase goes in the tenant copy.
+#: Separate from `phases` because it is a different kind of claim: `phases` is
+#: what root proved, and this is what somebody who cannot write root's journal
+#: saw. Keeping both in one map is how a Director command came to be the only
+#: record saying a deployment had happened (SYRD-117).
+UPGRADE_JOURNAL_OBSERVATIONS = "observations"
+
+
 def _read_journal_file(path: Path, project: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -20037,6 +20058,7 @@ def _read_journal_file(path: Path, project: str) -> dict[str, Any]:
     if str(payload.get("schema") or "") != UPGRADE_JOURNAL_SCHEMA:
         payload = {"schema": UPGRADE_JOURNAL_SCHEMA, "project": project, "phases": {}}
     payload.setdefault("phases", {})
+    payload.setdefault(UPGRADE_JOURNAL_OBSERVATIONS, {})
     return payload
 
 
@@ -20231,9 +20253,16 @@ def record_upgrade_phase(
 ) -> None:
     """Persist one phase's outcome so a retry resumes instead of repeating.
 
-    Root writes its own copy as well, and only that one is ever read back to
-    decide anything; the tenant copy exists so the tenant can see where its
-    upgrade is (SYRD-45).
+    Root's journal is the record. Only root writes a phase, only root's copy is
+    read back to decide anything, and the tenant's readable copy is republished
+    from it (SYRD-45).
+
+    An unprivileged caller records an OBSERVATION instead. It cannot write
+    root's journal, so a phase it wrote would be a claim nothing could
+    corroborate -- and that is exactly the reported defect: `finish-upgrade` is
+    unprivileged by design, so when the Director ran it the tenant copy gained
+    `release: done` that root's journal could never receive, and an operator
+    saw an exit-0 upgrade over an outstanding deployment (SYRD-117).
     """
     if dry_run:
         return
@@ -20243,40 +20272,109 @@ def record_upgrade_phase(
         "at": datetime.now(timezone.utc).isoformat(),
         "detail": detail,
     }
-    if os.geteuid() == 0:
-        trusted = read_upgrade_journal(config, config_path=config_path, trusted=True)
-        trusted["project"] = config.project
-        trusted["phases"][phase] = entry
-        path = privileged_upgrade_journal_path(config)
+    if os.geteuid() != 0:
+        _record_upgrade_observation(
+            config, config_path=config_path, phase=phase, state=state, detail=detail
+        )
+        return
+    trusted = read_upgrade_journal(config, config_path=config_path, trusted=True)
+    trusted["project"] = config.project
+    trusted["phases"][phase] = entry
+    path = privileged_upgrade_journal_path(config)
+    try:
+        ensure_privileged_provision_dir(path.parent)
+        staged = path.with_name(f".{path.name}.new")
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
-            ensure_privileged_provision_dir(path.parent)
-            staged = path.with_name(f".{path.name}.new")
-            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            os.write(descriptor, (json.dumps(trusted, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+            os.fchmod(descriptor, privileged_artifact_mode(path.name))
             try:
-                os.write(descriptor, (json.dumps(trusted, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-                os.fchmod(descriptor, privileged_artifact_mode(path.name))
-                try:
-                    os.fchown(descriptor, 0, 0)
-                    os.chown(path.parent, 0, 0)
-                except OSError:
-                    # The directory this lives in is root's already; ownership
-                    # here is belt-and-braces and not worth losing the record
-                    # over where it cannot be set.
-                    pass
-            finally:
-                os.close(descriptor)
-            staged.replace(path)
-        except OSError as exc:
-            print(f"switchyard: could not record {phase} for {config.project}: {exc}", file=sys.stderr)
-    journal = read_upgrade_journal(config, config_path=config_path)
-    journal["project"] = config.project
-    journal["phases"][phase] = entry
-    body = (json.dumps(journal, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                os.fchown(descriptor, 0, 0)
+                os.chown(path.parent, 0, 0)
+            except OSError:
+                # The directory this lives in is root's already; ownership
+                # here is belt-and-braces and not worth losing the record
+                # over where it cannot be set.
+                pass
+        finally:
+            os.close(descriptor)
+        staged.replace(path)
+    except OSError as exc:
+        print(f"switchyard: could not record {phase} for {config.project}: {exc}", file=sys.stderr)
+    publish_tenant_journal_projection(config, config_path=config_path, trusted=trusted)
+
+
+def publish_tenant_journal_projection(
+    config: ProjectConfig, *, config_path: Path, trusted: Mapping[str, Any]
+) -> None:
+    """Republish the tenant's readable copy FROM root's journal.
+
+    Root's phases go in verbatim, and an observation about a phase root has now
+    recorded is dropped -- it has been answered. What survives is what root
+    proved, plus notes about phases root has not spoken on, plainly marked as
+    notes (SYRD-117).
+    """
+    existing = read_upgrade_journal(config, config_path=config_path)
+    phases = dict(trusted.get("phases") or {})
+    observations = {
+        phase: note
+        for phase, note in dict(existing.get(UPGRADE_JOURNAL_OBSERVATIONS) or {}).items()
+        if phase not in phases
+    }
+    body = (
+        json.dumps(
+            {
+                "schema": UPGRADE_JOURNAL_SCHEMA,
+                "project": config.project,
+                "phases": phases,
+                UPGRADE_JOURNAL_OBSERVATIONS: observations,
+                "phases_written_by": "root",
+                "note": (
+                    "phases are a copy of the root-owned journal and are the only phase record "
+                    "anything reads; observations are what unprivileged commands saw and decide "
+                    "nothing"
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
     published, problem = publish_tenant_artifact(
         config, config_path.parent, upgrade_journal_path(config, config_path=config_path).name, body
     )
     if not published:
         print(problem, file=sys.stderr)
+
+
+def _record_upgrade_observation(
+    config: ProjectConfig, *, config_path: Path, phase: str, state: str, detail: str
+) -> None:
+    """Note what an unprivileged command saw, without touching `phases`."""
+    journal = read_upgrade_journal(config, config_path=config_path)
+    journal["project"] = config.project
+    journal.setdefault(UPGRADE_JOURNAL_OBSERVATIONS, {})[phase] = {
+        "state": state,
+        "observed_by": current_user_name(),
+        "at": datetime.now(timezone.utc).isoformat(),
+        "detail": detail,
+    }
+    path = upgrade_journal_path(config, config_path=config_path)
+    try:
+        staged = path.with_name(f".{path.name}.new")
+        staged.write_text(json.dumps(journal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        staged.replace(path)
+    except OSError as exc:
+        print(
+            f"switchyard: could not note the {phase} observation for {config.project}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def upgrade_phase_observation(journal: Mapping[str, Any], phase: str) -> Mapping[str, Any]:
+    """What an unprivileged command said about a phase. Decides nothing."""
+    note = (journal.get(UPGRADE_JOURNAL_OBSERVATIONS) or {}).get(phase)
+    return note if isinstance(note, Mapping) else {}
 
 
 def upgrade_phase_state(journal: Mapping[str, Any], phase: str) -> str:
@@ -20375,6 +20473,290 @@ def record_release_phase_from_status(
     return deployed
 
 
+# --------------------------------------------------------------------------
+# The release phase: proved from the host, never from a claim (SYRD-117)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReleaseAlignment:
+    """The four facts an operator has to compare, read one at a time.
+
+    Separate fields rather than a verdict, because the interesting states are
+    the disagreements: a board serving a build its own `current` link does not
+    name, a trusted journal saying `ready` over a deployment that happened, a
+    tenant copy claiming a completion nothing else has. One boolean would hide
+    every one of them (SYRD-117).
+    """
+
+    project: str
+    #: The shared Switchyard release this host has installed.
+    shared_release: str = ""
+    #: The commit the tenant's board `current` link resolves to.
+    deployed_release: str = ""
+    #: What the running board reports as its own build.
+    live_build: str = ""
+    #: The commit this upgrade was pinned to deploy, when one was recorded.
+    pinned_release: str = ""
+    #: Root's journal, and whether it could be read at all from here.
+    trusted_release_state: str = ""
+    trusted_readable: bool = True
+    #: The tenant's readable copy, and any unprivileged note beside it.
+    tenant_release_state: str = ""
+    tenant_observation: str = ""
+    #: Why a reading is missing, per fact.
+    errors: tuple[str, ...] = ()
+
+    @property
+    def board_is_serving_its_release(self) -> bool:
+        """The check the deploy itself makes: the live build IS the deployed tree."""
+        return bool(self.deployed_release) and self.live_build == self.deployed_release
+
+    @property
+    def deployed_matches_pin(self) -> bool:
+        """Whether what is deployed is what this upgrade was asked to deploy."""
+        return not self.pinned_release or self.deployed_release == self.pinned_release
+
+    @property
+    def diverged(self) -> bool:
+        """Whether the records disagree with each other or with the machine."""
+        if self.tenant_release_state and self.trusted_readable:
+            if self.tenant_release_state != self.trusted_release_state:
+                return True
+        if not self.trusted_readable:
+            return False
+        proved = self.board_is_serving_its_release and self.deployed_matches_pin
+        if self.trusted_release_state == "done":
+            return not proved
+        return proved
+
+    def close_refusals(self) -> list[str]:
+        """Why the release phase must not be recorded done, in order.
+
+        Read from the host every time. The deploy's exit status is deliberately
+        not on this list: a phase closed because a previous command returned 0
+        is a phase closed on a claim, and a claim is what this ticket is about.
+        Re-reading costs one HTTP request and one readlink.
+        """
+        refusals: list[str] = []
+        if not self.deployed_release:
+            refusals.append(
+                f"{self.project}'s board root names no deployed release, so there is no "
+                "deployment to close the phase over"
+            )
+        elif not self.live_build:
+            detail = f" ({'; '.join(self.errors)})" if self.errors else ""
+            refusals.append(f"the running board did not report a build id{detail}")
+        elif not self.board_is_serving_its_release:
+            refusals.append(
+                f"the running board reports build {self.live_build}, but {self.project}'s "
+                f"deployed release is {self.deployed_release}; the board is not serving what "
+                "was deployed"
+            )
+        if self.deployed_release and not self.deployed_matches_pin:
+            refusals.append(
+                f"the deployed release is {self.deployed_release}, but this upgrade was pinned "
+                f"to {self.pinned_release}; closing the phase would claim a deploy that did not "
+                "happen"
+            )
+        return refusals
+
+
+def _live_board_build_id(
+    config: ProjectConfig, *, opener: Callable[[str], Any] | None = None
+) -> tuple[str, str]:
+    """What the running board says it is, or why it could not be asked."""
+    board_root = (
+        str(config.board_url or "").rstrip("/").removesuffix("/api/tickets").removesuffix("/api")
+    )
+    if not board_root:
+        return "", f"{config.project} declares no board url"
+    open_url = opener or _open_board_url
+    try:
+        with open_url(board_root + "/api/board") as response:
+            payload = json.load(response)
+    except Exception as exc:  # noqa: BLE001 - any failure to read is "not proven"
+        return "", f"the board at {board_root} could not be read ({exc})"
+    build = str(payload.get("build_id") or "").strip() if isinstance(payload, Mapping) else ""
+    return build, "" if build else f"the board at {board_root} reported no build id"
+
+
+def release_alignment(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    opener: Callable[[str], Any] | None = None,
+) -> ReleaseAlignment:
+    """Compare the shared release, the deployed board, the live build and both journals.
+
+    Reads only. Every value comes from the host or the running board rather
+    than from a record somebody wrote about them, which is the point: the
+    defect this answers is a journal that disagreed with the machine and won
+    (SYRD-117).
+    """
+    errors: list[str] = []
+    shared = ""
+    marker = _read_switchyard_release_marker(
+        (switchyard_shared_install_root() / "current").resolve(strict=False)
+    )
+    if marker is not None:
+        shared = marker.marker_commit
+        if marker.marker_error:
+            errors.append(marker.marker_error)
+
+    deployed = ""
+    board_root = _tenant_board_root_from_config_or_plan(config, config_path)
+    if board_root is None:
+        errors.append(f"{config.project} serves no tenant board release")
+    else:
+        _release, deployed = _current_tenant_release(board_root)
+
+    live, live_error = _live_board_build_id(config, opener=opener)
+    if live_error:
+        errors.append(live_error)
+
+    # `read_upgrade_source` already refuses anything that is not root's own
+    # record and answers `{}` instead, so there is nothing to guard here.
+    pinned = str(read_upgrade_source(config).get("deploy_ref") or "").strip()
+    # Only a resolved commit can be compared with a deployed one. A branch name
+    # says which branch, not which commit, so it is not a pin for this purpose
+    # and treating it as one would fail every close.
+    if not re.fullmatch(r"[0-9a-f]{40}", pinned):
+        pinned = ""
+
+    trusted_readable = os.geteuid() == 0 or os.access(
+        privileged_upgrade_journal_path(config), os.R_OK
+    )
+    trusted_state = ""
+    if trusted_readable:
+        trusted_state = upgrade_phase_state(
+            read_upgrade_journal(config, config_path=config_path, trusted=True), "release"
+        )
+    else:
+        errors.append(
+            "root's journal is not readable from this account; run this as an operator to "
+            "compare it"
+        )
+    tenant_journal = read_upgrade_journal(config, config_path=config_path)
+    observation = upgrade_phase_observation(tenant_journal, "release")
+    return ReleaseAlignment(
+        project=config.project,
+        shared_release=shared,
+        deployed_release=deployed,
+        live_build=live,
+        pinned_release=pinned,
+        trusted_release_state=trusted_state,
+        trusted_readable=trusted_readable,
+        tenant_release_state=upgrade_phase_state(tenant_journal, "release"),
+        tenant_observation=str(observation.get("state") or ""),
+        errors=tuple(errors),
+    )
+
+
+def format_release_alignment(alignment: ReleaseAlignment) -> list[str]:
+    """One line per fact, so a disagreement is visible rather than summarised."""
+    trusted = (
+        (alignment.trusted_release_state or "(unrecorded)")
+        if alignment.trusted_readable
+        else "(not readable from this account)"
+    )
+    tenant = alignment.tenant_release_state or "(unrecorded)"
+    if alignment.tenant_observation:
+        tenant += f"; observed {alignment.tenant_observation} by an unprivileged command"
+    lines = [
+        f"switchyard: {alignment.project} release phase",
+        f"  shared release   {_format_release_sha(alignment.shared_release)}",
+        f"  deployed release {_format_release_sha(alignment.deployed_release)}",
+        f"  live board build {_format_release_sha(alignment.live_build)}",
+        f"  pinned release   {_format_release_sha(alignment.pinned_release)}",
+        f"  trusted journal  {trusted}",
+        f"  tenant journal   {tenant}",
+    ]
+    for error in alignment.errors:
+        lines.append(f"  note             {error}")
+    refusals = alignment.close_refusals()
+    if refusals:
+        lines.append("switchyard: the release phase cannot be recorded done:")
+        lines.extend(f"  - {refusal}" for refusal in refusals)
+    elif not alignment.trusted_readable:
+        lines.append(
+            f"switchyard: every check this account can make passes. Run "
+            f"`pkexec switchyard release-status {alignment.project}` to compare root's journal."
+        )
+    elif alignment.trusted_release_state == "done":
+        lines.append(
+            "switchyard: the release phase is closed and the board is serving the release it names."
+        )
+    else:
+        lines.append(
+            f"switchyard: the board is serving {alignment.deployed_release} and every check "
+            f"passes, but the release phase is recorded {trusted}. Close it with "
+            f"`pkexec switchyard release-status {alignment.project} --close`."
+        )
+    return lines
+
+
+def close_release_phase(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    opener: Callable[[str], Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Record the release phase done, but only after re-proving the deployment.
+
+    The one write, and it is root's. It happens only when the board is serving
+    the release its own `current` link names and that release is the one this
+    upgrade was pinned to. A failure records a non-done state carrying the
+    reason, so the next reader learns what stopped it instead of finding the
+    phase exactly where it was (SYRD-117).
+
+    It deploys nothing, restarts nothing and rolls back nothing, which is what
+    makes it usable on a tenant whose release is already deployed and whose
+    phase was left `ready` by a release that predates this.
+    """
+    if os.geteuid() != 0:
+        print_func(
+            f"switchyard: closing {config.project}'s release phase writes root's journal, which "
+            "this process cannot. Run it as an operator: "
+            f"`pkexec switchyard release-status {config.project} --close`."
+        )
+        return 1
+    alignment = release_alignment(config, config_path=config_path, opener=opener)
+    for line in format_release_alignment(alignment):
+        print_func(line)
+    refusals = alignment.close_refusals()
+    if refusals:
+        record_upgrade_phase(
+            config,
+            config_path=config_path,
+            phase="release",
+            state="blocked",
+            detail="; ".join(refusals),
+        )
+        print_func(
+            f"switchyard: recorded {config.project}'s release phase blocked with that reason. "
+            "Nothing was deployed, restarted or rolled back."
+        )
+        return 1
+    record_upgrade_phase(
+        config,
+        config_path=config_path,
+        phase="release",
+        state="done",
+        detail=(
+            f"verified live board build {alignment.live_build} is the deployed release "
+            f"{alignment.deployed_release}"
+            + (f", pinned {alignment.pinned_release}" if alignment.pinned_release else "")
+        ),
+    )
+    print_func(
+        f"switchyard: recorded {config.project}'s release phase done against live build "
+        f"{alignment.live_build}. Nothing was deployed, restarted or rolled back."
+    )
+    return 0
+
+
 def upgrade_phase_report(
     config: ProjectConfig,
     *,
@@ -20392,6 +20774,38 @@ def upgrade_phase_report(
             state = "not required"
         lines.append(f"  {phase:<11} {owner:<8} {state:<12} {detail}")
     return lines
+
+
+def outstanding_release_phase_report(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    journal: Mapping[str, Any],
+) -> list[str]:
+    """Say whether an operator release phase is still owed, and name the command.
+
+    Exit 0 from `switchyard upgrade` means the artifacts it owns are prepared.
+    It does not mean the board was deployed, and it never did: the release phase
+    belongs to an operator. Leaving that to be inferred from a phase table is
+    how an exit-0 upgrade came to be read as a completed deployment (SYRD-117).
+    """
+    state = upgrade_phase_state(journal, "release")
+    if state == "done":
+        return [
+            f"switchyard: {config.project}'s release phase is closed; artifacts are prepared and "
+            "the board is deployed."
+        ]
+    if state == "not required":
+        return []
+    return [
+        f"switchyard: exit 0 here means {config.project}'s generated artifacts are prepared. Its "
+        f"release phase is {state or 'pending'} and is an operator's: deploy the board with the "
+        "recorded sequence above, then close the phase with "
+        f"`pkexec switchyard release-status {config.project} --close`, which re-verifies the live "
+        "build before recording anything.",
+        f"switchyard: `switchyard release-status {config.project}` compares the shared release, "
+        "the deployed board, the live build and both journals at any time, and changes nothing.",
+    ]
 
 
 def migrate_declarative_director_onboarding(
@@ -21383,13 +21797,23 @@ def upgrade_project_command(
                 else "once its roles are on their own accounts and the release is deployed"
             )
             print_func(f"switchyard: {when}, {director_action}.")
+    trusted_journal = read_upgrade_journal(config, config_path=config_path, trusted=True)
     for line in upgrade_phase_report(
         config,
         config_path=config_path,
         cutover=final_cutover,
-        journal=read_upgrade_journal(config, config_path=config_path, trusted=True),
+        journal=trusted_journal,
     ):
         print_func(line)
+    # What exit 0 means, said before the operator reads it as "done". Preparing
+    # artifacts and deploying the board are different things, and an upgrade
+    # that returns 0 having only done the first has to say which one it did and
+    # name the exact command that does the other (SYRD-117).
+    if not dry_run:
+        for line in outstanding_release_phase_report(
+            config, config_path=config_path, journal=trusted_journal
+        ):
+            print_func(line)
     unsafe_windows = unsafe_root_presentation_windows(config, config_path=config_path)
     if unsafe_windows:
         print_func(unsafe_presentation_report(config, unsafe_windows))
@@ -22593,7 +23017,14 @@ def finish_upgrade_command(
         runner=runner,
         print_func=print_func,
     )
+    # An observation, not a closure. This command cannot write root's journal --
+    # it refuses to run as root by design -- so the phase it used to record went
+    # only into the tenant copy, and that copy became the sole record claiming a
+    # deployment had finished. It now says what it saw and says who can close
+    # the phase (SYRD-117).
     record_release_phase_from_status(config, config_path=config_path, status=release_status)
+    for line in director_release_divergence_report(config, config_path=config_path):
+        print_func(line)
     blocked = release_update_blocked(release_status)
     if blocked:
         # The same rule as the privileged phase, which this command is the other
@@ -22607,6 +23038,48 @@ def finish_upgrade_command(
         )
         return 1
     return 0
+
+
+def director_release_divergence_report(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    opener: Callable[[str], Any] | None = None,
+) -> list[str]:
+    """What the director should say about the release phase, and never claim.
+
+    The director can read the board and the tenant copy; it cannot read or write
+    root's journal. So it reports what it can see, says plainly that it did not
+    close anything, and names the one supported action that does (SYRD-117).
+    """
+    alignment = release_alignment(config, config_path=config_path, opener=opener)
+    lines = [
+        f"switchyard: finish-upgrade does not close {config.project}'s release phase. That phase "
+        "is root's record and this command is unprivileged by design, so what it wrote is an "
+        "observation beside the phases, not a phase.",
+    ]
+    if alignment.trusted_readable and alignment.trusted_release_state == "done":
+        return lines + [
+            f"switchyard: root's journal already records the release phase done for "
+            f"{config.project}; nothing is outstanding."
+        ]
+    if alignment.close_refusals():
+        return lines + [
+            f"switchyard: {config.project}'s board is not serving a deployment that could close "
+            "the phase yet:",
+            *(f"  - {refusal}" for refusal in alignment.close_refusals()),
+        ]
+    return lines + [
+        f"switchyard: {config.project}'s board is serving {alignment.deployed_release} and every "
+        "check passes, but the authoritative release phase is "
+        + (
+            f"recorded {alignment.trusted_release_state or 'pending'}"
+            if alignment.trusted_readable
+            else "not readable from this account"
+        )
+        + f". An operator closes it with `pkexec switchyard release-status {config.project} "
+        "--close`, which re-verifies the live build and deploys, restarts and rolls back nothing.",
+    ]
 
 
 def _configured_implementer_roles(
@@ -24100,6 +24573,56 @@ def _build_switchyard_finish_upgrade_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_release_status_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard release-status",
+        description=(
+            "Compare a project's shared Switchyard release, its deployed board release, the "
+            "build the running board reports, and both upgrade journals. Reads only. With "
+            "--close, and only as root, record the release phase done -- after re-proving from "
+            "the running board that the deployment happened. It deploys nothing, restarts "
+            "nothing and rolls back nothing."
+        ),
+    )
+    parser.add_argument("project", help="registered project name or slug")
+    parser.add_argument(
+        "--close",
+        action="store_true",
+        help=(
+            "record the authoritative release phase done after re-verifying the live build; "
+            "refuses, and records the reason, when any check fails"
+        ),
+    )
+    return parser
+
+
+def switchyard_release_status_command(
+    project: str,
+    *,
+    close: bool = False,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    opener: Callable[[str], Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Show where a tenant's release phase really is, and optionally close it.
+
+    The read is the point. An operator who had an exit-0 upgrade and a board
+    that had not moved could not tell those two apart from any single record;
+    this prints all four and marks the disagreement (SYRD-117).
+    """
+    entry = _resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
+    config = load_project_config(entry.slug, entry.config_path)
+    if close:
+        return close_release_phase(
+            config, config_path=entry.config_path, opener=opener, print_func=print_func
+        )
+    alignment = release_alignment(config, config_path=entry.config_path, opener=opener)
+    for line in format_release_alignment(alignment):
+        print_func(line)
+    return 1 if alignment.close_refusals() or alignment.diverged else 0
+
+
 def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard add-role", description="Add a role to an existing Switchyard project.")
     parser.add_argument("project", help="project name or slug")
@@ -24479,6 +25002,7 @@ Commands:
                    report whether every registered tenant has migrated director onboarding
   stop             stop a project's configured tmux pane sessions
   teardown         remove project board provisioning artifacts after a dry-run review
+  release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
@@ -25006,6 +25530,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             commit_git_dir=args.commit_git_dir,
             deploy_ref=args.deploy_ref,
         )
+    if argv[0].casefold() == "release-status":
+        args = _build_switchyard_release_status_parser().parse_args(argv[1:])
+        return switchyard_release_status_command(args.project, close=args.close)
     if argv[0].casefold() == "add-role":
         args = _build_switchyard_add_role_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

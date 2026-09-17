@@ -553,6 +553,12 @@ def test_a_rollback_the_user_cannot_see_is_reported_as_one() -> None:
                 return original_stop(config, **kwargs)
 
             team_launcher.stop_role_sessions = _stop_that_loses_the_window
+            # As root, which is who runs the identities transaction: the phase
+            # it records is root's, and since SYRD-117 only root records a
+            # phase at all. Running it as anybody else would exercise a caller
+            # this transaction never has.
+            original_euid = team_launcher.os.geteuid
+            team_launcher.os.geteuid = lambda: 0
             try:
                 result = team_launcher.cutover_role_identities_command(
                     team_launcher.load_project_config(PROJECT, config_path),
@@ -564,6 +570,7 @@ def test_a_rollback_the_user_cannot_see_is_reported_as_one() -> None:
                 )
             finally:
                 team_launcher.stop_role_sessions = original_stop
+                team_launcher.os.geteuid = original_euid
         output = "\n".join(printed)
         assert result == 1, output
         assert "no terminal is displaying them" in output, output

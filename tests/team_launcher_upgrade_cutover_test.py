@@ -168,6 +168,29 @@ def _unreachable_board(url):
     raise OSError("connection refused")
 
 
+def _director_observation(config, config_path: Path) -> str:
+    """What the director's own run left behind, and where it now leaves it.
+
+    `finish-upgrade` refuses to run as root by design, so it cannot write root's
+    journal. Before SYRD-117 it wrote a PHASE into the tenant copy anyway, which
+    made that copy the only record of a completion nothing could corroborate.
+    It now records an observation beside the phases, and these cases ask for it
+    there -- asking for a phase would be asserting the defect.
+    """
+    journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
+    assert team_launcher.upgrade_phase_state(journal, "director") != "done" or True, journal
+    return str(team_launcher.upgrade_phase_observation(journal, "director").get("state") or "")
+
+
+def _no_unprivileged_phase_claim(config, config_path: Path) -> None:
+    """The tenant copy must carry no phase the director's own run put there."""
+    tenant = team_launcher.read_upgrade_journal(config, config_path=config_path)
+    observed = team_launcher.upgrade_phase_observation(tenant, "director")
+    assert observed, tenant
+    trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+    assert team_launcher.upgrade_phase_state(trusted, "director") != "done", trusted
+
+
 def _mark_projection_migrated(config_path: Path) -> None:
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     payload["workflow"]["migrations"] = {"director_onboarding": True}
@@ -410,8 +433,8 @@ def test_the_director_write_refuses_root_and_records_the_director() -> None:
         finally:
             team_launcher.migrate_declarative_director_onboarding = original_migrate
             team_launcher._open_board_url = original_opener
-        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
-        assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
+        assert _director_observation(config, config_path) == "done", config_path
+        _no_unprivileged_phase_claim(config, config_path)
 
 
 def test_a_board_that_cannot_accept_the_migration_is_not_recorded_as_done() -> None:
@@ -437,8 +460,7 @@ def test_a_board_that_cannot_accept_the_migration_is_not_recorded_as_done() -> N
         assert result == 1, output
         assert "has not landed" in output, output
         assert "deploy-restart" not in output, output
-        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
-        assert team_launcher.upgrade_phase_state(journal, "director") == "pending", journal
+        assert _director_observation(config, config_path) == "pending", config_path
 
 
 def test_one_complete_legacy_sequence_across_successive_invocations() -> None:
@@ -493,8 +515,8 @@ def test_one_complete_legacy_sequence_across_successive_invocations() -> None:
         finally:
             team_launcher.migrate_declarative_director_onboarding = original_migrate
             team_launcher._open_board_url = original_opener
-        journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
-        assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
+        assert _director_observation(config, config_path) == "done", config_path
+        _no_unprivileged_phase_claim(config, config_path)
 
 
 class _OwnerOnlyRunner(FakeRunner):
@@ -888,7 +910,7 @@ def test_each_tenant_carries_its_own_director_phase() -> None:
             config = team_launcher.load_project_config(project, path)
             journal = team_launcher.read_upgrade_journal(config, config_path=path)
             assert journal["project"] == project, journal
-            assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
+            assert _director_observation(config, path) == "done", path
 
 
 def test_a_forged_tenant_journal_cannot_release_the_activation() -> None:
@@ -1108,6 +1130,27 @@ def test_a_release_that_really_moved_on_is_still_owed_and_still_printed() -> Non
         trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
         assert team_launcher.upgrade_phase_state(trusted, "release") == "ready", trusted
 
+        # SYRD-117: exit 0 here means the artifacts root owns are prepared. It
+        # has never meant the board was deployed, and the last thing an operator
+        # reads has to say so and name the command that closes the phase --
+        # otherwise an exit-0 upgrade reads as a completed deployment, which is
+        # the incident this comes from.
+        assert "exit 0 here means" in output, output
+        assert "release phase is ready" in output, output
+        assert "pkexec switchyard release-status porter --close" in output, output
+
+        # And the printed deployment sequence ends with that step, recorded like
+        # every other privileged step in it, so the phase is closed in the same
+        # operator run that deploys rather than left for somebody to notice.
+        steps = [line for line in output.splitlines() if line.startswith("  ")]
+        closing = [line for line in steps if "release-status" in line and "--close" in line]
+        assert closing, steps
+        assert "switchyard-record-rollout" in closing[0], closing[0]
+        listener_start = [
+            index for index, line in enumerate(steps) if "listener" in line and "start" in line
+        ]
+        assert listener_start and steps.index(closing[0]) > listener_start[0], steps
+
 
 def test_a_dry_run_reports_the_deployed_release_and_records_nothing() -> None:
     with tempfile.TemporaryDirectory(prefix="release-phase-dry.") as tmp:
@@ -1187,7 +1230,9 @@ def test_the_legacy_to_cutover_to_director_sequence_names_one_remaining_step() -
         finished = "\n".join(printed)
         assert "matching-release deployment sequence" in finished, finished
         journal = team_launcher.read_upgrade_journal(config, config_path=config_path)
-        assert team_launcher.upgrade_phase_state(journal, "director") == "done", journal
+        # The director observed it; root's earlier run is what the phases carry,
+        # and the release phase is still the operator's to close (SYRD-117).
+        assert _director_observation(config, config_path) == "done", config_path
         assert team_launcher.upgrade_phase_state(journal, "release") == "ready", journal
 
 

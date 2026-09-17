@@ -479,7 +479,7 @@ not own. The order exists because the failure modes do.
 | `artifacts` | root | regenerate what is safe while the current roles keep running |
 | `accounts` | operator | run `<project>-role-accounts.sh` to create the per-role accounts, homes, tooling and credentials |
 | `identities` | root | `switchyard cutover-roles <project>`: one transaction over workers, trees, configuration, installed units and services |
-| `release` | operator | deploy the board release that enforces the per-role table |
+| `release` | operator | deploy the board release that enforces the per-role table, then `pkexec switchyard release-status <project> --close` to record it |
 | `director` | director | `switchyard finish-upgrade <project>`, the one board write only the director may make |
 
 **The reviewed unit goes in before the release deploy, and the restart comes
@@ -825,6 +825,57 @@ output. Root keeps its own at `/etc/switchyard/provision/<project>/upgrade.json`
 No privileged gate reads either as evidence: the account state comes from the
 host, the process identities from the kernel, and the director phase from the
 board. A tenant that writes `director: done` into its copy changes nothing.
+
+**Only root writes a phase; everyone else writes an observation.** The tenant
+copy is a *projection* of root's journal. Its `phases` are root's, verbatim, and
+they are replaced -- not merged -- on every authoritative write, so a phase
+somebody else put there does not outlive the next thing root says. An
+unprivileged command records what it saw under `observations`, naming itself,
+and nothing reads an observation to decide anything.
+
+This is why. `finish-upgrade` refuses to run as root by design, because the
+board authorizes the director's write from the caller's uid. Before SYRD-117 it
+recorded phases anyway, and those phases could only reach the tenant copy: an
+operator upgraded, deployed the board separately, ran `finish-upgrade`, and got
+exit 0 with `release: done` in the tenant file while root's journal still said
+`ready`. The only record claiming the deployment had finished was the one
+written by the command that could not see it.
+
+**The release phase is closed by re-proving the deployment.** Nothing infers it
+from a previous command's exit status. `switchyard release-status <project>`
+compares four things and changes nothing:
+
+| what | where it comes from |
+| --- | --- |
+| shared release | the `.switchyard-release.json` marker under `/opt/switchyard/current` |
+| deployed release | the tenant board root's `current` link |
+| live board build | `build_id` from the running board's `/api/board` |
+| trusted / tenant journal | root's record, and the tenant's projection of it |
+
+`--close` records `release: done`, and only as root, and only when the running
+board reports the build its own `current` link names *and* that release is the
+one this upgrade was pinned to. Anything else records the phase non-done with
+the reason in `detail`. It deploys nothing, restarts nothing and rolls back
+nothing -- which is what makes it the bounded reconciliation for a tenant whose
+release is already deployed and whose phase was left `ready` by a Switchyard
+that had no way to close it.
+
+The printed deployment sequence ends with that step, wrapped in
+`switchyard-record-rollout` like the others, and it comes after the listener is
+started: closing before the deploy has finished putting the system back would
+be closing over a system mid-repair.
+
+**`switchyard upgrade` says what exit 0 means.** Its last lines name whether the
+release phase is still outstanding and, when it is, the exact command that
+closes it. Preparing artifacts and deploying a board are different things, and
+leaving that to be inferred from a phase table is how an exit-0 upgrade came to
+be read as a completed deployment.
+
+**`finish-upgrade` reports the divergence and closes nothing.** It says plainly
+that what it wrote is an observation rather than a phase, and it names
+`pkexec switchyard release-status <project> --close` as the one supported
+action -- or says nothing is outstanding when root's journal already records the
+phase done.
 
 **Root does not make the director's board write.** The declarative onboarding
 migration is authorized by the board from the caller's uid. Root has no role

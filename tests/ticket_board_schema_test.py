@@ -153,6 +153,80 @@ def queue_notification_kinds(schema_lower: str) -> set[str]:
     }
 
 
+
+def _call_arguments(sql: str, open_paren: int) -> list[str]:
+    """Split one SQL call's argument list, respecting nesting and quoting."""
+    depth, i, args, cur, in_string = 0, open_paren, [], [], False
+    while i < len(sql):
+        char = sql[i]
+        if in_string:
+            if char == "'":
+                if sql[i + 1 : i + 2] == "'":
+                    cur.append("''")
+                    i += 2
+                    continue
+                in_string = False
+            cur.append(char)
+            i += 1
+            continue
+        if char == "'":
+            in_string = True
+            cur.append(char)
+            i += 1
+            continue
+        if char == "(":
+            depth += 1
+            if depth == 1:
+                i += 1
+                continue
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                args.append("".join(cur))
+                return args
+        elif char == "," and depth == 1:
+            args.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(char)
+        i += 1
+    raise AssertionError("unbalanced argument list in schema.sql")
+
+
+def effective_notification_kinds(schema: str) -> set[str]:
+    """The kinds the constraint ACTUALLY accepts after every migration.
+
+    `queue_notification_kinds` reads the CREATE TABLE definition, which is the
+    first of several: the constraint is DROP/ADDed again by later migrations and
+    only the last definition survives. Reading the first one is why a migration
+    could silently narrow this and no test noticed -- see SYRD-199, where pgu948
+    rebuilt the list from a pre-pgu936 snapshot, dropped 'publication' and
+    'triage', and broke file-bug on the live board.
+    """
+    matches = re.findall(r"CHECK \(kind IN \(([^)]*)\)\)", schema)
+    assert matches, "no kind CHECK constraint found in schema.sql"
+    return {value.strip().strip("'") for value in matches[-1].split(",") if value.strip()}
+
+
+def enqueued_notification_kinds(schema: str) -> set[str]:
+    """Every kind literal the schema actually enqueues.
+
+    Only literals: several call sites pass `candidate.kind` or
+    `payload ->> 'kind'`, whose value cannot be read off the text. Those are
+    covered by the call sites that do name a literal, and by the runtime tests.
+    """
+    kinds = set()
+    for match in re.finditer(r"enqueue_notification\s*\(", schema):
+        arguments = _call_arguments(schema, match.end() - 1)
+        if len(arguments) < 2:
+            continue
+        literal = re.fullmatch(r"'([a-z_]+)'", arguments[1].strip())
+        if literal:
+            kinds.add(literal.group(1))
+    assert kinds, "no literal notification kinds found; the extractor has drifted"
+    return kinds
+
 def extract_last_function(sql: str, function_name: str) -> str:
     """The definition that actually wins.
 
@@ -251,6 +325,36 @@ def main() -> int:
     assert "create or replace function ticket_board.notification_delivery_in_backoff" in executable_schema_lower
     assert {"transition", "ticket_update", "nudge", "escalation", "idle_reminder"} <= queue_notification_kinds(
         executable_schema_lower
+    )
+
+    # The constraint that actually runs must accept every kind the schema
+    # actually enqueues. enqueue_notification runs inside the caller's
+    # transaction, so a kind the CHECK rejects does not lose a notification --
+    # it aborts the whole operation. That is how file-bug broke (SYRD-199).
+    #
+    # Stated as a relationship between two things read out of the file, not as a
+    # list to keep updated: a new kind that is enqueued and allowed passes with
+    # no edit here, and a migration that narrows the constraint fails whether or
+    # not anyone remembered this test.
+    executable_schema = "\n".join(
+        line for line in schema.splitlines() if not line.lstrip().startswith("--")
+    )
+    accepted = effective_notification_kinds(executable_schema)
+    enqueued = enqueued_notification_kinds(executable_schema)
+    rejected = sorted(enqueued - accepted)
+    assert not rejected, (
+        "schema.sql enqueues notification kinds its final CHECK constraint "
+        f"rejects: {rejected}. Any operation that enqueues one of these aborts. "
+        "Restore the union of every enqueued kind, never a previous list."
+    )
+
+    # ... and the migration that ships it must say the same thing, or a fresh
+    # install and an upgraded board disagree about what is legal.
+    kind_union_migration = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu949_syrd199_notification_kind_union.sql"
+    ).read_text(encoding="utf-8")
+    assert effective_notification_kinds(kind_union_migration) == accepted, (
+        "pgu949 and schema.sql disagree about the accepted notification kinds"
     )
 
     assert_contains_all(schema, EXPECTED_STATES, "state constraint")

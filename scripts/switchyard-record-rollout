@@ -45,9 +45,53 @@ def main(argv: list[str]) -> int:
     # Split at `--` before argparse sees anything. REMAINDER stops parsing at
     # the first positional, so with the options after the project name they
     # would be collected as part of the command and run as one.
+    # SYRD-193: one privileged action this cannot WRAP, only witness. The tenant
+    # lifecycle bridge forks, drops to the owner and hands the child this
+    # terminal, because a verb that attaches a tmux client needs one; capturing
+    # its output would take that away. So the bridge records the boundary after
+    # the fact, and this mode exists for exactly that: the same journal, the
+    # same operator resolution, no command re-run and none invented.
+    parser.add_argument("--record-only", default="", metavar="OUTCOME",
+                        help="record a completed privileged boundary instead of running a command")
+    parser.add_argument("--exit-status", type=int, default=None)
+    parser.add_argument("--detail", default="")
+    # What the boundary WAS, so the record names the action rather than its
+    # outcome, and who crossed it. The operator is passed explicitly because the
+    # program that witnessed the boundary already resolved it from the kernel's
+    # SUDO_UID; leaving it to be re-derived here records an empty operator when
+    # this is reached any other way.
+    parser.add_argument("--action", default="")
+    parser.add_argument("--operator", default="")
     rest = argv[1:]
     if "--" not in rest:
-        fail("no command: put it after `--`")
+        args = parser.parse_args(rest)
+        if not args.record_only:
+            fail("no command: put it after `--`")
+        if os.geteuid() != 0:
+            fail(
+                f"this must run as root so the record is root's. The journal lives under "
+                f"{journal_root()}, which the project account may read and may not write."
+            )
+        import shlex
+
+        described = shlex.split(args.action) if args.action else [args.record_only]
+        attempt = Attempt(
+            args.project, described,
+            target_commit=args.target_commit,
+            operator=args.operator,
+        )
+        directory = attempt.open()
+        record = attempt.close(
+            status=args.record_only,
+            exit_status=args.exit_status,
+            # Both, when both are given: the label says what kind of step this
+            # was and the detail says what happened in it, and a record that
+            # keeps only one of them loses half the question a reader arrives
+            # with.
+            detail=": ".join(part for part in (args.label, args.detail) if part),
+        )
+        print(f"{PROGRAM}: recorded {attempt.attempt} in {directory}", flush=True)
+        return 0 if (args.exit_status in (None, 0)) else 1
     boundary = rest.index("--")
     args = parser.parse_args(rest[:boundary])
     command = rest[boundary + 1 :]

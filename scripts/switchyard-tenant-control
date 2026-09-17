@@ -298,7 +298,59 @@ def main(argv: list[str]) -> int:
 
     if code == 0 and handoff.strip():
         publish_handoff(project, handoff, caller=caller)
+    # SYRD-193: the privileged boundary is journalled by root, automatically,
+    # with the operator this bridge already resolved from SUDO_UID. Nobody is
+    # asked to copy anything, and a lifecycle action that crossed accounts
+    # leaves the same evidence every other privileged step does. Best effort by
+    # design: a journal that could not be written must not turn a completed
+    # start or stop into a failure, and the operation's own exit status is what
+    # the caller gets either way.
+    record_privileged_boundary(project, operation, caller=caller, owner=owner, code=code)
     return code
+
+
+#: Where the root-owned recorder lives once a release is installed. Pinned to
+#: the shared install like every other program this bridge runs, and simply not
+#: used when it is absent.
+ROLLOUT_RECORDER = Path("/opt/switchyard/current/scripts/switchyard-record-rollout")
+
+
+def record_privileged_boundary(
+    project: str, operation: str, *, caller: str, owner: str, code: int
+) -> None:
+    """Write one journal entry for a lifecycle action root just allowed.
+
+    This bridge cannot hand the run to the recorder: it forks, drops to the
+    owner and gives the child this terminal, because a lifecycle verb may
+    attach a tmux client and a captured stdout is not a terminal (SYRD-90).
+    So the boundary is recorded after it closes, by the same root-owned program
+    that records every other one.
+    """
+    if not ROLLOUT_RECORDER.is_file():
+        return
+    outcome = "ok" if code == 0 else "failed"
+    try:
+        import subprocess  # local: the bridge's import surface stays minimal
+
+        subprocess.run(
+            [
+                str(ROLLOUT_RECORDER), project,
+                "--record-only", outcome,
+                "--exit-status", str(code),
+                "--action", f"switchyard {operation} {project}",
+                # The caller this bridge already resolved from the kernel's
+                # SUDO_UID, not re-derived: attribution is the point of a
+                # boundary record, and the child ran as the owner.
+                "--operator", caller,
+                "--label", f"tenant-control {operation}",
+                "--detail",
+                f"{caller} ran `switchyard {operation} {project}` as {owner} through the "
+                f"tenant control bridge (exit {code})",
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    except OSError:
+        return
 
 
 #: The descriptor the owner half answers on, and the most it may say. Chosen

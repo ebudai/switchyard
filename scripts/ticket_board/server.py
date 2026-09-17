@@ -120,6 +120,27 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
 #: refuses an operation it advertises and the database would accept (SYRD-180).
 CONTROL_OVERRIDE_OPERATIONS = {"force_move", "override_move"}
 
+#: Operations that are COMPOSITIONS of declarable capabilities. A declared
+#: workflow cannot grant these by name: they are deliberately absent from
+#: `workflow_config.CAPABILITIES`, so no document can name one and none ever
+#: has. Checking the operation name here therefore refused them on every
+#: declared board, whatever the document said -- which is how SYRD-133's
+#: documented equivalence for `request_dependency` came to hold on legacy
+#: boards only, and how SYRD-193's App ended a turn with a Director question
+#: and no durable wait (SYRD-194).
+#:
+#: Admission requires ALL of the parts, and that broadens nothing: a role
+#: holding the set can already reach the identical end state by calling the
+#: parts in sequence. A role holding only one half is still refused, and the
+#: database re-checks each part under its own capability regardless.
+COMPOSED_OPERATION_CAPABILITIES = {
+    # "The same permission as await_role, because it IS await_role plus the
+    # sentence that explains it" -- the comment on OPERATION_ALLOWED_ROLES
+    # below, which the legacy table honours and the declarative path did not.
+    # `add_comment` is named too because the sentence is half of what it does.
+    "request_dependency": frozenset({"add_comment", "await_role"}),
+}
+
 #: SYRD-93: publication is admitted by declared capability, never by role name.
 #: This map is the legacy, pre-declarative admission table, so these two
 #: operations are deliberately absent from it: a board with no declared workflow
@@ -1040,6 +1061,11 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                     # is still the authority; refusing here only meant the one
                     # documented escape hatch was unusable on every declared
                     # board (SYRD-180).
+                    return
+                composed = COMPOSED_OPERATION_CAPABILITIES.get(operation)
+                if composed and composed <= set(role["capabilities"]):
+                    # Built from capabilities this role already holds, so the
+                    # atomic form conveys no authority the sequence did not.
                     return
                 raise PermissionError(f"{caller_role} cannot call {operation}")
             return

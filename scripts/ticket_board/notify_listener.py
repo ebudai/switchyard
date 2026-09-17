@@ -174,6 +174,14 @@ SUPERSEDED_BY_AWAITING_ROLE = "superseded_by_awaiting_role"
 #: `pane_child_work`, which is this turn's work and still holds delivery; from
 #: the hook's own busy verdict; and from a human at the composer (SYRD-101).
 STALE_PRIOR_TURN_CHILD_WORK = "stale_prior_turn_child_work"
+#: The one stage a board with no declared workflow serialises, and the roles a
+#: static workflow never serialises in it. Both were written inline before a
+#: document could say otherwise; they are named here so it is visible that they
+#: apply ONLY to a tenant with nothing to read, and so a declarative tenant's
+#: answer comes from its own document rather than from these names (SYRD-37).
+LEGACY_SERIAL_STAGE = "in_progress"
+LEGACY_NON_SERIAL_ROLES = frozenset({"director", "audit", "inspector"})
+
 #: A serial-focus queue announcement names one implementer and the reservation
 #: holding them. Every reroute while the board stays in the same holding stage
 #: writes another announcement with the same ticket, state and assignee, so the
@@ -2626,7 +2634,19 @@ SELECT EXISTS (
         current_target_role = self._current_target_role(kind, current_state, current_assignee)
         return current_target_role == target_role if getattr(self, "workflow", None) else current_target_role is None or current_target_role == target_role
 
-    def _finish_current_blocker(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> str:
+    def _serial_gate_stage(self, target_role: str, payload: str) -> str:
+        """The stage this notification would put `target_role` to work in, if it is serial there.
+
+        Empty when nothing should be held: not a transition, not addressed to
+        the role it names, or a stage this role is allowed to hold several
+        tickets in at once.
+
+        A declared workflow answers from the document -- the role owns the
+        stage, and the role is serial in it. Without a document there is nothing
+        to read, so the legacy rule stands unchanged: the implementation stage
+        only, and not for the review and control roles a static workflow names
+        (SYRD-37).
+        """
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
@@ -2635,14 +2655,28 @@ SELECT EXISTS (
             return ""
         if str(parsed.get("kind") or "").strip().lower() != "transition":
             return ""
-        if str(parsed.get("new_state") or "").strip() != "in_progress":
+        state = str(parsed.get("new_state") or "").strip()
+        if not state:
             return ""
         assignee = str(parsed.get("assignee") or target_role).strip().lower()
-        if assignee != target_role or target_role in {"director", "audit", "inspector"}:
+        if assignee != target_role:
+            return ""
+        workflow = getattr(self, "workflow", None)
+        if not workflow:
+            if state != LEGACY_SERIAL_STAGE or target_role in LEGACY_NON_SERIAL_ROLES:
+                return ""
+            return state
+        from .workflow_config import role_is_serial_in
+
+        return state if role_is_serial_in(workflow, target_role, state) else ""
+
+    def _finish_current_blocker(self, conn: Any, ticket_id: str, target_role: str, payload: str) -> str:
+        stage = self._serial_gate_stage(target_role, payload)
+        if not stage:
             return ""
         result = conn.execute(
-            "SELECT ticket_board.finish_current_blocker(%s::text, %s::text)",
-            (ticket_id, target_role),
+            "SELECT ticket_board.finish_current_stage_blocker(%s::text, %s::text, %s::text)",
+            (ticket_id, target_role, stage),
         )
         row = result.fetchone()
         if row is None:
@@ -2837,10 +2871,11 @@ WHERE (r.definition->>'active')::boolean
             finish_current_ticket = self._finish_current_blocker(conn, ticket_id, target_role, payload)
             if finish_current_ticket:
                 self.logger.info(
-                    "Holding notification %s for %s until %s leaves in_progress",
+                    "Holding notification %s for %s until %s leaves %s's hands",
                     notification_id,
                     ticket_id,
                     finish_current_ticket,
+                    target_role,
                 )
                 if notification_id not in self._traced_gate_defer_notifications:
                     self._trace_notification(

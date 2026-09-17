@@ -739,6 +739,18 @@ def run_upgrade_checks(cluster: Any) -> int:
     t.psql(admin, migration)
     # Idempotent: a runner that applies it twice writes nothing new.
     t.psql(admin, migration)
+    # And then the rest of the series, in the order the runner applies it. The
+    # grants below are the CURRENT rbac.sql, which names every function the
+    # current release has; stopping the replay at this ticket's own migration
+    # would ask a board of that vintage to grant on functions a later migration
+    # creates, and the failure would look like this change's rather than like a
+    # replay that stopped early.
+    later = sorted(
+        path for path in (ROOT / "scripts/ticket_board/migrations").glob("*.sql")
+        if path.name > MIGRATION
+    )
+    for path in later:
+        t.psql(admin, path.read_text(encoding="utf-8"))
     t.psql(admin, t.RBAC_PATH.read_text(encoding="utf-8"))
 
     # After: the field is accepted, the record works, and the tenant's stored

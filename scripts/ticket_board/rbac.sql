@@ -126,6 +126,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.dismiss_notification_by_key(text, text, t
 GRANT EXECUTE ON FUNCTION ticket_board.claim_notification(timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.next_notification_attempt(timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.finish_current_blocker(text, text, timestamptz, interval) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.finish_current_stage_blocker(text, text, text, timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.ack_notification(bigint) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.discard_notification(bigint, text) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.dead_letter_notification(bigint, text, jsonb) TO ticket_board_listener;

@@ -306,6 +306,19 @@ def main() -> int:
             before = fixture.run(["git", "show", "origin/main:scripts/ticket_board/schema.sql"],
                                  capture=True).stdout
             fixture.psql(upgrade_admin, before)
+            # Anything this branch adds that main's schema does not have yet is
+            # applied before the grants, because rbac.sql is the CURRENT grant
+            # list and every function it names has to exist by then. That is the
+            # order the deploy uses -- schema, migrations, grants -- and without
+            # it this case fails on whichever function the branch happens to add
+            # rather than on the thing it is testing.
+            on_main = set(fixture.run(
+                ["git", "ls-tree", "--name-only", "origin/main",
+                 "scripts/ticket_board/migrations/"], capture=True
+            ).stdout.split())
+            for path in sorted((ROOT / "scripts/ticket_board/migrations").glob("*.sql")):
+                if f"scripts/ticket_board/migrations/{path.name}" not in on_main:
+                    fixture.psql(upgrade_admin, path.read_text(encoding="utf-8"))
             fixture.psql(upgrade_admin, fixture.RBAC_PATH.read_text())
             migration = (ROOT / "scripts/ticket_board/migrations"
                          / "pgu944_syrd180_held_review_reconcile.sql").read_text()

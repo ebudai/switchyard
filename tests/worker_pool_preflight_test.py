@@ -74,6 +74,7 @@ def write_config(tmp_path: Path, *, pool: dict | None, roles: list[tuple[str, st
 
 
 def load(tmp_path: Path, **kwargs):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     return team_launcher.load_project_config("stellaris", write_config(tmp_path, **kwargs))
 
 
@@ -101,8 +102,21 @@ def ready_runner(*, installed: bool = True, authenticated: bool = True):
     return runner
 
 
-def declared_board(*roles: str) -> dict:
-    return {"revision": 4, "document": {"roles": [{"name": role} for role in roles]}}
+def declared_board(*roles: str, queue: dict | None = None) -> dict:
+    """A board with a declared workflow, and by default a holding destination.
+
+    The queue is part of the default because every real declared tenant has one
+    -- a pool cannot be serialised without somewhere to divert the ticket it
+    will not deliver -- so a fixture without one would make "no blockers" mean
+    something no live board means.
+    """
+    return {
+        "revision": 4,
+        "document": {
+            "roles": [{"name": role} for role in roles],
+            "queue": {"stage": "analysis", "assignee": "director"} if queue is None else queue,
+        },
+    }
 
 
 # --------------------------------------------------------------------------
@@ -310,6 +324,60 @@ def test_a_pool_already_declared_is_not_reported_as_new_work() -> None:
     )
 
 
+def test_an_attached_pool_larger_than_the_window_is_a_blocker() -> None:
+    # `attached` promises every worker a pane, and a window has six slots. A
+    # pool that would need a seventh has to be told so before anything moves.
+    attached = {**POOL, "presentation": "attached"}
+    with tempfile.TemporaryDirectory(prefix="syrd37-attached.") as tmp:
+        tmp_path = Path(tmp)
+        big = team_launcher.worker_pool_preflight(
+            load(tmp_path / "big", pool=attached, roles=PERSISTENT),
+            owner_home=tmp_path / "home",
+            board_workflow=declared_board("director", "audit", "main", "ops"),
+            runner=ready_runner(),
+        )
+        small = team_launcher.worker_pool_preflight(
+            load(tmp_path / "small", pool={**attached, "size": 2}, roles=PERSISTENT),
+            owner_home=tmp_path / "home",
+            board_workflow=declared_board("director", "audit", "main", "ops"),
+            runner=ready_runner(),
+        )
+    over = next(finding for finding in big if finding.subject == "presentation")
+    check(over.blocking, f"eight attached workers beside four visible roles do not fit: {over}")
+    check("on-demand" in over.detail, "and it says what to do instead: " + over.detail)
+    fits = next(finding for finding in small if finding.subject == "presentation")
+    check(not fits.blocking, f"two of them do: {fits}")
+
+
+def test_a_declared_workflow_with_no_holding_destination_is_a_blocker() -> None:
+    # A pool is one ticket per worker. The board keeps it that way by diverting
+    # the extra ticket to the tenant's declared holding destination, and refuses
+    # the routing outright when there is none -- at the moment a director tries
+    # to give a busy worker a second ticket (SYRD-31).
+    document = {
+        "roles": [{"name": role, "kind": "implementer"} for role, _cli in PERSISTENT],
+        "stages": [{"name": "in_progress", "owners": ["main"]}],
+    }
+    with tempfile.TemporaryDirectory(prefix="syrd37-queue.") as tmp:
+        tmp_path = Path(tmp)
+        config = load(tmp_path, pool=POOL, roles=PERSISTENT)
+        without = team_launcher.worker_pool_preflight(
+            config, owner_home=tmp_path / "home", board_workflow=document, runner=ready_runner(),
+        )
+        with_queue = team_launcher.worker_pool_preflight(
+            config, owner_home=tmp_path / "home",
+            board_workflow={**document, "queue": {"stage": "analysis", "assignee": "director"}},
+            runner=ready_runner(),
+        )
+    missing = [finding for finding in without if finding.subject == "queue"]
+    check(len(missing) == 1 and missing[0].blocking, f"a document with no queue is blocked: {without}")
+    check("holding destination" in missing[0].detail, missing[0].detail)
+    check(
+        not [finding for finding in with_queue if finding.subject == "queue"],
+        f"and a document with one is not: {with_queue}",
+    )
+
+
 def test_the_report_separates_blockers_from_changes() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd37-report.") as tmp:
         tmp_path = Path(tmp)
@@ -329,12 +397,22 @@ def test_the_report_separates_blockers_from_changes() -> None:
     )
 
 
-def test_the_command_is_discoverable_and_says_it_only_reads() -> None:
+def test_the_command_is_discoverable_and_says_when_it_writes() -> None:
     check("worker-pool" in team_launcher.SWITCHYARD_COMMANDS, "the command is registered")
     check("worker-pool" in team_launcher.switchyard_help_text(), "and listed in the help")
     help_text = " ".join(team_launcher._build_switchyard_worker_pool_parser().format_help().split())
-    for promised in ("Reads only", "no role, account, worktree, board registration or session"):
+    # The default verb still only reads, and the help has to say where that
+    # stops: a reader who cannot tell which verbs write has to find out by
+    # running one (SYRD-37).
+    for promised in ("writes nothing without --apply", "preflight (default)"):
         check(promised in help_text, f"the help promises it: {promised!r} in {help_text}")
+    check(
+        team_launcher._build_switchyard_worker_pool_parser()
+        .parse_args(["stellaris"])
+        .action
+        == "preflight",
+        "and the bare command is still the read-only one",
+    )
 
 
 def main() -> int:

@@ -2635,9 +2635,17 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION ticket_board.finish_current_blocker(
+-- SYRD-37: the same question for any stage a role is serialised in, not only
+-- the implementation stage. A bench of interchangeable workers submits into one
+-- review lane, and a reviewer holding several tickets at once has no current
+-- one: the notifications are all deliverable, all addressed to the same pane,
+-- and nothing says which is next. Naming the earlier ticket makes the lane a
+-- queue with a head, and the later notification is DEFERRED rather than dropped
+-- -- the caller requeues it, which is what keeps review load from going silent.
+CREATE OR REPLACE FUNCTION ticket_board.finish_current_stage_blocker(
     p_ticket_id text,
     p_target_role text,
+    p_state text,
     p_now timestamptz DEFAULT clock_timestamp(),
     p_claim_timeout interval DEFAULT interval '2 minutes'
 )
@@ -2650,7 +2658,7 @@ AS $$
 DECLARE
     blocker_ticket_id text;
 BEGIN
-    PERFORM ticket_board.require_ticket_board_listener('finish_current_blocker');
+    PERFORM ticket_board.require_ticket_board_listener('finish_current_stage_blocker');
 
     WITH current_ticket AS (
         SELECT
@@ -2659,7 +2667,7 @@ BEGIN
         FROM ticket_board.tickets t
         LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
         WHERE t.id = p_ticket_id
-          AND t.state = 'in_progress'
+          AND t.state = p_state
           AND t.assignee = p_target_role
           AND NOT t.manually_controlled
     ),
@@ -2669,7 +2677,7 @@ BEGIN
             t.ticket_number,
             ns.entered_current_state_at
         FROM current_ticket c
-        JOIN ticket_board.tickets t ON t.state = 'in_progress'
+        JOIN ticket_board.tickets t ON t.state = p_state
         LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
         WHERE t.assignee = p_target_role
           AND t.id <> p_ticket_id
@@ -2728,6 +2736,26 @@ BEGIN
     RETURN coalesce(blocker_ticket_id, '');
 END;
 $$;
+CREATE OR REPLACE FUNCTION ticket_board.finish_current_blocker(
+    p_ticket_id text,
+    p_target_role text,
+    p_now timestamptz DEFAULT clock_timestamp(),
+    p_claim_timeout interval DEFAULT interval '2 minutes'
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    -- The implementation stage, asked the way it has always been asked. Kept as
+    -- its own entry point so an older listener and an older grant both keep
+    -- working across the upgrade that generalised it (SYRD-37).
+    SELECT ticket_board.finish_current_stage_blocker(
+        p_ticket_id, p_target_role, 'in_progress', p_now, p_claim_timeout
+    );
+$$;
+
 
 -- SYRD-135: the two halves of "clear this role's session once for this ticket".
 -- They are deliberately separate. Claiming the pair before the clear is sent
@@ -7195,6 +7223,11 @@ BEGIN
         -- a quoted "false" cannot read as a value and behave as its truthiness.
         IF r ? 'ephemeral' AND jsonb_typeof(r->'ephemeral') <> 'boolean' THEN
             RAISE EXCEPTION 'ephemeral must be a boolean: %', r->>'name'; END IF;
+        -- SYRD-37: whether this role is handed one ticket at a time in the
+        -- stages it owns. Same rule and same reason as `ephemeral`: absent is
+        -- "unchanged", and only a real boolean may say otherwise.
+        IF r ? 'serial' AND jsonb_typeof(r->'serial') <> 'boolean' THEN
+            RAISE EXCEPTION 'serial must be a boolean: %', r->>'name'; END IF;
         -- SYRD-141: what a person reads on this role's pane. Optional; a
         -- non-empty single-line string when present, because a terminal
         -- renders it and a newline in a title is an instruction, not text.

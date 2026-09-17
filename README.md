@@ -93,7 +93,7 @@ Commands:
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
   cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
-  worker-pool      report what bringing a project's declared worker pool up would change
+  worker-pool      plan, apply and run a project's declared pool of interchangeable workers
   present          map persistent role sessions into stable display slots at runtime
   attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker

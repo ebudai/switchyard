@@ -96,6 +96,7 @@ class FakeConnection:
         self.queue_rows = queue_rows or []
         self.ticket_rows = ticket_rows if ticket_rows is not None else self._ticket_rows_for_queue(self.queue_rows)
         self.finish_current_blockers = finish_current_blockers or {}
+        self.finish_current_stages: list[str] = []
         self.in_progress_entries = in_progress_entries or {}
         self.next_attempt_at = next_attempt_at
         self.notifications = notifications or []
@@ -156,8 +157,15 @@ class FakeConnection:
             if not self.queue_rows:
                 return FakeResult([])
             return FakeResult([self.queue_rows.pop(0)])
-        if "finish_current_blocker" in statement_text:
+        if "finish_current_stage_blocker" in statement_text or "finish_current_blocker" in statement_text:
+            # SYRD-37 parameterised the stage; the generalised entry point and
+            # the implementation-stage one it delegates to are both answered
+            # here, and the stage is asserted rather than ignored so a case
+            # cannot pass while the listener asks about the wrong lane.
             assert params is not None
+            if "finish_current_stage_blocker" in statement_text:
+                assert len(params) >= 3, params
+                self.finish_current_stages.append(str(params[2]))
             return FakeResult([(self._finish_current_blocker_for(str(params[0]), str(params[1])),)])
         if "current_ticket AS" in statement_text and "t.state = 'in_progress'" in statement_text:
             assert params is not None

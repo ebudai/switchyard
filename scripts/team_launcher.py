@@ -58,6 +58,10 @@ from scripts.ticket_board.project_provision import (
     validate_ticket_prefix,
     write_artifacts,
 )
+# One bound on a stored role prompt, in the module that owns it. A pool's
+# declared prompt becomes exactly that, so restating the limit here would let a
+# pool declare something the document refuses at apply time (SYRD-37).
+from scripts.ticket_board.workflow_config import ONBOARDING_PROMPT_MAX_CHARS
 from scripts.ticket_board.codex_hook_trust import (
     codex_command_hook_trust_entries as _codex_command_hook_trust_entries,
     codex_hook_current_hash as _codex_hook_current_hash,
@@ -252,7 +256,18 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # privileged parent shell behind it. A wrapper that ran it through sudo
     # would put exactly that shell there, and every key the operator pressed
     # would have it as an ancestor (SYRD-76).
-    {"present", "attach", "board-skill", "role-prompt", "set-role-runtime", "finish-upgrade"}
+    #
+    # `worker-pool` for the same reason as `role-prompt` and `attach` together.
+    # Everything it writes goes through the board's own workflow API as the
+    # invoking role, and everything else it does is a tmux session on the
+    # project account's own server. Escalating it would put a privileged parent
+    # shell behind `worker-pool <project> attach <worker>`, which is precisely
+    # the thing SYRD-76 exists to keep out from behind an operator's terminal
+    # (SYRD-37).
+    {
+        "present", "attach", "board-skill", "role-prompt", "set-role-runtime",
+        "finish-upgrade", "worker-pool",
+    }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
     command for command in SWITCHYARD_COMMANDS if command not in SWITCHYARD_UNPRIVILEGED_COMMANDS
@@ -497,6 +512,10 @@ WORKER_POOL_MEMBER_SEPARATOR = "-"
 #: rest of the system really has: a name that can be a role, a Unix account and
 #: a tmux session, and a size somebody could plausibly run.
 WORKER_POOL_MAX_SIZE = 64
+#: The same bound the workflow document puts on a role's stored prompt, taken
+#: from there rather than restated, so a pool cannot declare one the document
+#: would then refuse at apply time.
+WORKER_POOL_ONBOARDING_PROMPT_MAX_CHARS = ONBOARDING_PROMPT_MAX_CHARS
 
 
 @dataclass(frozen=True)
@@ -523,6 +542,12 @@ class WorkerPool:
     #: says otherwise; that is what makes a pool worker interchangeable rather
     #: than an implementer with a long memory (SYRD-135).
     ephemeral: bool = True
+    #: What a worker is told when its session starts fresh. Declared once for
+    #: the bench because every worker in it does the same job; empty means the
+    #: workers inherit the remit of the role they are copied from, which is the
+    #: right default and a poor answer for a pool whose job differs from it
+    #: (SYRD-36).
+    onboarding_prompt: str = ""
 
     @property
     def members(self) -> tuple[str, ...]:
@@ -560,7 +585,15 @@ def parse_worker_pool(raw: Any, *, path: Path | str = "") -> WorkerPool | None:
         raise SystemExit(
             f"{where}worker_pool presentation must be on-demand or attached: {presentation!r}"
         )
-    unknown = set(raw) - {"name", "runtime", "size", "kind", "presentation", "ephemeral"}
+    prompt = str(raw.get("onboarding_prompt") or "").strip()
+    if len(prompt) > WORKER_POOL_ONBOARDING_PROMPT_MAX_CHARS:
+        raise SystemExit(
+            f"{where}worker_pool onboarding_prompt must be at most "
+            f"{WORKER_POOL_ONBOARDING_PROMPT_MAX_CHARS} characters"
+        )
+    unknown = set(raw) - {
+        "name", "runtime", "size", "kind", "presentation", "ephemeral", "onboarding_prompt",
+    }
     if unknown:
         raise SystemExit(f"{where}worker_pool has unknown field(s): {', '.join(sorted(unknown))}")
     return WorkerPool(
@@ -570,6 +603,7 @@ def parse_worker_pool(raw: Any, *, path: Path | str = "") -> WorkerPool | None:
         kind=str(raw.get("kind") or "implementer").strip() or "implementer",
         presentation=presentation,
         ephemeral=raw.get("ephemeral") is not False,
+        onboarding_prompt=prompt,
     )
 
 
@@ -694,16 +728,45 @@ def worker_pool_preflight(
             )
         )
 
+    # A pool is one ticket per worker, and the board keeps it that way by
+    # diverting the extra ticket somewhere. A declared workflow that names no
+    # holding destination makes the board refuse the routing outright -- the
+    # director is told "configure a holding destination" at the moment they try
+    # to give a busy worker a second ticket, which is the worst time to find out
+    # (SYRD-31). A tenant still on the built-in workflow is not asked: it has no
+    # document to name one in, and its own blocker above says so.
+    document = board_workflow.get("document") if board_workflow and "document" in board_workflow else board_workflow
+    if isinstance(document, Mapping) and document.get("roles"):
+        queue = document.get("queue")
+        if not isinstance(queue, Mapping) or not queue.get("stage") or not queue.get("assignee"):
+            findings.append(
+                WorkerPoolFinding(
+                    True,
+                    "queue",
+                    f"{config.project}'s workflow names no holding destination, so the board "
+                    "cannot divert a ticket routed to a worker that already holds one; declare "
+                    "`queue` with a stage and the role that owns it",
+                )
+            )
+
     # Presentation: a pool larger than the window can show is ordinary, and
     # saying so is what stops somebody expecting eight panes.
     visible = [role for role in config.roles if not role.detached]
     if pool.presentation == "attached":
+        free = MAX_VISIBLE_PANES_PER_WINDOW - len(visible)
         findings.append(
             WorkerPoolFinding(
-                False,
+                len(missing) > free,
                 "presentation",
                 f"every worker would hold a pane: {len(visible)} visible role(s) today plus "
-                f"{pool.size} workers",
+                f"{len(missing)} worker(s), and a window has {MAX_VISIBLE_PANES_PER_WINDOW} "
+                f"slot(s), {free} of them free"
+                + (
+                    ". Declare the pool `on-demand` and attach a worker when somebody asks to "
+                    "watch it"
+                    if len(missing) > free
+                    else ""
+                ),
             )
         )
     else:
@@ -24907,25 +24970,275 @@ def switchyard_release_status_command(
 def switchyard_worker_pool_command(
     project: str,
     *,
+    action: str = "preflight",
+    member: str = "",
+    apply_changes: bool = False,
+    force: bool = False,
+    out: Path | None = None,
+    journal: Path | None = None,
     config_dir: Path | None = None,
     registry_dir: Path | None = None,
     board_reader: Callable[[ProjectConfig], Mapping[str, Any] | None] | None = None,
+    board_snapshot_reader: Callable[[ProjectConfig], Mapping[str, Any] | None] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    """Report what bringing a project's declared worker pool up would change.
+    """One pool's whole life, from what it would cost to which worker is holding what.
 
-    Preflight only, and deliberately the whole command for now: an operator
-    asked to upgrade a tenant with eight new workers in it is owed the list
-    before anything moves (SYRD-37).
+    Every verb that would change a board, a configuration or an account shows
+    what it would do and writes nothing without `--apply`; the three that only
+    move a tmux session -- start, stop, restart -- act, because a session is
+    the one thing here that is not durable state (SYRD-37).
     """
+    from scripts import worker_pool as pool_module
+
     entry = _resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
     config = load_project_config(entry.slug, entry.config_path)
+    pool = config.worker_pool
     read_board = board_reader or _read_board_workflow_document
-    findings = worker_pool_preflight(config, board_workflow=read_board(config), runner=runner)
-    for line in format_worker_pool_preflight(config, findings):
-        print_func(line)
-    return 1 if any(finding.blocking for finding in findings) else 0
+    board_workflow = read_board(config)
+    document = _worker_pool_document(config, board_workflow)
+
+    if action == "preflight":
+        findings = worker_pool_preflight(config, board_workflow=board_workflow, runner=runner)
+        for line in format_worker_pool_preflight(config, findings):
+            print_func(line)
+        if pool is not None and document:
+            admission = pool_module.review_admission(
+                pool_module.expand_pool(
+                    document, pool, project=config.project, worktree_base=config.worktree_base
+                )[0],
+                pool,
+            )
+            for line in pool_module.format_review_admission(admission):
+                print_func(line)
+        return 1 if any(finding.blocking for finding in findings) else 0
+
+    if pool is None:
+        print_func(f"switchyard: {config.project} declares no worker pool; there is nothing to {action}.")
+        return 1
+
+    if action == "plan":
+        readiness = _worker_pool_readiness(
+            config, pool, document=document, board_snapshot_reader=board_snapshot_reader, runner=runner
+        )
+        steps = pool_module.upgrade_plan(
+            config,
+            pool,
+            document=document,
+            readiness=readiness,
+            blockers=[
+                (finding.subject, finding.detail)
+                for finding in worker_pool_preflight(
+                    config, board_workflow=board_workflow, runner=runner
+                )
+                if finding.blocking
+            ],
+            config_path=entry.config_path,
+            workflow_path=out,
+        )
+        for line in pool_module.format_plan(config.project, steps):
+            print_func(line)
+        return 1 if any(step.blocking for step in steps) else 0
+
+    if action in {"list", "status"}:
+        readiness = _worker_pool_readiness(
+            config, pool, document=document, board_snapshot_reader=board_snapshot_reader, runner=runner
+        )
+        if not readiness:
+            print_func(
+                f"switchyard: {config.project} declares the {pool.name} pool but no worker is "
+                f"registered yet; run `switchyard worker-pool {config.project} apply` to see how."
+            )
+            return 1
+        running = sum(1 for state in readiness if state.session)
+        ready = sum(1 for state in readiness if state.ready)
+        print_func(
+            f"switchyard: {pool.name}: {len(readiness)} worker(s), {ready} ready, {running} running"
+        )
+        for state in readiness:
+            print_func(f"  {state.describe()}")
+        return 0
+
+    if action == "admission":
+        expanded = document
+        if document:
+            expanded, _changes = pool_module.expand_pool(
+                document, pool, project=config.project, worktree_base=config.worktree_base
+            )
+        admission = pool_module.review_admission(expanded or {}, pool)
+        if not admission.lanes:
+            print_func(
+                f"switchyard: {config.project} has no declared workflow to read review lanes from; "
+                "a board running the built-in workflow cannot serialise one."
+            )
+            return 1
+        # Said plainly, because the same lines mean different things before and
+        # after the pool is declared: one is a promise, the other a report.
+        declared = bool(pool_module.live_members(document or {}, pool))
+        tense = "is" if declared else "would be"
+        print_func(
+            f"switchyard: review admission for {pool.name} {tense}: {len(admission.lanes)} lane(s), "
+            f"{len(admission.ambiguous_lanes)} ambiguous"
+            + ("" if declared else "; no worker is declared yet, so this is what applying the pool would leave")
+        )
+        for line in pool_module.format_review_admission(admission):
+            print_func(line)
+        return 1 if admission.ambiguous_lanes else 0
+
+    if action in {"apply", "retire", "replace"}:
+        if document is None:
+            print_func(
+                f"switchyard: {config.project}'s board runs the built-in workflow, so a pool cannot "
+                "be declared in a document it does not have. Register each worker through "
+                f"`switchyard add-role {config.project} {pool.name}-N --cli {pool.runtime} --detached`, "
+                f"and see `switchyard worker-pool {config.project} plan` for the order and what it costs."
+            )
+            return 1
+        if action == "apply":
+            desired, changes = pool_module.expand_pool(
+                document, pool, project=config.project, worktree_base=config.worktree_base
+            )
+        elif action == "retire":
+            desired, changes = pool_module.retire_worker(document, pool, member)
+        else:
+            desired, changes = pool_module.replace_worker(
+                document, pool, member, project=config.project, worktree_base=config.worktree_base
+            )
+        print_func(f"switchyard: worker pool {action} for {config.project}: {len(changes)} document change(s)")
+        for change in changes:
+            print_func(f"  would   {change.subject}: {change.detail}")
+        if out is not None:
+            out.write_text(json.dumps(desired, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print_func(f"switchyard: wrote the proposed document to {out}")
+        if not apply_changes:
+            print_func(
+                "switchyard: nothing was changed. Review the document, then run this again with "
+                "--apply, which writes it through the ordinary workflow path -- the same "
+                "validation, the same rollback journal."
+            )
+            return 0
+        return _apply_worker_pool_document(
+            config, desired, config_path=entry.config_path, print_func=print_func
+        )
+
+    if action == "rollback":
+        from scripts import workflow_manage
+
+        if journal is None:
+            print_func(
+                "switchyard: rollback needs the journal the apply printed: "
+                f"--journal <path>. `switchyard rollout-log {config.project}` has the run."
+            )
+            return 1
+        return workflow_manage.main(
+            ["rollback", "--config", str(entry.config_path), "--journal", str(journal),
+             "--board-url", config.board_url]
+        )
+
+    if action in {"start", "stop", "restart"}:
+        readiness = _worker_pool_readiness(
+            config, pool, document=document, board_snapshot_reader=board_snapshot_reader, runner=runner
+        )
+        if action == "stop":
+            print_func(pool_module.stop_worker(config, member, runner=runner).describe())
+            return 0
+        started = pool_module.start_worker if action == "start" else pool_module.restart_worker
+        results = started(
+            config, pool, member,
+            readiness=readiness, config_path=entry.config_path, force=force, runner=runner,
+        )
+        for result in results if isinstance(results, list) else [results]:
+            print_func(result.describe())
+        return 0
+
+    if action == "attach":
+        from scripts import presentation_controller
+
+        return presentation_controller.attach_role_command(
+            config, role_name=member, json_output=False, runner=runner, print_func=print_func
+        )
+
+    raise SystemExit(f"switchyard: unknown worker-pool action {action!r}")
+
+
+def _worker_pool_document(
+    config: ProjectConfig, board_workflow: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """The tenant's declared workflow document, or None when it runs the built-in one.
+
+    Asked of the running board first, because what matters is the document the
+    board is actually enforcing; the generated config's copy is the fallback for
+    a board that cannot be reached.
+    """
+    if board_workflow:
+        document = board_workflow.get("document") if "document" in board_workflow else board_workflow
+        if isinstance(document, Mapping) and document.get("roles"):
+            return dict(document)
+    raw = getattr(config, "workflow", None)
+    return dict(raw) if isinstance(raw, Mapping) and raw.get("roles") else None
+
+
+def _worker_pool_readiness(
+    config: ProjectConfig,
+    pool: "WorkerPool",
+    *,
+    document: Mapping[str, Any] | None,
+    board_snapshot_reader: Callable[[ProjectConfig], Mapping[str, Any] | None] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+):
+    from scripts import worker_pool as pool_module
+
+    read_snapshot = board_snapshot_reader or _read_board_snapshot
+    return pool_module.worker_readiness(
+        config, pool, document=document, board=read_snapshot(config), runner=runner
+    )
+
+
+def _read_board_snapshot(config: ProjectConfig) -> Mapping[str, Any] | None:
+    """What the board says its tickets are, so a worker's holdings can be read."""
+    import urllib.request
+
+    url = str(config.board_url or "").strip()
+    if not url:
+        return None
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/board", timeout=10) as response:
+            if response.status != 200:
+                return None
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _apply_worker_pool_document(
+    config: ProjectConfig,
+    document: Mapping[str, Any],
+    *,
+    config_path: Path,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Write a pool's document through the ordinary workflow path, and nowhere else.
+
+    Deliberately not its own writer. `workflow_manage apply` validates against
+    the running board, refuses on a revision race, writes the rollback journal
+    BEFORE the board write, hands the journal to the tenant, and applies the
+    launcher projection atomically. A second implementation of that would be a
+    second set of ways to get it wrong.
+    """
+    import tempfile
+
+    from scripts import workflow_manage
+
+    with tempfile.TemporaryDirectory(prefix="switchyard-worker-pool.") as scratch:
+        path = Path(scratch) / "workflow.json"
+        path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print_func(f"switchyard: applying through ticket-board-workflow apply --config {config_path}")
+        return workflow_manage.main(
+            ["apply", "--document", str(path), "--config", str(config_path),
+             "--board-url", config.board_url]
+        )
 
 
 def _read_board_workflow_document(config: ProjectConfig) -> Mapping[str, Any] | None:
@@ -24949,16 +25262,65 @@ def _read_board_workflow_document(config: ProjectConfig) -> Mapping[str, Any] | 
     return document if isinstance(document, dict) else None
 
 
+#: Every verb `switchyard worker-pool` takes, and whether it names a worker.
+WORKER_POOL_ACTIONS: dict[str, bool] = {
+    "preflight": False,
+    "plan": False,
+    "list": False,
+    "status": False,
+    "admission": False,
+    "apply": False,
+    "rollback": False,
+    "retire": True,
+    "replace": True,
+    "start": True,
+    "stop": True,
+    "restart": True,
+    "attach": True,
+}
+
+
 def _build_switchyard_worker_pool_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard worker-pool",
         description=(
-            "Report what bringing a project's declared pool of interchangeable workers up "
-            "would change, and what would stop it. Reads only: no role, account, worktree, "
-            "board registration or session is created, and nothing existing is touched."
+            "Report and run the life of a project's declared pool of interchangeable workers. "
+            "Every verb that would change a board, a configuration or an account shows what it "
+            "would do and writes nothing without --apply; start, stop and restart move a tmux "
+            "session and nothing else."
         ),
     )
     parser.add_argument("project", help="project name or slug")
+    parser.add_argument(
+        "action",
+        nargs="?",
+        default="preflight",
+        choices=sorted(WORKER_POOL_ACTIONS),
+        help=(
+            "preflight (default): what bringing the pool up would change and what would stop it. "
+            "plan: the ordered upgrade, each step with the way back out of it. "
+            "list/status: every worker, what it needs and what it is holding. "
+            "admission: whether the review lanes this pool feeds have a head and an order. "
+            "apply: declare the pool in the tenant's workflow document. "
+            "retire/replace: take one worker out of service, keeping its identity forever. "
+            "start/stop/restart: one worker's session. attach: watch one worker. "
+            "rollback: undo an apply from its journal."
+        ),
+    )
+    parser.add_argument("member", nargs="?", default="", help="the worker a verb acts on, e.g. impl-3")
+    parser.add_argument(
+        "--apply",
+        dest="apply_changes",
+        action="store_true",
+        help="write the change instead of showing it",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="start a worker despite its readiness blockers; they are reported either way",
+    )
+    parser.add_argument("--out", type=Path, help="write the proposed workflow document here for review")
+    parser.add_argument("--journal", type=Path, help="the apply journal a rollback reverses")
     return parser
 
 
@@ -25329,7 +25691,7 @@ Commands:
   finish-upgrade   run the director-owned phase of an upgrade from the director's session
   cutover-roles    legacy compatibility command (new runtimes use the project account)
   add-role         add an implementer or auditor role, worktree, pane, and board registration
-  worker-pool      report what bringing a project's declared worker pool up would change
+  worker-pool      plan, apply and run a project's declared pool of interchangeable workers
   present          map persistent role sessions into stable display slots at runtime
   attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker
@@ -25875,7 +26237,20 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         return switchyard_release_status_command(args.project, close=args.close)
     if argv[0].casefold() == "worker-pool":
         args = _build_switchyard_worker_pool_parser().parse_args(argv[1:])
-        return switchyard_worker_pool_command(args.project)
+        if WORKER_POOL_ACTIONS[args.action] and not args.member.strip():
+            raise SystemExit(
+                f"switchyard: worker-pool {args.action} needs the worker it acts on, "
+                f"e.g. `switchyard worker-pool {args.project} {args.action} <pool>-3`"
+            )
+        return switchyard_worker_pool_command(
+            args.project,
+            action=args.action,
+            member=args.member.strip(),
+            apply_changes=args.apply_changes,
+            force=args.force,
+            out=args.out,
+            journal=args.journal,
+        )
     if argv[0].casefold() == "add-role":
         args = _build_switchyard_add_role_parser().parse_args(argv[1:])
         entry = _resolve_switchyard_project(args.project)

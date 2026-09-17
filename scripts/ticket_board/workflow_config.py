@@ -214,6 +214,52 @@ def ephemeral_roles(cfg: dict[str, Any]) -> set[str]:
     }
 
 
+#: The stage a role is serialised in when the document says nothing. Every
+#: tenant's implementation stage is already one-ticket-at-a-time -- the board
+#: reroutes a second ticket to its queue -- so a role that owns it was serial
+#: before this field existed, and a document that declares nothing must keep
+#: behaving exactly as it did (SYRD-37).
+IMPLEMENTATION_STAGE = "in_progress"
+
+
+def serial_roles(cfg: dict[str, Any]) -> dict[str, bool]:
+    """Each role's declared serial policy, by name, for the roles that declare one.
+
+    Absent means "unchanged": the caller applies the default for the stage it is
+    asking about rather than this function inventing one. Only a real `true` or
+    `false` appears here, so a tenant that turns serialisation OFF for a role
+    that would otherwise have it is recorded as having said so.
+    """
+    return {
+        role["name"]: bool(role["serial"])
+        for role in cfg.get("roles", [])
+        if isinstance(role, dict) and type(role.get("serial")) is bool
+    }
+
+
+def stage_owners(cfg: dict[str, Any], state: str) -> list[str]:
+    """Who owns one stage, or nothing if the document does not name it."""
+    stage = next((s for s in cfg.get("stages", []) if s.get("name") == state), None)
+    return list(stage.get("owners") or []) if stage else []
+
+
+def role_is_serial_in(cfg: dict[str, Any], role: str, state: str) -> bool:
+    """Whether `role` is handed one ticket at a time while it owns `state`.
+
+    Two conditions, and both are the document's: the role has to own the stage,
+    because serialising a role against a stage somebody else owns would hold
+    work for a queue it is not in; and the role has to be serial, which it is by
+    declaration, or -- when it declares nothing -- in the implementation stage
+    alone, which is where the board already enforced it.
+    """
+    if role not in stage_owners(cfg, state):
+        return False
+    declared = serial_roles(cfg).get(role)
+    if declared is not None:
+        return declared
+    return state == IMPLEMENTATION_STAGE
+
+
 def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     """Validate the complete desired graph. Never infer silence or actor authority."""
     cfg = copy.deepcopy(document)
@@ -313,6 +359,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "template_role",
                 "ephemeral",
                 "presentation_label",
+                "serial",
             },
             "unknown role field",
         )
@@ -399,6 +446,16 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             need(
                 isinstance(label, str) and bool(label.strip()) and "\n" not in label,
                 f"presentation_label must be non-empty single-line text: {name}",
+            )
+        if "serial" in role:
+            # SYRD-37: whether this role is handed one ticket at a time in the
+            # stages it owns. A real boolean or nothing, for the same reason
+            # `ephemeral` is: a quoted "false" would read as a value and behave
+            # as its truthiness, and a role would quietly stop -- or start --
+            # being serialised without anyone changing the policy they wrote.
+            need(
+                type(role["serial"]) is bool,
+                f"serial must be a boolean: {name}",
             )
         if "ephemeral" in role:
             # SYRD-135: absent means false, and only a real boolean may say

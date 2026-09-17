@@ -51,16 +51,20 @@ def _env_first(*names: str) -> str:
     return ""
 
 
-DEFAULT_BOARD_URL = _env_first("TICKET_BOARD_URL", "PGU_TICKET_BOARD_URL") or "http://127.0.0.1:8770"
+#: No hard-coded endpoint any more, and in particular no hard-coded PROJECT.
+#: These used to fall back to pgu's port and pgu's socket, so on a host running
+#: several tenants a scrubbed environment aimed every project's client at pgu --
+#: which is how `--board-url <dead port>` posted a comment to PGU-1 from syrd
+#: (SYRD-198). An endpoint nobody named is now an error, not a guess.
+DEFAULT_BOARD_URL = _env_first("TICKET_BOARD_URL", "PGU_TICKET_BOARD_URL")
 DEFAULT_REPORT_BOARD_URL = _env_first("TICKET_BOARD_REPORT_URL", "PGU_TICKET_BOARD_REPORT_URL")
-DEFAULT_BOARD_SOCKET = (
-    _env_first("TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
-    or "/run/pgu-ticket-board/ticket-board.sock"
-)
+DEFAULT_BOARD_SOCKET = _env_first("TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
 DEFAULT_WRITE_TOKEN = _env_first("TICKET_BOARD_WRITE_TOKEN", "PGU_TICKET_BOARD_WRITE_TOKEN")
 DEFAULT_REPORT_TOKEN = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN")
 DEFAULT_REPORT_TOKEN_FILE = _env_first("TICKET_BOARD_TENANT_REPORT_TOKEN_FILE", "TICKET_BOARD_REPORT_TOKEN_FILE")
 DEFAULT_REPORT_ORIGIN_PROJECT = _env_first("TICKET_BOARD_REPORT_ORIGIN_PROJECT")
+#: Kept only so the production-write guard still recognises it as a live board.
+#: It is never selected implicitly any more.
 LEGACY_BOARD_SOCKET = "/tmp/pgu-ticket-board.sock"
 
 
@@ -95,16 +99,97 @@ def _normalize_api_path(board_url: str) -> str:
 
 
 def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ) -> str | None:
-    if board_url != DEFAULT_BOARD_URL:
+    """The socket to use when the caller named no endpoint at all.
+
+    It used to decide "did the caller pass a board URL?" by comparing the value
+    against a default that was itself read from the environment. When the
+    environment named the same URL the caller passed, an explicit `--board-url`
+    became indistinguishable from passing nothing, the socket default fired, and
+    its hard-coded fallback belonged to another project (SYRD-198).
+
+    Explicitness is now decided by `resolve_endpoint` from whether the flag was
+    SUPPLIED, and this only answers the no-flags case.
+    """
+    if board_url and board_url != DEFAULT_BOARD_URL:
         return None
     explicit = _env_first_from(environ, "TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
-    if explicit:
-        return explicit
-    if Path(DEFAULT_BOARD_SOCKET).exists():
-        return DEFAULT_BOARD_SOCKET
-    if DEFAULT_BOARD_SOCKET != LEGACY_BOARD_SOCKET and Path(LEGACY_BOARD_SOCKET).exists():
-        return LEGACY_BOARD_SOCKET
-    return None
+    return explicit or None
+
+
+class EndpointError(TicketBoardWriteError):
+    """The endpoint could not be resolved, or the two given disagree."""
+
+
+def _project_at_url(board_url: str, timeout: float = 5.0) -> str | None:
+    root = board_url.rstrip("/")
+    if root.endswith("/api/tickets"):
+        root = root[: -len("/api/tickets")]
+    try:
+        with request.urlopen(f"{root}/api/board", timeout=timeout) as response:
+            return str(json.loads(response.read().decode("utf-8")).get("project") or "") or None
+    except Exception:
+        return None
+
+
+def _project_at_socket(socket_path: str, timeout: float = 5.0) -> str | None:
+    try:
+        conn = UnixHTTPConnection(socket_path, timeout)
+        conn.request("GET", "/api/board")
+        body = conn.getresponse().read().decode("utf-8")
+        conn.close()
+        return str(json.loads(body).get("project") or "") or None
+    except Exception:
+        return None
+
+
+def resolve_endpoint(
+    board_url: str | None,
+    socket_path: str | None,
+    *,
+    environ: Mapping[str, str] = os.environ,
+) -> tuple[str, str | None]:
+    """Decide the one endpoint a write goes to, from what the caller supplied.
+
+    `None` means the flag was not given; an empty string means it was given and
+    deliberately emptied. The rules, in order:
+
+      * an explicitly EMPTY socket means no socket, and never a different one;
+      * an explicit socket is authoritative;
+      * an explicit board URL with no explicit socket means HTTP only -- it will
+        never reach for an environment or legacy socket, which is the whole of
+        SYRD-198;
+      * with neither supplied, the environment decides;
+      * and if nothing names an endpoint, this fails rather than guessing, since
+        every guess available to it belongs to some particular project.
+
+    When both are supplied they must agree about which project they are, and
+    that is checked against the live boards rather than inferred from a path.
+    """
+    url_given = board_url is not None
+    socket_given = socket_path is not None
+    url = (board_url or "").strip() or (None if url_given else (DEFAULT_BOARD_URL or None))
+    sock = (socket_path or "").strip() or None
+
+    if socket_given and not sock:
+        sock = None
+    elif not socket_given:
+        sock = None if url_given else _default_socket_path(url or "", environ)
+
+    if not url and not sock:
+        raise EndpointError(
+            "no ticket board endpoint: pass --board-url or --socket, or set "
+            "TICKET_BOARD_URL or TICKET_BOARD_SOCKET. Nothing is assumed, because "
+            "every default available here would name one particular project."
+        )
+    if url and sock and url_given and socket_given:
+        url_project = _project_at_url(url)
+        sock_project = _project_at_socket(sock)
+        if url_project and sock_project and url_project != sock_project:
+            raise EndpointError(
+                f"--board-url is {url} (project {url_project}) but --socket is {sock} "
+                f"(project {sock_project}); refusing to write to one while naming the other"
+            )
+    return url or "", sock
 
 
 def _has_explicit_socket_path(socket_path: str | None, environ: Mapping[str, str] = os.environ) -> bool:
@@ -325,7 +410,7 @@ def _git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
 
 @dataclass(frozen=True)
 class TicketBoardWriteClient:
-    board_url: str = DEFAULT_BOARD_URL
+    board_url: str = ""
     caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0
     socket_path: str | None = None
@@ -348,7 +433,15 @@ class TicketBoardWriteClient:
 
     @property
     def effective_socket_path(self) -> str | None:
-        return self.socket_path or _default_socket_path(self.board_url)
+        # An empty string here means "explicitly no socket" and must not be
+        # allowed to fall through to a default; only None means "not stated".
+        if self.socket_path is not None:
+            return self.socket_path.strip() or None
+        if self.board_url:
+            # An explicit endpoint was chosen. Reaching for a socket now is how
+            # a write aimed at one board landed on another (SYRD-198).
+            return None
+        return _default_socket_path(self.board_url)
 
     def for_caller(self, caller_role: str) -> "TicketBoardWriteClient":
         return TicketBoardWriteClient(
@@ -1024,7 +1117,15 @@ def _build_parser() -> argparse.ArgumentParser:
     caller_default = default_caller_role()
     caller_default_display = caller_default or "unset"
     parser = argparse.ArgumentParser(description="Write tickets through the board action API.")
-    parser.add_argument("--board-url", default=DEFAULT_BOARD_URL, help=f"Board root or /api/tickets URL (default: {DEFAULT_BOARD_URL})")
+    parser.add_argument(
+        "--board-url",
+        default=None,
+        help=(
+            "Board root or /api/tickets URL. Supplying it is authoritative: the write "
+            "goes there or fails, and never falls back to a socket belonging to "
+            "another project (SYRD-198). Default: TICKET_BOARD_URL."
+        ),
+    )
     parser.add_argument(
         "--socket",
         dest="socket_path",
@@ -1275,6 +1376,8 @@ def main(argv: list[str] | None = None) -> int:
             raise TicketBoardWriteError(
                 "ticket board caller role required; pass --caller-role or set TICKET_BOARD_CALLER_ROLE"
             )
+        resolved_url, resolved_socket = resolve_endpoint(args.board_url, args.socket_path)
+        args.board_url, args.socket_path = resolved_url, resolved_socket
         client = TicketBoardWriteClient(
             args.board_url,
             args.caller_role,

@@ -289,12 +289,25 @@ def main(argv: list[str]) -> int:
         os._exit(126)
 
     os.close(write_fd)
-    with os.fdopen(read_fd, "r", encoding="utf-8", closefd=True) as handle:
-        # Bounded: this is a fixed handful of small fields, and a child that
-        # writes anything else is refused rather than relayed.
-        handoff = handle.read(HANDOFF_LIMIT_BYTES + 1)
+    # Reap FIRST, then drain -- never the other way round.
+    #
+    # This used to read the pipe to EOF before reaping, which silently made the
+    # whole privileged boundary depend on nobody else holding the write end.
+    # HANDOFF_CHILD_FD is deliberately inheritable, so any process the owner
+    # half leaves behind keeps that end open and EOF never comes: the read
+    # blocks forever, `waitpid` is never reached, the boundary is never
+    # recorded, and the caller never gets its result back -- so the desktop half
+    # never runs either. A live `switchyard stop testing` failed exactly that
+    # way, with no journal entry and no diagnostic (SYRD-202).
+    #
+    # Reaping first is safe because the handoff is bounded well below the pipe
+    # buffer, so the child can never block writing it and can never need the
+    # parent to drain before it exits. Whatever it wrote is sitting in the pipe
+    # when it dies; a non-blocking drain then takes that and stops, rather than
+    # waiting on a descriptor somebody else may hold.
     _pid, status = os.waitpid(child, 0)
     code = os.waitstatus_to_exitcode(status)
+    handoff = _drain_handoff(read_fd)
 
     if code == 0 and handoff.strip():
         publish_handoff(project, handoff, caller=caller)
@@ -314,6 +327,39 @@ def main(argv: list[str]) -> int:
 #: used when it is absent.
 ROLLOUT_RECORDER = Path("/opt/switchyard/current/scripts/switchyard-record-rollout")
 
+
+
+def _drain_handoff(read_fd: int) -> str:
+    """What the child left in the pipe, without waiting for anyone to close it.
+
+    Bounded by HANDOFF_LIMIT_BYTES + 1 for the same reason the blocking read was:
+    one byte past the limit is enough to know the child said too much, and the
+    caller refuses it rather than relaying it.
+    """
+    chunks: list[bytes] = []
+    remaining = HANDOFF_LIMIT_BYTES + 1
+    try:
+        os.set_blocking(read_fd, False)
+        while remaining > 0:
+            try:
+                chunk = os.read(read_fd, remaining)
+            except BlockingIOError:
+                # Nothing more is buffered. The child has already been reaped,
+                # so nothing more is coming from it; a descriptor still held
+                # open elsewhere is exactly what we refuse to wait on.
+                break
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+    return b"".join(chunks).decode("utf-8", "replace")
 
 def record_privileged_boundary(
     project: str, operation: str, *, caller: str, owner: str, code: int

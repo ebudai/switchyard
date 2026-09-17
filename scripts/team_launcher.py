@@ -26351,8 +26351,99 @@ def _switchyard_exec_through_tenant_control(
     result = runner([sudo_bin, "-n", helper, project, operation])
     code = int(getattr(result, "returncode", 1) or 0)
     if code == 0:
-        code = complete_desktop_presentation(project, caller=caller, runner=runner)
+        # Symmetric with the open. A stop's desktop half is closing the window
+        # this account owns; the owner half cannot see it or signal it
+        # (SYRD-202).
+        if operation == "stop":
+            code = close_desktop_presentation(project, caller=caller)
+        else:
+            code = complete_desktop_presentation(project, caller=caller, runner=runner)
     raise SystemExit(code)
+
+
+def desktop_presentation_windows(
+    project: str,
+    *,
+    caller: str,
+    proc_root: Path | None = None,
+) -> list[PresentationWindowProcess]:
+    """This project's windows in the account that owns the screen.
+
+    Deliberately derived from the project and the caller alone, with no
+    ProjectConfig: the desktop account cannot read the tenant's configuration at
+    all, which is the whole reason the bridge exists. `desktop_state_dir` is
+    already agreed by construction between the two sides of the handoff
+    (SYRD-90), and it is the path Konsole was actually started with, so it is
+    the one its argv carries.
+
+    Whole-argument matching, both spellings, exactly as the tenant-side scan
+    does: `<path>.backup` is a different file, and the project slug is a prefix
+    of every sibling tenant's paths.
+    """
+    root = Path(proc_root) if proc_root is not None else Path("/proc")
+    wanted = str(desktop_state_dir(project, caller) / f"{project}-presentation-layout.json")
+    found: list[PresentationWindowProcess] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+            owner_uid = entry.stat().st_uid
+        except OSError:
+            continue
+        if not argv or "konsole" not in Path(argv[0] or "").name:
+            continue
+        match = next(
+            (value for value in argv if value == wanted or value.partition("=")[2] == wanted),
+            "",
+        )
+        if not match:
+            continue
+        found.append(PresentationWindowProcess(int(entry.name), owner_uid, match))
+    return found
+
+
+def close_desktop_presentation(
+    project: str,
+    *,
+    caller: str,
+    proc_root: Path | None = None,
+    signaller: Callable[[int, int], None] = os.kill,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Close this project's presentation windows, here, where they can be closed.
+
+    The mirror of `complete_desktop_presentation`, and it exists for the same
+    reason that does. The owner account has the sessions and no screen; this
+    account has the screen. A stop run entirely on the owner side asked a
+    tenant-side scan for the tenant's own layout path, found nothing -- the live
+    window names THIS account's copy -- and reported "already closed" over a
+    window still on screen. Even had it matched, the owner may not signal a
+    process belonging to this account, so the close has to happen here (SYRD-202).
+
+    EVERY matching window, not the first: the UAT that found this left two on
+    the same layout, and a stop that closes one of them is the same bug again.
+    """
+    windows = desktop_presentation_windows(project, caller=caller, proc_root=proc_root)
+    if not windows:
+        return 0
+    problems: list[str] = []
+    for window in windows:
+        try:
+            signaller(window.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            problems.append(f"could not close {project}'s presentation window {window.pid}: {exc}")
+            continue
+        print_func(f"switchyard: closed {project}'s presentation window (pid {window.pid})")
+    for problem in problems:
+        print_func(f"switchyard: {problem}")
+    return 1 if problems else 0
 
 
 def complete_desktop_presentation(

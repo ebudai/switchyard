@@ -332,7 +332,7 @@ def record_privileged_boundary(
     try:
         import subprocess  # local: the bridge's import surface stays minimal
 
-        subprocess.run(
+        completed = subprocess.run(
             [
                 str(ROLLOUT_RECORDER), project,
                 "--record-only", outcome,
@@ -347,10 +347,24 @@ def record_privileged_boundary(
                 f"{caller} ran `switchyard {operation} {project}` as {owner} through the "
                 f"tenant control bridge (exit {code})",
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False, text=True,
         )
-    except OSError:
+    except OSError as exc:
+        print(f"switchyard-tenant-control: could not record this boundary: {exc}", file=sys.stderr)
         return
+    # Best effort about the OUTCOME, never about the evidence. Failing to record
+    # must not turn a completed start or stop into a failure -- but discarding
+    # the reason left a privileged boundary with no trace anywhere, including no
+    # trace that recording had been attempted. A live stop went unjournalled and
+    # nothing on the host could say why (SYRD-202).
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip().splitlines()
+        print(
+            f"switchyard-tenant-control: `switchyard {operation} {project}` completed "
+            f"(exit {code}) but its "
+            f"boundary record failed: {detail[-1] if detail else f'recorder exited {completed.returncode}'}",
+            file=sys.stderr,
+        )
 
 
 #: The descriptor the owner half answers on, and the most it may say. Chosen

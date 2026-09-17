@@ -912,6 +912,114 @@ def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
     return ticket
 
 
+#: Free-text fields carry prose -- comment bodies, reasons, ticket bodies,
+#: implementation notes. Prose in this project routinely contains backticks
+#: (`function_name()`), dollar signs, quotes and newlines, and passing it as a
+#: shell argument means the author's shell gets a vote on what reaches the
+#: board. On SYRD-195 it took one: a review comment was posted with its
+#: operative phrase missing, because the shell had executed the backticked
+#: phrase instead of passing it (SYRD-196).
+#:
+#: So every free-text option gains two companions that cannot be interpreted:
+#: `--<name>-file PATH` reads the bytes from a file, and `--<name> -` reads
+#: them from standard input. The direct `--<name> VALUE` form is unchanged, so
+#: nothing that works today stops working.
+#:
+#: Content is preserved exactly. No stripping, no newline normalisation, no
+#: shell, no `eval`: the bytes in the file are the bytes the board stores.
+FREE_TEXT_STDIN = "-"
+
+
+def add_free_text_argument(parser, flag, *, required=False, default="", help=None):
+    """Register `--flag`, `--flag-file`, and the resolution rule for both.
+
+    `required` is enforced after parsing rather than by argparse, because either
+    form may satisfy it and argparse can only require one option at a time.
+    """
+    dest = flag.lstrip("-").replace("-", "_")
+    direct_help = help or f"{dest.replace('_', ' ')} text"
+    parser.add_argument(
+        flag,
+        dest=dest,
+        default=None,
+        help=f"{direct_help}. Use {FREE_TEXT_STDIN} to read it from standard input.",
+    )
+    parser.add_argument(
+        f"{flag}-file",
+        dest=f"{dest}_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            f"read {dest.replace('_', ' ')} from PATH ({FREE_TEXT_STDIN} for standard input), "
+            "so backticks, dollar signs, quotes, newlines and leading dashes reach "
+            "the board literally"
+        ),
+    )
+    existing = list(getattr(parser, "_free_text_fields", ()))
+    existing.append((flag, dest, required, default))
+    parser._free_text_fields = existing
+    parser.set_defaults(_free_text_fields=existing)
+
+
+def _read_text_stream(stream, parser, flag):
+    data = stream.buffer.read() if hasattr(stream, "buffer") else stream.read()
+    if isinstance(data, bytes):
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            parser.error(f"{flag}: standard input is not valid UTF-8 ({exc})")
+    return data
+
+
+def _read_free_text(source, parser, flag):
+    import sys as _sys
+
+    if source == FREE_TEXT_STDIN:
+        if _sys.stdin is None:
+            parser.error(f"{flag}: asked to read standard input, but there is none")
+        if _sys.stdin.isatty():
+            # Reading a terminal here would hang with no output, which reads as
+            # the command having silently stopped.
+            parser.error(
+                f"{flag}: standard input is a terminal; redirect a file or a heredoc into it"
+            )
+        return _read_text_stream(_sys.stdin, parser, flag)
+    try:
+        with open(source, "rb") as handle:
+            return handle.read().decode("utf-8")
+    except FileNotFoundError:
+        parser.error(f"{flag}: no such file: {source}")
+    except IsADirectoryError:
+        parser.error(f"{flag}: is a directory: {source}")
+    except PermissionError:
+        parser.error(f"{flag}: cannot read: {source}")
+    except UnicodeDecodeError as exc:
+        parser.error(f"{flag}: {source} is not valid UTF-8 ({exc})")
+
+
+def resolve_free_text_arguments(args, parser):
+    """Turn --flag / --flag-file into the single value the dispatch already reads.
+
+    Resolved onto the same attribute the direct flag would have set, so every
+    call site downstream is untouched.
+    """
+    for flag, dest, required, default in getattr(args, "_free_text_fields", ()):
+        direct = getattr(args, dest, None)
+        path = getattr(args, f"{dest}_file", None)
+        if direct is not None and path is not None:
+            parser.error(f"{flag} and {flag}-file are mutually exclusive; give one")
+        if path is not None:
+            text = _read_free_text(path, parser, flag)
+        elif direct is not None:
+            text = _read_free_text(direct, parser, flag) if direct == FREE_TEXT_STDIN else direct
+        else:
+            text = default
+        if required and not text.strip():
+            parser.error(f"{flag} (or {flag}-file) is required and must not be empty")
+        setattr(args, dest, text)
+    return args
+
+
 def _build_parser() -> argparse.ArgumentParser:
     caller_default = default_caller_role()
     caller_default_display = caller_default or "unset"
@@ -975,31 +1083,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
-    create.add_argument("--body", required=True)
+    add_free_text_argument(create, "--body", required=True)
     create.add_argument("--assignee", default="unassigned")
     create.add_argument("--state", default="analysis")
     create.add_argument("--parent-id", default="")
     create.add_argument("--draft", action="store_true")
     create.add_argument("--screenshot")
     create.add_argument("--blocked-by", action="append", default=[])
-    create.add_argument("--blocked-reason", default="")
-    create.add_argument("--implementation", default="")
-    create.add_argument("--audit-prompt", default="")
-    create.add_argument("--comment-text", default="")
+    add_free_text_argument(create, "--blocked-reason", default="")
+    add_free_text_argument(create, "--implementation", default="")
+    add_free_text_argument(create, "--audit-prompt", default="")
+    add_free_text_argument(create, "--comment-text", default="")
     create.add_argument("--needs-inspection", action="store_true")
     create.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
     create.add_argument("--needs-user-signoff", action="store_true")
 
     file_bug = subparsers.add_parser("file-bug")
     file_bug.add_argument("--title", required=True)
-    file_bug.add_argument("--body", required=True)
+    add_free_text_argument(file_bug, "--body", required=True)
     file_bug.add_argument("--source-ticket-id", required=True)
     file_bug.add_argument("--assignee", default="unassigned")
     file_bug.add_argument("--needs-audit", action=argparse.BooleanOptionalAction, default=True)
 
     file_report = subparsers.add_parser("file-report")
     file_report.add_argument("--title", required=True)
-    file_report.add_argument("--body", required=True)
+    add_free_text_argument(file_report, "--body", required=True)
     file_report.add_argument("--origin-project", default=DEFAULT_REPORT_ORIGIN_PROJECT)
     file_report.add_argument("--external-source-ref", default="")
 
@@ -1011,7 +1119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     reassign = subparsers.add_parser("reassign")
     reassign.add_argument("ticket_id")
     reassign.add_argument("--assignee", required=True)
-    reassign.add_argument("--reason", required=True)
+    add_free_text_argument(reassign, "--reason", required=True)
 
     request_publication = subparsers.add_parser("request-publication")
     request_publication.add_argument("ticket_id")
@@ -1023,12 +1131,12 @@ def _build_parser() -> argparse.ArgumentParser:
     resolve_publication.add_argument("ticket_id")
     resolve_publication.add_argument("--request-id", required=True, type=int)
     resolve_publication.add_argument("--outcome", required=True, choices=("published", "rejected"))
-    resolve_publication.add_argument("--reason", default="")
+    add_free_text_argument(resolve_publication, "--reason", default="")
 
     director_edit = subparsers.add_parser("director-edit")
     director_edit.add_argument("ticket_id")
     director_edit.add_argument("--set", action="append", default=[], metavar="FIELD=VALUE")
-    director_edit.add_argument("--reason", required=True)
+    add_free_text_argument(director_edit, "--reason", required=True)
 
     force_move = subparsers.add_parser("force-move")
     force_move.add_argument("ticket_id")
@@ -1048,15 +1156,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     start_task = subparsers.add_parser("start-task")
     start_task.add_argument("ticket_id")
-    start_task.add_argument("--text", default="")
+    add_free_text_argument(start_task, "--text", default="")
 
     complete_task = subparsers.add_parser("complete-task")
     complete_task.add_argument("ticket_id")
-    complete_task.add_argument("--text", required=True)
+    add_free_text_argument(complete_task, "--text", required=True)
 
     audit_sign = subparsers.add_parser("audit-sign-off")
     audit_sign.add_argument("ticket_id")
-    audit_sign.add_argument("--text", required=True)
+    add_free_text_argument(audit_sign, "--text", required=True)
 
     submit = subparsers.add_parser("submit-to-audit")
     submit.add_argument("ticket_id")
@@ -1064,7 +1172,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     submit_no_commit = subparsers.add_parser("submit-to-audit-without-commit")
     submit_no_commit.add_argument("ticket_id")
-    submit_no_commit.add_argument("--reason", required=True)
+    add_free_text_argument(submit_no_commit, "--reason", required=True)
 
     submit_inspection = subparsers.add_parser("submit-to-inspection")
     submit_inspection.add_argument("ticket_id")
@@ -1072,25 +1180,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     implementer_kick = subparsers.add_parser("implementer-kick-back")
     implementer_kick.add_argument("ticket_id")
-    implementer_kick.add_argument("--reason", required=True)
+    add_free_text_argument(implementer_kick, "--reason", required=True)
 
     request_exempt = subparsers.add_parser("request-commit-exempt")
     request_exempt.add_argument("ticket_id")
-    request_exempt.add_argument("--reason", required=True)
+    add_free_text_argument(request_exempt, "--reason", required=True)
 
     recover_stalled = subparsers.add_parser(
         "recover-stalled-ticket",
         help="take the transition a stalled ticket's owner did not take, to its next required gate",
     )
     recover_stalled.add_argument("ticket_id")
-    recover_stalled.add_argument("--reason", required=True, help="why the recovery is being made")
+    add_free_text_argument(recover_stalled, "--reason", required=True, help="why the recovery is being made")
     request_dependency = subparsers.add_parser(
         "request-dependency",
         help="record why this work is waiting and hand it to the role it waits on, in one action",
     )
     request_dependency.add_argument("ticket_id")
     request_dependency.add_argument("--role", required=True, help="the role this work waits on")
-    request_dependency.add_argument("--reason", required=True, help="what they have to do, in their words")
+    add_free_text_argument(request_dependency, "--reason", required=True, help="what they have to do, in their words")
     await_role = subparsers.add_parser("await-role")
     await_role.add_argument("ticket_id")
     await_role.add_argument("--role", required=True)
@@ -1100,26 +1208,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
     audit_kick = subparsers.add_parser("audit-kick-back")
     audit_kick.add_argument("ticket_id")
-    audit_kick.add_argument("--reason", required=True)
+    add_free_text_argument(audit_kick, "--reason", required=True)
     audit_kick.add_argument("--target-assignee", default="")
 
     dat_sign = subparsers.add_parser("director-dat-sign-off")
     dat_sign.add_argument("ticket_id")
-    dat_sign.add_argument("--text", default="")
+    add_free_text_argument(dat_sign, "--text", default="")
 
     dat_kick = subparsers.add_parser("director-dat-kick-back")
     dat_kick.add_argument("ticket_id")
-    dat_kick.add_argument("--reason", required=True)
+    add_free_text_argument(dat_kick, "--reason", required=True)
     dat_kick.add_argument("--target-assignee", default="")
 
     for name in ("user-reopen", "cancel"):
         sub = subparsers.add_parser(name)
         sub.add_argument("ticket_id")
-        sub.add_argument("--reason", required=True)
+        add_free_text_argument(sub, "--reason", required=True)
 
     inspector_kick = subparsers.add_parser("inspector-kick-back")
     inspector_kick.add_argument("ticket_id")
-    inspector_kick.add_argument("--recommendations", required=True)
+    add_free_text_argument(inspector_kick, "--recommendations", required=True)
     inspector_kick.add_argument("--target-assignee", default="")
 
     done = subparsers.add_parser("mark-done")
@@ -1133,11 +1241,11 @@ def _build_parser() -> argparse.ArgumentParser:
     blockers = subparsers.add_parser("set-blockers")
     blockers.add_argument("ticket_id")
     blockers.add_argument("--blocked-by", action="append", required=True)
-    blockers.add_argument("--blocked-reason", required=True)
+    add_free_text_argument(blockers, "--blocked-reason", required=True)
 
     comment = subparsers.add_parser("add-comment")
     comment.add_argument("ticket_id")
-    comment.add_argument("--text", required=True)
+    add_free_text_argument(comment, "--text", required=True)
     comment.add_argument("--urgent", action="store_true")
 
     edit_fields = subparsers.add_parser("edit-fields")
@@ -1153,13 +1261,15 @@ def _build_parser() -> argparse.ArgumentParser:
     dismiss_notification.add_argument("--ticket-id", default="")
     dismiss_notification.add_argument("--target-role", default="")
     dismiss_notification.add_argument("--kind", default="transition")
-    dismiss_notification.add_argument("--reason", default="")
+    add_free_text_argument(dismiss_notification, "--reason", default="")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        args = _build_parser().parse_args(argv)
+        parser = _build_parser()
+        args = parser.parse_args(argv)
+        resolve_free_text_arguments(args, parser)
         command = args.command.replace("-", "_")
         if command != "file_report" and not args.caller_role.strip():
             raise TicketBoardWriteError(

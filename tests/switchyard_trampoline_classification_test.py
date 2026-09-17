@@ -35,25 +35,48 @@ GENERATOR = ROOT / "scripts" / "install-switchyard"
 
 
 def _render_wrapper(tmp: Path, target: Path) -> Path:
-    """The wrapper exactly as install-switchyard writes it, pointed at a stub."""
+    """The wrapper as install-switchyard really writes it.
+
+    Rendered by BASH, through the same unquoted heredoc the generator uses, not
+    by substituting strings in Python. That difference is the point: an unquoted
+    heredoc expands `$...` AND executes backticks, so a backtick in a comment
+    silently deletes itself and everything up to its partner. A Python renderer
+    that only swaps `\\$` for `$` shows text the installed file never contains,
+    and would have passed the very defect this guards.
+    """
     source = GENERATOR.read_text(encoding="utf-8")
-    start = source.index("switchyard_target_invocation_requires_root() {")
-    end = source.index("switchyard_user_can_prompt_for_sudo() {")
-    body = source[start:end]
-    # The generator writes this inside a quoted heredoc, so `\$` in the source is
-    # a literal `$` in the emitted file. Undo exactly that, and nothing else.
-    body = body.replace("\\$", "$").replace("\\\\n", "\\n").replace("\\\\\n", "\\\n")
-    script = tmp / "switchyard"
+    lines = source.splitlines()
+    opening = next(i for i, line in enumerate(lines) if line.strip() == 'cat >"$tmp" <<EOF')
+    closing = next(i for i in range(opening + 1, len(lines)) if lines[i].strip() == "EOF")
+    body = "\n".join(lines[opening + 1 : closing])
+
+    script = tmp / "render.sh"
     script.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        f'readonly SWITCHYARD_DEFAULT_TARGET={target}\n'
-        f"{body}\n"
-        'if switchyard_invocation_requires_root "$@"; then echo ROOT; else echo USER; fi\n',
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        "quote() { printf '%q' \"$1\"; }\n"
+        f'default_target={target}\n'
+        'help_text="HELP"\n'
+        'version_text="VERSION"\n'
+        'recovery_command="RECOVERY"\n'
+        f"cat <<EOF\n{body}\nEOF\n",
         encoding="utf-8",
     )
     script.chmod(0o755)
-    return script
+    done = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    # Keep the real functions, drop the real dispatch: the wrapper's own main
+    # body would exec the stub target instead of reporting the routing decision.
+    text = done.stdout
+    marker = 'if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then'
+    assert marker in text, "the rendered wrapper no longer has the dispatch this trims"
+    rendered = tmp / "switchyard"
+    rendered.write_text(
+        text[: text.index(marker)]
+        + '\nif switchyard_invocation_requires_root "$@"; then echo ROOT; else echo USER; fi\n',
+        encoding="utf-8",
+    )
+    rendered.chmod(0o755)
+    return rendered
 
 
 def _stub_target(tmp: Path, name: str, body: str) -> Path:
@@ -157,6 +180,53 @@ def test_the_targets_answer_is_actually_read() -> None:
             f"and the wrapper still routed {route}"
         )
         assert "could not classify" not in complaint, complaint
+
+
+def test_the_rendered_wrapper_says_what_the_generator_meant() -> None:
+    """The generator writes this file through a heredoc it expands.
+
+    A backtick in a comment or a string is command substitution there, so it and
+    everything between it and its partner is executed and removed before the
+    file is ever written. I shipped exactly that: `switchyard %s` vanished from
+    the fallback diagnostic, leaving one %s and two arguments, so printf reused
+    the format and printed the line twice with the wrong values -- and the
+    comments explaining the fix lost their subjects.
+
+    Checked on the RENDERED text, because the generator's source looks perfectly
+    fine; only the output shows the loss.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        rendered = _render_wrapper(root, _stub_target(root, "t", "echo no-root")).read_text(
+            encoding="utf-8"
+        )
+
+    body_start = rendered.index("switchyard_target_invocation_requires_root() {")
+    body = rendered[body_start:]
+    assert "`" not in body, "a backtick survived into the rendered wrapper"
+
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("printf "):
+            continue
+        # The format is the first single-quoted argument on the line.
+        first = stripped.index("'")
+        last = stripped.index("'", first + 1)
+        fmt = stripped[first + 1 : last]
+        placeholders = fmt.count("%s")
+        rest = stripped[last + 1 :].replace("\\", "").strip()
+        arguments = len([piece for piece in rest.split('"') if piece.strip() and piece.strip() != ">&2"])
+        assert placeholders == 0 or arguments == 0 or placeholders == arguments, (
+            f"printf format has {placeholders} %s but {arguments} arguments; "
+            f"printf will reuse the format and print more than once: {fmt!r}"
+        )
+
+    # And the diagnostic must still name the verb it could not classify.
+    assert "could not classify" in body
+    diagnostic = next(l for l in body.splitlines() if "could not classify" in l and "printf" in l)
+    assert diagnostic.count("%s") == 2, (
+        f"the fallback diagnostic lost a placeholder: {diagnostic.strip()!r}"
+    )
 
 
 def test_stop_and_status_are_absent_from_the_generated_verb_list() -> None:

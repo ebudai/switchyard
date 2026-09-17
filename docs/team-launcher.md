@@ -1020,11 +1020,56 @@ requires it to match the configured `live_commands` list, or the configured
 does not kill the pane. Use `--force` only when intentionally overriding that
 guard.
 
-`stop` kills each configured role's named tmux session as the project runtime
-user and leaves board/listener systemd services alone. It never runs
-`tmux kill-server`; absent role sessions are reported as already stopped, so a
-second `switchyard stop <project>` or `scripts/team-launcher <project> stop`
-is a clean no-op.
+### Three verbs, three depths
+
+There are three ways to make a tenant quieter, and they are not degrees of the
+same thing. Reach for the shallowest one that does what you mean.
+
+**Closing the Konsole window is presentation-only.** The workers keep running,
+the board keeps serving, the listener keeps delivering. Nothing is lost and
+nothing is stopped; you have put the window away. Reopen it with
+`switchyard <project>`.
+
+**`switchyard stop <project>` is a reversible whole-tenant suspension.** It
+closes that project's presentation window, stops its viewer, display and role
+sessions, terminates any project process that escaped its pane, stops its
+notification listener on the owner's user manager, and stops its board in the
+system scope -- in that order, because each consumer has to go before the thing
+it consumes. It removes nothing: the board database and its history, the
+project's registration and configuration, worktrees, credentials, provider
+state, skills, onboarding, resumable session records, releases and the rollout
+journal are all exactly as they were. Every step runs even if an earlier one
+failed, and what could not be stopped is named rather than summarised; a
+partially stopped tenant exits non-zero and says so.
+
+**`switchyard teardown <project>` removes provisioned state.** That is a
+different question, and it is not reversible by starting anything.
+
+`switchyard start <project>` is the other half of `stop`: it starts the board,
+then the listener, then restores the sessions and opens the presentation --
+forwards through the same dependency order. Unlike the suspension it stops at
+the first boundary that fails and says which one, because sessions started
+against a board that never came up produce panes that cannot register, and
+reporting success over them is worse than the failure. Starting a tenant that is
+already running is a clean no-op: units already active are left alone rather
+than restarted. `switchyard <project>` recovers a suspended tenant the same way.
+
+`switchyard status` and `switchyard list` distinguish `running`,
+`presentation-closed`, `partially-stopped`, `suspended`, and an unregistered
+tenant. A probe that could not answer leaves the row's base state standing
+rather than inventing a suspension out of silence: "not proved down" and "down"
+are different answers.
+
+Internal transactions that only need the workers quiescent -- the upgrade and
+cutover paths -- use the worker-only stop instead, and must keep doing so. Those
+must not take a board down or close somebody's window: the roles change
+accounts, the display slots do not, and a rolled-back tenant whose window had
+been closed came back with every slot pointing at a viewer no terminal showed.
+`scripts/team-launcher <project> stop` is that lower-level session stop, not the
+tenant suspension.
+
+Absent role sessions are reported as already stopped and `stop` never runs
+`tmux kill-server`, so a second `switchyard stop <project>` is a clean no-op.
 
 `switchyard upgrade <project>` updates safe generated project artifacts and
 checks the provisioned tenant board release. For generated projects whose pane

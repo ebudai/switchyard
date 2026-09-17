@@ -237,6 +237,10 @@ SWITCHYARD_COMMANDS = (
     "role-prompt",
     "onboarding-readiness",
     "stop",
+    # The other half of `stop`: bring a suspended tenant back in dependency
+    # order, and stop at the boundary that fails rather than claiming a start
+    # over a board that never came up (SYRD-193).
+    "start",
     "teardown",
     "status",
     "validate-models",
@@ -10379,6 +10383,28 @@ class SwitchyardProjectStatus:
     # SYRD-43: presentation windows running as root. A project with any of these
     # is not safely attached however many panes are up.
     root_windows: tuple[int, ...] = ()
+    # SYRD-193: the three facts that tell a suspension from a closed window from
+    # a half-stopped tenant. `None` is "not asked or not answered", which is a
+    # third answer and must not read as False -- a listener whose manager did
+    # not reply has not been shown to be down.
+    board_active: bool | None = None
+    listener_active: bool | None = None
+    presentation_open: bool | None = None
+
+    @property
+    def runtime_state(self) -> str:
+        """`state`, refined by what else is up. Falls back when nothing was asked."""
+        if self.state in {"unknown", "unsafe-root-window"}:
+            return self.state
+        facts = (self.board_active, self.listener_active, self.presentation_open)
+        if any(fact is None for fact in facts):
+            return self.state
+        panes = bool(self.panes_up)
+        if self.board_active and self.listener_active and panes:
+            return "running" if self.presentation_open else "presentation-closed"
+        if not self.board_active and not self.listener_active and not panes and not self.presentation_open:
+            return "suspended"
+        return "partially-stopped"
 
     @property
     def panes_display(self) -> str:
@@ -17945,6 +17971,10 @@ def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[
         "name": status.name,
         "slug": status.slug,
         "state": status.state,
+        "runtime_state": status.runtime_state,
+        "board_active": status.board_active,
+        "listener_active": status.listener_active,
+        "presentation_open": status.presentation_open,
         "panes_up": status.panes_up,
         "panes_total": status.panes_total,
         "panes": status.panes_display,
@@ -24086,6 +24116,424 @@ def add_project_role_command(
     return 0
 
 
+@dataclass(frozen=True)
+class PresentationWindowProcess:
+    """One Konsole window, and the project whose layout it was opened on."""
+
+    pid: int
+    owner_uid: int
+    layout: str
+
+
+def presentation_window_processes(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    gui_user: str = "",
+    proc_root: Path | None = None,
+) -> list[PresentationWindowProcess]:
+    """The presentation windows open on THIS project's layout, by pid.
+
+    Identified by the absolute layout path in the window's own argv, compared as
+    a whole argument rather than searched for as text. A substring match would
+    make `atlas` close `atlas-staging`'s window, and the project slug is a
+    prefix of every sibling tenant's paths; the window title is worse still,
+    because it is the project's display name and two tenants may share one.
+
+    Konsole is started with these arguments and does not exec away from them, so
+    unlike a role pane's environment wrapper (SYRD-169) the marker is still
+    there when this is asked. The pid is read from /proc rather than from
+    anything recorded at launch: a window that was reopened by hand, or survived
+    a crash of whatever started it, is still this project's window (SYRD-193).
+    """
+    root = Path(proc_root) if proc_root is not None else Path("/proc")
+    candidates = {
+        str(desktop_presentation_layout_path(config, config_path=config_path, gui_user=gui_user or "")),
+        str(default_layout_output_path(config, config_path=config_path).with_name(
+            f"{config.project}-presentation-layout.json"
+        )),
+    }
+    found: list[PresentationWindowProcess] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().decode("utf-8", "replace").split("\0")
+            owner_uid = entry.stat().st_uid
+        except OSError:
+            continue
+        if not argv or "konsole" not in Path(argv[0] or "").name:
+            continue
+        # Either spelling of the same argument, and neither by substring: a
+        # window opened by hand may use `--layout=PATH` where the launcher uses
+        # two arguments, while `PATH.backup` is a different file and a different
+        # window. Matching whole values keeps both facts true.
+        match = next(
+            (
+                value
+                for value in argv
+                if value in candidates or value.partition("=")[2] in candidates
+            ),
+            "",
+        )
+        if not match:
+            continue
+        found.append(PresentationWindowProcess(int(entry.name), owner_uid, match))
+    return found
+
+
+def close_presentation_window(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    gui_user: str = "",
+    proc_root: Path | None = None,
+    signaller: Callable[[int, int], None] = os.kill,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Close this project's presentation window, and only this project's.
+
+    A terminate, not a kill: Konsole closes its window and its own children on
+    SIGTERM, and the sessions inside it are tmux clients whose servers this
+    command stops separately. Returns what it could not close.
+    """
+    problems: list[str] = []
+    windows = presentation_window_processes(
+        config, config_path=config_path, gui_user=gui_user, proc_root=proc_root
+    )
+    if not windows:
+        print_func(f"already closed presentation window: {config.project}")
+        return problems
+    for window in windows:
+        try:
+            signaller(window.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # It closed between the scan and the signal, which is the outcome
+            # this was asking for.
+            continue
+        except PermissionError:
+            problems.append(
+                f"the {config.project} presentation window (pid {window.pid}) belongs to uid "
+                f"{window.owner_uid} and this process may not close it"
+            )
+            continue
+        except OSError as exc:
+            problems.append(f"could not close the {config.project} presentation window: {exc}")
+            continue
+        print_func(f"closed presentation window: {config.project} (pid {window.pid})")
+    return problems
+
+
+@dataclass(frozen=True)
+class ResidualProcess:
+    """A process still carrying this project's identity after its session died."""
+
+    pid: int
+    uid: int
+    command: str
+
+
+def _process_environ(entry: Path) -> dict[str, str]:
+    try:
+        raw = (entry / "environ").read_bytes()
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for item in raw.decode("utf-8", "replace").split("\0"):
+        name, separator, value = item.partition("=")
+        if separator:
+            values[name] = value
+    return values
+
+
+def _process_ancestry(pid: int, *, proc_root: Path) -> set[int]:
+    """This process and everything that started it, so a stop cannot kill itself."""
+    seen: set[int] = set()
+    current = pid
+    while current > 1 and current not in seen:
+        seen.add(current)
+        try:
+            stat = (proc_root / str(current) / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            break
+        # Field 4 is the parent, counted after the LAST ')': a comm may contain
+        # spaces and parentheses, and splitting on whitespace reads the wrong
+        # field for any process whose name does (SYRD-169).
+        tail = stat.rpartition(")")[2].split()
+        if len(tail) < 2:
+            break
+        try:
+            current = int(tail[1])
+        except ValueError:
+            break
+    return seen
+
+
+def residual_project_processes(
+    config: ProjectConfig,
+    *,
+    proc_root: Path | None = None,
+    exclude: Iterable[int] = (),
+) -> list[ResidualProcess]:
+    """Processes still carrying this project's identity, by environment.
+
+    The marker is `TICKET_BOARD_PROJECT`, read from the ENVIRONMENT rather than
+    from argv. That is the whole point: a child that outlived its pane -- or
+    that exec'd away from the wrapper that started it -- keeps its inherited
+    environment, while the argv marker is gone the moment it execs, which is the
+    mistake SYRD-169 was. An exact match on the slug, because `atlas` must not
+    answer for `atlas-staging`.
+
+    This command's own process and every one of its ancestors are excluded:
+    running `switchyard stop` from inside a role pane must not report, or
+    terminate, the shell that is running it.
+    """
+    root = Path(proc_root) if proc_root is not None else Path("/proc")
+    skip = set(exclude) | _process_ancestry(os.getpid(), proc_root=root)
+    residual: list[ResidualProcess] = []
+    try:
+        entries = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return residual
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid in skip:
+            continue
+        if _process_environ(entry).get("TICKET_BOARD_PROJECT", "") != config.project:
+            continue
+        try:
+            uid = entry.stat().st_uid
+            command = (entry / "cmdline").read_bytes().decode("utf-8", "replace").replace("\0", " ").strip()
+        except OSError:
+            continue
+        residual.append(ResidualProcess(pid, uid, command or f"pid {pid}"))
+    return residual
+
+
+def contain_residual_project_processes(
+    config: ProjectConfig,
+    *,
+    proc_root: Path | None = None,
+    signaller: Callable[[int, int], None] = os.kill,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Terminate what escaped the panes, and report precisely what would not go.
+
+    A suspension that leaves a role's work running is not a suspension: the
+    tenant looks stopped and is still writing. Everything signalled here carries
+    this project's own identity in its environment, so nothing belonging to
+    another tenant -- or to the desktop account's own unrelated work -- is in
+    scope even when they share a uid.
+    """
+    problems: list[str] = []
+    for process in residual_project_processes(config, proc_root=proc_root):
+        try:
+            signaller(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            problems.append(
+                f"{config.project} process {process.pid} (uid {process.uid}) survived its pane and "
+                f"this process may not stop it: {process.command[:120]}"
+            )
+            continue
+        except OSError as exc:
+            problems.append(f"could not stop {config.project} process {process.pid}: {exc}")
+            continue
+        print_func(f"stopped escaped {config.project} process: {process.pid} ({process.command[:80]})")
+    return problems
+
+
+#: What a tenant's runtime can be, as `status` and `list` report it. A
+#: suspension is reversible and keeps every byte of restart state; a teardown
+#: removes provisioned state and is a different verb (SYRD-193).
+TENANT_RUNTIME_STATES = (
+    "running",              # board, listener, sessions and a window
+    "presentation-closed",  # the window is gone, everything else still runs
+    "partially-stopped",    # some of it is down and some is not
+    "suspended",            # nothing runs, everything is preserved
+    "unregistered",         # no registration: torn down, or never provisioned
+)
+
+
+@dataclass(frozen=True)
+class TenantRuntime:
+    """What is actually up for one tenant, each part asked of its own manager."""
+
+    project: str
+    board_active: bool
+    listener_active: bool
+    live_sessions: tuple[str, ...]
+    presentation_open: bool
+    residual: tuple[int, ...] = ()
+    unknown: tuple[str, ...] = ()
+
+    @property
+    def state(self) -> str:
+        running = [self.board_active, self.listener_active, bool(self.live_sessions)]
+        if all(running) and self.presentation_open:
+            return "running"
+        if all(running) and not self.presentation_open:
+            return "presentation-closed"
+        if not any(running) and not self.presentation_open and not self.residual:
+            return "suspended"
+        return "partially-stopped"
+
+
+def describe_tenant_runtime(runtime: TenantRuntime) -> str:
+    """One line a person can act on, naming what is still up."""
+    parts = [
+        f"board {'up' if runtime.board_active else 'down'}",
+        f"listener {'up' if runtime.listener_active else 'down'}",
+        f"sessions {len(runtime.live_sessions)}",
+        f"window {'open' if runtime.presentation_open else 'closed'}",
+    ]
+    if runtime.residual:
+        parts.append(f"escaped processes {len(runtime.residual)}")
+    line = f"{runtime.project}: {runtime.state} ({', '.join(parts)})"
+    if runtime.unknown:
+        line += " -- not proved: " + "; ".join(runtime.unknown)
+    return line
+
+
+def _board_system_unit_action(
+    config: ProjectConfig,
+    action: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> list[str]:
+    """Act on the tenant's board unit in the SYSTEM scope, and read the state back.
+
+    The board is a system unit and the listener is the owner's user unit; asking
+    the wrong manager is not a smaller mistake than asking the wrong host. A
+    `systemctl --user stop` for the board stops nothing and returns cleanly,
+    which is how a tenant is reported suspended with its board still serving
+    (SYRD-193).
+    """
+    unit = _board_system_unit(config)
+    result = runner(["systemctl", action, unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if getattr(result, "returncode", 1) != 0:
+        detail = (str(getattr(result, "stderr", "") or "").strip() or "no output")[:200]
+        return [f"could not {action} {unit} (exit {result.returncode}): {detail}"]
+    state = runner(
+        ["systemctl", "is-active", unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    observed = str(getattr(state, "stdout", "") or "").strip()
+    wanted = {"stop": {"inactive", "failed", "deactivating"}, "start": {"active"}}[action]
+    if observed and observed not in wanted:
+        return [f"{unit} is {observed} after {action}"]
+    return []
+
+
+def board_system_unit_is_active(
+    config: ProjectConfig, *, runner: Callable[..., subprocess.CompletedProcess[Any]]
+) -> bool:
+    result = runner(
+        ["systemctl", "is-active", _board_system_unit(config)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    return str(getattr(result, "stdout", "") or "").strip() == "active"
+
+
+def suspend_tenant(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    gui_user: str = "",
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    proc_root: Path | None = None,
+    signaller: Callable[[int, int], None] = os.kill,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Suspend one tenant: reversible, project-scoped, and honest about failure.
+
+    The order is the dependency order read backwards, because each step's
+    consumer has to go first: the window before the sessions it frames, the
+    sessions before the listener that wakes them, the listener before the board
+    it reads. Nothing here removes state -- no database, no worktree, no
+    registration, no journal -- which is the whole difference between this and
+    `teardown`.
+
+    Every step runs even if an earlier one failed. A window that would not close
+    is no reason to leave a board serving, and reporting the first failure while
+    silently skipping the rest is how a tenant ends up half suspended with one
+    line of output about it.
+    """
+    problems: list[str] = []
+    problems.extend(
+        close_presentation_window(
+            config, config_path=config_path, gui_user=gui_user,
+            proc_root=proc_root, signaller=signaller, print_func=print_func,
+        )
+    )
+    if stop_project(config, runner=runner, print_func=print_func) != 0:
+        problems.append(f"not every {config.project} session could be stopped")
+    problems.extend(
+        contain_residual_project_processes(
+            config, proc_root=proc_root, signaller=signaller, print_func=print_func
+        )
+    )
+    listener_problems = stop_owner_listener(config, runner=runner, config_path=config_path)
+    problems.extend(listener_problems)
+    if not listener_problems:
+        print_func(f"stopped listener: {_listener_user_unit(config)}")
+    board_problems = _board_system_unit_action(config, "stop", runner=runner)
+    problems.extend(board_problems)
+    if not board_problems:
+        print_func(f"stopped board: {_board_system_unit(config)}")
+    return problems
+
+
+def resume_tenant(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Bring a suspended tenant back, in dependency order, stopping at the boundary.
+
+    Forwards this time: the board before the listener that reads it, and both
+    before the sessions whose panes talk to them. Unlike the suspension, this
+    STOPS at the first failed boundary and says which one -- starting sessions
+    against a board that did not come up produces panes that cannot register,
+    and a report of success over them is worse than the failure.
+    """
+    # Idempotent by asking first. `systemctl start` on a live unit is a no-op,
+    # but the listener is restored with `restart`, which would bounce a healthy
+    # one -- and resuming an already-running tenant must not interrupt it.
+    if board_system_unit_is_active(config, runner=runner):
+        print_func(f"already running board: {_board_system_unit(config)}")
+        board_problems: list[str] = []
+    else:
+        board_problems = _board_system_unit_action(config, "start", runner=runner)
+    if board_problems:
+        return board_problems + [
+            f"{config.project} was not resumed past its board; nothing after it was started, and "
+            "the tenant is still suspended rather than half up"
+        ]
+    if not board_problems and not board_system_unit_is_active(config, runner=runner):
+        return [f"{_board_system_unit(config)} did not come up; nothing after it was started"]
+    print_func(f"started board: {_board_system_unit(config)}")
+    if capture_listener_state(config, runner=runner, config_path=config_path) == "active":
+        print_func(f"already running listener: {_listener_user_unit(config)}")
+        return []
+    listener_problems = start_owner_listener(config, runner=runner, config_path=config_path)
+    if listener_problems:
+        return listener_problems + [
+            f"{config.project}'s board is up but its listener is not; its roles would run without "
+            "notifications, so no session was started"
+        ]
+    print_func(f"started listener: {_listener_user_unit(config)}")
+    return []
+
+
 def stop_project(
     config: ProjectConfig,
     *,
@@ -25365,6 +25813,12 @@ def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_start_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="switchyard start")
+    parser.add_argument("project", nargs="+")
+    return parser
+
+
 def _build_switchyard_teardown_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard teardown",
@@ -25702,7 +26156,8 @@ Commands:
   role-prompt      show, set, or clear a role's onboarding prompt
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
-  stop             stop a project's configured tmux pane sessions
+  stop             suspend a project: window, sessions, listener and board, reversibly
+  start            resume a suspended project in dependency order
   teardown         remove project board provisioning artifacts after a dry-run review
   release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
@@ -26364,7 +26819,44 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         project = " ".join(args.project)
         entry = _resolve_switchyard_project(project)
         config = _load_switchyard_project_config_for_command(entry, argv)
-        return stop_project(config)
+        # SYRD-193: the public verb is a whole-tenant suspension now -- window,
+        # sessions, escaped processes, listener and board -- and it preserves
+        # every byte of restart state. The worker-only stop it used to be is
+        # still `stop_role_sessions`, which is what the upgrade transaction
+        # calls and what must not take a board or a window down.
+        problems = suspend_tenant(config, config_path=entry.config_path)
+        for problem in problems:
+            print(f"switchyard: {problem}")
+        if problems:
+            print(
+                f"switchyard: {config.project} is partially stopped; nothing was removed and "
+                f"`switchyard start {config.project}` still resumes what is down."
+            )
+            return 1
+        print(
+            f"switchyard: {config.project} is suspended. Its board database, history, worktrees, "
+            f"credentials, provider state and session records are untouched; "
+            f"`switchyard start {config.project}` brings it back."
+        )
+        return 0
+    if argv[0].casefold() == "start":
+        args = _build_switchyard_start_parser().parse_args(argv[1:])
+        project = " ".join(args.project)
+        entry = _resolve_switchyard_project(project)
+        config = _load_switchyard_project_config_for_command(entry, argv)
+        problems = resume_tenant(config, config_path=entry.config_path)
+        for problem in problems:
+            print(f"switchyard: {problem}")
+        if problems:
+            return 1
+        config = prepare_project_desktop(config)
+        return launch_project(
+            config,
+            config_path=entry.config_path,
+            mode="start",
+            script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
+            report_session_records=True,
+        )
     if argv[0].casefold() == "teardown":
         args = _build_switchyard_teardown_parser().parse_args(argv[1:])
         return switchyard_teardown_command(
@@ -26530,6 +27022,9 @@ def main(argv: list[str] | None = None) -> int:
             runner=subprocess.run,
         )
     if args.command == "stop":
+        # The session-level stop, deliberately: this is the lower-level entry
+        # point, and `switchyard stop` is the tenant suspension that also takes
+        # the board, the listener and the window (SYRD-193).
         return stop_project(config)
     if args.command == "teardown":
         return switchyard_teardown_command(

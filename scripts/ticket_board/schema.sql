@@ -10719,7 +10719,8 @@ ALTER TABLE ticket_board.ticket_notification_queue
 ALTER TABLE ticket_board.ticket_notification_queue
     ADD CONSTRAINT ticket_notification_queue_kind_check
     CHECK (kind IN ('transition', 'ticket_update', 'nudge', 'escalation',
-                    'idle_reminder', 'awaiting_role', 'unresolved_turn'));
+                    'idle_reminder', 'awaiting_role', 'unresolved_turn',
+                    'unresolved_turn_repair'));
 
 -- The identity a repeat is measured against: same ticket, same stage, same
 -- assignee, same completed turn. A fresh turn changes it and re-arms; an
@@ -10967,6 +10968,43 @@ BEGIN
             identity
         );
         enqueued := enqueued + 1;
+        -- The owner's single repair prompt. Enqueued in the same pass and the
+        -- same transaction as the Director's copy, but independently of it: the
+        -- Director is told whether or not the owner ever reads this, which is
+        -- the property SYRD-193 was missing. One per turn identity, on its own
+        -- dedupe key, so acknowledging one does not re-arm the other.
+        PERFORM ticket_board.enqueue_notification(
+            candidate.id,
+            'unresolved_turn_repair',
+            candidate.owner_role,
+            format(
+                '%s is still yours and this turn ended without resolving it. Do one of: '
+                || 'transition it if the work is done; `request-dependency` if you need '
+                || 'another role; record a blocker if something else must land first; or '
+                || 'continue work, which covers the next turn only. The Director has '
+                || 'already been told.',
+                candidate.id
+            ),
+            jsonb_build_object(
+                'kind', 'unresolved_turn_repair',
+                'id', candidate.id,
+                'state', candidate.state,
+                'assignee', candidate.assignee,
+                'owner_role', candidate.owner_role,
+                'target_role', candidate.owner_role,
+                'turn_id', candidate.turn_id,
+                'choices', jsonb_build_array(
+                    'transition', 'request-dependency', 'blocker', 'continue'
+                ),
+                'message', format(
+                    '%s is still yours and this turn ended without resolving it.',
+                    candidate.id
+                )
+            ),
+            'repair:' || identity
+        );
+        -- Counted once per TICKET reported, not once per row: the two
+        -- notifications are one event with two audiences.
     END LOOP;
     RETURN enqueued;
 END;

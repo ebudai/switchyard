@@ -84,7 +84,13 @@ def main() -> int:
         # 1. The regression: an unresolved turn end reaches the Director at once,
         #    with no prior idle reminder and no waiting.
         assert guard(admin) == 1
-        assert queued(admin, "PGU-1") == ["unresolved_turn|director"], queued(admin, "PGU-1")
+        # Two audiences, one event: the Director is told, and the owner gets its
+        # single repair prompt. The Director's copy does not depend on the owner
+        # ever reading theirs, which is the property SYRD-193 was missing.
+        assert queued(admin, "PGU-1") == [
+            "unresolved_turn|director",
+            "unresolved_turn_repair|app",
+        ], queued(admin, "PGU-1")
         checks += 2
 
         # 2. The same turn, reported again, stays silent -- and stays silent even
@@ -98,7 +104,10 @@ def main() -> int:
 
         # 3. A FRESH turn identity re-arms the guard.
         assert guard(admin, turn="turn-2") == 1
-        assert queued(admin, "PGU-1") == ["unresolved_turn|director"]
+        assert queued(admin, "PGU-1") == [
+            "unresolved_turn|director",
+            "unresolved_turn_repair|app",
+        ]
         drain(admin)
         checks += 2
 

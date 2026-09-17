@@ -165,6 +165,12 @@ NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_
 #: absent: it IS the handoff's own bounded schedule, and dropping it here would
 #: silence the very notifications the wait exists to send (SYRD-99).
 SUPERSEDABLE_REMINDER_KINDS = frozenset({"idle_reminder", "nudge", "escalation"})
+#: Kinds addressed to the control role by construction rather than by stage
+#: ownership. On a declared board the ordinary resolver answers "whoever owns
+#: this stage", which for an unresolved-turn handoff is the very role that
+#: stopped -- so without this the Director's copy resolves to the owner, is
+#: judged stale, and is dropped before delivery (SYRD-194).
+DIRECTOR_BOUND_KINDS = frozenset({"escalation", "unresolved_turn"})
 #: Distinct from `stale_notification`, which means the ticket moved, and from
 #: `pane busy`, which means delivery was only postponed. This one means the
 #: reminder was answered before it could be delivered.
@@ -2361,7 +2367,7 @@ WHERE id = %s
             # question the ordinary resolver answers with "nobody" (SYRD-120).
             from .workflow_config import unassigned_stage_owner
             return unassigned_stage_owner(cfg, state, assignee)
-        if cfg and kind != "escalation":
+        if cfg and kind not in DIRECTOR_BOUND_KINDS:
             from .workflow_config import notification_role
             return notification_role(cfg, state, assignee)
         if kind == "transition":
@@ -2380,7 +2386,7 @@ WHERE id = %s
             if state == "director_review":
                 return "director"
             return None
-        if kind == "escalation":
+        if kind in DIRECTOR_BOUND_KINDS:
             return "director"
         if state == "in_progress":
             return assignee if assignee != "unassigned" else None

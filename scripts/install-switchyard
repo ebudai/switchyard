@@ -138,6 +138,11 @@ switchyard_target_invocation_requires_root() {
     if ! classification="\$("\$SWITCHYARD_DEFAULT_TARGET" --switchyard-wrapper-requires-root "\$@" 2>/dev/null)"; then
         return 2
     fi
+    # The LAST non-empty line, not the whole capture. Anything the target prints
+    # on stdout ahead of its answer -- a notice, a warning -- used to make this
+    # unparseable, and an unparseable answer silently fell back to the verb list
+    # below (SYRD-202).
+    classification="\$(printf '%s\\n' "\$classification" | grep -v '^[[:space:]]*\$' | tail -n 1)"
     case "\$classification" in
         requires-root)
             return 0
@@ -155,19 +160,38 @@ switchyard_invocation_requires_root() {
     if [[ "\$#" -eq 0 ]]; then
         return 1
     fi
-    if switchyard_target_invocation_requires_root "\$@"; then
-        return 0
-    fi
+    # Call it, THEN read its status. Not `if ... fi` followed by `\$?`: when an
+    # `if` runs no branch its own status is 0, so the `case` below saw 0 rather
+    # than the classifier's 1 and never matched. The target's answer was
+    # discarded on every invocation and routing always came from the verb list
+    # underneath -- which is why `stop` went to root and `start` did not, for
+    # every caller, every time (SYRD-202).
+    switchyard_target_invocation_requires_root "\$@"
     case "\$?" in
+        0)
+            return 0
+            ;;
         1)
             return 1
             ;;
     esac
+    # Only reached when the target could not classify. That used to happen in
+    # silence, which is how `stop` escalated to root for a year without anyone
+    # seeing it: root is not the desktop account and is not the tenant's control
+    # bridge, so the boundary went unjournalled and the window was never closed.
+    printf 'switchyard: could not classify `switchyard %s` with %s; falling back to the built-in verb list\\n' \\
+        "\${1:-}" "\$SWITCHYARD_DEFAULT_TARGET" >&2
     case "\$1" in
         -h|--help|help|--version|version)
             return 1
             ;;
-        new|register|upgrade|add-role|set-owner-identity|set-vcs-close-role|status|validate-models|stop)
+        # `stop` and `status` are deliberately NOT here. They are exactly the
+        # verbs a tenant's control bridge runs without root, and escalating them
+        # blind sends them to root instead -- which suspends the tenant, records
+        # nothing, and cannot close a window it does not own. Unclassified, they
+        # go to the target as this user and IT decides, which is the same answer
+        # the classifier would have given (SYRD-202).
+        new|register|upgrade|add-role|set-owner-identity|set-vcs-close-role|validate-models)
             if [[ "\${2:-}" == "-h" || "\${2:-}" == "--help" ]]; then
                 return 1
             fi

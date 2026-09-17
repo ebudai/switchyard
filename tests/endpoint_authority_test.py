@@ -42,7 +42,49 @@ PRODUCTION_SOCKETS = tuple(
 #: `effective_socket_path` exists both before and after this change, so a probe
 #: through it fails on BEHAVIOUR rather than on a missing function. Reverting
 #: write_client.py alone makes the incident case below return the pgu socket.
-CLIENT_PROBE = '''
+# The client surface as the CLI actually builds it. `effective_socket_path` on a
+# bare TicketBoardWriteClient is NOT the guard: the library is documented to
+# rediscover a socket for the default URL, and it cannot tell an explicitly
+# supplied default from an absent flag -- that is a fact about its inputs, not a
+# bug to fix there. So drive main() with real argv and report the socket the
+# client it built would have written through. The write itself is intercepted.
+CLI_PROBE = '''
+import json, sys
+sys.path.insert(0, %r)
+from scripts.ticket_board import write_client as wc
+
+argv = json.loads(sys.argv[1])
+seen = {}
+
+class Stop(Exception):
+    pass
+
+def capture(self, *a, **k):
+    seen["socket"] = self.effective_socket_path
+    seen["url"] = self.board_url
+    raise Stop()
+
+wc.TicketBoardWriteClient._post = capture
+
+# Global flags precede the subcommand, and the flag is --socket.
+args = ["--caller-role", "ops"]
+if argv["board_url"] is not None:
+    args += ["--board-url", argv["board_url"]]
+if argv["socket_path"] is not None:
+    args += ["--socket", argv["socket_path"]]
+args += ["add-comment", "SYRD-1", "--text", "probe"]
+try:
+    wc.main(args)
+except Stop:
+    seen["reached"] = True
+except wc.TicketBoardWriteError as exc:
+    seen["error"] = str(exc)
+except SystemExit as exc:
+    seen.setdefault("error", f"exit {exc.code}")
+print(json.dumps(seen))
+'''
+
+PROBE = '''
 import json, sys
 sys.path.insert(0, %r)
 from scripts.ticket_board import write_client as wc
@@ -75,14 +117,15 @@ def resolve_under(env: dict, board_url=None, socket_path=None) -> dict:
     return json.loads(done.stdout.strip().splitlines()[-1])
 
 
-def client_socket_under(env: dict, board_url, socket_path) -> str | None:
+def cli_socket_under(env: dict, board_url, socket_path) -> dict:
+    """What the CLI's own client would write through, for this argv and env."""
     done = subprocess.run(
-        [sys.executable, "-c", CLIENT_PROBE % str(ROOT),
+        [sys.executable, "-c", CLI_PROBE % str(ROOT),
          json.dumps({"board_url": board_url, "socket_path": socket_path})],
         capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", **env},
     )
     assert done.returncode == 0, done.stderr
-    return json.loads(done.stdout.strip().splitlines()[-1])["socket"]
+    return json.loads(done.stdout.strip().splitlines()[-1])
 
 
 def tenant_comment_counts() -> dict:
@@ -120,19 +163,39 @@ def main() -> int:
     before = tenant_comment_counts()
     print(f"  live tenants seen: {sorted(before)}")
 
-    # 1. THE INCIDENT, through the client surface that actually chose pgu on the
-    #    day. First, deliberately: `effective_socket_path` exists before and after
-    #    this change, so reverting write_client.py fails HERE, on behaviour,
-    #    rather than later on a function that did not exist yet.
+    # 1. THE INCIDENT, through the surface that actually chose pgu on the day:
+    #    the client the CLI builds. A bare client is deliberately NOT probed --
+    #    see CLI_PROBE.
     for label, env in ENVIRONMENTS.items():
         for socket_path, how in ((None, "omitted"), ("", "emptied")):
-            chosen = client_socket_under(env, DEAD, socket_path)
+            got = cli_socket_under(env, DEAD, socket_path)
+            assert got.get("reached"), (label, how, got)
+            chosen = got["socket"]
             assert chosen not in PRODUCTION_SOCKETS, (
                 f"{label} / socket {how}: an explicit board URL chose {chosen}"
             )
-            assert chosen is None, (label, how, chosen)
+            assert chosen is None, (label, how, got)
             checks += 2
-    print("  client surface never chooses a production socket for an explicit URL")
+    print("  CLI client never chooses a production socket for an explicit URL")
+
+    # 1b. The case the library provably cannot catch, and the exact shape of the
+    #     incident: the URL the caller SUPPLIES equals the one the environment
+    #     already names. _default_socket_path sees two identical strings and is
+    #     right to discover a socket; only the CLI knows a flag was passed. If
+    #     the CLI stops saying so, this is what fails.
+    for label, env in ENVIRONMENTS.items():
+        url = env.get("TICKET_BOARD_URL") or env.get("PGU_TICKET_BOARD_URL")
+        if not url:
+            continue
+        got = cli_socket_under(env, url, None)
+        assert got.get("reached"), (label, got)
+        assert got["socket"] is None, (
+            f"{label}: --board-url {url} equalled the ambient default and still "
+            f"resolved socket {got.get('socket')}"
+        )
+        assert got["url"] == url, (label, got)
+        checks += 2
+    print("  explicitly supplying the ambient URL still yields no socket")
 
     # 1c. The same property through the new resolver, under every environment.
     for label, env in ENVIRONMENTS.items():

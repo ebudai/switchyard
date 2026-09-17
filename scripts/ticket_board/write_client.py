@@ -99,21 +99,28 @@ def _normalize_api_path(board_url: str) -> str:
 
 
 def _default_socket_path(board_url: str, environ: Mapping[str, str] = os.environ) -> str | None:
-    """The socket to use when the caller named no endpoint at all.
+    """The socket to use when the caller named no endpoint of its own.
 
-    It used to decide "did the caller pass a board URL?" by comparing the value
-    against a default that was itself read from the environment. When the
-    environment named the same URL the caller passed, an explicit `--board-url`
-    became indistinguishable from passing nothing, the socket default fired, and
-    its hard-coded fallback belonged to another project (SYRD-198).
+    This is a LIBRARY contract and it is unchanged: with the default board URL,
+    the ambient socket wins, then the runtime socket if it exists, then the
+    legacy one. Module attributes are read at call time because callers patch
+    them.
 
-    Explicitness is now decided by `resolve_endpoint` from whether the flag was
-    SUPPLIED, and this only answers the no-flags case.
+    It deliberately does NOT try to decide whether the caller "explicitly" chose
+    a URL. It cannot: a value equal to the default is indistinguishable from no
+    value here, which is exactly how SYRD-198 happened. That decision belongs to
+    `resolve_endpoint`, which sees whether the flag was supplied.
     """
-    if board_url and board_url != DEFAULT_BOARD_URL:
+    if board_url != DEFAULT_BOARD_URL:
         return None
     explicit = _env_first_from(environ, "TICKET_BOARD_SOCKET", "PGU_TICKET_BOARD_SOCKET")
-    return explicit or None
+    if explicit:
+        return explicit
+    if DEFAULT_BOARD_SOCKET and Path(DEFAULT_BOARD_SOCKET).exists():
+        return DEFAULT_BOARD_SOCKET
+    if LEGACY_BOARD_SOCKET and DEFAULT_BOARD_SOCKET != LEGACY_BOARD_SOCKET and Path(LEGACY_BOARD_SOCKET).exists():
+        return LEGACY_BOARD_SOCKET
+    return None
 
 
 class EndpointError(TicketBoardWriteError):
@@ -410,7 +417,7 @@ def _git_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
 
 @dataclass(frozen=True)
 class TicketBoardWriteClient:
-    board_url: str = ""
+    board_url: str = DEFAULT_BOARD_URL
     caller_role: str = field(default_factory=default_caller_role)
     timeout: float = 10.0
     socket_path: str | None = None
@@ -418,6 +425,11 @@ class TicketBoardWriteClient:
     write_token: str = DEFAULT_WRITE_TOKEN
     report_board_url: str = DEFAULT_REPORT_BOARD_URL
     report_token_file: str = DEFAULT_REPORT_TOKEN_FILE
+    #: "The caller named an HTTP endpoint and no socket", set only by the CLI,
+    #: which is the only layer that can see whether a flag was SUPPLIED. It is
+    #: last because for_caller() copies positionally, and it defaults to False
+    #: so every existing construction of this class resolves exactly as before.
+    socket_disabled: bool = False
 
     @property
     def api_url(self) -> str:
@@ -433,26 +445,24 @@ class TicketBoardWriteClient:
 
     @property
     def effective_socket_path(self) -> str | None:
-        # An empty string here means "explicitly no socket" and must not be
-        # allowed to fall through to a default; only None means "not stated".
-        if self.socket_path is not None:
-            return self.socket_path.strip() or None
-        if self.board_url:
-            # An explicit endpoint was chosen. Reaching for a socket now is how
-            # a write aimed at one board landed on another (SYRD-198).
+        # `socket_disabled` is the only addition, and only the CLI sets it. The
+        # resolution below is the library contract, untouched: a caller that
+        # constructs this class directly gets exactly what it always got.
+        if self.socket_disabled:
             return None
-        return _default_socket_path(self.board_url)
+        return self.socket_path or _default_socket_path(self.board_url)
 
     def for_caller(self, caller_role: str) -> "TicketBoardWriteClient":
         return TicketBoardWriteClient(
-            self.board_url,
-            caller_role,
-            self.timeout,
-            self.socket_path,
-            self.report_token,
-            self.write_token,
-            self.report_board_url,
-            self.report_token_file,
+            board_url=self.board_url,
+            caller_role=caller_role,
+            timeout=self.timeout,
+            socket_path=self.socket_path,
+            report_token=self.report_token,
+            write_token=self.write_token,
+            report_board_url=self.report_board_url,
+            report_token_file=self.report_token_file,
+            socket_disabled=self.socket_disabled,
         )
 
     def _post(self, path: str, payload: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
@@ -1378,10 +1388,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         resolved_url, resolved_socket = resolve_endpoint(args.board_url, args.socket_path)
         args.board_url, args.socket_path = resolved_url, resolved_socket
+        # The CLI knows what was SUPPLIED; the client cannot. Saying "no socket"
+        # out loud is what stops the library rediscovering one (SYRD-198).
+        socket_disabled = resolved_socket is None
         client = TicketBoardWriteClient(
             args.board_url,
             args.caller_role,
             socket_path=args.socket_path,
+            socket_disabled=socket_disabled,
             report_token=args.report_token,
             write_token=args.write_token,
             report_board_url=args.report_board_url,

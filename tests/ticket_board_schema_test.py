@@ -153,6 +153,27 @@ def queue_notification_kinds(schema_lower: str) -> set[str]:
     }
 
 
+def extract_last_function(sql: str, function_name: str) -> str:
+    """The definition that actually wins.
+
+    `extract_function` returns the FIRST occurrence, which is the right thing
+    for a schema whose base definition is the canonical one. schema.sql carries
+    more than one body for `notify_idle_turn_end_nudges`, and the LAST is the
+    one a fresh install ends up executing -- so when a migration redefines that
+    function, the last copy is what parity has to be measured against, or the
+    schema could declare one thing and run another (SYRD-194).
+    """
+    matches = list(
+        re.finditer(
+            rf"CREATE OR REPLACE FUNCTION ticket_board\.{re.escape(function_name)}\s*\(.*?\n\$\$;",
+            sql,
+            re.DOTALL,
+        )
+    )
+    assert matches, f"function ticket_board.{function_name} missing"
+    return matches[-1].group(0).strip()
+
+
 def extract_function(sql: str, function_name: str) -> str:
     match = re.search(
         rf"CREATE OR REPLACE FUNCTION ticket_board\.{re.escape(function_name)}\s*\(.*?\n\$\$;",
@@ -672,6 +693,35 @@ def main() -> int:
         turn_end_activity_migration_text,
         "notify_idle_turn_end_nudges",
     )
+    # SYRD-194: pgu948 redefines the same function to exempt the fourth
+    # notification kind, and schema.sql carries that body as its LAST copy --
+    # the one a fresh install executes. Measured against the last occurrence
+    # rather than the first, because the first is still pgu943's and both
+    # statements have to stay true: the base matches the migration that defined
+    # it, and what actually runs matches the migration that last redefined it.
+    unresolved_turn_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu948_syrd194_unresolved_turn_guard.sql"
+    ).read_text(encoding="utf-8")
+    assert "unresolved_turn" in unresolved_turn_migration_text
+    assert "turn_continuation_lease" in unresolved_turn_migration_text
+    assert extract_last_function(schema, "notify_idle_turn_end_nudges") == extract_function(
+        unresolved_turn_migration_text,
+        "notify_idle_turn_end_nudges",
+    )
+    # The guard, the lease and the predicates it rests on reach a live board only
+    # through this migration, so the bodies it ships are the schema's bodies. A
+    # partial upgrade would otherwise leave a board reporting on one definition
+    # and leasing against another.
+    for function_name in (
+        "notify_unresolved_turn_end",
+        "grant_turn_continuation",
+        "consume_turn_continuation",
+        "ticket_turn_is_resolved",
+        "turn_unresolved_identity",
+    ):
+        assert extract_function(schema, function_name) == extract_function(
+            unresolved_turn_migration_text, function_name
+        ), function_name
     # SYRD-180: the migration is the only way this reaches a live board, so its
     # bodies are the schema's bodies -- for the executor and the recovery command
     # as much as for the two new functions, because a partial upgrade would leave

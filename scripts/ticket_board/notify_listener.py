@@ -1488,6 +1488,14 @@ class PaneActivityGate:
         return self.is_busy(target)
 
 
+#: The owner's window to answer their own unresolved-turn prompt before the
+#: Director hears about it. Long enough that an ordinary forgotten turn is
+#: repaired by the person who forgot it, short enough that a genuinely stalled
+#: ticket still reaches the Director the User would otherwise have to notice
+#: for them (SYRD-203).
+UNRESOLVED_TURN_GRACE_SECONDS = 600
+
+
 class TicketBoardNotifyListener:
     def __init__(
         self,
@@ -1546,6 +1554,14 @@ class TicketBoardNotifyListener:
         self.delivered_count = 0
         self._traced_gate_defer_notifications: set[int] = set()
         self._seen_turn_end_idle_since_by_role: dict[str, str] = {}
+        # How long an owner has to answer their own repair prompt before the
+        # Director is told. Staged recovery, not dual delivery: one unresolved
+        # turn is first of all news for the person who can resolve it
+        # (SYRD-203).
+        self.unresolved_turn_grace_seconds = int(
+            os.environ.get("TICKET_BOARD_UNRESOLVED_TURN_GRACE_SECONDS", "") or
+            UNRESOLVED_TURN_GRACE_SECONDS
+        )
         self._consumed_present_idle_since_by_role: dict[str, str] = {}
         self._work_observed_at_by_role: dict[str, str] = {}
 
@@ -2177,8 +2193,9 @@ SELECT ticket_board.record_notification_trace(
         Director handoff never depends on the reminder path having anything to
         say (SYRD-193).
         """
-        if not idle_since:
-            return 0
+        # No early return on an empty map: the escalation half of this runs on
+        # ordinary passes, because "the owner never answered" is a statement
+        # about elapsed time and a silent owner ends no turns (SYRD-203).
         for role, turn_id in sorted(idle_since.items()):
             try:
                 conn.execute(
@@ -2191,8 +2208,12 @@ SELECT ticket_board.record_notification_trace(
                 )
         try:
             result = conn.execute(
-                "SELECT ticket_board.notify_unresolved_turn_end(%s::jsonb, clock_timestamp())",
-                (json.dumps(idle_since, sort_keys=True),),
+                "SELECT ticket_board.notify_unresolved_turn_end("
+                "%s::jsonb, clock_timestamp(), %s::interval)",
+                (
+                    json.dumps(idle_since, sort_keys=True),
+                    f"{self.unresolved_turn_grace_seconds} seconds",
+                ),
             )
             row = result.fetchone()
         except Exception as exc:

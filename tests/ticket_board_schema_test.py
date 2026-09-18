@@ -816,8 +816,12 @@ def main() -> int:
     # through this migration, so the bodies it ships are the schema's bodies. A
     # partial upgrade would otherwise leave a board reporting on one definition
     # and leasing against another.
+    # `notify_unresolved_turn_end` is deliberately NOT in this list any more.
+    # Parity is against the migration that last DEFINED a function, and SYRD-203
+    # redefined this one for staged recovery; the migration below still ships
+    # the body it introduced, and rewriting it to match would be rewriting
+    # history rather than recording it (pgu947 asserts the current body).
     for function_name in (
-        "notify_unresolved_turn_end",
         "grant_turn_continuation",
         "consume_turn_continuation",
         "ticket_turn_is_resolved",
@@ -873,6 +877,18 @@ def main() -> int:
         assert "ticket_board.notification_delivery_superseded(" in extract_function(
             schema, caller
         ), caller
+    # SYRD-203: the staged recovery. The function's signature changed, so the
+    # grant must name the new one -- a migration that recreated it and left the
+    # old grant behind would leave the listener unable to call it at all.
+    staged_recovery_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu947_syrd203_staged_turn_recovery.sql"
+    ).read_text(encoding="utf-8")
+    assert extract_function(schema, "notify_unresolved_turn_end") == extract_function(
+        staged_recovery_migration_text, "notify_unresolved_turn_end"
+    )
+    assert "notify_unresolved_turn_end(jsonb, timestamptz, interval)" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8")
     held_review_reconcile_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu944_syrd180_held_review_reconcile.sql"
     ).read_text(encoding="utf-8")

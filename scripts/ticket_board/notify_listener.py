@@ -2239,6 +2239,20 @@ SELECT ticket_board.record_notification_trace(
         else:
             idle_since = self._present_fresh_idle_since_by_role()
         if not idle_since:
+            # The REMINDER generator below has nothing to say without a turn
+            # end, and returning here is right for it. The unresolved-turn half
+            # is not like that: its escalation is a statement about elapsed
+            # time, and the owner it is waiting on is by definition silent, so
+            # requiring a turn end to ask about them makes it depend on the one
+            # event that cannot be assumed.
+            #
+            # SYRD-203 made `_process_unresolved_turn_end` tolerate an empty map
+            # and said so in its docstring, but left this return in front of it,
+            # so an ordinary pass never reached the code that had just been
+            # taught to handle one. Live on SYRD-206: the owner was prompted
+            # correctly, the grace expired, and the Director heard nothing until
+            # some OTHER role happened to end a turn (SYRD-207).
+            self._process_unresolved_turn_end(conn, {})
             return 0
         # The same two inputs the stall generator beside this one has taken
         # since SYRD-58. A turn ending says the previous turn finished, not that

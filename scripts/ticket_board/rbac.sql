@@ -144,7 +144,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timest
 -- lease it consults. The listener reads leases and retires them; it never
 -- grants one, because a continuation is the owner's statement, not the
 -- listener's.
-GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.consume_turn_continuation(text, text) TO ticket_board_listener;
 GRANT SELECT ON ticket_board.turn_continuation_lease TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_serial_focus_queue_wakeups(timestamptz) TO ticket_board_listener;

@@ -816,8 +816,12 @@ def main() -> int:
     # through this migration, so the bodies it ships are the schema's bodies. A
     # partial upgrade would otherwise leave a board reporting on one definition
     # and leasing against another.
+    # `notify_unresolved_turn_end` is deliberately NOT in this list any more.
+    # Parity is against the migration that last DEFINED a function, and SYRD-203
+    # redefined this one for staged recovery; the migration below still ships
+    # the body it introduced, and rewriting it to match would be rewriting
+    # history rather than recording it (pgu947 asserts the current body).
     for function_name in (
-        "notify_unresolved_turn_end",
         "grant_turn_continuation",
         "consume_turn_continuation",
         "ticket_turn_is_resolved",
@@ -873,6 +877,44 @@ def main() -> int:
         assert "ticket_board.notification_delivery_superseded(" in extract_function(
             schema, caller
         ), caller
+    # SYRD-203: the staged recovery. The function's signature changed, so the
+    # grant must name the new one -- a migration that recreated it and left the
+    # old grant behind would leave the listener unable to call it at all.
+    staged_recovery_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu950_syrd203_staged_turn_recovery.sql"
+    ).read_text(encoding="utf-8")
+    assert extract_function(schema, "notify_unresolved_turn_end") == extract_function(
+        staged_recovery_migration_text, "notify_unresolved_turn_end"
+    )
+    assert "notify_unresolved_turn_end(jsonb, timestamptz, interval)" in (
+        ROOT / "scripts" / "ticket_board" / "rbac.sql"
+    ).read_text(encoding="utf-8")
+    # CREATE OR REPLACE matches on parameter types, so adding the grace interval
+    # OVERLOADS this function rather than replacing it -- and with a default on
+    # the new parameter, a two-argument call then matches both and Postgres
+    # refuses it as ambiguous. Both the schema and the migration must drop the
+    # old signature, and the migration must restate the grant the drop removes
+    # (SYRD-203 review).
+    for text, where in ((schema, "schema.sql"),
+                        (staged_recovery_migration_text, "pgu950")):
+        assert "DROP FUNCTION IF EXISTS ticket_board.notify_unresolved_turn_end(jsonb, timestamptz);" in text, where
+    assert "GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval)" in (
+        staged_recovery_migration_text
+    )
+    # And it must sort AFTER the migration that last defined the old body:
+    # ticket-board-migrate applies these in alphabetical order, so a lower
+    # number would be overwritten by pgu948 on any clean build or replay.
+    migrations = sorted(path.name for path in
+                        (ROOT / "scripts" / "ticket_board" / "migrations").glob("pgu*.sql"))
+    assert migrations.index("pgu950_syrd203_staged_turn_recovery.sql") > migrations.index(
+        "pgu948_syrd194_unresolved_turn_guard.sql"
+    ), migrations[-4:]
+    # Only that THIS number is unused. Six older numbers are shared by two
+    # migrations each (pgu458, pgu521, pgu755, pgu759, pgu776, pgu812), so a
+    # blanket uniqueness rule would be inventing history rather than recording
+    # it; what matters is that a new migration does not land on a name that
+    # already means something else.
+    assert len([name for name in migrations if name.startswith("pgu950_")]) == 1, migrations[-6:]
     held_review_reconcile_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu944_syrd180_held_review_reconcile.sql"
     ).read_text(encoding="utf-8")

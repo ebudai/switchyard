@@ -937,14 +937,23 @@ LIMIT 1
 
             second_present_idle = listener.process_idle_turn_end_nudges(listener_conn)
             assert second_present_idle == 0, second_present_idle
-            repeated_escalation_count = listener_conn.execute(
+            # SYRD-203: the Director's side, which is what this case is about
+            # and what its name says. The owner's `unresolved_turn_repair` may
+            # legitimately be queued here: staged recovery prompts the person
+            # who can resolve the ticket on every unresolved turn end, and the
+            # Director is told only if that prompt does not work. Asserting the
+            # whole queue was empty made this case fail on the owner being
+            # helped, which is not a repeated escalation.
+            repeated_escalation_rows = listener_conn.execute(
                 """
-SELECT count(*)::int
+SELECT kind
 FROM ticket_board.ticket_notification_queue
 WHERE ticket_id = 'PGU-9001'
+  AND target_role = 'director'
+ORDER BY id
 """
-            ).fetchone()[0]
-            assert repeated_escalation_count == 0, repeated_escalation_count
+            ).fetchall()
+            assert repeated_escalation_rows == [], repeated_escalation_rows
 
         # SYRD-32 cross-layer contract: suppressing a reminder because its
         # owner started working must not spend that owner's reminder round.

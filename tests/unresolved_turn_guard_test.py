@@ -40,11 +40,23 @@ MIGRATION = (
 LISTENER = "ticket_board_listener"
 
 
-def guard(admin: str, *, role: str = "app", turn: str = "turn-1", now: str = "clock_timestamp()") -> int:
+def guard(admin: str, *, role: str = "app", turn: str = "turn-1", now: str = "clock_timestamp()",
+          grace: str = "10 minutes") -> int:
     out = t.psql(
         admin,
         "SET ROLE " + LISTENER + ";\n"
-        f"SELECT ticket_board.notify_unresolved_turn_end('{{\"{role}\": \"{turn}\"}}'::jsonb, {now});",
+        f"SELECT ticket_board.notify_unresolved_turn_end('{{\"{role}\": \"{turn}\"}}'::jsonb, "
+        f"{now}, interval '{grace}');",
+    )
+    return int(out.strip().splitlines()[-1])
+
+
+def escalation_pass(admin: str, *, now: str = "clock_timestamp()", grace: str = "0 seconds") -> int:
+    """A listener pass with no turn ending: only the staged escalation runs."""
+    out = t.psql(
+        admin,
+        "SET ROLE " + LISTENER + ";\n"
+        f"SELECT ticket_board.notify_unresolved_turn_end('{{}}'::jsonb, {now}, interval '{grace}');",
     )
     return int(out.strip().splitlines()[-1])
 
@@ -74,24 +86,36 @@ def main() -> int:
         t.psql(admin, MIGRATION)
         t.psql(
             admin,
-            f"GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz) TO {LISTENER};"
+            f"GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval) TO {LISTENER};"
             f"GRANT EXECUTE ON FUNCTION ticket_board.consume_turn_continuation(text, text) TO {LISTENER};"
             f"GRANT SELECT ON ticket_board.turn_continuation_lease TO {LISTENER};",
         )
         t.seed_postgres_ticket(admin, "PGU-1", title="App work", state="in_progress", assignee="app")
         drain(admin)
 
-        # 1. The regression: an unresolved turn end reaches the Director at once,
-        #    with no prior idle reminder and no waiting.
+        # 1. An unresolved turn end prompts the OWNER, and nobody else yet.
+        #    SYRD-203 corrected this from immediate dual delivery: telling the
+        #    Director in the same breath makes every ordinary forgotten turn an
+        #    escalation. The Director is told by the staged half below, and only
+        #    if this prompt does not work.
         assert guard(admin) == 1
-        # Two audiences, one event: the Director is told, and the owner gets its
-        # single repair prompt. The Director's copy does not depend on the owner
-        # ever reading theirs, which is the property SYRD-193 was missing.
         assert queued(admin, "PGU-1") == [
-            "unresolved_turn|director",
             "unresolved_turn_repair|app",
         ], queued(admin, "PGU-1")
         checks += 2
+
+        # 1b. Inside the grace period, nothing escalates. After it, the Director
+        #     is told once -- on an ordinary pass, because a silent owner ends no
+        #     turns and there is no second boundary to hang this on.
+        assert escalation_pass(admin, grace="10 minutes") == 0
+        assert queued(admin, "PGU-1") == ["unresolved_turn_repair|app"]
+        assert escalation_pass(admin) == 1
+        assert queued(admin, "PGU-1") == [
+            "unresolved_turn_repair|app",
+            "unresolved_turn|director",
+        ], queued(admin, "PGU-1")
+        assert escalation_pass(admin) == 0
+        checks += 5
 
         # 2. The same turn, reported again, stays silent -- and stays silent even
         #    after the queue row is gone, which is what "acknowledgement does not
@@ -102,12 +126,12 @@ def main() -> int:
         assert queued(admin, "PGU-1") == []
         checks += 3
 
-        # 3. A FRESH turn identity re-arms the guard.
+        # 3. A FRESH turn identity re-arms the guard -- the owner's prompt
+        #    first, as before.
         assert guard(admin, turn="turn-2") == 1
         assert queued(admin, "PGU-1") == [
-            "unresolved_turn|director",
             "unresolved_turn_repair|app",
-        ]
+        ], queued(admin, "PGU-1")
         drain(admin)
         checks += 2
 
@@ -228,10 +252,18 @@ def main() -> int:
             "VALUES ('PGU-1', 'escalation', 'director', 'already told', "
             "'{}'::jsonb, 'already-told:PGU-1');",
         )
-        assert guard(admin, turn="turn-already-told") == 0
-        assert [q for q in queued(admin, "PGU-1") if q.startswith("unresolved_turn")] == []
+        # SYRD-203: this used to report 0 and enqueue nothing at all, because
+        # the Director's queued escalation suppressed the whole candidate. Under
+        # staged recovery the Director's news is not the OWNER's prompt: the
+        # owner is still prompted, and it is only the Director's copy that the
+        # reminder path's escalation spares.
+        assert guard(admin, turn="turn-already-told") == 1
+        assert [q for q in queued(admin, "PGU-1") if q.startswith("unresolved_turn|")] == []
+        assert "unresolved_turn_repair|app" in queued(admin, "PGU-1"), queued(admin, "PGU-1")
+        assert escalation_pass(admin) == 0
+        assert [q for q in queued(admin, "PGU-1") if q.startswith("unresolved_turn|")] == []
         drain(admin)
-        checks += 2
+        checks += 5
 
         # ... and once that is delivered and gone, a later unresolved turn is
         # reported again: the suppression is about the same breath, not forever.

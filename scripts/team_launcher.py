@@ -9806,6 +9806,170 @@ def _drop_database_command(database: str) -> tuple[str, ...]:
     )
 
 
+#: Accounts this must never terminate, whatever a plan says. A teardown acts on
+#: ONE account -- the owner its verified plan names -- and the damage from
+#: getting that wrong is not a failed teardown but a desktop logged out or
+#: another tenant killed mid-run (SYRD-209).
+TEARDOWN_PROTECTED_USERS = frozenset({"root", "nobody"})
+#: Below this, an account belongs to the distribution rather than to a tenant.
+#: `useradd` gives ordinary accounts uids from 1000 up, and a teardown that
+#: would `userdel` anything under that is aimed at the wrong machine.
+TEARDOWN_MINIMUM_OWNER_UID = 1000
+
+
+def owner_removal_refusal(
+    owner_user: str,
+    *,
+    caller: str = "",
+    uid_lookup: Callable[[str], int | None] = uid_for_user,
+    desktop_approval: Callable[[], Mapping[str, str]] | None = None,
+) -> str:
+    """Why this account must not be terminated and removed, or "".
+
+    Asked before anything runs, so a refusal costs nothing and a dry-run shows
+    it. The account is already the one the verified plan names; these are the
+    checks that catch a plan aimed at the wrong account in the first place --
+    the caller's own login, the desktop operator whose session would go with it,
+    a system account, or root.
+    """
+    owner = (owner_user or "").strip()
+    if not owner:
+        return "the teardown plan names no owner account, so there is nothing to remove"
+    if owner in TEARDOWN_PROTECTED_USERS:
+        return f"{owner} is a system account and is never removed by a tenant teardown"
+    invoking = (caller or current_user_name() or "").strip()
+    # SUDO_USER, because this runs as root through sudo and `current_user_name()`
+    # is then root: the person to protect is the one who typed the command.
+    behind_sudo = str(os.environ.get("SUDO_USER", "") or "").strip()
+    for name, what in ((invoking, "the account running this teardown"),
+                       (behind_sudo, "the account that invoked this teardown")):
+        if name and owner == name:
+            return (
+                f"{owner} is {what}; removing it would end the session running the removal"
+            )
+    # Resolved at call time rather than as a default: this function is defined
+    # above the approval reader, and binding it here would be an import-order
+    # accident waiting to become a NameError.
+    read_approval = desktop_approval or read_host_desktop_approval
+    try:
+        approval = dict(read_approval() or {})
+    except Exception:  # noqa: BLE001 - an unreadable approval record protects nothing
+        approval = {}
+    operator = str(approval.get("gui_user", "") or "").strip()
+    if operator and owner == operator:
+        return (
+            f"{owner} is this host's approved desktop operator; a tenant teardown does not "
+            "remove the person running the desktop"
+        )
+    uid = uid_lookup(owner)
+    if uid is not None and uid < TEARDOWN_MINIMUM_OWNER_UID:
+        return (
+            f"{owner} has uid {uid}, below the {TEARDOWN_MINIMUM_OWNER_UID} an ordinary tenant "
+            "account is given; this plan is aimed at a system account"
+        )
+    return ""
+
+
+def _owner_removal_actions(owner_user: str) -> list["SwitchyardTeardownAction"]:
+    """Disable linger, end the owner's session, then remove the account.
+
+    In that order, and all of it, because `userdel` alone does not do this job.
+    A tenant owner with linger enabled keeps a systemd --user manager running
+    with sd-pam, PipeWire, WirePlumber and a session D-Bus under it; userdel
+    refuses an account whose processes are still running, and the teardown that
+    produced SYRD-209 tore down everything else and then left the account -- and
+    its linger -- behind, so the next `switchyard new` for the same slug met an
+    existing owner.
+
+    Every step tolerates its own absence, because a teardown must be resumable
+    after a partial one: linger that was never enabled, a manager that is not
+    running, and an account already gone are all states this can be run from.
+    """
+    quoted = shlex.quote(owner_user)
+    linger = (
+        f"if id -u {quoted} >/dev/null 2>&1; then "
+        f"loginctl disable-linger {quoted} 2>/dev/null || true; "
+        "else echo 'account already absent; nothing to unlinger'; fi"
+    )
+    # The manager first by unit, then the session by user: stopping
+    # user@UID.service takes the manager and everything under it, and
+    # terminate-user catches a session that was started another way. Neither is
+    # an error when there is nothing to stop.
+    end_session = (
+        f"if id -u {quoted} >/dev/null 2>&1; then "
+        f"owner_uid=$(id -u {quoted}); "
+        'systemctl stop "user@${owner_uid}.service" 2>/dev/null || true; '
+        f"loginctl terminate-user {quoted} 2>/dev/null || true; "
+        'systemctl stop "user-runtime-dir@${owner_uid}.service" 2>/dev/null || true; '
+        "else echo 'account already absent; no session to end'; fi"
+    )
+    # Bounded, and it says what it is waiting for. A fixed sleep either wastes
+    # the time or does not wait long enough, and neither reports what was still
+    # running when it gave up.
+    settle = (
+        f"if ! id -u {quoted} >/dev/null 2>&1; then echo 'account already absent'; exit 0; fi; "
+        "for _ in $(seq 1 50); do "
+        f"pgrep -u {quoted} >/dev/null 2>&1 || exit 0; sleep 0.2; done; "
+        f"echo \"processes still running as {owner_user} after waiting:\" >&2; "
+        f"ps -o pid=,comm= -u {quoted} >&2; exit 1"
+    )
+    remove = (
+        f"if id -u {quoted} >/dev/null 2>&1; then userdel {quoted}; "
+        "else echo 'account already absent'; fi"
+    )
+    return [
+        SwitchyardTeardownAction(
+            f"disable linger for owner {owner_user}",
+            _bash_action(linger),
+        ),
+        SwitchyardTeardownAction(
+            f"stop the systemd user manager and session for {owner_user}",
+            _bash_action(end_session),
+        ),
+        SwitchyardTeardownAction(
+            f"wait for {owner_user}'s remaining processes to exit",
+            _bash_action(settle),
+        ),
+        SwitchyardTeardownAction(
+            f"remove owner user account {owner_user}",
+            _bash_action(remove),
+        ),
+    ]
+
+
+def owner_removal_residue(
+    owner_user: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[str]:
+    """What is still there after the removal ran. Empty means it worked.
+
+    Read back from the machine rather than inferred from exit statuses: the
+    whole of SYRD-209 is a teardown that reported success over an account that
+    was still in /etc/passwd, still lingering, and still running a user manager.
+    """
+    residue: list[str] = []
+    quoted = shlex.quote(owner_user)
+    account = runner(["bash", "-lc", f"getent passwd {quoted} || true"],
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    entry = str(getattr(account, "stdout", "") or "").strip()
+    if entry:
+        residue.append(f"the account still exists: {entry.splitlines()[0]}")
+    linger = runner(["bash", "-lc", f"loginctl show-user {quoted} -p Linger --value 2>/dev/null || true"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    if str(getattr(linger, "stdout", "") or "").strip().lower() == "yes":
+        residue.append(f"linger is still enabled for {owner_user}")
+    processes = runner(["bash", "-lc", f"ps -o pid=,comm= -u {quoted} 2>/dev/null || true"],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    running = [line.strip() for line in str(getattr(processes, "stdout", "") or "").splitlines() if line.strip()]
+    if running:
+        residue.append(
+            f"{len(running)} process(es) still running as {owner_user}: "
+            + ", ".join(running[:6]) + (" ..." if len(running) > 6 else "")
+        )
+    return residue
+
+
 def _switchyard_teardown_actions(
     plan: ProjectBoardProvision,
     *,
@@ -9895,12 +10059,11 @@ def _switchyard_teardown_actions(
             )
         )
     if remove_owner_user:
-        actions.append(
-            SwitchyardTeardownAction(
-                f"remove owner user account {plan.owner_user}",
-                ("userdel", plan.owner_user),
-            )
-        )
+        # Four steps, in this order, rather than one `userdel`. The account this
+        # removes has linger enabled and a systemd --user manager running under
+        # it; userdel refuses a busy account, and the run that produced SYRD-209
+        # removed every other trace and left this one behind (SYRD-209).
+        actions.extend(_owner_removal_actions(plan.owner_user))
     return tuple(actions)
 
 
@@ -10026,6 +10189,11 @@ def switchyard_teardown_command(
             remove_owner_user=remove_owner_user,
         ),
     )
+    # Asked before the plan is printed and before anything runs, so a dry run
+    # shows the refusal and a real run costs nothing to refuse. One account is
+    # in scope -- the one this verified plan names -- and these are the checks
+    # that catch a plan aimed somewhere else (SYRD-209).
+    owner_refusal = owner_removal_refusal(plan.owner_user) if remove_owner_user else ""
     _print_teardown_plan(
         teardown,
         dry_run=dry_run,
@@ -10035,8 +10203,12 @@ def switchyard_teardown_command(
         remove_owner_user=remove_owner_user,
         print_func=print_func,
     )
+    if owner_refusal:
+        print_func(f"switchyard: owner removal refused: {owner_refusal}")
     if dry_run:
         return 0
+    if owner_refusal:
+        raise SystemExit(f"switchyard: refusing to remove the owner account: {owner_refusal}")
     if registered_healthy and not destroy_registered_tenant:
         raise SystemExit(
             f"switchyard: refusing to tear down registered launchable tenant {plan.project!r}; "
@@ -10054,6 +10226,21 @@ def switchyard_teardown_command(
         )
     _confirm_teardown_project(plan.project, confirmation=confirm, input_func=input_func)
     _run_teardown_actions(teardown.actions, runner=runner, print_func=print_func)
+    # Read back from the machine before claiming this worked. Every action
+    # exiting zero is not the same fact as the account being gone, and the
+    # incident this fixes is a teardown that reported success over an owner
+    # that still existed, still lingered, and still had a user manager running
+    # (SYRD-209).
+    if remove_owner_user:
+        residue = owner_removal_residue(plan.owner_user, runner=runner)
+        if residue:
+            message = [
+                f"switchyard: teardown did NOT remove {plan.owner_user}; "
+                f"{plan.project} is not safe to recreate under the same slug.",
+            ]
+            message.extend(f"  - {item}" for item in residue)
+            raise SystemExit("\n".join(message))
+        print_func(f"switchyard: owner account {plan.owner_user} removed; no residue")
     print_func(f"switchyard: teardown complete for {plan.project}")
     return 0
 

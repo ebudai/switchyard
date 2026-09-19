@@ -11667,6 +11667,26 @@ def agent_cli_promoter_path() -> Path:
     return _repo_root() / "scripts" / AGENT_CLI_PROMOTER_NAME
 
 
+def _host_wide_agent_cli_state(
+    cli: str, *, which: Callable[..., str | None]
+) -> tuple[object, ...] | None:
+    """What the host-wide copy of this CLI is right now, or None if there is none.
+
+    Enough to tell "the same file" from "a different one" across a privileged
+    step: the path it resolves to, the inode it lands on, its size and its
+    mtime. Read rather than assumed, because the whole point is to stop
+    describing a filesystem nobody looked at.
+    """
+    path = which(agent_cli_binary(cli), path=DEFAULT_PANE_BASE_PATH)
+    if not path:
+        return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
 def promote_agent_cli_through_sudo(
     cli: str,
     source: str | Path,
@@ -11761,17 +11781,28 @@ def promote_agent_cli_through_sudo(
         "--",
         str(program), cli, str(resolved), "--project", project,
     ]
+    # Looked at before and after, because a nonzero exit from the WRAPPER does
+    # not say where it failed. The recorder can start the promoter, the promoter
+    # can replace the CLI, and the recorder can then fail closing its journal --
+    # at which point the host has changed and a flat "nothing was installed"
+    # is false (SYRD-211 DAT rejection 5).
+    before = _host_wide_agent_cli_state(cli, which=which)
     result = runner(command)
     code = int(getattr(result, "returncode", 1) or 0)
     if code != 0:
-        # The privileged side leaves any existing host-wide copy in place on
-        # every failure path, so this claim is one the filesystem supports. It
-        # did not before, and the message said otherwise (SYRD-211 DAT
-        # rejection 1).
+        after = _host_wide_agent_cli_state(cli, which=which)
+        if after == before:
+            raise AgentCliUnavailable(
+                f"switchyard: promoting {cli} failed (exit {code}); no host-wide copy was "
+                "installed and any existing one is untouched. The attempt is in the rollout "
+                "journal"
+            )
+        where = after[0] if after else "nowhere it resolves from"
         raise AgentCliUnavailable(
-            f"switchyard: promoting {cli} failed (exit {code}); no host-wide copy was "
-            "installed and any existing one is untouched. The attempt is in the rollout "
-            "journal"
+            f"switchyard: promoting {cli} failed (exit {code}), but the host-wide {cli} "
+            f"CHANGED while it ran: it is now {where}. The promotion itself may have "
+            "completed and the journal may not have, so check that copy and the rollout "
+            "journal before relying on either"
         )
     verdict = classify_agent_cli(cli, which=which)
     if not verdict.serves_a_new_owner:

@@ -120,7 +120,10 @@ def _grant(layout: dict[str, Path], project: str, *, operator: str, owner: str) 
     return grant
 
 
-def _recorder(layout: dict[str, Path], journal: Path, *, exit_code: int | None = None) -> Path:
+def _recorder(
+    layout: dict[str, Path], journal: Path, *,
+    exit_code: int | None = None, after_child: int | None = None,
+) -> Path:
     """The rollout recorder the promotion runs THROUGH.
 
     By default this is the shipped program, copied where a release installs it,
@@ -131,6 +134,20 @@ def _recorder(layout: dict[str, Path], journal: Path, *, exit_code: int | None =
     breaking it.
     """
     recorder = layout["opt"] / "current" / "scripts" / "switchyard-record-rollout"
+    if after_child is not None:
+        # Runs the real promoter to completion, then fails the way closing a
+        # journal can: the host is already changed by the time this exits.
+        recorder.write_text(
+            "#!/bin/sh\n"
+            'while [ "$1" != "--" ]; do shift; done\n'
+            "shift\n"
+            '"$@"\n'
+            "echo simulated-journal-close-failure\n"
+            f"exit {after_child}\n",
+            encoding="utf-8",
+        )
+        recorder.chmod(0o755)
+        return recorder
     if exit_code is None:
         shutil.copyfile(ROOT / "scripts" / "switchyard-record-rollout", recorder)
         # The recorder imports the journal package from beside itself.
@@ -173,6 +190,10 @@ def _sudo_shim(
         f'  mount --bind "{layout["grants"]}" /usr/local/lib/switchyard || exit 96\n'
         f'  mount --bind "{layout["opt"]}" /opt/switchyard || exit 95\n'
         f"  SUDO_UID={operator_uid} export SUDO_UID\n"
+        # Production sudo supplies both; the journal resolves the operator from
+        # SUDO_USER, so a shim that sets only SUDO_UID records nobody and the
+        # attribution requirement goes unproven.
+        f"  SUDO_USER={pwd.getpwuid(operator_uid).pw_name} export SUDO_USER\n"
         f'  SWITCHYARD_ROLLOUT_JOURNAL_ROOT="{layout["journal"]}" '
         "export SWITCHYARD_ROLLOUT_JOURNAL_ROOT\n"
         f"  {prelude}\n"
@@ -382,6 +403,16 @@ def test_an_unprivileged_operator_completes_a_real_promotion() -> None:
         check("claude" in recorded, f"and names the CLI: {recorded[:300]}")
         check("promoted" in recorded,
               f"keeping what the promoter actually printed: {recorded[:300]}")
+        # Attribution is the point of a boundary record, so it is read from the
+        # journal rather than assumed from an attempt existing at all.
+        check(f'"operator": "{SANDBOX_OPERATOR_USER}"' in recorded,
+              f"the operator is named: {recorded[:400]}")
+        check(f'"operator_uid": {SANDBOX_OPERATOR_UID}' in recorded,
+              f"by uid as well as name: {recorded[:400]}")
+        check('"operator_source": "sudo"' in recorded,
+              f"and how it was resolved: {recorded[:400]}")
+        check("no operator recorded" not in recorded,
+              f"the crossing did not record an anonymous operator: {recorded[:400]}")
 
 
 def _leftovers(bin_dir: Path) -> list[str]:
@@ -640,6 +671,64 @@ def test_a_source_the_operator_cannot_read_is_never_opened_by_root() -> None:
               "and its bytes were not published either")
 
 
+def test_a_journal_that_fails_AFTER_the_promoter_is_not_reported_as_no_change() -> None:
+    """A nonzero wrapper exit does not say WHERE it failed.
+
+    The recorder can start the promoter, the promoter can replace the CLI, and
+    the recorder can then fail closing its journal. Reporting "no host-wide copy
+    was installed and any existing one is untouched" there is false, and it was
+    (SYRD-211 DAT rejection 5). The pre-child case below still proves the other
+    half: when the wrapper never reaches the promoter, nothing changed.
+    """
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped post-child journal failure: {unavailable})")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-closefail.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        _recorder(layout, root / "journal.txt", after_child=42)
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+
+        sentinel = layout["bin"] / "claude"
+        _fake_cli(sentinel, "claude GOOD 1.0")
+        before = sentinel.read_bytes()
+        source = root / "candidate"
+        _fake_cli(source, "claude NEW 2.0")
+
+        def which(binary, path=None):
+            candidate = layout["bin"] / binary
+            return str(candidate) if candidate.exists() else None
+
+        try:
+            launcher.promote_agent_cli_through_sudo(
+                "claude", source, project="test",
+                sudo_bin=str(_sudo_shim(root, layout)),
+                helper=layout["helper"],
+                recorder_path=layout["opt"] / "current" / "scripts" / "switchyard-record-rollout",
+                helper_owner_uid=os.getuid(), helper_boundary=root,
+                which=which, print_func=lambda _l: None,
+            )
+        except launcher.AgentCliUnavailable as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("a nonzero wrapper result must not read as success")
+
+        # The promoter really did replace it -- that is the situation being
+        # described, so the description has to match it.
+        check(sentinel.read_bytes() != before,
+              "the promoter completed and the host-wide copy changed")
+        check(b"NEW 2.0" in sentinel.read_bytes(),
+              f"it is the candidate: {sentinel.read_bytes()[:60]!r}")
+        check("any existing one is untouched" not in message,
+              f"and the report does NOT claim otherwise: {message}")
+        check("CHANGED while it ran" in message,
+              f"it says the host changed: {message}")
+        check("journal may not have" in message,
+              f"and which half is in doubt: {message}")
+
+
 def test_a_promotion_that_names_no_tenant_is_refused() -> None:
     """The journal entry is opened against a project, so there has to be one."""
     crossed: list[list[str]] = []
@@ -720,13 +809,34 @@ def test_no_mutation_happens_when_the_journal_cannot_be_opened() -> None:
         source = root / "candidate"
         _fake_cli(source, "claude 2.0")
 
-        result = _through_recorder(root, layout, "claude", str(source))
-        check(result.returncode != 0,
-              f"a recorder that fails is a failed promotion: {result.returncode}")
+        def which(binary, path=None):
+            candidate = layout["bin"] / binary
+            return str(candidate) if candidate.exists() else None
+
+        try:
+            launcher.promote_agent_cli_through_sudo(
+                "claude", source, project="test",
+                sudo_bin=str(_sudo_shim(root, layout)),
+                helper=layout["helper"],
+                recorder_path=layout["opt"] / "current" / "scripts" / "switchyard-record-rollout",
+                helper_owner_uid=os.getuid(), helper_boundary=root,
+                which=which, print_func=lambda _l: None,
+            )
+        except launcher.AgentCliUnavailable as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("a recorder that fails is a failed promotion")
         check(sentinel.read_bytes() == before,
               "the existing host-wide copy is untouched")
         check(_leftovers(layout["bin"]) == [],
               f"and nothing was left staged: {_leftovers(layout['bin'])}")
+        # The other half of the pair: when the host really did not change, the
+        # report says so -- which is only worth anything because it is read from
+        # the filesystem rather than assumed from the exit status.
+        check("any existing one is untouched" in message,
+              f"and the report says so: {message}")
+        check("CHANGED while it ran" not in message,
+              f"without claiming a change that did not happen: {message}")
 
 
 def test_the_privileged_half_refuses_what_it_should() -> None:

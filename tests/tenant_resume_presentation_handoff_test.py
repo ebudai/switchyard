@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -445,11 +446,23 @@ def test_the_privileged_helper_accepts_the_viewer_target_and_nothing_else_new() 
 def test_launch_project_on_auto_non_kde_emits_the_viewer_handoff() -> None:
     """Driven through `launch_project` itself, because the branch is the bug.
 
+    Run for BOTH routes into the viewer. A tenant with presentation state goes
+    through the presentation controller, and that route never handed anything
+    back -- which is the one the preserved Zorin tenant takes, having been
+    launched many times before (SYRD-211 live UAT).
+
     The previous candidate added the handoff only to the separate branch, and a
     test that calls the handoff helper directly cannot tell the difference. This
     resolves the layout the way the product does -- auto, on a desktop that is
     not KDE -- and reads what came out of the bridge descriptor.
     """
+    import subprocess as _sp
+
+    for with_presentation in (False, True):
+        _viewer_handoff_once(with_presentation)
+
+
+def _viewer_handoff_once(with_presentation: bool) -> None:
     import subprocess as _sp
 
     read_fd, write_fd = os.pipe()
@@ -469,8 +482,7 @@ def test_launch_project_on_auto_non_kde_emits_the_viewer_handoff() -> None:
                 encoding="utf-8",
             )
             config_path = tmp_path / "porter.json"
-            config_path.write_text(
-                json.dumps({
+            document = {
                     # Headless here on purpose: the branch under test is the
                     # bridged VIEWER path, which does not consult the desktop
                     # policy, and a wayland policy would pull this fixture into
@@ -485,9 +497,12 @@ def test_launch_project_on_auto_non_kde_emits_the_viewer_handoff() -> None:
                          "target": "porter-ops:0.0",
                          "workdir": str(repo / "worktrees" / "ops")},
                     ],
-                }) + "\n",
-                encoding="utf-8",
-            )
+            }
+            if with_presentation:
+                # What a tenant launched before carries, and what sends it
+                # through the presentation controller's viewer route.
+                document["presentation"] = {"slots": {}}
+            config_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
             config = launcher.load_project_config("porter", config_path)
 
             # A desktop that is not KDE, so `auto` resolves to the viewer.
@@ -544,11 +559,12 @@ def test_launch_project_on_auto_non_kde_emits_the_viewer_handoff() -> None:
                 except OSError:
                     pass
 
-    check(raw, f"the viewer branch wrote a handoff: {said[-3:]}")
+    check(raw,
+          f"the viewer branch wrote a handoff (presentation={with_presentation}): {said[-3:]}")
     payload = json.loads(raw.splitlines()[0])
     check(payload["project"] == "porter", f"for this tenant: {payload}")
     check(payload["layout"] == launcher.LAYOUT_MODE_VIEWER,
-          f"and says it is the viewer layout: {payload}")
+          f"and says it is the viewer layout (presentation={with_presentation}): {payload}")
     check(payload["slot_count"] == 1,
           f"with one thing for the caller to show: {payload}")
     check("switchyard-display-attach" in payload["pane_program"],
@@ -840,6 +856,154 @@ def test_a_hostile_staged_helper_is_refused_rather_than_restaged() -> None:
                   f"for its shape, not its age: {str(exc)[:160]}")
         else:
             raise AssertionError("a world-writable staged helper must stop the launch")
+
+
+def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
+    """Owner -> root -> caller -> a process, observed as a process.
+
+    Every case so far stopped at a payload or a layout document. Live UAT shows
+    why that is not enough: the protocol half worked, the panes attached, and
+    the thing that never happened was the last one -- a window. So this drives
+    `complete_desktop_presentation`, which is what the outer caller runs, and
+    watches what it tries to start.
+    """
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    import pwd as _pwd
+
+    bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tenant_control_launch")
+    me = _pwd.getpwuid(os.getuid()).pw_name
+    handoff_file = (
+        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
+        / "syrd-presentation-handoff.json"
+    )
+    launched: list[list[str]] = []
+
+    class _Started:
+        """Stands in for the window process, answering what the launcher asks."""
+
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    def process_launcher(args, **_kwargs):
+        launched.append(list(args))
+        return _Started()
+
+    # 1. the owner half, bridged on an auto/non-KDE layout, writes the payload
+    owner_payload = launcher.render_presentation_handoff(
+        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        slot_titles=["Syrd"], window_title="Syrd",
+        layout=launcher.LAYOUT_MODE_VIEWER,
+    )
+    # 2. root validates and republishes it where the caller can read it
+    if handoff_file.exists():
+        handoff_file.unlink()
+    bridge.publish_handoff("syrd", json.dumps(owner_payload), caller=me)
+    check(handoff_file.is_file(), "root published the handoff for this caller")
+
+    saved_grant = launcher._tenant_control_grant
+    launcher._tenant_control_grant = lambda _p, **_k: {
+        "project": "syrd", "owner": "syrd-agent", "authorized_user": me
+    }
+    said: list[str] = []
+    try:
+        # 3. the caller opens it
+        code = launcher.complete_desktop_presentation(
+            "syrd", caller=me,
+            runner=lambda args, **_k: subprocess.CompletedProcess(list(args), 0),
+            process_launcher=process_launcher,
+            print_func=said.append,
+        )
+    finally:
+        launcher._tenant_control_grant = saved_grant
+        if handoff_file.exists():
+            handoff_file.unlink()
+
+    check(code == 0, f"the caller reported success: {code} {said}")
+    check(launched, f"and actually started something: {said}")
+    argv = launched[0]
+    check(any("konsole" in token.lower() for token in argv),
+          f"a terminal window: {argv[:3]}")
+    layout_arg = next(
+        (token for token in argv if token.endswith("presentation-layout.json")), ""
+    )
+    check(layout_arg, f"built from a layout it wrote: {argv}")
+    document = json.loads(Path(layout_arg).read_text(encoding="utf-8"))
+    leaves = launcher._layout_leaves(document)
+    check(len(leaves) == 1, f"one tab, because the handoff said viewer: {len(leaves)}")
+    command = leaves[0]["Command"]
+    check(command.rstrip().endswith("viewer"),
+          f"and it asks the staged helper for the viewer: {command[-70:]}")
+    check("syrd-display-" not in command,
+          f"never a per-slot display session: {command}")
+
+
+def test_a_viewer_launch_that_cannot_hand_back_says_so() -> None:
+    """The silence is as much the defect as the missing window.
+
+    Live UAT returned to the shell with no window AND no complaint. The caller
+    could not tell whether this tenant has one; the owner half always can -- it
+    knows it is bridged and knows whether it was given a descriptor -- so it is
+    the side that speaks. Driven through `launch_project` rather than asserted
+    against the source text, because a source assertion passes while the line
+    it names is unreachable.
+    """
+    import subprocess as _sp
+
+    saved_desktop = launcher.detected_invoking_desktop
+    said: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="syrd211-nohandoff.") as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            (repo / "worktrees" / "ops").mkdir(parents=True)
+            layout_file = tmp_path / "layout.json"
+            layout_file.write_text(
+                json.dumps(launcher._new_project_layout_payload(1)) + "\n", encoding="utf-8"
+            )
+            config_path = tmp_path / "porter.json"
+            config_path.write_text(
+                json.dumps({
+                    "desktop_access": {"mode": "headless"},
+                    "project": "porter",
+                    "run_as_user": launcher.current_user_name(),
+                    "layout": str(layout_file),
+                    "repository": str(repo),
+                    "roles": [
+                        {"role": "ops", "slot": 0, "cli": ["codex"],
+                         "target": "porter-ops:0.0",
+                         "workdir": str(repo / "worktrees" / "ops")},
+                    ],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            config = launcher.load_project_config("porter", config_path)
+            launcher.detected_invoking_desktop = lambda **_k: "X-Cinnamon"
+
+            def ok(args, **_kwargs):
+                return _sp.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+            # Bridged, and given NO descriptor to answer on.
+            with _Bridged(handoff_fd=None):
+                try:
+                    launcher.launch_project(
+                        config, config_path=config_path, mode="start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=ok, layout_output=tmp_path / "layout-output.json",
+                        layout_mode="auto", print_func=said.append,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    said.append(f"(launch raised {type(exc).__name__}: {exc})")
+    finally:
+        launcher.detected_invoking_desktop = saved_desktop
+
+    warned = [line for line in said if "no way to hand its window back" in line]
+    check(warned, f"the owner half says nobody will open a window: {said[-4:]}")
+    check(warned[0].startswith("warning:"), f"as a warning: {warned[0][:70]}")
+    check("porter" in warned[0], f"naming the tenant: {warned[0]}")
 
 
 def main() -> int:

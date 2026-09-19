@@ -8783,26 +8783,39 @@ def launch_project(
                 window_title=window_title,
                 runner=role_process_runner,
             )
-            if launch_result == 0 and running_through_tenant_control():
-                # The viewer is one tiled session holding every role, and it is
-                # detached: the owner account cannot display it and there are no
-                # per-slot display sessions to open tabs on. So the caller is
-                # told it is a viewer and shown one tab. Live Zorin resolves the
-                # auto layout to this on a non-KDE desktop, and the handoff was
-                # only ever emitted on the other branch (SYRD-211 live UAT).
-                hand_presentation_back_to_the_caller(
-                    config,
-                    slot_count=1,
-                    window_title=window_title,
-                    layout=LAYOUT_MODE_VIEWER,
-                    slot_titles=[window_title or project_window_title(config)],
-                    pane_program=Path(display_attach_helper_path(config.project)),
-                    print_func=print_func,
-                )
         elif viewer_roles:
             launch_result = 1
         else:
             launch_result = 0
+        if launch_result == 0 and running_through_tenant_control():
+            # After the whole chain, not inside one arm of it. The viewer is
+            # reached two ways -- through the presentation controller when this
+            # tenant has presentation state, and directly when it does not --
+            # and the first of those never handed anything back. Live Zorin took
+            # exactly that one: every pane attached, the command returned, and
+            # no window and no complaint (SYRD-211 live UAT).
+            #
+            # The viewer is one tiled session holding every role, and it is
+            # detached: this account cannot display it and there are no per-slot
+            # display sessions to open tabs on. So the caller is told it is a
+            # viewer and shown one tab.
+            if not hand_presentation_back_to_the_caller(
+                config,
+                slot_count=1,
+                window_title=window_title,
+                layout=LAYOUT_MODE_VIEWER,
+                slot_titles=[window_title or project_window_title(config)],
+                pane_program=Path(display_attach_helper_path(config.project)),
+                print_func=print_func,
+            ):
+                # Said rather than swallowed. This account has no screen, so a
+                # handoff that cannot be made means nobody is going to open a
+                # window and nothing downstream will notice.
+                print_func(
+                    f"warning: switchyard: {config.project}'s panes are up, but this "
+                    "invocation was given no way to hand its window back, so none will "
+                    "open. Run it again from the session that owns the screen"
+                )
     else:
         ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
         if use_runtime_presentation:

@@ -1740,8 +1740,87 @@ def tmux_viewer_split_window_args(viewer_session: str, role: RoleConfig) -> list
     return ["tmux", "split-window", "-t", f"{viewer_session}:0", "-c", role.workdir, command]
 
 
-def tmux_viewer_select_layout_args(viewer_session: str) -> list[str]:
-    return ["tmux", "select-layout", "-t", f"{viewer_session}:0", "tiled"]
+def _tmux_layout_checksum(layout: str) -> int:
+    """tmux's own 16-bit layout checksum, which it refuses a layout without."""
+    value = 0
+    for character in layout:
+        value = (value >> 1) + ((value & 1) << 15)
+        value = (value + ord(character)) & 0xFFFF
+    return value
+
+
+def _tmux_layout_spans(total: int, parts: int) -> list[int]:
+    """`parts` sizes across `total` cells, one cell per divider between them.
+
+    The remainder goes to the leftmost or topmost, which is what tmux does and
+    is why a five-pane bottom row reads as two equal halves rather than one
+    short one.
+    """
+    base, extra = divmod(total - (parts - 1), parts)
+    return [base + (1 if index < extra else 0) for index in range(parts)]
+
+
+def viewer_grid(panes: int) -> tuple[int, int]:
+    """Columns and rows for `panes` viewer panes on a landscape window.
+
+    tmux's own `tiled` grows rows before columns, so five panes come out two
+    columns by three rows: every pane unnecessarily narrow, and the shape of an
+    empty sixth cell where the last row is short. On the wide window a desktop
+    viewer always gets, that is backwards. Taking the rows from the integer
+    square root and the columns from what is left inverts it -- five panes
+    become three columns by two rows, which is the presentation Switchyard has
+    always described: the first row across the top, the rest across the bottom
+    (SYRD-216).
+    """
+    if panes < 1:
+        raise ValueError("a viewer needs at least one pane")
+    rows = max(1, math.isqrt(panes))
+    return (-(-panes // rows), rows)
+
+
+def viewer_layout_string(panes: int, *, width: int, height: int) -> str:
+    """An explicit tmux layout for `panes` panes in a `width` x `height` window.
+
+    Written out rather than asked for by name because tmux has no named layout
+    with this shape. Panes are filled row-major in pane order, so slot order
+    reads left to right and then down, and a short last row spreads across the
+    whole width instead of leaving a gap.
+    """
+    columns, _ = viewer_grid(panes)
+    per_row = [min(columns, panes - start) for start in range(0, panes, columns)]
+    heights = _tmux_layout_spans(height, len(per_row))
+    rows: list[str] = []
+    top = 0
+    pane = 0
+    for count, row_height in zip(per_row, heights):
+        cells = []
+        left = 0
+        for cell_width in _tmux_layout_spans(width, count):
+            cells.append(f"{cell_width}x{row_height},{left},{top},{pane}")
+            left += cell_width + 1
+            pane += 1
+        if count > 1:
+            rows.append(f"{width}x{row_height},0,{top}" + "{" + ",".join(cells) + "}")
+        else:
+            # A row holding one pane IS that pane: there is nothing for a
+            # side-by-side container to arrange, and tmux writes none either.
+            rows.append(f"{width}x{row_height},0,{top},{pane - 1}")
+        top += row_height + 1
+    # The stack around the rows is written even when there is one of them:
+    # tmux reads a container holding a single child exactly as it reads the
+    # child, so there is no case to split here.
+    body = f"{width}x{height},0,0[" + ",".join(rows) + "]"
+    return f"{_tmux_layout_checksum(body):04x},{body}"
+
+
+def tmux_viewer_select_layout_args(viewer_session: str, panes: int) -> list[str]:
+    return [
+        "tmux",
+        "select-layout",
+        "-t",
+        f"{viewer_session}:0",
+        viewer_layout_string(panes, width=DEFAULT_VIEWER_COLUMNS, height=DEFAULT_VIEWER_ROWS),
+    ]
 
 
 def tmux_viewer_set_status_args(viewer_session: str) -> list[str]:
@@ -1803,7 +1882,7 @@ def launch_tmux_viewer_session(
         if proc.returncode != 0:
             return int(proc.returncode)
     for args in (
-        tmux_viewer_select_layout_args(viewer_session),
+        tmux_viewer_select_layout_args(viewer_session, len(roles)),
         tmux_viewer_set_status_args(viewer_session),
         tmux_viewer_set_titles_args(viewer_session),
         tmux_viewer_set_titles_string_args(viewer_session, window_title or viewer_session),

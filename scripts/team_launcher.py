@@ -693,7 +693,7 @@ def worker_pool_preflight(
                 True,
                 "runtime",
                 f"{pool.runtime} is not installed for owner user {owner}; "
-                f"{_missing_cli_install_clause(pool.runtime, owner)}",
+                f"{_missing_cli_install_clause(pool.runtime)}",
             )
         )
     else:
@@ -11638,6 +11638,112 @@ def _promote_or_report(
     return promote(cli, source, which=which, print_func=print_func)
 
 
+def resolvable_agent_cli_promotions(
+    *,
+    which: Callable[..., str | None] = shutil.which,
+) -> list[AgentCliAvailability]:
+    """Agent CLIs this operator has privately and no tenant owner can reach.
+
+    Deliberately asked of the OPERATOR's context and not of the tenant's, and
+    deliberately before the tenant control boundary is crossed. Past it the
+    launcher runs as the owner with a built PATH, so the operator's own copies
+    are invisible there -- which is the whole of why a resumed tenant printed
+    per-owner vendor instructions instead of offering the promotion SYRD-210
+    exists to offer (SYRD-211 second kickback).
+
+    A resumed tenant's selection lives in its configuration, under the owner's
+    home, which this unprivileged account cannot read -- that is the boundary
+    working. So the question asked here is the one that CAN be answered from
+    outside: which agent CLIs exist for this operator alone. Anything already
+    host-wide is not offered, because there is nothing to fix.
+    """
+    offers: list[AgentCliAvailability] = []
+    for cli in sorted(FIRST_RUN_AUTH_STATUS_COMMANDS):
+        verdict = classify_agent_cli(cli, which=which)
+        if verdict.scope == AGENT_CLI_SCOPE_CALLER_ONLY and verdict.caller_path:
+            offers.append(verdict)
+    return offers
+
+
+def offer_host_wide_promotion_before_launch(
+    project: str,
+    *,
+    policy: str = "",
+    sources: Mapping[str, str] | None = None,
+    interactive: bool = True,
+    which: Callable[..., str | None] = shutil.which,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+    promoter: Callable[..., AgentCliAvailability] | None = None,
+) -> list[str]:
+    """Offer, before crossing the bridge. Never block the launch.
+
+    The difference from `require_agent_clis_for_new_tenant` is the word
+    "offer". There, nothing exists yet and provisioning a tenant that cannot run
+    its own CLI is pointless, so an unsettled CLI stops the run. Here the tenant
+    already exists, this is a resume, and declining has to leave the launch
+    exactly as it was -- refusing to start somebody's tenant because they keep a
+    private copy of a CLI it may not even use would be a worse bug than the one
+    this fixes.
+
+    Returns the CLIs promoted, for the caller to report.
+    """
+    offers = resolvable_agent_cli_promotions(which=which)
+    if not offers:
+        return []
+    declared = dict(sources or {})
+    promoted: list[str] = []
+    for verdict in offers:
+        chosen = declared.get(verdict.cli, "").strip()
+        if not chosen:
+            if not interactive:
+                # Unattended runs never guess and never prompt. A resume is not
+                # the place to make a host-wide installation decision on
+                # somebody's behalf, so this says what is available and goes on
+                # to launch.
+                if policy != AGENT_CLI_POLICY_PROMOTE_LOCAL:
+                    print_func(
+                        f"switchyard: {verdict.cli} is installed at {verdict.caller_path}, which "
+                        f"only {current_user_name()} can reach; {project}'s owner cannot. Promote "
+                        f"it with --agent-cli-policy promote-local "
+                        f"--agent-cli-source {verdict.cli}={verdict.caller_path}"
+                    )
+                    continue
+                chosen = verdict.caller_path
+            else:
+                print_func(
+                    f"switchyard: {verdict.cli} is installed at {verdict.caller_path}, which only "
+                    f"{current_user_name()} can reach. {project} runs as its own owner account, "
+                    "which does not inherit it, and no later tenant would either"
+                )
+                print_func(
+                    f"switchyard:   [p] promote {verdict.caller_path} to a root-owned host-wide "
+                    "copy, reused by every later project; no credentials, config or session "
+                    "travel with it"
+                )
+                print_func(
+                    "switchyard:   [s] skip; launch without it, and leave this host unchanged"
+                )
+                answer = _read_prompt(
+                    f"Promote {verdict.cli} host-wide? [p/s] (p): ", input_func=input_func
+                ).strip().casefold()
+                if answer in {"s", "skip"}:
+                    continue
+                if answer not in {"", "p", "promote"}:
+                    print_func(
+                        f"switchyard: {answer!r} is not one of the choices for {verdict.cli}; "
+                        "skipping it and launching unchanged"
+                    )
+                    continue
+                chosen = verdict.caller_path
+        result = _promote_or_report(
+            verdict.cli, chosen, promoter=promoter, which=which, print_func=print_func
+        )
+        if result.serves_a_new_owner:
+            promoted.append(verdict.cli)
+    return promoted
+
+
 def require_agent_clis_for_new_tenant(
     role_clis: Sequence[tuple[str, str]],
     *,
@@ -12051,31 +12157,46 @@ def host_wide_install_instruction(cli: str) -> str:
     )
 
 
-def _missing_cli_install_clause(cli: str, owner_user: str = "") -> str:
+def _missing_cli_install_clause(cli: str) -> str:
     """How to install one missing CLI, as text the reader runs themselves.
 
-    Names the owner user because installing a CLI only for the human running
-    switchyard is the failure people actually hit: panes run as the owner, so a
-    CLI on the invoking user's PATH is invisible to them.
+    It used to say "install <cli> for owner user <owner> with: <vendor command>".
+    Both halves were wrong together: the vendor command installs for whoever
+    runs it, so following it exactly installed into the operator's own account
+    and the tenant still could not start -- and doing it per owner is the
+    duplicate installation SYRD-210 removed. Live UAT was given this line on a
+    resumed tenant (SYRD-211 second kickback).
+
+    What it names now is the host-wide destination, which serves this owner and
+    every later one. The vendor command is still text for a person to run;
+    switchyard never fetches or runs it (PGU-904).
     """
-    owner = (owner_user or "").strip()
-    target = f" for owner user {owner}" if owner else ""
     command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
-    if not command:
-        return f"install {cli}{target} with that vendor's own installer"
-    return f"install {cli}{target} with: {command}"
+    installer = command or "that vendor's own installer"
+    return (
+        f"install {cli} host-wide with {installer}, or let switchyard promote a copy you "
+        "already have when it offers"
+    )
 
 
 def _owner_user_cli_reminder(owner_user: str = "") -> str:
+    """The remedy, which is host-wide and once -- not per owner account.
+
+    This used to say "install each one for owner user <owner>". That is the
+    duplicate per-owner installation SYRD-210 removed: it is work again for
+    every new tenant, and the vendor commands printed beside it install for
+    whoever runs them, so an operator who followed it exactly installed into
+    their own account and the tenant still could not start. Live Zorin UAT was
+    given this text on a resumed tenant after SYRD-210 had already landed
+    (SYRD-211 second kickback).
+    """
     owner = (owner_user or "").strip()
-    if not owner:
-        return (
-            "switchyard: panes run as the project's owner user, so a CLI installed only "
-            "for the user running switchyard is not found."
-        )
+    whose = f"owner user {owner}" if owner else "the project's owner user"
     return (
-        f"switchyard: install each one for owner user {owner}; panes run as that user, so a CLI "
-        "installed only for the user running switchyard is not found."
+        f"switchyard: panes run as {whose}, which does not inherit a CLI installed only for the "
+        "user running switchyard. Install it host-wide once -- or, if you already have a private "
+        "copy, let switchyard promote that executable to a root-owned host-wide copy when it "
+        "offers, which every later project reuses."
     )
 
 
@@ -13788,7 +13909,7 @@ def _format_first_run_setup_manifest(manifest: FirstRunSetupManifest) -> list[st
     for cli, roles in manifest.missing_cli_roles.items():
         lines.append(
             f"switchyard: missing CLI {cli} (affected roles: {', '.join(roles)}): "
-            f"{_missing_cli_install_clause(cli, manifest.owner_user)}"
+            f"{_missing_cli_install_clause(cli)}"
         )
     if manifest.missing_cli_roles:
         lines.append(_owner_user_cli_reminder(manifest.owner_user))
@@ -14007,7 +14128,7 @@ def report_first_run_auth_warnings(
         print_func(
             f"warning: switchyard: {cli} is not installed{owner_detail} "
             f"(affected roles: {', '.join(roles)}); "
-            f"{_missing_cli_install_clause(cli, report.owner_user)}"
+            f"{_missing_cli_install_clause(cli)}"
         )
     if report.owner_shell_issue:
         issue = report.owner_shell_issue
@@ -14058,7 +14179,9 @@ def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
         detail = command or "see that vendor's own installation documentation"
         lines.append(f"switchyard:   {cli.ljust(width)}  {detail}")
     lines.append(
-        "switchyard: these commands are yours to run; switchyard does not install agent CLIs."
+        "switchyard: switchyard never fetches or runs a vendor's installer, so these commands are "
+        "yours to run. It can promote an executable you already have to a host-wide copy; that "
+        "offer is made before launch."
     )
     return "\n".join(lines)
 
@@ -27621,7 +27744,20 @@ def _switchyard_command_is_unprivileged(argv: Sequence[str]) -> bool:
     return bool(argv) and argv[0].casefold() in SWITCHYARD_UNPRIVILEGED_COMMANDS
 
 
-def _switchyard_cross_account(project: str, argv: Sequence[str]) -> None:
+def _switchyard_cross_account(
+    project: str,
+    argv: Sequence[str],
+    *,
+    agent_cli_policy: str = "",
+    agent_cli_sources: Mapping[str, str] | None = None,
+    interactive: bool | None = None,
+    which: Callable[..., str | None] = shutil.which,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+    promoter: Callable[..., AgentCliAvailability] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    ensure_helper: Callable[..., None] | None = None,
+) -> None:
     """Reach the owner's account, by the narrowest route that is installed.
 
     The bridge first: it needs no password and can run only this tenant's
@@ -27632,7 +27768,32 @@ def _switchyard_cross_account(project: str, argv: Sequence[str]) -> None:
     if grant:
         operation = _tenant_control_operation(argv, project)
         if operation:
-            _switchyard_exec_through_tenant_control(project, operation, grant=grant)
+            if operation == "start":
+                # Here, and not on the far side. Past the bridge the launcher
+                # runs as the owner with a built PATH and cannot see -- let
+                # alone promote -- this operator's private copies, so a resumed
+                # tenant reported them as per-owner installs the operator was
+                # told to repeat. Offered rather than required: nothing is being
+                # created, so declining must leave the launch untouched
+                # (SYRD-211).
+                offer_host_wide_promotion_before_launch(
+                    project,
+                    policy=agent_cli_policy,
+                    sources=agent_cli_sources,
+                    interactive=(
+                        sys.stdin.isatty() if interactive is None else interactive
+                    ),
+                    which=which,
+                    input_func=input_func,
+                    print_func=print_func,
+                    promoter=promoter,
+                )
+            bridge_kwargs: dict[str, Any] = {"runner": runner, "print_func": print_func}
+            if ensure_helper is not None:
+                bridge_kwargs["ensure_helper"] = ensure_helper
+            _switchyard_exec_through_tenant_control(
+                project, operation, grant=grant, **bridge_kwargs
+            )
     _switchyard_exec_with_root(argv)
 
 

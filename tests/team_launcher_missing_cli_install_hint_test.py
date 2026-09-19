@@ -93,9 +93,21 @@ def test_hard_stop_names_the_command_the_owner_user_and_who_runs_it() -> None:
     assert team_launcher.AGENT_CLI_INSTALL_COMMANDS["hermes"] not in message
 
     # ...and the failure people actually hit, preempted.
-    assert "panes run as that user" in message
-    assert "installed only for the user running switchyard is not found" in message
-    assert "switchyard does not install agent CLIs" in message
+    assert "panes run as owner user otto-agent" in message
+    assert "does not inherit a CLI installed only for the user running switchyard" in message
+
+    # The PGU-904 guarantee, still stated -- but no longer as the categorical
+    # "switchyard does not install agent CLIs". SYRD-210 added promotion of an
+    # executable the operator already has, so that sentence became false while
+    # the guarantee behind it did not: switchyard never FETCHES or RUNS a
+    # vendor's installer. Live UAT was given the old text on a resumed tenant
+    # together with per-owner install instructions (SYRD-211 second kickback).
+    assert "never fetches or runs a vendor's installer" in message
+    assert "promote an executable you already have" in message
+
+    # And the remedy is host-wide once, not once per owner account.
+    assert "install each one for owner user" not in message
+    assert "host-wide" in message
 
 
 def test_manifest_and_warning_lines_also_carry_the_command() -> None:
@@ -108,29 +120,46 @@ def test_manifest_and_warning_lines_also_carry_the_command() -> None:
     )
     lines = team_launcher._format_first_run_setup_manifest(manifest)
     assert any(team_launcher.AGENT_CLI_INSTALL_COMMANDS["agy"] in line for line in lines), lines
-    assert any("installed only for the user running switchyard is not found" in line for line in lines), lines
+    assert any("does not inherit a CLI installed only for the user running switchyard" in line
+               for line in lines), lines
+    # The per-CLI line names a host-wide destination, not an owner account.
+    assert any("install agy host-wide with" in line for line in lines), lines
+    assert not any("for owner user otto-agent with:" in line for line in lines), lines
 
     output: list[str] = []
     team_launcher.report_first_run_auth_warnings(_report({"agy": ["inspector"]}), print_func=output.append)
     assert len(output) == 1, output
     assert team_launcher.AGENT_CLI_INSTALL_COMMANDS["agy"] in output[0], output
-    assert "for owner user otto-agent" in output[0], output
+    assert "host-wide" in output[0], output
+    assert "for owner user otto-agent with:" not in output[0], output
 
 
 def test_unknown_cli_degrades_to_prose_instead_of_raising() -> None:
     # missing_cli_roles is populated from FIRST_RUN_AUTH_STATUS_COMMANDS today,
     # so this cannot happen yet. It will the first time the two tables diverge,
     # and a KeyError there would take out the whole stop message.
-    clause = team_launcher._missing_cli_install_clause("some-future-cli", "otto-agent")
-    assert clause == "install some-future-cli for owner user otto-agent with that vendor's own installer"
+    clause = team_launcher._missing_cli_install_clause("some-future-cli")
+    assert clause == (
+        "install some-future-cli host-wide with that vendor's own installer, or let switchyard "
+        "promote a copy you already have when it offers"
+    ), clause
 
     message = team_launcher._format_missing_cli_launch_failure(_report({"some-future-cli": ["main"]}))
     assert "see that vendor's own installation documentation" in message
 
 
-def test_owner_user_is_omitted_cleanly_when_unknown() -> None:
-    clause = team_launcher._missing_cli_install_clause("claude", "")
-    assert clause == f"install claude with: {team_launcher.AGENT_CLI_INSTALL_COMMANDS['claude']}"
+def test_the_clause_no_longer_depends_on_an_owner_account() -> None:
+    """The destination is host-wide, so which owner is asking cannot change it.
+
+    The clause used to take an owner and name it. That was the per-owner
+    instruction SYRD-210 removed, so the parameter went with the text rather
+    than being left behind unused (SYRD-211).
+    """
+    clause = team_launcher._missing_cli_install_clause("claude")
+    assert clause == (
+        f"install claude host-wide with {team_launcher.AGENT_CLI_INSTALL_COMMANDS['claude']}, "
+        "or let switchyard promote a copy you already have when it offers"
+    ), clause
 
     message = team_launcher._format_missing_cli_launch_failure(_report({"claude": ["main"]}, owner_user=""))
     assert "for owner user" not in message

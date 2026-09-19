@@ -206,8 +206,13 @@ def test_the_authorized_human_reaches_the_owner_through_the_bridge_alone() -> No
     original = team_launcher.current_user_name
     team_launcher.current_user_name = lambda: HUMAN  # type: ignore[assignment]
     try:
+        # The subject here is what crosses the boundary at the PRODUCTION path,
+        # so the SYRD-211 staged-helper verification is stood down rather than
+        # pointed at a temporary root -- which would change the very path this
+        # asserts. Verification has its own suite.
         team_launcher._switchyard_exec_through_tenant_control(
-            PROJECT, "start", grant=grant, runner=runner
+            PROJECT, "start", grant=grant, runner=runner,
+            ensure_helper=lambda *_args, **_kwargs: None,
         )
         raise AssertionError("the bridge should have run")
     except SystemExit as exit_error:

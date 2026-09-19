@@ -27130,6 +27130,216 @@ def _tenant_control_operation(argv: Sequence[str], project_argument: str) -> str
     return ""
 
 
+#: The label the repair leaves in the rollout journal, so an operator reading it
+#: can tell a staged-tool repair apart from a provisioning or upgrade run.
+TENANT_CONTROL_REPAIR_LABEL = "tenant-control-repair"
+
+
+@dataclass(frozen=True)
+class TenantControlHelperState:
+    """What the registered helper actually is, before root is asked to run it.
+
+    Absence and hostility are different answers, and collapsing them is what
+    SYRD-211 is. A tenant whose provisioning was interrupted after the grant and
+    the sudoers rule were written, or one that predates staging, has a perfectly
+    valid registration and no file -- that is recoverable by re-staging. A file
+    that exists with the wrong owner, the wrong mode, or a symlink in its path
+    is not recoverable by anything this program should do on its own.
+    """
+
+    project: str
+    path: Path
+    present: bool
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def usable(self) -> bool:
+        return self.present and not self.reasons
+
+    @property
+    def repairable(self) -> bool:
+        return not self.present and not self.reasons
+
+
+def tenant_control_helper_state(
+    project: str,
+    *,
+    grant: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    owner_uid: int | None = None,
+) -> TenantControlHelperState:
+    """Verify the helper as a pinned exec target, not just as a filename.
+
+    The whole path is checked, not the leaf: a root-owned program in a directory
+    somebody else can write is a program somebody else can replace, and the
+    sudoers rule names the path rather than the bytes. That check already exists
+    for exactly this reason (`untrusted_root_executable_reasons`, SYRD-62) and
+    is reused here rather than approximated.
+
+    Cross-tenant isolation is decided before any filesystem call. The slug comes
+    from the command line, so a slug carrying a separator would otherwise aim
+    this -- and the repair that follows -- at another tenant's directory.
+    """
+    base = Path(root) if root is not None else TENANT_CONTROL_ROOT
+    reasons: list[str] = []
+    slug = str(project)
+    if not slug or slug in {".", ".."} or "/" in slug or "\\" in slug or "\x00" in slug:
+        # Refused without touching the disk: this value chooses the directory.
+        return TenantControlHelperState(
+            project=slug,
+            path=base,
+            present=False,
+            reasons=(f"{slug!r} is not a project slug this may be aimed at",),
+        )
+    path = base / slug / "switchyard-tenant-control"
+    if grant:
+        # Only a value that is there and disagrees. `_tenant_control_grant`
+        # already refuses a grant whose project is not this one and returns an
+        # empty mapping, so an absent key here means "no grant was read", which
+        # that caller handles -- reading it as a disagreement refuses tenants
+        # whose grant simply was not loaded.
+        recorded = str(grant.get("project") or "")
+        if recorded and recorded != slug:
+            reasons.append(
+                f"the grant at {base / slug} records project {recorded} rather than {slug}"
+            )
+    try:
+        path.lstat()
+        present = True
+    except FileNotFoundError:
+        present = False
+    except OSError as exc:
+        return TenantControlHelperState(
+            project=slug, path=path, present=False,
+            reasons=(*reasons, f"{path} cannot be inspected: {exc}"),
+        )
+    if present:
+        reasons.extend(
+            untrusted_root_executable_reasons(path, boundary=base, owner_uid=owner_uid)
+        )
+        try:
+            if not path.lstat().st_mode & 0o111:
+                reasons.append(f"{path} is not executable")
+        except OSError as exc:  # pragma: no cover - lstat succeeded a moment ago
+            reasons.append(f"{path} cannot be inspected: {exc}")
+    return TenantControlHelperState(
+        project=slug, path=path, present=present, reasons=tuple(reasons)
+    )
+
+
+def tenant_control_repair_command(
+    project: str, *, release_root: str = "", root: Path | None = None
+) -> str:
+    """The recorded privileged command that re-stages this tenant's tooling.
+
+    Deliberately the whole staging step rather than one `install` of one file.
+    That step is the supported way these executables reach the shared path, it
+    is idempotent by construction -- each name is installed if the release
+    carries it and removed if it does not -- and it is scoped to this project's
+    directory, so no other tenant is touched by a repair.
+    """
+    release = release_root or str(switchyard_shared_install_root() / "current")
+    commands = role_tooling_staging_commands(project, release, staging_root=root)
+    script = "\n".join(commands)
+    recorder = _rollout_recorder_path()
+    if recorder is None:
+        return f"bash -c {shlex.quote(script)}"
+    return " ".join(
+        [
+            "sudo",
+            shlex.quote(str(recorder)),
+            shlex.quote(project),
+            "--label",
+            TENANT_CONTROL_REPAIR_LABEL,
+            "--",
+            "bash",
+            "-c",
+            shlex.quote(script),
+        ]
+    )
+
+
+def repair_tenant_control_helper(
+    project: str,
+    *,
+    release_root: str = "",
+    root: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> str:
+    """Re-stage the missing helper through the recorded privileged path.
+
+    Returns an empty string when the helper is usable afterwards, and the reason
+    it is not otherwise. The repair is announced before it runs because it asks
+    for a privileged step the operator did not type.
+    """
+    command = tenant_control_repair_command(project, release_root=release_root, root=root)
+    print_func(
+        f"switchyard: {project}: the tenant control helper is not staged; repairing it from "
+        "the current release before continuing"
+    )
+    result = runner(["bash", "-c", command])
+    code = int(getattr(result, "returncode", 1) or 0)
+    if code != 0:
+        return (
+            f"repairing the tenant control helper for {project} failed (exit {code}); "
+            "the rollout journal records the attempt"
+        )
+    return ""
+
+
+def ensure_tenant_control_helper(
+    project: str,
+    *,
+    grant: Mapping[str, str] | None = None,
+    release_root: str = "",
+    root: Path | None = None,
+    owner_uid: int | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> None:
+    """Verify, repair if it is merely absent, verify again, or refuse.
+
+    The second verification is the point of the first: a repair that reported
+    success and left something unusable would otherwise be handed to sudo, which
+    is the failure this replaces.
+    """
+    state = tenant_control_helper_state(
+        project, grant=grant, root=root, owner_uid=owner_uid
+    )
+    if state.usable:
+        # Already correct. Nothing is rewritten, so a second launch costs one
+        # stat and no privileged step (SYRD-211 idempotence).
+        return
+    if state.reasons:
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"switchyard: refusing to run {state.path} as root:",
+                    *(f"switchyard:   {reason}" for reason in state.reasons),
+                    "switchyard: this is not repaired automatically; nothing else will be run "
+                    "in its place",
+                ]
+            )
+        )
+    problem = repair_tenant_control_helper(
+        project, release_root=release_root, root=root, runner=runner, print_func=print_func
+    )
+    if problem:
+        raise SystemExit(f"switchyard: {problem}")
+    state = tenant_control_helper_state(
+        project, grant=grant, root=root, owner_uid=owner_uid
+    )
+    if state.usable:
+        print_func(f"switchyard: {project}: tenant control helper repaired at {state.path}")
+        return
+    detail = "; ".join(state.reasons) or f"{state.path} is still not staged"
+    raise SystemExit(
+        f"switchyard: the tenant control helper for {project} is still unusable after "
+        f"repair: {detail}"
+    )
+
+
 def _switchyard_exec_through_tenant_control(
     project: str,
     operation: str,
@@ -27137,6 +27347,8 @@ def _switchyard_exec_through_tenant_control(
     grant: dict[str, str],
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     exec_func: Callable[[str, Sequence[str]], Any] = os.execvp,
+    print_func: Callable[[str], None] = print,
+    ensure_helper: Callable[..., None] = ensure_tenant_control_helper,
 ) -> None:
     """Run one lifecycle verb as the owner, without a password.
 
@@ -27154,6 +27366,13 @@ def _switchyard_exec_through_tenant_control(
             f"switchyard: {caller} may not control {project}; it is registered to {authorized}\n"
             "switchyard: ask that user, or run this as the project owner or an operator"
         )
+    # Before root is asked to run it. A registered tenant whose staging was
+    # interrupted -- or which predates staging -- has a valid grant, a valid
+    # sudoers rule and no file, and handing that to sudo produced the whole of
+    # SYRD-211: `command not found`, before anything else could say why. Absent
+    # is repaired from the current release and the launch resumes; any other
+    # shape is refused here rather than executed.
+    ensure_helper(project, grant=grant, runner=runner, print_func=print_func)
     # Run, not replace. The bridge answers with one validated handoff when the
     # owner half could not do the desktop half, and this process -- which owns
     # the desktop -- is the one that can. Its terminal is passed through

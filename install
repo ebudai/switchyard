@@ -96,8 +96,9 @@ dry_run_install() {
 
 print_final_next_step() {
     printf '\nNEXT STEP\n'
-    printf 'Switchyard does not install agent CLIs. Install at least one of claude, codex, agy, or hermes yourself, with that vendor'"'"'s own installer, for the user that will own the project.\n'
-    printf 'Then run `switchyard new`: it detects which agent CLIs are installed and walks you through signing in to each one before any pane starts.\n'
+    printf 'Switchyard never fetches or runs a vendor'"'"'s installer. Install at least one of claude, codex, agy, or hermes yourself, with that vendor'"'"'s own installer -- you choose which version you run.\n'
+    printf 'It does not have to be installed for each project owner. If a CLI is reachable only by your own account, `switchyard new` offers to promote that executable to a root-owned host-wide copy, reused by every later project; no credentials, config, trust or session travel with it.\n'
+    printf 'Then run `switchyard new`: it classifies each selected CLI before creating anything, settles anything unusable with you, and walks you through signing in to each one before any pane starts.\n'
 }
 
 report_checkout_version() {

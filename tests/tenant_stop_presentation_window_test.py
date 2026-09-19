@@ -173,6 +173,19 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
     closed: list[str] = []
     original_open = team_launcher.complete_desktop_presentation  # noqa: F405
     original_close = team_launcher.close_desktop_presentation  # noqa: F405
+    # A normally provisioned tenant, which is this test's precondition: since
+    # SYRD-211 the bridge verifies the staged helper before asking root to run
+    # it, so a fixture with no helper at all is refused before either desktop
+    # half is reached.
+    staged = tempfile.TemporaryDirectory(prefix="tenant-stop-helper.")
+    helper_root = Path(staged.name)
+    helper_dir = helper_root / PROJECT
+    helper_dir.mkdir(parents=True)
+    helper = helper_dir / "switchyard-tenant-control"
+    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    helper.chmod(0o755)
+    original_root = team_launcher.TENANT_CONTROL_ROOT  # noqa: F405
+    team_launcher.TENANT_CONTROL_ROOT = helper_root  # noqa: F405
     try:
         team_launcher.complete_desktop_presentation = (  # noqa: F405
             lambda project, **kw: opened.append(project) or 0
@@ -199,6 +212,8 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
     finally:
         team_launcher.complete_desktop_presentation = original_open  # noqa: F405
         team_launcher.close_desktop_presentation = original_close  # noqa: F405
+        team_launcher.TENANT_CONTROL_ROOT = original_root  # noqa: F405
+        staged.cleanup()
 
 
 # --------------------------------------------------------------------------

@@ -925,20 +925,155 @@ def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
     check(code == 0, f"the caller reported success: {code} {said}")
     check(launched, f"and actually started something: {said}")
     argv = launched[0]
-    check(any("konsole" in token.lower() for token in argv),
-          f"a terminal window: {argv[:3]}")
-    layout_arg = next(
-        (token for token in argv if token.endswith("presentation-layout.json")), ""
+    terminal = launcher.available_presentation_terminal()
+    check(terminal is not None, "this host has a terminal to open one in")
+    check(any(token.endswith(terminal[0]) for token in argv),
+          f"it started the terminal this desktop actually has: {argv}")
+    check(argv[-1] == "viewer",
+          f"on the viewer target, not a per-slot session: {argv[-4:]}")
+    check("switchyard-display-attach" in " ".join(argv),
+          f"through the staged privileged helper: {argv}")
+    check(f"syrd-display-" not in " ".join(argv),
+          f"never a per-slot display session: {argv}")
+    check(not any(token.endswith("presentation-layout.json") for token in argv),
+          f"and no Konsole layout document is involved at all: {argv}")
+
+
+def test_a_non_kde_desktop_without_konsole_still_opens_a_window() -> None:
+    """The live failure: `env: 'konsole': No such file or directory`, status 127.
+
+    Konsole cannot be a requirement on a desktop that is not KDE. The viewer
+    layout -- the one such a desktop selects -- needs one terminal running one
+    command, which every terminal can do.
+    """
+    seen: list[str] = []
+
+    def only_xfce(binary, path=None):
+        seen.append(binary)
+        return "/usr/bin/xfce4-terminal" if binary == "xfce4-terminal" else None
+
+    terminal = launcher.available_presentation_terminal(which=only_xfce)
+    check(terminal is not None, f"a terminal was found: {terminal}")
+    check(terminal[0] == "xfce4-terminal", f"the one this desktop has: {terminal}")
+    check("konsole" in seen, "konsole was looked for first, as a KDE host would want")
+
+    args = launcher.terminal_launch_args(
+        ["sudo", "-n", "/usr/local/lib/switchyard/test/switchyard-display-attach",
+         "test", "viewer"],
+        terminal=terminal, gui_user=launcher.current_user_name(), window_title="Test",
     )
-    check(layout_arg, f"built from a layout it wrote: {argv}")
-    document = json.loads(Path(layout_arg).read_text(encoding="utf-8"))
-    leaves = launcher._layout_leaves(document)
-    check(len(leaves) == 1, f"one tab, because the handoff said viewer: {len(leaves)}")
-    command = leaves[0]["Command"]
-    check(command.rstrip().endswith("viewer"),
-          f"and it asks the staged helper for the viewer: {command[-70:]}")
-    check("syrd-display-" not in command,
-          f"never a per-slot display session: {command}")
+    check(any(token.endswith("xfce4-terminal") for token in args),
+          f"the command starts that terminal: {args}")
+    check(args[-1] == "viewer", f"on the viewer target: {args[-3:]}")
+    check("-x" in args, f"using the flag that terminal takes for a command: {args}")
+    check("--title" in args and "Test" in args, f"and carries the window title: {args}")
+
+
+def test_each_terminal_is_given_the_flag_it_actually_takes() -> None:
+    """They do not agree, and getting it wrong is a window that never opens."""
+    command = ["sudo", "-n", "/usr/local/lib/switchyard/test/switchyard-display-attach",
+               "test", "viewer"]
+    for name, command_flag, title_flag in launcher.PRESENTATION_TERMINALS:
+        args = launcher.terminal_launch_args(
+            command, terminal=(name, command_flag, title_flag),
+            gui_user=launcher.current_user_name(), window_title="Test",
+        )
+        check(args[-len(command):] == command,
+              f"{name}: the command is passed through unchanged: {args[-len(command):]}")
+        if command_flag:
+            check(args[-len(command) - 1] == command_flag,
+                  f"{name}: introduced by {command_flag}: {args[-len(command) - 2:]}")
+        else:
+            check(args[-len(command) - 1].endswith(name) or title_flag in args,
+                  f"{name}: takes the command with no flag: {args}")
+        check(title_flag in args, f"{name}: and the title flag it takes: {args}")
+
+
+def test_no_terminal_at_all_is_a_precise_refusal_not_an_exit_127() -> None:
+    """Nothing to open it with is a prerequisite, said as one."""
+    check(launcher.available_presentation_terminal(which=lambda *a, **k: None) is None,
+          "a host with no terminal finds none")
+    message = launcher.missing_terminal_refusal("test")
+    check("none of" in message and "konsole" in message and "xterm" in message,
+          f"the refusal names what was looked for: {message}")
+    check("Install one of them" in message, f"and what to do: {message}")
+    check("panes are running" in message,
+          f"separating what works from what does not: {message}")
+
+
+def test_the_caller_refuses_before_starting_anything_when_no_terminal_exists() -> None:
+    """Through the caller itself, not only through the helpers it uses.
+
+    The helper returning None is not the behaviour that matters: what matters is
+    that `complete_desktop_presentation` stops there rather than handing `env` a
+    program that is not installed and reporting whatever it exits with.
+    """
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    import pwd as _pwd
+
+    bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tc_noterminal")
+    me = _pwd.getpwuid(os.getuid()).pw_name
+    handoff_file = (
+        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
+        / "syrd-presentation-handoff.json"
+    )
+    payload = launcher.render_presentation_handoff(
+        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        slot_titles=["Syrd"], window_title="Syrd", layout=launcher.LAYOUT_MODE_VIEWER,
+    )
+    if handoff_file.exists():
+        handoff_file.unlink()
+    bridge.publish_handoff("syrd", json.dumps(payload), caller=me)
+
+    launched: list = []
+    said: list[str] = []
+    saved_grant = launcher._tenant_control_grant
+    saved_terminal = launcher.available_presentation_terminal
+    launcher._tenant_control_grant = lambda _p, **_k: {
+        "project": "syrd", "owner": "syrd-agent", "authorized_user": me
+    }
+    launcher.available_presentation_terminal = lambda **_k: None
+    try:
+        code = launcher.complete_desktop_presentation(
+            "syrd", caller=me,
+            runner=lambda args, **_k: subprocess.CompletedProcess(list(args), 0),
+            process_launcher=lambda args, **_k: launched.append(list(args)),
+            print_func=said.append,
+        )
+    finally:
+        launcher._tenant_control_grant = saved_grant
+        launcher.available_presentation_terminal = saved_terminal
+        if handoff_file.exists():
+            handoff_file.unlink()
+
+    check(code != 0, f"a host with no terminal is a failure, not a success: {code}")
+    check(launched == [], f"and nothing was started: {launched}")
+    check(any("none of" in line and "Install one of them" in line for line in said),
+          f"with a prerequisite said precisely: {said}")
+
+
+def test_a_terminal_that_exits_at_once_is_reported_not_called_success() -> None:
+    """Exit 127 behind a window that never appeared is the shape to catch."""
+    said: list[str] = []
+
+    class _DiedImmediately:
+        pid = 7
+        def poll(self):
+            return 127
+
+    code = launcher.launch_presentation_terminal(
+        ["/usr/bin/env", "konsole"],
+        project="test", terminal="konsole",
+        process_launcher=lambda args, **_k: _DiedImmediately(),
+        print_func=said.append,
+    )
+    check(code == 127, f"the status is the terminal's own: {code}")
+    check(any("exited immediately" in line and "127" in line for line in said),
+          f"and it is reported: {said}")
+    check(any("without opening" in line for line in said),
+          f"saying no window appeared: {said}")
 
 
 def test_a_viewer_launch_that_cannot_hand_back_says_so() -> None:

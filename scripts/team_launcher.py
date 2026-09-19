@@ -1366,17 +1366,20 @@ def write_konsole_config_defaults(directory: Path, *, model: Path | None = None)
     return ""
 
 
-def konsole_launch_args(
-    layout_path: Path,
-    *,
-    gui_user: str | None = None,
-    window_title: str = "",
-    config_dir: Path | None = None,
-) -> list[str]:
+def _gui_launch_prefix(
+    *, gui_user: str | None = None, config_dir: Path | None = None
+) -> tuple[list[str], str]:
+    """Everything before the terminal program: how to cross, and what to carry.
+
+    Shared, because which terminal opens the window is a separate question from
+    how to reach the desktop that will show it. Konsole was the only answer to
+    the first for a long time, and a non-KDE host does not have it (SYRD-211
+    live UAT).
+    """
     user = (gui_user if gui_user is not None else default_gui_user()).strip()
     privilege_drop, refusal = gui_privilege_drop_args(user)
     if refusal:
-        return _refusal_command(refusal)
+        return [], refusal
     wayland_display = None
     host_wayland_display = _env_first(HOST_WAYLAND_ENV, LEGACY_HOST_WAYLAND_ENV)
     if host_wayland_display:
@@ -1385,9 +1388,7 @@ def konsole_launch_args(
         wayland_name = _env_first(GUI_WAYLAND_ENV, LEGACY_GUI_WAYLAND_ENV) or "wayland-0"
         wayland_display = normalize_wayland_display(wayland_name, gui_user=user)
     if not wayland_display:
-        return _refusal_command(
-            "team-launcher: no host Wayland display; run from Eric desktop session"
-        )
+        return [], "team-launcher: no host Wayland display; run from Eric desktop session"
     config_dirs = ""
     if config_dir is not None:
         existing = "" if privilege_drop else str(os.environ.get("XDG_CONFIG_DIRS") or "")
@@ -1414,9 +1415,86 @@ def konsole_launch_args(
             f"WAYLAND_DISPLAY={wayland_display}",
             *([f"XDG_CONFIG_DIRS={config_dirs}"] if config_dirs else []),
         ]
+    return [*privilege_drop, *environment], ""
+
+
+#: Terminals that can be asked to run one command, and how each one takes it.
+#:
+#: They do not agree: some want `-e`, some `--`, some `-x`, and kitty takes the
+#: command with no flag at all. The title flag differs too. Ordered by how
+#: likely a desktop is to have them, with Konsole first because a KDE host does.
+#:
+#: This exists because the presentation window was always Konsole, and the
+#: viewer layout -- the one a NON-KDE desktop selects -- then died with
+#: `env: 'konsole': No such file or directory` on a host that had four other
+#: terminals installed (SYRD-211 live UAT).
+PRESENTATION_TERMINALS: tuple[tuple[str, str, str], ...] = (
+    ("konsole", "-e", "--qwindowtitle"),
+    ("gnome-terminal", "--", "--title"),
+    ("kgx", "--", "--title"),
+    ("xfce4-terminal", "-x", "--title"),
+    ("mate-terminal", "-x", "--title"),
+    ("tilix", "-e", "--title"),
+    ("alacritty", "-e", "--title"),
+    ("kitty", "", "--title"),
+    ("xterm", "-e", "-T"),
+)
+
+
+def available_presentation_terminal(
+    *, which: Callable[..., str | None] = shutil.which
+) -> tuple[str, str, str] | None:
+    """The first terminal this desktop actually has, or nothing."""
+    for entry in PRESENTATION_TERMINALS:
+        if which(entry[0]):
+            return entry
+    return None
+
+
+def missing_terminal_refusal(project: str) -> str:
+    """Said instead of exiting 127 from inside a terminal that is not there."""
+    return (
+        f"switchyard: cannot open {project}'s presentation window: none of "
+        f"{', '.join(name for name, _flag, _title in PRESENTATION_TERMINALS)} is installed. "
+        "Install one of them, or run this from a desktop that has one; the panes are "
+        "running either way and nothing has been changed"
+    )
+
+
+def terminal_launch_args(
+    command: Sequence[str],
+    *,
+    terminal: tuple[str, str, str],
+    gui_user: str | None = None,
+    window_title: str = "",
+) -> list[str]:
+    """One terminal, opened on one command, in the desktop's own session."""
+    prefix, refusal = _gui_launch_prefix(gui_user=gui_user)
+    if refusal:
+        return _refusal_command(refusal)
+    name, command_flag, title_flag = terminal
+    args = [*prefix, gui_program_path(name)]
+    title = window_title.strip()
+    if title and title_flag:
+        args.extend([title_flag, title])
+    if command_flag:
+        args.append(command_flag)
+    args.extend(str(part) for part in command)
+    return args
+
+
+def konsole_launch_args(
+    layout_path: Path,
+    *,
+    gui_user: str | None = None,
+    window_title: str = "",
+    config_dir: Path | None = None,
+) -> list[str]:
+    prefix, refusal = _gui_launch_prefix(gui_user=gui_user, config_dir=config_dir)
+    if refusal:
+        return _refusal_command(refusal)
     args = [
-        *privilege_drop,
-        *environment,
+        *prefix,
         gui_program_path("konsole"),
         "--separate",
     ]
@@ -1785,6 +1863,55 @@ def hand_presentation_back_to_the_caller(
         "ran this, which owns the screen."
     )
     return True
+
+
+def launch_presentation_terminal(
+    args: Sequence[str],
+    *,
+    project: str,
+    terminal: str,
+    process_launcher: Callable[..., Any] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Start one terminal on one command, and say whether it stayed up.
+
+    A window that exits immediately is the failure this exists to report: live
+    Zorin saw status 127 from `env` and nothing on screen, while the command
+    that started it returned as though it had opened something.
+    """
+    if list(args[:2]) == ["sh", "-lc"]:
+        return int(runner(list(args)).returncode)
+    launch_process = process_launcher or subprocess.Popen
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="ab", prefix=f"{project}-presentation.", suffix=".log", delete=False
+        ) as handle:
+            log_path = Path(handle.name)
+            _make_konsole_log_readable(log_path)
+            proc = launch_process(
+                list(args),
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=handle,
+                start_new_session=True,
+            )
+    except OSError as exc:
+        print_func(f"switchyard: could not start {terminal} for {project}: {exc}")
+        return 1
+    time.sleep(0.2)
+    returncode = proc.poll()
+    if returncode is not None:
+        print_func(
+            f"switchyard: {terminal} exited immediately (status {returncode}) without "
+            f"opening {project}'s window; its output is in {log_path}"
+        )
+        return int(returncode)
+    print_func(
+        f"switchyard: opened {project}'s presentation in {terminal}; it shows every "
+        "role in one window"
+    )
+    return 0
 
 
 def launch_konsole_window(
@@ -28464,6 +28591,35 @@ def complete_desktop_presentation(
     if not owner:
         print_func(f"switchyard: {project} has no recorded owner; not opening a window")
         return 1
+    terminal = available_presentation_terminal()
+    if terminal is None:
+        # Said here rather than discovered as exit 127 from inside `env`. Live
+        # Zorin got `env: 'konsole': No such file or directory` and a window
+        # that never appeared (SYRD-211 live UAT).
+        print_func(missing_terminal_refusal(project))
+        return 1
+    if handoff.get("layout") == LAYOUT_MODE_VIEWER:
+        # One tiled session, so one terminal running one command: there is no
+        # per-tab layout to write, and therefore nothing here that needs
+        # Konsole in particular.
+        attach = presentation_controller.display_attach_args_for(
+            project,
+            presentation_controller.VIEWER_ATTACH_TARGET,
+            owner=owner,
+            gui_user=caller,
+        )
+        title = handoff["window_title"] or _registered_project_name(project) or project
+        args = terminal_launch_args(
+            attach, terminal=terminal, gui_user=caller, window_title=title
+        )
+        return launch_presentation_terminal(
+            args,
+            project=project,
+            terminal=terminal[0],
+            process_launcher=process_launcher,
+            runner=runner,
+            print_func=print_func,
+        )
     layout = presentation_controller.presentation_layout_payload(
         project,
         slot_count=handoff["slot_count"],

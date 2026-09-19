@@ -11479,6 +11479,311 @@ MODEL_PROBE_NO_TOOL_CALL_REASON = (
 )
 
 
+#: What a selected CLI is, from the point of view of a tenant owner that does
+#: not exist yet.
+#:
+#: The distinction is not cosmetic and it is not about accounts in general: it
+#: is about WHEN. `switchyard new` chooses CLIs before it creates the owner, so
+#: at decision time the owner has no home, no PATH and no files. Anything
+#: reachable only through somebody's home directory therefore cannot serve the
+#: tenant being planned, however well it works for the person typing the
+#: command. Only a host-wide executable can, and that is also the only kind a
+#: SECOND tenant gets for free (SYRD-210).
+AGENT_CLI_SCOPE_HOST_WIDE = "host_wide"
+AGENT_CLI_SCOPE_CALLER_ONLY = "caller_only"
+AGENT_CLI_SCOPE_ABSENT = "absent"
+
+
+@dataclass(frozen=True)
+class AgentCliAvailability:
+    """Where one selected CLI can be reached from, and by whom."""
+
+    cli: str
+    scope: str
+    host_wide_path: str = ""
+    caller_path: str = ""
+
+    @property
+    def serves_a_new_owner(self) -> bool:
+        return self.scope == AGENT_CLI_SCOPE_HOST_WIDE
+
+
+def agent_cli_binary(cli: str) -> str:
+    """The executable a CLI selection actually runs.
+
+    Read from the probe command rather than assumed equal to the CLI name, so
+    one table stays the source of truth for both.
+    """
+    command = FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli) or []
+    return command[0] if command else cli
+
+
+def classify_agent_cli(
+    cli: str,
+    *,
+    which: Callable[..., str | None] = shutil.which,
+) -> AgentCliAvailability:
+    """Host-wide, reachable only by the caller, or absent.
+
+    Host-wide is decided against DEFAULT_PANE_BASE_PATH -- the base every pane
+    is given -- and not against this process's PATH, which carries the invoking
+    human's home directories and would call their private install host-wide.
+    """
+    binary = agent_cli_binary(cli)
+    host_wide = which(binary, path=DEFAULT_PANE_BASE_PATH) or ""
+    if host_wide:
+        return AgentCliAvailability(
+            cli=cli, scope=AGENT_CLI_SCOPE_HOST_WIDE, host_wide_path=str(host_wide)
+        )
+    caller = which(binary) or ""
+    if caller:
+        return AgentCliAvailability(
+            cli=cli, scope=AGENT_CLI_SCOPE_CALLER_ONLY, caller_path=str(caller)
+        )
+    return AgentCliAvailability(cli=cli, scope=AGENT_CLI_SCOPE_ABSENT)
+
+
+def classify_selected_agent_clis(
+    role_clis: Sequence[tuple[str, str]],
+    *,
+    which: Callable[..., str | None] = shutil.which,
+) -> dict[str, AgentCliAvailability]:
+    """One verdict per distinct CLI in a selection, in selection order."""
+    seen: dict[str, AgentCliAvailability] = {}
+    for _role, cli in role_clis:
+        if cli in seen:
+            continue
+        seen[cli] = classify_agent_cli(cli, which=which)
+    return seen
+
+
+def agent_cli_scope_explanation(availability: AgentCliAvailability, owner_user: str = "") -> str:
+    """Why this verdict blocks the tenant, in the reader's terms.
+
+    Never prints a bare vendor installer for a caller-only CLI: run as printed,
+    those install into the account of whoever runs them, which is the desktop
+    operator and not the owner this tenant is being created for (SYRD-210).
+    """
+    owner = (owner_user or "").strip() or "the new owner user"
+    if availability.scope == AGENT_CLI_SCOPE_HOST_WIDE:
+        return f"{availability.cli} is installed host-wide at {availability.host_wide_path}"
+    if availability.scope == AGENT_CLI_SCOPE_CALLER_ONLY:
+        return (
+            f"{availability.cli} is installed at {availability.caller_path}, which is reachable "
+            f"only by the account running this command. {owner} does not exist yet and will not "
+            f"inherit it, and no later tenant would either"
+        )
+    return (
+        f"{availability.cli} is not installed anywhere this host can reach: not host-wide, and "
+        "not for the account running this command"
+    )
+
+
+#: Predeclared answers for a run with nobody to ask. Required rather than
+#: defaulted: every value here decides something a human would otherwise be
+#: shown, and picking one silently is how an unattended run ends up having
+#: installed software nobody asked for -- or having created half a tenant.
+AGENT_CLI_POLICY_REQUIRE_HOST_WIDE = "require-host-wide"
+AGENT_CLI_POLICY_INSTALL_HOST_WIDE = "install-host-wide"
+AGENT_CLI_POLICIES = (AGENT_CLI_POLICY_REQUIRE_HOST_WIDE, AGENT_CLI_POLICY_INSTALL_HOST_WIDE)
+
+
+class AgentCliUnavailable(SystemExit):
+    """Refused before the first mutation, with everything needed to fix it.
+
+    A SystemExit so it ends the command, and its own type so a caller that
+    wants to distinguish "we chose not to provision" from "provisioning broke"
+    can. Raised only from the precheck, which runs before the owner account,
+    the project directory or any provisioning artifact exists -- declining an
+    installation must never leave a half-built tenant behind (SYRD-210).
+    """
+
+
+def _agent_cli_blocking_report(
+    blocked: dict[str, AgentCliAvailability], owner_user: str
+) -> list[str]:
+    lines = [
+        f"switchyard: cannot provision {owner_user or 'this tenant'} with the selected CLIs; "
+        "nothing has been created yet",
+    ]
+    for availability in blocked.values():
+        lines.append(f"switchyard:   {agent_cli_scope_explanation(availability, owner_user)}")
+    return lines
+
+
+def require_agent_clis_for_new_tenant(
+    role_clis: Sequence[tuple[str, str]],
+    *,
+    owner_user: str,
+    policy: str = "",
+    interactive: bool = True,
+    which: Callable[..., str | None] = shutil.which,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+    installer: Callable[..., AgentCliAvailability] | None = None,
+) -> Sequence[tuple[str, str]]:
+    """Settle every selected CLI BEFORE anything is created.
+
+    Returns the selection to provision with, which may differ from the one
+    passed in if the operator chose a different CLI for the affected roles.
+
+    The whole point is the ordering. This used to be discovered at the first-run
+    manifest, after the owner account, the project directory and the board
+    already existed, and the remedy printed there was a vendor installer that
+    installs for whoever runs it -- so an operator who followed it exactly
+    installed the CLI into their own account and the tenant still could not use
+    it (SYRD-210).
+    """
+    selection = list(role_clis)
+    availability = classify_selected_agent_clis(selection, which=which)
+    blocked = {
+        cli: verdict for cli, verdict in availability.items() if not verdict.serves_a_new_owner
+    }
+    if not blocked:
+        for verdict in availability.values():
+            print_func(
+                f"switchyard: {verdict.cli} is host-wide at {verdict.host_wide_path}; "
+                f"{owner_user} and later tenants use it without a per-owner install"
+            )
+        return tuple(selection)
+
+    report = _agent_cli_blocking_report(blocked, owner_user)
+
+    if not interactive:
+        if policy == AGENT_CLI_POLICY_REQUIRE_HOST_WIDE or not policy:
+            hint = (
+                "switchyard: re-run with --agent-cli-policy install-host-wide to install them "
+                "host-wide, or choose CLIs that are already host-wide with --role-cli"
+            )
+            raise AgentCliUnavailable("\n".join([*report, hint]))
+        if policy != AGENT_CLI_POLICY_INSTALL_HOST_WIDE:
+            raise AgentCliUnavailable(
+                f"switchyard: unknown --agent-cli-policy {policy!r}; "
+                f"choose one of {', '.join(AGENT_CLI_POLICIES)}"
+            )
+        for line in report:
+            print_func(line)
+        for cli in list(blocked):
+            _install_agent_cli_host_wide(
+                cli, print_func=print_func, which=which, installer=installer
+            )
+        return tuple(selection)
+
+    for line in report:
+        print_func(line)
+
+    for cli in list(blocked):
+        # Enumerated from the probe table, not the installer table. Both list the
+        # same CLIs, but reading the install commands here would widen the set of
+        # functions that touch them, and that set is deliberately small: PGU-904
+        # keeps those strings away from anything that could run them.
+        alternatives = [
+            name
+            for name in sorted(FIRST_RUN_AUTH_STATUS_COMMANDS)
+            if name != cli and classify_agent_cli(name, which=which).serves_a_new_owner
+        ]
+        while True:
+            print_func(f"switchyard: choose how to proceed for {cli}:")
+            print_func(
+                f"switchyard:   [i] install {cli} host-wide now; every tenant on this host "
+                "reuses it, and no provider credentials, trust or session state are shared"
+            )
+            if alternatives:
+                print_func(
+                    "switchyard:   [s] switch the affected roles to a CLI that is already "
+                    f"host-wide ({', '.join(alternatives)})"
+                )
+            print_func("switchyard:   [a] abort; nothing has been created and nothing will be")
+            answer = (input_func("Choice [i/s/a]: ") or "").strip().casefold()
+            if answer in ("a", "abort"):
+                raise AgentCliUnavailable(
+                    "switchyard: aborted before creating anything; no tenant residue to clean up"
+                )
+            if answer in ("i", "install"):
+                _install_agent_cli_host_wide(
+                    cli, print_func=print_func, which=which, installer=installer
+                )
+                break
+            if answer in ("s", "switch") and alternatives:
+                replacement = (
+                    input_func(f"Replacement CLI [{alternatives[0]}]: ") or alternatives[0]
+                ).strip()
+                if replacement not in alternatives:
+                    print_func(
+                        f"switchyard: {replacement or '(empty)'} is not host-wide; "
+                        f"choose one of {', '.join(alternatives)}"
+                    )
+                    continue
+                affected = [role for role, name in selection if name == cli]
+                selection = [
+                    (role, replacement if name == cli else name) for role, name in selection
+                ]
+                print_func(
+                    f"switchyard: {', '.join(affected)} now use {replacement} instead of {cli}"
+                )
+                break
+            print_func("switchyard: answer i, s or a")
+
+    return tuple(selection)
+
+
+def host_wide_install_instruction(cli: str) -> str:
+    """How to make one CLI host-wide, scoped so it lands where panes look.
+
+    Switchyard does not run this. PGU-904 removed CLI installation from this
+    module on purpose, and the reason applies with more force here: the only
+    installers these vendors publish are `curl | sh`, and a host-wide variant
+    would have to run one as ROOT, during provisioning, from the network. That
+    is a supply-chain decision rather than a convenience, and not one to take
+    silently while fixing a usability bug (SYRD-210).
+
+    What this does fix is the half that was plainly wrong. The printed remedy
+    used to be the bare vendor line, which installs into whichever account runs
+    it -- the desktop operator's, never the owner's. This one says where the
+    executable has to end up and what must NOT travel with it.
+    """
+    command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
+    if not command:
+        return (
+            f"install {cli} with that vendor's own installer, then place the executable in "
+            "/usr/local/bin owned by root, mode 0755, so every tenant resolves it"
+        )
+    return (
+        f"install {cli} host-wide: run the vendor installer under a throwaway HOME so nothing "
+        "it writes becomes shared, then move only the executable to /usr/local/bin owned by "
+        "root, mode 0755. No configuration, token or session file may travel with it -- "
+        "credentials stay in the owner account that authenticates"
+    )
+
+
+def _install_agent_cli_host_wide(
+    cli: str,
+    *,
+    print_func: Callable[[str], None] = print,
+    which: Callable[..., str | None] = shutil.which,
+    installer: Callable[..., AgentCliAvailability] | None = None,
+) -> AgentCliAvailability:
+    """Make one CLI host-wide, or refuse with the exact instruction.
+
+    `installer` is the seam for a host that has a supported mechanism, and for
+    tests. With none supplied this refuses rather than executing a vendor script
+    as root; refusing still happens before anything is created, so the tenant is
+    not half-built either way.
+    """
+    if installer is None:
+        raise AgentCliUnavailable(
+            f"switchyard: switchyard will not run {cli}'s vendor installer as root. "
+            f"{host_wide_install_instruction(cli)}. Then re-run: nothing has been created yet"
+        )
+    verdict = installer(cli, print_func=print_func, which=which)
+    if not verdict.serves_a_new_owner:
+        raise AgentCliUnavailable(
+            f"switchyard: {cli} still does not resolve on the pane base PATH after installation"
+        )
+    print_func(f"switchyard: {cli} is now host-wide at {verdict.host_wide_path}")
+    return verdict
+
+
 def _missing_cli_install_clause(cli: str, owner_user: str = "") -> str:
     """How to install one missing CLI, as text the reader runs themselves.
 
@@ -18396,6 +18701,7 @@ def switchyard_new_command(
     registry_dir: Path | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
+    agent_cli_policy: str = "",
 ) -> int:
     if from_artifact is not None:
         artifact = load_project_design_artifact(from_artifact)
@@ -18542,6 +18848,20 @@ def switchyard_new_command(
     )
     if resolved_agy_credential_source:
         _validate_agy_credential_source(resolved_agy_credential_source, owner_user, home_base)
+    # BEFORE the first mutation, and that placement is the fix. Everything below
+    # this line creates something: the service user, the owner account, the
+    # project directory, the provisioning artifacts. A CLI problem discovered
+    # after any of them has already stranded a partly built tenant, which is
+    # what "declining installation must never strand a partially provisioned
+    # tenant" means in practice (SYRD-210).
+    selected_role_clis = require_agent_clis_for_new_tenant(
+        selected_role_clis,
+        owner_user=owner_user,
+        policy=agent_cli_policy,
+        interactive=not yes,
+        input_func=input_func,
+        print_func=print_func,
+    )
     _ensure_board_service_user(precheck_plan.service_user, runner=runner)
     _ensure_board_service_peer_auth(precheck_plan, source_repo=effective_source_repo, runner=runner)
     owner_result = _ensure_owner_user_and_project_dir(
@@ -25158,6 +25478,16 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         help="git repository path, or colon-separated paths, used to verify board commit hashes",
     )
     parser.add_argument("--output-dir", type=Path, help="write provisioning artifacts here")
+    parser.add_argument(
+        "--agent-cli-policy",
+        choices=list(AGENT_CLI_POLICIES),
+        default="",
+        help=(
+            "what an unattended run may do about a selected CLI that is not installed host-wide: "
+            "require-host-wide refuses before creating anything; install-host-wide installs it "
+            "once for every tenant on this host. Interactive runs ask instead of assuming."
+        ),
+    )
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
     parser.add_argument("--database", help="PostgreSQL database; omitted means <slug>_ticket_board")
     parser.add_argument("--yes", action="store_true", help="proceed without the confirmation prompt")
@@ -26875,6 +27205,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             workflow_config=args.workflow_config,
             commit_git_dir=args.commit_git_dir,
             output_dir=args.output_dir,
+            agent_cli_policy=args.agent_cli_policy,
             port=args.port,
             database=args.database,
             yes=args.yes,

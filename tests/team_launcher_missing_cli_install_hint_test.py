@@ -20,7 +20,20 @@ from team_launcher_test_helpers import *
 CLIS = ("agy", "claude", "codex", "hermes")
 # The only functions allowed to touch the vendor command table. Both format
 # text; neither can execute anything. Adding a name here is a deliberate act.
-COMMAND_TABLE_READERS = {"_missing_cli_install_clause", "_format_missing_cli_launch_failure"}
+# Every function allowed to read the vendor install strings. The set is exact so
+# that adding one is a decision somebody made on purpose rather than a diff that
+# slipped through: the point of PGU-904 is that these strings stay away from
+# anything that could execute them.
+#
+# host_wide_install_instruction joins them for SYRD-210. It formats text and
+# nothing else -- switchyard still refuses to run a vendor installer, and refuses
+# harder here than where this guard was written, because a host-wide install
+# would have to run `curl | sh` as ROOT during provisioning.
+COMMAND_TABLE_READERS = {
+    "_missing_cli_install_clause",
+    "_format_missing_cli_launch_failure",
+    "host_wide_install_instruction",
+}
 EXECUTION_MARKERS = ("subprocess", "runner", "os.system", "popen", "check_call", "check_output")
 
 

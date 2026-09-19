@@ -13423,6 +13423,18 @@ FOREGROUND_COMPLETION_POLL_SECONDS = 0.5
 #: for a key that was never going to be written (SYRD-191).
 FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 600.0
 
+#: How long a foreground step may sit with nothing recorded before the operator
+#: is told what they are looking at.
+#:
+#: The timeout above ends a step that will never complete, but ten minutes of
+#: an ordinary prompt is indistinguishable from a hang while you are sitting in
+#: front of it -- live Zorin UAT reported exactly that: the questions were
+#: answered, Claude dropped to its normal prompt, and thefive-pane team never
+#: launched because Switchyard was still waiting for a key the CLI does not
+#: write until it exits (SYRD-211 live UAT).
+FOREGROUND_READY_PROMPT_GRACE_SECONDS = 45.0
+
+
 
 def _run_owner_cli_until(
     *,
@@ -13468,6 +13480,8 @@ def _run_owner_cli_until(
         return True
     process = (popen or subprocess.Popen)(args, **kwargs)
     deadline = monotonic() + timeout_seconds
+    said_what_to_do = False
+    grace = monotonic() + FOREGROUND_READY_PROMPT_GRACE_SECONDS
     try:
         while True:
             if process.poll() is not None:
@@ -13478,6 +13492,16 @@ def _run_owner_cli_until(
                 # terminal is taken back from it.
                 sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
                 break
+            if not said_what_to_do and monotonic() >= grace:
+                # Not a warning: most of the time the person is simply looking
+                # at an ordinary prompt and has no way to know Switchyard is
+                # waiting for something the CLI writes when it closes.
+                said_what_to_do = True
+                print_func(
+                    f"switchyard: still waiting for {watching}. If {command[0]} is now at its "
+                    "ordinary prompt, its first run is finished -- exit it (/exit, or Ctrl-D) "
+                    "and Switchyard will carry on by itself. Nothing needs answering twice."
+                )
             if monotonic() >= deadline:
                 # Loud, and specific about what did not happen. A step that
                 # cannot complete is a disagreement between this code and the
@@ -14218,26 +14242,6 @@ def run_first_run_auth_phase(
     print_first_run_setup_manifest(manifest, print_func=print_func)
     missing_cli_roles.update(manifest.missing_cli_roles)
 
-    authenticated_now: dict[str, list[str]] = {}
-    for step in manifest.login_steps:
-        login_command = list(step.command)
-        _run_owner_cli_interactive(
-            owner_user=effective_owner,
-            owner_home=effective_home,
-            cwd=effective_home,
-            command=login_command,
-            runner=runner,
-        )
-        auth_status = _cli_auth_status(step.cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
-        if auth_status == "not_installed":
-            missing_cli_roles[step.cli] = list(step.roles)
-        elif auth_status != "authenticated":
-            unauthenticated[step.cli] = list(step.roles)
-        else:
-            # This run is what made that provider usable. Every role configured
-            # for it that is already running started before it (SYRD-191).
-            authenticated_now[step.cli] = list(step.roles)
-
     # The provider's own first run, once per provider, before any role is
     # launched or presented. Switchyard asks the CLI to run its setup and then
     # looks at the account state again; it never writes that state itself and
@@ -14260,6 +14264,40 @@ def run_first_run_auth_phase(
         )
         if not completed:
             incomplete_setup.append((step.cli, list(step.roles)))
+
+    authenticated_now: dict[str, list[str]] = {}
+    for step in manifest.login_steps:
+        # Asked again first. That provider's own first run may have signed in
+        # as part of itself, and live Zorin UAT showed the cost of not
+        # checking: `claude login`, `codex login`, and then Claude asking to
+        # sign in a second time inside its welcome flow (SYRD-211 live UAT).
+        # Running setup before this is what makes the second question
+        # avoidable; re-reading here is what makes it actually avoided.
+        if _cli_auth_status(
+            step.cli,
+            owner_user=effective_owner,
+            owner_home=effective_home,
+            runner=runner,
+        ) == "authenticated":
+            authenticated_now.setdefault(step.cli, list(step.roles))
+            continue
+        login_command = list(step.command)
+        _run_owner_cli_interactive(
+            owner_user=effective_owner,
+            owner_home=effective_home,
+            cwd=effective_home,
+            command=login_command,
+            runner=runner,
+        )
+        auth_status = _cli_auth_status(step.cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
+        if auth_status == "not_installed":
+            missing_cli_roles[step.cli] = list(step.roles)
+        elif auth_status != "authenticated":
+            unauthenticated[step.cli] = list(step.roles)
+        else:
+            # This run is what made that provider usable. Every role configured
+            # for it that is already running started before it (SYRD-191).
+            authenticated_now[step.cli] = list(step.roles)
 
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:

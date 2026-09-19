@@ -280,7 +280,17 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
     ]
 
-def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_role() -> None:
+def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_role() -> None:
+    """Setup FIRST, then a login only if the account still needs one.
+
+    Logins used to run first, and live Zorin UAT showed what that costs: the
+    operator signed into Claude, signed into Codex, and was then asked to sign
+    into Claude a second time inside its own welcome flow, which does its own
+    sign-in. Running the account-wide first run before the logins, and
+    re-reading the account before each one, is what makes the second question
+    unnecessary -- and the login is still there for an account the welcome flow
+    does not settle (SYRD-211 live UAT).
+    """
     """One login and one first run per provider, one trust action per worktree.
 
     This used to assert that a VISIBLE role's worktree trust was skipped, on
@@ -327,10 +337,16 @@ def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_r
         ("claude", "designer", str(tmp_path / "worktrees" / "designer")),
         ("claude", "director", str(tmp_path / "worktrees" / "director")),
     ]
-    # Login for each provider, then Claude's own first run once for both of its
-    # roles, then one trust action per distinct worktree -- three of them, for
-    # two Claude roles and one agy role, and none for Codex, which takes no
-    # directory trust.
+    # The manifest probes, then Claude's own first run once for both of its
+    # roles, then -- for each provider still unauthenticated -- one login,
+    # each preceded by the re-read that would have skipped it, then one trust
+    # action per distinct worktree: three, for two Claude roles and one agy
+    # role, and none for Codex, which takes no directory trust.
+    #
+    # `claude auth login` survives here only because this fake records nothing:
+    # its welcome flow does not mark the account authenticated, so the re-read
+    # still says no. On a real host that flow signs in and the login is skipped,
+    # which is the duplicate live UAT was asked to sit through.
     assert runner.calls == [
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v claude"],
@@ -338,13 +354,19 @@ def test_first_run_auth_phase_sequences_logins_then_setup_then_trust_for_every_r
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v codex"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v agy"],
+        ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v claude"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "login"],
         ["sudo", "-u", "otto-agent", "claude", "auth", "status", "--json"],
+        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v codex"],
         ["sudo", "-u", "otto-agent", "codex", "login"],
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
+        ["sudo", "-u", "otto-agent", "agy", "models"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v agy"],
         ["sudo", "-u", "otto-agent", "agy"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
-        ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "agy"],
@@ -428,7 +450,13 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
 
     assert report.unauthenticated_roles == {}
     assert report.untrusted_roles == []
+    # The middle pair is the account being re-read immediately before the login
+    # runs. It is what lets a provider whose own first run already signed in be
+    # skipped instead of asked again, and it costs one probe per login step
+    # (SYRD-211 live UAT).
     assert runner.calls == [
+        ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
+        ["sudo", "-u", "otto-agent", "sh", "-c", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
         ["sudo", "-u", "otto-agent", "sh", "-c", "command -v hermes"],
         ["sudo", "-u", "otto-agent", "hermes", "model"],

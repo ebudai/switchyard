@@ -11727,6 +11727,77 @@ def require_agent_clis_for_new_tenant(
     return tuple(selection)
 
 
+@dataclass(frozen=True)
+class OwnerCliVerification:
+    """What the owner account actually resolves and runs, after it exists."""
+
+    cli: str
+    owner_user: str
+    path: str = ""
+    version: str = ""
+
+    @property
+    def resolved(self) -> bool:
+        return bool(self.path)
+
+
+def verify_agent_clis_for_owner(
+    role_clis: Sequence[tuple[str, str]],
+    *,
+    owner_user: str,
+    owner_home: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[OwnerCliVerification]:
+    """Ask the generated owner what it will actually run, and say so.
+
+    The precheck answers a question about the host before the owner exists;
+    this answers the only question that finally matters -- what THIS account
+    resolves -- and it can only be asked once the account is real. They can
+    disagree: a host-wide CLI is what the precheck required, but the owner's own
+    PATH is searched first, so an owner-local copy would win at pane launch and
+    nothing else would ever mention it.
+
+    Reported rather than merely checked, because "which binary is my tenant
+    running" is the question a version mismatch makes someone ask days later
+    (SYRD-210).
+    """
+    results: list[OwnerCliVerification] = []
+    for cli in dict.fromkeys(cli for _role, cli in role_clis):
+        binary = agent_cli_binary(cli)
+        located = _run_owner_cli_probe(
+            owner_user=owner_user,
+            owner_home=owner_home,
+            command=["sh", "-c", f"command -v {shlex.quote(binary)}"],
+            runner=runner,
+        )
+        path = (located.stdout or "").strip().splitlines()
+        resolved = path[0] if path and located.returncode == 0 else ""
+        version = ""
+        if resolved:
+            probe = _run_owner_cli_probe(
+                owner_user=owner_user,
+                owner_home=owner_home,
+                command=[binary, "--version"],
+                runner=runner,
+            )
+            if probe.returncode == 0:
+                lines = (probe.stdout or "").strip().splitlines()
+                version = lines[0].strip() if lines else ""
+        results.append(
+            OwnerCliVerification(cli=cli, owner_user=owner_user, path=resolved, version=version)
+        )
+        if resolved:
+            suffix = f" ({version})" if version else " (version not reported)"
+            print_func(f"switchyard: {owner_user} runs {cli} from {resolved}{suffix}")
+        else:
+            print_func(
+                f"switchyard: {owner_user} cannot resolve {cli}; its panes would fail to start. "
+                f"{host_wide_install_instruction(cli)}"
+            )
+    return results
+
+
 def host_wide_install_instruction(cli: str) -> str:
     """How to make one CLI host-wide, scoped so it lands where panes look.
 
@@ -18870,6 +18941,19 @@ def switchyard_new_command(
         runner=runner,
         shell=owner_shell,
         owner_home=home_base / owner_user,
+    )
+    # Only meaningful once the account exists, which is why it is HERE and not
+    # beside the precheck. The precheck asks whether this host can serve a
+    # tenant; this asks what the tenant it just created actually resolves, and
+    # they can differ -- the owner's own PATH is searched first, so an
+    # owner-local copy would win at pane launch and nothing else would say so
+    # (SYRD-210).
+    verify_agent_clis_for_owner(
+        selected_role_clis,
+        owner_user=owner_user,
+        owner_home=home_base / owner_user,
+        runner=runner,
+        print_func=print_func,
     )
     if owner_result.created:
         created_shell = owner_result.shell_path or owner_shell

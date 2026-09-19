@@ -330,6 +330,97 @@ def test_an_unknown_cli_still_gets_a_scoped_instruction() -> None:
     assert "/usr/local/bin" in instruction and "root" in instruction, instruction
 
 
+class OwnerProbe:
+    """Stands in for the owner account, answering `command -v` and `--version`."""
+
+    def __init__(self, resolved: dict[str, str], versions: dict[str, str] | None = None) -> None:
+        self.resolved = resolved
+        self.versions = versions or {}
+        self.asked: list[str] = []
+
+    def __call__(self, args, **_kwargs):
+        import subprocess as sp
+
+        joined = " ".join(str(a) for a in args)
+        self.asked.append(joined)
+        for binary, path in self.resolved.items():
+            if f"command -v {binary}" in joined:
+                return sp.CompletedProcess(args, 0, stdout=f"{path}\n", stderr="")
+            if joined.rstrip().endswith(f"{binary} --version"):
+                version = self.versions.get(binary, "")
+                code = 0 if version else 1
+                return sp.CompletedProcess(args, code, stdout=f"{version}\n", stderr="")
+        return sp.CompletedProcess(args, 1, stdout="", stderr="not found")
+
+
+def test_the_owner_account_reports_the_exact_path_and_version() -> None:
+    rec = Recorder()
+    probe = OwnerProbe({"claude": "/usr/local/bin/claude"}, {"claude": "claude 1.2.3"})
+    results = team_launcher.verify_agent_clis_for_owner(
+        (("main", "claude"), ("ops", "claude")),
+        owner_user="test-agent",
+        owner_home=Path("/home/test-agent"),
+        runner=probe,
+        print_func=rec.print,
+    )
+    assert [r.cli for r in results] == ["claude"], "one verification per distinct CLI"
+    assert results[0].path == "/usr/local/bin/claude"
+    assert results[0].version == "claude 1.2.3"
+    assert "/usr/local/bin/claude" in rec.text and "claude 1.2.3" in rec.text
+
+
+def test_a_cli_the_owner_cannot_resolve_is_reported_with_the_scoped_remedy() -> None:
+    rec = Recorder()
+    probe = OwnerProbe({})
+    results = team_launcher.verify_agent_clis_for_owner(
+        (("main", "codex"),),
+        owner_user="test-agent",
+        owner_home=Path("/home/test-agent"),
+        runner=probe,
+        print_func=rec.print,
+    )
+    assert not results[0].resolved
+    assert "cannot resolve codex" in rec.text
+    assert "/usr/local/bin" in rec.text, "the remedy must say where it has to end up"
+    assert team_launcher.AGENT_CLI_INSTALL_COMMANDS["codex"] not in rec.text
+
+
+def test_a_missing_version_is_said_rather_than_faked() -> None:
+    rec = Recorder()
+    probe = OwnerProbe({"codex": "/usr/local/bin/codex"})
+    results = team_launcher.verify_agent_clis_for_owner(
+        (("main", "codex"),),
+        owner_user="test-agent",
+        owner_home=Path("/home/test-agent"),
+        runner=probe,
+        print_func=rec.print,
+    )
+    assert results[0].resolved and results[0].version == ""
+    assert "version not reported" in rec.text
+
+
+def test_owner_verification_runs_after_the_owner_account_is_created() -> None:
+    """My first attempt put this before the account existed, where it could only fail.
+
+    The precheck and this verification ask different questions and belong on
+    opposite sides of the account being created; the source order is the only
+    place that distinction is visible.
+    """
+    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+    gate = source.index("selected_role_clis = require_agent_clis_for_new_tenant(")
+    created = source.index("owner_result = _ensure_owner_user_and_project_dir(")
+    # Searched from the top, not from `created`: searching forward turns "it
+    # moved above the account" into a ValueError about a missing substring,
+    # which says nothing about what is actually wrong.
+    verified = source.find("    verify_agent_clis_for_owner(")
+    assert verified != -1, "the owner verification call is gone entirely"
+    assert gate < created, "the precheck must run before the account is created"
+    assert created < verified, (
+        "owner verification runs before the account is created, where it can only ever "
+        "report that nothing resolves"
+    )
+
+
 def test_the_gate_runs_before_the_first_mutation() -> None:
     """Ordering is the fix, and it is invisible in behaviour until it is wrong.
 

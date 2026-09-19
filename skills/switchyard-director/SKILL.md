@@ -93,9 +93,18 @@ carry them are named by each tenant: you can always move a ticket out of any
 non-terminal stage, and you can always reopen a terminal one. If you cannot find
 the transition that does it, read `workflow_actions` again -- it exists.
 
-You can never approve. No transition that writes a sign-off flag may list you
-among its actors, which is why `mark_done` and `director_dat_sign_off` are
-ordinary moves rather than approvals: they advance work that others signed for.
+You can never approve on your own judgement. No transition that writes a
+sign-off flag may list you among its actors, which is why `mark_done` and
+`director_dat_sign_off` are ordinary moves rather than approvals: they advance
+work that others signed for.
+
+The single exception is a relay, and it is not an exception to that rule. A
+relayed approval enters a decision made by a role that has no pane to enter it
+from -- the user -- and the board refuses it unless it lands exactly where that
+role's own approval lands, names the commit it accepts, carries the reason you
+were given, and leaves the work short of done. It records the sign-off as
+theirs and you as having entered it. Strip the provenance and it is a plain
+director approval again, which the document still will not hold.
 
 ## Draft and triage
 
@@ -241,6 +250,28 @@ deliberately not notified by the board. Prepare it: state on the ticket what to
 try, what correct looks like, and what to do if it is wrong. One question, with
 the context needed to answer it. A UAT ticket the user cannot act on without
 asking you a question was not prepared.
+
+### Recording what the user reports
+
+The user answers in conversation, and `user_sign_off` / `user_kick_back` are
+theirs and will refuse you. Both results have a relay, taken through
+`workflow-action` because they are declared transitions:
+
+```bash
+ticket-board-write workflow-action <id> relay_user_sign_off \
+  --payload-json '{"reason": "<what the user reported>", "commit_hash": "<the commit the ticket carries>"}'
+ticket-board-write workflow-action <id> relay_user_kick_back \
+  --payload-json '{"reason": "<what the user reported>"}'
+```
+
+Use them instead of an override. An override reaches the same stage while
+naming no commit, checking no gate, and leaving nothing a later reader can tell
+apart from your own judgement -- and on an acceptance it leaves the sign-off
+unwritten on a ticket the user actually accepted. The acceptance additionally
+requires the stage gate and every earlier review to be in place, and it must
+name the candidate the ticket already carries; if it refuses, the ticket is not
+in the state you think it is. Relay what you were told, in the words you were
+told it.
 
 ## Notification recovery
 

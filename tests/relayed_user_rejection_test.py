@@ -30,11 +30,19 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from schema_function_drift import assert_no_drift
 from scripts.ticket_board.workflow_config import available_transitions, validate
 from temporary_cluster import temporary_cluster
 
 MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu952_syrd214_relay_user_rejection.sql"
 MIGRATION = MIGRATION_PATH.read_text()
+#: Applied after pgu952 on any board that takes the upgrade path, and it is the
+#: later of the two that decides which function bodies an upgraded board runs.
+LATER_MIGRATIONS = sorted(
+    p.read_text()
+    for p in (ROOT / "scripts/ticket_board/migrations").glob("*.sql")
+    if p.name > MIGRATION_PATH.name
+)
 
 RELAY = "relay_user_kick_back"
 
@@ -48,22 +56,24 @@ ATTRIBUTION = [
     "director did not perform the review behind it",
 ]
 
-#: Installed by schema.sql on a fresh board and by the migration on an existing
+#: Installed by schema.sql on a fresh board and by a migration on an existing
 #: one. Nothing makes the two agree except saying so.
 SHARED_FUNCTIONS = ("validate_declared_workflow", "perform_workflow_action_as")
 
 
-def function_body(name: str) -> str:
-    schema = t.SCHEMA_PATH.read_text()
-    start = schema.index(f"CREATE OR REPLACE FUNCTION ticket_board.{name}(")
-    return schema[start:schema.index("$$;", start) + 3]
-
-
 def legacy_document(cfg: dict) -> dict:
-    """The document every board provisioned before this ticket is running."""
+    """The document every board provisioned before relaying existed.
+
+    Every relay goes, not just this ticket's: the field cannot simply be
+    stripped in place, because a relayed approval with its provenance removed
+    is a plain director sign-off, which the capability floor refuses -- rightly,
+    and that refusal is not the one this suite is here to reproduce.
+    """
     stripped = json.loads(json.dumps(cfg))
     stripped["transitions"] = [
-        dict(tr) for tr in stripped["transitions"] if tr["action"] != RELAY
+        dict(tr)
+        for tr in stripped["transitions"]
+        if not tr.get("relays_decision_of")
     ]
     for tr in stripped["transitions"]:
         tr.pop("relays_decision_of", None)
@@ -233,12 +243,25 @@ def main() -> int:
                         tr.update(changes)
                 return doc
 
-            # Approving for the User: the shape this must never take.
+            # SYRD-217 replaced "a relay may only return" with a narrower rule:
+            # a relay must mirror a move the relayed role can make from here.
+            # A rejection relay that turns itself into an approval is then
+            # caught by what an approval has to carry, not by the primitive.
             refuse(variant(primitive="approve", to="director_review", clear_signoffs=[]),
-                   f"a relay that approves ({phase})", says="never approve it")
+                   f"a rejection relay recast as an approval ({phase})",
+                   says="must name the commit it accepts")
             # Carrying the ticket past User review by any other primitive.
             refuse(variant(primitive="move", to="director_review", clear_signoffs=[]),
-                   f"a relay that advances ({phase})", says="never approve it")
+                   f"a relay that advances ({phase})", says="only return or approve work")
+            # Returning somewhere the User's own kick-back does not go, or
+            # clearing something it does not clear: a relay is that role's move
+            # under another hand, so it may not differ in effect.
+            refuse(variant(clear_signoffs=["user_signoff"]),
+                   f"a relay that clears less than the User's own move ({phase})",
+                   says="land exactly where")
+            refuse(variant(relays_decision_of="audit"),
+                   f"a relay of a decision that role never makes here ({phase})",
+                   says="must mirror a move")
             refuse(variant(require_reason=False), f"a relay with no reason ({phase})",
                    says="must carry its reason")
             refuse(variant(actors=["user"]), f"a role relaying its own decision ({phase})",
@@ -256,11 +279,12 @@ def main() -> int:
         assert len(relays(shipped)) == 1, "the shipped document carries the action"
 
         # Fresh provisioning installs schema.sql's copy of these functions and
-        # an upgrade installs the migration's, which is how every migration in
+        # an upgrade installs a migration's, which is how every migration in
         # this tree works. Nothing but this makes them the same function, and a
         # board that took the other path would quietly behave differently.
-        for name in SHARED_FUNCTIONS:
-            assert function_body(name) in MIGRATION, f"{name} has drifted from {MIGRATION_PATH.name}"
+        # A later migration may take ownership of a body; this one keeps what it
+        # shipped, so the comparison is against whichever migration runs last.
+        assert_no_drift(*SHARED_FUNCTIONS)
 
         try:
             # -- A board provisioned from schema.sql, running its bodies. -------
@@ -289,7 +313,14 @@ def main() -> int:
             # -- The upgrade. ---------------------------------------------------
             before = revision()
             t.psql(admin, MIGRATION)
-            assert revision() == before + 1, (before, revision())
+            # Anything that ships after this one is part of the same upgrade, so
+            # it is applied too: a board sitting on pgu952's bodies alone is a
+            # state no real board is ever left in.
+            granted = revision()
+            assert granted == before + 1, (before, granted)
+            for later in LATER_MIGRATIONS:
+                t.psql(admin, later)
+            after_all = revision()
             added = relays(document())
             assert len(added) == 1, added
             model = next(tr for tr in document()["transitions"] if tr["action"] == "user_kick_back")
@@ -302,10 +333,12 @@ def main() -> int:
                 "SELECT document->'migrations'->>'relay_user_rejection' "
                 "FROM ticket_board.workflow_configuration WHERE singleton;"
             ) == "true"
-            # Idempotent: a second run grants nothing twice and writes no
-            # revision nobody asked for.
+            # Idempotent: a second run of the whole sequence grants nothing
+            # twice and writes no revision nobody asked for.
             t.psql(admin, MIGRATION)
-            assert revision() == before + 1, revision()
+            for later in LATER_MIGRATIONS:
+                t.psql(admin, later)
+            assert revision() == after_all, (after_all, revision())
             assert len(relays(document())) == 1, document()["transitions"]
 
             # -- The same behaviour, now on the migration's bodies. -------------
@@ -345,12 +378,16 @@ def main() -> int:
                      "no user-owned return out of user_review")
             # Two roles could be the controller, so none of them is chosen.
             declines(without_relay(grant_control=("audit",)), "ambiguous control role")
-            # The name is already taken by something the tenant declared.
+            # The name is already taken by something the tenant declared -- and
+            # by something that is not a relay at all, which is the case worth
+            # protecting: the migration must not overwrite a name whose meaning
+            # here is the tenant's own.
             declines(without_relay(extra=[{
                 "from": "director_review", "to": "in_progress", "action": RELAY,
-                "label": "Tenant's own relay", "actors": ["director"], "primitive": "return",
-                "owner_scoped": False, "require_commit": False, "require_reason": True,
-                "clear_signoffs": [], "allow_no_code": False, "relays_decision_of": "user",
+                "label": "Tenant's own kick back", "actors": ["director"],
+                "primitive": "return", "owner_scoped": False, "require_commit": False,
+                "require_reason": True, "clear_signoffs": [], "allow_no_code": False,
+                "relays_decision_of": None,
             }]), "the action name already means something else")
             # The tenant already relays the User's rejection, under its own
             # name. Matching on the name alone would hand it a second one.

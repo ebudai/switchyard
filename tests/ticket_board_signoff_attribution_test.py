@@ -230,11 +230,20 @@ def test_the_declared_workflow_gives_no_review_to_the_director() -> None:
     An approve transition is the only thing that raises a stage's sign-off, so
     the actors on those transitions are the whole question. Read from the
     shipped document rather than asserted about it.
+
+    A relayed approval is the one exception, and it is not an exception to the
+    attribution: the sign-off it writes still belongs to the stage's owner, who
+    made the decision off the board, and the relayer is recorded as having
+    entered it rather than given it (SYRD-217). Those are checked separately
+    below, against what makes them safe rather than against their actors.
     """
     signoff_stages = {stage["name"]: stage["signoff"] for stage in DOCUMENT["stages"] if stage["signoff"]}
     assert set(signoff_stages.values()) == set(SIGNOFF_FLAGS), signoff_stages
 
-    approvals = [t for t in DOCUMENT["transitions"] if t["primitive"] == "approve"]
+    approvals = [
+        t for t in DOCUMENT["transitions"]
+        if t["primitive"] == "approve" and not t.get("relays_decision_of")
+    ]
     assert approvals, "the fixture workflow has no approvals to check"
     for transition in approvals:
         stage = transition["from"]
@@ -242,6 +251,40 @@ def test_the_declared_workflow_gives_no_review_to_the_director() -> None:
         owners = next(s for s in DOCUMENT["stages"] if s["name"] == stage)["owners"]
         assert transition["actors"] == owners, transition
         assert "director" not in transition["actors"], transition
+
+
+def test_a_relayed_approval_still_belongs_to_the_role_it_names() -> None:
+    """The narrow exception, held to what makes it narrow.
+
+    A relayed approval is the only way the director's name reaches an approve
+    transition. It stays safe because it can only be the stage owner's own move
+    under another hand: it names that owner, it lands where the owner's own
+    approval lands, the owner is not among its actors, it carries a reason and
+    a commit, and the owner is a role with no pane to act from in the first
+    place.
+    """
+    relayed = [
+        t for t in DOCUMENT["transitions"]
+        if t["primitive"] == "approve" and t.get("relays_decision_of")
+    ]
+    assert relayed, "the fixture workflow has no relayed approvals to check"
+    panes = {role["name"]: role.get("target") for role in DOCUMENT["roles"]}
+    for transition in relayed:
+        stage = next(s for s in DOCUMENT["stages"] if s["name"] == transition["from"])
+        decided_by = transition["relays_decision_of"]
+        assert stage["owners"] == [decided_by], transition
+        assert decided_by not in transition["actors"], transition
+        assert panes[decided_by] is None, "a role that can act for itself must"
+        assert transition["require_reason"] and transition["require_commit"], transition
+        assert not transition["owner_scoped"], transition
+        own = [
+            t for t in DOCUMENT["transitions"]
+            if t["from"] == transition["from"]
+            and t["primitive"] == "approve"
+            and decided_by in t["actors"]
+        ]
+        assert own, transition
+        assert all(t["to"] == transition["to"] for t in own), (transition, own)
 
 
 def test_a_kick_back_still_clears_the_approval_it_sends_back() -> None:

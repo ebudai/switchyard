@@ -165,15 +165,31 @@ identity instead: the role holding `merge`, `set-blockers` and
 `set-manually-controlled` is the controller and may use them (SYRD-49, SYRD-78,
 SYRD-180).
 
-**Relay a failed UAT, do not override it.** The User reports UAT in conversation
-and has no pane to reject from, but `user_kick_back` is the User's own action and
-refuses you, as a sign-off decision should. `relay-user-kick-back <id> --reason
-"..."` is the move for it: it returns the ticket along the ordinary correction
-path, clears the same sign-offs the User's own rejection clears, notifies the
-implementer once, and records in the ticket that you relayed the User's decision
-rather than made it. It cannot approve -- a relay only ever sends work back -- so
-it is not a way to sign off on the User's behalf, and nothing carries a ticket
-past User review without the User (SYRD-214).
+**Relay the User's UAT result, do not override it.** The User reports UAT in
+conversation and has no pane to act from, and `user_sign_off` / `user_kick_back`
+are the User's own actions and refuse you, as sign-off decisions should. Both
+results have a relay instead. They are declared transitions, so they are taken
+through `workflow-action` rather than a subcommand of their own:
+
+```bash
+ticket-board-write workflow-action <id> relay_user_sign_off \
+  --payload-json '{"reason": "User completed the steps and accepted", "commit_hash": "<the commit the ticket carries>"}'
+ticket-board-write workflow-action <id> relay_user_kick_back \
+  --payload-json '{"reason": "User reports <what failed>"}'
+```
+
+The rejection returns the ticket along the ordinary correction path, clears the
+same sign-offs the User's own rejection clears, and notifies the implementer
+once (SYRD-214). The acceptance sets `user_signoff` and stops at your own final
+review -- it cannot close a ticket, it requires the stage's gate and every
+earlier review to already be in place, and it must name the candidate the ticket
+already carries and cannot change it (SYRD-217).
+
+Both are recorded as the User's decision entered by you, never as your own
+review, and neither exists on an installation where the User has a board pane of
+its own. Use them instead of an override: the override reaches the same stage
+while naming no commit, checking no gate, and leaving nothing a later reader can
+tell apart from your own judgement.
 
 **Narrate every override.** `force-move` and `override-move` bypass the workflow;
 `edit-fields` bypasses the normal field-specific operations. Each exceptional use needs a

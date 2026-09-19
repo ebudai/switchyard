@@ -25,6 +25,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from workflow_document_eras import before_relaying
 from publication_cache_fixture import build_cache, commit_file, publish
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
@@ -84,7 +85,9 @@ def main() -> int:
             commit_git_dir=str(cache),
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
         )
-        cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+        # An era-appropriate document: pgu930 re-validates what is stored
+        # with its own validator, which predates relayed decisions.
+        cfg = validate(before_relaying())
         server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier())
         t.TEST_WRITE_TOKEN = server.write_token
         thread = threading.Thread(target=server.serve_forever, daemon=True)

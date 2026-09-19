@@ -31,11 +31,14 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
+from workflow_document_eras import before_relaying
 from scripts.ticket_board.workflow_config import parking_stage_names, validate  # noqa: E402
 
 from temporary_cluster import temporary_cluster  # noqa: E402
 
-CANONICAL = json.loads((ROOT / "examples/workflows/inspection.json").read_text())
+#: Era-appropriate: the migration under test re-validates what is stored with
+#: its own validator, which predates relayed decisions.
+CANONICAL = before_relaying()
 MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu929_syrd92_director_defer_backlog.sql"
 MIGRATION = MIGRATION_PATH.read_text()
 #: Applying this file alone to a board running today's schema reinstalls the
@@ -400,7 +403,11 @@ def run_database_checks(cluster) -> None:
     fresh = fresh_app.workflow_document()["document"]
     assert parking_stage_names(fresh) == {"backlog"}, fresh["stages"]
     apply_migration_tail(fresh_admin)
-    assert fresh_app.workflow_document()["document"] == fresh, "a healthy tenant must not be rewritten"
+    # Migrations after this one legitimately grant the relayed decisions
+    # (SYRD-214, SYRD-217), so the comparison is of everything else: this
+    # ticket's repair must add nothing of its own to a healthy tenant.
+    assert before_relaying(fresh_app.workflow_document()["document"]) == before_relaying(fresh), \
+        "a healthy tenant must not be rewritten"
 
     run_fresh_board_checks(fresh_app, fresh_admin)
     run_upgrade_history_checks(cluster)

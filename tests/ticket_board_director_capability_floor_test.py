@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from scripts import onboarding_readiness  # noqa: E402
+from workflow_document_eras import before_relaying  # noqa: E402
 from scripts.ticket_board.workflow_config import (  # noqa: E402
     DIRECTOR_CONTROL_CAPABILITIES,
     DIRECTOR_IDENTIFYING_CAPABILITIES,
@@ -301,8 +302,11 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
     from temporary_cluster import temporary_cluster
 
     # A tenant from before either release: it has neither the capability the
-    # floor gained in SYRD-82 nor the one it gained in SYRD-83.
-    stale = base_document()
+    # floor gained in SYRD-82 nor the one it gained in SYRD-83 -- and no
+    # relayed decisions either, since those arrived far later in this very
+    # tail. A document carrying them could not have existed on a board about
+    # to run pgu927, and pgu927's own validator would refuse it, rightly.
+    stale = before_relaying(base_document())
     later_capabilities = ("reassign", "director_edit", "resolve_publication", "recover_stalled_ticket")
     director_of(stale)["capabilities"] = [
         c for c in director_of(stale)["capabilities"] if c not in later_capabilities

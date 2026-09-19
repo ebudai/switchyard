@@ -23,6 +23,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
+from workflow_document_eras import before_relaying
 from scripts.ticket_board import write_client  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 
@@ -130,7 +131,9 @@ def main():
             ticket_prefix="PGU",
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
         )
-        document = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+        # An era-appropriate document: this suite applies a migration that
+        # predates relayed decisions and re-validates whatever is stored.
+        document = validate(before_relaying())
         app.apply_workflow(document, expected_revision=0, dry_run=False, caller_role="director")
 
         server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier())

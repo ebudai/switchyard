@@ -678,16 +678,32 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "no-code completion requires implementation origin and reason",
         )
         # A relay records somebody else's decision, which is a narrow and
-        # easily-abused thing to let one role do for another. So it is
-        # constrained rather than merely declared:
+        # easily-abused thing to let one role do for another.
         #
-        # * it may only RETURN work. An approval relayed on somebody's behalf
-        #   is that person's sign-off forged, which is the one thing this must
-        #   never become;
-        # * it must take a reason, because the whole record is what the other
-        #   party said;
-        # * the role whose decision is being relayed may not be an actor of it,
-        #   since a role that can act does not need anyone to relay for it.
+        # SYRD-214 admitted returns only, reasoning that a relayed approval is
+        # a forged sign-off. SYRD-217 is the case that reasoning missed: the
+        # User's acceptance is exactly as unreachable as their rejection, and
+        # refusing to record it protected nobody -- it moved the same decision
+        # into a narrated override, where the destination is whatever the
+        # Director types and no gate is checked at all. The sign-off the board
+        # was declining to forge simply went unrecorded on a shipped ticket.
+        #
+        # So the rule is no longer "never approve". It is "never anything the
+        # relayed role could not have done itself, from here":
+        #
+        # * the relay must mirror a move that role can actually make out of
+        #   this stage -- same primitive, same destination, same sign-off
+        #   clearing -- so a relay is that role's own move with a different
+        #   hand on it and a different record, and never a shortcut the role
+        #   does not itself have;
+        # * it must take a reason, because the record is what the other party
+        #   said;
+        # * the relayed role may not be an actor of it, since a role that can
+        #   act does not need anyone to relay for it;
+        # * it is not owner-scoped, because the relayer is not the owner;
+        # * and an approval relayed for somebody must name the artefact it
+        #   accepts, and must not be the move that ends the ticket -- a relay
+        #   hands work on, it never finishes it.
         relayed = tr["relays_decision_of"]
         need(
             relayed is None or (isinstance(relayed, str) and relayed in roles),
@@ -695,8 +711,8 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         )
         if relayed is not None:
             need(
-                tr["primitive"] == "return",
-                "a relayed decision may only return work, never approve it",
+                tr["primitive"] in ("return", "approve"),
+                "a relayed decision may only return or approve work",
             )
             need(tr["require_reason"], "a relayed decision must carry its reason")
             need(
@@ -707,6 +723,55 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 not tr["owner_scoped"],
                 "a relay is performed by somebody other than the owner",
             )
+            mirrored = [
+                other
+                for other in cfg["transitions"]
+                if isinstance(other, dict)
+                and other.get("from") == a
+                and other.get("primitive") == tr["primitive"]
+                and isinstance(other.get("actors"), list)
+                and relayed in other["actors"]
+            ]
+            need(
+                bool(mirrored),
+                "a relay must mirror a move the relayed role can make from here",
+            )
+            need(
+                all(
+                    other["to"] == b
+                    and sorted(other.get("clear_signoffs") or [])
+                    == sorted(tr["clear_signoffs"])
+                    for other in mirrored
+                ),
+                "a relay must land exactly where the relayed role's own move lands",
+            )
+            if tr["primitive"] == "approve":
+                # The bound that keeps a relayed approval from eroding the
+                # separation an approval exists to enforce: it is only for a
+                # role with no pane of its own. Every role that can be driven
+                # on this board has a target; the User is the one that does
+                # not, which is the whole reason its verdict arrives in
+                # conversation. A reviewer that can sign off for itself must,
+                # and an installation that does give the User a surface keeps
+                # direct sign-off, which is the right answer there.
+                #
+                # Approvals only, deliberately. Applied to returns as well it
+                # would retroactively invalidate documents pgu952 legitimately
+                # produced, and the migration written to clean those up would
+                # fight pgu952 on every run, each undoing the other. Returning
+                # work is not what this protects anyway (SYRD-217).
+                need(
+                    roles[relayed].get("target") is None,
+                    "an approval is only relayed for a role with no pane of its own",
+                )
+                need(
+                    tr["require_commit"],
+                    "a relayed approval must name the commit it accepts",
+                )
+                need(
+                    not stages[b]["terminal"],
+                    "a relayed approval may not be the move that ends a ticket",
+                )
         outgoing[a].add(b)
         incoming.add(b)
     for name, stage in stages.items():
@@ -795,10 +860,27 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     # a guarantee. An `approve` transition is what writes its source stage's
     # sign-off flag, so listing the director among its actors is how a document
     # would hand the controller the power to approve the work it directs.
+    #
+    # SYRD-217 narrows it by exactly one case, and it is worth being explicit
+    # that this is a weakening of SYRD-82's floor. A relayed approval writes
+    # somebody else's sign-off, not the director's: the relay fence above has
+    # already forced it to mirror a move that role can make from that stage, to
+    # name the commit it accepts, to carry the reason it was given, and to be
+    # relayable only for a role that has no way to act for itself. The director
+    # still holds no approval of its own anywhere in the document.
+    #
+    # What this cannot do is make the director honest. A director who
+    # misreports what the User said produces a false sign-off, and the board
+    # cannot tell. It could not tell before either -- the same false acceptance
+    # was reached by a narrated override, which named no commit, checked no
+    # gate, and left no structured record at all. This trades an undetectable
+    # bypass for an undetectable lie that is at least written down as a relay.
     approvals = sorted(
         tr["action"]
         for tr in cfg["transitions"]
-        if tr["primitive"] == "approve" and DIRECTOR_ROLE in tr["actors"]
+        if tr["primitive"] == "approve"
+        and DIRECTOR_ROLE in tr["actors"]
+        and tr["relays_decision_of"] is None
     )
     need(
         not approvals,

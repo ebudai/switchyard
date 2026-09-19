@@ -670,6 +670,22 @@
       "allow_no_code": false
     },
     {
+      "from": "user_review",
+      "to": "director_review",
+      "action": "relay_user_sign_off",
+      "label": "Record the User's acceptance (relayed)",
+      "actors": [
+        "director"
+      ],
+      "primitive": "approve",
+      "owner_scoped": false,
+      "require_commit": true,
+      "require_reason": true,
+      "clear_signoffs": [],
+      "allow_no_code": false,
+      "relays_decision_of": "user"
+    },
+    {
       "from": "director_review",
       "to": "done",
       "action": "mark_done",

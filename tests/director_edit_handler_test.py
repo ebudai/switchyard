@@ -30,6 +30,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from workflow_document_eras import before_relaying
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
 
@@ -81,7 +82,9 @@ def main() -> int:
             ticket_prefix="PGU",
             database_url=t.conninfo(sock, port, db, t.SERVICE_ROLE),
         )
-        cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+        # An era-appropriate document: this suite applies a migration that
+        # predates relayed decisions and re-validates whatever is stored.
+        cfg = validate(before_relaying())
         server = t.TicketBoardServer(("127.0.0.1", 0), app, director_notifier=t.QuietNotifier())
         t.TEST_WRITE_TOKEN = server.write_token
         thread = threading.Thread(target=server.serve_forever, daemon=True)

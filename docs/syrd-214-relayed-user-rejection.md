@@ -48,6 +48,15 @@ ticket is whether the Director made this call or carried it.
 
 ## What a relay may not be
 
+> **Superseded in part by SYRD-217.** The return-only rule below was the fence
+> as this ticket shipped it. SYRD-217 found the case it got wrong -- the User's
+> acceptance is as unreachable as their rejection, and refusing to record it
+> pushed the same decision into a narrated override where nothing was checked
+> at all -- and replaced "never approve" with "never anything the relayed role
+> could not have done itself, from here". See
+> `docs/syrd-217-relayed-user-acceptance.md`. Everything else in this document
+> still holds, and `relay_user_kick_back` is unchanged.
+
 A role acting for another role is a narrow and easily-abused thing, so
 `relays_decision_of` is fenced rather than merely declared. A transition that
 names one must use the `return` primitive, must require a reason, must not be

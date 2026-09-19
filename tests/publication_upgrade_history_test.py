@@ -31,12 +31,15 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from workflow_document_eras import before_relaying
 from temporary_cluster import temporary_cluster
 
 MIGRATIONS = ROOT / "scripts/ticket_board/migrations"
 MINE = MIGRATIONS / "pgu930_syrd93_publication_requests.sql"
 PREVIOUS = "pgu929_syrd92_director_defer_backlog.sql"
-CANONICAL = json.loads((ROOT / "examples/workflows/inspection.json").read_text())
+#: Era-appropriate: the migrations under test re-validate what is stored with
+#: their own validators, which predate relayed decisions.
+CANONICAL = before_relaying()
 
 
 def migration_numbers() -> dict[int, list[str]]:

@@ -34,12 +34,15 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
+from workflow_document_eras import before_relaying
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 
 MIGRATION = "pgu941_syrd141_presentation_label.sql"
-CANONICAL = json.loads((ROOT / "examples/workflows/inspection.json").read_text(encoding="utf-8"))
+#: Era-appropriate: the migration under test re-validates what is stored with
+#: its own validator, which predates relayed decisions.
+CANONICAL = before_relaying()
 
 
 def document(**labels: Any) -> dict[str, Any]:

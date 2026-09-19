@@ -13423,17 +13423,291 @@ FOREGROUND_COMPLETION_POLL_SECONDS = 0.5
 #: for a key that was never going to be written (SYRD-191).
 FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 600.0
 
-#: How long a foreground step may sit with nothing recorded before the operator
-#: is told what they are looking at.
-#:
-#: The timeout above ends a step that will never complete, but ten minutes of
-#: an ordinary prompt is indistinguishable from a hang while you are sitting in
-#: front of it -- live Zorin UAT reported exactly that: the questions were
-#: answered, Claude dropped to its normal prompt, and thefive-pane team never
-#: launched because Switchyard was still waiting for a key the CLI does not
-#: write until it exits (SYRD-211 live UAT).
-FOREGROUND_READY_PROMPT_GRACE_SECONDS = 45.0
 
+
+
+#: Terminal control sequences, taken out before any of this reads a screen: a
+#: provider draws its interface with them, and matching against the raw stream
+#: would match escape codes as often as words.
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+#: Output a provider prints while it is waiting for the PERSON, rather than
+#: sitting ready for work. Quiet alone cannot mean "finished": an OAuth code box
+#: and a theme picker are both perfectly silent while somebody reads them, and
+#: ending a step there would cut the User off mid-answer, which is worse than
+#: the wait it replaces.
+PROVIDER_PENDING_ANSWER_MARKERS: tuple[str, ...] = (
+    "paste code here",
+    "press enter to continue",
+    "select a theme",
+    "choose a theme",
+    "do you trust",
+    "yes, proceed",
+    "(y/n)",
+    "[y/n]",
+    "enter to confirm",
+    "authorization code",
+)
+
+#: A gap long enough to mean the provider has finished drawing one screen and
+#: started another. Redraws arrive as a burst of chunks; anything after a pause
+#: this long is a new screen, and what was on the last one stops counting --
+#: otherwise an OAuth box printed a minute ago keeps reading as a live question
+#: forever.
+PROVIDER_SCREEN_RESET_SECONDS = 1.0
+
+#: How long a provider must be BOTH silent and not waiting on anybody before its
+#: first run counts as finished. It is not a deadline -- a step that is still
+#: asking something resets it, however long the person takes.
+PROVIDER_READY_QUIET_SECONDS = 6.0
+
+#: What ends a provider's own session once its first run is done. Sent BY
+#: Switchyard into the session it started, so the person never types it: being
+#: asked to exit once for the account and again for every worktree is the chore
+#: this whole phase exists to avoid.
+PROVIDER_SESSION_EXIT_INPUT: dict[str, str] = {"claude": "/exit\r"}
+
+
+def _visible_text(raw: str) -> str:
+    """Terminal output reduced to the letters it puts on the screen.
+
+    Whitespace goes too, and that is not tidiness. These interfaces position
+    every word with a cursor-move rather than with spaces, so a real Claude
+    OAuth box arrives as `Paste<ESC>[8Gcode<ESC>[13Ghere`: strip the escapes
+    alone and "paste code here" is nowhere in it. Measured against bytes
+    captured from the live flow, not imagined (SYRD-211).
+    """
+    return "".join(_ANSI_ESCAPE.sub("", raw).split()).casefold()
+
+
+def provider_is_waiting_for_an_answer(recent_output: str) -> bool:
+    """Is this screen asking the person something, or is it ready?
+
+    Read from what the provider actually printed rather than from a clock. The
+    markers are the affordances a question has and a ready prompt does not.
+    """
+    text = _visible_text(recent_output)
+    return any(
+        "".join(marker.split()).casefold() in text
+        for marker in PROVIDER_PENDING_ANSWER_MARKERS
+    )
+
+
+class PtyForegroundSession:
+    """One provider run on a real terminal, watched while the person uses it.
+
+    A pipe is not good enough here. These CLIs draw a full-screen interface and
+    behave differently without a terminal, and the step has to be able to both
+    hand the person their keyboard and see what the provider is putting on the
+    screen. A pty gives it both: the child believes it owns a terminal, and this
+    side reads every byte it writes (SYRD-211 live UAT).
+    """
+
+    def __init__(self, args: Sequence[str], **kwargs: Any) -> None:
+        import pty
+
+        self._master, slave = pty.openpty()
+        os.set_blocking(self._master, False)
+        try:
+            self._process = subprocess.Popen(
+                list(args), stdin=slave, stdout=slave, stderr=slave, **kwargs
+            )
+        finally:
+            os.close(slave)
+
+    def read(self) -> str:
+        try:
+            chunk = os.read(self._master, 65536)
+        except (BlockingIOError, InterruptedError):
+            return ""
+        except OSError:
+            return ""
+        return chunk.decode("utf-8", "replace")
+
+    def write(self, text: str) -> None:
+        try:
+            os.write(self._master, text.encode("utf-8"))
+        except OSError:
+            pass
+
+    def relay_from(self, source_fd: int) -> None:
+        """Whatever the person types goes to the provider, unchanged."""
+        try:
+            data = os.read(source_fd, 65536)
+        except (BlockingIOError, InterruptedError, OSError):
+            return
+        if data:
+            try:
+                os.write(self._master, data)
+            except OSError:
+                pass
+
+    def poll(self) -> int | None:
+        return self._process.poll()
+
+    def terminate(self) -> None:
+        if self._process.poll() is None:
+            self._process.terminate()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._process.wait(timeout=timeout)
+
+    def close(self) -> None:
+        try:
+            os.close(self._master)
+        except OSError:
+            pass
+
+
+def _run_provider_first_run(
+    *,
+    cli: str,
+    owner_user: str,
+    owner_home: Path,
+    command: Sequence[str],
+    is_complete: Callable[[], bool],
+    watching: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    transform: Callable[[list[str], dict[str, Any]], tuple[list[str], dict[str, Any]]] | None = None,
+    session_factory: Callable[..., Any] | None = None,
+    print_func: Callable[[str], None] = print,
+    **watch_kwargs: Any,
+) -> bool:
+    """The provider's own first run: driven by a caller, or watched on a pty.
+
+    An injected runner means a suite is driving the step, and it keeps the old
+    shape -- run it, then read the account back. Live, the step gets a real
+    terminal and Switchyard ends it itself (SYRD-211 live UAT).
+    """
+    args = _owner_command_env_args(owner_user, owner_home, command)
+    kwargs: dict[str, Any] = {"cwd": str(owner_home), "env": _pane_identity_scrubbed_env()}
+    if transform is not None:
+        args, kwargs = transform(args, kwargs)
+    if runner is not None:
+        runner(args, **kwargs)
+        return is_complete()
+    if is_complete():
+        return True
+    return run_provider_first_run_session(
+        cli=cli,
+        args=args,
+        kwargs=kwargs,
+        is_complete=is_complete,
+        watching=watching,
+        session_factory=session_factory,
+        input_fd=sys.stdin.fileno() if sys.stdin and sys.stdin.isatty() else None,
+        print_func=print_func,
+        **watch_kwargs,
+    )
+
+
+def run_provider_first_run_session(
+    *,
+    cli: str,
+    args: Sequence[str],
+    kwargs: dict[str, Any],
+    is_complete: Callable[[], bool],
+    watching: str,
+    session_factory: Callable[..., Any] | None = None,
+    input_fd: int | None = None,
+    output_write: Callable[[str], Any] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    quiet_seconds: float = PROVIDER_READY_QUIET_SECONDS,
+    timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Run a provider's own first run and end it as soon as it is finished.
+
+    Finished means one of two OBSERVED things, never a bare timer:
+
+    * the account records its first run -- the fast path, when the provider
+      writes that while it is still running; or
+    * the provider stops printing and its last screen is not asking anybody
+      anything. That is the ordinary prompt, and it is where live Zorin UAT
+      stopped: the questions were answered, Claude sat at its prompt, and
+      Switchyard waited ten minutes for a key that is not written until exit.
+
+    Either way Switchyard ends the session itself -- by sending the provider's
+    own exit input, then terminating if it does not go. The person types
+    nothing, which is the whole point: `/exit` once for the account and again
+    for every worktree is the chore this phase exists to remove.
+
+    A screen that is still asking something resets the quiet window, so somebody
+    reading an OAuth code box or a theme list is never cut off however long they
+    take.
+    """
+    session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
+    deadline = monotonic() + timeout_seconds
+    recent = ""
+    last_output = monotonic()
+    ended_by_us = False
+    try:
+        while True:
+            if session.poll() is not None:
+                return is_complete()
+            chunk = session.read()
+            if chunk:
+                if output_write is not None:
+                    output_write(chunk)
+                else:
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+                now = monotonic()
+                # A new screen replaces the old one rather than piling on it.
+                if now - last_output >= PROVIDER_SCREEN_RESET_SECONDS:
+                    recent = chunk
+                else:
+                    recent = (recent + chunk)[-4096:]
+                last_output = now
+            if input_fd is not None:
+                session.relay_from(input_fd)
+            if is_complete():
+                sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                ended_by_us = True
+                break
+            quiet_for = monotonic() - last_output
+            if (
+                recent
+                and quiet_for >= quiet_seconds
+                and not provider_is_waiting_for_an_answer(recent)
+            ):
+                print_func(
+                    f"switchyard: {cli} has finished its first run and is at its ordinary "
+                    "prompt; closing it and carrying on. You do not have to exit anything."
+                )
+                ended_by_us = True
+                break
+            if monotonic() >= deadline:
+                print_func(
+                    f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
+                    "The CLI was ended and the run continues; the step is reported as "
+                    "outstanding below."
+                )
+                ended_by_us = True
+                break
+            sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+        if ended_by_us:
+            exit_input = PROVIDER_SESSION_EXIT_INPUT.get(cli, "")
+            if exit_input and session.poll() is None:
+                # Its own way out first, so it writes whatever it keeps for the
+                # account before it goes.
+                session.write(exit_input)
+                for _ in range(20):
+                    if session.poll() is not None:
+                        break
+                    sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+        return is_complete()
+    finally:
+        if session.poll() is None:
+            session.terminate()
+            try:
+                session.wait(timeout=10)
+            except Exception:
+                pass
+        close = getattr(session, "close", None)
+        if close is not None:
+            close()
 
 
 def _run_owner_cli_until(
@@ -13480,8 +13754,6 @@ def _run_owner_cli_until(
         return True
     process = (popen or subprocess.Popen)(args, **kwargs)
     deadline = monotonic() + timeout_seconds
-    said_what_to_do = False
-    grace = monotonic() + FOREGROUND_READY_PROMPT_GRACE_SECONDS
     try:
         while True:
             if process.poll() is not None:
@@ -13492,16 +13764,6 @@ def _run_owner_cli_until(
                 # terminal is taken back from it.
                 sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
                 break
-            if not said_what_to_do and monotonic() >= grace:
-                # Not a warning: most of the time the person is simply looking
-                # at an ordinary prompt and has no way to know Switchyard is
-                # waiting for something the CLI writes when it closes.
-                said_what_to_do = True
-                print_func(
-                    f"switchyard: still waiting for {watching}. If {command[0]} is now at its "
-                    "ordinary prompt, its first run is finished -- exit it (/exit, or Ctrl-D) "
-                    "and Switchyard will carry on by itself. Nothing needs answering twice."
-                )
             if monotonic() >= deadline:
                 # Loud, and specific about what did not happen. A step that
                 # cannot complete is a disagreement between this code and the
@@ -14249,10 +14511,10 @@ def run_first_run_auth_phase(
     incomplete_setup: list[tuple[str, list[str]]] = []
     for step in manifest.provider_setup_steps:
         print_func(_provider_setup_instruction(step.cli, effective_owner))
-        completed = _run_owner_cli_until(
+        completed = _run_provider_first_run(
+            cli=step.cli,
             owner_user=effective_owner,
             owner_home=effective_home,
-            cwd=effective_home,
             command=list(step.command),
             is_complete=lambda cli=step.cli: _provider_account_setup_complete(
                 cli, owner_home=effective_home

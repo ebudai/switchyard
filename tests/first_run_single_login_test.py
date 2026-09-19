@@ -40,6 +40,21 @@ if str(ROOT / "tests") not in sys.path:
 
 from scripts import team_launcher as launcher  # noqa: E402
 
+def _bounded(clock: dict, step: float, ceiling: float = 2000.0):
+    """A fake clock that fails instead of looping.
+
+    A wait that is no longer bounded shows up as a hung suite, which is a poor
+    way to learn it: this turns that into an assertion.
+    """
+
+    def sleep(_seconds: float) -> None:
+        clock["now"] += step
+        if clock["now"] > ceiling:
+            raise AssertionError("the session wait never ended; nothing bounds it")
+
+    return sleep
+
+
 CHECKS = 0
 
 
@@ -156,65 +171,300 @@ def test_setup_runs_before_the_logins_it_can_make_unnecessary() -> None:
           "and each login re-reads the account before asking for a credential")
 
 
-def test_a_step_at_an_ordinary_prompt_is_told_what_to_do_long_before_the_bound() -> None:
-    """The ten-minute stare, which is what the User actually reported.
+def test_a_provider_at_its_ordinary_prompt_is_ended_by_switchyard() -> None:
+    """The failed acceptance, as a fixture.
 
-    The key this waits for is written when the CLI exits, so after the questions
-    the operator is sitting at a working prompt with nothing to answer and no
-    sign that anything wants them.
+    The provider asks its questions, the person answers them, and it settles at
+    an ordinary prompt and stays there -- exactly what the User saw. Switchyard
+    has to end it and carry on: no `/exit`, no Ctrl-D, no window to close, and
+    without waiting out the ten-minute bound.
     """
-    check(
-        launcher.FOREGROUND_READY_PROMPT_GRACE_SECONDS
-        < launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
-        "the advice arrives before the give-up",
-    )
-    said: list[str] = []
     clock = {"now": 0.0}
+    written: list[str] = []
 
-    class _NeverExits:
-        def poll(self) -> None:
+    class _ProviderThatReachesItsPrompt:
+        """Questions, then a ready prompt, then silence -- and it stays alive."""
+
+        def __init__(self, _args, **_kwargs) -> None:
+            self.screens = [
+                "Select\x1b[8Ga\x1b[10Gtheme",
+                "\x1b[2GPaste\x1b[8Gcode\x1b[13Ghere\x1b[18Gif\x1b[21Gprompted\x1b[30G>",
+                "\x1b[38;5;246m>\x1b[39m  Try \"fix the build\"",
+            ]
+            self.terminated = False
+            self.exited = False
+
+        def read(self) -> str:
+            return self.screens.pop(0) if self.screens else ""
+
+        def write(self, text: str) -> None:
+            written.append(text)
+            # A real provider goes when it is told to; this one does not, so the
+            # fallback has to be what actually ends it.
+
+        def relay_from(self, _fd: int) -> None:
             return None
 
-        def terminate(self) -> None:
-            clock["terminated"] = True
+        def poll(self):
+            return 0 if self.exited else None
 
-        def wait(self, timeout: float | None = None) -> int:
+        def terminate(self) -> None:
+            self.terminated = True
+            self.exited = True
+
+        def wait(self, timeout=None) -> int:
             return 0
+
+        def close(self) -> None:
+            return None
+
+    sessions: list[_ProviderThatReachesItsPrompt] = []
+
+    def factory(args, **kwargs):
+        session = _ProviderThatReachesItsPrompt(args, **kwargs)
+        sessions.append(session)
+        return session
 
     def monotonic() -> float:
         return clock["now"]
 
     def sleep(_seconds: float) -> None:
-        clock["now"] += 30.0
-        clock["polls"] = clock.get("polls", 0) + 1
-        if clock["polls"] > 200:
-            # A bounded wait that is not bounded is a hang, and a hang is a bad
-            # way to learn that: fail it here instead of letting the suite stop.
-            raise AssertionError(
-                "the foreground wait never ended; nothing bounds it any more"
-            )
+        clock["now"] += 1.0
+        if clock["now"] > 300.0:
+            raise AssertionError("the session was never ended; nothing bounds it")
 
-    completed = launcher._run_owner_cli_until(
-        owner_user="otto-agent",
-        owner_home=Path("/home/otto-agent"),
-        cwd=Path("/home/otto-agent"),
-        command=["claude"],
+    said: list[str] = []
+    completed = launcher.run_provider_first_run_session(
+        cli="claude",
+        args=["sudo", "-u", "otto-agent", "claude"],
+        kwargs={},
+        # The account never records it -- the key is written on exit, which is
+        # the whole reason watching for it could not work.
         is_complete=lambda: False,
         watching="claude to record its own first run",
-        popen=lambda *_a, **_k: _NeverExits(),
+        session_factory=factory,
         sleep=sleep,
         monotonic=monotonic,
         print_func=said.append,
+        output_write=lambda _text: None,
     )
-    check(completed is False, "a step that records nothing is still reported outstanding")
-    advice = [line for line in said if "ordinary prompt" in line]
-    check(advice, f"the operator is told what they are looking at: {said}")
-    check("exit it" in advice[0] or "/exit" in advice[0],
-          f"and exactly what to do: {advice[0]}")
-    check(len(advice) == 1, f"said once, not every poll: {said}")
+
+    session = sessions[0]
+    check(session.terminated, "Switchyard ended the provider's session itself")
+    check(written == ["/exit\r"],
+          f"by sending the provider's own exit input first: {written}")
+    check(clock["now"] < launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+          f"well before the ten-minute bound: {clock['now']}s")
+    check(not any("gave up waiting" in line for line in said),
+          f"so the bound was never reached: {said}")
+    check(any("ordinary prompt" in line and "carrying on" in line for line in said),
+          f"and it says why it closed: {said}")
+    check(any("do not have to exit anything" in line for line in said),
+          f"telling the person they need do nothing: {said}")
+    check(completed is False,
+          "the account still has not recorded it, and that is reported honestly")
+
+
+def test_a_provider_still_asking_something_is_never_cut_off() -> None:
+    """Quiet is not finished. A person reading an OAuth box is silent too."""
+    clock = {"now": 0.0}
+
+    class _ProviderStuckOnOAuth:
+        def __init__(self, _args, **_kwargs) -> None:
+            # Captured from a real Claude first run on this host.
+            self.sent = False
+            self.terminated = False
+
+        def read(self) -> str:
+            if self.sent:
+                return ""
+            self.sent = True
+            return "\x1b[2GPaste\x1b[8Gcode\x1b[13Ghere\x1b[18Gif\x1b[21Gprompted\x1b[30G>"
+
+        def write(self, text: str) -> None:
+            # Allowed once the bound gives up -- the provider's own way out is
+            # still the polite first move. What must not happen is being closed
+            # while the question is still on screen.
+            written_while_asking.append((clock["now"], text))
+
+        def relay_from(self, _fd: int) -> None:
+            return None
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    written_while_asking: list[tuple[float, str]] = []
+    made: list[_ProviderStuckOnOAuth] = []
+
+    def factory(args, **kwargs):
+        session = _ProviderStuckOnOAuth(args, **kwargs)
+        made.append(session)
+        return session
+
+    said: list[str] = []
+    launcher.run_provider_first_run_session(
+        cli="claude",
+        args=["sudo", "-u", "otto-agent", "claude"],
+        kwargs={},
+        is_complete=lambda: False,
+        watching="claude to record its own first run",
+        session_factory=factory,
+        sleep=_bounded(clock, 5.0),
+        monotonic=lambda: clock["now"],
+        print_func=said.append,
+        output_write=lambda _text: None,
+    )
+    check(clock["now"] >= launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+          f"the person was given the whole bound to answer: {clock['now']}s")
     check(any("gave up waiting" in line for line in said),
-          "and the bound still ends it if nothing happens")
-    check(clock.get("terminated"), "with the CLI ended rather than left running")
+          f"and only the bound ended it: {said}")
+    check(not any("ordinary prompt" in line for line in said),
+          f"it was never mistaken for a ready prompt: {said}")
+    check(all(at >= launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS
+              for at, _ in written_while_asking),
+          f"nothing was sent into it while the question stood: {written_while_asking}")
+
+
+def test_a_provider_that_has_printed_nothing_yet_is_not_closed_for_being_quiet() -> None:
+    """Silence before anything is drawn is a provider starting up, not one done.
+
+    Ending on quiet alone would close a session in the gap between `exec` and
+    its first frame, and the person would never see the questions at all.
+    """
+    clock = {"now": 0.0}
+
+    class _StillStarting:
+        def __init__(self, _args, **_kwargs) -> None:
+            self.closed_at: float | None = None
+
+        def read(self) -> str:
+            return ""
+
+        def write(self, _text: str) -> None:
+            if self.closed_at is None:
+                self.closed_at = clock["now"]
+
+        def relay_from(self, _fd: int) -> None:
+            return None
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            if self.closed_at is None:
+                self.closed_at = clock["now"]
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    made: list[_StillStarting] = []
+    said: list[str] = []
+    launcher.run_provider_first_run_session(
+        cli="claude",
+        args=["sudo", "-u", "otto-agent", "claude"],
+        kwargs={},
+        is_complete=lambda: False,
+        watching="claude to record its own first run",
+        session_factory=lambda a, **k: (made.append(_StillStarting(a, **k)) or made[-1]),
+        sleep=_bounded(clock, 5.0),
+        monotonic=lambda: clock["now"],
+        print_func=said.append,
+        output_write=lambda _text: None,
+    )
+    check(made[0].closed_at is not None, "it was ended eventually")
+    check(made[0].closed_at >= launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+          f"but only by the bound, never for being quiet: closed at {made[0].closed_at}s")
+    check(not any("ordinary prompt" in line for line in said),
+          f"and it was never called ready: {said}")
+
+
+def test_an_account_that_records_its_first_run_ends_the_session_at_once() -> None:
+    """The fast path: when the provider does write the key, do not wait for quiet."""
+    clock = {"now": 0.0}
+    recorded = {"done": False}
+
+    class _RecordsThenSitsThere:
+        def __init__(self, _args, **_kwargs) -> None:
+            self.frames = ["Select\x1b[8Ga\x1b[10Gtheme"]
+            self.closed_at: float | None = None
+
+        def read(self) -> str:
+            if self.frames:
+                # Answering the question is what records it.
+                recorded["done"] = True
+                return self.frames.pop(0)
+            return ""
+
+        def write(self, _text: str) -> None:
+            if self.closed_at is None:
+                self.closed_at = clock["now"]
+
+        def relay_from(self, _fd: int) -> None:
+            return None
+
+        def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            if self.closed_at is None:
+                self.closed_at = clock["now"]
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def close(self) -> None:
+            return None
+
+    made: list[_RecordsThenSitsThere] = []
+    completed = launcher.run_provider_first_run_session(
+        cli="claude",
+        args=["sudo", "-u", "otto-agent", "claude"],
+        kwargs={},
+        is_complete=lambda: recorded["done"],
+        watching="claude to record its own first run",
+        session_factory=lambda a, **k: (made.append(_RecordsThenSitsThere(a, **k)) or made[-1]),
+        sleep=_bounded(clock, 1.0),
+        monotonic=lambda: clock["now"],
+        print_func=lambda _l: None,
+        output_write=lambda _text: None,
+    )
+    check(completed is True, "the account recorded its first run")
+    check(made[0].closed_at is not None, "and the session was ended")
+    check(made[0].closed_at < launcher.PROVIDER_READY_QUIET_SECONDS * 2,
+          f"immediately, without waiting for the screen to go quiet: {made[0].closed_at}s")
+
+
+def test_a_real_oauth_screen_reads_as_a_question_and_a_prompt_does_not() -> None:
+    """Measured against bytes captured from a live first run, not invented.
+
+    These interfaces place every word with a cursor move rather than a space, so
+    the raw stream carries `Paste<ESC>[8Gcode<ESC>[13Ghere`. Stripping escapes
+    alone leaves `Pastecodehere`, and a marker written with spaces in it matches
+    nothing -- which is how a too-tidy version of this check would have closed
+    somebody's session mid-sign-in.
+    """
+    oauth = "\x1b[2GPaste\x1b[8Gcode\x1b[13Ghere\x1b[18Gif\x1b[21Gprompted\x1b[30G>"
+    check(launcher.provider_is_waiting_for_an_answer(oauth),
+          "the real OAuth box reads as a question")
+    check(launcher.provider_is_waiting_for_an_answer("Select\x1b[8Ga\x1b[10Gtheme"),
+          "and so does the theme picker")
+    check(launcher.provider_is_waiting_for_an_answer("Do you trust the files in this folder?"),
+          "and a trust question")
+    check(not launcher.provider_is_waiting_for_an_answer(
+        "\x1b[38;5;246m>\x1b[39m  Try \"fix the build\""),
+        "an ordinary prompt does not")
 
 
 def main() -> int:

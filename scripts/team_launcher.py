@@ -1428,22 +1428,45 @@ def _gui_launch_prefix(
 #: viewer layout -- the one a NON-KDE desktop selects -- then died with
 #: `env: 'konsole': No such file or directory` on a host that had four other
 #: terminals installed (SYRD-211 live UAT).
-PRESENTATION_TERMINALS: tuple[tuple[str, str, str], ...] = (
-    ("konsole", "-e", "--qwindowtitle"),
-    ("gnome-terminal", "--", "--title"),
-    ("kgx", "--", "--title"),
-    ("xfce4-terminal", "-x", "--title"),
-    ("mate-terminal", "-x", "--title"),
-    ("tilix", "-e", "--title"),
-    ("alacritty", "-e", "--title"),
-    ("kitty", "", "--title"),
-    ("xterm", "-e", "-T"),
+#: How a terminal behaves once it has been started, which is not the same
+#: question as how to hand it a command.
+#:
+#: `stays` -- the process lives as long as the window, so its exit is evidence.
+#: `returns` -- it is a client: it hands the request to a session server and
+#: exits 0 straight away, and its exit says nothing about the window at all.
+TERMINAL_STAYS = "stays"
+TERMINAL_RETURNS = "returns"
+
+#: Terminals that can be asked to run one command, how each one takes it, and
+#: what its exit means.
+#:
+#: They do not agree on any of it: some want `-e`, some `--`, some `-x`, and
+#: kitty takes the command with no flag. The title flag differs too. And
+#: gnome-terminal and kgx are clients -- they return 0 immediately once the
+#: session server has the request -- so reading that as "no window opened" both
+#: reported a failure and returned success (SYRD-211 DAT rejection).
+#:
+#: Ordered by how likely a desktop is to have them, Konsole first because a KDE
+#: host does. This exists because the presentation window was always Konsole,
+#: and the viewer layout -- the one a NON-KDE desktop selects -- then died with
+#: `env: 'konsole': No such file or directory` on a host with four other
+#: terminals installed (SYRD-211 live UAT).
+PRESENTATION_TERMINALS: tuple[tuple[str, str, str, str], ...] = (
+    ("konsole", "-e", "--qwindowtitle", TERMINAL_STAYS),
+    ("gnome-terminal", "--", "--title", TERMINAL_RETURNS),
+    ("kgx", "--", "--title", TERMINAL_RETURNS),
+    ("xfce4-terminal", "-x", "--title", TERMINAL_RETURNS),
+    ("mate-terminal", "-x", "--title", TERMINAL_RETURNS),
+    ("tilix", "-e", "--title", TERMINAL_RETURNS),
+    ("alacritty", "-e", "--title", TERMINAL_STAYS),
+    ("kitty", "", "--title", TERMINAL_STAYS),
+    ("xterm", "-e", "-T", TERMINAL_STAYS),
 )
 
 
 def available_presentation_terminal(
     *, which: Callable[..., str | None] = shutil.which
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, str] | None:
     """The first terminal this desktop actually has, or nothing."""
     for entry in PRESENTATION_TERMINALS:
         if which(entry[0]):
@@ -1455,7 +1478,7 @@ def missing_terminal_refusal(project: str) -> str:
     """Said instead of exiting 127 from inside a terminal that is not there."""
     return (
         f"switchyard: cannot open {project}'s presentation window: none of "
-        f"{', '.join(name for name, _flag, _title in PRESENTATION_TERMINALS)} is installed. "
+        f"{', '.join(entry[0] for entry in PRESENTATION_TERMINALS)} is installed. "
         "Install one of them, or run this from a desktop that has one; the panes are "
         "running either way and nothing has been changed"
     )
@@ -1464,7 +1487,7 @@ def missing_terminal_refusal(project: str) -> str:
 def terminal_launch_args(
     command: Sequence[str],
     *,
-    terminal: tuple[str, str, str],
+    terminal: tuple[str, str, str, str],
     gui_user: str | None = None,
     window_title: str = "",
 ) -> list[str]:
@@ -1472,7 +1495,7 @@ def terminal_launch_args(
     prefix, refusal = _gui_launch_prefix(gui_user=gui_user)
     if refusal:
         return _refusal_command(refusal)
-    name, command_flag, title_flag = terminal
+    name, command_flag, title_flag, _lifecycle = terminal
     args = [*prefix, gui_program_path(name)]
     title = window_title.strip()
     if title and title_flag:
@@ -1869,17 +1892,29 @@ def launch_presentation_terminal(
     args: Sequence[str],
     *,
     project: str,
-    terminal: str,
+    terminal: tuple[str, str, str, str],
     process_launcher: Callable[..., Any] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    """Start one terminal on one command, and say whether it stayed up.
+    """Start one terminal on one command, and report what is actually known.
 
-    A window that exits immediately is the failure this exists to report: live
-    Zorin saw status 127 from `env` and nothing on screen, while the command
-    that started it returned as though it had opened something.
+    Three outcomes, because an exit means different things for different
+    terminals:
+
+    * still running -- the window is up, for a terminal whose process lives as
+      long as it;
+    * exited 0, from a CLIENT -- the session server has the request. That is an
+      acknowledgement, not a failure. Reading it as one said "no window opened"
+      and returned success in the same breath, which is both wrong and
+      self-contradictory (SYRD-211 DAT rejection);
+    * exited nonzero, or exited 0 from a terminal that should have stayed --
+      the window did not open, and the status and log say so.
+
+    Nothing here claims a window failed to open without evidence, and nothing
+    returns success after saying something failed.
     """
+    name, _command_flag, _title_flag, lifecycle = terminal
     if list(args[:2]) == ["sh", "-lc"]:
         return int(runner(list(args)).returncode)
     launch_process = process_launcher or subprocess.Popen
@@ -1897,21 +1932,29 @@ def launch_presentation_terminal(
                 start_new_session=True,
             )
     except OSError as exc:
-        print_func(f"switchyard: could not start {terminal} for {project}: {exc}")
+        print_func(f"switchyard: could not start {name} for {project}: {exc}")
         return 1
     time.sleep(0.2)
     returncode = proc.poll()
-    if returncode is not None:
+    if returncode is None:
         print_func(
-            f"switchyard: {terminal} exited immediately (status {returncode}) without "
-            f"opening {project}'s window; its output is in {log_path}"
+            f"switchyard: opened {project}'s presentation in {name}; it shows every "
+            "role in one window"
         )
-        return int(returncode)
+        return 0
+    if returncode == 0 and lifecycle == TERMINAL_RETURNS:
+        print_func(
+            f"switchyard: {name} accepted {project}'s presentation and returned, as it "
+            "does; the window opens in the desktop's own session"
+        )
+        return 0
     print_func(
-        f"switchyard: opened {project}'s presentation in {terminal}; it shows every "
-        "role in one window"
+        f"switchyard: {name} exited immediately (status {returncode}) without opening "
+        f"{project}'s window; its output is in {log_path}"
     )
-    return 0
+    # Never success after saying that. A terminal that should have stayed and
+    # exited 0 is still a window that did not open.
+    return int(returncode) or 1
 
 
 def launch_konsole_window(
@@ -28615,7 +28658,7 @@ def complete_desktop_presentation(
         return launch_presentation_terminal(
             args,
             project=project,
-            terminal=terminal[0],
+            terminal=terminal,
             process_launcher=process_launcher,
             runner=runner,
             print_func=print_func,

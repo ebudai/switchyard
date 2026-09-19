@@ -973,9 +973,11 @@ def test_each_terminal_is_given_the_flag_it_actually_takes() -> None:
     """They do not agree, and getting it wrong is a window that never opens."""
     command = ["sudo", "-n", "/usr/local/lib/switchyard/test/switchyard-display-attach",
                "test", "viewer"]
-    for name, command_flag, title_flag in launcher.PRESENTATION_TERMINALS:
+    for name, command_flag, title_flag, lifecycle in launcher.PRESENTATION_TERMINALS:
+        check(lifecycle in (launcher.TERMINAL_STAYS, launcher.TERMINAL_RETURNS),
+              f"{name}: its lifecycle is recorded: {lifecycle}")
         args = launcher.terminal_launch_args(
-            command, terminal=(name, command_flag, title_flag),
+            command, terminal=(name, command_flag, title_flag, lifecycle),
             gui_user=launcher.current_user_name(), window_title="Test",
         )
         check(args[-len(command):] == command,
@@ -1054,26 +1056,131 @@ def test_the_caller_refuses_before_starting_anything_when_no_terminal_exists() -
           f"with a prerequisite said precisely: {said}")
 
 
-def test_a_terminal_that_exits_at_once_is_reported_not_called_success() -> None:
-    """Exit 127 behind a window that never appeared is the shape to catch."""
-    said: list[str] = []
+def test_what_an_immediate_exit_means_depends_on_the_terminal() -> None:
+    """The contradiction the DAT rejection found, in all four shapes.
 
-    class _DiedImmediately:
-        pid = 7
+    `gnome-terminal` hands the request to a session server and returns 0 at
+    once; reading that as "no window opened" reported a failure AND returned
+    success in the same breath. A terminal whose process should have stayed is
+    the opposite case, and exiting 0 there is still a window that did not open.
+    """
+
+    class _Exited:
+        pid = 11
+
+        def __init__(self, code: int | None) -> None:
+            self.code = code
+
         def poll(self):
-            return 127
+            return self.code
 
-    code = launcher.launch_presentation_terminal(
-        ["/usr/bin/env", "konsole"],
-        project="test", terminal="konsole",
-        process_launcher=lambda args, **_k: _DiedImmediately(),
-        print_func=said.append,
-    )
+    def run(name: str, code: int | None) -> tuple[int, list[str]]:
+        entry = next(e for e in launcher.PRESENTATION_TERMINALS if e[0] == name)
+        said: list[str] = []
+        result = launcher.launch_presentation_terminal(
+            ["/usr/bin/env", name], project="test", terminal=entry,
+            process_launcher=lambda args, **_k: _Exited(code),
+            print_func=said.append,
+        )
+        return result, said
+
+    # A client that acknowledged and returned: success, and said as such.
+    code, said = run("gnome-terminal", 0)
+    check(code == 0, f"a client acknowledgement is success: {code}")
+    check(any("accepted" in line and "returned" in line for line in said),
+          f"and is described as one: {said}")
+    check(not any("without opening" in line for line in said),
+          f"never claiming no window opened without evidence: {said}")
+
+    # The same client failing is still a failure.
+    code, said = run("gnome-terminal", 1)
+    check(code == 1, f"a client that failed is a failure: {code}")
+    check(any("without opening" in line for line in said), f"and says so: {said}")
+
+    # A terminal whose process should have stayed, gone at once.
+    code, said = run("konsole", 127)
     check(code == 127, f"the status is the terminal's own: {code}")
     check(any("exited immediately" in line and "127" in line for line in said),
           f"and it is reported: {said}")
+
+    # The trap: exit 0 from a terminal that should have stayed. Reported as a
+    # failure, so it must not also return success.
+    code, said = run("konsole", 0)
     check(any("without opening" in line for line in said),
-          f"saying no window appeared: {said}")
+          f"it is reported as a failure: {said}")
+    check(code != 0,
+          f"so it must not return success after saying that: {code}")
+
+    # Still running is the plain case.
+    code, said = run("konsole", None)
+    check(code == 0, f"a terminal still running is a window: {code}")
+    check(any("opened" in line for line in said), f"and says so: {said}")
+
+
+def test_the_gnome_path_a_zorin_desktop_would_take_is_not_read_as_failure() -> None:
+    """The live shape, end to end through the caller.
+
+    A desktop with gnome-terminal and no konsole: the caller must pick it,
+    start it, and treat its immediate return as the acknowledgement it is.
+    """
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    import pwd as _pwd
+
+    bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tc_gnome")
+    me = _pwd.getpwuid(os.getuid()).pw_name
+    handoff_file = (
+        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
+        / "syrd-presentation-handoff.json"
+    )
+    payload = launcher.render_presentation_handoff(
+        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        slot_titles=["Syrd"], window_title="Syrd", layout=launcher.LAYOUT_MODE_VIEWER,
+    )
+    if handoff_file.exists():
+        handoff_file.unlink()
+    bridge.publish_handoff("syrd", json.dumps(payload), caller=me)
+
+    class _AcknowledgedAndReturned:
+        pid = 12
+
+        def poll(self):
+            return 0
+
+    launched: list[list[str]] = []
+    said: list[str] = []
+    saved_grant = launcher._tenant_control_grant
+    saved_terminal = launcher.available_presentation_terminal
+    launcher._tenant_control_grant = lambda _p, **_k: {
+        "project": "syrd", "owner": "syrd-agent", "authorized_user": me
+    }
+    gnome = next(e for e in launcher.PRESENTATION_TERMINALS if e[0] == "gnome-terminal")
+    launcher.available_presentation_terminal = lambda **_k: gnome
+    try:
+        code = launcher.complete_desktop_presentation(
+            "syrd", caller=me,
+            runner=lambda args, **_k: subprocess.CompletedProcess(list(args), 0),
+            process_launcher=lambda args, **_k: (
+                launched.append(list(args)) or _AcknowledgedAndReturned()
+            ),
+            print_func=said.append,
+        )
+    finally:
+        launcher._tenant_control_grant = saved_grant
+        launcher.available_presentation_terminal = saved_terminal
+        if handoff_file.exists():
+            handoff_file.unlink()
+
+    check(launched, f"a terminal was started: {said}")
+    argv = launched[0]
+    check(any(token.endswith("gnome-terminal") for token in argv),
+          f"the one this desktop has: {argv}")
+    check("--" in argv, f"given the flag gnome-terminal takes: {argv}")
+    check(argv[-1] == "viewer", f"on the viewer target: {argv[-3:]}")
+    check(code == 0, f"and its acknowledgement is success: {code} {said}")
+    check(not any("without opening" in line for line in said),
+          f"with no claim that the window failed: {said}")
 
 
 def test_a_viewer_launch_that_cannot_hand_back_says_so() -> None:

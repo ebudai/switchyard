@@ -602,6 +602,246 @@ def test_the_helper_refuses_a_target_that_is_neither_a_slot_nor_the_viewer() -> 
             raise AssertionError(f"{bogus!r} should not be accepted")
 
 
+def _module_from(path: Path, name: str):
+    """Load a program from the bytes at `path`, which is the point.
+
+    Executing the checkout's source proves what the release would install.
+    Executing the STAGED file proves what this tenant would actually run, and
+    those are the two different things the DAT rejection was about.
+    """
+    import types
+
+    module = types.ModuleType(name)
+    module.__dict__["__name__"] = name
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)  # noqa: S102
+    return module
+
+
+def test_the_viewer_discriminator_survives_the_real_root_reserializer() -> None:
+    """Owner -> ROOT -> caller, through the shipped `publish_handoff`.
+
+    My earlier cases read the owner's descriptor or fed the owner's payload
+    straight to the caller's validator, and so could not see that root
+    reserializes a fixed set of fields and dropped this one. This runs the real
+    root function and reads what it actually wrote.
+    """
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    import pwd as _pwd
+
+    bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tenant_control_root")
+    me = _pwd.getpwuid(os.getuid()).pw_name
+    destination = (
+        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
+        / "syrd-presentation-handoff.json"
+    )
+
+    def publish(payload: dict) -> dict | None:
+        if destination.exists():
+            destination.unlink()
+        bridge.publish_handoff("syrd", json.dumps(payload), caller=me)
+        if not destination.exists():
+            return None
+        written = json.loads(destination.read_text(encoding="utf-8"))
+        destination.unlink()
+        return written
+
+    owner_payload = launcher.render_presentation_handoff(
+        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        slot_titles=["Syrd"], window_title="Syrd",
+        layout=launcher.LAYOUT_MODE_VIEWER,
+    )
+    republished = publish(owner_payload)
+    check(republished is not None, "root published the viewer handoff")
+    check(republished["layout"] == launcher.LAYOUT_MODE_VIEWER,
+          f"and kept the discriminator: {republished}")
+
+    # The caller then validates root's copy -- not the owner's -- and builds
+    # from it. That is the chain the live run takes.
+    validated, problem = launcher.validated_presentation_handoff(republished, project="syrd")
+    check(not problem, f"the caller accepts root's copy: {problem}")
+    check(validated["layout"] == launcher.LAYOUT_MODE_VIEWER,
+          "still a viewer after two validations")
+    from scripts import presentation_controller
+
+    built = presentation_controller.presentation_layout_payload(
+        "syrd", slot_count=validated["slot_count"], owner="syrd-agent", gui_user=me,
+        pane_program=Path(validated["pane_program"]),
+        slot_titles=validated["slot_titles"], window_title=validated["window_title"],
+        layout_mode=validated["layout"],
+    )
+    leaves = launcher._layout_leaves(built)
+    check(len(leaves) == 1, f"one tab: {len(leaves)}")
+    check(leaves[0]["Command"].rstrip().endswith("viewer"),
+          f"asking the helper for the viewer target: {leaves[0]['Command'][-60:]}")
+
+    # An older owner half, with no layout at all, still reaches the caller.
+    older = {k: v for k, v in owner_payload.items() if k != "layout"}
+    republished_older = publish(older)
+    check(republished_older is not None, "an older owner half is still published")
+    check(republished_older["layout"] == launcher.LAYOUT_MODE_SEPARATE,
+          f"as the layout that predates the field: {republished_older}")
+
+    # And root refuses an arbitrary discriminator rather than relaying it.
+    hostile = dict(owner_payload)
+    hostile["layout"] = "anything-at-all"
+    check(publish(hostile) is None,
+          "root publishes nothing for a layout it does not know")
+
+
+def test_the_staged_helper_the_tenant_would_actually_run_accepts_the_viewer() -> None:
+    """The last layer: the per-tenant copy, not the release's source."""
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper)")
+        return
+    staged = _module_from(REAL_PINNED_HELPER, "staged_display_attach")
+    if not hasattr(staged, "VIEWER_TARGET"):
+        # Exactly the preserved tenant's situation. The layer is still proved,
+        # by the upgrade case below, which stages that older helper itself and
+        # then runs the upgraded file.
+        print("  (this host's staged helper predates the viewer target, as Zorin's did;"
+              " the upgrade case proves this layer)")
+        return
+    check(staged.session_name("syrd", staged.VIEWER_TARGET) == "syrd-viewer",
+          "the staged helper resolves the viewer target to this tenant's viewer session")
+    check(staged.session_name("syrd", 2) == "syrd-display-2",
+          "and a slot still names its display session")
+
+
+def test_a_tenant_staged_by_an_older_release_is_restaged_before_it_is_used() -> None:
+    """The preserved Zorin tenant's shape: present, correct, and out of date.
+
+    It begins with the exact `d6bed23` display helper -- numeric-only, which
+    refuses `viewer` -- and the launch has to bring it up to this release
+    through the recorded privileged path before the window is built.
+    """
+    old_source = ROOT / ".git"  # presence check only; bytes come from git below
+    import subprocess as _sp
+
+    old_bytes = _sp.run(
+        ["git", "show", "d6bed23c98fd8127302d4b9fd994c1582f57fcdf:scripts/switchyard-display-attach"],
+        cwd=str(ROOT), capture_output=True, text=True,
+    )
+    if old_bytes.returncode != 0:
+        print("  (skipped: the d6bed23 helper is not reachable from this checkout)")
+        return
+    del old_source
+
+    with tempfile.TemporaryDirectory(prefix="syrd211-stale.") as tmp:
+        root = Path(tmp)
+        release = root / "release"
+        (release / "scripts").mkdir(parents=True)
+        staging_root = root / "staging"
+        mine = staging_root / "test"
+        mine.mkdir(parents=True)
+        neighbour = staging_root / "other"
+        neighbour.mkdir(parents=True)
+
+        # This release's copies.
+        for name in launcher.ROLE_STAGED_EXECUTABLES:
+            source = ROOT / "scripts" / name
+            if source.is_file():
+                (release / "scripts" / name).write_bytes(source.read_bytes())
+
+        # The tenant's staged copies: correct shape, previous release.
+        for name in launcher.ROLE_STAGED_EXECUTABLES:
+            source = ROOT / "scripts" / name
+            if source.is_file():
+                target = mine / name
+                target.write_bytes(source.read_bytes())
+                target.chmod(0o755)
+        stale_helper = mine / "switchyard-display-attach"
+        stale_helper.write_text(old_bytes.stdout, encoding="utf-8")
+        stale_helper.chmod(0o755)
+        untouched = neighbour / "switchyard-display-attach"
+        untouched.write_text(old_bytes.stdout, encoding="utf-8")
+        before_neighbour = untouched.read_bytes()
+
+        stale = launcher.staged_tooling_out_of_date(
+            "test", release_root=str(release), root=staging_root
+        )
+        check(stale == ["switchyard-display-attach"],
+              f"exactly the out-of-date program is named: {stale}")
+
+        staged_old = _module_from(stale_helper, "zorin_staged_helper")
+        check(not hasattr(staged_old, "VIEWER_TARGET"),
+              "and it is the numeric-only one the preserved tenant had")
+
+        commands: list[str] = []
+
+        def restaging_runner(args, **_kwargs):
+            commands.append(" ".join(args))
+            # What the recorded staging step does: install this release's bytes.
+            for name in launcher.ROLE_STAGED_EXECUTABLES:
+                source = release / "scripts" / name
+                if source.is_file():
+                    target = mine / name
+                    target.write_bytes(source.read_bytes())
+                    target.chmod(0o755)
+            return _sp.CompletedProcess(args, 0)
+
+        said: list[str] = []
+        launcher.ensure_tenant_control_helper(
+            "test",
+            grant={"project": "test", "authorized_user": launcher.current_user_name()},
+            release_root=str(release), root=staging_root,
+            owner_uid=os.getuid(), runner=restaging_runner, print_func=said.append,
+        )
+        check(len(commands) == 1, f"one recorded privileged step: {commands}")
+        check("switchyard-record-rollout" in commands[0],
+              f"through the rollout journal: {commands[0][:120]}")
+        check(any("older release" in line for line in said),
+              f"and says why it is doing it: {said}")
+
+        upgraded = _module_from(mine / "switchyard-display-attach", "upgraded_staged_helper")
+        check(hasattr(upgraded, "VIEWER_TARGET"),
+              "the tenant now runs this release's helper")
+        check(upgraded.session_name("test", upgraded.VIEWER_TARGET) == "test-viewer",
+              "which accepts the viewer target and resolves this tenant's session")
+
+        # Idempotent: a second launch restages nothing.
+        commands.clear()
+        launcher.ensure_tenant_control_helper(
+            "test",
+            grant={"project": "test", "authorized_user": launcher.current_user_name()},
+            release_root=str(release), root=staging_root,
+            owner_uid=os.getuid(), runner=restaging_runner, print_func=lambda _l: None,
+        )
+        check(commands == [], f"a second launch runs nothing privileged: {commands}")
+
+        # Cross-tenant isolation: the neighbour was never touched.
+        check(untouched.read_bytes() == before_neighbour,
+              "another tenant's staged helper is byte-for-byte what it was")
+
+
+def test_a_hostile_staged_helper_is_refused_rather_than_restaged() -> None:
+    """Out of date is repaired; the wrong shape is not."""
+    with tempfile.TemporaryDirectory(prefix="syrd211-hostile-stale.") as tmp:
+        root = Path(tmp)
+        staging_root = root / "staging"
+        mine = staging_root / "test"
+        mine.mkdir(parents=True)
+        helper = mine / "switchyard-tenant-control"
+        helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        helper.chmod(0o777)
+
+        def refuse(_args, **_kwargs):
+            raise AssertionError("a hostile staged helper must not be restaged")
+
+        try:
+            launcher.ensure_tenant_control_helper(
+                "test", root=staging_root, owner_uid=os.getuid(),
+                runner=refuse, print_func=lambda _l: None,
+            )
+        except SystemExit as exc:
+            check("refusing to run" in str(exc), f"it is refused: {str(exc)[:90]}")
+            check("group- or world-writable" in str(exc),
+                  f"for its shape, not its age: {str(exc)[:160]}")
+        else:
+            raise AssertionError("a world-writable staged helper must stop the launch")
+
+
 def main() -> int:
     failures = 0
     for name, value in sorted(globals().items()):

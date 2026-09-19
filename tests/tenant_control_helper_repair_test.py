@@ -60,10 +60,23 @@ def _tenant(root: Path, project: str = "test") -> Path:
     return directory
 
 
-def _stage(directory: Path, *, mode: int = 0o755) -> Path:
+#: The programs a launch checks for currency, so a fixture that means "this
+#: tenant is correctly staged" has to stage what the release would install
+#: rather than a stub: since SYRD-211's DAT rejection, present is not current.
+_RELEASE_SCRIPTS = Path("/opt/switchyard/current/scripts")
+
+
+def _stage(directory: Path, *, mode: int = 0o755, current: bool = True) -> Path:
+    """Stage this tenant's protocol programs, as the release would install them."""
     helper = directory / "switchyard-tenant-control"
-    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    helper.chmod(mode)
+    for name in ("switchyard-tenant-control", "switchyard-display-attach"):
+        source = _RELEASE_SCRIPTS / name
+        target = directory / name
+        if current and source.is_file():
+            target.write_bytes(source.read_bytes())
+        else:
+            target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        target.chmod(mode)
     return helper
 
 

@@ -47,6 +47,7 @@ from scripts.ticket_board.project_provision import (
     render_canary_unit,
     render_vcs_close_role_sql,
     role_account_migration_name,
+    ROLE_STAGED_EXECUTABLES,
     role_tooling_staging_commands,
     role_tooling_staging_dir,
     staged_role_tooling_problems,
@@ -28037,6 +28038,55 @@ def repair_tenant_control_helper(
     return ""
 
 
+#: The staged programs whose WIRE CONTRACT this launch depends on: the bridge
+#: it crosses and the helper each tab of the window runs. Deliberately not every
+#: staged executable -- restaging a tenant because its `directorctl` differs
+#: would make an ordinary launch privileged on any drift at all, and say nothing
+#: about whether the window can be opened (SYRD-211 DAT rejection).
+PROTOCOL_STAGED_EXECUTABLES: tuple[str, ...] = (
+    "switchyard-tenant-control",
+    "switchyard-display-attach",
+)
+
+
+def staged_tooling_out_of_date(
+    project: str,
+    *,
+    release_root: str = "",
+    root: Path | None = None,
+) -> list[str]:
+    """Staged programs whose bytes are not the ones this release would install.
+
+    Present is not current. A tenant repaired or provisioned by an earlier
+    release keeps that release's staged copies for ever: nothing restages them
+    merely because the shared release moved on, and the launch verifier is
+    satisfied by an executable of the right shape. The preserved Zorin tenant
+    held a `switchyard-display-attach` that accepts only numeric slots, so a
+    window asking it for `viewer` would have been refused by the tenant's own
+    copy however correct the release was (SYRD-211 DAT rejection).
+
+    Compared by content rather than by a marker file, because that is the
+    question being asked: would this release install different bytes here.
+    """
+    release = Path(release_root) if release_root else switchyard_shared_install_root() / "current"
+    staging = Path(root) if root is not None else TENANT_CONTROL_ROOT
+    staging = staging / project
+    stale: list[str] = []
+    for name in PROTOCOL_STAGED_EXECUTABLES:
+        source = release / "scripts" / name
+        if not source.is_file():
+            # Not in this release: the staging step removes it, which is that
+            # step's business rather than this check's.
+            continue
+        target = staging / name
+        try:
+            if not target.is_file() or target.read_bytes() != source.read_bytes():
+                stale.append(name)
+        except OSError:
+            stale.append(name)
+    return stale
+
+
 def ensure_tenant_control_helper(
     project: str,
     *,
@@ -28057,9 +28107,34 @@ def ensure_tenant_control_helper(
         project, grant=grant, root=root, owner_uid=owner_uid
     )
     if state.usable:
-        # Already correct. Nothing is rewritten, so a second launch costs one
-        # stat and no privileged step (SYRD-211 idempotence).
-        return
+        stale = staged_tooling_out_of_date(project, release_root=release_root, root=root)
+        if not stale:
+            # Already correct and already current. Nothing is rewritten, so a
+            # second launch costs a few stats and no privileged step.
+            return
+        print_func(
+            f"switchyard: {project}'s staged tooling is from an older release "
+            f"({', '.join(stale)}); restaging it from the current one before continuing"
+        )
+        problem = repair_tenant_control_helper(
+            project, release_root=release_root, root=root, runner=runner, print_func=print_func
+        )
+        if problem:
+            raise SystemExit(f"switchyard: {problem}")
+        state = tenant_control_helper_state(
+            project, grant=grant, root=root, owner_uid=owner_uid
+        )
+        remaining = staged_tooling_out_of_date(
+            project, release_root=release_root, root=root
+        )
+        if state.usable and not remaining:
+            print_func(f"switchyard: {project}'s staged tooling is now this release's")
+            return
+        detail = "; ".join(state.reasons) or f"still stale: {', '.join(remaining)}"
+        raise SystemExit(
+            f"switchyard: {project}'s staged tooling could not be brought up to this "
+            f"release: {detail}"
+        )
     if state.reasons:
         raise SystemExit(
             "\n".join(

@@ -421,6 +421,18 @@ HANDOFF_CHILD_FD = 3
 HANDOFF_LIMIT_BYTES = 4096
 HANDOFF_SCHEMA = "switchyard.presentation-handoff.v2"
 MAX_PRESENTATION_SLOTS = 6
+
+#: Which shape the owner half built. Root passes it on only if it is one of
+#: these: a discriminator the desktop half acts on is not a string to relay
+#: unchecked, however harmless it looks.
+#:
+#: Absent means the shape that predates the field, because an owner half from an
+#: older release is still a valid one to hear from. Without this the field was
+#: simply dropped here -- the owner said `viewer`, root republished a handoff
+#: with no layout, and the caller read that as `separate` and opened one tab
+#: onto a display session that does not exist (SYRD-211 live UAT).
+HANDOFF_LAYOUTS = ("separate", "viewer")
+DEFAULT_HANDOFF_LAYOUT = "separate"
 #: A slot title is rendered into the caller's terminal through an escape
 #: sequence, so it is checked here for what is in it and not only for its type.
 #: Root re-serialises this file field by field, so a title that is not checked
@@ -463,6 +475,9 @@ def publish_handoff(project: str, raw: str, *, caller: str) -> None:
     # by nobody else.
     if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         return
+    layout = payload.get("layout", DEFAULT_HANDOFF_LAYOUT)
+    if not isinstance(layout, str) or layout not in HANDOFF_LAYOUTS:
+        return
     titles = payload.get("slot_titles")
     if not isinstance(titles, list) or len(titles) != slots:
         return
@@ -483,6 +498,7 @@ def publish_handoff(project: str, raw: str, *, caller: str) -> None:
         {
             "schema": HANDOFF_SCHEMA,
             "project": project,
+            "layout": layout,
             "slot_count": slots,
             "pane_program": program,
             "slot_titles": list(titles),

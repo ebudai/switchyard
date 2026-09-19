@@ -41,6 +41,8 @@ if str(ROOT) not in sys.path:
 
 from scripts import team_launcher as launcher  # noqa: E402
 
+AGENT_CLI_PROMOTION_LABEL = launcher.AGENT_CLI_PROMOTION_LABEL
+
 HELPER = ROOT / "scripts" / "switchyard-promote-agent-cli"
 #: The uid the sandbox drops to when it stands in for the operator. It must be
 #: mapped inside the namespace, which `--map-auto` arranges from /etc/subuid.
@@ -90,10 +92,18 @@ def _sandbox(tmp: Path) -> dict[str, Path]:
         "bin": tmp / "hostwide",
         "grants": tmp / "grants",
         "opt": tmp / "opt",
+        "journal": tmp / "journal",
     }
     for path in layout.values():
         path.mkdir(parents=True, exist_ok=True)
-    (layout["opt"] / "current" / "scripts").mkdir(parents=True, exist_ok=True)
+    scripts = layout["opt"] / "current" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    # As in production: the promoter and the recorder are siblings in the
+    # installed release, so both pin under the same chain.
+    staged_helper = scripts / HELPER.name
+    shutil.copyfile(HELPER, staged_helper)
+    staged_helper.chmod(0o755)
+    layout["helper"] = staged_helper
     return layout
 
 
@@ -110,15 +120,32 @@ def _grant(layout: dict[str, Path], project: str, *, operator: str, owner: str) 
     return grant
 
 
-def _recorder(layout: dict[str, Path], journal: Path) -> Path:
-    """A stand-in for the rollout recorder that keeps what it was told."""
+def _recorder(layout: dict[str, Path], journal: Path, *, exit_code: int | None = None) -> Path:
+    """The rollout recorder the promotion runs THROUGH.
+
+    By default this is the shipped program, copied where a release installs it,
+    so the promotion crosses the real wrapper: it opens the attempt, runs the
+    promoter, and keeps what the promoter printed and returned. A stub that
+    always exits 0 is what let a missing or broken recorder go unnoticed
+    (SYRD-211 DAT rejection 4), so it is only used where a case is deliberately
+    breaking it.
+    """
     recorder = layout["opt"] / "current" / "scripts" / "switchyard-record-rollout"
-    recorder.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{journal}"\n'
-        "exit 0\n",
-        encoding="utf-8",
-    )
+    if exit_code is None:
+        shutil.copyfile(ROOT / "scripts" / "switchyard-record-rollout", recorder)
+        # The recorder imports the journal package from beside itself.
+        shutil.copytree(
+            ROOT / "scripts" / "ticket_board",
+            layout["opt"] / "current" / "scripts" / "ticket_board",
+            dirs_exist_ok=True,
+        )
+    else:
+        recorder.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> "{journal}"\n'
+            f"exit {exit_code}\n",
+            encoding="utf-8",
+        )
     recorder.chmod(0o755)
     return recorder
 
@@ -146,6 +173,8 @@ def _sudo_shim(
         f'  mount --bind "{layout["grants"]}" /usr/local/lib/switchyard || exit 96\n'
         f'  mount --bind "{layout["opt"]}" /opt/switchyard || exit 95\n'
         f"  SUDO_UID={operator_uid} export SUDO_UID\n"
+        f'  SWITCHYARD_ROLLOUT_JOURNAL_ROOT="{layout["journal"]}" '
+        "export SWITCHYARD_ROLLOUT_JOURNAL_ROOT\n"
         f"  {prelude}\n"
         '  exec "$@"\n'
         "' _ \"$@\"\n",
@@ -153,6 +182,33 @@ def _sudo_shim(
     )
     shim.chmod(0o755)
     return shim
+
+
+def _through_recorder(
+    root: Path, layout: dict[str, Path], cli: str, source: str, project: str = "test",
+    *, operator_uid: int = SANDBOX_OPERATOR_UID, prelude: str = "",
+) -> subprocess.CompletedProcess[str]:
+    """The production shape: sudo -> recorder -> promoter.
+
+    The attempt is opened by the recorder before the promoter starts, so there
+    is no ordering in which the host changed and nothing recorded it.
+    """
+    recorder = layout["opt"] / "current" / "scripts" / "switchyard-record-rollout"
+    return subprocess.run(
+        [
+            str(_sudo_shim(root, layout, operator_uid=operator_uid, prelude=prelude)),
+            str(recorder), project, "--label", AGENT_CLI_PROMOTION_LABEL, "--",
+            str(layout["helper"]), cli, source, "--project", project,
+        ],
+        capture_output=True, text=True,
+    )
+
+
+def _journal(layout: dict[str, Path]) -> str:
+    return "\n".join(
+        entry.read_text(errors="replace")
+        for entry in sorted(layout["journal"].rglob("*")) if entry.is_file()
+    )
 
 
 def test_the_shipped_promoter_cannot_work_unprivileged_on_its_own() -> None:
@@ -187,7 +243,9 @@ def test_a_helper_that_is_not_root_pinned_is_refused_by_the_production_default()
     check(os.geteuid() != 0, "this case is only meaningful from a non-root caller")
     try:
         launcher.promote_agent_cli_through_sudo(
-            "claude", "/bin/sh", helper=HELPER, print_func=lambda _l: None,
+            "claude", "/bin/sh", project="test", helper=HELPER,
+            recorder_path=Path("/opt/switchyard/current/scripts/switchyard-record-rollout"),
+            print_func=lambda _l: None,
             runner=lambda *_a, **_k: (_ for _ in ()).throw(
                 AssertionError("sudo was reached with an unpinned helper")
             ),
@@ -216,6 +274,7 @@ def test_the_tenant_is_named_across_the_boundary() -> None:
         try:
             launcher.promote_agent_cli_through_sudo(
                 "claude", source, project="test", helper=HELPER,
+                recorder_path=HELPER,
                 helper_owner_uid=os.getuid(), helper_boundary=ROOT,
                 runner=lambda args, **_k: (
                     crossed.append(list(args)) or subprocess.CompletedProcess(args, 0)
@@ -241,7 +300,8 @@ def test_a_nonzero_crossing_is_a_failure_not_a_promotion() -> None:
         _fake_cli(source, "claude 1.0")
         try:
             launcher.promote_agent_cli_through_sudo(
-                "claude", source, helper=HELPER,
+                "claude", source, project="test", helper=HELPER,
+                recorder_path=HELPER,
                 helper_owner_uid=os.getuid(), helper_boundary=ROOT,
                 runner=lambda args, **_k: subprocess.CompletedProcess(args, 3),
                 which=lambda *_a, **_k: None,
@@ -272,8 +332,8 @@ def test_an_unprivileged_operator_completes_a_real_promotion() -> None:
         # setgid, so a file that merely inherited its directory's group would
         # carry that group instead of root's.
         os.chmod(layout["bin"], 0o2775)
-        journal = root / "journal.txt"
-        _recorder(layout, journal)
+        _recorder(layout, root / "journal.txt")
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
         source = root / "local" / "claude"
         source.parent.mkdir()
         _fake_cli(source, "claude 9.9.9")
@@ -284,11 +344,13 @@ def test_an_unprivileged_operator_completes_a_real_promotion() -> None:
         said: list[str] = []
         verdict = launcher.promote_agent_cli_through_sudo(
             "claude", source,
-            sudo_bin=str(shim), helper=HELPER,
+            sudo_bin=str(shim), helper=layout["helper"],
+            project="test",
+            recorder_path=layout["opt"] / "current" / "scripts" / "switchyard-record-rollout",
             # A sandbox can neither own a file as root nor put one under a chain
             # of root-owned directories; the production default for both is
             # pinned by its own case above.
-            helper_owner_uid=os.getuid(), helper_boundary=ROOT,
+            helper_owner_uid=os.getuid(), helper_boundary=root,
             which=lambda binary, path=None: (
                 str(layout["bin"] / binary) if (layout["bin"] / binary).exists() else None
             ),
@@ -309,12 +371,17 @@ def test_an_unprivileged_operator_completes_a_real_promotion() -> None:
         check(_leftovers(layout["bin"]) == [],
               f"no staging or backup file was left: {_leftovers(layout['bin'])}")
         check(verdict.serves_a_new_owner, f"the verdict is host-wide: {verdict}")
-        check(journal.is_file(), "the privileged mutation was journalled")
-        entry = journal.read_text()
-        check("agent-cli-promotion" in entry, f"under its own label: {entry}")
-        check("--operator" in entry and SANDBOX_OPERATOR_USER in entry,
-              f"naming the operator: {entry}")
-        check("claude" in entry, f"and the CLI: {entry}")
+        # The journal the REAL recorder wrote, not a stub's echo.
+        attempts = sorted(layout["journal"].rglob("*"))
+        recorded = "\n".join(
+            entry.read_text(errors="replace") for entry in attempts if entry.is_file()
+        )
+        check(attempts, f"the privileged mutation opened a journal attempt: {attempts}")
+        check(AGENT_CLI_PROMOTION_LABEL in recorded,
+              f"under its own label: {recorded[:300]}")
+        check("claude" in recorded, f"and names the CLI: {recorded[:300]}")
+        check("promoted" in recorded,
+              f"keeping what the promoter actually printed: {recorded[:300]}")
 
 
 def _leftovers(bin_dir: Path) -> list[str]:
@@ -339,8 +406,7 @@ def test_a_failing_candidate_never_replaces_a_working_one() -> None:
         root = Path(tmp)
         root.chmod(0o755)
         layout = _sandbox(root)
-        journal = root / "journal.txt"
-        _recorder(layout, journal)
+        _recorder(layout, root / "journal.txt")
 
         sentinel = layout["bin"] / "claude"
         _fake_cli(sentinel, "claude GOOD 1.0")
@@ -351,10 +417,8 @@ def test_a_failing_candidate_never_replaces_a_working_one() -> None:
         broken.write_text('#!/bin/sh\necho broken\nexit 7\n', encoding="utf-8")
         broken.chmod(0o755)
 
-        result = subprocess.run(
-            [str(_sudo_shim(root, layout)), str(HELPER), "claude", str(broken)],
-            capture_output=True, text=True,
-        )
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+        result = _through_recorder(root, layout, "claude", str(broken))
         output = result.stdout + result.stderr
         check(result.returncode != 0, f"the promotion was refused: {output[:160]}")
         check("Nothing has been replaced" in output,
@@ -365,8 +429,12 @@ def test_a_failing_candidate_never_replaces_a_working_one() -> None:
               "with its mode intact")
         check(_leftovers(layout["bin"]) == [],
               f"and no staging or backup file remains: {_leftovers(layout['bin'])}")
-        check(journal.is_file() and "failed" in journal.read_text(),
-              f"the refusal is journalled: {journal.read_text() if journal.is_file() else '(none)'}")
+        recorded = _journal(layout)
+        check(recorded, "the refusal opened a journal attempt")
+        check("does not work for" in recorded,
+              f"keeping the promoter's own reason: {recorded[:300]}")
+        check("not recorded" not in recorded and "not recorded" not in output,
+              f"and no false 'not recorded' diagnostic: {output[:200]}")
 
 
 def test_a_binary_that_only_works_for_the_operator_is_refused() -> None:
@@ -501,6 +569,164 @@ def test_the_promoted_cli_is_verified_as_the_tenant_and_never_as_root() -> None:
               f"it ran as the tenant owner from the grant, not the operator: uid {ran_as}")
         check(f"verified as the tenant owner {SANDBOX_TENANT_USER}" in result.stdout,
               f"and says whose authority proved it: {result.stdout[:200]}")
+
+
+def test_a_source_the_operator_cannot_read_is_never_opened_by_root() -> None:
+    """Root must not become a reader-for-hire because the caller named a path.
+
+    A root-owned mode-0700 script that answers `--version` was promoted into a
+    world-readable /usr/local/bin/<cli>, publishing its contents to every
+    account on the host, purely because root did the opening (SYRD-211 DAT
+    rejection 3).
+    """
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped inaccessible-source case: {unavailable})")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-private.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        _recorder(layout, root / "journal.txt")
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+
+        sentinel = layout["bin"] / "claude"
+        _fake_cli(sentinel, "claude GOOD 1.0")
+        before = sentinel.read_bytes()
+
+        private = root / "root-private-claude"
+        payload = "PRIVATE-PAYLOAD-8f21c"
+        # A perfectly working CLI: it answers --version. The only thing wrong
+        # with it is that the operator has no authority over it. Written here
+        # rather than inside the namespace because this uid maps to root in
+        # there, so the file is already root-owned when the helper sees it.
+        private.write_text(
+            f'#!/bin/sh\necho "claude 1.0"\n# {payload}\nexit 0\n', encoding="utf-8"
+        )
+        private.chmod(0o700)
+        result = _through_recorder(root, layout, "claude", str(private))
+        output = result.stdout + result.stderr
+
+        check(result.returncode != 0,
+              f"a source the operator cannot read is refused: {output[:200]}")
+        check("cannot read" in output,
+              f"naming whose authority was missing: {output[:200]}")
+        check(sentinel.read_bytes() == before,
+              "the previous host-wide copy is byte-for-byte what it was")
+        check(payload not in sentinel.read_text(),
+              "and the private payload was not published into it")
+        check(_leftovers(layout["bin"]) == [],
+              f"with no staging file left: {_leftovers(layout['bin'])}")
+        installed = layout["bin"] / "claude"
+        check(payload not in installed.read_text(),
+              "nothing world-readable carries the private bytes")
+
+        # And the same again through GROUP authority, which is the half an
+        # euid change alone does not drop: a root:root mode-0750 file is
+        # readable by anyone still carrying root's supplementary groups, and
+        # not by the operator.
+        group_only = root / "group-private-claude"
+        group_only.write_text(
+            f'#!/bin/sh\necho "claude 1.0"\n# {payload}\nexit 0\n', encoding="utf-8"
+        )
+        group_only.chmod(0o750)
+        grouped = _through_recorder(root, layout, "claude", str(group_only))
+        grouped_output = grouped.stdout + grouped.stderr
+        check(grouped.returncode != 0,
+              f"a group-readable-by-root source is refused too: {grouped_output[:200]}")
+        check("cannot read" in grouped_output,
+              f"for the same reason: {grouped_output[:200]}")
+        check(payload not in (layout["bin"] / "claude").read_text(),
+              "and its bytes were not published either")
+
+
+def test_a_promotion_that_names_no_tenant_is_refused() -> None:
+    """The journal entry is opened against a project, so there has to be one."""
+    crossed: list[list[str]] = []
+    with tempfile.TemporaryDirectory(prefix="syrd211-noproject.") as tmp:
+        source = Path(tmp) / "claude"
+        _fake_cli(source, "claude 1.0")
+        try:
+            launcher.promote_agent_cli_through_sudo(
+                "claude", source, helper=HELPER, recorder_path=HELPER,
+                helper_owner_uid=os.getuid(), helper_boundary=ROOT,
+                runner=lambda args, **_k: (
+                    crossed.append(list(args)) or subprocess.CompletedProcess(args, 0)
+                ),
+                print_func=lambda _l: None,
+            )
+        except launcher.AgentCliUnavailable as exc:
+            check("without naming the tenant" in str(exc),
+                  f"the refusal says what is missing: {exc}")
+            check("recorded against that tenant" in str(exc),
+                  f"and why it matters: {exc}")
+        else:
+            raise AssertionError("an unjournallable promotion must be refused")
+    check(crossed == [], f"and nothing crossed the boundary: {crossed}")
+
+
+def test_no_mutation_happens_when_the_journal_cannot_be_opened() -> None:
+    """A privileged host mutation without a record must not happen at all.
+
+    The journal used to be a best-effort call AFTER the replace: with no
+    recorder installed it returned silently, and with a broken one it printed a
+    warning -- and in both cases /usr/local/bin had already changed and the
+    promotion reported success (SYRD-211 DAT rejection 4).
+    """
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped journal-boundary case: {unavailable})")
+        return
+
+    # No recorder installed: the launcher refuses before anything crosses.
+    with tempfile.TemporaryDirectory(prefix="syrd211-norecorder.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        source = root / "claude"
+        _fake_cli(source, "claude 1.0")
+        crossed: list[list[str]] = []
+        try:
+            launcher.promote_agent_cli_through_sudo(
+                "claude", source, project="test", helper=layout["helper"],
+                recorder_path=layout["opt"] / "current" / "scripts" / "absent-recorder",
+                helper_owner_uid=os.getuid(), helper_boundary=root,
+                runner=lambda args, **_k: (
+                    crossed.append(list(args)) or subprocess.CompletedProcess(args, 0)
+                ),
+                print_func=lambda _l: None,
+            )
+        except launcher.AgentCliUnavailable as exc:
+            check("not installed on this host" in str(exc),
+                  f"the missing recorder is named: {exc}")
+            check("without a journal" in str(exc),
+                  f"and the reason is the journal, not the recorder: {exc}")
+        else:
+            raise AssertionError("a promotion with no journal must be refused")
+        check(crossed == [], f"and nothing crossed the boundary: {crossed}")
+        check(not (layout["bin"] / "claude").exists(), "so nothing was installed")
+
+    # A recorder that cannot run: the promoter never starts, so the host is
+    # unchanged and the failure is the caller's to see.
+    with tempfile.TemporaryDirectory(prefix="syrd211-brokenrecorder.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        _recorder(layout, root / "journal.txt", exit_code=42)
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+        sentinel = layout["bin"] / "claude"
+        _fake_cli(sentinel, "claude GOOD 1.0")
+        before = sentinel.read_bytes()
+        source = root / "candidate"
+        _fake_cli(source, "claude 2.0")
+
+        result = _through_recorder(root, layout, "claude", str(source))
+        check(result.returncode != 0,
+              f"a recorder that fails is a failed promotion: {result.returncode}")
+        check(sentinel.read_bytes() == before,
+              "the existing host-wide copy is untouched")
+        check(_leftovers(layout["bin"]) == [],
+              f"and nothing was left staged: {_leftovers(layout['bin'])}")
 
 
 def test_the_privileged_half_refuses_what_it_should() -> None:

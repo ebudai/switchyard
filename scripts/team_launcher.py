@@ -11642,6 +11642,22 @@ def _promote_or_report(
 #: checkout: root should execute root-owned bytes it was installed with.
 AGENT_CLI_PROMOTER_NAME = "switchyard-promote-agent-cli"
 
+#: The journal label a promotion is recorded under.
+AGENT_CLI_PROMOTION_LABEL = "agent-cli-promotion"
+
+
+def _rollout_recorder_path_or_none() -> Path | None:
+    """The recorder root should execute, without falling back to a checkout.
+
+    `_rollout_recorder_path` accepts this checkout's copy so an operator packet
+    can be rendered anywhere. A privileged mutation is a different question: the
+    program root runs has to be one root was installed with.
+    """
+    installed = (
+        switchyard_shared_install_root() / "current" / "scripts" / "switchyard-record-rollout"
+    )
+    return installed if installed.is_file() else None
+
 
 def agent_cli_promoter_path() -> Path:
     """Where the privileged promoter lives once a release is installed."""
@@ -11661,6 +11677,7 @@ def promote_agent_cli_through_sudo(
     print_func: Callable[[str], None] = print,
     sudo_bin: str = "",
     helper: Path | None = None,
+    recorder_path: Path | None = None,
     helper_owner_uid: int | None = None,
     helper_boundary: Path | None = None,
 ) -> AgentCliAvailability:
@@ -11686,40 +11703,64 @@ def promote_agent_cli_through_sudo(
     # Locally first, so an obvious mistake is a clear message rather than a
     # password prompt followed by one.
     resolved = resolve_agent_cli_source(cli, source)
+    if not project:
+        # The journal entry is opened against a project, and a privileged host
+        # mutation that cannot be journalled must not happen at all.
+        raise AgentCliUnavailable(
+            f"switchyard: refusing to promote {cli} without naming the tenant it is for; "
+            "the promotion is recorded against that tenant"
+        )
     program = Path(helper) if helper is not None else agent_cli_promoter_path()
-    if not program.is_file():
+    recorder = Path(recorder_path) if recorder_path is not None else _rollout_recorder_path_or_none()
+    if recorder is None or not recorder.is_file():
         raise AgentCliUnavailable(
-            f"switchyard: cannot promote {cli}: {program} is not installed on this host"
+            f"switchyard: refusing to promote {cli}: the rollout recorder is not installed on this "
+            "host, and a privileged host mutation is not made without a journal"
         )
-    # Root, and never "whoever is asking" -- the lesson of this ticket's first
-    # kickback. The whole chain is checked, to the filesystem root, because sudo
-    # names a path and a root-owned program under a directory somebody else can
-    # write is a program somebody else can replace.
-    #
-    # `helper_owner_uid` and `helper_boundary` are a matched pair and exist only
-    # for a sandbox, which can neither own a file as root nor place one under a
-    # chain of root-owned directories. Production passes neither; a dedicated
-    # case pins that default from an unprivileged caller, because a stand-in
-    # hiding what it stands in for is the mistake this ticket already made.
-    entitled = TENANT_CONTROL_OWNER_UID if helper_owner_uid is None else helper_owner_uid
-    reasons = untrusted_root_executable_reasons(
-        program, owner_uid=entitled, boundary=helper_boundary
-    )
-    if reasons:
-        raise AgentCliUnavailable(
-            f"switchyard: refusing to run {program} as root: {reasons[0]}"
+    pinned: dict[str, Path] = {}
+    for candidate, what in ((recorder, "rollout recorder"), (program, "promoter")):
+        if not candidate.is_file():
+            raise AgentCliUnavailable(
+                f"switchyard: cannot promote {cli}: {candidate} is not installed on this host"
+            )
+        # Where it really lands. A release is reached through `current`, which
+        # is a symlink -- one that lives in a root-owned directory, so only root
+        # can repoint it. Refusing every symlink outright would refuse the real
+        # installed recorder; what has to be root's the whole way is the path it
+        # resolves to, and that is what gets walked.
+        candidate = Path(os.path.realpath(candidate))
+        pinned[what] = candidate
+        # Root, and never "whoever is asking". `helper_owner_uid` and
+        # `helper_boundary` are a matched pair and exist only for a sandbox,
+        # which can neither own a file as root nor place one under a chain of
+        # root-owned directories. Production passes neither; a dedicated case
+        # pins that default from an unprivileged caller.
+        entitled = TENANT_CONTROL_OWNER_UID if helper_owner_uid is None else helper_owner_uid
+        reasons = untrusted_root_executable_reasons(
+            candidate, owner_uid=entitled, boundary=helper_boundary
         )
+        if reasons:
+            raise AgentCliUnavailable(
+                f"switchyard: refusing to run the {what} {candidate} as root: {reasons[0]}"
+            )
+    recorder = pinned["rollout recorder"]
+    program = pinned["promoter"]
     sudo = sudo_bin or os.environ.get("SWITCHYARD_SUDO_BIN", "") or "sudo"
     print_func(
-        f"switchyard: promoting {cli} needs root, so this asks sudo to run {program}; "
-        "only the CLI name and that path cross"
+        f"switchyard: promoting {cli} needs root, so this asks sudo to run {program} through "
+        f"{recorder.name}; only the CLI name, that path and {project} cross"
     )
-    command = [sudo, str(program), cli, str(resolved)]
-    if project:
-        # Named so the privileged side can take the verification identity from
-        # that tenant's root-owned grant instead of proving only "not root"
-        # against this operator (SYRD-211 DAT rejection 2).
-        command += ["--project", project]
+    # THROUGH the recorder, not beside it. The attempt is opened before the
+    # promoter starts, and whatever it prints and returns is what the journal
+    # keeps -- so there is no path where /usr/local/bin changed and nothing
+    # recorded it, and no second interpretation of the recorder's own exit
+    # status to get wrong (SYRD-211 DAT rejection 4).
+    command = [
+        sudo, str(recorder), project,
+        "--label", AGENT_CLI_PROMOTION_LABEL,
+        "--",
+        str(program), cli, str(resolved), "--project", project,
+    ]
     result = runner(command)
     code = int(getattr(result, "returncode", 1) or 0)
     if code != 0:

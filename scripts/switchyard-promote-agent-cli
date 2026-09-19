@@ -21,8 +21,13 @@ This is the elevation boundary for that one action, and nothing else:
 * WHERE. A fixed destination. The caller does not choose it, which is what keeps
   this from being a root file-copy primitive.
 * AFTERWARDS. The promoted binary is verified by RUNNING it, so it is never run
-  as root: privileges are dropped to the operator for that, in a clean
-  tenant-equivalent environment.
+  as root: privileges are dropped to the tenant owner for that, in a clean
+  tenant-equivalent environment, and only then is anything replaced.
+* THE RECORD. This program does not write one. It is RUN BY
+  `switchyard-record-rollout`, which opens the journal attempt before this
+  starts and captures whatever this prints and returns. A mutation that could
+  not be journalled therefore never begins, instead of being recorded as an
+  afterthought that may quietly not happen at all (SYRD-211 DAT rejection 4).
 
 Deliberately standalone. It imports nothing from the launcher: a boundary that
 trusts the unprivileged side's tables to decide what the privileged side may do
@@ -71,9 +76,6 @@ GRANT_NAME = "control-grant.json"
 #: account instead -- one with no home worth reading and no supplementary
 #: groups. Never the operator.
 ISOLATED_VERIFIER = "nobody"
-
-#: Where a privileged host mutation is recorded, when a release is installed.
-ROLLOUT_RECORDER = Path("/opt/switchyard/current/scripts/switchyard-record-rollout")
 
 PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 
@@ -176,23 +178,58 @@ def validated_cli(name: str) -> str:
     return name
 
 
+def _resume_root(saved_groups: list[int]) -> None:
+    """Back to root. euid first, because only root may change the rest."""
+    os.seteuid(0)
+    os.setegid(0)
+    try:
+        os.setgroups(saved_groups)
+    except OSError:  # pragma: no cover - we only ever shrink and restore
+        pass
+
+
 def opened_source(cli: str, offered: str, operator: pwd.struct_passwd) -> int:
-    """A descriptor on the file that will actually be copied, and its checks.
+    """Open it with the OPERATOR's authority, then check the descriptor.
 
-    Every check is made with `fstat` on this descriptor rather than on the path.
-    A path can be replaced between the check and the copy; a descriptor cannot,
-    so what was validated is what is read.
+    Root opening a path the caller named is a confused deputy: the caller picks
+    the path, root supplies the authority, and the bytes come out somewhere the
+    caller can read. A root-owned mode-0700 script that answers `--version` was
+    promoted into a world-readable /usr/local/bin/<cli> exactly that way, which
+    disclosed its contents to every account on the host (SYRD-211 DAT
+    rejection 3).
 
-    Symlinks are followed on the way in -- the usual source IS a link into a
-    per-user install -- but what is then validated and copied is the real file.
+    So the open happens under the operator's own uid, gid and supplementary
+    groups -- their real filesystem authority, not an approximation of it. A
+    file they cannot read is refused here, before root has read a byte of it.
+
+    Everything after the open is checked with `fstat` on the descriptor that
+    open returned, so the race protection is unchanged: the file validated is
+    the file copied, whoever renames what afterwards.
     """
-    path = Path(offered)
-    if not path.is_absolute():
+    if not Path(offered).is_absolute():
         fail(f"{offered} is not an absolute path")
+    try:
+        groups = os.getgrouplist(operator.pw_name, operator.pw_gid)
+    except (KeyError, OSError):
+        groups = [operator.pw_gid]
+    saved_groups = os.getgroups()
+    try:
+        os.setgroups(groups)
+        os.setegid(operator.pw_gid)
+        os.seteuid(operator.pw_uid)
+    except OSError as exc:
+        _resume_root(saved_groups)
+        fail(f"could not take {operator.pw_name}'s authority to read {offered}: {exc}")
     try:
         fd = os.open(offered, os.O_RDONLY)
     except OSError as exc:
-        fail(f"cannot read {offered}: {exc}")
+        _resume_root(saved_groups)
+        fail(
+            f"{operator.pw_name} cannot read {offered}: {exc}. Refusing to open it as root: "
+            f"promoting it would publish its contents in a world-readable {DESTINATION_DIR}/{cli}"
+        )
+    finally:
+        _resume_root(saved_groups)
     try:
         info = os.fstat(fd)
     except OSError as exc:
@@ -329,45 +366,6 @@ def verify_unprivileged(destination: Path, identity: pwd.struct_passwd) -> tuple
     return (output.splitlines()[0] if output else ""), ""
 
 
-def record(
-    *, project: str, operator: str, cli: str, outcome: str, code: int, detail: str
-) -> None:
-    """One journal entry for a privileged host mutation, by the usual recorder.
-
-    Promoting a CLI installs a root-owned executable every tenant on this host
-    will run. That is a privileged mutation, and it leaves the same kind of
-    evidence every other one does rather than relying on somebody copying a
-    terminal (SYRD-211 DAT rejection).
-
-    Only what the boundary decided is recorded: who, which CLI, where it came
-    from, and why it was refused. No file contents and no credentials.
-    """
-    if not ROLLOUT_RECORDER.is_file():
-        return
-    try:
-        completed = subprocess.run(
-            [
-                str(ROLLOUT_RECORDER), project or "host",
-                "--record-only", outcome,
-                "--exit-status", str(code),
-                "--action", f"switchyard promote {cli} host-wide",
-                "--operator", operator,
-                "--label", "agent-cli-promotion",
-                "--detail", detail[:400],
-            ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False, text=True,
-        )
-    except OSError as exc:
-        print(f"{PROGRAM}: could not record this promotion: {exc}", file=sys.stderr)
-        return
-    if completed.returncode != 0:
-        print(
-            f"{PROGRAM}: this promotion was not recorded: "
-            f"{(completed.stderr or '').strip()[:200]}",
-            file=sys.stderr,
-        )
-
-
 def main(argv: list[str]) -> int:
     if os.geteuid() != 0:
         fail("must run as root, through sudo")
@@ -382,14 +380,6 @@ def main(argv: list[str]) -> int:
     cli = validated_cli(args[0])
     identity, whose = verification_identity(project, operator)
 
-    def refuse(reason: str) -> NoReturn:
-        record(
-            project=project, operator=operator.pw_name, cli=cli,
-            outcome="failed", code=1,
-            detail=f"refused promoting {cli} from {args[1]}: {reason}",
-        )
-        fail(reason)
-
     fd = opened_source(cli, args[1], operator)
     try:
         staged = stage_candidate(fd, cli)
@@ -401,21 +391,12 @@ def main(argv: list[str]) -> int:
     version, problem = verify_unprivileged(staged, identity)
     if problem:
         discard(staged)
-        refuse(
+        fail(
             f"{cli} from {args[1]} does not work for the {whose}: {problem}. "
             "Nothing has been replaced"
         )
 
     destination = commit_candidate(staged, cli)
-    record(
-        project=project, operator=operator.pw_name, cli=cli,
-        outcome="ok", code=0,
-        detail=(
-            f"{operator.pw_name} promoted {cli} from {args[1]} to {destination}, "
-            f"root-owned 0755, verified as the {whose}"
-            + (f" ({version})" if version else "")
-        ),
-    )
     print(
         f"{PROGRAM}: promoted {args[1]} to {destination} for {operator.pw_name}, "
         f"owned by root, mode 0755"

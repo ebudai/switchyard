@@ -202,6 +202,65 @@ def test_a_promotion_that_did_not_take_is_not_reported_as_done() -> None:
     check(promoted == [], f"but a CLI that is still caller-only is not claimed: {promoted}")
 
 
+def test_accepting_the_offer_uses_the_privileged_crossing_not_an_in_process_chown() -> None:
+    """Which promoter the default actually is, asked of the real default.
+
+    Every positive case here injects `_Promoter`, which is exactly how the first
+    attempt shipped an offer whose default could only ever fail: it called
+    `promote_agent_cli_host_wide`, which chowns to root from inside this
+    unprivileged process (SYRD-211 DAT rejection). So this case passes NO
+    promoter and reads which path it took from the diagnostic.
+    """
+    said: list[str] = []
+    crossings: list[list[str]] = []
+    with tempfile.TemporaryDirectory(prefix="syrd211-default.") as tmp:
+        local = Path(tmp) / "claude"
+        local.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        local.chmod(0o755)
+
+        def which(binary, path=None):
+            if path == launcher.DEFAULT_PANE_BASE_PATH:
+                return str(local) if crossings else None
+            return str(local) if binary == "claude" else None
+
+        promoted = launcher.offer_host_wide_promotion_before_launch(
+            "test", interactive=True, which=which,
+            input_func=lambda _p: "p", print_func=said.append,
+            # No promoter. The default must reach a privileged crossing, and
+            # this runner is where that crossing would land.
+            runner=lambda args, **_k: (
+                crossings.append(list(args)) or subprocess.CompletedProcess(args, 0)
+            ),
+        )
+    text = "\n".join(said)
+    # The two promoters are told apart by their own diagnostics. On a checkout
+    # the privileged half is not yet root-owned, so the crossing refuses before
+    # sudo -- which is correct, and still names the path this took. The crossing
+    # itself is exercised end to end, against a real kernel elevation boundary,
+    # in tests/agent_cli_privileged_promotion_test.py.
+    check("switchyard-promote-agent-cli" in text,
+          f"the default is the privileged promoter: {text}")
+    check("needs root so the result is root-owned" not in text,
+          f"and NOT the in-process chown, which can only fail unprivileged: {text}")
+    check(promoted == [], f"nothing was promoted, and the launch was not blocked: {promoted}")
+    check(crossings == [], f"sudo was not reached with an unpinned helper: {crossings}")
+
+
+def test_a_promotion_that_fails_is_not_reported_as_done() -> None:
+    """A nonzero crossing has to stop being a promotion."""
+    said: list[str] = []
+    promoted = launcher.offer_host_wide_promotion_before_launch(
+        "test", interactive=True, which=_which(private={"claude"}),
+        input_func=lambda _p: "p", print_func=said.append,
+        promoter=lambda cli, source, **_k: (_ for _ in ()).throw(
+            launcher.AgentCliUnavailable(f"switchyard: promoting {cli} failed (exit 3)")
+        ),
+    )
+    check(promoted == [], f"a failed promotion is not claimed: {promoted}")
+    check(any("failed (exit 3)" in line for line in said),
+          f"and the operator is told why: {said}")
+
+
 def test_the_offer_is_made_before_the_bridge_is_crossed() -> None:
     """The whole point of the fix: past the bridge these paths are invisible."""
     order: list[str] = []

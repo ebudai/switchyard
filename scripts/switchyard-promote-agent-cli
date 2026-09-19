@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Install ONE agent CLI the operator already has, host-wide, as root.
+
+SYRD-211. SYRD-210 promoted a caller-local executable to a root-owned host-wide
+copy, and did it with a plain `chown(path, 0, 0)` from inside the running
+process. That worked only because its one caller, `switchyard new`, already runs
+as root. A resumed tenant is launched by `switchyard <project>`, which is
+deliberately unprivileged, so the same call fails with EPERM and the operator
+cannot accept the offer at all.
+
+This is the elevation boundary for that one action, and nothing else:
+
+* WHO. The operator is resolved from SUDO_UID through the account database, not
+  from SUDO_USER, which is a string the caller's environment can carry. A system
+  account may not use this.
+* WHAT. One CLI from a fixed list, named here rather than taken from the
+  unprivileged side. A privileged program validates its own arguments.
+* WHICH FILE. Validated on the OPEN DESCRIPTOR, not on the path, so the file
+  checked is the file copied. It must be a regular executable belonging to the
+  operator or to root, and not writable by anyone else.
+* WHERE. A fixed destination. The caller does not choose it, which is what keeps
+  this from being a root file-copy primitive.
+* AFTERWARDS. The promoted binary is verified by RUNNING it, so it is never run
+  as root: privileges are dropped to the operator for that, in a clean
+  tenant-equivalent environment.
+
+Deliberately standalone. It imports nothing from the launcher: a boundary that
+trusts the unprivileged side's tables to decide what the privileged side may do
+is not a boundary.
+"""
+
+from __future__ import annotations
+
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import NoReturn
+
+PROGRAM = "switchyard-promote-agent-cli"
+
+#: The CLIs this may install. Its own copy on purpose -- see the module note.
+PROMOTABLE_CLIS = ("agy", "claude", "codex", "hermes")
+
+#: Not chosen by the caller.
+DESTINATION_DIR = Path("/usr/local/bin")
+
+#: The PATH every pane is given; the promoted copy has to resolve on it.
+PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+#: Below this, an account is a system account rather than a person.
+MINIMUM_OPERATOR_UID = 1000
+
+CLI_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+
+def fail(message: str) -> NoReturn:
+    raise SystemExit(f"{PROGRAM}: {message}")
+
+
+def calling_operator() -> pwd.struct_passwd:
+    """The human behind this sudo, from the id the kernel gave sudo to resolve.
+
+    SUDO_USER is copied from the environment sudo was handed; SUDO_UID is the
+    numeric id sudo itself resolved. Taking the name from the id means a caller
+    cannot present somebody else's name (the tenant control bridge resolves its
+    caller the same way, SYRD-50).
+    """
+    raw = os.environ.get("SUDO_UID", "").strip()
+    if not raw.isdigit():
+        fail("run this through sudo; the invoking operator could not be identified")
+    uid = int(raw)
+    if uid < MINIMUM_OPERATOR_UID:
+        fail(f"uid {uid} is a system account; only a real operator may promote a CLI")
+    try:
+        return pwd.getpwuid(uid)
+    except KeyError:
+        fail(f"uid {uid} has no account; refusing to promote on its behalf")
+
+
+def validated_cli(name: str) -> str:
+    if not CLI_NAME.match(name):
+        fail(f"{name!r} is not a CLI name")
+    if name not in PROMOTABLE_CLIS:
+        fail(f"{name} is not one of {', '.join(PROMOTABLE_CLIS)}")
+    return name
+
+
+def opened_source(cli: str, offered: str, operator: pwd.struct_passwd) -> int:
+    """A descriptor on the file that will actually be copied, and its checks.
+
+    Every check is made with `fstat` on this descriptor rather than on the path.
+    A path can be replaced between the check and the copy; a descriptor cannot,
+    so what was validated is what is read.
+
+    Symlinks are followed on the way in -- the usual source IS a link into a
+    per-user install -- but what is then validated and copied is the real file.
+    """
+    path = Path(offered)
+    if not path.is_absolute():
+        fail(f"{offered} is not an absolute path")
+    try:
+        fd = os.open(offered, os.O_RDONLY)
+    except OSError as exc:
+        fail(f"cannot read {offered}: {exc}")
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        os.close(fd)
+        fail(f"cannot inspect {offered}: {exc}")
+    problems: list[str] = []
+    if not stat.S_ISREG(info.st_mode):
+        problems.append("is not a regular file")
+    if not info.st_mode & 0o111:
+        problems.append("is not executable")
+    if info.st_uid not in (0, operator.pw_uid):
+        problems.append(
+            f"belongs to uid {info.st_uid}, neither root nor {operator.pw_name}"
+        )
+    if info.st_mode & 0o022:
+        problems.append(
+            f"is group- or world-writable (mode {stat.S_IMODE(info.st_mode):04o}), so "
+            "somebody else chooses what would be installed"
+        )
+    if problems:
+        os.close(fd)
+        fail(f"refusing to promote {cli} from {offered}: it " + "; it ".join(problems))
+    return fd
+
+
+def install_from(fd: int, cli: str) -> Path:
+    """Atomic, root-owned, at the fixed destination."""
+    destination = DESTINATION_DIR / cli
+    try:
+        DESTINATION_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        fail(f"cannot prepare {DESTINATION_DIR}: {exc}")
+    staged_fd, staged_name = tempfile.mkstemp(
+        dir=str(DESTINATION_DIR), prefix=f".{cli}.promote."
+    )
+    staged = Path(staged_name)
+    try:
+        with os.fdopen(staged_fd, "wb") as target:
+            os.lseek(fd, 0, os.SEEK_SET)
+            with os.fdopen(os.dup(fd), "rb") as source:
+                shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+            os.fchmod(target.fileno(), 0o755)
+            os.fchown(target.fileno(), 0, 0)
+        os.replace(staged, destination)
+    except OSError as exc:
+        try:
+            staged.unlink()
+        except OSError:
+            pass
+        fail(f"could not install {cli} at {destination}: {exc}")
+    return destination
+
+
+def verify_unprivileged(destination: Path, operator: pwd.struct_passwd) -> str:
+    """Run it as the operator, never as root, in a tenant-equivalent context.
+
+    Root must not execute a vendor binary it has just installed: the whole point
+    of the promotion is that tenants run it, and tenants are not root. So
+    privileges are dropped for this, the environment is emptied down to the PATH
+    every pane gets, and HOME is a throwaway the operator can write -- a binary
+    that only works because of something in somebody's real home fails here
+    instead of at a first pane launch.
+    """
+    home = Path(tempfile.mkdtemp(prefix="switchyard-cli-verify."))
+    try:
+        os.chown(home, operator.pw_uid, operator.pw_gid)
+        try:
+            groups = [operator.pw_gid]
+            proc = subprocess.run(
+                [str(destination), "--version"],
+                cwd=str(home),
+                env={
+                    "PATH": PANE_BASE_PATH,
+                    "HOME": str(home),
+                    "USER": operator.pw_name,
+                    "LOGNAME": operator.pw_name,
+                    "LANG": "C.UTF-8",
+                },
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=60,
+                user=operator.pw_uid,
+                group=operator.pw_gid,
+                extra_groups=groups,
+            )
+        except subprocess.TimeoutExpired:
+            fail(f"{destination} did not answer --version within 60s")
+        except OSError as exc:
+            fail(f"{destination} could not be executed as {operator.pw_name}: {exc}")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if proc.returncode != 0:
+        fail(
+            f"{destination} is installed but did not run as {operator.pw_name}: "
+            + (proc.stdout or "").strip()[:200]
+        )
+    return (proc.stdout or "").strip().splitlines()[0] if proc.stdout.strip() else ""
+
+
+def resolves_on_pane_path(cli: str) -> str:
+    found = shutil.which(cli, path=PANE_BASE_PATH)
+    if not found:
+        fail(
+            f"{cli} was installed but does not resolve on the PATH every pane is given"
+        )
+    return found
+
+
+def main(argv: list[str]) -> int:
+    if os.geteuid() != 0:
+        fail("must run as root, through sudo")
+    if len(argv) != 2:
+        fail("usage: switchyard-promote-agent-cli <cli> <source-executable>")
+    operator = calling_operator()
+    cli = validated_cli(argv[0])
+    fd = opened_source(cli, argv[1], operator)
+    try:
+        destination = install_from(fd, cli)
+    finally:
+        os.close(fd)
+    resolved = resolves_on_pane_path(cli)
+    version = verify_unprivileged(destination, operator)
+    print(
+        f"{PROGRAM}: promoted {argv[1]} to {destination} for {operator.pw_name}, "
+        f"owned by root, mode 0755"
+    )
+    print(
+        f"{PROGRAM}: {cli} resolves at {resolved} and runs as {operator.pw_name}"
+        + (f" ({version})" if version else " (version not reported)")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

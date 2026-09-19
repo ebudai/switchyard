@@ -11638,6 +11638,97 @@ def _promote_or_report(
     return promote(cli, source, which=which, print_func=print_func)
 
 
+#: The privileged half of a promotion, in the shared release rather than in this
+#: checkout: root should execute root-owned bytes it was installed with.
+AGENT_CLI_PROMOTER_NAME = "switchyard-promote-agent-cli"
+
+
+def agent_cli_promoter_path() -> Path:
+    """Where the privileged promoter lives once a release is installed."""
+    installed = switchyard_shared_install_root() / "current" / "scripts" / AGENT_CLI_PROMOTER_NAME
+    if installed.is_file():
+        return installed
+    return _repo_root() / "scripts" / AGENT_CLI_PROMOTER_NAME
+
+
+def promote_agent_cli_through_sudo(
+    cli: str,
+    source: str | Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    which: Callable[..., str | None] = shutil.which,
+    print_func: Callable[[str], None] = print,
+    sudo_bin: str = "",
+    helper: Path | None = None,
+    helper_owner_uid: int | None = None,
+    helper_boundary: Path | None = None,
+) -> AgentCliAvailability:
+    """Promote from an UNPRIVILEGED process, across one explicit boundary.
+
+    `promote_agent_cli_host_wide` chowns the staged file to root from inside
+    this process. Its only caller was `switchyard new`, which already runs as
+    root, so that worked there and nowhere else -- a resumed tenant is launched
+    by an ordinary `switchyard <project>`, and accepting the promotion offer
+    there failed with EPERM before anything could be installed (SYRD-211 DAT
+    rejection).
+
+    So the privileged half is a separate root-owned program and this is the
+    crossing. Only the CLI name and the source path cross it; the destination,
+    the ownership, the mode and the account the result is verified as are all
+    decided on the far side, from root-owned bytes, which is what keeps this
+    from being a way to have root copy an arbitrary file anywhere.
+
+    The whole path to that program is pinned before root is asked to run it: a
+    root-owned program in a directory somebody else can write is a program
+    somebody else can replace, and sudo names a path (SYRD-62).
+    """
+    # Locally first, so an obvious mistake is a clear message rather than a
+    # password prompt followed by one.
+    resolved = resolve_agent_cli_source(cli, source)
+    program = Path(helper) if helper is not None else agent_cli_promoter_path()
+    if not program.is_file():
+        raise AgentCliUnavailable(
+            f"switchyard: cannot promote {cli}: {program} is not installed on this host"
+        )
+    # Root, and never "whoever is asking" -- the lesson of this ticket's first
+    # kickback. The whole chain is checked, to the filesystem root, because sudo
+    # names a path and a root-owned program under a directory somebody else can
+    # write is a program somebody else can replace.
+    #
+    # `helper_owner_uid` and `helper_boundary` are a matched pair and exist only
+    # for a sandbox, which can neither own a file as root nor place one under a
+    # chain of root-owned directories. Production passes neither; a dedicated
+    # case pins that default from an unprivileged caller, because a stand-in
+    # hiding what it stands in for is the mistake this ticket already made.
+    entitled = TENANT_CONTROL_OWNER_UID if helper_owner_uid is None else helper_owner_uid
+    reasons = untrusted_root_executable_reasons(
+        program, owner_uid=entitled, boundary=helper_boundary
+    )
+    if reasons:
+        raise AgentCliUnavailable(
+            f"switchyard: refusing to run {program} as root: {reasons[0]}"
+        )
+    sudo = sudo_bin or os.environ.get("SWITCHYARD_SUDO_BIN", "") or "sudo"
+    print_func(
+        f"switchyard: promoting {cli} needs root, so this asks sudo to run {program}; "
+        "only the CLI name and that path cross"
+    )
+    result = runner([sudo, str(program), cli, str(resolved)])
+    code = int(getattr(result, "returncode", 1) or 0)
+    if code != 0:
+        raise AgentCliUnavailable(
+            f"switchyard: promoting {cli} failed (exit {code}); nothing has been changed"
+        )
+    verdict = classify_agent_cli(cli, which=which)
+    if not verdict.serves_a_new_owner:
+        raise AgentCliUnavailable(
+            f"switchyard: {cli} reported promoted but still does not resolve on the base PATH "
+            "every pane is given"
+        )
+    print_func(f"switchyard: {cli} is now host-wide at {verdict.host_wide_path}")
+    return verdict
+
+
 def resolvable_agent_cli_promotions(
     *,
     which: Callable[..., str | None] = shutil.which,
@@ -11675,6 +11766,7 @@ def offer_host_wide_promotion_before_launch(
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
     promoter: Callable[..., AgentCliAvailability] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> list[str]:
     """Offer, before crossing the bridge. Never block the launch.
 
@@ -11691,6 +11783,11 @@ def offer_host_wide_promotion_before_launch(
     offers = resolvable_agent_cli_promotions(which=which)
     if not offers:
         return []
+    # A resume runs unprivileged, so the default here is the boundary-crossing
+    # promoter and NOT `promote_agent_cli_host_wide`, which chowns to root from
+    # inside this process and can only work where the caller is already root
+    # (SYRD-211 DAT rejection).
+    promote = promoter or promote_agent_cli_through_sudo
     declared = dict(sources or {})
     promoted: list[str] = []
     for verdict in offers:
@@ -11736,9 +11833,15 @@ def offer_host_wide_promotion_before_launch(
                     )
                     continue
                 chosen = verdict.caller_path
-        result = _promote_or_report(
-            verdict.cli, chosen, promoter=promoter, which=which, print_func=print_func
-        )
+        try:
+            result = promote(
+                verdict.cli, chosen, which=which, print_func=print_func, runner=runner
+            )
+        except AgentCliUnavailable as exc:
+            # Offered, not required: a promotion that could not happen must not
+            # stop a tenant that already exists from starting.
+            print_func(str(exc))
+            continue
         if result.serves_a_new_owner:
             promoted.append(verdict.cli)
     return promoted
@@ -27787,6 +27890,7 @@ def _switchyard_cross_account(
                     input_func=input_func,
                     print_func=print_func,
                     promoter=promoter,
+                    runner=runner,
                 )
             bridge_kwargs: dict[str, Any] = {"runner": runner, "print_func": print_func}
             if ensure_helper is not None:

@@ -55,6 +55,40 @@ def _bounded(clock: dict, step: float, ceiling: float = 2000.0):
     return sleep
 
 
+class _BlockedOnInput(Exception):
+    """Raised out of a blocking read so a hang fails instead of stopping."""
+
+
+class watchdog:
+    """Turn "this blocked forever" into a named failure.
+
+    A hang is the worst way to learn that something blocks: the suite simply
+    stops, with no line to read. These cases deliberately drive code with a real
+    idle terminal, which is exactly where blocking shows up.
+    """
+
+    def __init__(self, seconds: int, what: str) -> None:
+        self.seconds = seconds
+        self.what = what
+
+    def __enter__(self):
+        import signal
+
+        def fire(_signum, _frame):
+            raise _BlockedOnInput(self.what)
+
+        self._previous = signal.signal(signal.SIGALRM, fire)
+        signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, *_exc):
+        import signal
+
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, self._previous)
+        return False
+
+
 CHECKS = 0
 
 
@@ -465,6 +499,99 @@ def test_a_real_oauth_screen_reads_as_a_question_and_a_prompt_does_not() -> None
     check(not launcher.provider_is_waiting_for_an_answer(
         "\x1b[38;5;246m>\x1b[39m  Try \"fix the build\""),
         "an ordinary prompt does not")
+
+
+def test_relaying_a_terminal_with_nothing_typed_does_not_block() -> None:
+    """The real relay, on a real terminal, with nobody typing.
+
+    Every session fake in this file stubs `relay_from`, and `input_fd` defaults
+    to None -- so the shipped relay was never run by any of them. On a tty
+    `os.read(0, ...)` blocks until somebody types, and this call sits inside the
+    loop that watches the provider: the screen stops being read, the quiet
+    window stops advancing, and a session at its ordinary prompt is never
+    closed (SYRD-211 Audit kick-back).
+    """
+    import os
+    import pty
+    import time
+
+    keyboard, terminal = pty.openpty()  # stands in for the operator's tty
+    child_out, child_in = pty.openpty()
+    try:
+        session = launcher.PtyForegroundSession.__new__(launcher.PtyForegroundSession)
+        session._master = child_in  # noqa: SLF001 - the relay's only dependency
+        started = time.monotonic()
+        # Nothing has been typed. This must return, not wait.
+        with watchdog(10, "relay_from blocked on a terminal with nothing typed"):
+            session.relay_from(terminal)
+        elapsed = time.monotonic() - started
+        check(elapsed < 1.0, f"the relay returned without waiting for input: {elapsed:.2f}s")
+
+        # And when something HAS been typed, it reaches the provider unchanged.
+        os.write(keyboard, b"hello\r")
+        time.sleep(0.05)
+        session.relay_from(terminal)
+        # Watchdogged as well: if the relay dropped it, this read has nothing to
+        # wait for and would stop the suite rather than fail it.
+        with watchdog(10, "what was typed never reached the provider"):
+            forwarded = os.read(child_out, 1024)
+        check(b"hello" in forwarded, f"what was typed reached the provider: {forwarded!r}")
+    finally:
+        for fd in (keyboard, terminal, child_out, child_in):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_the_watch_loop_advances_while_a_real_terminal_sits_idle() -> None:
+    """End to end on the shipped class, with a real idle tty as the input.
+
+    No fake session and no stubbed relay: a real provider process on a real pty,
+    a real terminal handed in as `input_fd`, and nobody typing into it. The loop
+    has to keep reading the provider and close it at its ordinary prompt.
+    """
+    import os
+    import pty
+    import sys as _sys
+    import time
+
+    keyboard, terminal = pty.openpty()
+    said: list[str] = []
+    # A provider that prints an ordinary prompt and then waits forever.
+    child = [
+        _sys.executable, "-c",
+        "import sys,time; sys.stdout.write('> Try \"fix the build\"'); "
+        "sys.stdout.flush(); time.sleep(300)",
+    ]
+    started = time.monotonic()
+    try:
+        with watchdog(20, "the watch loop blocked on an idle terminal instead of polling it"):
+            completed = launcher.run_provider_first_run_session(
+                cli="claude",
+                args=child,
+                kwargs={},
+                is_complete=lambda: False,
+                watching="a provider that reaches its prompt",
+                input_fd=terminal,
+                quiet_seconds=1.0,
+                timeout_seconds=30.0,
+                    print_func=said.append,                output_write=lambda _text: None,
+            )
+    finally:
+        for fd in (keyboard, terminal):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    elapsed = time.monotonic() - started
+    check(elapsed < 20.0,
+          f"the loop kept running while the terminal sat idle: {elapsed:.1f}s")
+    check(any("ordinary prompt" in line for line in said),
+          f"and closed the provider at its prompt: {said}")
+    check(not any("gave up waiting" in line for line in said),
+          f"rather than by the bound: {said}")
+    check(completed is False, "the account recorded nothing, reported honestly")
 
 
 def main() -> int:

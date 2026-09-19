@@ -14,6 +14,7 @@ import re
 import secrets
 import shutil
 import signal
+import select
 import shlex
 import socket
 import stat
@@ -13531,7 +13532,21 @@ class PtyForegroundSession:
             pass
 
     def relay_from(self, source_fd: int) -> None:
-        """Whatever the person types goes to the provider, unchanged."""
+        """Whatever the person types goes to the provider, unchanged.
+
+        Asked whether there IS anything first, with a zero timeout. Reading a
+        terminal straight away blocks until somebody types, and this runs inside
+        the loop that watches the provider: on any real tty the watch stopped
+        dead at the first turn, so the screen was never read, the quiet window
+        never advanced, and a session at its ordinary prompt was never closed --
+        the very failure the loop exists to end (SYRD-211 Audit kick-back).
+        """
+        try:
+            ready, _, _ = select.select([source_fd], [], [], 0)
+        except (OSError, ValueError):
+            return
+        if not ready:
+            return
         try:
             data = os.read(source_fd, 65536)
         except (BlockingIOError, InterruptedError, OSError):

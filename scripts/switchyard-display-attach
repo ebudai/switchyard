@@ -108,7 +108,18 @@ def load_grant(project: str) -> dict[str, str]:
     return {key: str(value) for key, value in payload.items()}
 
 
-def session_name(project: str, slot: int) -> str:
+#: The one non-numeric target. On a desktop that is not KDE, `switchyard <project>`
+#: resolves the auto layout to `viewer`: the owner builds a single tiled tmux
+#: session holding every role instead of one display session per slot, and there
+#: are no slots to attach. The caller still has to be able to see it, and it is
+#: still one session of this tenant built from pinned data here -- so it is one
+#: more validated target, not a new way to name a session (SYRD-211 live UAT).
+VIEWER_TARGET = "viewer"
+
+
+def session_name(project: str, slot: int | str) -> str:
+    if slot == VIEWER_TARGET:
+        return f"{project}-viewer"
     return f"{project}-display-{slot}"
 
 
@@ -131,15 +142,19 @@ def lock_argv(session: str) -> list[str]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        fail("usage: switchyard-display-attach <project> <slot>")
+        fail(f"usage: switchyard-display-attach <project> <slot|{VIEWER_TARGET}>")
     project, raw_slot = argv
     if not PROJECT_SLUG.fullmatch(project):
         fail("project must be a plain slug")
-    if not raw_slot.isdigit():
-        fail("slot must be a number")
-    slot = int(raw_slot)
-    if slot >= MAX_SLOTS:
-        fail(f"slot must be within 0..{MAX_SLOTS - 1}")
+    slot: int | str
+    if raw_slot == VIEWER_TARGET:
+        slot = VIEWER_TARGET
+    elif raw_slot.isdigit():
+        slot = int(raw_slot)
+        if slot >= MAX_SLOTS:
+            fail(f"slot must be within 0..{MAX_SLOTS - 1}")
+    else:
+        fail(f"slot must be a number or {VIEWER_TARGET}")
 
     grant = load_grant(project)
     caller = calling_user()

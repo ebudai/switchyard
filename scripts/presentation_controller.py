@@ -1337,8 +1337,13 @@ def display_attach_args(
     )
 
 
+#: What the caller asks the privileged helper for when the tenant's layout is
+#: the single tiled viewer session rather than one display session per slot.
+VIEWER_ATTACH_TARGET = "viewer"
+
+
 def display_attach_args_for(
-    project: str, slot: int, *, owner: str, gui_user: str
+    project: str, slot: int | str, *, owner: str, gui_user: str
 ) -> list[str]:
     """The same answer from primitives, for a caller with no tenant config.
 
@@ -1347,7 +1352,11 @@ def display_attach_args_for(
     root-owned grant, and itself. One definition, so the tab the desktop half
     opens runs what the owner half would have given it (SYRD-90).
     """
-    session = display_session_name(project, slot)
+    session = (
+        team_launcher.viewer_session_for_project(project)
+        if slot == VIEWER_ATTACH_TARGET
+        else display_session_name(project, slot)
+    )
     direct = ["env", "TMUX=", "tmux", "attach", "-t", _exact_tmux_target(session)]
     owner = (owner or "").strip()
     desktop = (gui_user or team_launcher.current_user_name()).strip()
@@ -1371,6 +1380,7 @@ def presentation_layout_payload(
     pane_program: Path,
     slot_titles: Sequence[str] = (),
     window_title: str = "",
+    layout_mode: str = "",
 ) -> dict[str, Any]:
     """The Konsole layout for one project's presentation window.
 
@@ -1384,12 +1394,22 @@ def presentation_layout_payload(
     cwd-and-program text on the desktop handoff path (SYRD-122, SYRD-130).
     """
     titles = list(slot_titles)
-    layout = team_launcher._new_project_layout_payload(slot_count)
+    # The viewer layout is ONE tab: the owner built a single tiled tmux session
+    # holding every role, so there are no per-slot display sessions to open
+    # tabs on, and asking for slot 0..4 of something that does not exist is a
+    # window of five errors (SYRD-211 live UAT).
+    viewer = layout_mode == team_launcher.LAYOUT_MODE_VIEWER
+    layout = team_launcher._new_project_layout_payload(1 if viewer else slot_count)
     for slot, leaf in enumerate(team_launcher._layout_leaves(layout)):
         title = titles[slot] if slot < len(titles) else ""
         leaf["Command"] = team_launcher.inert_pane_command(
             pane_program,
-            display_attach_args_for(project, slot, owner=owner, gui_user=gui_user),
+            display_attach_args_for(
+                project,
+                VIEWER_ATTACH_TARGET if viewer else slot,
+                owner=owner,
+                gui_user=gui_user,
+            ),
             title=title,
             window_title=window_title,
         )

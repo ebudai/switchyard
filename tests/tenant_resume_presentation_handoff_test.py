@@ -297,6 +297,311 @@ def test_a_deferred_hook_warning_does_not_suppress_the_window() -> None:
           f"the window does not depend on any hook result: {window_branch[:200]}")
 
 
+REAL_PINNED_HELPER = Path("/usr/local/lib/switchyard/syrd/switchyard-display-attach")
+
+
+def test_auto_layout_on_a_non_kde_desktop_resolves_to_viewer() -> None:
+    """Zorin's shape, from the product's own resolver rather than an assumption."""
+    check(
+        launcher.resolve_layout_mode(
+            "auto", environ={"XDG_CURRENT_DESKTOP": "X-Cinnamon"},
+            runner=lambda *_a, **_k: __import__("subprocess").CompletedProcess([], 1),
+        ) == launcher.LAYOUT_MODE_VIEWER,
+        "a non-KDE desktop gets the viewer layout",
+    )
+    check(
+        launcher.resolve_layout_mode(
+            "auto", environ={"XDG_CURRENT_DESKTOP": "KDE"},
+            runner=lambda *_a, **_k: __import__("subprocess").CompletedProcess([], 1),
+        ) == launcher.LAYOUT_MODE_SEPARATE,
+        "and KDE gets the separate one",
+    )
+
+
+def test_the_bridged_viewer_hands_off_a_viewer_and_the_caller_opens_one_tab() -> None:
+    """The missed path, end to end through the real renderer and validator.
+
+    The owner builds one tiled tmux session; the caller has to be told that,
+    because five tabs onto display sessions that do not exist is a window of
+    five errors. The payload is rendered by the product, validated by the
+    product, and turned into a layout by the product.
+    """
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    read_fd, write_fd = os.pipe()
+    said: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="syrd211-viewer.") as tmp:
+            config = _config(Path(tmp))
+            with _Bridged(handoff_fd=write_fd):
+                handed = launcher.hand_presentation_back_to_the_caller(
+                    config,
+                    slot_count=1,
+                    window_title="Syrd",
+                    layout=launcher.LAYOUT_MODE_VIEWER,
+                    slot_titles=["Syrd"],
+                    pane_program=REAL_PINNED_HELPER,
+                    print_func=said.append,
+                )
+        check(handed is True, "the viewer branch hands the display back")
+        payload = json.loads(os.read(read_fd, 65536).decode("utf-8"))
+        check(payload["layout"] == launcher.LAYOUT_MODE_VIEWER,
+              f"and says it is a viewer: {payload}")
+        check(payload["slot_count"] == 1, f"with one thing to show: {payload}")
+    finally:
+        os.close(read_fd)
+
+    # The caller validates it again and builds its own layout from it.
+    validated, problem = launcher.validated_presentation_handoff(
+        payload, project=payload["project"]
+    )
+    check(not problem, f"the caller accepts it: {problem}")
+    check(validated["layout"] == launcher.LAYOUT_MODE_VIEWER,
+          "and keeps the layout through validation")
+    from scripts import presentation_controller
+
+    built = presentation_controller.presentation_layout_payload(
+        payload["project"], slot_count=validated["slot_count"],
+        owner="otto-agent", gui_user="eric",
+        pane_program=Path(validated["pane_program"]),
+        slot_titles=validated["slot_titles"], window_title=validated["window_title"],
+        layout_mode=validated["layout"],
+    )
+    leaves = launcher._layout_leaves(built)
+    check(len(leaves) == 1, f"one tab, not one per absent display session: {len(leaves)}")
+    command = leaves[0]["Command"]
+    project = payload["project"]
+    check(command.rstrip().endswith("viewer"),
+          f"the tab asks the helper for the viewer target: {command[-80:]}")
+    # Not "-display-" anywhere: that substring is in the helper's own filename,
+    # `switchyard-display-attach`, so the check has to name the SESSION.
+    check(f"{project}-display-" not in command,
+          f"never a per-slot display session: {command}")
+
+
+def test_the_bridged_separate_layout_still_opens_one_tab_per_slot() -> None:
+    """The audited path, unchanged: KDE keeps its per-slot window."""
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    payload = launcher.render_presentation_handoff(
+        "syrd", slot_count=5, pane_program=REAL_PINNED_HELPER,
+        slot_titles=["a", "b", "c", "d", "e"], window_title="Syrd",
+    )
+    check(payload["layout"] == launcher.LAYOUT_MODE_SEPARATE,
+          f"the default is the separate layout: {payload['layout']}")
+    validated, problem = launcher.validated_presentation_handoff(payload, project="syrd")
+    check(not problem, f"which validates: {problem}")
+    from scripts import presentation_controller
+
+    built = presentation_controller.presentation_layout_payload(
+        "syrd", slot_count=validated["slot_count"], owner="syrd-agent", gui_user="eric",
+        pane_program=Path(validated["pane_program"]),
+        slot_titles=validated["slot_titles"], window_title=validated["window_title"],
+        layout_mode=validated["layout"],
+    )
+    check(len(launcher._layout_leaves(built)) == 5,
+          "and still opens one tab per slot")
+
+
+def test_a_handoff_naming_an_unknown_layout_is_refused() -> None:
+    if not REAL_PINNED_HELPER.is_file():
+        print("  (skipped: this host has no staged display-attach helper to pin)")
+        return
+    payload = launcher.render_presentation_handoff(
+        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        slot_titles=["Syrd"], window_title="Syrd",
+    )
+    payload["layout"] = "something-else"
+    _, problem = launcher.validated_presentation_handoff(payload, project="syrd")
+    check("unknown layout" in problem, f"an unknown layout is refused: {problem}")
+    # And a payload from an older owner half, with no layout at all, still works.
+    payload.pop("layout")
+    validated, problem = launcher.validated_presentation_handoff(payload, project="syrd")
+    check(not problem, f"an older payload is still understood: {problem}")
+    check(validated["layout"] == launcher.LAYOUT_MODE_SEPARATE,
+          "and reads as the layout that predates the field")
+
+
+def test_the_privileged_helper_accepts_the_viewer_target_and_nothing_else_new() -> None:
+    """The boundary keeps validating: one more target, not a way to name sessions."""
+    import types
+
+    source = (ROOT / "scripts" / "switchyard-display-attach").read_text(encoding="utf-8")
+    helper = types.ModuleType("display_attach_under_test")
+    helper.__dict__["__name__"] = "display_attach_under_test"
+    exec(compile(source, "switchyard-display-attach", "exec"), helper.__dict__)  # noqa: S102
+    check(helper.session_name("test", "viewer") == "test-viewer",
+          "the viewer target names this tenant's viewer session")
+    check(helper.session_name("test", 3) == "test-display-3",
+          "and a slot still names its display session")
+    # The lock is applied to whatever was selected, viewer included.
+    argv = helper.lock_argv(helper.session_name("test", "viewer"))
+    check(argv[:4] == ["tmux", "set-option", "-t", "=test-viewer:"],
+          f"the key lock targets the viewer session exactly: {argv[:4]}")
+
+
+def test_launch_project_on_auto_non_kde_emits_the_viewer_handoff() -> None:
+    """Driven through `launch_project` itself, because the branch is the bug.
+
+    The previous candidate added the handoff only to the separate branch, and a
+    test that calls the handoff helper directly cannot tell the difference. This
+    resolves the layout the way the product does -- auto, on a desktop that is
+    not KDE -- and reads what came out of the bridge descriptor.
+    """
+    import subprocess as _sp
+
+    read_fd, write_fd = os.pipe()
+    saved_desktop = launcher.detected_invoking_desktop
+    saved_user = launcher.current_user_name
+    said: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="syrd211-launch.") as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            (repo / "worktrees" / "ops").mkdir(parents=True)
+            layout_file = tmp_path / "layout.json"
+            # Built by the product's own generator, so the fixture's layout is
+            # the shape the launcher expects rather than a guess at it.
+            layout_file.write_text(
+                json.dumps(launcher._new_project_layout_payload(1)) + "\n",
+                encoding="utf-8",
+            )
+            config_path = tmp_path / "porter.json"
+            config_path.write_text(
+                json.dumps({
+                    # Headless here on purpose: the branch under test is the
+                    # bridged VIEWER path, which does not consult the desktop
+                    # policy, and a wayland policy would pull this fixture into
+                    # consent validation that is somebody else's subject.
+                    "desktop_access": {"mode": "headless"},
+                    "project": "porter",
+                    "run_as_user": launcher.current_user_name(),
+                    "layout": str(layout_file),
+                    "repository": str(repo),
+                    "roles": [
+                        {"role": "ops", "slot": 0, "cli": ["codex"],
+                         "target": "porter-ops:0.0",
+                         "workdir": str(repo / "worktrees" / "ops")},
+                    ],
+                }) + "\n",
+                encoding="utf-8",
+            )
+            config = launcher.load_project_config("porter", config_path)
+
+            # A desktop that is not KDE, so `auto` resolves to the viewer.
+            launcher.detected_invoking_desktop = lambda **_k: "X-Cinnamon"
+            check(
+                launcher.resolve_layout_mode("auto", environ={"XDG_CURRENT_DESKTOP": "X-Cinnamon"},
+                                             runner=lambda *_a, **_k: _sp.CompletedProcess([], 1))
+                == launcher.LAYOUT_MODE_VIEWER,
+                "the fixture really is on the viewer branch",
+            )
+
+            class _Ok:
+                """Everything the launch asks of the system says yes."""
+
+                def __init__(self) -> None:
+                    self.calls: list[list[str]] = []
+
+                def __call__(self, args, **_kwargs):
+                    self.calls.append(list(args))
+                    return _sp.CompletedProcess(list(args), 0, stdout="", stderr="")
+
+            runner = _Ok()
+            with _Bridged(handoff_fd=write_fd):
+                try:
+                    launcher.launch_project(
+                        config,
+                        config_path=config_path,
+                        mode="start",
+                        script_path=ROOT / "scripts" / "team-launcher",
+                        runner=runner,
+                        layout_output=tmp_path / "layout-output.json",
+                        layout_mode="auto",
+                        print_func=said.append,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    # The launch may not complete in a fixture, but the handoff
+                    # is emitted at the viewer branch and that is the subject.
+                    said.append(f"(launch raised {type(exc).__name__}: {exc})")
+        # The writer takes ownership of the descriptor and closes it, so this
+        # is only for the case where it never got that far.
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+        write_fd = -1
+        raw = os.read(read_fd, 65536).decode("utf-8").strip()
+    finally:
+        launcher.detected_invoking_desktop = saved_desktop
+        launcher.current_user_name = saved_user
+        for fd in (read_fd, write_fd):
+            if fd and fd > 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    check(raw, f"the viewer branch wrote a handoff: {said[-3:]}")
+    payload = json.loads(raw.splitlines()[0])
+    check(payload["project"] == "porter", f"for this tenant: {payload}")
+    check(payload["layout"] == launcher.LAYOUT_MODE_VIEWER,
+          f"and says it is the viewer layout: {payload}")
+    check(payload["slot_count"] == 1,
+          f"with one thing for the caller to show: {payload}")
+    check("switchyard-display-attach" in payload["pane_program"],
+          f"opened through the privileged attach helper: {payload}")
+
+
+def test_the_viewer_session_is_named_when_the_caller_attaches_directly() -> None:
+    """Owner and desktop the same account: no helper, a direct tmux attach.
+
+    The sudo form never mentions the session -- the helper derives it from
+    pinned data -- so this is the path where getting the viewer session's NAME
+    wrong is visible.
+    """
+    from scripts import presentation_controller
+
+    args = presentation_controller.display_attach_args_for(
+        "porter", presentation_controller.VIEWER_ATTACH_TARGET,
+        owner="eric", gui_user="eric",
+    )
+    check("porter-viewer" in " ".join(args),
+          f"it attaches this tenant's viewer session: {args}")
+    check("porter-display-" not in " ".join(args),
+          f"and not a display session: {args}")
+    slot_args = presentation_controller.display_attach_args_for(
+        "porter", 0, owner="eric", gui_user="eric",
+    )
+    check("porter-display-0" in " ".join(slot_args),
+          f"a slot still names its display session: {slot_args}")
+
+
+def test_the_helper_refuses_a_target_that_is_neither_a_slot_nor_the_viewer() -> None:
+    """One more validated target, not a way to name sessions."""
+    import types
+
+    source = (ROOT / "scripts" / "switchyard-display-attach").read_text(encoding="utf-8")
+    helper = types.ModuleType("display_attach_argv")
+    helper.__dict__["__name__"] = "display_attach_argv"
+    exec(compile(source, "switchyard-display-attach", "exec"), helper.__dict__)  # noqa: S102
+    for bogus in ("viewerr", "../viewer", "0x1", "", "display-0"):
+        try:
+            helper.main(["test", bogus])
+        except SystemExit as exc:
+            message = str(exc)
+            check("slot must be a number" in message or "usage:" in message,
+                  f"{bogus!r} is refused by name: {message}")
+        except BaseException as exc:  # noqa: BLE001
+            raise AssertionError(
+                f"{bogus!r} should be refused cleanly, not raise {type(exc).__name__}: {exc}"
+            ) from exc
+        else:
+            raise AssertionError(f"{bogus!r} should not be accepted")
+
+
 def main() -> int:
     failures = 0
     for name, value in sorted(globals().items()):

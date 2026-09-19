@@ -758,6 +758,25 @@
       "allow_no_code": false
     },
     {
+      "from": "user_review",
+      "to": "in_progress",
+      "action": "relay_user_kick_back",
+      "label": "Record the User's rejection (relayed)",
+      "actors": [
+        "director"
+      ],
+      "primitive": "return",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": true,
+      "clear_signoffs": [
+        "audit_signoff",
+        "user_signoff"
+      ],
+      "allow_no_code": false,
+      "relays_decision_of": "user"
+    },
+    {
       "from": "director_review",
       "to": "in_progress",
       "action": "director_kick_back",

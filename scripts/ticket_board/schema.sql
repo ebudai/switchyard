@@ -7306,6 +7306,22 @@ BEGIN
         IF (tr->>'allow_no_code')::boolean AND ((tr->>'require_commit')::boolean OR NOT (tr->>'require_reason')::boolean OR NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=tr->>'from' AND x->>'kind'='implementation')) THEN RAISE EXCEPTION 'invalid no-code transition policy'; END IF;
         IF EXISTS (SELECT FROM jsonb_array_elements_text(tr->'clear_signoffs') x
             WHERE cfg->'flags'->x->>'kind' IS DISTINCT FROM 'signoff') THEN RAISE EXCEPTION 'invalid signoff reset'; END IF;
+        -- SYRD-214: a transition may record a decision its actor did not make,
+        -- for a role that reached its verdict off the board. The fence is
+        -- narrow on purpose -- a relay returns work and does nothing else, so
+        -- no shape of this approves, signs off, or advances a ticket on the
+        -- absent role's behalf. Absent means the ordinary case: the actor's
+        -- own decision, which is every transition that predates relaying.
+        IF jsonb_typeof(tr->'relays_decision_of') IS NOT NULL
+           AND jsonb_typeof(tr->'relays_decision_of') <> 'null' THEN
+            IF jsonb_typeof(tr->'relays_decision_of') <> 'string'
+               OR NOT coalesce(tr->>'relays_decision_of'=ANY(role_names),false)
+               OR tr->>'primitive'<>'return'
+               OR NOT (tr->>'require_reason')::boolean
+               OR tr->'actors' ? (tr->>'relays_decision_of')
+               OR (tr->>'owner_scoped')::boolean THEN
+                RAISE EXCEPTION 'invalid relayed decision policy: %', tr->>'action'; END IF;
+        END IF;
     END LOOP;
     IF EXISTS (SELECT x->>'from',x->>'to',x->>'action' FROM jsonb_array_elements(cfg->'transitions') x
         GROUP BY 1,2,3 HAVING count(*)>1) THEN RAISE EXCEPTION 'duplicate transition'; END IF;
@@ -7763,7 +7779,34 @@ BEGIN
     IF (tr->>'require_reason')::boolean AND btrim(coalesce(payload->>'text',payload->>'reason',''))='' THEN RAISE EXCEPTION 'reason required'; END IF;
     IF payload ? 'commit_hash' AND (payload->>'commit_hash') !~ '^[0-9a-fA-F]{7,40}$' THEN RAISE EXCEPTION 'invalid commit hash'; END IF;
     IF btrim(coalesce(payload->>'text',payload->>'reason',''))<>'' THEN
-        PERFORM ticket_board.append_ticket_comment(t.id,coalesce(p_narrator,actor),coalesce(payload->>'text',payload->>'reason'));
+        -- SYRD-214: a relayed decision says whose it was, in the record itself.
+        --
+        -- What the preamble adds is the one thing a reader cannot otherwise
+        -- tell: that the decision came from somebody who does not operate the
+        -- board, and that the role exercising the action is not claiming to
+        -- have made it or to have done the review behind it. It names the
+        -- actor rather than the narrator because the actor is whose authority
+        -- the transition's actor list was checked against. (The two differ
+        -- only on the SYRD-133 recovery path, which cannot reach a relay: its
+        -- transitions are allow_no_code and so leave implementation, while a
+        -- relay is a return and so enters it.) Composed here rather than left
+        -- to whoever types the reason: provenance that depends on wording is
+        -- provenance that goes missing the first time somebody is in a hurry.
+        PERFORM ticket_board.append_ticket_comment(
+            t.id,
+            coalesce(p_narrator,actor),
+            CASE WHEN tr->>'relays_decision_of' IS NULL THEN
+                coalesce(payload->>'text',payload->>'reason')
+            ELSE
+                -- One E-string: only the first of a run of adjacent literals
+                -- takes the E prefix, so a continuation carrying \n or an
+                -- escaped quote would be neither escaped nor balanced.
+                format(
+                    E'%1$s relayed this decision from %2$s, who reported it outside the board. It is recorded as the decision of %2$s, it is not %2$s sign-off, and %1$s did not perform the review behind it.\n\n%3$s',
+                    actor,
+                    tr->>'relays_decision_of',
+                    coalesce(payload->>'text',payload->>'reason'))
+            END);
     END IF;
     PERFORM set_config('ticket_board.held_review_target','',true);
     PERFORM set_config('ticket_board.workflow_action',action,true);

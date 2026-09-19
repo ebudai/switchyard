@@ -595,6 +595,9 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     for tr in cfg["transitions"]:
         if isinstance(tr, dict):
             tr.setdefault("allow_no_code", False)
+            # Absent means "this action is the actor's own decision", which is
+            # every transition that existed before relaying did.
+            tr.setdefault("relays_decision_of", None)
         need(
             isinstance(tr, dict)
             and set(tr)
@@ -610,6 +613,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
                 "require_commit",
                 "require_reason",
                 "clear_signoffs",
+                "relays_decision_of",
             },
             "transition fields must be explicit",
         )
@@ -673,6 +677,36 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             ),
             "no-code completion requires implementation origin and reason",
         )
+        # A relay records somebody else's decision, which is a narrow and
+        # easily-abused thing to let one role do for another. So it is
+        # constrained rather than merely declared:
+        #
+        # * it may only RETURN work. An approval relayed on somebody's behalf
+        #   is that person's sign-off forged, which is the one thing this must
+        #   never become;
+        # * it must take a reason, because the whole record is what the other
+        #   party said;
+        # * the role whose decision is being relayed may not be an actor of it,
+        #   since a role that can act does not need anyone to relay for it.
+        relayed = tr["relays_decision_of"]
+        need(
+            relayed is None or (isinstance(relayed, str) and relayed in roles),
+            "a relayed decision must name a known role",
+        )
+        if relayed is not None:
+            need(
+                tr["primitive"] == "return",
+                "a relayed decision may only return work, never approve it",
+            )
+            need(tr["require_reason"], "a relayed decision must carry its reason")
+            need(
+                relayed not in tr["actors"],
+                "a role does not relay its own decision",
+            )
+            need(
+                not tr["owner_scoped"],
+                "a relay is performed by somebody other than the owner",
+            )
         outgoing[a].add(b)
         incoming.add(b)
     for name, stage in stages.items():

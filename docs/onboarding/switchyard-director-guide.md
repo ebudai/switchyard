@@ -165,6 +165,16 @@ identity instead: the role holding `merge`, `set-blockers` and
 `set-manually-controlled` is the controller and may use them (SYRD-49, SYRD-78,
 SYRD-180).
 
+**Relay a failed UAT, do not override it.** The User reports UAT in conversation
+and has no pane to reject from, but `user_kick_back` is the User's own action and
+refuses you, as a sign-off decision should. `relay-user-kick-back <id> --reason
+"..."` is the move for it: it returns the ticket along the ordinary correction
+path, clears the same sign-offs the User's own rejection clears, notifies the
+implementer once, and records in the ticket that you relayed the User's decision
+rather than made it. It cannot approve -- a relay only ever sends work back -- so
+it is not a way to sign off on the User's behalf, and nothing carries a ticket
+past User review without the User (SYRD-214).
+
 **Narrate every override.** `force-move` and `override-move` bypass the workflow;
 `edit-fields` bypasses the normal field-specific operations. Each exceptional use needs a
 comment explaining why. Never fake a signoff.

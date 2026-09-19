@@ -1719,6 +1719,61 @@ def launch_tmux_viewer_session(
     return 0
 
 
+def running_through_tenant_control() -> bool:
+    """Is this launcher the owner half of a bridged invocation?
+
+    The bridge names the human who crossed it in the environment it builds, and
+    that is the only thing here that distinguishes "the person is at this
+    screen" from "this is the owner account, which has no screen at all".
+    """
+    return bool(os.environ.get(TENANT_CONTROL_CALLER_ENV, "").strip())
+
+
+def hand_presentation_back_to_the_caller(
+    config: "ProjectConfig",
+    *,
+    slot_count: int,
+    window_title: str = "",
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Report the window for the bridge caller to open, and say so if it cannot.
+
+    `_hand_off_desktop_half` does this for tenants that run the presentation
+    controller, and only those: it is reached through `launch_presentation`,
+    which `presentation_enabled` gates on the config carrying a `presentation`
+    section. A provisioned tenant carries `desktop_access` and a `layout` and no
+    such section, so a bridged launch of one fell through to opening Konsole
+    HERE -- as the owner account, which has no screen -- and the caller, finding
+    no handoff, opened nothing and returned success.
+
+    That is what live Zorin UAT saw: every worker started or attached, then the
+    shell back, no window and no complaint (SYRD-211 live UAT).
+    """
+    raw_fd = os.environ.get(PRESENTATION_HANDOFF_FD_ENV, "").strip()
+    if not raw_fd.isdigit():
+        return False
+    payload = render_presentation_handoff(
+        config.project,
+        slot_count=slot_count,
+        pane_program=pane_window_program(switchyard_pane_launcher_for(config)),
+        slot_titles=presentation_slot_titles(config, slot_count),
+        window_title=window_title or project_window_title(config),
+    )
+    try:
+        with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    except OSError as exc:
+        raise SystemExit(
+            f"switchyard: could not hand {config.project}'s presentation window back to "
+            f"the account that asked for it: {exc}"
+        )
+    print_func(
+        f"switchyard: {config.project}'s panes are up; its window opens in the session that "
+        "ran this, which owns the screen."
+    )
+    return True
+
+
 def launch_konsole_window(
     layout_path: Path,
     *,
@@ -8752,6 +8807,15 @@ def launch_project(
                 assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
                 print_func=print_func,
             )
+        elif running_through_tenant_control() and hand_presentation_back_to_the_caller(
+            config,
+            slot_count=len(visible_roles_for_viewer(config)),
+            window_title=window_title,
+            print_func=print_func,
+        ):
+            # Opened by the caller, which owns the screen. This account does
+            # not, and Konsole started from here goes nowhere (SYRD-211).
+            launch_result = 0
         else:
             launch_result = launch_konsole_window(
                 output_path,
@@ -28120,6 +28184,41 @@ def close_desktop_presentation(
     return 1 if problems else 0
 
 
+def _tenant_has_desktop_access(project: str, *, caller: str = "") -> bool | None:
+    """Does this tenant have a window -- or can this account not tell?
+
+    Three answers, not two. The obvious source is the tenant's configuration,
+    and most of the time this account cannot read it: it lives under the
+    owner's home, and not being able to look in there is the boundary working
+    rather than a fault. Measured on this host, exactly one of four registered
+    tenants was readable from this account.
+
+    So the caller's own desktop state directory for the project is consulted
+    too -- that is this account's, it is where this project's window has been
+    staged before, and its existence means this caller has had a window for
+    this tenant. When neither says anything, the answer is None: unknown, and
+    an unknown must not be reported as a fault (SYRD-211 live UAT).
+    """
+    try:
+        entry = _usable_switchyard_entry_for_project(project, config_dir=None, registry_dir=None)[0]
+    except Exception:
+        entry = None
+    if entry is not None:
+        try:
+            raw = json.loads(Path(entry.config_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, AttributeError, TypeError):
+            raw = None
+        if isinstance(raw, dict):
+            return isinstance(raw.get("desktop_access"), dict)
+    if caller:
+        try:
+            if desktop_state_dir(project, caller).is_dir():
+                return True
+        except OSError:
+            pass
+    return None
+
+
 def complete_desktop_presentation(
     project: str,
     *,
@@ -28143,6 +28242,19 @@ def complete_desktop_presentation(
     try:
         raw = handoff_path.read_text(encoding="utf-8")
     except OSError:
+        # "Nothing to open" is only true for a tenant that has no window. For
+        # one with a desktop policy this means the owner half never handed its
+        # window back, and returning zero here reports a launch that opened
+        # nothing as a success -- which is what live Zorin UAT was given: every
+        # worker attached, then the shell back, no window and no complaint
+        # (SYRD-211 live UAT).
+        if _tenant_has_desktop_access(project, caller=caller) is True:
+            print_func(
+                f"switchyard: {project}'s panes are running, but no presentation window was "
+                "handed back to this session, so none was opened. The tenant is up; its window "
+                f"is not. Run `switchyard {project}` again, and report this if it repeats"
+            )
+            return 1
         return 0
     try:
         handoff_path.unlink()

@@ -11584,8 +11584,8 @@ def agent_cli_scope_explanation(availability: AgentCliAvailability, owner_user: 
 #: shown, and picking one silently is how an unattended run ends up having
 #: installed software nobody asked for -- or having created half a tenant.
 AGENT_CLI_POLICY_REQUIRE_HOST_WIDE = "require-host-wide"
-AGENT_CLI_POLICY_INSTALL_HOST_WIDE = "install-host-wide"
-AGENT_CLI_POLICIES = (AGENT_CLI_POLICY_REQUIRE_HOST_WIDE, AGENT_CLI_POLICY_INSTALL_HOST_WIDE)
+AGENT_CLI_POLICY_PROMOTE_LOCAL = "promote-local"
+AGENT_CLI_POLICIES = (AGENT_CLI_POLICY_REQUIRE_HOST_WIDE, AGENT_CLI_POLICY_PROMOTE_LOCAL)
 
 
 class AgentCliUnavailable(SystemExit):
@@ -11611,16 +11611,44 @@ def _agent_cli_blocking_report(
     return lines
 
 
+def _parse_agent_cli_sources(values: Sequence[str] | None) -> dict[str, str]:
+    """`--agent-cli-source cli=path`, rejected early rather than half-read."""
+    parsed: dict[str, str] = {}
+    for raw in values or ():
+        cli, separator, path = str(raw).partition("=")
+        cli, path = cli.strip(), path.strip()
+        if not separator or not cli or not path:
+            raise AgentCliUnavailable(
+                f"switchyard: --agent-cli-source expects <cli>=<path>, got {raw!r}"
+            )
+        parsed[cli] = path
+    return parsed
+
+
+def _promote_or_report(
+    cli: str,
+    source: str,
+    *,
+    promoter: Callable[..., AgentCliAvailability] | None,
+    which: Callable[..., str | None],
+    print_func: Callable[[str], None],
+) -> AgentCliAvailability:
+    """One promotion, through the seam tests and hosts can replace."""
+    promote = promoter or promote_agent_cli_host_wide
+    return promote(cli, source, which=which, print_func=print_func)
+
+
 def require_agent_clis_for_new_tenant(
     role_clis: Sequence[tuple[str, str]],
     *,
     owner_user: str,
     policy: str = "",
     interactive: bool = True,
+    sources: Mapping[str, str] | None = None,
     which: Callable[..., str | None] = shutil.which,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
-    installer: Callable[..., AgentCliAvailability] | None = None,
+    promoter: Callable[..., AgentCliAvailability] | None = None,
 ) -> Sequence[tuple[str, str]]:
     """Settle every selected CLI BEFORE anything is created.
 
@@ -11649,44 +11677,75 @@ def require_agent_clis_for_new_tenant(
 
     report = _agent_cli_blocking_report(blocked, owner_user)
 
+    declared = dict(sources or {})
+
     if not interactive:
-        if policy == AGENT_CLI_POLICY_REQUIRE_HOST_WIDE or not policy:
+        # A policy alone is not an answer here. `promote-local` says WHAT may
+        # happen; it cannot say which executable to promote, and guessing one on
+        # an unattended host is exactly the kind of decision this refuses to make
+        # for somebody. So the source is required too, and its absence is a
+        # refusal before anything exists rather than a prompt nobody can answer.
+        if policy != AGENT_CLI_POLICY_PROMOTE_LOCAL:
+            if policy and policy != AGENT_CLI_POLICY_REQUIRE_HOST_WIDE:
+                raise AgentCliUnavailable(
+                    f"switchyard: unknown --agent-cli-policy {policy!r}; "
+                    f"choose one of {', '.join(AGENT_CLI_POLICIES)}"
+                )
             hint = (
-                "switchyard: re-run with --agent-cli-policy install-host-wide to install them "
-                "host-wide, or choose CLIs that are already host-wide with --role-cli"
+                "switchyard: choose CLIs that are already host-wide with --role-cli, or re-run "
+                "with --agent-cli-policy promote-local and --agent-cli-source <cli>=<path> for "
+                "each one. Switchyard never fetches a vendor installer (PGU-904)"
             )
             raise AgentCliUnavailable("\n".join([*report, hint]))
-        if policy != AGENT_CLI_POLICY_INSTALL_HOST_WIDE:
+
+        missing_sources = [cli for cli in blocked if not declared.get(cli)]
+        if missing_sources:
+            offer = ", ".join(
+                f"--agent-cli-source {cli}={blocked[cli].caller_path or '<path>'}"
+                for cli in missing_sources
+            )
             raise AgentCliUnavailable(
-                f"switchyard: unknown --agent-cli-policy {policy!r}; "
-                f"choose one of {', '.join(AGENT_CLI_POLICIES)}"
+                "\n".join(
+                    [
+                        *report,
+                        f"switchyard: promote-local needs a source for {', '.join(missing_sources)}; "
+                        f"add {offer}",
+                    ]
+                )
             )
         for line in report:
             print_func(line)
         for cli in list(blocked):
-            _install_agent_cli_host_wide(
-                cli, print_func=print_func, which=which, installer=installer
+            _promote_or_report(
+                cli, declared[cli], promoter=promoter, which=which, print_func=print_func
             )
         return tuple(selection)
 
     for line in report:
         print_func(line)
 
-    for cli in list(blocked):
-        # Enumerated from the probe table, not the installer table. Both list the
-        # same CLIs, but reading the install commands here would widen the set of
-        # functions that touch them, and that set is deliberately small: PGU-904
-        # keeps those strings away from anything that could run them.
+    for cli, verdict in list(blocked.items()):
         alternatives = [
             name
             for name in sorted(FIRST_RUN_AUTH_STATUS_COMMANDS)
             if name != cli and classify_agent_cli(name, which=which).serves_a_new_owner
         ]
+        # The executable we already found is the obvious source, and offering it
+        # by default is the difference between "install this somehow" and one
+        # keystroke. Nothing is fetched: promoting a copy that is already on this
+        # machine keeps PGU-904's boundary intact and leaves the operator owning
+        # which version every tenant runs (SYRD-210).
+        detected = verdict.caller_path
         while True:
             print_func(f"switchyard: choose how to proceed for {cli}:")
+            if detected:
+                print_func(
+                    f"switchyard:   [p] promote {detected} to a root-owned host-wide copy, "
+                    "reused by every later project; no credentials, config or session travel "
+                    "with it"
+                )
             print_func(
-                f"switchyard:   [i] install {cli} host-wide now; every tenant on this host "
-                "reuses it, and no provider credentials, trust or session state are shared"
+                "switchyard:   [l] promote a local executable you name instead"
             )
             if alternatives:
                 print_func(
@@ -11694,15 +11753,32 @@ def require_agent_clis_for_new_tenant(
                     f"host-wide ({', '.join(alternatives)})"
                 )
             print_func("switchyard:   [a] abort; nothing has been created and nothing will be")
-            answer = (input_func("Choice [i/s/a]: ") or "").strip().casefold()
+            default = "p" if detected else "l"
+            answer = (
+                input_func(f"Choice [{'p/' if detected else ''}l/s/a] ({default}): ") or default
+            ).strip().casefold()
+
             if answer in ("a", "abort"):
                 raise AgentCliUnavailable(
                     "switchyard: aborted before creating anything; no tenant residue to clean up"
                 )
-            if answer in ("i", "install"):
-                _install_agent_cli_host_wide(
-                    cli, print_func=print_func, which=which, installer=installer
+            if answer in ("p", "promote") and detected:
+                _promote_or_report(
+                    cli, detected, promoter=promoter, which=which, print_func=print_func
                 )
+                break
+            if answer in ("l", "local"):
+                offered = (input_func(f"Path to a {cli} executable: ") or "").strip()
+                if not offered:
+                    print_func("switchyard: no path given")
+                    continue
+                try:
+                    _promote_or_report(
+                        cli, offered, promoter=promoter, which=which, print_func=print_func
+                    )
+                except AgentCliSourceRejected as exc:
+                    print_func(str(exc))
+                    continue
                 break
             if answer in ("s", "switch") and alternatives:
                 replacement = (
@@ -11722,7 +11798,9 @@ def require_agent_clis_for_new_tenant(
                     f"switchyard: {', '.join(affected)} now use {replacement} instead of {cli}"
                 )
                 break
-            print_func("switchyard: answer i, s or a")
+            print_func(
+                "switchyard: answer " + ("p, " if detected else "") + "l, s or a"
+            )
 
     return tuple(selection)
 
@@ -11798,6 +11876,152 @@ def verify_agent_clis_for_owner(
     return results
 
 
+#: Where a promoted agent CLI lands. On DEFAULT_PANE_BASE_PATH, so every tenant
+#: resolves it, and root-owned, so no tenant can rewrite what every tenant runs.
+AGENT_CLI_HOST_WIDE_BIN = Path("/usr/local/bin")
+
+
+class AgentCliSourceRejected(AgentCliUnavailable):
+    """The offered local artifact is not something to put on every tenant's PATH."""
+
+
+def resolve_agent_cli_source(cli: str, source: str | Path) -> Path:
+    """The real executable behind an offered path, or a refusal saying why.
+
+    Symlinks are followed to the file that will actually be copied. That matters
+    here more than usual: the common source IS a link -- a per-user install in
+    the operator's home -- and copying the link rather than its target would put
+    a pointer into somebody's home directory on every tenant's PATH, which is
+    the arrangement this ticket exists to end (SYRD-210).
+    """
+    offered = Path(source).expanduser()
+    if not offered.exists():
+        raise AgentCliSourceRejected(
+            f"switchyard: no {cli} executable at {offered}; nothing has been created"
+        )
+    resolved = offered.resolve(strict=False)
+    if resolved.is_dir():
+        raise AgentCliSourceRejected(
+            f"switchyard: {offered} is a directory; give the {cli} executable itself"
+        )
+    if not resolved.is_file():
+        raise AgentCliSourceRejected(f"switchyard: {offered} is not a regular file")
+    if not os.access(resolved, os.X_OK):
+        raise AgentCliSourceRejected(f"switchyard: {resolved} is not executable")
+    return resolved
+
+
+def promote_agent_cli_host_wide(
+    cli: str,
+    source: str | Path,
+    *,
+    bin_dir: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    which: Callable[..., str | None] = shutil.which,
+    print_func: Callable[[str], None] = print,
+    chown: Callable[[Any, int, int], None] = os.chown,
+) -> AgentCliAvailability:
+    """Copy one local executable to where every tenant can run it.
+
+    A copy, never a link. The source is usually a per-user install in the
+    operator's home, and a symlink would leave every tenant's PATH pointing into
+    an account they cannot read and whose owner can replace the target.
+
+    Atomic: written beside the destination and renamed onto it, so a tenant
+    launching mid-promotion sees the old file or the new one and never a
+    half-written one.
+
+    Only the executable moves. No configuration, token, trust record or session
+    file is read or copied -- those stay in the account that authenticates,
+    which is created later and per tenant (SYRD-210).
+    """
+    destination_dir = Path(bin_dir) if bin_dir is not None else AGENT_CLI_HOST_WIDE_BIN
+    resolved = resolve_agent_cli_source(cli, source)
+    destination = destination_dir / cli
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    staged = destination_dir / f".{cli}.switchyard-promote.{os.getpid()}"
+    try:
+        shutil.copyfile(resolved, staged)
+        os.chmod(staged, 0o755)
+        try:
+            chown(staged, 0, 0)
+        except PermissionError as exc:
+            raise AgentCliUnavailable(
+                f"switchyard: promoting {cli} needs root so the result is root-owned: {exc}"
+            ) from exc
+        os.replace(staged, destination)
+    except AgentCliUnavailable:
+        _unlink_quietly(staged)
+        raise
+    except OSError as exc:
+        _unlink_quietly(staged)
+        raise AgentCliUnavailable(
+            f"switchyard: could not install {cli} at {destination}: {exc}"
+        ) from exc
+
+    print_func(f"switchyard: promoted {resolved} to {destination}, owned by root")
+    version = _agent_cli_version_in_tenant_context(destination, runner=runner)
+    verdict = classify_agent_cli(cli, which=which)
+    if not verdict.serves_a_new_owner:
+        raise AgentCliUnavailable(
+            f"switchyard: {cli} is installed at {destination} but does not resolve on the base "
+            "PATH every pane is given; nothing has been created"
+        )
+    print_func(
+        f"switchyard: {cli} verified in a tenant-owner context: {verdict.host_wide_path}"
+        + (f" ({version})" if version else " (version not reported)")
+    )
+    return verdict
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _agent_cli_version_in_tenant_context(
+    executable: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    """Run it the way a tenant will, before any tenant exists.
+
+    The owner account is created later, so it cannot be asked yet. What CAN be
+    reproduced now is the context it will run in: an emptied environment, the
+    base PATH every pane is given, and a HOME that is not the operator's -- so a
+    binary that only works because of something in the promoting user's home
+    fails here rather than at somebody's first pane launch.
+    """
+    home = Path(tempfile.mkdtemp(prefix="switchyard-cli-verify."))
+    try:
+        proc = runner(
+            [str(executable), "--version"],
+            cwd=str(home),
+            env={"PATH": DEFAULT_PANE_BASE_PATH, "HOME": str(home)},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as exc:
+        raise AgentCliUnavailable(
+            f"switchyard: {executable} could not be executed in a tenant context: {exc}"
+        ) from exc
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if proc.returncode != 0:
+        detail = (proc.stdout or "").strip().splitlines()
+        raise AgentCliUnavailable(
+            f"switchyard: {executable} failed to run in a tenant context "
+            f"(exit {proc.returncode}): {detail[-1] if detail else 'no output'}"
+        )
+    lines = (proc.stdout or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
 def host_wide_install_instruction(cli: str) -> str:
     """How to make one CLI host-wide, scoped so it lands where panes look.
 
@@ -11825,34 +12049,6 @@ def host_wide_install_instruction(cli: str) -> str:
         "root, mode 0755. No configuration, token or session file may travel with it -- "
         "credentials stay in the owner account that authenticates"
     )
-
-
-def _install_agent_cli_host_wide(
-    cli: str,
-    *,
-    print_func: Callable[[str], None] = print,
-    which: Callable[..., str | None] = shutil.which,
-    installer: Callable[..., AgentCliAvailability] | None = None,
-) -> AgentCliAvailability:
-    """Make one CLI host-wide, or refuse with the exact instruction.
-
-    `installer` is the seam for a host that has a supported mechanism, and for
-    tests. With none supplied this refuses rather than executing a vendor script
-    as root; refusing still happens before anything is created, so the tenant is
-    not half-built either way.
-    """
-    if installer is None:
-        raise AgentCliUnavailable(
-            f"switchyard: switchyard will not run {cli}'s vendor installer as root. "
-            f"{host_wide_install_instruction(cli)}. Then re-run: nothing has been created yet"
-        )
-    verdict = installer(cli, print_func=print_func, which=which)
-    if not verdict.serves_a_new_owner:
-        raise AgentCliUnavailable(
-            f"switchyard: {cli} still does not resolve on the pane base PATH after installation"
-        )
-    print_func(f"switchyard: {cli} is now host-wide at {verdict.host_wide_path}")
-    return verdict
 
 
 def _missing_cli_install_clause(cli: str, owner_user: str = "") -> str:
@@ -18773,6 +18969,7 @@ def switchyard_new_command(
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
     agent_cli_policy: str = "",
+    agent_cli_sources: Sequence[str] | None = None,
 ) -> int:
     if from_artifact is not None:
         artifact = load_project_design_artifact(from_artifact)
@@ -18929,6 +19126,7 @@ def switchyard_new_command(
         selected_role_clis,
         owner_user=owner_user,
         policy=agent_cli_policy,
+        sources=_parse_agent_cli_sources(agent_cli_sources),
         interactive=not yes,
         input_func=input_func,
         print_func=print_func,
@@ -25568,8 +25766,19 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "what an unattended run may do about a selected CLI that is not installed host-wide: "
-            "require-host-wide refuses before creating anything; install-host-wide installs it "
-            "once for every tenant on this host. Interactive runs ask instead of assuming."
+            "require-host-wide refuses before creating anything; promote-local copies an "
+            "executable you name to /usr/local/bin, root-owned, reusable by every later project. "
+            "Switchyard never fetches a vendor installer. Interactive runs ask instead."
+        ),
+    )
+    parser.add_argument(
+        "--agent-cli-source",
+        action="append",
+        default=[],
+        metavar="CLI=PATH",
+        help=(
+            "local executable to promote host-wide for CLI, required by "
+            "--agent-cli-policy promote-local; repeatable"
         ),
     )
     parser.add_argument("--port", type=int, help="HTTP port; omitted means deterministic allocation")
@@ -27290,6 +27499,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             commit_git_dir=args.commit_git_dir,
             output_dir=args.output_dir,
             agent_cli_policy=args.agent_cli_policy,
+            agent_cli_sources=args.agent_cli_source,
             port=args.port,
             database=args.database,
             yes=args.yes,

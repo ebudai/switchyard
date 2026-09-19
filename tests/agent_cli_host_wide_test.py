@@ -27,7 +27,7 @@ if str(ROOT / "tests") not in sys.path:
 from standalone_test_runner import run_module_tests
 from scripts import team_launcher
 from scripts.team_launcher import (
-    AGENT_CLI_POLICY_INSTALL_HOST_WIDE,
+    AGENT_CLI_POLICY_PROMOTE_LOCAL,
     AGENT_CLI_POLICY_REQUIRE_HOST_WIDE,
     AGENT_CLI_SCOPE_ABSENT,
     AGENT_CLI_SCOPE_CALLER_ONLY,
@@ -73,8 +73,8 @@ class Recorder:
         self.prompts.append(prompt)
         return self.answers.pop(0) if self.answers else "a"
 
-    def installer(self, cli: str, **_kwargs):
-        self.installed.append(cli)
+    def promoter(self, cli: str, source, **_kwargs):
+        self.installed.append((cli, str(source)))
         return team_launcher.AgentCliAvailability(
             cli=cli, scope=AGENT_CLI_SCOPE_HOST_WIDE, host_wide_path=f"/usr/local/bin/{cli}"
         )
@@ -161,7 +161,7 @@ def test_choosing_a_replacement_switches_only_the_affected_roles() -> None:
 
 
 def test_choosing_install_installs_once_and_keeps_the_selection() -> None:
-    rec = Recorder(answers=["i"])
+    rec = Recorder(answers=["p"])
     selection = (("main", "codex"), ("ops", "codex"))
     out = require_agent_clis_for_new_tenant(
         selection,
@@ -169,10 +169,10 @@ def test_choosing_install_installs_once_and_keeps_the_selection() -> None:
         which=which_for(host_wide=("claude",), caller_only=("codex",)),
         input_func=rec.input,
         print_func=rec.print,
-        installer=rec.installer,
+        promoter=rec.promoter,
     )
     assert out == selection, out
-    assert rec.installed == ["codex"], rec.installed
+    assert [cli for cli, _src in rec.installed] == ["codex"], rec.installed
 
 
 def test_abort_creates_nothing_and_says_so() -> None:
@@ -184,7 +184,7 @@ def test_abort_creates_nothing_and_says_so() -> None:
             which=which_for(caller_only=("codex",)),
             input_func=rec.input,
             print_func=rec.print,
-            installer=rec.installer,
+            promoter=rec.promoter,
         )
     except AgentCliUnavailable as exc:
         assert "no tenant residue" in str(exc), exc
@@ -204,12 +204,13 @@ def test_unattended_without_a_declared_policy_fails_before_any_mutation() -> Non
             which=which_for(caller_only=("codex",)),
             input_func=rec.input,
             print_func=rec.print,
-            installer=rec.installer,
+            promoter=rec.promoter,
         )
     except AgentCliUnavailable as exc:
         message = str(exc)
         assert "nothing has been created yet" in message, message
-        assert "--agent-cli-policy install-host-wide" in message, message
+        assert "--agent-cli-policy promote-local" in message, message
+        assert "never fetches a vendor installer" in message, message
     else:
         raise AssertionError("an unattended run must refuse rather than choose")
     assert rec.prompts == [], "an unattended run must never prompt"
@@ -226,29 +227,13 @@ def test_unattended_require_host_wide_refuses() -> None:
             policy=AGENT_CLI_POLICY_REQUIRE_HOST_WIDE,
             which=which_for(caller_only=("codex",)),
             print_func=rec.print,
-            installer=rec.installer,
+            promoter=rec.promoter,
         )
     except AgentCliUnavailable:
         pass
     else:
         raise AssertionError("require-host-wide must refuse an absent CLI")
     assert rec.installed == []
-
-
-def test_unattended_install_host_wide_installs_without_prompting() -> None:
-    rec = Recorder()
-    out = require_agent_clis_for_new_tenant(
-        (("main", "codex"),),
-        owner_user="test-agent",
-        interactive=False,
-        policy=AGENT_CLI_POLICY_INSTALL_HOST_WIDE,
-        which=which_for(caller_only=("codex",)),
-        print_func=rec.print,
-        installer=rec.installer,
-    )
-    assert out == (("main", "codex"),)
-    assert rec.installed == ["codex"]
-    assert rec.prompts == []
 
 
 def test_a_host_wide_install_serves_the_next_tenant_with_no_further_install() -> None:
@@ -263,54 +248,158 @@ def test_a_host_wide_install_serves_the_next_tenant_with_no_further_install() ->
             return None
         return f"/home/eric/.local/bin/{binary}" if binary == "codex" else None
 
-    def installer(cli: str, **_kwargs):
+    def promoter(cli: str, source, **_kwargs):
         installed.append(cli)
         host_wide.add(cli)
         return team_launcher.AgentCliAvailability(
             cli=cli, scope=AGENT_CLI_SCOPE_HOST_WIDE, host_wide_path=f"/usr/local/bin/{cli}"
         )
 
-    first = Recorder(answers=["i"])
+    first = Recorder(answers=["p"])
     require_agent_clis_for_new_tenant(
         (("main", "codex"),), owner_user="alpha-agent",
-        which=which, input_func=first.input, print_func=first.print, installer=installer,
+        which=which, input_func=first.input, print_func=first.print, promoter=promoter,
     )
     second = Recorder()
     out = require_agent_clis_for_new_tenant(
         (("main", "codex"),), owner_user="beta-agent",
-        which=which, input_func=second.input, print_func=second.print, installer=installer,
+        which=which, input_func=second.input, print_func=second.print, promoter=promoter,
     )
     assert out == (("main", "codex"),)
     assert installed == ["codex"], f"the second tenant reinstalled it: {installed}"
     assert second.prompts == [], "the second tenant must not be asked anything"
 
 
-def test_switchyard_refuses_to_run_a_vendor_installer_itself() -> None:
-    """The conflict this ticket runs into, pinned as behaviour.
-
-    SYRD-210 asks for "a supported host-wide installation". The only installers
-    these vendors publish are `curl | sh`, and host-wide means running one as
-    ROOT, during provisioning, from the network. PGU-904 removed CLI
-    installation from this module for that reason and guards it structurally.
-
-    So choosing [i] with no supported mechanism refuses -- before anything is
-    created -- and says exactly what to do. It does not quietly do it.
-    """
-    rec = Recorder(answers=["i"])
+def test_promote_local_needs_a_source_and_says_which_one() -> None:
+    """A policy says what may happen; it cannot say which executable to promote."""
+    rec = Recorder()
     try:
         require_agent_clis_for_new_tenant(
             (("main", "codex"),),
             owner_user="test-agent",
+            interactive=False,
+            policy=AGENT_CLI_POLICY_PROMOTE_LOCAL,
             which=which_for(caller_only=("codex",)),
-            input_func=rec.input,
             print_func=rec.print,
+            promoter=rec.promoter,
         )
     except AgentCliUnavailable as exc:
         message = str(exc)
-        assert "will not run" in message and "as root" in message, message
-        assert "nothing has been created yet" in message, message
+        assert "needs a source for codex" in message, message
+        # and it offers the one it already found, rather than making them hunt
+        assert "--agent-cli-source codex=/home/eric/.local/bin/codex" in message, message
     else:
-        raise AssertionError("choosing install must not silently run a vendor script")
+        raise AssertionError("promote-local without a source must refuse")
+    assert rec.installed == []
+
+
+def test_unattended_promote_local_uses_the_declared_source() -> None:
+    rec = Recorder()
+    out = require_agent_clis_for_new_tenant(
+        (("main", "codex"),),
+        owner_user="test-agent",
+        interactive=False,
+        policy=AGENT_CLI_POLICY_PROMOTE_LOCAL,
+        sources={"codex": "/opt/vendor/codex"},
+        which=which_for(caller_only=("codex",)),
+        print_func=rec.print,
+        promoter=rec.promoter,
+    )
+    assert out == (("main", "codex"),)
+    assert rec.installed == [("codex", "/opt/vendor/codex")], rec.installed
+    assert rec.prompts == []
+
+
+def test_the_detected_executable_is_offered_as_the_default_source() -> None:
+    """The Director's refinement: promote what we already found, in one keystroke."""
+    rec = Recorder(answers=[""])  # empty answer takes the default
+    require_agent_clis_for_new_tenant(
+        (("main", "codex"),),
+        owner_user="test-agent",
+        which=which_for(caller_only=("codex",)),
+        input_func=rec.input,
+        print_func=rec.print,
+        promoter=rec.promoter,
+    )
+    assert rec.installed == [("codex", "/home/eric/.local/bin/codex")], rec.installed
+    assert "promote /home/eric/.local/bin/codex" in rec.text
+
+
+def test_promotion_copies_the_real_file_and_never_links_into_a_home() -> None:
+    """End to end against the filesystem, because this one has to be a copy.
+
+    The usual source is a per-user install in the operator's home. A symlink
+    would leave every tenant's PATH pointing into an account they cannot read
+    and whose owner can replace the target.
+    """
+    import os
+    import stat
+    import subprocess as sp
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        home_bin = root / "home" / "eric" / ".local" / "bin"
+        home_bin.mkdir(parents=True)
+        real = home_bin / "codex-1.4.0"
+        real.write_text("#!/bin/sh\necho 'codex 1.4.0'\n", encoding="utf-8")
+        real.chmod(0o755)
+        link = home_bin / "codex"
+        link.symlink_to(real)
+
+        bins = root / "usr" / "local" / "bin"
+        chowned: list[tuple[str, int, int]] = []
+
+        def fake_chown(path, uid, gid):
+            chowned.append((str(path), uid, gid))
+
+        verdict = team_launcher.promote_agent_cli_host_wide(
+            "codex",
+            link,
+            bin_dir=bins,
+            which=lambda binary, path=None: str(bins / binary) if (bins / binary).exists() else None,
+            print_func=lambda _line: None,
+            chown=fake_chown,
+            runner=sp.run,
+        )
+
+        installed = bins / "codex"
+        assert installed.is_file() and not installed.is_symlink(), "must be a copy, not a link"
+        assert installed.read_text() == real.read_text()
+        assert stat.S_IMODE(installed.stat().st_mode) == 0o755
+        assert chowned and chowned[-1][1:] == (0, 0), "the result must be root-owned"
+        assert verdict.serves_a_new_owner
+        assert not any(p.name.startswith(".codex.switchyard-promote") for p in bins.iterdir()), (
+            "the staging file must not be left behind"
+        )
+
+
+def test_a_source_that_is_not_an_executable_is_refused_by_name() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        missing = root / "nope"
+        for source, expected in (
+            (missing, "no codex executable"),
+            (root, "is a directory"),
+        ):
+            try:
+                team_launcher.resolve_agent_cli_source("codex", source)
+            except team_launcher.AgentCliSourceRejected as exc:
+                assert expected in str(exc), (source, exc)
+            else:
+                raise AssertionError(f"{source} should have been refused")
+
+        plain = root / "not-executable"
+        plain.write_text("x", encoding="utf-8")
+        plain.chmod(0o644)
+        try:
+            team_launcher.resolve_agent_cli_source("codex", plain)
+        except team_launcher.AgentCliSourceRejected as exc:
+            assert "not executable" in str(exc), exc
+        else:
+            raise AssertionError("a non-executable file should have been refused")
 
 
 def test_the_printed_instruction_is_scoped_and_carries_no_credentials() -> None:
@@ -438,6 +527,28 @@ def test_the_gate_runs_before_the_first_mutation() -> None:
         )
 
 
+def _run() -> None:
+    """Report an escaping SystemExit against the test that raised it.
+
+    AgentCliUnavailable IS a SystemExit -- correct for the product, since it
+    ends the command cleanly -- but an uncaught one in a test ends the whole
+    suite printing only its own message, with no indication of which test let it
+    out. That cost a confused minute here; it should not cost the next person
+    one.
+    """
+    for name, test in sorted(
+        (name, value)
+        for name, value in globals().items()
+        if name.startswith("test_") and callable(value)
+    ):
+        try:
+            test()
+        except SystemExit as exc:
+            raise AssertionError(
+                f"{name} let a SystemExit escape: {str(exc).splitlines()[0]}"
+            ) from exc
+
+
 if __name__ == "__main__":
-    run_module_tests(globals())
+    _run()
     print("agent_cli_host_wide_test: ok")

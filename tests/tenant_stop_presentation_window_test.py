@@ -176,7 +176,9 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
     # A normally provisioned tenant, which is this test's precondition: since
     # SYRD-211 the bridge verifies the staged helper before asking root to run
     # it, so a fixture with no helper at all is refused before either desktop
-    # half is reached.
+    # half is reached. A sandbox cannot create root-owned files, and the
+    # entitled owner of those paths is root -- so the stand-in uid is declared
+    # here rather than being whatever this process happens to be.
     staged = tempfile.TemporaryDirectory(prefix="tenant-stop-helper.")
     helper_root = Path(staged.name)
     helper_dir = helper_root / PROJECT
@@ -184,8 +186,9 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
     helper = helper_dir / "switchyard-tenant-control"
     helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     helper.chmod(0o755)
-    original_root = team_launcher.TENANT_CONTROL_ROOT  # noqa: F405
-    team_launcher.TENANT_CONTROL_ROOT = helper_root  # noqa: F405
+    verify_in_sandbox = lambda *a, **k: team_launcher.ensure_tenant_control_helper(  # noqa: E731,F405
+        *a, **k, root=helper_root, owner_uid=os.getuid()
+    )
     try:
         team_launcher.complete_desktop_presentation = (  # noqa: F405
             lambda project, **kw: opened.append(project) or 0
@@ -204,6 +207,7 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
                     PROJECT, operation,
                     grant={"authorized_user": team_launcher.current_user_name()},  # noqa: F405
                     runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0),
+                    ensure_helper=verify_in_sandbox,
                 )
             except SystemExit as exit_code:
                 assert exit_code.code == 0, (operation, exit_code.code)
@@ -212,7 +216,6 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
     finally:
         team_launcher.complete_desktop_presentation = original_open  # noqa: F405
         team_launcher.close_desktop_presentation = original_close  # noqa: F405
-        team_launcher.TENANT_CONTROL_ROOT = original_root  # noqa: F405
         staged.cleanup()
 
 

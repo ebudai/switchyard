@@ -36,6 +36,14 @@ if str(ROOT) not in sys.path:
 
 from scripts import team_launcher as launcher  # noqa: E402
 
+#: A sandbox cannot create root-owned files, so tests that need a CORRECTLY
+#: provisioned tenant in a temporary directory say so explicitly: this uid
+#: stands in for root there. Production never passes it -- the entitled owner
+#: is root, whoever is asking -- and two cases below pin exactly that, because
+#: letting the sandbox uid be the default is what SYRD-211 shipped and what live
+#: Zorin UAT rejected.
+SANDBOX_ROOT_UID = os.getuid()
+
 CHECKS = 0
 
 
@@ -83,6 +91,74 @@ class _Repairs:
         self.lines.append(line)
 
 
+def test_the_entitled_owner_is_root_not_whoever_is_asking() -> None:
+    """The SYRD-211 kickback, pinned at the production default.
+
+    Live Zorin UAT repaired the helper successfully, journaled it, and then
+    refused the tenant it had just repaired:
+
+        /usr/local/lib/switchyard/test/switchyard-tenant-control is owned by
+        uid 0 rather than by uid 1000
+
+    The installed shape was the REQUIRED one. `untrusted_root_executable_reasons`
+    defaults `owner_uid` to this process's own uid, which is right where it runs
+    as root during provisioning and exactly wrong here: this verification runs in
+    the operator's unprivileged launcher, against paths that are root-owned by
+    requirement.
+
+    So a tree owned by THIS process -- an ordinary unprivileged uid -- must be
+    refused by the production default, and refused for that reason. Under the
+    shipped code it was accepted, because the caller happened to own it.
+    """
+    check(os.getuid() != 0, "this case is only meaningful from a non-root caller")
+    with tempfile.TemporaryDirectory(prefix="syrd211-entitled.") as tmp:
+        root = Path(tmp)
+        _stage(_tenant(root))
+        state = launcher.tenant_control_helper_state("test", grant=_grant(), root=root)
+        check(state.present, "the file is there")
+        check(not state.usable,
+              f"and a caller-owned tree is not usable at the production default: {state.reasons}")
+        check(any(f"rather than by uid {launcher.TENANT_CONTROL_OWNER_UID}" in reason
+                  for reason in state.reasons),
+              f"refused against root, not against the caller: {state.reasons}")
+        check(launcher.TENANT_CONTROL_OWNER_UID == 0, "and that identity is root")
+        # It is not repairable either: re-staging cannot make a caller-owned
+        # tree root-owned, so this must refuse rather than loop through sudo.
+        check(not state.repairable, "a wrong owner is never a repairable absence")
+
+
+def test_a_genuinely_root_owned_helper_verifies_from_an_unprivileged_caller() -> None:
+    """The other half, against real root-owned paths rather than a sandbox.
+
+    A temporary tree can only ever stand in for root, so the positive case is
+    taken from a real staged tenant on this host when there is one: root-owned
+    directories, a root-owned executable, and this unprivileged process asking.
+    """
+    check(os.getuid() != 0, "this case is only meaningful from a non-root caller")
+    real_root = Path("/usr/local/lib/switchyard")
+    candidates = []
+    try:
+        for entry in sorted(real_root.iterdir()):
+            helper = entry / "switchyard-tenant-control"
+            try:
+                if entry.stat().st_uid == 0 and helper.stat().st_uid == 0:
+                    candidates.append(entry.name)
+            except OSError:
+                continue
+    except OSError:
+        candidates = []
+    if not candidates:
+        # Nothing to assert against rather than a silent pass: say so, and let
+        # the caller-owned case above carry the regression on its own.
+        print("  (no root-owned staged tenant on this host; positive case skipped)")
+        return
+    project = candidates[0]
+    state = launcher.tenant_control_helper_state(project)
+    check(state.present, f"{project}: the real staged helper is there")
+    check(state.usable,
+          f"{project}: and a root-owned helper verifies from uid {os.getuid()}: {state.reasons}")
+
+
 def test_a_missing_helper_is_absent_not_hostile() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd211-absent.") as tmp:
         root = Path(tmp)
@@ -101,10 +177,13 @@ def test_a_missing_helper_is_repaired_and_the_launch_resumes() -> None:
         directory = _tenant(root)
         repairs = _Repairs(directory)
         launcher.ensure_tenant_control_helper(
-            "test", grant=_grant(), root=root, runner=repairs, print_func=repairs.say
+            "test", grant=_grant(), root=root, runner=repairs, print_func=repairs.say,
+            owner_uid=SANDBOX_ROOT_UID,
         )
         check(len(repairs.commands) == 1, f"exactly one privileged step ran: {repairs.commands}")
-        state = launcher.tenant_control_helper_state("test", grant=_grant(), root=root)
+        state = launcher.tenant_control_helper_state(
+            "test", grant=_grant(), root=root, owner_uid=SANDBOX_ROOT_UID
+        )
         check(state.usable, f"and the helper is usable afterwards: {state.reasons}")
         check(any("repairing it from" in line for line in repairs.lines),
               f"the operator is told before it happens: {repairs.lines}")
@@ -153,7 +232,8 @@ def test_a_valid_helper_costs_no_privileged_step() -> None:
             raise AssertionError("a usable helper must not be rewritten")
 
         launcher.ensure_tenant_control_helper(
-            "test", grant=_grant(), root=root, runner=never, print_func=lambda _l: None
+            "test", grant=_grant(), root=root, runner=never, print_func=lambda _l: None,
+            owner_uid=SANDBOX_ROOT_UID,
         )
         check(calls == [], "a second launch runs nothing privileged")
 
@@ -163,14 +243,17 @@ def test_a_repair_is_idempotent_across_two_launches() -> None:
         root = Path(tmp)
         directory = _tenant(root)
         repairs = _Repairs(directory)
-        launcher.ensure_tenant_control_helper(
-            "test", grant=_grant(), root=root, runner=repairs, print_func=repairs.say
-        )
-        first = len(repairs.commands)
-        launcher.ensure_tenant_control_helper(
-            "test", grant=_grant(), root=root, runner=repairs, print_func=repairs.say
-        )
-        check(first == 1, f"the first launch repaired once: {repairs.commands}")
+
+        def launch() -> None:
+            launcher.ensure_tenant_control_helper(
+                "test", grant=_grant(), root=root, runner=repairs, print_func=repairs.say,
+                owner_uid=SANDBOX_ROOT_UID,
+            )
+
+        launch()
+        after_first = len(repairs.commands)
+        launch()
+        check(after_first == 1, f"the first launch repaired once: {repairs.commands}")
         check(len(repairs.commands) == 1,
               f"and the second reused it without rewriting: {repairs.commands}")
 
@@ -209,9 +292,10 @@ def test_hostile_helper_shapes_are_refused_rather_than_repaired() -> None:
         # Naming the entitled uid rather than a literal 0 is what lets this be
         # exercised without a root-owned sandbox -- the same seam the staging
         # verifier uses (SYRD-62).
-        cases.append(("wrongowner", "owned by", {"owner_uid": os.getuid() + 1}))
+        cases.append(("wrongowner", "owned by", {"owner_uid": SANDBOX_ROOT_UID + 1}))
 
         for project, expected, extra in cases:
+            extra = {"owner_uid": SANDBOX_ROOT_UID, **extra}
             state = launcher.tenant_control_helper_state(project, root=root, **extra)
             check(state.present, f"{project}: something is there")
             check(any(expected in reason for reason in state.reasons),
@@ -258,7 +342,9 @@ def test_a_grant_without_a_project_key_is_not_a_disagreement() -> None:
         directory = _tenant(root)
         _stage(directory)
         for grant in ({}, {"authorized_user": "someone"}, {"project": ""}):
-            state = launcher.tenant_control_helper_state("test", grant=grant, root=root)
+            state = launcher.tenant_control_helper_state(
+                "test", grant=grant, root=root, owner_uid=SANDBOX_ROOT_UID
+            )
             check(state.usable, f"a grant of {grant!r} leaves the helper usable: {state.reasons}")
 
 
@@ -315,6 +401,9 @@ def test_the_bridge_verifies_before_it_asks_root_to_run_anything() -> None:
             launcher._switchyard_exec_through_tenant_control(
                 "test", "status", grant=_grant(), runner=runner,
                 print_func=lambda _l: None,
+                ensure_helper=lambda *a, **k: launcher.ensure_tenant_control_helper(
+                    *a, **k, root=root, owner_uid=SANDBOX_ROOT_UID
+                ),
             )
         except SystemExit:
             pass
@@ -323,6 +412,39 @@ def test_the_bridge_verifies_before_it_asks_root_to_run_anything() -> None:
         check(seen, "the bridge ran something")
         check(any("switchyard-tenant-control" in " ".join(args) for args in seen),
               f"and it reached the helper once it verified: {seen}")
+
+
+def test_the_bridge_verifies_by_default_without_being_asked_to() -> None:
+    """The seam exists for tests; its DEFAULT is what protects production.
+
+    Every other bridge case here supplies the sandbox stand-in through
+    `ensure_helper`, which means none of them exercises what an ordinary caller
+    gets. This one passes no seam at all: with an unstaged tenant the real
+    default must stop the launch before the helper is ever handed to sudo.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd211-default.") as tmp:
+        root = Path(tmp)
+        _tenant(root)
+        invoked: list[list[str]] = []
+
+        def runner(args, **_kwargs):
+            invoked.append(list(args))
+            return subprocess.CompletedProcess(args, 0)
+
+        original = launcher.TENANT_CONTROL_ROOT
+        launcher.TENANT_CONTROL_ROOT = root
+        try:
+            launcher._switchyard_exec_through_tenant_control(
+                "test", "status", grant=_grant(), runner=runner, print_func=lambda _l: None
+            )
+        except SystemExit as exc:
+            check("unusable after repair" in str(exc) or "refusing to run" in str(exc),
+                  f"the default verification stopped the launch: {str(exc)[:110]}")
+        finally:
+            launcher.TENANT_CONTROL_ROOT = original
+        reached = [args for args in invoked
+                   if args[:2] == ["sudo", "-n"] and "switchyard-tenant-control" in " ".join(args)]
+        check(reached == [], f"and sudo was never asked to run the helper: {reached}")
 
 
 def test_the_reported_failure_no_longer_reaches_sudo() -> None:
@@ -343,7 +465,10 @@ def test_the_reported_failure_no_longer_reaches_sudo() -> None:
         launcher.TENANT_CONTROL_ROOT = root
         try:
             launcher._switchyard_exec_through_tenant_control(
-                "test", "status", grant=_grant(), runner=runner, print_func=lambda _l: None
+                "test", "status", grant=_grant(), runner=runner, print_func=lambda _l: None,
+                ensure_helper=lambda *a, **k: launcher.ensure_tenant_control_helper(
+                    *a, **k, root=root, owner_uid=SANDBOX_ROOT_UID
+                ),
             )
         except SystemExit as exc:
             check(int(exc.code or 0) == 0, f"the launch continued rather than failing: {exc.code}")
@@ -352,7 +477,8 @@ def test_the_reported_failure_no_longer_reaches_sudo() -> None:
         helper_calls = [args for args in invoked
                         if args[:1] == ["sudo"] and "switchyard-tenant-control" in " ".join(args)]
         check(helper_calls, f"the helper was finally invoked, not reported missing: {invoked}")
-        check(launcher.tenant_control_helper_state("test", root=root).usable,
+        check(launcher.tenant_control_helper_state(
+                  "test", root=root, owner_uid=SANDBOX_ROOT_UID).usable,
               "and the tenant is left with a usable helper")
 
 

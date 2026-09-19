@@ -27134,6 +27134,18 @@ def _tenant_control_operation(argv: Sequence[str], project_argument: str) -> str
 #: can tell a staged-tool repair apart from a provisioning or upgrade run.
 TENANT_CONTROL_REPAIR_LABEL = "tenant-control-repair"
 
+#: Root, and never "whoever is asking".
+#:
+#: These staged paths are root-owned by requirement -- that is the whole point
+#: of staging them outside the owner's home -- while this verification runs in
+#: the operator's UNPRIVILEGED launcher process. So the entitled identity is a
+#: property of the path, not of the caller, and
+#: `untrusted_root_executable_reasons` defaulting `owner_uid` to this process's
+#: own uid is exactly wrong here: live Zorin UAT rejected a correctly installed
+#: tenant because verification ran as uid 1000 and demanded that uid on
+#: root-owned files (SYRD-211 kickback).
+TENANT_CONTROL_OWNER_UID = 0
+
 
 @dataclass(frozen=True)
 class TenantControlHelperState:
@@ -27179,7 +27191,13 @@ def tenant_control_helper_state(
     Cross-tenant isolation is decided before any filesystem call. The slug comes
     from the command line, so a slug carrying a separator would otherwise aim
     this -- and the repair that follows -- at another tenant's directory.
+
+    `owner_uid` is the identity entitled to have written all of it, and it
+    defaults to root rather than to this process. A sandbox that cannot create
+    root-owned files passes its own uid to stand in for root; production never
+    does, because the caller here is deliberately unprivileged.
     """
+    entitled = TENANT_CONTROL_OWNER_UID if owner_uid is None else owner_uid
     base = Path(root) if root is not None else TENANT_CONTROL_ROOT
     reasons: list[str] = []
     slug = str(project)
@@ -27215,7 +27233,7 @@ def tenant_control_helper_state(
         )
     if present:
         reasons.extend(
-            untrusted_root_executable_reasons(path, boundary=base, owner_uid=owner_uid)
+            untrusted_root_executable_reasons(path, boundary=base, owner_uid=entitled)
         )
         try:
             if not path.lstat().st_mode & 0o111:

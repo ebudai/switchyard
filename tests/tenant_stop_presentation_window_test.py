@@ -183,9 +183,15 @@ def test_the_stop_verb_takes_the_closing_half_not_the_opening_one() -> None:
     helper_root = Path(staged.name)
     helper_dir = helper_root / PROJECT
     helper_dir.mkdir(parents=True)
+    # Both protocol programs. Since SYRD-211's DAT rejection the launch checks
+    # every one of them rather than only the bridge, so a fixture staging just
+    # the bridge is a half-staged tenant -- which is a different subject from
+    # this test's, and would be refused before either desktop half is reached.
+    for name in ("switchyard-tenant-control", "switchyard-display-attach"):
+        staged_program = helper_dir / name
+        staged_program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        staged_program.chmod(0o755)
     helper = helper_dir / "switchyard-tenant-control"
-    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    helper.chmod(0o755)
     verify_in_sandbox = lambda *a, **k: team_launcher.ensure_tenant_control_helper(  # noqa: E731,F405
         *a, **k, root=helper_root, owner_uid=os.getuid()
     )

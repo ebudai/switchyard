@@ -27911,6 +27911,7 @@ def tenant_control_helper_state(
     grant: Mapping[str, str] | None = None,
     root: Path | None = None,
     owner_uid: int | None = None,
+    name: str = "switchyard-tenant-control",
 ) -> TenantControlHelperState:
     """Verify the helper as a pinned exec target, not just as a filename.
 
@@ -27941,7 +27942,7 @@ def tenant_control_helper_state(
             present=False,
             reasons=(f"{slug!r} is not a project slug this may be aimed at",),
         )
-    path = base / slug / "switchyard-tenant-control"
+    path = base / slug / name
     if grant:
         # Only a value that is there and disagrees. `_tenant_control_grant`
         # already refuses a grant whose project is not this one and returns an
@@ -28049,30 +28050,64 @@ PROTOCOL_STAGED_EXECUTABLES: tuple[str, ...] = (
 )
 
 
+def staged_protocol_states(
+    project: str,
+    *,
+    grant: Mapping[str, str] | None = None,
+    root: Path | None = None,
+    owner_uid: int | None = None,
+) -> dict[str, TenantControlHelperState]:
+    """Each protocol program, checked as a pinned exec target in its own right.
+
+    Only the bridge used to be checked, and the other one was then compared with
+    `is_file()` and `read_bytes()` -- which follow symlinks and ask nothing
+    about ownership or mode. So a world-writable display helper read as ordinary
+    version drift and was restaged over, and a symlink whose target happened to
+    carry the current bytes read as current and became the pathname root's
+    display grant executes (SYRD-211 DAT rejection).
+
+    The grant is checked once, against the tenant, rather than once per file.
+    """
+    states: dict[str, TenantControlHelperState] = {}
+    for index, name in enumerate(PROTOCOL_STAGED_EXECUTABLES):
+        states[name] = tenant_control_helper_state(
+            project,
+            grant=grant if index == 0 else None,
+            root=root,
+            owner_uid=owner_uid,
+            name=name,
+        )
+    return states
+
+
 def staged_tooling_out_of_date(
     project: str,
     *,
     release_root: str = "",
     root: Path | None = None,
+    only: Sequence[str] | None = None,
 ) -> list[str]:
-    """Staged programs whose bytes are not the ones this release would install.
+    """Staged protocol programs whose bytes are not this release's.
+
+    Answered only for files that have already passed the shape check: comparing
+    bytes is reading a file, and reading one root is about to overwrite -- or
+    that root's grant is about to execute -- is a question to ask after "is this
+    a root-owned regular file at a root-controlled path", not before.
 
     Present is not current. A tenant repaired or provisioned by an earlier
     release keeps that release's staged copies for ever: nothing restages them
-    merely because the shared release moved on, and the launch verifier is
-    satisfied by an executable of the right shape. The preserved Zorin tenant
-    held a `switchyard-display-attach` that accepts only numeric slots, so a
-    window asking it for `viewer` would have been refused by the tenant's own
-    copy however correct the release was (SYRD-211 DAT rejection).
-
-    Compared by content rather than by a marker file, because that is the
-    question being asked: would this release install different bytes here.
+    merely because the shared release moved on, and a shape check is satisfied
+    by an executable of the right shape. The preserved Zorin tenant held a
+    `switchyard-display-attach` that accepts only numeric slots, so a window
+    asking it for `viewer` would have been refused by the tenant's own copy
+    however correct the release was (SYRD-211 DAT rejection).
     """
     release = Path(release_root) if release_root else switchyard_shared_install_root() / "current"
     staging = Path(root) if root is not None else TENANT_CONTROL_ROOT
     staging = staging / project
+    names = list(only) if only is not None else list(PROTOCOL_STAGED_EXECUTABLES)
     stale: list[str] = []
-    for name in PROTOCOL_STAGED_EXECUTABLES:
+    for name in names:
         source = release / "scripts" / name
         if not source.is_file():
             # Not in this release: the staging step removes it, which is that
@@ -28080,7 +28115,10 @@ def staged_tooling_out_of_date(
             continue
         target = staging / name
         try:
-            if not target.is_file() or target.read_bytes() != source.read_bytes():
+            if target.is_symlink() or not target.is_file():
+                stale.append(name)
+                continue
+            if target.read_bytes() != source.read_bytes():
                 stale.append(name)
         except OSError:
             stale.append(name)
@@ -28097,70 +28135,93 @@ def ensure_tenant_control_helper(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
 ) -> None:
-    """Verify, repair if it is merely absent, verify again, or refuse.
+    """Every protocol program: refuse, repair, or carry on -- decided per file.
 
-    The second verification is the point of the first: a repair that reported
-    success and left something unusable would otherwise be handed to sudo, which
-    is the failure this replaces.
+    Three states, kept apart for each of them, because collapsing any two is
+    what this ticket keeps finding:
+
+    * **hostile** -- wrong owner, writable by others, a symlink anywhere in its
+      path, not a regular executable. Refused, and no privileged step is run.
+      Restaging over it would overwrite evidence and reward whoever put it
+      there; accepting it hands root's grant a pathname somebody else controls.
+    * **absent** -- a valid registration with no file. Re-staged.
+    * **safe but stale** -- this release would install different bytes. Also
+      re-staged, because present is not current.
+
+    The shape of every protocol file is settled before any of them is read, and
+    both shape and content are checked again after a repair (SYRD-211).
     """
-    state = tenant_control_helper_state(
+    states = staged_protocol_states(
         project, grant=grant, root=root, owner_uid=owner_uid
     )
-    if state.usable:
-        stale = staged_tooling_out_of_date(project, release_root=release_root, root=root)
-        if not stale:
-            # Already correct and already current. Nothing is rewritten, so a
-            # second launch costs a few stats and no privileged step.
-            return
+    hostile = {name: state for name, state in states.items() if state.reasons}
+    if hostile:
+        lines: list[str] = []
+        for name, state in hostile.items():
+            lines.append(f"switchyard: refusing to run {state.path} as root:")
+            lines.extend(f"switchyard:   {reason}" for reason in state.reasons)
+        lines.append(
+            "switchyard: this is not repaired automatically, and nothing was run in its "
+            "place. A staged program somebody else can write is not version drift"
+        )
+        raise SystemExit("\n".join(lines))
+
+    absent = [name for name, state in states.items() if not state.present]
+    safe = [name for name, state in states.items() if state.present]
+    stale = staged_tooling_out_of_date(
+        project, release_root=release_root, root=root, only=safe
+    )
+    if not absent and not stale:
+        # Correct, current, and nothing rewritten: a second launch costs a few
+        # stats and no privileged step.
+        return
+    if absent:
+        for name in absent:
+            print_func(
+                f"switchyard: {project}: {name} is not staged; repairing it from the "
+                "current release before continuing"
+            )
+    if stale:
         print_func(
             f"switchyard: {project}'s staged tooling is from an older release "
             f"({', '.join(stale)}); restaging it from the current one before continuing"
-        )
-        problem = repair_tenant_control_helper(
-            project, release_root=release_root, root=root, runner=runner, print_func=print_func
-        )
-        if problem:
-            raise SystemExit(f"switchyard: {problem}")
-        state = tenant_control_helper_state(
-            project, grant=grant, root=root, owner_uid=owner_uid
-        )
-        remaining = staged_tooling_out_of_date(
-            project, release_root=release_root, root=root
-        )
-        if state.usable and not remaining:
-            print_func(f"switchyard: {project}'s staged tooling is now this release's")
-            return
-        detail = "; ".join(state.reasons) or f"still stale: {', '.join(remaining)}"
-        raise SystemExit(
-            f"switchyard: {project}'s staged tooling could not be brought up to this "
-            f"release: {detail}"
-        )
-    if state.reasons:
-        raise SystemExit(
-            "\n".join(
-                [
-                    f"switchyard: refusing to run {state.path} as root:",
-                    *(f"switchyard:   {reason}" for reason in state.reasons),
-                    "switchyard: this is not repaired automatically; nothing else will be run "
-                    "in its place",
-                ]
-            )
         )
     problem = repair_tenant_control_helper(
         project, release_root=release_root, root=root, runner=runner, print_func=print_func
     )
     if problem:
         raise SystemExit(f"switchyard: {problem}")
-    state = tenant_control_helper_state(
+
+    # Shape AND content, for every protocol file, before anything crosses.
+    states = staged_protocol_states(
         project, grant=grant, root=root, owner_uid=owner_uid
     )
-    if state.usable:
-        print_func(f"switchyard: {project}: tenant control helper repaired at {state.path}")
+    unusable = {name: state for name, state in states.items() if not state.usable}
+    remaining = staged_tooling_out_of_date(
+        project,
+        release_root=release_root,
+        root=root,
+        only=[name for name, state in states.items() if state.present],
+    )
+    if not unusable and not remaining:
+        for name in absent:
+            print_func(
+                f"switchyard: {project}: {name} repaired at {states[name].path}"
+            )
+        print_func(f"switchyard: {project}'s staged tooling is this release's")
         return
-    detail = "; ".join(state.reasons) or f"{state.path} is still not staged"
+    detail = "; ".join(
+        [
+            *(
+                f"{name}: {'; '.join(state.reasons) or 'still not staged'}"
+                for name, state in unusable.items()
+            ),
+            *(f"{name}: still not this release's" for name in remaining),
+        ]
+    )
     raise SystemExit(
-        f"switchyard: the tenant control helper for {project} is still unusable after "
-        f"repair: {detail}"
+        f"switchyard: {project}'s staged tooling is still unusable after repair, so it "
+        f"could not be brought up to this release: {detail}"
     )
 
 

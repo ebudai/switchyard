@@ -495,6 +495,250 @@ def test_the_reported_failure_no_longer_reaches_sudo() -> None:
               "and the tenant is left with a usable helper")
 
 
+def _protocol_sandbox(root: Path) -> tuple[Path, Path]:
+    """A tenant with a safe, current tenant-control bridge and nothing else yet."""
+    mine = root / "test"
+    mine.mkdir(parents=True, exist_ok=True)
+    release = root / "release"
+    (release / "scripts").mkdir(parents=True, exist_ok=True)
+    for name in launcher.PROTOCOL_STAGED_EXECUTABLES:
+        source = _RELEASE_SCRIPTS / name
+        if source.is_file():
+            (release / "scripts" / name).write_bytes(source.read_bytes())
+    bridge = mine / "switchyard-tenant-control"
+    bridge.write_bytes((_RELEASE_SCRIPTS / "switchyard-tenant-control").read_bytes())
+    bridge.chmod(0o755)
+    return mine, release
+
+
+def _ensure(root: Path, release: Path, calls: list) -> str:
+    try:
+        launcher.ensure_tenant_control_helper(
+            "test",
+            grant={"project": "test", "authorized_user": launcher.current_user_name()},
+            release_root=str(release), root=root, owner_uid=os.getuid(),
+            runner=lambda args, **_k: calls.append(list(args))
+            or subprocess.CompletedProcess(args, 0),
+            print_func=lambda _l: None,
+        )
+        return ""
+    except SystemExit as exc:
+        return str(exc)
+
+
+def test_a_hostile_display_helper_beside_a_safe_bridge_is_refused() -> None:
+    """The bridge was the only program whose shape was ever checked.
+
+    The other one was compared with `is_file()` and `read_bytes()`, which follow
+    symlinks and ask nothing about ownership or mode -- so a world-writable
+    display helper read as ordinary version drift and the privileged restage ran
+    straight over it (SYRD-211 DAT rejection).
+    """
+    if not (_RELEASE_SCRIPTS / "switchyard-tenant-control").is_file():
+        print("  (skipped: no installed release to stage from)")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-hostile-display.") as tmp:
+        root = Path(tmp)
+        mine, release = _protocol_sandbox(root)
+        hostile = mine / "switchyard-display-attach"
+        hostile.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        hostile.chmod(0o777)
+
+        calls: list = []
+        message = _ensure(root, release, calls)
+        check(message, "the launch is stopped")
+        check(calls == [], f"and NO privileged step ran: {calls}")
+        check("switchyard-display-attach" in message,
+              f"the refusal names the hostile program: {message[:160]}")
+        check("group- or world-writable" in message,
+              f"and what is wrong with it: {message[:200]}")
+        check("not version drift" in message,
+              f"saying explicitly that this is not drift: {message[:260]}")
+        check(hostile.read_text() == "#!/bin/sh\nexit 0\n",
+              "and it was not overwritten")
+
+
+def test_a_display_helper_reached_through_a_symlink_is_refused() -> None:
+    """Even when what it points at carries exactly this release's bytes.
+
+    The pathname is what root's display grant executes, so a link is a program
+    whoever owns the link chooses -- current bytes today say nothing about the
+    bytes at the moment of the exec.
+    """
+    if not (_RELEASE_SCRIPTS / "switchyard-display-attach").is_file():
+        print("  (skipped: no installed release to stage from)")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-symlink-display.") as tmp:
+        root = Path(tmp)
+        mine, release = _protocol_sandbox(root)
+        target = root / "elsewhere-display-attach"
+        target.write_bytes((release / "scripts" / "switchyard-display-attach").read_bytes())
+        target.chmod(0o755)
+        (mine / "switchyard-display-attach").symlink_to(target)
+
+        calls: list = []
+        message = _ensure(root, release, calls)
+        check(message, "a symlink is refused even with the current bytes behind it")
+        check(calls == [], f"and nothing privileged ran: {calls}")
+        check("symlink" in message, f"the reason is the link itself: {message[:200]}")
+        check((mine / "switchyard-display-attach").is_symlink(),
+              "and it was left exactly as found, for somebody to look at")
+
+
+def test_a_safe_but_stale_display_helper_is_restaged() -> None:
+    """The third state, kept apart from the other two: drift IS repairable."""
+    if not (_RELEASE_SCRIPTS / "switchyard-display-attach").is_file():
+        print("  (skipped: no installed release to stage from)")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-stale-display.") as tmp:
+        root = Path(tmp)
+        mine, release = _protocol_sandbox(root)
+        stale = mine / "switchyard-display-attach"
+        stale.write_text("#!/bin/sh\n# an older release\nexit 0\n", encoding="utf-8")
+        stale.chmod(0o755)
+
+        calls: list = []
+
+        def restaging(args, **_kwargs):
+            calls.append(list(args))
+            for name in launcher.PROTOCOL_STAGED_EXECUTABLES:
+                source = release / "scripts" / name
+                if source.is_file():
+                    target = mine / name
+                    target.write_bytes(source.read_bytes())
+                    target.chmod(0o755)
+            return subprocess.CompletedProcess(args, 0)
+
+        launcher.ensure_tenant_control_helper(
+            "test",
+            grant={"project": "test", "authorized_user": launcher.current_user_name()},
+            release_root=str(release), root=root, owner_uid=os.getuid(),
+            runner=restaging, print_func=lambda _l: None,
+        )
+        check(len(calls) == 1, f"safe drift is repaired, once: {calls}")
+        check(stale.read_bytes()
+              == (release / "scripts" / "switchyard-display-attach").read_bytes(),
+              "and the tenant now has this release's helper")
+        check(launcher.staged_tooling_out_of_date(
+            "test", release_root=str(release), root=root) == [],
+            "with nothing left stale")
+
+
+def test_staleness_reports_a_symlink_as_not_current_whatever_it_points_at() -> None:
+    """The content check's own contract, asked of it directly.
+
+    The shape check refuses a symlink before this is ever reached on the launch
+    path, but this function is callable on its own and its answer is "would this
+    release install different bytes here". A link is not a file this release
+    would install, however current the bytes behind it are today.
+    """
+    if not (_RELEASE_SCRIPTS / "switchyard-display-attach").is_file():
+        print("  (skipped: no installed release to stage from)")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-stale-symlink.") as tmp:
+        root = Path(tmp)
+        mine, release = _protocol_sandbox(root)
+        target = root / "elsewhere"
+        target.write_bytes((release / "scripts" / "switchyard-display-attach").read_bytes())
+        target.chmod(0o755)
+        (mine / "switchyard-display-attach").symlink_to(target)
+        stale = launcher.staged_tooling_out_of_date(
+            "test", release_root=str(release), root=root
+        )
+        check(stale == ["switchyard-display-attach"],
+              f"the symlink is not current, whatever it points at: {stale}")
+
+        # And a real copy of the same bytes IS current, so the check is about
+        # the link rather than about the content.
+        (mine / "switchyard-display-attach").unlink()
+        real = mine / "switchyard-display-attach"
+        real.write_bytes(target.read_bytes())
+        real.chmod(0o755)
+        check(launcher.staged_tooling_out_of_date(
+            "test", release_root=str(release), root=root) == [],
+            "the same bytes as a regular file are current")
+
+
+def test_a_repair_that_leaves_a_hostile_display_helper_is_caught() -> None:
+    """After a repair, both files are checked for SHAPE as well as content.
+
+    A restage that put the bridge right and left a world-writable display helper
+    behind would otherwise hand root's grant that pathname.
+    """
+    if not (_RELEASE_SCRIPTS / "switchyard-tenant-control").is_file():
+        print("  (skipped: no installed release to stage from)")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-hostile-after.") as tmp:
+        root = Path(tmp)
+        mine, release = _protocol_sandbox(root)
+        # The bridge is missing, so a repair is due.
+        (mine / "switchyard-tenant-control").unlink()
+
+        def repairs_badly(args, **_kwargs):
+            bridge = mine / "switchyard-tenant-control"
+            bridge.write_bytes((release / "scripts" / "switchyard-tenant-control").read_bytes())
+            bridge.chmod(0o755)
+            display = mine / "switchyard-display-attach"
+            display.write_bytes(
+                (release / "scripts" / "switchyard-display-attach").read_bytes()
+            )
+            # Right bytes, wrong mode.
+            display.chmod(0o777)
+            return subprocess.CompletedProcess(args, 0)
+
+        try:
+            launcher.ensure_tenant_control_helper(
+                "test",
+                grant={"project": "test", "authorized_user": launcher.current_user_name()},
+                release_root=str(release), root=root, owner_uid=os.getuid(),
+                runner=repairs_badly, print_func=lambda _l: None,
+            )
+        except SystemExit as exc:
+            message = str(exc)
+            check("switchyard-display-attach" in message,
+                  f"the file left hostile is named: {message[:200]}")
+            check("group- or world-writable" in message,
+                  f"with its shape, not its version: {message[:220]}")
+        else:
+            raise AssertionError(
+                "a repair leaving a world-writable protocol file must not continue into sudo"
+            )
+
+
+def test_both_protocol_files_are_checked_after_a_repair_not_just_the_bridge() -> None:
+    """A repair that fixes one and leaves the other is not a repair."""
+    if not (_RELEASE_SCRIPTS / "switchyard-display-attach").is_file():
+        print("  (skipped: no installed release to stage from)")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-halfrepair.") as tmp:
+        root = Path(tmp)
+        mine, release = _protocol_sandbox(root)
+        stale = mine / "switchyard-display-attach"
+        stale.write_text("#!/bin/sh\n# an older release\nexit 0\n", encoding="utf-8")
+        stale.chmod(0o755)
+
+        def repairs_only_the_bridge(args, **_kwargs):
+            bridge = mine / "switchyard-tenant-control"
+            bridge.write_bytes((release / "scripts" / "switchyard-tenant-control").read_bytes())
+            bridge.chmod(0o755)
+            return subprocess.CompletedProcess(args, 0)
+
+        try:
+            launcher.ensure_tenant_control_helper(
+                "test",
+                grant={"project": "test", "authorized_user": launcher.current_user_name()},
+                release_root=str(release), root=root, owner_uid=os.getuid(),
+                runner=repairs_only_the_bridge, print_func=lambda _l: None,
+            )
+        except SystemExit as exc:
+            check("switchyard-display-attach" in str(exc),
+                  f"the file still not current is named: {str(exc)[:200]}")
+            check("still not this release's" in str(exc),
+                  f"and what is wrong with it: {str(exc)[:200]}")
+        else:
+            raise AssertionError("a half-finished repair must not continue into sudo")
+
+
 def main() -> int:
     failures = 0
     for name, value in sorted(globals().items()):

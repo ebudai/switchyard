@@ -11655,6 +11655,7 @@ def promote_agent_cli_through_sudo(
     cli: str,
     source: str | Path,
     *,
+    project: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     which: Callable[..., str | None] = shutil.which,
     print_func: Callable[[str], None] = print,
@@ -11713,11 +11714,23 @@ def promote_agent_cli_through_sudo(
         f"switchyard: promoting {cli} needs root, so this asks sudo to run {program}; "
         "only the CLI name and that path cross"
     )
-    result = runner([sudo, str(program), cli, str(resolved)])
+    command = [sudo, str(program), cli, str(resolved)]
+    if project:
+        # Named so the privileged side can take the verification identity from
+        # that tenant's root-owned grant instead of proving only "not root"
+        # against this operator (SYRD-211 DAT rejection 2).
+        command += ["--project", project]
+    result = runner(command)
     code = int(getattr(result, "returncode", 1) or 0)
     if code != 0:
+        # The privileged side leaves any existing host-wide copy in place on
+        # every failure path, so this claim is one the filesystem supports. It
+        # did not before, and the message said otherwise (SYRD-211 DAT
+        # rejection 1).
         raise AgentCliUnavailable(
-            f"switchyard: promoting {cli} failed (exit {code}); nothing has been changed"
+            f"switchyard: promoting {cli} failed (exit {code}); no host-wide copy was "
+            "installed and any existing one is untouched. The attempt is in the rollout "
+            "journal"
         )
     verdict = classify_agent_cli(cli, which=which)
     if not verdict.serves_a_new_owner:
@@ -11835,7 +11848,8 @@ def offer_host_wide_promotion_before_launch(
                 chosen = verdict.caller_path
         try:
             result = promote(
-                verdict.cli, chosen, which=which, print_func=print_func, runner=runner
+                verdict.cli, chosen, which=which, print_func=print_func, runner=runner,
+                project=project,
             )
         except AgentCliUnavailable as exc:
             # Offered, not required: a promotion that could not happen must not

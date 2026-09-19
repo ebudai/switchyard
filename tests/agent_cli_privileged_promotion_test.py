@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import pwd
 import stat
 import subprocess
 import sys
@@ -73,21 +74,79 @@ def _fake_cli(path: Path, banner: str) -> None:
     path.chmod(0o755)
 
 
-def _sudo_shim(tmp: Path, bin_dir: Path, *, operator_uid: int = SANDBOX_OPERATOR_UID) -> Path:
+#: The tenant owner the sandbox verifies as. A real account on this host with a
+#: uid inside the mapped range, distinct from the operator's -- which is the
+#: whole point, since verifying as the operator proves only "not root".
+#: /etc/passwd cannot be written inside the namespace (it belongs to the real
+#: root), so these are looked up rather than invented.
+SANDBOX_TENANT_UID = 1001
+SANDBOX_TENANT_USER = pwd.getpwuid(SANDBOX_TENANT_UID).pw_name
+SANDBOX_OPERATOR_USER = pwd.getpwuid(SANDBOX_OPERATOR_UID).pw_name
+
+
+def _sandbox(tmp: Path) -> dict[str, Path]:
+    """The root-owned locations the privileged half reads, as writable stand-ins."""
+    layout = {
+        "bin": tmp / "hostwide",
+        "grants": tmp / "grants",
+        "opt": tmp / "opt",
+    }
+    for path in layout.values():
+        path.mkdir(parents=True, exist_ok=True)
+    (layout["opt"] / "current" / "scripts").mkdir(parents=True, exist_ok=True)
+    return layout
+
+
+def _grant(layout: dict[str, Path], project: str, *, operator: str, owner: str) -> Path:
+    directory = layout["grants"] / project
+    directory.mkdir(parents=True, exist_ok=True)
+    grant = directory / "control-grant.json"
+    grant.write_text(
+        json.dumps({"project": project, "owner": owner, "authorized_user": operator,
+                    "launcher": "/opt/switchyard/current/switchyard"}),
+        encoding="utf-8",
+    )
+    grant.chmod(0o644)
+    return grant
+
+
+def _recorder(layout: dict[str, Path], journal: Path) -> Path:
+    """A stand-in for the rollout recorder that keeps what it was told."""
+    recorder = layout["opt"] / "current" / "scripts" / "switchyard-record-rollout"
+    recorder.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{journal}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    recorder.chmod(0o755)
+    return recorder
+
+
+def _sudo_shim(
+    tmp: Path,
+    layout: dict[str, Path],
+    *,
+    operator_uid: int = SANDBOX_OPERATOR_UID,
+    prelude: str = "",
+) -> Path:
     """A `sudo` that really becomes root -- by asking the kernel, not by lying.
 
     It enters a user namespace (so the caller is root there, which is the
-    elevation) and a mount namespace, and binds the sandbox directory over the
-    destination the privileged program is going to choose for itself. The
-    program is not told where to write; it still decides, and the kernel decides
-    what that means.
+    elevation) and a mount namespace, then binds writable stand-ins over the
+    root-owned locations the privileged program reads and writes. The program is
+    not told where any of them are; it still decides, and the kernel decides what
+    that means.
     """
-    shim = tmp / "sudo"
+    shim = tmp / f"sudo-{operator_uid}"
     shim.write_text(
         "#!/bin/sh\n"
         "exec unshare --user --map-root-user --map-auto --mount /bin/sh -c '\n"
-        f'  mount --bind "{bin_dir}" /usr/local/bin || exit 97\n'
+        f'  mount --bind "{layout["bin"]}" /usr/local/bin || exit 97\n'
+        f'  mount --bind "{layout["grants"]}" /usr/local/lib/switchyard || exit 96\n'
+        f'  mount --bind "{layout["opt"]}" /opt/switchyard || exit 95\n'
         f"  SUDO_UID={operator_uid} export SUDO_UID\n"
+        f"  {prelude}\n"
         '  exec "$@"\n'
         "' _ \"$@\"\n",
         encoding="utf-8",
@@ -142,6 +201,38 @@ def test_a_helper_that_is_not_root_pinned_is_refused_by_the_production_default()
         raise AssertionError("a checkout-owned helper must not be run as root")
 
 
+def test_the_tenant_is_named_across_the_boundary() -> None:
+    """Without it the privileged side has no grant to take an identity from.
+
+    Dropping `--project` costs nothing visible on this side -- the promotion
+    still succeeds -- and silently downgrades the far side to its no-tenant
+    fallback, which is exactly the weaker check the second DAT rejection was
+    about.
+    """
+    crossed: list[list[str]] = []
+    with tempfile.TemporaryDirectory(prefix="syrd211-project.") as tmp:
+        source = Path(tmp) / "claude"
+        _fake_cli(source, "claude 1.0")
+        try:
+            launcher.promote_agent_cli_through_sudo(
+                "claude", source, project="test", helper=HELPER,
+                helper_owner_uid=os.getuid(), helper_boundary=ROOT,
+                runner=lambda args, **_k: (
+                    crossed.append(list(args)) or subprocess.CompletedProcess(args, 0)
+                ),
+                which=lambda *_a, **_k: "/usr/local/bin/claude",
+                print_func=lambda _l: None,
+            )
+        except launcher.AgentCliUnavailable as exc:  # pragma: no cover - would be a bug
+            raise AssertionError(f"the crossing should have been attempted: {exc}") from exc
+    check(crossed, "the boundary was crossed")
+    argv = crossed[0]
+    check("--project" in argv, f"the tenant is named: {argv}")
+    check(argv[argv.index("--project") + 1] == "test",
+          f"and it is the tenant being resumed: {argv}")
+    check(argv.count("--project") == 1, f"named once: {argv}")
+
+
 def test_a_nonzero_crossing_is_a_failure_not_a_promotion() -> None:
     """The privileged half said no; this side must not claim it said yes."""
     with tempfile.TemporaryDirectory(prefix="syrd211-exit.") as tmp:
@@ -159,19 +250,16 @@ def test_a_nonzero_crossing_is_a_failure_not_a_promotion() -> None:
         except launcher.AgentCliUnavailable as exc:
             message = str(exc)
             check("exit 3" in message, f"the exit status is reported: {message}")
-            check("nothing has been changed" in message,
-                  f"and nothing is claimed to have happened: {message}")
+            check("any existing one is untouched" in message,
+                  f"and the claim it makes is one the far side now keeps: {message}")
+            check("nothing has been changed" not in message,
+                  f"the old unconditional claim is gone: {message}")
         else:
             raise AssertionError("a refused crossing must not be reported as a promotion")
 
 
 def test_an_unprivileged_operator_completes_a_real_promotion() -> None:
-    """The case the DAT rejection asked for. Nothing here is a mock.
-
-    The promoter is the shipped default, this process is unprivileged, the
-    elevation is a real user namespace, and the program that installs the file
-    is the real `switchyard-promote-agent-cli` deciding its own destination.
-    """
+    """The case the first DAT rejection asked for. Nothing here is a mock."""
     unavailable = _namespaces_available()
     if unavailable:
         print(f"  (skipped kernel-enforced promotion: {unavailable})")
@@ -179,60 +267,240 @@ def test_an_unprivileged_operator_completes_a_real_promotion() -> None:
     check(os.geteuid() != 0, "the caller is unprivileged")
     with tempfile.TemporaryDirectory(prefix="syrd211-promote.") as tmp:
         root = Path(tmp)
-        bin_dir = root / "hostwide"
-        bin_dir.mkdir()
-        # setgid, owned by another group: a real shape for a shared
-        # /usr/local/bin, and the reason the install sets ownership explicitly
-        # instead of trusting what the directory hands a new file.
-        os.chmod(bin_dir, 0o2775)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        # setgid, so a file that merely inherited its directory's group would
+        # carry that group instead of root's.
+        os.chmod(layout["bin"], 0o2775)
+        journal = root / "journal.txt"
+        _recorder(layout, journal)
         source = root / "local" / "claude"
         source.parent.mkdir()
         _fake_cli(source, "claude 9.9.9")
-        # Give the bind source a group the promoted file must NOT inherit.
-        subprocess.run([str(_sudo_shim(root, bin_dir)), "/bin/sh", "-c",
-                        f'chgrp 1001 "{bin_dir}" 2>/dev/null; true'],
-                       capture_output=True, text=True)
-        shim = _sudo_shim(root, bin_dir)
+        # setgid AND owned by another group, so a file that merely inherited its
+        # directory would carry that group rather than root's.
+        shim = _sudo_shim(root, layout, prelude="chgrp 1001 /usr/local/bin")
 
         said: list[str] = []
-        # The real default promoter. Only the sudo binary and the pin stand-in
-        # are supplied; the crossing, the privileged program and the install are
-        # the shipped ones.
         verdict = launcher.promote_agent_cli_through_sudo(
             "claude", source,
             sudo_bin=str(shim), helper=HELPER,
-            # A sandbox can neither own a file as root nor put one under a
-            # chain of root-owned directories; the production default for both
-            # is pinned by its own case above.
+            # A sandbox can neither own a file as root nor put one under a chain
+            # of root-owned directories; the production default for both is
+            # pinned by its own case above.
             helper_owner_uid=os.getuid(), helper_boundary=ROOT,
             which=lambda binary, path=None: (
-                str(bin_dir / binary) if (bin_dir / binary).exists() else None
+                str(layout["bin"] / binary) if (layout["bin"] / binary).exists() else None
             ),
             print_func=said.append,
         )
 
-        installed = bin_dir / "claude"
-        check(installed.is_file(), f"the CLI was installed: {sorted(bin_dir.iterdir())}")
+        installed = layout["bin"] / "claude"
+        check(installed.is_file(), f"the CLI was installed: {sorted(layout['bin'].iterdir())}")
         check(not installed.is_symlink(), "as a copy, never a link")
         check(installed.read_text() == source.read_text(), "with the source's bytes")
         info = installed.lstat()
         check(stat.S_IMODE(info.st_mode) == 0o755,
               f"mode 0755: {stat.S_IMODE(info.st_mode):04o}")
-        # Inner uid 0 is this uid outside the namespace, so root-owned in there
-        # is exactly this ownership out here.
         check(info.st_uid == os.getuid(),
               f"owned by the namespace's root: uid {info.st_uid}")
-        # The bind source is setgid to a non-root group, so a file that merely
-        # inherited its directory's group would carry that group instead.
         check(info.st_gid == os.getgid(),
               f"and group root, not inherited from the setgid directory: gid {info.st_gid}")
-        leftovers = [entry.name for entry in bin_dir.iterdir()
-                     if entry.name.startswith(".claude.promote.")]
-        check(leftovers == [], f"and no staging file was left behind: {leftovers}")
+        check(_leftovers(layout["bin"]) == [],
+              f"no staging or backup file was left: {_leftovers(layout['bin'])}")
         check(verdict.serves_a_new_owner, f"the verdict is host-wide: {verdict}")
-        text = "\n".join(said)
-        check("only the CLI name and that path cross" in text,
-              f"the operator is told what crosses: {text}")
+        check(journal.is_file(), "the privileged mutation was journalled")
+        entry = journal.read_text()
+        check("agent-cli-promotion" in entry, f"under its own label: {entry}")
+        check("--operator" in entry and SANDBOX_OPERATOR_USER in entry,
+              f"naming the operator: {entry}")
+        check("claude" in entry, f"and the CLI: {entry}")
+
+
+def _leftovers(bin_dir: Path) -> list[str]:
+    return sorted(
+        entry.name for entry in bin_dir.iterdir()
+        if entry.name.startswith(".") and "promote" in entry.name or ".previous." in entry.name
+    )
+
+
+def test_a_failing_candidate_never_replaces_a_working_one() -> None:
+    """The first DAT rejection: verification used to run AFTER os.replace.
+
+    A candidate whose `--version` fails destroyed the good host-wide copy and
+    left the rejected bytes installed, while the caller reported that nothing
+    had changed. The sentinel here is what makes that a test rather than a claim.
+    """
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped destructive-replace case: {unavailable})")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-sentinel.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        journal = root / "journal.txt"
+        _recorder(layout, journal)
+
+        sentinel = layout["bin"] / "claude"
+        _fake_cli(sentinel, "claude GOOD 1.0")
+        before = sentinel.read_bytes()
+        before_mode = stat.S_IMODE(sentinel.lstat().st_mode)
+
+        broken = root / "broken-claude"
+        broken.write_text('#!/bin/sh\necho broken\nexit 7\n', encoding="utf-8")
+        broken.chmod(0o755)
+
+        result = subprocess.run(
+            [str(_sudo_shim(root, layout)), str(HELPER), "claude", str(broken)],
+            capture_output=True, text=True,
+        )
+        output = result.stdout + result.stderr
+        check(result.returncode != 0, f"the promotion was refused: {output[:160]}")
+        check("Nothing has been replaced" in output,
+              f"and says so truthfully: {output[:200]}")
+        check(sentinel.read_bytes() == before,
+              "the working host-wide copy is byte-for-byte what it was")
+        check(stat.S_IMODE(sentinel.lstat().st_mode) == before_mode,
+              "with its mode intact")
+        check(_leftovers(layout["bin"]) == [],
+              f"and no staging or backup file remains: {_leftovers(layout['bin'])}")
+        check(journal.is_file() and "failed" in journal.read_text(),
+              f"the refusal is journalled: {journal.read_text() if journal.is_file() else '(none)'}")
+
+
+def test_a_binary_that_only_works_for_the_operator_is_refused() -> None:
+    """The second DAT rejection: verifying as the operator proves only 'not root'.
+
+    The candidate here reads a mode-0600 file owned by the operator. Verified as
+    the operator it passes; verified as the account that will actually run it,
+    it cannot, and must be refused before anything is replaced.
+    """
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped operator-only case: {unavailable})")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-operatoronly.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        _recorder(layout, root / "journal.txt")
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+
+        sentinel = layout["bin"] / "claude"
+        _fake_cli(sentinel, "claude GOOD 1.0")
+        before = sentinel.read_bytes()
+
+        secret = root / "operator-only"
+        candidate = root / "needs-secret"
+        candidate.write_text(
+            "#!/bin/sh\n"
+            f'cat "{secret}" >/dev/null 2>&1 || {{ echo cannot-read; exit 9; }}\n'
+            'echo "claude 1.0"\nexit 0\n',
+            encoding="utf-8",
+        )
+        candidate.chmod(0o755)
+
+        prelude = (
+            f'echo secret > "{secret}"; '
+            f'chown {SANDBOX_OPERATOR_UID} "{secret}"; chmod 600 "{secret}"'
+        )
+        result = subprocess.run(
+            [str(_sudo_shim(root, layout, prelude=prelude)),
+             str(HELPER), "claude", str(candidate), "--project", "test"],
+            capture_output=True, text=True,
+        )
+        output = result.stdout + result.stderr
+        check(result.returncode != 0,
+              f"a binary the tenant owner cannot run is refused: {output[:200]}")
+        check("does not work for the tenant owner" in output,
+              f"naming whose authority decided it: {output[:200]}")
+        check(sentinel.read_bytes() == before,
+              "and the working copy is untouched")
+        check(_leftovers(layout["bin"]) == [],
+              f"with nothing left staged: {_leftovers(layout['bin'])}")
+
+
+def test_the_verification_identity_comes_from_the_root_owned_grant() -> None:
+    """Not from the caller: the grant decides, and it must agree about who asks."""
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped grant corroboration: {unavailable})")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-grant.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        _recorder(layout, root / "journal.txt")
+        good = root / "claude"
+        _fake_cli(good, "claude 1.0")
+
+        def promote(project: str, *, operator_uid: int = SANDBOX_OPERATOR_UID, prelude: str = ""):
+            return subprocess.run(
+                [str(_sudo_shim(root, layout, operator_uid=operator_uid, prelude=prelude)),
+                 str(HELPER), "claude", str(good), "--project", project],
+                capture_output=True, text=True,
+            )
+
+        # A grant naming somebody else as the authorised operator.
+        _grant(layout, "other", operator="somebody-else", owner=SANDBOX_TENANT_USER)
+        wrong = promote("other")
+        check(wrong.returncode != 0, "an operator the grant does not name is refused")
+        check("is not the operator registered to control" in wrong.stdout + wrong.stderr,
+              f"saying so: {(wrong.stdout + wrong.stderr)[:160]}")
+
+        # A grant that is not root-owned is not tenant data.
+        _grant(layout, "loose", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+        (layout["grants"] / "loose" / "control-grant.json").chmod(0o666)
+        loose = promote("loose")
+        check(loose.returncode != 0, "a writable grant is refused")
+        check("not root-owned and unwritable" in loose.stdout + loose.stderr,
+              f"saying why: {(loose.stdout + loose.stderr)[:160]}")
+
+        # No grant at all for a named project.
+        missing = promote("absent")
+        check(missing.returncode != 0, "a project with no grant is refused")
+
+        check(not (layout["bin"] / "claude").exists(),
+              "and after every refusal nothing was installed")
+
+
+def test_the_promoted_cli_is_verified_as_the_tenant_and_never_as_root() -> None:
+    """Root installs it; the account that will run it is the one that proves it."""
+    unavailable = _namespaces_available()
+    if unavailable:
+        print(f"  (skipped identity witness: {unavailable})")
+        return
+    with tempfile.TemporaryDirectory(prefix="syrd211-identity.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o777)
+        layout = _sandbox(root)
+        os.chmod(layout["bin"], 0o777)
+        _recorder(layout, root / "journal.txt")
+        _grant(layout, "test", operator=SANDBOX_OPERATOR_USER, owner=SANDBOX_TENANT_USER)
+        witness = root / "ran-as.txt"
+        source = root / "claude"
+        source.write_text(
+            "#!/bin/sh\n"
+            f'id -u > "{witness}"\n'
+            'echo "claude 1.0"\nexit 0\n',
+            encoding="utf-8",
+        )
+        source.chmod(0o755)
+        result = subprocess.run(
+            [str(_sudo_shim(root, layout)),
+             str(HELPER), "claude", str(source), "--project", "test"],
+            capture_output=True, text=True,
+        )
+        output = result.stdout + result.stderr
+        check(result.returncode == 0, f"the promotion succeeded: {output[:250]}")
+        check(witness.is_file(), f"the promoted binary was actually run: {output[:200]}")
+        ran_as = witness.read_text().strip()
+        check(ran_as != "0", f"and NOT as root -- it ran as uid {ran_as}")
+        check(ran_as == str(SANDBOX_TENANT_UID),
+              f"it ran as the tenant owner from the grant, not the operator: uid {ran_as}")
+        check(f"verified as the tenant owner {SANDBOX_TENANT_USER}" in result.stdout,
+              f"and says whose authority proved it: {result.stdout[:200]}")
 
 
 def test_the_privileged_half_refuses_what_it_should() -> None:
@@ -243,32 +511,30 @@ def test_the_privileged_half_refuses_what_it_should() -> None:
         return
     with tempfile.TemporaryDirectory(prefix="syrd211-refuse.") as tmp:
         root = Path(tmp)
-        bin_dir = root / "hostwide"
-        bin_dir.mkdir()
+        root.chmod(0o755)
+        layout = _sandbox(root)
+        _recorder(layout, root / "journal.txt")
         good = root / "claude"
         _fake_cli(good, "claude 1.0")
-        shim = _sudo_shim(root, bin_dir)
 
-        def promote(cli: str, source: str, *, operator_uid: int = SANDBOX_OPERATOR_UID):
+        def promote(cli: str, source: str, *, operator_uid: int = SANDBOX_OPERATOR_UID,
+                    prelude: str = ""):
             return subprocess.run(
-                [str(_sudo_shim(root, bin_dir, operator_uid=operator_uid)),
+                [str(_sudo_shim(root, layout, operator_uid=operator_uid, prelude=prelude)),
                  str(HELPER), cli, source],
                 capture_output=True, text=True,
             )
 
-        # A CLI name that is not on the privileged side's own list.
         refused = promote("definitely-not-a-cli", str(good))
         check(refused.returncode != 0, "an unknown CLI is refused")
         check("is not one of" in refused.stdout + refused.stderr,
               f"naming what is allowed: {(refused.stdout + refused.stderr)[:120]}")
 
-        # A path that tries to name the destination instead of a CLI.
         traversal = promote("../../etc/shadow", str(good))
         check(traversal.returncode != 0, "a path is not a CLI name")
         check("is not a CLI name" in traversal.stdout + traversal.stderr,
               f"refused before anything else: {(traversal.stdout + traversal.stderr)[:120]}")
 
-        # A source anyone could rewrite between the check and the copy.
         writable = root / "writable-claude"
         _fake_cli(writable, "claude 1.0")
         writable.chmod(0o777)
@@ -277,7 +543,6 @@ def test_the_privileged_half_refuses_what_it_should() -> None:
         check("group- or world-writable" in loose.stdout + loose.stderr,
               f"saying why: {(loose.stdout + loose.stderr)[:140]}")
 
-        # A directory, and a non-executable file.
         directory = promote("claude", str(root))
         check(directory.returncode != 0, "a directory is not an executable")
         check("is not a regular file" in directory.stdout + directory.stderr,
@@ -292,72 +557,20 @@ def test_the_privileged_half_refuses_what_it_should() -> None:
         check("is not executable" in not_exec.stdout + not_exec.stderr,
               f"saying why: {(not_exec.stdout + not_exec.stderr)[:120]}")
 
-        # A source belonging to neither root nor the operator. The mount
-        # namespace maps a range, so a second uid really exists to own it.
         other = root / "someone-elses-claude"
         _fake_cli(other, "claude 1.0")
-        foreign = subprocess.run(
-            [str(shim), "/bin/sh", "-c",
-             f'chown 1001 "{other}" && exec "$@"', "_",
-             str(HELPER), "claude", str(other)],
-            capture_output=True, text=True,
-        )
+        foreign = promote("claude", str(other), prelude=f'chown 1002 "{other}"')
         check(foreign.returncode != 0, "a source owned by a third party is refused")
         check("neither root nor" in foreign.stdout + foreign.stderr,
               f"saying whose it is: {(foreign.stdout + foreign.stderr)[:140]}")
 
-        # A system account may not drive this.
         system = promote("claude", str(good), operator_uid=0)
         check(system.returncode != 0, "a system uid may not promote")
         check("system account" in system.stdout + system.stderr,
               f"saying why: {(system.stdout + system.stderr)[:120]}")
 
-        check(not (bin_dir / "claude").exists(),
+        check(not (layout["bin"] / "claude").exists(),
               "and after every refusal nothing was installed")
-
-
-def test_the_promoted_cli_is_never_executed_as_root() -> None:
-    """Root installs it; root must not run it.
-
-    The promoted binary reports the uid that ran it, so this is read from the
-    program's own behaviour rather than from the source of the helper.
-    """
-    unavailable = _namespaces_available()
-    if unavailable:
-        print(f"  (skipped root-execution check: {unavailable})")
-        return
-    with tempfile.TemporaryDirectory(prefix="syrd211-asroot.") as tmp:
-        root = Path(tmp)
-        # The verification deliberately drops to the operator, so the witness
-        # has to be writable by that uid -- otherwise the redirect fails and the
-        # missing file reads like "it was never run".
-        root.chmod(0o777)
-        bin_dir = root / "hostwide"
-        bin_dir.mkdir()
-        witness = root / "ran-as.txt"
-        source = root / "claude"
-        source.write_text(
-            "#!/bin/sh\n"
-            f'id -u > "{witness}"\n'
-            'echo "claude 1.0"\n'
-            "exit 0\n",
-            encoding="utf-8",
-        )
-        source.chmod(0o755)
-        shim = _sudo_shim(root, bin_dir)
-        result = subprocess.run(
-            [str(shim), str(HELPER), "claude", str(source)],
-            capture_output=True, text=True,
-        )
-        check(result.returncode == 0,
-              f"the promotion succeeded: {(result.stdout + result.stderr)[:200]}")
-        check(witness.is_file(), "the promoted binary was actually run to verify it")
-        ran_as = witness.read_text().strip()
-        check(ran_as != "0",
-              f"and NOT as root -- it ran as uid {ran_as}")
-        check(ran_as == str(SANDBOX_OPERATOR_UID),
-              f"it ran as the operator: uid {ran_as}")
-        check("runs as" in result.stdout, f"and says so: {result.stdout[:160]}")
 
 
 def main() -> int:

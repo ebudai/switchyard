@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import json
 import re
 import shutil
 import stat
@@ -47,14 +48,34 @@ PROGRAM = "switchyard-promote-agent-cli"
 #: The CLIs this may install. Its own copy on purpose -- see the module note.
 PROMOTABLE_CLIS = ("agy", "claude", "codex", "hermes")
 
-#: Not chosen by the caller.
+#: Not chosen by the caller, and deliberately one of the entries below: a
+#: promoted copy has to land somewhere every pane already looks. These two move
+#: together or not at all.
 DESTINATION_DIR = Path("/usr/local/bin")
 
-#: The PATH every pane is given; the promoted copy has to resolve on it.
+#: The PATH every pane is given, and the environment the candidate is verified
+#: in. Contains DESTINATION_DIR above.
 PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 #: Below this, an account is a system account rather than a person.
 MINIMUM_OPERATOR_UID = 1000
+
+#: Root-owned tenant data. The verification identity is taken from here, never
+#: from the caller: proving a binary runs for the operator proves only "not
+#: root", and the operator can read their own home and their own groups while
+#: the tenant owner cannot (SYRD-211 DAT rejection 2).
+GRANT_ROOT = Path("/usr/local/lib/switchyard")
+GRANT_NAME = "control-grant.json"
+
+#: When no tenant is named, verification runs as a deliberately isolated
+#: account instead -- one with no home worth reading and no supplementary
+#: groups. Never the operator.
+ISOLATED_VERIFIER = "nobody"
+
+#: Where a privileged host mutation is recorded, when a release is installed.
+ROLLOUT_RECORDER = Path("/opt/switchyard/current/scripts/switchyard-record-rollout")
+
+PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 
 CLI_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 
@@ -81,6 +102,70 @@ def calling_operator() -> pwd.struct_passwd:
         return pwd.getpwuid(uid)
     except KeyError:
         fail(f"uid {uid} has no account; refusing to promote on its behalf")
+
+
+def verification_identity(
+    project: str, operator: pwd.struct_passwd
+) -> tuple[pwd.struct_passwd, str]:
+    """Who the promoted binary is proved to work for, and why that is not you.
+
+    With a tenant named, the answer comes from that tenant's root-owned grant:
+    the same file the lifecycle bridge trusts, read by root, naming the owner
+    account the panes actually run as. The operator does not get to assert it,
+    and the grant must agree that this operator is the one authorised to drive
+    that tenant -- otherwise anyone with a sudo rule could have root verify
+    against somebody else's account.
+
+    With no tenant named, verification falls back to an isolated account rather
+    than to the operator, because the operator is exactly the identity whose
+    private files would make a broken binary look fine.
+    """
+    if not project:
+        try:
+            return pwd.getpwnam(ISOLATED_VERIFIER), f"isolated account {ISOLATED_VERIFIER}"
+        except KeyError:
+            fail(
+                f"no tenant was named and there is no {ISOLATED_VERIFIER} account to verify as; "
+                "nothing has been installed"
+            )
+    if not PROJECT_SLUG.match(project):
+        fail(f"{project!r} is not a project slug")
+    grant_file = GRANT_ROOT / project / GRANT_NAME
+    try:
+        info = grant_file.lstat()
+    except OSError as exc:
+        fail(f"cannot read the tenant grant for {project}: {exc}")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{grant_file} is not a regular file")
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        fail(
+            f"{grant_file} is not root-owned and unwritable by others; refusing to take a "
+            "verification identity from it"
+        )
+    try:
+        payload = json.loads(grant_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"cannot parse the tenant grant for {project}: {exc}")
+    if not isinstance(payload, dict) or str(payload.get("project") or "") != project:
+        fail(f"the grant at {grant_file} does not name {project}")
+    authorized = str(payload.get("authorized_user") or "")
+    if authorized != operator.pw_name:
+        fail(
+            f"{operator.pw_name} is not the operator registered to control {project} "
+            f"({authorized or 'nobody'} is); refusing to verify against its owner"
+        )
+    owner = str(payload.get("owner") or "")
+    if not owner:
+        fail(f"the grant at {grant_file} records no owner account")
+    if owner == operator.pw_name:
+        fail(
+            f"the grant for {project} names {owner} as both operator and owner; a tenant-equivalent "
+            "verification needs an account that is not the operator"
+        )
+    try:
+        return pwd.getpwnam(owner), f"tenant owner {owner} of {project}"
+    except KeyError:
+        fail(f"the owner account {owner} for {project} does not exist")
 
 
 def validated_cli(name: str) -> str:
@@ -133,9 +218,15 @@ def opened_source(cli: str, offered: str, operator: pwd.struct_passwd) -> int:
     return fd
 
 
-def install_from(fd: int, cli: str) -> Path:
-    """Atomic, root-owned, at the fixed destination."""
-    destination = DESTINATION_DIR / cli
+def stage_candidate(fd: int, cli: str) -> Path:
+    """Write the candidate beside its destination, root-owned -- and stop there.
+
+    Nothing is replaced yet. The previous host-wide copy, if there is one, is
+    still the one every tenant runs, and stays that way until this candidate has
+    proved it works. Verifying after `os.replace` destroyed a good binary
+    whenever the new one turned out to be broken, while the caller reported that
+    nothing had changed (SYRD-211 DAT rejection 1).
+    """
     try:
         DESTINATION_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -151,41 +242,70 @@ def install_from(fd: int, cli: str) -> Path:
                 shutil.copyfileobj(source, target)
             target.flush()
             os.fsync(target.fileno())
+            # Explicit, not inherited: a setgid destination directory would
+            # otherwise hand the promoted file somebody else's group.
             os.fchmod(target.fileno(), 0o755)
             os.fchown(target.fileno(), 0, 0)
+    except OSError as exc:
+        discard(staged)
+        fail(f"could not stage {cli} in {DESTINATION_DIR}: {exc}")
+    return staged
+
+
+def discard(path: Path) -> None:
+    """Leave nothing behind. Called on every failure path, including replace."""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def commit_candidate(staged: Path, cli: str) -> Path:
+    """One atomic rename, and it is the last thing that happens.
+
+    Everything that can refuse already has: the source, the staged copy's
+    ownership and mode, the candidate actually running for the tenant, and the
+    destination being somewhere panes look. So a tenant launching during this
+    sees the old whole file or the new whole file, and no later failure has
+    anything to undo.
+    """
+    destination = DESTINATION_DIR / cli
+    try:
         os.replace(staged, destination)
     except OSError as exc:
-        try:
-            staged.unlink()
-        except OSError:
-            pass
+        discard(staged)
         fail(f"could not install {cli} at {destination}: {exc}")
     return destination
 
 
-def verify_unprivileged(destination: Path, operator: pwd.struct_passwd) -> str:
+def verify_unprivileged(destination: Path, identity: pwd.struct_passwd) -> tuple[str, str]:
     """Run it as the operator, never as root, in a tenant-equivalent context.
 
     Root must not execute a vendor binary it has just installed: the whole point
-    of the promotion is that tenants run it, and tenants are not root. So
-    privileges are dropped for this, the environment is emptied down to the PATH
-    every pane gets, and HOME is a throwaway the operator can write -- a binary
-    that only works because of something in somebody's real home fails here
-    instead of at a first pane launch.
+    of the promotion is that tenants run it, and tenants are not root.
+
+    The identity is the TENANT's, not the operator's. Dropping to the operator
+    proved only "not root": the operator can still read their own home and their
+    own supplementary groups, so a binary that depends on an operator-only file
+    verified cleanly and then failed for the account that actually runs it
+    (SYRD-211 DAT rejection 2).
+
+    Returns the reported version and the output, so a failure can be journalled
+    with the reason rather than just a status.
     """
     home = Path(tempfile.mkdtemp(prefix="switchyard-cli-verify."))
     try:
-        os.chown(home, operator.pw_uid, operator.pw_gid)
+        os.chown(home, identity.pw_uid, identity.pw_gid)
         try:
-            groups = [operator.pw_gid]
+            groups = [identity.pw_gid]
             proc = subprocess.run(
                 [str(destination), "--version"],
                 cwd=str(home),
                 env={
                     "PATH": PANE_BASE_PATH,
                     "HOME": str(home),
-                    "USER": operator.pw_name,
-                    "LOGNAME": operator.pw_name,
+                    "USER": identity.pw_name,
+                    "LOGNAME": identity.pw_name,
                     "LANG": "C.UTF-8",
                 },
                 stdin=subprocess.DEVNULL,
@@ -193,53 +313,115 @@ def verify_unprivileged(destination: Path, operator: pwd.struct_passwd) -> str:
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=60,
-                user=operator.pw_uid,
-                group=operator.pw_gid,
+                user=identity.pw_uid,
+                group=identity.pw_gid,
                 extra_groups=groups,
             )
         except subprocess.TimeoutExpired:
-            fail(f"{destination} did not answer --version within 60s")
+            return "", "timeout: it did not answer --version within 60s"
         except OSError as exc:
-            fail(f"{destination} could not be executed as {operator.pw_name}: {exc}")
+            return "", f"could not be executed as {identity.pw_name}: {exc}"
     finally:
         shutil.rmtree(home, ignore_errors=True)
+    output = (proc.stdout or "").strip()
     if proc.returncode != 0:
-        fail(
-            f"{destination} is installed but did not run as {operator.pw_name}: "
-            + (proc.stdout or "").strip()[:200]
-        )
-    return (proc.stdout or "").strip().splitlines()[0] if proc.stdout.strip() else ""
+        return "", f"exited {proc.returncode} as {identity.pw_name}: {output[:200]}"
+    return (output.splitlines()[0] if output else ""), ""
 
 
-def resolves_on_pane_path(cli: str) -> str:
-    found = shutil.which(cli, path=PANE_BASE_PATH)
-    if not found:
-        fail(
-            f"{cli} was installed but does not resolve on the PATH every pane is given"
+def record(
+    *, project: str, operator: str, cli: str, outcome: str, code: int, detail: str
+) -> None:
+    """One journal entry for a privileged host mutation, by the usual recorder.
+
+    Promoting a CLI installs a root-owned executable every tenant on this host
+    will run. That is a privileged mutation, and it leaves the same kind of
+    evidence every other one does rather than relying on somebody copying a
+    terminal (SYRD-211 DAT rejection).
+
+    Only what the boundary decided is recorded: who, which CLI, where it came
+    from, and why it was refused. No file contents and no credentials.
+    """
+    if not ROLLOUT_RECORDER.is_file():
+        return
+    try:
+        completed = subprocess.run(
+            [
+                str(ROLLOUT_RECORDER), project or "host",
+                "--record-only", outcome,
+                "--exit-status", str(code),
+                "--action", f"switchyard promote {cli} host-wide",
+                "--operator", operator,
+                "--label", "agent-cli-promotion",
+                "--detail", detail[:400],
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False, text=True,
         )
-    return found
+    except OSError as exc:
+        print(f"{PROGRAM}: could not record this promotion: {exc}", file=sys.stderr)
+        return
+    if completed.returncode != 0:
+        print(
+            f"{PROGRAM}: this promotion was not recorded: "
+            f"{(completed.stderr or '').strip()[:200]}",
+            file=sys.stderr,
+        )
 
 
 def main(argv: list[str]) -> int:
     if os.geteuid() != 0:
         fail("must run as root, through sudo")
-    if len(argv) != 2:
-        fail("usage: switchyard-promote-agent-cli <cli> <source-executable>")
+    project = ""
+    args = list(argv)
+    if len(args) >= 2 and args[-2] == "--project":
+        project = args[-1]
+        args = args[:-2]
+    if len(args) != 2:
+        fail("usage: switchyard-promote-agent-cli <cli> <source-executable> [--project <slug>]")
     operator = calling_operator()
-    cli = validated_cli(argv[0])
-    fd = opened_source(cli, argv[1], operator)
+    cli = validated_cli(args[0])
+    identity, whose = verification_identity(project, operator)
+
+    def refuse(reason: str) -> NoReturn:
+        record(
+            project=project, operator=operator.pw_name, cli=cli,
+            outcome="failed", code=1,
+            detail=f"refused promoting {cli} from {args[1]}: {reason}",
+        )
+        fail(reason)
+
+    fd = opened_source(cli, args[1], operator)
     try:
-        destination = install_from(fd, cli)
+        staged = stage_candidate(fd, cli)
     finally:
         os.close(fd)
-    resolved = resolves_on_pane_path(cli)
-    version = verify_unprivileged(destination, operator)
+
+    # Proved BEFORE anything is replaced, and proved for the account that will
+    # actually run it.
+    version, problem = verify_unprivileged(staged, identity)
+    if problem:
+        discard(staged)
+        refuse(
+            f"{cli} from {args[1]} does not work for the {whose}: {problem}. "
+            "Nothing has been replaced"
+        )
+
+    destination = commit_candidate(staged, cli)
+    record(
+        project=project, operator=operator.pw_name, cli=cli,
+        outcome="ok", code=0,
+        detail=(
+            f"{operator.pw_name} promoted {cli} from {args[1]} to {destination}, "
+            f"root-owned 0755, verified as the {whose}"
+            + (f" ({version})" if version else "")
+        ),
+    )
     print(
-        f"{PROGRAM}: promoted {argv[1]} to {destination} for {operator.pw_name}, "
+        f"{PROGRAM}: promoted {args[1]} to {destination} for {operator.pw_name}, "
         f"owned by root, mode 0755"
     )
     print(
-        f"{PROGRAM}: {cli} resolves at {resolved} and runs as {operator.pw_name}"
+        f"{PROGRAM}: {cli} verified as the {whose}"
         + (f" ({version})" if version else " (version not reported)")
     )
     return 0

@@ -53,11 +53,45 @@ from pathlib import Path
 from typing import NoReturn
 
 PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
-#: A key table that is never given any bindings, so every lookup in it misses
-#: and the key is passed to the pane instead of being acted on by tmux.
+#: The key table this client's keys are looked up in. It holds exactly the
+#: bindings below and nothing else, so every other key -- including every key
+#: the owner's own tmux.conf binds -- misses and is passed to the pane.
 DISPLAY_KEY_TABLE = "switchyard-display"
+
 #: What makes an attached client input-only. Kept beside the attach it guards.
-LOCK_OPTIONS = (("prefix", "None"), ("prefix2", "None"), ("key-table", DISPLAY_KEY_TABLE))
+#:
+#: `mouse on` is here so the bindings below can see a click. It does not open
+#: anything up: mouse events are looked up in the key table like any other key,
+#: and this table has one mouse binding, which selects a pane.
+LOCK_OPTIONS = (
+    ("prefix", "None"),
+    ("prefix2", "None"),
+    ("key-table", DISPLAY_KEY_TABLE),
+    ("mouse", "on"),
+)
+
+#: The only things this client may do, and all of them move focus.
+#:
+#: An empty table left every key falling through to the pane, which is what
+#: makes the client input-only -- and also meant the desktop user could not
+#: leave whichever pane happened to be active. Live Zorin opened the viewer and
+#: could reach nothing but slot 4, so the first-run prompts in the other four
+#: roles could not be answered (SYRD-211 live UAT).
+#:
+#: Focus is not a capability. None of these creates a shell, opens a command
+#: prompt, reaches another session, or changes what any pane is running -- and
+#: nothing else is bound, so `:` `c` `%` `"` `s` `w` `x` and every prefix still
+#: go to the pane as ordinary characters.
+#:
+#: The keys are modified deliberately: a bare arrow or digit belongs to the CLI
+#: running in the pane, and taking one from it would be a different bug.
+FOCUS_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("MouseDown1Pane", ("select-pane", "-t", "=")),
+    ("M-Up", ("select-pane", "-U")),
+    ("M-Down", ("select-pane", "-D")),
+    ("M-Left", ("select-pane", "-L")),
+    ("M-Right", ("select-pane", "-R")),
+)
 GRANT_ROOT = Path("/usr/local/lib/switchyard")
 GRANT_NAME = "control-grant.json"
 PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -124,19 +158,36 @@ def session_name(project: str, slot: int | str) -> str:
 
 
 def lock_argv(session: str) -> list[str]:
-    """One tmux invocation that removes every way this client could act.
+    """One tmux invocation that leaves this client able to focus and nothing else.
 
     Also proves the session is already there: set-option refuses a session that
     does not exist, and attaching to a slot that was never bootstrapped should
     say so rather than sit on a blank terminal.
+
+    The table is emptied before it is filled, so a session made by an older
+    release cannot keep bindings this one does not grant -- this program is the
+    boundary, and it applies the whole of it every time.
     """
-    argv = ["tmux"]
-    for index, (option, value) in enumerate(LOCK_OPTIONS):
-        if index:
+    argv: list[str] = ["tmux"]
+
+    def part(words: list[str]) -> None:
+        if argv != ["tmux"]:
             argv.append(";")
+        argv.extend(words)
+
+    for option, value in LOCK_OPTIONS:
         # The trailing colon makes this a session target, which is what
         # exact-name selection needs in order to apply at all.
-        argv.extend(["set-option", "-t", f"={session}:", option, value])
+        part(["set-option", "-t", f"={session}:", option, value])
+    # Bind one first, because `unbind-key -a -T` refuses a table that does not
+    # exist yet and the whole invocation would stop there. Then clear it, so a
+    # session made by an older release cannot keep bindings this one does not
+    # grant, and then bind the set this release allows.
+    first_key, first_command = FOCUS_BINDINGS[0]
+    part(["bind-key", "-T", DISPLAY_KEY_TABLE, first_key, *first_command])
+    part(["unbind-key", "-a", "-T", DISPLAY_KEY_TABLE])
+    for key, command in FOCUS_BINDINGS:
+        part(["bind-key", "-T", DISPLAY_KEY_TABLE, key, *command])
     return argv
 
 

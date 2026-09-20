@@ -508,3 +508,219 @@ first run.
 One mutant survived a first pass: the blind-session adapter inventing output.
 It could not be killed because that adapter was reachable only from tests, and
 the answer was to delete it rather than to assert around it.
+
+## Reopened a fourth time: none of the above ever ran
+
+`test5`, a brand-new tenant on the previous candidate, failed identically to
+`test4`: the Claude process reached its ordinary Auto-mode prompt and stayed
+there, and — the detail that gives it away — "the title remained `✳ Claude
+Code` with no republished Switchyard setup countdown."
+
+No countdown means no narrator. No narrator means the watched session was never
+constructed. Everything the three previous sections describe was live-path code
+that the live path never reached.
+
+### The mechanism
+
+`run_first_run_auth_phase` reads its `runner` argument as *"the caller is
+driving these steps itself"*:
+
+```python
+injected_runner = runner
+runner = runner or subprocess.run
+...
+if runner is not None:          # in the foreground step runners
+    runner(args, **kwargs)      # fired and forgotten
+    return is_complete()
+```
+
+Its own docstring said so: *"None means the live path: probes run through
+`subprocess.run`, and the foreground steps are bounded rather than fired and
+forgotten."*
+
+But both live entry points passed a runner, because their own parameter
+**defaulted to `subprocess.run`**:
+
+- `switchyard_new_command(..., runner = subprocess.run)` → `run_first_run_auth_phase(..., runner=runner)`
+- `run_switchyard_launch_first_run_auth(..., runner = subprocess.run)` → the same
+
+So on a real launch every foreground provider step was a plain blocking
+`subprocess.run` with inherited stdio. No pty. No watcher. No title. No
+countdown. No quiet-screen classification. No deadline. It returned when the
+CLI exited — and an interactive Claude at its ordinary prompt does not exit
+until somebody types `/exit`, which is the one thing this ticket forbids asking
+for.
+
+Demonstrated by driving the real phase over a stub CLI that prints a prompt,
+claims the title `✳ Claude Code`, and sits there:
+
+```
+--- runner=subprocess.run   (what `switchyard new` passed) ---
+  Switchyard titles    : 0
+--- runner=None            (the documented live path) ---
+  Switchyard titles    : 1
+      | Switchyard setup (temporary): claude first run
+```
+
+### Why three rounds of testing missed it
+
+Every phase test injects a runner, because that is how a suite avoids launching
+a real CLI. So the injected branch was covered twice over and the branch that
+ships had no coverage at the phase boundary at all.
+
+My own measurements had the same shape: I drove `_run_owner_cli_until` and the
+session directly with `runner=None`, so I was exercising the live path's code
+while production took the other branch. Every result was real and none of it
+was reachable.
+
+### The change
+
+`runner` conflated two questions — which runner probes use, and who drives the
+interactive steps. A live command needs the first and not the second, and had
+no way to say so. They are now separate: `run_first_run_auth_phase` takes
+`foreground_runner`, defaulting to a sentinel meaning "same as `runner`" so
+every existing caller and suite is unaffected.
+
+Both live commands go through one helper, `run_first_run_auth_for_launch`,
+because the decision is invisible at a call site and getting it wrong is
+silent. Spelling it out at each command is how both of them came to pass
+`subprocess.run`.
+
+The entry points default `runner` to a sentinel rather than `subprocess.run`,
+so "nobody injected anything" stays distinguishable from "somebody injected the
+default". And in `switchyard_new_command` the capture and the resolution are a
+single statement, because a capture-then-resolve pair is one editing accident
+away from capturing the resolved value and unwatching everything again.
+
+A first version of this also refused the ambiguity outright: passing
+`subprocess.run` to the shared helper raised. That was wrong, and Director
+review caught it before release — see "The refusal that broke two callers"
+below.
+
+### Verification
+
+157 checks. The ones that matter are at the boundary that had none:
+
+- the phase does not hand the foreground to the probe runner — driven with a
+  real (stubbed) provider on the owner's PATH so the watched branch genuinely
+  runs, asserting that the bare CLI and the vendors' login commands never reach
+  the injected runner;
+- the shipped launch watches its setup windows, and an injected runner still
+  drives every step, so no suite starts launching real CLIs;
+- one place decides, tested both ways;
+- neither entry point can confuse "no runner" with "the default one";
+- the ambiguous runner is refused.
+
+Mutation: 13 mutants, 12 killed. The survivor is recorded honestly below.
+
+A first pass had three survivors, all in this area, and they were the point: my
+first attempt tested only what the wrapper *passed*, not what the phase *did*
+with it, and not the `switchyard new` path at all — the same blind spot one
+layer up. The phase-level case also silently tested nothing at first, because
+its stub runner reported the CLI as not installed and the phase skipped every
+interactive step; and once it did run them it launched a real `codex login`
+OAuth server, because only `claude` had been stubbed. Both are fixed: the
+runner reports installed-but-unauthenticated, and every provider is stubbed.
+
+### The one mutant still standing
+
+Reordering the capture and resolution inside `switchyard_new_command` — so it
+keeps the resolved runner and unwatches every window — is **not** killed by any
+test. That function creates Unix accounts and repositories, so driving it far
+enough to reach the phase call is not possible in a unit test here.
+
+What bounds it: the decision itself now lives in one covered helper, the
+reorder-prone pair is a single statement, and the wrong value is refused at the
+boundary with an error rather than silently accepted. If that line is ever got
+wrong again the launch fails loudly instead of stranding somebody in an
+unwatched window.
+
+## The refusal that broke two callers
+
+The first version of the fix above made the ambiguity loud: passing
+`subprocess.run` to `run_first_run_auth_for_launch` raised a `ValueError`,
+because that value is indistinguishable from "nobody injected anything" and
+resolving it the wrong way unwatches every window.
+
+Director review found it release-blocking, and rightly. Two live callers pass
+exactly that value, legitimately, for their **probes**:
+
+- `switchyard_validate_models_command` defaults `runner=subprocess.run` and
+  passes it through `run_switchyard_launch_first_run_auth`;
+- `scripts/workflow_launcher.py::prepare_role` resolves its own default to
+  `subprocess.run` and passes it through the same function.
+
+Both would have raised before authentication or trust ran. I had audited the
+`switchyard new` path that failed UAT and not the others — the same mistake in
+a different place: fixing what was reported instead of what was affected.
+
+### Said outright instead of inferred
+
+The refusal is withdrawn. Ownership of the windows is now a parameter of its
+own wherever a caller can express it:
+
+```python
+def run_switchyard_launch_first_run_auth(
+    config, *, validate_models=False,
+    runner=subprocess.run,          # probes: ordinary, and correct
+    foreground_runner=None,         # the watched path, by default
+    print_func=print,
+)
+```
+
+A caller passing `subprocess.run` for its probes now keeps its watched windows,
+which is what both of those callers wanted all along and could not ask for.
+
+`switchyard_new_command` is the one place that still has to infer, because its
+`runner` does a dozen other jobs and the two questions cannot be asked
+separately at its boundary. That inference is now a named, tested function,
+`foreground_runner_for`, rather than an expression buried in a call.
+
+### Why `switchyard new` cannot simply watch always
+
+Tried, and measured rather than assumed. Making it watch unconditionally breaks
+four suites immediately — `team_launcher_new_project_test`,
+`team_launcher_project_artifacts_test`,
+`team_launcher_switchyard_new_prompts_test` and
+`team_launcher_agy_credential_seeding_test` — each failing inside
+`subprocess._execute_child`, because they inject a runner, reach real foreground
+steps, and would launch actual providers. The sentinel is what keeps a suite
+driving its own steps while production gets a pty.
+
+That is also a useful fact about the coverage: those four suites *do* drive
+`switchyard new` through the first-run phase, which is why a mutant that makes
+the decision return `subprocess.run` now dies there.
+
+### Verification
+
+160 checks. The new ones cover each live caller rather than reasoning about it:
+
+- `switchyard validate-models` keeps the probe runner it was given **and**
+  still watches its windows;
+- the workflow launcher's `prepare_role` does the same, driven all the way to
+  the first-run hop and asserted to have reached it — the first draft of that
+  case stopped short at a `KeyError` on the workflow projection and proved
+  nothing, so it now stubs only the projection and the worktree/hook steps that
+  belong to other tickets;
+- the injected-runner decision is tested for all three inputs, including a
+  caller that deliberately injects `subprocess.run` and must not be overruled;
+- the launch wrapper's `foreground_runner` default is pinned to the watched
+  path.
+
+The real, pre-existing `test_switchyard_validate_models_command_runs_model_validation_on_demand`
+passes unchanged, which is the direct check that probes still reach the runner
+exactly as before.
+
+Mutation: 14 mutants, 13 killed, with `team_launcher_new_project_test` added to
+the harness so the `switchyard new` decision is under mutation at all.
+
+### The one mutant still standing
+
+Handing `foreground_runner_for` the resolved runner instead of the caller's
+original, at the one call site inside `switchyard_new_command`, is killed by
+nothing. Under any injected runner the two are the same value, so only the live
+path differs — and that path creates Unix accounts and repositories, so it
+cannot be driven from a unit test here.
+
+It is smaller than it was: the decision itself is a named function tested for
+every input, and the only uncovered step is which variable is handed to it.

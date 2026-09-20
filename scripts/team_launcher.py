@@ -15117,6 +15117,40 @@ def _prepare_first_run_auth_worktrees(
     ensure_project_worktrees(config, refresh=True, runner=worktree_runner)
 
 
+class _NoRunnerInjected:
+    """The difference between "nobody injected a runner" and "somebody injected
+    `subprocess.run`".
+
+    It is a real difference and it decides whether a person gets a watched
+    setup window or an unwatched one, but `subprocess.run` is also the obvious
+    default for a command that shells out for a dozen other things. Both live
+    entry points therefore declared `runner = subprocess.run`, passed it on,
+    and the phase -- correctly, by its own contract -- read that as "the caller
+    is driving the interactive steps itself" and fired every one of them
+    unwatched. Three candidates' worth of watching, narrating and bounding were
+    live-path code that the live path never reached (SYRD-221).
+
+    A sentinel keeps the two apart where the two matter.
+    """
+
+
+NO_RUNNER_INJECTED = _NoRunnerInjected()
+
+
+def foreground_runner_for(
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | _NoRunnerInjected,
+) -> Callable[..., subprocess.CompletedProcess[Any]] | None:
+    """Who drives the windows a person sits in front of, given what was injected.
+
+    Only for a command whose `runner` does a dozen other jobs as well, so the
+    two questions cannot be asked separately at its boundary. A caller that CAN
+    ask them separately says so outright instead -- see
+    `run_switchyard_launch_first_run_auth`, where `subprocess.run` for probes
+    is ordinary and correct and must not cost anybody a watched window.
+    """
+    return None if isinstance(runner, _NoRunnerInjected) else runner
+
+
 def run_first_run_auth_phase(
     config: ProjectConfig,
     *,
@@ -15130,9 +15164,18 @@ def run_first_run_auth_phase(
     #: because the desktop branch below rebinds this name and comparing against
     #: it afterwards said "injected" on every tenant with a pane (SYRD-191).
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    #: Who drives the interactive steps. This used to be `runner` itself, which
+    #: meant a caller could not ask for "probe with this, but WATCH the windows
+    #: a person sits in front of" -- and every live caller wanted exactly that
+    #: and got the opposite (SYRD-221). `None` is the watched path; a runner
+    #: here is a suite driving the steps; the sentinel means "same as `runner`",
+    #: which is what every existing caller expects.
+    foreground_runner: Callable[..., subprocess.CompletedProcess[Any]] | None | _NoRunnerInjected = (
+        NO_RUNNER_INJECTED
+    ),
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
-    injected_runner = runner
+    injected_runner = runner if isinstance(foreground_runner, _NoRunnerInjected) else foreground_runner
     runner = runner or subprocess.run
     foreground_transform: Callable[..., Any] | None = None
     if config.desktop_access is not None:
@@ -15424,7 +15467,19 @@ def run_switchyard_launch_first_run_auth(
     config: ProjectConfig,
     *,
     validate_models: bool = False,
+    #: How this process runs its PROBES -- auth status, "is it installed",
+    #: model validation. Ordinary callers pass `subprocess.run` and are right
+    #: to; `switchyard validate-models` and the workflow launcher's
+    #: `prepare_role` both do.
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    #: Who drives the windows a person sits in front of, which is a separate
+    #: question and used to be answered by `runner` alone. Any runner at all
+    #: meant "fired and forgotten", so every live caller -- each passing
+    #: `subprocess.run` for its probes -- silently gave up the pty, the title,
+    #: the countdown and the deadline. `None` is the watched path and the right
+    #: default for a person at a terminal; a suite driving the steps itself
+    #: passes its own runner here (SYRD-221).
+    foreground_runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
     owner_user = (config.run_as_user or current_user_name()).strip()
@@ -15436,6 +15491,7 @@ def run_switchyard_launch_first_run_auth(
         owner_home=_owner_home_for_auth(owner_user),
         validate_models=validate_models,
         runner=runner,
+        foreground_runner=foreground_runner,
         print_func=print_func,
     )
 
@@ -20299,7 +20355,10 @@ def switchyard_new_command(
     agy_credential_settings_path: Path | None = None,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    #: The sentinel, not `subprocess.run`: injecting nothing has to stay
+    #: distinguishable from injecting the default, because that is what
+    #: decides whether the person gets a watched setup window (SYRD-221).
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | _NoRunnerInjected = NO_RUNNER_INJECTED,
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
     session_dir_exists: Callable[[Path], bool] | None = None,
@@ -20317,6 +20376,16 @@ def switchyard_new_command(
     agent_cli_policy: str = "",
     agent_cli_sources: Sequence[str] | None = None,
 ) -> int:
+    # One statement, deliberately. Whether anything was injected is what
+    # decides if the setup windows are watched, and a capture-then-resolve
+    # pair is one editing accident away from capturing the RESOLVED value and
+    # silently unwatching every window again -- which is the defect this
+    # ticket spent three candidates not fixing (SYRD-221). Everything below
+    # wants the plain runner it always had; only the first-run phase wants to
+    # know what the caller actually passed.
+    first_run_runner, runner = runner, (
+        subprocess.run if isinstance(runner, _NoRunnerInjected) else runner
+    )
     if from_artifact is not None:
         artifact = load_project_design_artifact(from_artifact)
         resolved_slug = artifact.project
@@ -20676,6 +20745,7 @@ def switchyard_new_command(
         owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
         validate_models=True,
         runner=runner,
+        foreground_runner=foreground_runner_for(first_run_runner),
         print_func=print_func,
     )
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report, print_func=print_func):

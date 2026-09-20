@@ -24,10 +24,12 @@ test built on another guess would prove nothing.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import subprocess
 import sys
+import types
 import tempfile
 from pathlib import Path
 
@@ -1012,6 +1014,304 @@ def test_a_step_that_cannot_be_watched_is_still_bounded() -> None:
           f"an unwatchable step neither completed nor timed out: {printed}")
     check(not any("ordinary prompt" in m for m in printed),
           f"a step with no screen claimed to have read one: {printed}")
+
+
+# --- the branch that ships ---------------------------------------------------
+#
+# Three candidates of watching, narrating and bounding were live-path code that
+# the live path never reached. `run_first_run_auth_phase` reads any `runner` as
+# "the caller is driving these steps itself" and fires them unwatched -- and
+# both live entry points declared `runner = subprocess.run` and passed it on.
+# So on a real `switchyard new` every setup window was a plain blocking
+# `subprocess.run` with inherited stdio: no pty, no title, no countdown, no
+# quiet-screen classification, no deadline. It returned when the CLI exited,
+# and an interactive Claude at its ordinary prompt does not exit until somebody
+# types `/exit` -- the one thing this ticket forbids asking for.
+#
+# Every phase test injects a runner, because that is how a suite avoids
+# launching a real CLI. So the injected branch was covered twice over and the
+# shipped branch not at all. These are that coverage.
+
+
+def phase_kwargs_for(call):
+    """What the wrapper actually asks the phase for."""
+    seen: dict = {}
+    real = team_launcher.run_first_run_auth_phase
+
+    def recording(_config, **kwargs):
+        seen.update(kwargs)
+        return team_launcher.FirstRunAuthReport({}, [])
+
+    team_launcher.run_first_run_auth_phase = recording
+    try:
+        call()
+    finally:
+        team_launcher.run_first_run_auth_phase = real
+    return seen
+
+
+def test_the_phase_does_not_hand_the_foreground_to_the_probe_runner() -> None:
+    """What the phase DOES with the answer, not just what it is told.
+
+    A live command needs both halves at once: probes through its own runner,
+    and the interactive windows watched. If the phase collapses those back
+    together, every entry point can pass the right thing and the windows are
+    still fired and forgotten -- which is the defect, one layer down.
+
+    Driven on the shipped default with a real (stub) provider on the owner's
+    PATH, so the watched branch genuinely runs.
+    """
+    calls: list[list[str]] = []
+
+    def probe_runner(args, **kwargs):
+        # Installed but not signed in, so the phase actually schedules the
+        # interactive steps. A runner that reports "not installed" skips them
+        # all, and the case would pass while testing nothing.
+        calls.append([str(a) for a in args])
+        if "command -v" in " ".join(str(a) for a in args):
+            return subprocess.CompletedProcess(list(args), 0, "/usr/bin/claude\n", "")
+        return subprocess.CompletedProcess(list(args), 1, "", "")
+
+    with tempfile.TemporaryDirectory(prefix="syrd221-foreground.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        (owner_home / "bin").mkdir(parents=True)
+        # Every provider is stubbed, not just the one under test. The watched
+        # path EXECS what it is given, so a provider left unstubbed is a real
+        # vendor login running out of a test -- which is what happened the
+        # first time this case was written.
+        for name in ("claude", "codex"):
+            stub = owner_home / "bin" / name
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        config = _mixed_tenant(tmp_path)
+        team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user=team_launcher.current_user_name(),
+            owner_home=owner_home,
+            runner=probe_runner,
+            foreground_runner=None,
+            print_func=lambda _message: None,
+        )
+
+    check(calls, "the phase ran no probes at all; this case is testing nothing")
+    # The probes are what the injected runner is for.
+    check(any("status" in " ".join(call) for call in calls),
+          f"the probe runner was not used for probing: {calls[:3]}")
+
+    # The windows a person sits in front of are what it is NOT for: the bare
+    # CLI of a first run or a folder trust, and the vendors' own login
+    # commands. Any of those reaching the runner means it was fired and
+    # forgotten -- no pty, no title, no deadline.
+    def is_a_window(call: list[str]) -> bool:
+        return bool(call) and (call[-1] in {"claude", "codex"} or call[-1] == "login")
+
+    fired = [call[-3:] for call in calls if is_a_window(call)]
+    check(not fired,
+          f"interactive setup windows were fired through the probe runner: {fired}")
+
+
+def test_the_shipped_launch_watches_its_setup_windows() -> None:
+    """Injecting nothing must mean the watched path, not `subprocess.run`."""
+    with tempfile.TemporaryDirectory(prefix="syrd221-shipped.") as tmp:
+        config = _mixed_tenant(Path(tmp))
+        seen = phase_kwargs_for(
+            lambda: team_launcher.run_switchyard_launch_first_run_auth(config)
+        )
+    check("foreground_runner" in seen,
+          f"the launch does not say who drives its interactive steps: {sorted(seen)}")
+    check(seen["foreground_runner"] is None,
+          "the shipped launch fires its setup windows unwatched -- no pty, no title, "
+          f"no deadline: foreground_runner={seen['foreground_runner']!r}")
+    check(seen.get("runner") is not None,
+          "the probes lost their runner while the foreground gained one")
+
+
+def test_an_injected_runner_still_drives_every_step() -> None:
+    """A suite must not suddenly start launching real CLIs."""
+    sentinel = lambda *a, **k: subprocess.CompletedProcess([], 0, "", "")
+    with tempfile.TemporaryDirectory(prefix="syrd221-injected.") as tmp:
+        config = _mixed_tenant(Path(tmp))
+        seen = phase_kwargs_for(
+            lambda: team_launcher.run_switchyard_launch_first_run_auth(
+                config, runner=sentinel, foreground_runner=sentinel
+            )
+        )
+    check(seen["foreground_runner"] is sentinel,
+          "an injected runner no longer drives the interactive steps")
+    check(seen["runner"] is sentinel,
+          "an injected runner no longer drives the probes")
+
+
+def test_the_injected_runner_decision_is_named_and_tested_once() -> None:
+    """`switchyard new` carries one runner for a dozen jobs, so it has to infer.
+
+    Injecting nothing is the live path and must mean watched; injecting a
+    runner means a suite is driving the steps and must keep doing so, or the
+    suite starts launching real providers -- which is exactly what happens if
+    this returns the wrong thing.
+    """
+    driving = lambda *a, **k: subprocess.CompletedProcess([], 0, "", "")
+    check(team_launcher.foreground_runner_for(team_launcher.NO_RUNNER_INJECTED) is None,
+          "injecting nothing left the setup windows unwatched")
+    check(team_launcher.foreground_runner_for(driving) is driving,
+          "an injected runner no longer drives the interactive steps")
+    check(team_launcher.foreground_runner_for(subprocess.run) is subprocess.run,
+          "a caller that deliberately injects subprocess.run is overruled")
+
+
+def test_no_live_entry_point_can_confuse_no_runner_with_the_default_one() -> None:
+    """The defaults are the defect, so the defaults are what is pinned.
+
+    `subprocess.run` is the obvious default for a command that shells out for a
+    dozen other things, and it is also the exact value that tells the phase to
+    stop watching. Those two must not be the same object.
+    """
+    # `switchyard new` carries a runner it also uses for a dozen other things,
+    # so there the two are told apart by a sentinel.
+    new_default = inspect.signature(
+        team_launcher.switchyard_new_command
+    ).parameters["runner"].default
+    check(isinstance(new_default, team_launcher._NoRunnerInjected),
+          f"switchyard_new_command cannot tell 'nobody injected a runner' from "
+          f"'somebody injected subprocess.run': {new_default!r}")
+    # The launch wrapper says it outright instead, so that a caller passing
+    # `subprocess.run` for its PROBES -- which is ordinary and correct -- does
+    # not thereby give up the watched window.
+    launch = inspect.signature(team_launcher.run_switchyard_launch_first_run_auth).parameters
+    check("foreground_runner" in launch,
+          "the launch wrapper has no way to say who drives the setup windows")
+    check(launch["foreground_runner"].default is None,
+          f"the shipped launch does not watch its windows: {launch['foreground_runner'].default!r}")
+    # And the phase itself still defaults to the watched path.
+    phase_default = inspect.signature(
+        team_launcher.run_first_run_auth_phase
+    ).parameters["runner"].default
+    check(phase_default is None,
+          f"the phase no longer defaults to the live path: {phase_default!r}")
+
+
+# --- every live caller, not just the one that failed UAT --------------------
+#
+# The first attempt at this fix refused `subprocess.run` at the boundary, to
+# make the ambiguity loud. That broke two live callers outright: `switchyard
+# validate-models` and the workflow launcher's `prepare_role` both pass
+# `subprocess.run` for their probes, which is ordinary and correct, and both
+# would have raised before authentication or trust ran. Ownership of the
+# windows is now said outright instead of inferred from the probe runner, and
+# each live caller is checked here rather than reasoned about.
+
+
+def phase_kwargs_during(call):
+    """What reaches the phase when a real command runs."""
+    seen: dict = {}
+    real = team_launcher.run_first_run_auth_phase
+
+    def recording(_config, **kwargs):
+        seen.clear()
+        seen.update(kwargs)
+        return team_launcher.FirstRunAuthReport({}, [])
+
+    team_launcher.run_first_run_auth_phase = recording
+    try:
+        call()
+    finally:
+        team_launcher.run_first_run_auth_phase = real
+    return seen
+
+
+def test_validate_models_probes_with_its_runner_and_still_watches_its_windows() -> None:
+    """`switchyard validate-models` passes `subprocess.run`, and must keep working.
+
+    It is a live caller with a legitimate probe runner. Refusing that value was
+    a release-blocking regression in the first version of this fix.
+    """
+    probe = lambda *a, **k: subprocess.CompletedProcess([], 0, "", "")
+    with tempfile.TemporaryDirectory(prefix="syrd221-validate.") as tmp:
+        tmp_path = Path(tmp)
+        config_dir = tmp_path / "config"; config_dir.mkdir()
+        registry_dir = tmp_path / "registry"; registry_dir.mkdir()
+        config_path = config_dir / "otto.json"
+        config_path.write_text(json.dumps({
+            "project": "otto", "project_name": "Otto", "run_as_user": "otto-agent",
+            "layout": str(tmp_path / "layout.json"),
+            "roles": [{"role": "ops", "slot": 0, "cli": ["codex"],
+                       "model": "openai/x", "workdir": str(tmp_path / "repo")}],
+        }) + "\n", encoding="utf-8")
+        (tmp_path / "layout.json").write_text(
+            '{"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}\n', encoding="utf-8"
+        )
+        seen = phase_kwargs_during(lambda: team_launcher.switchyard_validate_models_command(
+            "otto", config_dir=config_dir, registry_dir=registry_dir,
+            runner=probe, print_func=lambda _m: None,
+        ))
+    check(seen.get("runner") is probe,
+          f"validate-models lost the probe runner it was given: {seen.get('runner')!r}")
+    check(seen.get("foreground_runner") is None,
+          "validate-models fires its setup windows unwatched: "
+          f"foreground_runner={seen.get('foreground_runner')!r}")
+    check(seen.get("validate_models") is True,
+          "validate-models stopped asking for model validation")
+
+
+def test_workflow_prepare_role_probes_with_its_runner_and_still_watches() -> None:
+    """The workflow launcher resolves its own default to `subprocess.run` too.
+
+    Driven all the way to the first-run hop, and asserted to have got there --
+    a case that quietly stops short proves the opposite of what it claims.
+    Only the projection and the worktree/hook steps before the hop are stubbed;
+    they belong to other tickets and are not what this is about.
+    """
+    from scripts import workflow_launcher
+
+    probe = lambda *a, **k: subprocess.CompletedProcess([], 0, "", "")
+    seen: dict = {}
+
+    def recording(_config, **kwargs):
+        seen.update(kwargs)
+        return team_launcher.FirstRunAuthReport({}, [])
+
+    saved = (
+        team_launcher.run_switchyard_launch_first_run_auth,
+        team_launcher.ensure_project_worktrees,
+        team_launcher.ensure_generated_project_pane_hooks,
+        workflow_launcher.project_roles,
+    )
+    team_launcher.run_switchyard_launch_first_run_auth = recording
+    team_launcher.ensure_project_worktrees = lambda *a, **k: types.SimpleNamespace(
+        ok=True, failed_roles=[]
+    )
+    team_launcher.ensure_generated_project_pane_hooks = lambda *a, **k: None
+    workflow_launcher.project_roles = lambda raw, _document: {"roles": raw["roles"]}
+    try:
+        with tempfile.TemporaryDirectory(prefix="syrd221-prepare.") as tmp:
+            tmp_path = Path(tmp)
+            config_path = tmp_path / "otto.json"
+            config_path.write_text(json.dumps({
+                "project": "otto", "project_name": "Otto", "run_as_user": "otto-agent",
+                "desktop_access": {"mode": "headless"},
+                "layout": str(tmp_path / "layout.json"),
+                "workflow": {},
+                "roles": [{"role": "ops", "slot": 0, "cli": ["codex"],
+                           "workdir": str(tmp_path / "repo")}],
+            }) + "\n", encoding="utf-8")
+            workflow_launcher.prepare_role(config_path, "ops", runner=probe)
+    finally:
+        (
+            team_launcher.run_switchyard_launch_first_run_auth,
+            team_launcher.ensure_project_worktrees,
+            team_launcher.ensure_generated_project_pane_hooks,
+            workflow_launcher.project_roles,
+        ) = saved
+
+    check(seen, "prepare_role never reached the first-run hop; this case proves nothing")
+    check(seen.get("runner") is probe,
+          f"prepare_role lost the probe runner it was given: {seen.get('runner')!r}")
+    # It passes no foreground runner at all, so the wrapper's watched default
+    # applies. Either way round is fine; firing them unwatched is not.
+    check(seen.get("foreground_runner") is None,
+          "prepare_role fires its setup windows unwatched: "
+          f"foreground_runner={seen.get('foreground_runner')!r}")
 
 
 def main() -> int:

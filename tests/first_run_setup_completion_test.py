@@ -28,6 +28,7 @@ import inspect
 import os
 import pty
 import select
+import signal
 import time
 import json
 import re
@@ -1333,7 +1334,8 @@ def test_workflow_prepare_role_probes_with_its_runner_and_still_watches() -> Non
 
 
 def drive_through_a_real_terminal(
-    script: str, *, size=(40, 100), resize_to=None, seconds=8.0, quiet=True
+    script: str, *, size=(40, 100), resize_to=None, seconds=8.0, quiet=True,
+    own_session=False, kill_with=None,
 ):
     """Run a stub CLI behind the watched session, in front of a terminal that
     answers queries the way a real one does.
@@ -1350,8 +1352,39 @@ def drive_through_a_real_terminal(
         stub.write_text(script)
         stub.chmod(0o755)
 
-        pid, fd = pty.fork()
+        # Built by hand rather than with `pty.fork`, so the parent can keep its
+        # own descriptor on the slave. Without one, the pty is torn down the
+        # moment the child dies and `tcgetattr` then reports fresh defaults
+        # that are indistinguishable from a terminal properly restored -- which
+        # is how the fatal-signal cases came to pass against mutants that never
+        # restored anything.
+        master, slave = pty.openpty()
+        pid = os.fork()
         if pid == 0:                                    # the Switchyard side
+            os.setsid()
+            try:
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+            except OSError:
+                pass
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            if slave > 2:
+                os.close(slave)
+            os.close(master)
+            extra = {}
+            # A launch from a terminal has the default dispositions. This
+            # harness can be started from something that ignores SIGHUP --
+            # `nohup` does, and the sweep runs under it -- and Switchyard
+            # correctly restores whatever it inherited, so a re-raise into an
+            # inherited SIG_IGN does nothing and the case fails for a reason
+            # that has nothing to do with the code under test. Set the
+            # precondition rather than inherit it.
+            for number in team_launcher._RawTerminal.FATAL_SIGNALS:
+                try:
+                    signal.signal(number, signal.SIG_DFL)
+                except (ValueError, OSError, RuntimeError):
+                    pass
             try:
                 # A real launch writes to a terminal, so its stdout is line
                 # buffered and every message lands the moment it is printed.
@@ -1363,12 +1396,17 @@ def drive_through_a_real_terminal(
                 team_launcher.run_provider_first_run_session(
                     cli="claude",
                     args=[str(stub)],
-                    kwargs={"cwd": tmp},
+                    # `own_session` is the shape that actually ships: a provider
+                    # is launched across a user boundary through `sudo -u`, so
+                    # it sits in a session of its own and cannot pick up the
+                    # outer terminal's signals by inheritance.
+                    kwargs={"cwd": tmp, **({"start_new_session": True} if own_session else {})},
                     is_complete=lambda: False,
                     watching="a stub provider",
                     input_fd=0,
                     timeout_seconds=seconds,
                     print_func=(lambda _message: None) if quiet else print,
+                    **extra,
                 )
                 after = termios.tcgetattr(0)
                 sys.stdout.write(f"\r\nRESTORED={before == after}\r\n")
@@ -1379,10 +1417,48 @@ def drive_through_a_real_terminal(
             os._exit(0)
 
         # the terminal's side: give it a real window, and answer what it asks
+        fd = master
         fcntl.ioctl(fd, termios.TIOCSWINSZ, _struct.pack("HHHH", size[0], size[1], 0, 0))
         captured = b""
+        start_at = time.time()
+        pid_alive = True
         deadline = time.time() + seconds + 12
         while time.time() < deadline:
+            # Before the read, and not inside it: a provider holding a question
+            # up says nothing for seconds at a time, and a kill that only fires
+            # when there is output lands after the session has already ended --
+            # which is how this case came to pass against a mutant that caught
+            # no signals at all.
+            if kill_with is not None and time.time() - start_at > 4 and pid_alive:
+                os.kill(pid, kill_with)
+                pid_alive = False
+                time.sleep(1.5)
+                try:
+                    flags = termios.tcgetattr(slave)[3]
+                    captured += (
+                        f"AFTERSIGNAL icanon={bool(flags & termios.ICANON)} "
+                        f"echo={bool(flags & termios.ECHO)} "
+                        f"isig={bool(flags & termios.ISIG)}\n"
+                    ).encode()
+                except Exception as exc:                # pragma: no cover
+                    captured += f"AFTERSIGNAL-FAILED {exc}\n".encode()
+                # And it has to actually stop. A handler that restores the
+                # terminal but never re-raises has ignored a stop request; one
+                # that re-raises without restoring re-enters itself and never
+                # gets anywhere. Both leave the process alive, and neither is
+                # visible in the terminal state alone.
+                gone = False
+                for _ in range(20):
+                    try:
+                        if os.waitpid(pid, os.WNOHANG)[0] != 0:
+                            gone = True
+                            break
+                    except ChildProcessError:
+                        gone = True
+                        break
+                    time.sleep(0.1)
+                captured += f"EXITED={gone}\n".encode()
+                break
             ready, _, _ = select.select([fd], [], [], 0.4)
             if not ready:
                 continue
@@ -1395,6 +1471,9 @@ def drive_through_a_real_terminal(
             captured += chunk
             if b"\x1b[c" in chunk:
                 os.write(fd, b"\x1b[?62;1;4c")         # what a terminal replies
+            # Resize once the provider has said it is up, so the signal has
+            # somebody to arrive at.
+            if b"ready" in captured or b"\x1b[c" in chunk:
                 if resize_to is not None:
                     # Somebody drags the window while setup is up.
                     fcntl.ioctl(
@@ -1403,9 +1482,18 @@ def drive_through_a_real_terminal(
                     )
                     resize_to = None
         try:
+            os.kill(pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
             os.waitpid(pid, 0)
         except ChildProcessError:
             pass
+        for descriptor in (master, slave):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     return captured.decode("utf-8", "replace")
 
 
@@ -1529,6 +1617,202 @@ def test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too() -> None:
     check(screen[ends - 1] == "\r",
           "the message was printed into a raw terminal, so it staircases across "
           f"whatever the provider drew: {screen[at:ends + 1]!r}")
+
+
+#: A provider that reports the window it was given, then says so again every
+#: time the kernel tells it the window changed. Trapping WINCH is the point:
+#: re-reading the size proves only what the kernel stored, not that anything
+#: reached the process -- and what the Zorin review found was a provider that
+#: never heard about the change at all.
+ANSWERS_A_RESIZE_SIGNAL = (
+    "#!/bin/sh\n"
+    "stty raw -echo\n"
+    "trap 'printf \"RESIZED=%s\\r\\n\" \"$(stty size | tr \" \" x)\"' WINCH\n"
+    "stty size\n"
+    "printf 'ready\\r\\n'\n"
+    "i=0; while [ $i -lt 40 ]; do sleep 0.5; i=$((i+1)); done\n"
+)
+
+
+def test_the_provider_owns_the_terminal_it_is_given() -> None:
+    """Without a controlling terminal a resize signals nobody.
+
+    `tcgetpgrp` failing with ENOTTY is the shape the Zorin review measured:
+    the pty had no session and no foreground process group, so the kernel had
+    nowhere to send SIGWINCH and the provider drew 116-column rules into a
+    62-column window.
+    """
+    session = team_launcher.PtyForegroundSession(["sleep", "5"])
+    try:
+        time.sleep(0.6)
+        try:
+            group = os.tcgetpgrp(session._master)
+        except OSError as exc:
+            raise AssertionError(
+                f"the pty has no foreground process group, so a resize signals "
+                f"nobody: {exc.__class__.__name__}: {exc}"
+            )
+        check(group > 0,
+              f"the pty has no foreground process group to signal: {group}")
+        check(group == session._process.pid,
+              f"the provider is not the terminal's foreground group: {group} "
+              f"is not {session._process.pid}")
+    finally:
+        session.terminate()
+        try:
+            session.wait(timeout=5)
+        except Exception:
+            pass
+        session.close()
+
+
+def test_a_resize_reaches_the_provider_as_a_signal() -> None:
+    """Driven in the session shape that ships, and with a control.
+
+    A provider launched across a user boundary is in a session of its own, so
+    it cannot inherit the outer terminal's SIGWINCH -- it has to arrive through
+    the pty it was handed.
+    """
+    resized = drive_through_a_real_terminal(
+        ANSWERS_A_RESIZE_SIGNAL, size=(40, 118), resize_to=(24, 62),
+        seconds=10.0, own_session=True,
+    )
+    check("ready" in resized,
+          f"the provider never started, so this proves nothing: {resized[:200]!r}")
+    check("40 118" in resized,
+          f"the provider did not start at the window it was given: {resized[:200]!r}")
+    check("RESIZED=" in resized,
+          "a window-size change reached nobody: the provider went on drawing to "
+          f"the size it started at: {resized[-300:]!r}")
+    check("24x62" in resized,
+          f"the provider was told about a resize but not the right one: {resized[-300:]!r}")
+
+    # The control matters: a test that cannot tell a delivered signal from a
+    # spurious one is not evidence of delivery.
+    untouched = drive_through_a_real_terminal(
+        ANSWERS_A_RESIZE_SIGNAL, size=(40, 118), seconds=10.0, own_session=True,
+    )
+    check("ready" in untouched, "the control provider never started")
+    check("RESIZED=" not in untouched,
+          f"the provider was signalled a resize that never happened: {untouched[-200:]!r}")
+
+
+def test_the_terminal_is_given_back_even_when_switchyard_is_killed() -> None:
+    """Python's cleanup does not run for a fatal signal.
+
+    Measured before the fix, after a SIGTERM: `icanon=False echo=False
+    isig=False` -- the person's shell left unusable, with nothing said about
+    why. SIGKILL is the one case nothing can help with.
+    """
+    for number, name in ((signal.SIGTERM, "SIGTERM"), (signal.SIGHUP, "SIGHUP")):
+        # A provider still holding a question up, so the step cannot finish on
+        # its own and the signal lands mid-session. With a stub that goes quiet
+        # the session ends first and the case proves nothing -- it passed
+        # against a mutant that caught no signals at all before this changed.
+        screen = drive_through_a_real_terminal(
+            KEEPS_A_QUESTION_UP, seconds=30.0, kill_with=number
+        )
+        check("AFTERSIGNAL " in screen,
+              f"the {name} case never reported the terminal state: {screen[-200:]!r}")
+        check("RESTORED=" not in screen,
+              f"the {name} case let the session finish before the signal, so it "
+              f"proves nothing: {screen[-200:]!r}")
+        state = screen[screen.index("AFTERSIGNAL "):].splitlines()[0]
+        check("icanon=True" in state and "echo=True" in state and "isig=True" in state,
+              f"{name} left the terminal raw and the shell unusable: {state}")
+        check("EXITED=True" in screen,
+              f"{name} did not stop the run: a stop request that restores the "
+              f"terminal and then carries on is still ignored, and one that "
+              f"re-raises without restoring re-enters itself: {screen[-160:]!r}")
+
+
+ECHOES_WHAT_IT_IS_TYPED = (
+    "#!/bin/sh\n"
+    "stty raw -echo\n"
+    "printf 'ready\\r\\n'\n"
+    "while :; do c=$(dd bs=1 count=1 2>/dev/null); printf 'ECHO%s\\r\\n' \"$c\"; done\n"
+)
+
+
+def test_a_keystroke_does_not_wait_for_the_next_tick() -> None:
+    """An arrow key a second behind the finger is not a usable menu.
+
+    A blind poll costs two waits per keystroke: one before what was typed is
+    passed on, another before the redraw it caused is noticed. Measured at
+    0.80-1.00s round trip on a 0.5s interval, which is what the Zorin review
+    independently reported as 0.60-1.00s.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd221-latency.") as tmp:
+        stub = Path(tmp) / "echoing-cli"
+        stub.write_text(ECHOES_WHAT_IT_IS_TYPED)
+        stub.chmod(0o755)
+
+        pid, fd = pty.fork()
+        if pid == 0:
+            sys.stdout.reconfigure(line_buffering=True)
+            team_launcher.run_provider_first_run_session(
+                cli="claude", args=[str(stub)], kwargs={"cwd": tmp},
+                is_complete=lambda: False, watching="an echoing stub",
+                input_fd=0, timeout_seconds=25.0, quiet_seconds=90.0,
+                print_func=lambda _message: None,
+            )
+            os._exit(0)
+
+        try:
+            seen = b""
+            started = time.time()
+            while b"ready" not in seen and time.time() - started < 10:
+                ready, _, _ = select.select([fd], [], [], 0.3)
+                if ready:
+                    seen += os.read(fd, 65536)
+            check(b"ready" in seen, "the echoing stub never started")
+
+            trips = []
+            for _ in range(3):
+                seen = b""
+                at = time.time()
+                os.write(fd, b"x")
+                while time.time() - at < 6:
+                    ready, _, _ = select.select([fd], [], [], 0.05)
+                    if not ready:
+                        continue
+                    seen += os.read(fd, 65536)
+                    if b"ECHO" in seen:
+                        trips.append(time.time() - at)
+                        break
+                time.sleep(0.2)
+        finally:
+            try:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+
+    check(len(trips) == 3, f"the stub stopped answering: {trips}")
+    worst = max(trips)
+    # Generous next to the interval it used to cost, and still far below
+    # anything a person would call lag.
+    check(worst < team_launcher.FOREGROUND_COMPLETION_POLL_SECONDS / 2,
+          f"a keystroke waited for the next tick instead of being passed on: "
+          f"{', '.join(f'{t:.2f}s' for t in trips)}")
+
+
+def test_the_provider_is_launched_across_the_user_boundary_it_ships_with() -> None:
+    """What the pty work is actually wrapped around.
+
+    A provider runs as the tenant owner, so what the session starts is `sudo
+    -u <owner> ...`, and everything about the terminal -- the controlling
+    terminal, the foreground process group, the window size -- has to hold for
+    that process and the CLI it execs, not merely for a child of this process.
+    """
+    same = team_launcher._owner_command_args(team_launcher.current_user_name(), ["claude"])
+    check(same[:1] == ["claude"],
+          f"a same-user launch has grown a boundary it does not need: {same}")
+    across = team_launcher._owner_command_args("otto-agent", ["claude"])
+    check(across[:3] == ["sudo", "-u", "otto-agent"],
+          f"the cross-user launch is not the shape the pty work must survive: {across}")
+    check(across[-1] == "claude",
+          f"the provider is no longer what ends up being run: {across}")
 
 
 def main() -> int:

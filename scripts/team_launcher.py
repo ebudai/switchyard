@@ -14067,6 +14067,41 @@ def _set_terminal_window_size(fd: int, size: tuple[int, int]) -> None:
         pass
 
 
+def _own_the_terminal() -> None:
+    """Make the provider a session leader owning the pty it was handed.
+
+    Run in the child between fork and exec. Without it the pty has no session
+    and no foreground process group -- `tcgetpgrp` fails with ENOTTY -- so a
+    window-size change signals nobody, and the provider goes on drawing to the
+    size it started at however the window is dragged. Measured on Zorin against
+    the real CLI: started at 118 columns, terminal reduced to 62, and it kept
+    drawing 116-column rules (SYRD-221).
+
+    It matters most for the shape that actually ships. A provider is launched
+    across a user boundary through `sudo -u`, which puts it in a session of its
+    own, so it cannot pick up the outer terminal's signals by inheritance the
+    way a same-session child does.
+    """
+    import fcntl
+    import termios
+
+    try:
+        os.setsid()
+    except OSError:
+        # Already a session leader, which is the state this wanted anyway --
+        # a caller may have asked for `start_new_session`, and failing here
+        # would kill the launch between fork and exec for no reason.
+        pass
+    try:
+        # Descriptor 0 is the pty slave here: it was handed to this child as
+        # its standard input and the parent has not closed it yet.
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    except OSError:
+        # A kernel that will not hand it over is not a reason to abandon the
+        # run; the window simply will not follow a resize.
+        pass
+
+
 class _RawTerminal:
     """The outer terminal, made byte-transparent while a provider owns it.
 
@@ -14085,9 +14120,18 @@ class _RawTerminal:
     than anything this was fixing.
     """
 
+    #: The ways this process can be killed while it is holding somebody's
+    #: terminal raw. Python's cleanup does not run for any of them, so without
+    #: a handler the terminal is left with `icanon=False echo=False
+    #: isig=False` -- measured after a SIGTERM -- and the person's shell is
+    #: unusable with no indication why (SYRD-221). SIGKILL cannot be caught and
+    #: is the one case nothing here can help with.
+    FATAL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+
     def __init__(self, fd: int | None) -> None:
         self._fd = fd
         self._saved: Any = None
+        self._handlers: dict[int, Any] = {}
 
     def __enter__(self) -> "_RawTerminal":
         import termios
@@ -14102,16 +14146,45 @@ class _RawTerminal:
             tty.setraw(self._fd, termios.TCSANOW)
         except (termios.error, OSError, ValueError):
             self._saved = None
+            return self
+        self._catch_fatal_signals()
         return self
 
     def __exit__(self, *_exc: Any) -> bool:
         self.restore()
         return False
 
+    def _catch_fatal_signals(self) -> None:
+        for number in self.FATAL_SIGNALS:
+            try:
+                self._handlers[number] = signal.signal(number, self._dying)
+            except (ValueError, OSError, RuntimeError):
+                # Not the main thread, or a platform without it. The terminal
+                # is still restored on every path Python itself unwinds.
+                self._handlers.pop(number, None)
+
+    def _release_fatal_signals(self) -> None:
+        while self._handlers:
+            number, previous = self._handlers.popitem()
+            try:
+                signal.signal(number, previous)
+            except (ValueError, OSError, RuntimeError):
+                pass
+
+    def _dying(self, number: int, _frame: Any) -> None:
+        """Hand the terminal back, then die the way we were told to.
+
+        Re-raised rather than swallowed: a signal that says stop must still
+        stop this, and the caller's own disposition decides what that means.
+        """
+        self.restore()
+        os.kill(os.getpid(), number)
+
     def restore(self) -> None:
         """Give the terminal back. Safe to call more than once."""
         import termios
 
+        self._release_fatal_signals()
         if self._saved is None:
             return
         saved, self._saved = self._saved, None
@@ -14145,7 +14218,12 @@ class PtyForegroundSession:
             _set_terminal_window_size(slave, self._size)
         try:
             self._process = subprocess.Popen(
-                list(args), stdin=slave, stdout=slave, stderr=slave, **kwargs
+                list(args),
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                preexec_fn=_own_the_terminal,
+                **kwargs,
             )
         finally:
             os.close(slave)
@@ -14169,6 +14247,31 @@ class PtyForegroundSession:
             return
         self._size = size
         _set_terminal_window_size(self._master, size)
+
+    def wait_for_activity(self, timeout: float, input_fd: int | None = None) -> None:
+        """Sleep until there is something to do, rather than for a fixed time.
+
+        A blind poll costs a person two waits per keystroke: up to one interval
+        before what they typed is passed on, and up to another before the
+        redraw it caused is noticed. Measured at 0.80-1.00s round trip on a
+        0.5s interval, which is what an interactive menu feels like when every
+        arrow key lags a second behind the finger (SYRD-221).
+
+        The timeout still bounds it, because the loop has work of its own that
+        no descriptor will wake it for: the countdown, the deadline, and the
+        quiet window that decides the provider has finished.
+        """
+        watching = [self._master]
+        if input_fd is not None:
+            try:
+                if os.isatty(input_fd):
+                    watching.append(input_fd)
+            except (OSError, ValueError):
+                pass
+        try:
+            select.select(watching, [], [], timeout)
+        except (OSError, ValueError, InterruptedError):
+            time.sleep(timeout)
 
     def read(self) -> str:
         try:
@@ -14480,7 +14583,15 @@ def run_provider_first_run_session(
                 follow = getattr(session, "sync_window_size", None)
                 if follow is not None:
                     follow()
-                sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                # Wait on the descriptors when the session can, so a keystroke
+                # is passed on the moment it is typed rather than at the next
+                # tick. A session that cannot be waited on -- the shape suites
+                # drive -- keeps the plain interval.
+                wait = getattr(session, "wait_for_activity", None)
+                if wait is None:
+                    sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                else:
+                    wait(FOREGROUND_COMPLETION_POLL_SECONDS, input_fd)
         if closing_message:
             print_func(closing_message)
         if ended_by_us:

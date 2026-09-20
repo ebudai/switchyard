@@ -821,3 +821,99 @@ terminal had been handed back, so the mis-ordering was invisible. A real launch
 writes to a terminal and is line buffered. The harness now reconfigures itself
 to match, and the mutant dies. A test whose I/O discipline differs from
 production's can agree with production and still be measuring something else.
+
+## What the Zorin-local review found next
+
+The control-sequence corruption is fixed and confirmed on the VM against the
+real CLI. Two production pty defects remained, plus a latency measurement.
+
+### A resize that signals nobody
+
+The candidate copied the new size into the inner pty with `TIOCSWINSZ`, but the
+pty had no controlling terminal and no foreground process group — `tcgetpgrp`
+returning ENOTTY — so the kernel had nowhere to send SIGWINCH. Real Claude
+started at 118 columns, the terminal was reduced to 62, and it kept drawing
+116-column rules.
+
+The provider is now made a session leader owning the pty it was handed, between
+fork and exec. Measured here: `tcgetpgrp(master)` returns the provider's own
+process group rather than 0.
+
+That matters most for the shape that actually ships. A provider is launched
+across a user boundary through `sudo -u`, which puts it in a session of its
+own, so it cannot pick up the outer terminal's signals by inheritance the way a
+same-session child does. Reproducing the defect locally needed that shape: with
+the provider spawned into the outer session, a resize reaches it anyway — and
+my first probe said "delivered" for exactly that reason, measuring the outer
+terminal's own SIGWINCH rather than the proxy's.
+
+The shipped test now drives the cross-user session shape, and proves delivery
+by having the provider **trap** SIGWINCH rather than re-read `stty size`. The
+old test observed only what the kernel had stored, which is true whether or not
+anything was ever told.
+
+### A killed Switchyard left the terminal raw
+
+Measured after a SIGTERM: `icanon=False echo=False isig=False` — the person's
+shell unusable, with nothing said about why. Python's cleanup does not run for
+a fatal signal, so the normal, SIGINT, timeout and exception paths all restored
+the terminal and the fatal ones did not.
+
+SIGTERM, SIGHUP and SIGQUIT are now caught for exactly as long as the terminal
+is raw: the handler hands the terminal back and re-raises, so a signal that
+says stop still stops the run. SIGKILL is the one case nothing can help with.
+
+### Interactive latency, assessed rather than deferred
+
+The reviewer measured 0.60–1.00s round trip. Reproduced here at 0.80–1.00s, and
+the cause is arithmetic: the loop slept a fixed `FOREGROUND_COMPLETION_POLL_SECONDS`
+(0.5s) and relayed input once per iteration, so a keystroke waited up to one
+interval to be passed on and its redraw up to another.
+
+The loop now waits on the descriptors instead of sleeping blindly, with the
+interval kept as an upper bound because the loop has work no descriptor will
+wake it for — the countdown, the deadline, and the quiet window. Same probe
+after the change: 0.00s, every sample.
+
+### Verification
+
+198 checks. Mutation: 15 mutants, 14 killed.
+
+### Three tests that proved nothing until the mutants said so
+
+**The fatal-signal case let the session finish first.** It used a stub that
+goes quiet, so the ordinary-prompt path ended the step before the signal landed
+— and it passed against a mutant that caught no signals at all. It now uses a
+provider still holding a question up, and asserts the session did *not* finish
+on its own.
+
+**The kill only fired when there was output.** The harness checked its deadline
+after `if not ready: continue`, and a provider holding a question up says
+nothing for seconds at a time. Moved above the read.
+
+**`tcgetattr` on a destroyed pty looks like a restored one.** With `pty.fork`
+the parent holds no slave descriptor, so when the child dies the pty is torn
+down and `tcgetattr` reports fresh defaults — indistinguishable from a terminal
+properly handed back. The harness now builds the pty by hand and keeps its own
+slave open.
+
+That third one is the same lesson as the buffering one a section earlier: the
+observation has to survive the thing it is observing.
+
+### The one mutant still standing
+
+Re-raising the signal without restoring first is not killed. In principle it
+matters — restoring is what uninstalls the handler, so without it the re-raise
+re-enters itself. In practice the process still ends up dying and the terminal
+still ends up restored, through the ordinary unwind, on every path measured
+here: terminal state, exit, and promptness within 0.5s. It is kept because it
+is right, not because a test demands it.
+
+### Not verified here
+
+The cross-user launch runs the provider through `sudo -u <owner>`, and this
+host does not authorise sudo from a candidate. The argv shape is asserted, and
+the session work is applied to whatever is spawned — `sudo` becomes the session
+leader owning the pty before it execs the provider, so the CLI inherits that
+controlling terminal. That is reasoning, not measurement, and the VM is where
+it can be measured.

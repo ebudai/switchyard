@@ -4,6 +4,11 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from tmux_socket_cleanup import (
+    assert_private_tmux_socket,
+    private_tmux_args,
+    private_tmux_socket,
+)
 
 import fcntl
 import pty
@@ -182,6 +187,18 @@ class RealDesktopWindow:
     def __init__(self, session: str, *, env: dict[str, str]) -> None:
         self.session = session
         self.env = env
+        # The server this window belongs to, named rather than left to an
+        # inherited `TMUX`. Taken from the environment the caller is already
+        # driving that server with, so the client this opens and the sessions
+        # the test made are the same server by construction (SYRD-219).
+        tmpdir = env.get("TMUX_TMPDIR")
+        if not tmpdir:
+            raise AssertionError(
+                "RealDesktopWindow was given an environment with no TMUX_TMPDIR, "
+                "so it cannot tell which tmux server it is opening a client on"
+            )
+        self.socket = private_tmux_socket(Path(tmpdir))
+        assert_private_tmux_socket(self.socket, Path(tmpdir))
         self.calls: list[dict[str, object]] = []
         self.clients: list[tuple[subprocess.Popen[bytes], int]] = []
 
@@ -194,7 +211,7 @@ class RealDesktopWindow:
         # that is only a Popen object is not the thing under test (SYRD-65).
         env = {**self.env, "TERM": "xterm-256color"}
         proc = subprocess.Popen(
-            ["tmux", "attach", "-t", f"={self.session}"],
+            private_tmux_args(self.socket, ["attach", "-t", f"={self.session}"]),
             stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
         )
         os.close(slave)
@@ -202,7 +219,9 @@ class RealDesktopWindow:
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             listed = subprocess.run(
-                ["tmux", "list-clients", "-t", f"={self.session}", "-F", "#{client_tty}"],
+                private_tmux_args(
+                    self.socket, ["list-clients", "-t", f"={self.session}", "-F", "#{client_tty}"]
+                ),
                 env=env, capture_output=True, text=True,
             )
             if listed.returncode == 0 and listed.stdout.split():
@@ -917,7 +936,7 @@ def test_isolated_tmux_clients_preserve_visible_sizes_and_a_single_status_bar() 
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             proc = subprocess.Popen(
-                ["tmux", "attach", "-t", f"={session}"],
+                private_tmux_args(private_tmux_socket(tmux_tmp), ["attach", "-t", f"={session}"]),
                 stdin=slave, stdout=slave, stderr=slave, env=tmux_env, start_new_session=True,
             )
             os.close(slave)
@@ -990,7 +1009,10 @@ def test_isolated_tmux_clients_preserve_visible_sizes_and_a_single_status_bar() 
             for proc, master in clients:
                 proc.kill()
                 os.close(master)
-            runner(["tmux", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            runner(
+                private_tmux_args(private_tmux_socket(tmux_tmp), ["kill-server"]),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
 
 def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> None:
@@ -1104,7 +1126,10 @@ def test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions() -> Non
                 runner(["tmux", "has-session", "-t", f"={session}"], check=True)
             assert collision_snapshot() == before
         finally:
-            runner(["tmux", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            runner(
+                private_tmux_args(private_tmux_socket(tmux_tmp), ["kill-server"]),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
 
 def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() -> None:
@@ -1208,7 +1233,10 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
             assert "switchyard present porter recover app" in recovery_surface
         finally:
             window.close()
-            runner(["tmux", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            runner(
+                private_tmux_args(private_tmux_socket(tmux_tmp), ["kill-server"]),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
 
 
 if __name__ == "__main__":

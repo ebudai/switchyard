@@ -2,14 +2,22 @@
 """Source lint for tmux invocations.
 
 Rules:
-- tests/ tmux invocations must use an explicit -L socket for isolation.
+- tests/ tmux invocations must use an explicit -L or -S socket for isolation.
+  Both pin which server is meant and both beat an inherited `TMUX`; a bare
+  invocation, or one isolated only by `TMUX_TMPDIR`, resolves to the caller's
+  own server instead -- which is how a viewer suite run from a role pane
+  disconnected a live desktop twice (SYRD-219).
 - a tests/ module that invokes tmux must also isolate the user bus, or every
   pane it opens asks the live tenant's systemd manager for a transient scope
   however private its socket is. `bus_isolation_violations` is that rule; it is
   asserted repository-wide from tmux_user_bus_isolation_test rather than folded
   into `lint_tmux_sources`, whose own aggregate is red on main for unrelated
   reasons (SYRD-55).
-- tests/ and scripts/ must never invoke the tmux server-shutdown command.
+- tests/ and scripts/ must never invoke the tmux server-shutdown command
+  *unqualified*. Killing a server you named explicitly is how a private
+  fixture tears itself down; killing whichever server happens to answer is
+  the defect. The rule was an absolute ban, which is why five suites carried
+  a violation nobody could clear: the correct teardown was itself forbidden.
 - scripts/ may use a project's default tmux socket; the -L test-isolation rule
   does not apply there.
 
@@ -120,6 +128,17 @@ def _literal_string_constants(node: ast.AST) -> list[str]:
     return []
 
 
+#: The two ways an invocation pins which server it means. Both beat an
+#: inherited `TMUX`, which is the whole point: measured from inside a live
+#: pane, a bare `tmux` and a `TMUX_TMPDIR`-only `tmux` both resolve to the
+#: pane's own server, while `-L` and `-S` resolve where they say (SYRD-219).
+SOCKET_FLAGS = ("-L", "-S")
+
+
+def _names_a_socket(literals: list[str]) -> bool:
+    return any(flag in literals for flag in SOCKET_FLAGS)
+
+
 def _tmux_argv_shape(node: ast.AST) -> TmuxArgvShape | None:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left = _tmux_argv_shape(node.left)
@@ -127,7 +146,8 @@ def _tmux_argv_shape(node: ast.AST) -> TmuxArgvShape | None:
             return None
         return TmuxArgvShape(
             starts_with_tmux=left.starts_with_tmux,
-            has_explicit_socket=left.has_explicit_socket or "-L" in _literal_string_constants(node.right),
+            has_explicit_socket=left.has_explicit_socket
+            or _names_a_socket(_literal_string_constants(node.right)),
             literal_args=(*left.literal_args, *_literal_string_constants(node.right)),
         )
     if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
@@ -137,7 +157,7 @@ def _tmux_argv_shape(node: ast.AST) -> TmuxArgvShape | None:
         return None
     return TmuxArgvShape(
         starts_with_tmux=True,
-        has_explicit_socket="-L" in _literal_string_constants(node),
+        has_explicit_socket=_names_a_socket(_literal_string_constants(node)),
         literal_args=tuple(_literal_string_constants(node)),
     )
 
@@ -270,12 +290,15 @@ def forbidden_server_shutdown_violations(source: str, path: Path) -> list[TmuxLi
         argv = _tmux_argv_shape(node)
         if argv is None or not argv.starts_with_tmux:
             continue
-        if FORBIDDEN_TMUX_COMMAND in argv.literal_args:
+        if FORBIDDEN_TMUX_COMMAND in argv.literal_args and not argv.has_explicit_socket:
             violations.append(
                 TmuxLintViolation(
                     path=path,
                     line=node.lineno,
-                    detail="tmux server shutdown command is forbidden in tests/ and scripts/",
+                    detail=(
+                        "tmux server shutdown without an explicit -L/-S socket is "
+                        "forbidden in tests/ and scripts/"
+                    ),
                 )
             )
     return violations

@@ -35,6 +35,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from team_launcher_test_helpers import *
+from tmux_socket_cleanup import (
+    assert_private_tmux_socket,
+    kill_private_tmux_server,
+    private_tmux_args,
+    private_tmux_env,
+    private_tmux_socket,
+)
 from team_launcher_upgrade_cutover_test import (
     _RunningTenant,
     _declarative_tenant,
@@ -855,14 +862,22 @@ class _RealTmux:
     def __init__(self, tmp: Path) -> None:
         self.dir = tmp / "tmux"
         self.dir.mkdir(mode=0o700, exist_ok=True)
-        self.env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-        self.env["TMUX_TMPDIR"] = str(self.dir)
+        # The socket is named, not merely hinted at by a directory. `TMUX`
+        # names a socket and beats `TMUX_TMPDIR`, so a fixture isolated by the
+        # directory alone drives the caller's own server when it runs inside a
+        # pane -- and this one stops servers (SYRD-219).
+        self.socket = private_tmux_socket(self.dir)
+        assert_private_tmux_socket(self.socket, self.dir)
+        self.env = private_tmux_env(self.dir)
         self.typed = tmp / "typed"
         self.clients: list[tuple[subprocess.Popen[bytes], int]] = []
 
+    def args(self, *args: str) -> list[str]:
+        return private_tmux_args(self.socket, list(args))
+
     def __call__(self, *args: str, check: bool = True) -> str:
         result = subprocess.run(
-            ["tmux", *args], env=self.env, capture_output=True, text=True
+            self.args(*args), env=self.env, capture_output=True, text=True
         )
         if check and result.returncode != 0:
             raise AssertionError(f"tmux {args}: {result.stderr.strip()}")
@@ -898,7 +913,7 @@ class _RealTmux:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
             env = {**self.env, "TERM": term}
             proc = subprocess.Popen(
-                ["tmux", "attach", "-t", f"={SLOTS[0]}"],
+                self.args("attach", "-t", f"={SLOTS[0]}"),
                 stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True,
             )
             os.close(slave)
@@ -947,7 +962,7 @@ class _RealTmux:
             except subprocess.TimeoutExpired:
                 proc.kill()
             os.close(master)
-        subprocess.run(["tmux", "kill-server"], env=self.env, capture_output=True)
+        kill_private_tmux_server(self.socket, self.dir, self.env)
 
 
 #: Everything a tmux client can normally do to the server behind it.

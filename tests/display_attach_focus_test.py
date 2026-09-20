@@ -33,6 +33,16 @@ import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tests"))
+
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+
+# An isolated socket is not isolation on its own: without this the panes opened
+# on it still ask the live tenant's user manager for transient scopes, however
+# private the socket is (SYRD-55, SYRD-219).
+isolate_tmux_bus()
+
 HELPER = ROOT / "scripts" / "switchyard-display-attach"
 
 CHECKS = 0

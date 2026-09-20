@@ -21,6 +21,12 @@ import struct
 import termios
 
 from team_launcher_test_helpers import *
+from tmux_socket_cleanup import (
+    assert_private_tmux_socket,
+    kill_private_tmux_server,
+    private_tmux_args,
+    private_tmux_socket,
+)
 from scripts import presentation_controller
 
 PROJECT = "porter"
@@ -368,8 +374,15 @@ def test_a_real_terminal_attaches_to_a_real_worker_and_returns_on_detach() -> No
         # before it can be the client this case is about.
         env["TERM"] = "xterm-256color"
 
+        # Named socket, not just a directory: `TMUX` beats `TMUX_TMPDIR`, and
+        # this case stops a server when it is done (SYRD-219).
+        socket = private_tmux_socket(tmux_tmp)
+        assert_private_tmux_socket(socket, tmux_tmp)
+
         def tmux(*args: str, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-            return subprocess.run(["tmux", *args], env=env, text=True, **kwargs)
+            return subprocess.run(
+                private_tmux_args(socket, list(args)), env=env, text=True, **kwargs
+            )
 
         def runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
             call_env = dict(env)
@@ -426,8 +439,7 @@ def test_a_real_terminal_attaches_to_a_real_worker_and_returns_on_detach() -> No
                          stdout=subprocess.PIPE).stdout.strip()
             assert still == worker_pid, (still, worker_pid)
         finally:
-            subprocess.run(["tmux", "kill-server"], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            kill_private_tmux_server(socket, tmux_tmp, env)
 
 
 def main() -> int:

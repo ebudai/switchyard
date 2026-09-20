@@ -32,6 +32,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
+
+# An isolated socket is not isolation on its own: without this the panes
+# opened on it still ask the live tenant's user manager for transient
+# scopes, however private the socket is (SYRD-55, SYRD-219).
+isolate_tmux_bus()
+
 from scripts import presentation_controller as presentation  # noqa: E402
 from scripts import team_launcher  # noqa: E402
 

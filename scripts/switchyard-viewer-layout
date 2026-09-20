@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Re-lay a viewer window to suit the shape it now has.
+
+tmux never re-derives a layout when a window is resized -- not a written-out
+one and not even a named one like `tiled`. It scales the tree it already has,
+so a viewer laid out three across and two down keeps that topology when the
+desktop window is dragged tall and narrow, and five panes end up in three
+columns of a few characters each.
+
+So the viewer installs a `window-resized` hook pointing here, and this recomputes
+the layout for the size the window actually is. That is the whole job.
+
+Computed rather than chosen from two prepared layouts, and the reason is worth
+writing down: applying a layout whose size differs from the window's makes tmux
+resize the *window* to the layout, not the layout to the window. A hook carrying
+constants would therefore fight the attached client over the window size. A
+layout computed for the current size matches it exactly, changes nothing about
+it, and so cannot loop (SYRD-216).
+
+The ambient tmux server is the right one here, unlike in a test: this runs from
+a `run-shell` on the very server whose window it is fixing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.team_launcher import viewer_layout_string  # noqa: E402
+
+
+def tmux(socket: str | None, *args: str) -> subprocess.CompletedProcess[str]:
+    command = ["tmux"]
+    if socket:
+        command += ["-S", socket]
+    return subprocess.run([*command, *args], capture_output=True, text=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("target", help="the viewer window, as <session>:<window>")
+    parser.add_argument("--socket", default="", help="tmux socket path, when not the ambient one")
+    args = parser.parse_args(argv)
+
+    socket = args.socket or None
+    measured = tmux(
+        socket, "display-message", "-p", "-t", args.target,
+        "#{window_width} #{window_height} #{window_panes}",
+    )
+    if measured.returncode != 0:
+        # The window can be gone by the time a resize is acted on; that is not
+        # a failure worth a message on somebody's desktop.
+        return 0
+    try:
+        width, height, panes = (int(part) for part in measured.stdout.split())
+    except ValueError:
+        print(f"switchyard: cannot read {args.target}: {measured.stdout.strip()!r}", file=sys.stderr)
+        return 1
+    if panes < 1:
+        return 0
+
+    applied = tmux(
+        socket, "select-layout", "-t", args.target,
+        viewer_layout_string(panes, width=width, height=height),
+    )
+    if applied.returncode != 0:
+        print(
+            f"switchyard: could not re-lay {args.target} at {width}x{height}: "
+            f"{applied.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

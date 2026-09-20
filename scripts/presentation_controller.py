@@ -1297,7 +1297,24 @@ def _launch_viewer(
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not populate viewer {viewer}")
     commands = (
-        ["tmux", "select-layout", "-t", _exact_tmux_target(f"{viewer}:0"), "tiled"],
+        # Not `tiled`: tmux grows rows before columns, so five slots come out
+        # two columns by three rows -- narrow panes and the shape of an empty
+        # sixth cell. The written-out layout puts the row across the top and
+        # the remainder across the full width below it (SYRD-216).
+        [
+            "tmux",
+            "select-layout",
+            "-t",
+            _exact_tmux_target(f"{viewer}:0"),
+            team_launcher.viewer_layout_string(
+                len(sessions),
+                width=team_launcher.DEFAULT_VIEWER_COLUMNS,
+                height=team_launcher.DEFAULT_VIEWER_ROWS,
+            ),
+        ],
+        # And keep it matching the window's shape, not just its first shape:
+        # tmux scales a layout on resize and never re-derives it (SYRD-216).
+        team_launcher.tmux_viewer_relayout_hook_args(viewer),
         *_viewer_frame_commands(viewer),
     )
     for args in commands:

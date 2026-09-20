@@ -1740,8 +1740,128 @@ def tmux_viewer_split_window_args(viewer_session: str, role: RoleConfig) -> list
     return ["tmux", "split-window", "-t", f"{viewer_session}:0", "-c", role.workdir, command]
 
 
-def tmux_viewer_select_layout_args(viewer_session: str) -> list[str]:
-    return ["tmux", "select-layout", "-t", f"{viewer_session}:0", "tiled"]
+def _tmux_layout_checksum(layout: str) -> int:
+    """tmux's own 16-bit layout checksum, which it refuses a layout without."""
+    value = 0
+    for character in layout:
+        value = (value >> 1) + ((value & 1) << 15)
+        value = (value + ord(character)) & 0xFFFF
+    return value
+
+
+def _tmux_layout_spans(total: int, parts: int) -> list[int]:
+    """`parts` sizes across `total` cells, one cell per divider between them.
+
+    The remainder goes to the leftmost or topmost, which is what tmux does and
+    is why a five-pane bottom row reads as two equal halves rather than one
+    short one.
+    """
+    base, extra = divmod(total - (parts - 1), parts)
+    return [base + (1 if index < extra else 0) for index in range(parts)]
+
+
+#: A terminal cell is about twice as tall as it is wide, so a window is only
+#: really wider than it is tall once it has twice as many columns as rows.
+VIEWER_CELL_ASPECT = 2
+
+
+def viewer_grid(panes: int, *, width: int, height: int) -> tuple[int, int]:
+    """Columns and rows for `panes` viewer panes in a `width` x `height` window.
+
+    tmux's own `tiled` grows rows before columns and never looks at the window,
+    so five panes come out two columns by three rows whatever shape the window
+    is: on a wide one, every pane unnecessarily narrow and the shape of an empty
+    sixth cell where the last row is short.
+
+    The counts come from the integer square root either way; which of them is
+    the column count is the window's business. Five panes are three across and
+    two down on a landscape window, and two across and three down on a portrait
+    one -- the same grid, turned to match (SYRD-216).
+    """
+    if panes < 1:
+        raise ValueError("a viewer needs at least one pane")
+    across = max(1, math.isqrt(panes))
+    along = -(-panes // across)
+    if width >= height * VIEWER_CELL_ASPECT:
+        return (along, across)
+    return (across, along)
+
+
+def viewer_layout_string(panes: int, *, width: int, height: int) -> str:
+    """An explicit tmux layout for `panes` panes in a `width` x `height` window.
+
+    Written out rather than asked for by name because tmux has no named layout
+    with this shape. Panes are filled row-major in pane order, so slot order
+    reads left to right and then down, and a short last row spreads across the
+    whole width instead of leaving a gap.
+    """
+    columns, _ = viewer_grid(panes, width=width, height=height)
+    per_row = [min(columns, panes - start) for start in range(0, panes, columns)]
+    heights = _tmux_layout_spans(height, len(per_row))
+    rows: list[str] = []
+    top = 0
+    pane = 0
+    for count, row_height in zip(per_row, heights):
+        cells = []
+        left = 0
+        for cell_width in _tmux_layout_spans(width, count):
+            cells.append(f"{cell_width}x{row_height},{left},{top},{pane}")
+            left += cell_width + 1
+            pane += 1
+        if count > 1:
+            rows.append(f"{width}x{row_height},0,{top}" + "{" + ",".join(cells) + "}")
+        else:
+            # A row holding one pane IS that pane: there is nothing for a
+            # side-by-side container to arrange, and tmux writes none either.
+            rows.append(f"{width}x{row_height},0,{top},{pane - 1}")
+        top += row_height + 1
+    # The stack around the rows is written even when there is one of them:
+    # tmux reads a container holding a single child exactly as it reads the
+    # child, so there is no case to split here.
+    body = f"{width}x{height},0,0[" + ",".join(rows) + "]"
+    return f"{_tmux_layout_checksum(body):04x},{body}"
+
+
+def viewer_layout_helper_path() -> Path:
+    """The re-layout helper, in whichever release this code is running from."""
+    return Path(__file__).resolve().parent / "switchyard-viewer-layout"
+
+
+def tmux_viewer_relayout_hook_args(viewer_session: str) -> list[str]:
+    """Keep the layout matching the window's shape, not just its first shape.
+
+    tmux scales a layout on resize and never re-derives it, so without this a
+    viewer laid out for a wide window keeps that topology when the desktop
+    window is dragged tall and narrow. `window-resized` is the hook that
+    carries the new size; `client-resized` fires before the window has followed
+    and would apply the previous shape's layout (SYRD-216).
+
+    The socket is passed explicitly rather than left to the ambient `TMUX`,
+    because a hook's command inherits the server's environment and not a
+    client's.
+    """
+    helper = _quote_command(
+        [sys.executable, str(viewer_layout_helper_path()), f"{viewer_session}:0",
+         "--socket", "#{socket_path}"]
+    )
+    # `-w` is kept although a `session:window` target already scopes the hook
+    # to the window on this tmux -- measured, with and without, on a session
+    # holding two windows. It says which kind of hook this is, and it does not
+    # rest on undocumented behaviour holding in another version.
+    return [
+        "tmux", "set-hook", "-w", "-t", f"{viewer_session}:0",
+        "window-resized", f"run-shell {shlex.quote(helper)}",
+    ]
+
+
+def tmux_viewer_select_layout_args(viewer_session: str, panes: int) -> list[str]:
+    return [
+        "tmux",
+        "select-layout",
+        "-t",
+        f"{viewer_session}:0",
+        viewer_layout_string(panes, width=DEFAULT_VIEWER_COLUMNS, height=DEFAULT_VIEWER_ROWS),
+    ]
 
 
 def tmux_viewer_set_status_args(viewer_session: str) -> list[str]:
@@ -1803,7 +1923,8 @@ def launch_tmux_viewer_session(
         if proc.returncode != 0:
             return int(proc.returncode)
     for args in (
-        tmux_viewer_select_layout_args(viewer_session),
+        tmux_viewer_select_layout_args(viewer_session, len(roles)),
+        tmux_viewer_relayout_hook_args(viewer_session),
         tmux_viewer_set_status_args(viewer_session),
         tmux_viewer_set_titles_args(viewer_session),
         tmux_viewer_set_titles_string_args(viewer_session, window_title or viewer_session),

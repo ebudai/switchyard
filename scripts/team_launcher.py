@@ -16,6 +16,7 @@ import shutil
 import signal
 import select
 import shlex
+import struct
 import socket
 import stat
 import subprocess
@@ -14040,6 +14041,86 @@ def provider_is_waiting_for_an_answer(recent_output: str) -> bool:
     return _provider_screen_offers_a_choice(recent_output)
 
 
+def _terminal_window_size(fd: int) -> tuple[int, int] | None:
+    """The rows and columns of a real terminal, or None if it is not one."""
+    import fcntl
+    import termios
+
+    try:
+        packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+    except (OSError, ValueError):
+        return None
+    rows, cols, _xpix, _ypix = struct.unpack("HHHH", packed)
+    if not rows or not cols:
+        return None
+    return rows, cols
+
+
+def _set_terminal_window_size(fd: int, size: tuple[int, int]) -> None:
+    import fcntl
+    import termios
+
+    rows, cols = size
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except (OSError, ValueError):
+        pass
+
+
+class _RawTerminal:
+    """The outer terminal, made byte-transparent while a provider owns it.
+
+    A pty proxy that leaves the outer terminal in canonical mode with echo on
+    is not a proxy, it is a second voice on the same screen. Measured against
+    the real CLI: Claude asks the terminal questions -- primary device
+    attributes, the kitty keyboard protocol -- and the terminal answers on this
+    process's stdin. The line discipline then ECHOES those answers, so
+    `^[[?62;1;4c` and `^[[?0u` are drawn into the middle of the theme menu.
+    Canonical mode also holds each keystroke until Enter, so the arrow keys
+    that menu is driven with never arrive at all (SYRD-221).
+
+    Raw mode is what makes the relay faithful: nothing echoed, nothing
+    buffered, every byte passed through exactly once. Restored afterwards
+    whatever happens, because leaving somebody's terminal in raw mode is worse
+    than anything this was fixing.
+    """
+
+    def __init__(self, fd: int | None) -> None:
+        self._fd = fd
+        self._saved: Any = None
+
+    def __enter__(self) -> "_RawTerminal":
+        import termios
+        import tty
+
+        if self._fd is None:
+            return self
+        try:
+            if not os.isatty(self._fd):
+                return self
+            self._saved = termios.tcgetattr(self._fd)
+            tty.setraw(self._fd, termios.TCSANOW)
+        except (termios.error, OSError, ValueError):
+            self._saved = None
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        self.restore()
+        return False
+
+    def restore(self) -> None:
+        """Give the terminal back. Safe to call more than once."""
+        import termios
+
+        if self._saved is None:
+            return
+        saved, self._saved = self._saved, None
+        try:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, saved)
+        except (termios.error, OSError, ValueError):
+            pass
+
+
 class PtyForegroundSession:
     """One provider run on a real terminal, watched while the person uses it.
 
@@ -14055,12 +14136,39 @@ class PtyForegroundSession:
 
         self._master, slave = pty.openpty()
         os.set_blocking(self._master, False)
+        # A pty opened cold is 80x24 whatever the window is, so a full-screen
+        # CLI lays itself out for a terminal nobody is looking at. Measured on
+        # the theme menu: the wrong width wraps the option list into the
+        # preview below it (SYRD-221).
+        self._size = self._outer_size()
+        if self._size is not None:
+            _set_terminal_window_size(slave, self._size)
         try:
             self._process = subprocess.Popen(
                 list(args), stdin=slave, stdout=slave, stderr=slave, **kwargs
             )
         finally:
             os.close(slave)
+
+    @staticmethod
+    def _outer_size() -> tuple[int, int] | None:
+        for stream in (sys.stdout, sys.stdin):
+            try:
+                fd = stream.fileno()
+            except (AttributeError, ValueError, OSError):
+                continue
+            size = _terminal_window_size(fd)
+            if size is not None:
+                return size
+        return None
+
+    def sync_window_size(self) -> None:
+        """Follow the window if somebody resizes it mid-setup."""
+        size = self._outer_size()
+        if size is None or size == self._size:
+            return
+        self._size = size
+        _set_terminal_window_size(self._master, size)
 
     def read(self) -> str:
         try:
@@ -14292,65 +14400,89 @@ def run_provider_first_run_session(
     reading an OAuth code box or a theme list is never cut off however long they
     take.
     """
-    session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
-    deadline = monotonic() + timeout_seconds
-    # Named before it starts, because once the CLI owns the screen the only
-    # thing that still says what this window is for is its title.
-    window = _SetupWindowNarrator(
-        cli=cli, purpose=purpose, deadline=deadline, monotonic=monotonic, write=output_write
-    )
-    window.opened()
-    recent = ""
-    last_output = monotonic()
-    ended_by_us = False
+    #: Said once the terminal is back in its own mode. A line printed while the
+    #: outer tty is raw has no carriage return of its own and climbs the screen
+    #: in a staircase, over whatever the provider drew (SYRD-221).
+    closing_message = ""
+    session = None
+    window = None
+    # The terminal is taken BEFORE the provider is started, not after. A CLI
+    # asks its questions in the first milliseconds it is alive, and a reply
+    # that lands while the outer tty is still echoing is drawn on the screen --
+    # which is the corruption, arriving in the one window where raw mode was
+    # not yet on. Found by the regression test for it, not by reasoning
+    # (SYRD-221).
+    terminal = _RawTerminal(input_fd)
     try:
-        while True:
-            if session.poll() is not None:
-                return is_complete()
-            chunk = session.read()
-            if chunk:
-                if output_write is not None:
-                    output_write(chunk)
-                else:
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
-                now = monotonic()
-                # A new screen replaces the old one rather than piling on it.
-                if now - last_output >= PROVIDER_SCREEN_RESET_SECONDS:
-                    recent = chunk
-                else:
-                    recent = (recent + chunk)[-4096:]
-                last_output = now
-            if input_fd is not None:
-                session.relay_from(input_fd)
-            if is_complete():
+        with terminal:
+            session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
+            deadline = monotonic() + timeout_seconds
+            # Named before it starts, because once the CLI owns the screen the
+            # only thing that still says what this window is for is its title.
+            window = _SetupWindowNarrator(
+                cli=cli, purpose=purpose, deadline=deadline, monotonic=monotonic,
+                write=output_write,
+            )
+            window.opened()
+            recent = ""
+            last_output = monotonic()
+            ended_by_us = False
+            while True:
+                if session.poll() is not None:
+                    return is_complete()
+                chunk = session.read()
+                if chunk:
+                    if output_write is not None:
+                        output_write(chunk)
+                    else:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                    now = monotonic()
+                    # A new screen replaces the old one rather than piling on it.
+                    if now - last_output >= PROVIDER_SCREEN_RESET_SECONDS:
+                        recent = chunk
+                    else:
+                        recent = (recent + chunk)[-4096:]
+                    last_output = now
+                if input_fd is not None:
+                    session.relay_from(input_fd)
+                if is_complete():
+                    sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                    ended_by_us = True
+                    break
+                quiet_for = monotonic() - last_output
+                if (
+                    recent
+                    and quiet_for >= quiet_seconds
+                    and not provider_is_waiting_for_an_answer(recent)
+                ):
+                    closing_message = window.done_at_prompt()
+                    ended_by_us = True
+                    break
+                if monotonic() >= deadline:
+                    # Specific about what did not happen, because "gave up
+                    # waiting" on its own reads as a Switchyard fault when the
+                    # usual cause is a sign-in nobody finished. The resumable
+                    # command follows in the report below, with the account named.
+                    closing_message = window.stalled(
+                        watching=watching, timeout_seconds=timeout_seconds
+                    )
+                    ended_by_us = True
+                    break
+                # The window says what it is waiting for, continuously, because a
+                # silent one is indistinguishable from a stopped one -- which is
+                # exactly how this step was reported: "stopped in a standalone
+                # Claude window". It had not stopped; it was waiting for a sign-in
+                # nobody had been told was still outstanding (SYRD-221).
+                window.tick()
+                # A window dragged mid-setup must not leave the provider
+                # drawing to the one it started in.
+                follow = getattr(session, "sync_window_size", None)
+                if follow is not None:
+                    follow()
                 sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
-                ended_by_us = True
-                break
-            quiet_for = monotonic() - last_output
-            if (
-                recent
-                and quiet_for >= quiet_seconds
-                and not provider_is_waiting_for_an_answer(recent)
-            ):
-                print_func(window.done_at_prompt())
-                ended_by_us = True
-                break
-            if monotonic() >= deadline:
-                # Specific about what did not happen, because "gave up
-                # waiting" on its own reads as a Switchyard fault when the
-                # usual cause is a sign-in nobody finished. The resumable
-                # command follows in the report below, with the account named.
-                print_func(window.stalled(watching=watching, timeout_seconds=timeout_seconds))
-                ended_by_us = True
-                break
-            # The window says what it is waiting for, continuously, because a
-            # silent one is indistinguishable from a stopped one -- which is
-            # exactly how this step was reported: "stopped in a standalone
-            # Claude window". It had not stopped; it was waiting for a sign-in
-            # nobody had been told was still outstanding (SYRD-221).
-            window.tick()
-            sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+        if closing_message:
+            print_func(closing_message)
         if ended_by_us:
             exit_input = PROVIDER_SESSION_EXIT_INPUT.get(cli, "")
             if exit_input and session.poll() is None:
@@ -14363,16 +14495,18 @@ def run_provider_first_run_session(
                     sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
         return is_complete()
     finally:
-        if session.poll() is None:
-            session.terminate()
-            try:
-                session.wait(timeout=10)
-            except Exception:
-                pass
-        close = getattr(session, "close", None)
-        if close is not None:
-            close()
-        window.closed()
+        if session is not None:
+            if session.poll() is None:
+                session.terminate()
+                try:
+                    session.wait(timeout=10)
+                except Exception:
+                    pass
+            close = getattr(session, "close", None)
+            if close is not None:
+                close()
+        if window is not None:
+            window.closed()
 
 
 def _run_owner_cli_until(

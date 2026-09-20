@@ -724,3 +724,100 @@ cannot be driven from a unit test here.
 
 It is smaller than it was: the decision itself is a named function tested for
 every input, and the only uncovered step is which variable is handed to it.
+
+## The proxy was not invisible
+
+`test6`, a brand-new tenant, proved the watched path is finally live — the
+window title read `Switchyard setup (temporary): claude first run` — and the
+same screenshot showed the next defect: raw `^[[...` drawn into the theme menu.
+
+A pty proxy that leaves the outer terminal in canonical mode with echo on is
+not a proxy, it is a second voice on the same screen. There was no `termios`,
+`tty` or window-size handling anywhere in the file.
+
+### What the terminal was doing
+
+Claude asks the terminal questions — primary device attributes, the kitty
+keyboard protocol. A real terminal answers on Switchyard's stdin. The line
+discipline then **echoes those answers**, caret-rendered, into the middle of
+whatever the provider is drawing. Canonical mode also withholds each keystroke
+until Enter, so the arrow keys the theme menu is driven with never arrive.
+
+Reproduced by putting a terminal that answers queries in front of the real CLI:
+
+```
+bytes=2302  queries answered=2
+caret-rendered control sequences visible on screen: 2
+    '^[[?62;1;4c'
+    '^[[?0u'
+VERDICT: CORRUPTED -- echoed control bytes are on the screen
+```
+
+Those are exactly the `^[[...` in the UAT screenshot. After the change, the
+same probe against the same CLI:
+
+```
+bytes=2263  queries answered=2
+caret-rendered control sequences visible on screen: 0
+VERDICT: clean -- no echoed control bytes
+```
+
+and the terminal is handed back byte-identically (`termios` compared before and
+after: equal).
+
+### Three things a proxy owes the terminal
+
+**Raw mode, taken before the provider starts.** Nothing echoed, nothing
+buffered, every byte passed through once — and restored whatever happens,
+because leaving somebody's terminal raw is worse than anything this was fixing.
+The *before* matters: a CLI asks its questions in the first milliseconds it is
+alive, and the regression test caught a reply landing while the outer tty was
+still echoing, in the one window where raw mode was not yet on. That ordering
+was wrong in my first draft and the test found it, not reasoning.
+
+**The window the person is actually looking at.** A pty opened cold is 80x24
+whatever the real window is, so a full-screen CLI lays itself out for a
+terminal nobody is looking at — which on the theme menu wraps the option list
+into the preview below it. The inner pty now starts at the outer terminal's
+size and follows it when the window is dragged mid-setup.
+
+**Switchyard's own voice, in the terminal's own mode.** A line printed while
+the outer tty is raw has no carriage return of its own and climbs the screen in
+a staircase, over whatever the provider drew — so the message explaining what
+went wrong arrives looking like more of the corruption it is explaining. Both
+closing messages are now deferred and said once the terminal is back.
+
+### Verification
+
+176 checks. The new ones drive a real pty with a terminal in front of it that
+answers queries the way a real one does: the replies must not reach the screen;
+the terminal must be handed back in the mode it was lent in; the provider must
+be given the window the person is looking at, and must follow it when it is
+resized; and what Switchyard says must be said to a terminal in its own mode,
+checked down both endings.
+
+Mutation: 16 mutants, no survivors.
+
+### Two things the mutants caught that I had got wrong
+
+Both were silent no-ops in my own edits, and both would have shipped looking
+fine.
+
+**The deferred messages were never deferred.** The edit that was supposed to
+turn `print_func(...)` into `closing_message = ...` did not match after an
+earlier reindentation, so it did nothing: `closing_message` was dead, and both
+messages were still printed into the raw terminal. The mutation run showed a
+mutant that removed the deferred print surviving, which is only possible if
+nothing was using it.
+
+**The resize follow was never called.** `sync_window_size` was defined and
+wired nowhere. The resize test failed on the real behaviour, not on a bad
+assertion.
+
+There was a third, subtler one. The staircase test passed even against a mutant
+that printed into the raw terminal, because the harness inherited a suite's
+**block-buffered** stdout: every message sat in a buffer until long after the
+terminal had been handed back, so the mis-ordering was invisible. A real launch
+writes to a terminal and is line buffered. The harness now reconfigures itself
+to match, and the mutant dies. A test whose I/O discipline differs from
+production's can agree with production and still be measuring something else.

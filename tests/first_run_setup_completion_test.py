@@ -25,6 +25,10 @@ test built on another guess would prove nothing.
 from __future__ import annotations
 
 import inspect
+import os
+import pty
+import select
+import time
 import json
 import re
 import subprocess
@@ -1312,6 +1316,219 @@ def test_workflow_prepare_role_probes_with_its_runner_and_still_watches() -> Non
     check(seen.get("foreground_runner") is None,
           "prepare_role fires its setup windows unwatched: "
           f"foreground_runner={seen.get('foreground_runner')!r}")
+
+
+# --- the proxy has to be invisible -----------------------------------------
+#
+# Live UAT on test6 proved the watched path is finally active -- the window
+# title read "Switchyard setup (temporary): claude first run" -- and showed the
+# next defect in the same screenshot: raw `^[[...` drawn into the theme menu.
+#
+# A pty proxy that leaves the outer terminal in canonical mode with echo on is
+# not a proxy, it is a second voice on the same screen. Claude asks the
+# terminal questions (primary device attributes, the kitty keyboard protocol);
+# the terminal answers on Switchyard's stdin; and the line discipline echoes
+# those answers onto the screen. Canonical mode also withholds each keystroke
+# until Enter, so the arrow keys the menu is driven with never arrive.
+
+
+def drive_through_a_real_terminal(
+    script: str, *, size=(40, 100), resize_to=None, seconds=8.0, quiet=True
+):
+    """Run a stub CLI behind the watched session, in front of a terminal that
+    answers queries the way a real one does.
+
+    Returns everything that reached the screen, plus whether the terminal was
+    handed back in the mode it was lent in.
+    """
+    import fcntl
+    import struct as _struct
+    import termios
+
+    with tempfile.TemporaryDirectory(prefix="syrd221-proxy.") as tmp:
+        stub = Path(tmp) / "stub-cli"
+        stub.write_text(script)
+        stub.chmod(0o755)
+
+        pid, fd = pty.fork()
+        if pid == 0:                                    # the Switchyard side
+            try:
+                # A real launch writes to a terminal, so its stdout is line
+                # buffered and every message lands the moment it is printed.
+                # This harness inherits a suite's block-buffered stdout, which
+                # would hold each line until long after the terminal has been
+                # handed back -- hiding exactly the mis-ordering under test.
+                sys.stdout.reconfigure(line_buffering=True)
+                before = termios.tcgetattr(0)
+                team_launcher.run_provider_first_run_session(
+                    cli="claude",
+                    args=[str(stub)],
+                    kwargs={"cwd": tmp},
+                    is_complete=lambda: False,
+                    watching="a stub provider",
+                    input_fd=0,
+                    timeout_seconds=seconds,
+                    print_func=(lambda _message: None) if quiet else print,
+                )
+                after = termios.tcgetattr(0)
+                sys.stdout.write(f"\r\nRESTORED={before == after}\r\n")
+                sys.stdout.flush()
+            except BaseException as exc:                # pragma: no cover
+                sys.stdout.write(f"\r\nPROBEFAIL={type(exc).__name__}:{exc}\r\n")
+                sys.stdout.flush()
+            os._exit(0)
+
+        # the terminal's side: give it a real window, and answer what it asks
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, _struct.pack("HHHH", size[0], size[1], 0, 0))
+        captured = b""
+        deadline = time.time() + seconds + 12
+        while time.time() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.4)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            captured += chunk
+            if b"\x1b[c" in chunk:
+                os.write(fd, b"\x1b[?62;1;4c")         # what a terminal replies
+                if resize_to is not None:
+                    # Somebody drags the window while setup is up.
+                    fcntl.ioctl(
+                        fd, termios.TIOCSWINSZ,
+                        _struct.pack("HHHH", resize_to[0], resize_to[1], 0, 0),
+                    )
+                    resize_to = None
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+    return captured.decode("utf-8", "replace")
+
+
+#: A full-screen CLI, in the order a real one does it: report the window it was
+#: given, take its own terminal the way such an app does, then ask the terminal
+#: a question. The order matters -- an app that queried before configuring its
+#: own pty would be testing that pty's echo rather than the proxy's.
+ASKS_THE_TERMINAL = (
+    "#!/bin/sh\n"
+    "stty size\n"
+    "stty raw -echo\n"
+    "printf '\\033[c'\n"
+    "sleep 2\n"
+)
+
+
+def test_the_proxy_does_not_draw_the_terminals_replies_on_the_screen() -> None:
+    """The reported corruption, as a test.
+
+    Without raw mode the terminal's answer to the CLI's own question is echoed
+    back by the line discipline and rendered as `^[[?62;1;4c` in the middle of
+    whatever the provider is drawing.
+    """
+    screen = drive_through_a_real_terminal(ASKS_THE_TERMINAL)
+    check("PROBEFAIL" not in screen, f"the probe never ran: {screen[:200]!r}")
+    echoed = re.findall(r"\^\[[\[\]][0-9;?>]*[A-Za-z~]?", screen)
+    check(not echoed,
+          f"the terminal's replies were echoed onto the screen: {echoed[:6]}")
+
+
+def test_the_proxy_gives_the_terminal_back_as_it_found_it() -> None:
+    """Leaving somebody's terminal raw is worse than anything this fixed."""
+    screen = drive_through_a_real_terminal(ASKS_THE_TERMINAL)
+    check("RESTORED=True" in screen,
+          f"the terminal was not restored to the mode it was lent in: {screen[-200:]!r}")
+
+
+def test_the_provider_is_given_the_window_the_person_is_looking_at() -> None:
+    """A pty opened cold is 80x24 whatever the window is.
+
+    A full-screen CLI then lays itself out for a terminal nobody is looking at,
+    which on the theme menu wraps the option list into the preview below it.
+    """
+    screen = drive_through_a_real_terminal(ASKS_THE_TERMINAL, size=(40, 100))
+    check("PROBEFAIL" not in screen, f"the probe never ran: {screen[:200]!r}")
+    check("40 100" in screen,
+          f"the provider was given a window nobody is looking at: {screen[-300:]!r}")
+
+
+REPORTS_ITS_WINDOW_TWICE = (
+    "#!/bin/sh\n"
+    "stty size\n"
+    "stty raw -echo\n"
+    "printf '\\033[c'\n"
+    "sleep 3\n"
+    "stty size\n"
+    "sleep 1\n"
+)
+
+
+def test_the_provider_follows_the_window_when_it_is_resized() -> None:
+    """A window dragged mid-setup must not leave the CLI drawing to the old one."""
+    screen = drive_through_a_real_terminal(
+        REPORTS_ITS_WINDOW_TWICE, size=(40, 100), resize_to=(50, 120), seconds=9.0
+    )
+    check("PROBEFAIL" not in screen, f"the probe never ran: {screen[:200]!r}")
+    check("40 100" in screen,
+          f"the provider did not start at the window it was given: {screen[:200]!r}")
+    check("50 120" in screen,
+          f"the provider never saw the window being resized: {screen[-300:]!r}")
+
+
+#: A provider sitting on an unanswered choice, so the step runs out of time and
+#: Switchyard has something to say at the end of it.
+KEEPS_A_QUESTION_UP = (
+    "#!/bin/sh\n"
+    "stty raw -echo\n"
+    "printf '\\342\\235\\257 yes\\r\\n  no\\r\\n'\n"
+    "sleep 20\n"
+)
+
+
+def test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode() -> None:
+    """A line printed into a raw terminal has no carriage return of its own.
+
+    It climbs the screen in a staircase, over whatever the provider drew -- so
+    the message explaining what went wrong arrives looking like more of the
+    corruption it is trying to explain.
+    """
+    screen = drive_through_a_real_terminal(KEEPS_A_QUESTION_UP, seconds=5.0, quiet=False)
+    check("PROBEFAIL" not in screen, f"the probe never ran: {screen[:200]!r}")
+    at = screen.find("gave up waiting")
+    check(at != -1, f"the step never said it had run out of time: {screen[-300:]!r}")
+    ends = screen.find("\n", at)
+    check(ends != -1, "the message never ended a line")
+    check(screen[ends - 1] == "\r",
+          "the message was printed into a raw terminal, so it staircases across "
+          f"whatever the provider drew: {screen[at:ends + 1]!r}")
+
+
+#: A provider that has finished and gone back to its ordinary prompt, so the
+#: step ends on the screen rather than on the clock -- the other thing
+#: Switchyard has to say, down the other branch.
+SITS_AT_ITS_PROMPT = (
+    "#!/bin/sh\n"
+    "stty raw -echo\n"
+    "printf 'ready\\r\\n'\n"
+    "sleep 20\n"
+)
+
+
+def test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too() -> None:
+    """Both endings say something, so both have to say it to a sane terminal."""
+    screen = drive_through_a_real_terminal(SITS_AT_ITS_PROMPT, seconds=14.0, quiet=False)
+    check("PROBEFAIL" not in screen, f"the probe never ran: {screen[:200]!r}")
+    at = screen.find("ordinary prompt")
+    check(at != -1,
+          f"the step never noticed the provider was done: {screen[-300:]!r}")
+    ends = screen.find("\n", at)
+    check(ends != -1, "the message never ended a line")
+    check(screen[ends - 1] == "\r",
+          "the message was printed into a raw terminal, so it staircases across "
+          f"whatever the provider drew: {screen[at:ends + 1]!r}")
 
 
 def main() -> int:

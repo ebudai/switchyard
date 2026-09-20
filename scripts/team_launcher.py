@@ -13917,6 +13917,21 @@ SETUP_PURPOSE_SIGN_IN = "sign-in"
 SETUP_PURPOSE_FOLDER_TRUST = "folder trust"
 #: What did not happen, per step, so giving up names the answer that is still
 #: outstanding instead of only the clock. Keyed by the purpose above.
+SETUP_STEP_DONE_AT_PROMPT = {
+    SETUP_PURPOSE_FIRST_RUN: (
+        "{cli} has finished its first run and is at its ordinary prompt; closing it and "
+        "carrying on. You do not have to exit anything."
+    ),
+    SETUP_PURPOSE_SIGN_IN: (
+        "{cli} is signed in and at its ordinary prompt; closing it and carrying on. You "
+        "do not have to exit anything."
+    ),
+    SETUP_PURPOSE_FOLDER_TRUST: (
+        "{cli} is at its ordinary prompt with nothing left to ask about this directory, "
+        "so this step is done; closing it and carrying on. You do not have to exit "
+        "anything."
+    ),
+}
 SETUP_STEP_STALLED_DETAIL = {
     SETUP_PURPOSE_FIRST_RUN: (
         "{cli} did not record its first run, so it was still asking for something when "
@@ -14207,6 +14222,21 @@ class _SetupWindowNarrator:
         )
         self._last = now
 
+    def done_at_prompt(self) -> str:
+        """What to say when the screen, not the state file, is what finished it.
+
+        A step can be over without the CLI recording anything Switchyard reads:
+        the person answered, the provider went back to its ordinary prompt, and
+        nothing more is coming. Saying "finished its first run" for a folder
+        trust step would be a guess dressed as a fact, so each step says what
+        it actually observed.
+        """
+        return "switchyard: " + SETUP_STEP_DONE_AT_PROMPT.get(
+            self._purpose,
+            "{cli} is at its ordinary prompt, so this step is done; closing it and "
+            "carrying on. You do not have to exit anything.",
+        ).format(cli=self._cli)
+
     def stalled(self, *, watching: str, timeout_seconds: float) -> str:
         """What to say when the deadline passed with the answer still missing."""
         detail = SETUP_STEP_STALLED_DETAIL.get(
@@ -14215,7 +14245,9 @@ class _SetupWindowNarrator:
         return (
             f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
             f"{detail} The CLI was ended and the run continues; the step and how to "
-            "resume it are reported below."
+            "resume it are reported below. If the CLI showed no prompt at all, it "
+            "already considers this done and Switchyard is reading the wrong state -- "
+            "say so, because that is a defect here and not something to answer again."
         )
 
     def closed(self) -> None:
@@ -14301,10 +14333,7 @@ def run_provider_first_run_session(
                 and quiet_for >= quiet_seconds
                 and not provider_is_waiting_for_an_answer(recent)
             ):
-                print_func(
-                    f"switchyard: {cli} has finished its first run and is at its ordinary "
-                    "prompt; closing it and carrying on. You do not have to exit anything."
-                )
+                print_func(window.done_at_prompt())
                 ended_by_us = True
                 break
             if monotonic() >= deadline:
@@ -14356,8 +14385,10 @@ def _run_owner_cli_until(
     watching: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     #: How the live step is started, resolved when it runs rather than bound
-    #: when this was defined, so a caller can watch it.
-    popen: Callable[..., Any] | None = None,
+    #: when this was defined, so a caller can watch it. A session rather than a
+    #: bare process, because a step that cannot be read cannot be ended by what
+    #: is on its screen -- which is the whole of this step's completion.
+    session_factory: Callable[..., Any] | None = None,
     #: The adjustment the desktop branch makes to every command it runs. The
     #: bounded path starts the process itself, so it has to make the same one
     #: or a tenant with a desktop policy would lose it (SYRD-191).
@@ -14373,9 +14404,10 @@ def _run_owner_cli_until(
     #: falling back to the command keeps a caller that does not from having to
     #: invent one.
     cli: str = "",
-    #: Where the window's name is written. None means the real terminal, which
-    #: is the live path; a test passes its own to read back what was claimed.
-    title_write: Callable[[str], Any] | None = None,
+    #: Where the window's name and the CLI's own output are written. None
+    #: means the real terminal, which is the live path; a test passes its own
+    #: to read back what the window claimed.
+    output_write: Callable[[str], Any] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> bool:
     """Run one interactive step and take the terminal back when it is done.
@@ -14385,6 +14417,14 @@ def _run_owner_cli_until(
     worktree -- is not a first run, it is a chore, so the step is bounded here
     instead: the state the step exists to record is watched, and the moment it
     appears the CLI is ended and the phase moves on.
+
+    "Done" is three things, not two, and the third is the one that was
+    missing. The state the step records is one; the deadline is another; and a
+    provider sitting at its ordinary prompt with nothing left to ask is the
+    third. Without it this step could only wait, and a fresh tenant's UAT
+    reported exactly what that looks like: the person answered everything, the
+    CLI went back to its prompt, and Switchyard held a standalone window open
+    for ten more minutes (SYRD-221).
 
     A runner may be injected, in which case the step is simply run and its
     completion read back afterwards: that is the shape tests drive, and it is
@@ -14399,55 +14439,31 @@ def _run_owner_cli_until(
         return is_complete()
     if is_complete():
         return True
-    process = (popen or subprocess.Popen)(args, **kwargs)
-    deadline = monotonic() + timeout_seconds
-    # The same narration the first-run step got, because this is the same
-    # window to the person in front of it -- and there are more of these: one
-    # sign-in per provider, one folder trust per worktree. Naming only the
-    # first of them is how a launch that is working still reads as one that
-    # stopped in a standalone CLI (SYRD-221).
-    window = _SetupWindowNarrator(
+    # Watched on a pty, exactly like the provider's own first run -- because
+    # the failure this step kept producing is the one that runner was built to
+    # end. A bare `Popen` inheriting stdio cannot see the screen, so the ONLY
+    # way out was the state file or the deadline: when Claude answered the
+    # question and went back to its ordinary prompt without recording anything
+    # Switchyard reads, the step sat there for the full ten minutes with the
+    # person watching a standalone CLI that was, as far as they could tell,
+    # finished. Live UAT reported precisely that on a brand-new tenant
+    # (SYRD-221). Reading the screen gives this step the same third answer the
+    # first run has: nothing left to ask, so it is done.
+    return run_provider_first_run_session(
         cli=cli or (Path(command[0]).name if command else "the provider"),
-        purpose=purpose,
-        deadline=deadline,
+        args=args,
+        kwargs=kwargs,
+        is_complete=is_complete,
+        watching=watching,
+        session_factory=session_factory,
+        input_fd=sys.stdin.fileno() if sys.stdin and sys.stdin.isatty() else None,
+        output_write=output_write,
+        sleep=sleep,
         monotonic=monotonic,
-        write=title_write,
+        timeout_seconds=timeout_seconds,
+        purpose=purpose,
+        print_func=print_func,
     )
-    window.opened()
-    try:
-        while True:
-            if process.poll() is not None:
-                # The person closed it themselves, which is always allowed.
-                return is_complete()
-            if is_complete():
-                # Recorded. Give the CLI a moment to finish writing before the
-                # terminal is taken back from it.
-                sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
-                break
-            if monotonic() >= deadline:
-                # Loud, and specific about what did not happen. A step that
-                # cannot complete is a disagreement between this code and the
-                # CLI about where the answer is kept, and silence about it is
-                # what made one look like a hang.
-                print_func(
-                    window.stalled(watching=watching, timeout_seconds=timeout_seconds)
-                    + " If the CLI showed no prompt at all, it already considers this"
-                    " done and Switchyard is reading the wrong state -- say so, because"
-                    " that is a defect here and not something to answer again."
-                )
-                break
-            window.tick()
-            sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except Exception:
-                process.kill()
-        window.closed()
-    return is_complete()
-
 
 def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> bool:
     if proc.returncode != 0:

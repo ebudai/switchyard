@@ -511,11 +511,23 @@ def test_a_step_whose_provider_never_finishes_is_given_up_on_and_reported() -> N
         def poll(self):
             return None
 
+        def read(self) -> str:
+            return ""
+
+        def relay_from(self, source_fd) -> None:
+            return None
+
+        def write(self, text: str) -> None:
+            return None
+
         def terminate(self) -> None:
             self.terminated = True
 
         def wait(self, timeout=None):
             return -15
+
+        def close(self) -> None:
+            return None
 
     printed: list[str] = []
     ticks = iter(range(0, 10_000))
@@ -525,7 +537,7 @@ def test_a_step_whose_provider_never_finishes_is_given_up_on_and_reported() -> N
             command=["claude", "auth", "login"],
             is_complete=lambda: False,
             watching="claude to record a signed-in account",
-            runner=None, popen=NeverFinishes,
+            runner=None, session_factory=NeverFinishes,
             sleep=lambda _s: None, monotonic=lambda: next(ticks),
             timeout_seconds=5.0, print_func=printed.append,
         )
@@ -548,11 +560,23 @@ def test_a_step_already_recorded_does_not_start_the_provider_again() -> None:
         def poll(self):
             return 0
 
+        def read(self) -> str:
+            return ""
+
+        def relay_from(self, source_fd) -> None:
+            return None
+
+        def write(self, text: str) -> None:
+            return None
+
         def terminate(self) -> None:
             return None
 
         def wait(self, timeout=None):
             return 0
+
+        def close(self) -> None:
+            return None
 
     with tempfile.TemporaryDirectory(prefix="syrd221-done.") as tmp:
         finished = team_launcher._run_owner_cli_until(
@@ -560,7 +584,7 @@ def test_a_step_already_recorded_does_not_start_the_provider_again() -> None:
             command=["claude", "auth", "login"],
             is_complete=lambda: True,
             watching="claude to record a signed-in account",
-            runner=None, popen=ShouldNotStart,
+            runner=None, session_factory=ShouldNotStart,
             sleep=lambda _s: None, monotonic=lambda: 0.0,
             timeout_seconds=5.0, print_func=lambda _m: None,
         )
@@ -648,8 +672,13 @@ def test_the_countdown_reads_as_time_a_person_recognises() -> None:
 # what "stopped in a standalone Claude window" describes.
 
 
-class StubProcess:
-    """A CLI that sits there until it is ended, like the real ones do."""
+class SilentSession:
+    """A CLI that sits there drawing nothing until it is ended.
+
+    Drawing nothing is the point: a step can end on a quiet screen with
+    nothing left to ask, so a double that stays blank exercises the other
+    endings -- the recorded state, and the deadline.
+    """
 
     def __init__(self) -> None:
         self._returncode: int | None = None
@@ -658,6 +687,15 @@ class StubProcess:
     def poll(self):
         return self._returncode
 
+    def read(self) -> str:
+        return ""
+
+    def relay_from(self, source_fd) -> None:
+        return None
+
+    def write(self, text: str) -> None:
+        return None
+
     def terminate(self) -> None:
         self.terminated = True
         self._returncode = -15
@@ -665,8 +703,8 @@ class StubProcess:
     def wait(self, timeout=None):
         return self._returncode
 
-    def kill(self) -> None:
-        self._returncode = -9
+    def close(self) -> None:
+        return None
 
 
 def run_bounded_step(*, is_complete, purpose, cli="claude", timeout=60.0):
@@ -681,13 +719,13 @@ def run_bounded_step(*, is_complete, purpose, cli="claude", timeout=60.0):
         command=[cli],
         is_complete=is_complete,
         watching=f"{cli} to record something for somebody",
-        popen=lambda args, **kwargs: StubProcess(),
+        session_factory=lambda args, **kwargs: SilentSession(),
         sleep=lambda _seconds: None,
         monotonic=lambda: next(ticks),
         timeout_seconds=timeout,
         purpose=purpose,
         cli=cli,
-        title_write=titles.append,
+        output_write=titles.append,
         print_func=printed.append,
     )
     return finished, printed, "".join(titles)
@@ -851,6 +889,129 @@ def test_the_phase_tells_each_bounded_step_which_window_it_is() -> None:
     purposes = {call["purpose"] for call in calls}
     check(len(purposes) > 1,
           f"every bounded step claims the same window name: {purposes}")
+
+
+# --- the third answer: the screen, when the state file says nothing ---------
+#
+# Live UAT on a brand-new `test4` tenant: the User answered everything, Claude
+# went back to its ordinary prompt, and Switchyard held that standalone window
+# open. It "did not detect completion, close the temporary window, or continue
+# to the full multi-role presentation", and the session showed Auto mode --
+# so it was a setup window, not a presentation pane.
+#
+# The cause was structural. `_run_owner_cli_until` started the CLI with a bare
+# `Popen` inheriting stdio, so it could not see the screen at all: its only
+# ways out were the state file and the deadline. The provider's own first run
+# had a third way out -- gone quiet, asking nothing, therefore done -- and
+# these steps did not. They do now, through the same watched session.
+
+
+def run_bounded_step_over(screen_name: str, *, is_complete, purpose, timeout=60.0):
+    """Drive the real bounded runner over a recorded screen."""
+    ticks = iter(range(0, 10_000))
+    printed: list[str] = []
+    out: list[str] = []
+    finished = team_launcher._run_owner_cli_until(
+        owner_user=team_launcher.current_user_name(),
+        owner_home=Path("/tmp"),
+        cwd=Path("/tmp"),
+        command=["claude"],
+        is_complete=is_complete,
+        watching="claude to record trust for /tmp",
+        session_factory=factory_for(screen_name),
+        sleep=lambda _seconds: None,
+        monotonic=lambda: next(ticks),
+        timeout_seconds=timeout,
+        purpose=purpose,
+        cli="claude",
+        output_write=out.append,
+        print_func=printed.append,
+    )
+    return finished, printed, "".join(out)
+
+
+def test_a_bounded_step_ends_when_the_cli_goes_back_to_its_prompt() -> None:
+    """The UAT, as a test: nothing recorded, and the window still closes.
+
+    `is_complete` never fires -- that is the reported failure exactly, a step
+    watching for state the CLI is not going to write. What must not happen is
+    ten minutes of a standalone window; what must happen is that the run goes
+    on to the presentation.
+    """
+    finished, printed, _written = run_bounded_step_over(
+        "ordinary-prompt-auto-mode",
+        is_complete=lambda: False,
+        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+        timeout=600.0,
+    )
+    check(finished is False,
+          "a step whose state was never recorded reported itself complete")
+    check(not any("gave up waiting" in m for m in printed),
+          f"the step burned its whole deadline instead of reading the screen: {printed}")
+    done = [m for m in printed if "ordinary prompt" in m]
+    check(done, f"nothing said the CLI had nothing left to ask: {printed}")
+    check("carrying on" in done[0],
+          f"the step did not say it was continuing: {done[0]}")
+    check("do not have to exit" in done[0],
+          f"the step still leaves the User wondering about /exit: {done[0]}")
+
+
+def test_a_step_says_what_it_observed_rather_than_what_it_assumed() -> None:
+    """A folder-trust step has no business reporting a finished first run."""
+    _finished, printed, _written = run_bounded_step_over(
+        "ordinary-prompt-auto-mode",
+        is_complete=lambda: False,
+        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+        timeout=600.0,
+    )
+    done = [m for m in printed if "ordinary prompt" in m]
+    check(done, "the trust step said nothing when it saw the prompt")
+    check("first run" not in done[0],
+          f"a folder-trust step claims to have finished a first run: {done[0]}")
+    check("directory" in done[0],
+          f"the message does not say what was being waited on: {done[0]}")
+    # And the first run still says its own thing, rather than borrowing this one.
+    _f, first_printed, _w = run_session(
+        "ordinary-prompt", is_complete=lambda: False, quiet=0.0, timeout=600.0
+    )
+    first_done = [m for m in first_printed if "ordinary prompt" in m]
+    check(first_done, "the first-run step no longer reports reaching the prompt")
+    check("first run" in first_done[0],
+          f"the first-run step stopped naming its own step: {first_done[0]}")
+
+
+def test_a_question_still_holds_the_window_open() -> None:
+    """The screen is evidence both ways, and must not become an escape hatch.
+
+    If an unanswered menu counted as "nothing left to ask", this change would
+    reintroduce the original defect -- a window closing under somebody who is
+    still reading it.
+    """
+    finished, printed, _written = run_bounded_step_over(
+        "folder-trust",
+        is_complete=lambda: False,
+        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+        timeout=40.0,
+    )
+    check(finished is False, "an unanswered trust dialog was reported as complete")
+    check(not any("ordinary prompt" in m for m in printed),
+          f"the window closed with the trust question still on it: {printed}")
+    check(any("gave up waiting" in m for m in printed),
+          f"nothing was said when the step ran out of time: {printed}")
+
+
+def test_a_step_that_cannot_be_watched_is_still_bounded() -> None:
+    """A caller supplying a bare process gets no screen, and must not hang."""
+    finished, printed, _written = run_bounded_step(
+        is_complete=lambda: False,
+        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+        timeout=30.0,
+    )
+    check(finished is False, "an unwatchable step reported itself complete")
+    check(any("gave up waiting" in m for m in printed),
+          f"an unwatchable step neither completed nor timed out: {printed}")
+    check(not any("ordinary prompt" in m for m in printed),
+          f"a step with no screen claimed to have read one: {printed}")
 
 
 def main() -> int:

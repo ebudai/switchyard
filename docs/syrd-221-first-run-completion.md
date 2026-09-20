@@ -389,3 +389,122 @@ brand-new tenant still requires somebody to sit at that window and finish it,
 and folder trust is still asked once per worktree. If the acceptance criterion
 is a fresh tenant reaching its presentation with no human step at all, that is a
 different change and is not in this layer.
+
+## Reopened a third time: a step that could not see the screen
+
+The brand-new `test4` tenant failed, and its report is precise enough to be a
+diagnosis on its own: after the User completed the theme and sign-in flow
+without `/exit`, Switchyard "advanced only to another standalone Claude Code
+session and left it sitting indefinitely at the ordinary prompt. It did not
+detect completion, close the temporary window, or continue to the full
+multi-role presentation." The session showed Auto mode, so it was a setup
+window and not a presentation pane.
+
+Two of those facts together are the whole thing. The CLI was **at its ordinary
+prompt** — the person had finished answering. Switchyard **did not notice**.
+
+### Why it could not notice
+
+`_run_owner_cli_until` started the CLI with a bare `subprocess.Popen`
+inheriting stdio. It never read the screen. So it had exactly two ways to end a
+step: the state file it watches, or the 600-second deadline.
+
+The provider's own first run has a **third**, and has had since SYRD-211 — gone
+quiet, asking nothing, therefore done. That third answer exists precisely
+because live UAT had already shown what its absence looks like: "the questions
+were answered, Claude sat at its prompt, and Switchyard waited ten minutes for
+a key that is not written until exit."
+
+The sign-in and folder-trust steps never got it. And `_first_run_trust_command`
+is `list(role.cli)` — a bare `claude` — which is also why the window showed Auto
+mode rather than the role's bypass-permissions runtime.
+
+The code's own give-up message had anticipated this exact case:
+
+> If the CLI showed no prompt at all, it already considers this done and
+> Switchyard is reading the wrong state -- say so, because that is a defect
+> here and not something to answer again.
+
+The User's report is that sentence coming true. Rather than leave the User to
+notice it and report it, the step now notices it itself.
+
+### Reproduced, then re-measured
+
+Driving `_run_owner_cli_until` as the trust step calls it, against the real
+`claude`, in a directory it already trusts so it opens straight at the ordinary
+prompt, with the predicate returning False throughout — the UAT's "did not
+detect completion":
+
+```
+elapsed=25.5s of a 25s budget        <- burned the entire deadline
+```
+
+with `⏵⏵ auto mode on` on screen, the same thing the UAT saw. After the change,
+same probe, same directory, predicate still always False:
+
+```
+elapsed=7.5s of a 90s budget
+switchyard: claude is at its ordinary prompt with nothing left to ask about
+this directory, so this step is done; closing it and carrying on. You do not
+have to exit anything.
+```
+
+Ten minutes of a standalone window becomes seven seconds and a sentence, and
+the run goes on to the presentation.
+
+### What was ruled out on the way
+
+Recorded so the next pass does not re-tread them:
+
+- `claude auth status --json` and `claude auth login` both exist and work on
+  v2.1.278; `auth status --json` reports `loggedIn: true`, so a signed-in
+  account correctly skips the sign-in step. The login step was not the culprit.
+- The real ordinary prompt is **not** misread as a question by the widened
+  structural detector. Checked against the live screen: `False`. The widening
+  from the first fix is not the cause.
+- The ordinary prompt **does** go quiet — measured gaps of 9.9s, 8.0s and 27.1s
+  against a 6s threshold. Nothing was wrong with the detection; there was no
+  watcher on these steps to do it.
+- Answering the trust dialog "Yes" records `hasTrustDialogAccepted` where
+  Switchyard looks, and the step then ends in about 1.4s. The happy path was
+  never broken. The stuck path is when the CLI does not write what the step
+  watches for.
+
+### One runner
+
+`_run_owner_cli_until` now runs its step through the same watched pty session as
+the first run, so all three foreground steps share one runner and one narrator.
+A step ends when its state is recorded, **or** when the provider has gone quiet
+at a screen asking nothing, or at the deadline.
+
+The "nothing left to ask" message is per step, for the same reason the stalled
+message is: a folder-trust step reporting "finished its first run" would be a
+guess dressed as a fact.
+
+Removing the duplicate loop removed the `popen` seam with it. That seam existed
+only for tests — production always built a pty session — so every test double
+now implements the session the shipped path actually drives, rather than a
+narrower thing nothing in production uses.
+
+### Verification
+
+`tests/first_run_setup_completion_test.py`, 139 checks. The central case is the
+UAT as a test: the predicate never fires, and the window must still close
+without burning the deadline. Its screen is a fresh recording of the real CLI at
+the Auto-mode prompt — `tests/fixtures/claude-first-run/ordinary-prompt-auto-mode.txt`,
+the reported screen itself.
+
+Guarded in both directions, because the screen is evidence either way: an
+unanswered trust dialog must still hold the window open, or this change would
+reintroduce the original defect of a window closing under somebody still reading
+it. And a step whose screen cannot be read must still be bounded rather than
+hang.
+
+Mutation: 16 mutants, no survivors — among them the bounded step going back to
+not reading the screen, a quiet screen never ending a step, an unanswered
+question no longer holding the window, and every step claiming it finished a
+first run.
+
+One mutant survived a first pass: the blind-session adapter inventing output.
+It could not be killed because that adapter was reachable only from tests, and
+the answer was to delete it rather than to assert around it.

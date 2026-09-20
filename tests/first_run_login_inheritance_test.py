@@ -575,7 +575,24 @@ def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> Non
     ended = {"terminated": False}
 
     class NeverFinishes:
+        """A CLI that draws nothing and never exits.
+
+        Drawing nothing matters: the step can also end on a screen that has
+        gone quiet with nothing left to ask, and this double is here to prove
+        the OTHER ending -- a disagreement between this code and a CLI must
+        never look like a hang (SYRD-221).
+        """
+
         def poll(self):
+            return None
+
+        def read(self):
+            return ""
+
+        def relay_from(self, source_fd):
+            return None
+
+        def write(self, text):
             return None
 
         def terminate(self):
@@ -583,6 +600,9 @@ def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> Non
 
         def wait(self, timeout=None):
             return 0
+
+        def close(self):
+            return None
 
         def kill(self):
             ended["terminated"] = True
@@ -596,7 +616,7 @@ def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> Non
         command=["claude"],
         is_complete=lambda: False,
         watching="claude to record trust for /home/otto-agent/worktrees/designer",
-        popen=lambda *args, **kwargs: NeverFinishes(),
+        session_factory=lambda *args, **kwargs: NeverFinishes(),
         sleep=lambda seconds: clock.__setitem__("now", clock["now"] + 30),
         monotonic=lambda: clock["now"],
         timeout_seconds=60,

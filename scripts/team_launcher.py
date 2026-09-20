@@ -13905,6 +13905,16 @@ def _visible_text(raw: str) -> str:
 #: ordinary prompt -- so a title set here survives exactly the window the User
 #: needs to be able to tell apart from the presentation (SYRD-221).
 SETUP_WINDOW_TITLE = "Switchyard setup (temporary): {cli} first run"
+#: What the window says it is waiting for while the provider owns the screen.
+#: The title is the only channel available: this CLI draws inline rather than
+#: on the alternate screen, so anything written to stdout lands in the middle
+#: of what it is drawing (SYRD-221).
+SETUP_WINDOW_WAITING_TITLE = (
+    "Switchyard setup: answer {cli}'s prompts to the end -- {remaining} left"
+)
+#: How often that countdown is refreshed. Often enough that a person glancing
+#: at the title learns something, rarely enough to be no part of the drawing.
+SETUP_WINDOW_TITLE_INTERVAL_SECONDS = 5.0
 #: And what it goes back to afterwards, so a finished setup window does not
 #: keep claiming to be one.
 SETUP_WINDOW_TITLE_DONE = "Switchyard"
@@ -14111,6 +14121,14 @@ def _run_provider_first_run(
     )
 
 
+def _countdown(seconds: float) -> str:
+    """A remaining time somebody can read at a glance."""
+    whole = max(0, int(seconds))
+    if whole >= 60:
+        return f"{whole // 60}m{whole % 60:02d}s"
+    return f"{whole}s"
+
+
 def run_provider_first_run_session(
     *,
     cli: str,
@@ -14154,6 +14172,7 @@ def run_provider_first_run_session(
     deadline = monotonic() + timeout_seconds
     recent = ""
     last_output = monotonic()
+    last_title = monotonic()
     ended_by_us = False
     try:
         while True:
@@ -14192,13 +14211,33 @@ def run_provider_first_run_session(
                 ended_by_us = True
                 break
             if monotonic() >= deadline:
+                # Specific about what did not happen, because "gave up
+                # waiting" on its own reads as a Switchyard fault when the
+                # usual cause is a sign-in nobody finished. The resumable
+                # command follows in the report below, with the account named.
                 print_func(
                     f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
-                    "The CLI was ended and the run continues; the step is reported as "
-                    "outstanding below."
+                    f"{cli} did not record its first run, so it was still asking for "
+                    "something when time ran out -- most often the sign-in that follows "
+                    "the theme question. The CLI was ended and the run continues; the "
+                    "step and how to resume it are reported below."
                 )
                 ended_by_us = True
                 break
+            # The window says what it is waiting for, continuously, because a
+            # silent one is indistinguishable from a stopped one -- which is
+            # exactly how this step was reported: "stopped in a standalone
+            # Claude window". It had not stopped; it was waiting for a sign-in
+            # nobody had been told was still outstanding (SYRD-221).
+            now = monotonic()
+            if now - last_title >= SETUP_WINDOW_TITLE_INTERVAL_SECONDS:
+                set_terminal_title(
+                    SETUP_WINDOW_WAITING_TITLE.format(
+                        cli=cli, remaining=_countdown(deadline - now)
+                    ),
+                    write=output_write,
+                )
+                last_title = now
             sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
         if ended_by_us:
             exit_input = PROVIDER_SESSION_EXIT_INPUT.get(cli, "")
@@ -14563,14 +14602,21 @@ def _claude_account_setup_complete(owner_home: Path) -> bool:
     Credentials and setup are separate: the live testing tenant held a valid
     `.claude/.credentials.json` beside a `.claude.json` carrying an
     `oauthAccount` and neither `hasCompletedOnboarding` nor a `theme`, and every
-    pane opened the theme flow instead of a prompt.
+    pane opened the theme flow instead of a prompt (SYRD-191).
+
+    Completion is now `hasCompletedOnboarding` alone; a `theme` is
+    deliberately no longer accepted as a second signal. Measured on Claude Code v2.1.270: answering
+    the theme prompt writes neither key, during the session or after it, and a
+    genuinely onboarded account carries no top-level `theme` at all. So the
+    fallback could never be the thing that reported success -- and had some
+    path written a theme mid-flow it would have reported success early, which
+    is the same class of defect as reading an unanswered menu as a finished
+    prompt. It cost nothing to keep and could only ever be wrong (SYRD-221).
     """
     config = _read_json_object(owner_home / ".claude.json")
     if not config:
         return False
-    if config.get("hasCompletedOnboarding") is True:
-        return True
-    return bool(str(config.get("theme") or "").strip())
+    return config.get("hasCompletedOnboarding") is True
 
 
 def _provider_account_setup_complete(cli: str, *, owner_home: Path) -> bool:

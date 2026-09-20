@@ -25,6 +25,7 @@ test built on another guess would prove nothing.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -565,6 +566,75 @@ def test_a_step_already_recorded_does_not_start_the_provider_again() -> None:
         )
     check(finished is True, "an already-recorded step was not reported complete")
     check(started == [], f"the provider was started for a step already done: {started}")
+
+
+def test_a_theme_alone_is_not_a_completed_first_run() -> None:
+    """Measured, not assumed: answering the theme records neither key.
+
+    Claude Code v2.1.270 writes no top-level `theme` when the theme prompt is
+    answered -- not during the session and not after it -- and a genuinely
+    onboarded account carries none either. Accepting one as proof of a finished
+    first run could therefore never be right, and had some path written one
+    mid-flow it would have reported success while the sign-in was still
+    outstanding: the same class of defect as reading an unanswered menu as a
+    finished prompt.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd221-theme.") as tmp:
+        home = Path(tmp)
+        home.joinpath(".claude.json").write_text(json.dumps({"theme": "dark"}))
+        check(team_launcher._provider_account_setup_complete("claude", owner_home=home) is False,
+              "a theme alone is being read as a completed first run")
+        home.joinpath(".claude.json").write_text(
+            json.dumps({"theme": "dark", "hasCompletedOnboarding": True}))
+        check(team_launcher._provider_account_setup_complete("claude", owner_home=home) is True,
+              "a recorded first run is not being recognised")
+        home.joinpath(".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True}))
+        check(team_launcher._provider_account_setup_complete("claude", owner_home=home) is True,
+              "the key a real onboarded account carries is not enough on its own")
+
+
+def test_the_window_says_what_it_is_waiting_for_while_it_waits() -> None:
+    """A silent window is indistinguishable from a stopped one.
+
+    That is not a turn of phrase: this step was reported twice as "stopped in a
+    standalone Claude window" when it had not stopped -- it was waiting for a
+    sign-in nobody had been told was still outstanding, and saying nothing for
+    up to ten minutes while it did.
+
+    The status goes in the title because the title is the only channel left:
+    this CLI draws inline rather than on the alternate screen, so anything
+    written to stdout lands in the middle of what it is drawing.
+    """
+    _finished, printed, written = run_session(
+        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=60.0
+    )
+    titles = [chunk for chunk in written.split("\033]0;") if chunk]
+    waiting = [t for t in titles if "answer" in t and "left" in t]
+    check(waiting, f"the window never said what it was waiting for: {titles[:4]}")
+    check(any("claude" in t for t in waiting),
+          f"the status does not name the provider being waited on: {waiting[:2]}")
+    # A countdown, so a person can tell waiting from hanging.
+    check(any(re.search(r"\d+m\d\ds left|\d+s left", t) for t in waiting),
+          f"the status carries no remaining time: {waiting[:2]}")
+    # And it keeps saying it, rather than saying it once and going quiet.
+    check(len(waiting) > 1, f"the status was published only once: {len(waiting)}")
+    # The giving-up message names what was outstanding, not just the clock.
+    gave_up = [m for m in printed if "gave up waiting" in m]
+    check(gave_up, f"nothing was said when the step ran out of time: {printed}")
+    check("did not record its first run" in gave_up[0],
+          f"the message does not say what was missing: {gave_up[0]}")
+    check("sign-in" in gave_up[0],
+          f"the message does not name the usual cause: {gave_up[0]}")
+    check("resume" in gave_up[0],
+          f"the message does not point at how to resume: {gave_up[0]}")
+
+
+def test_the_countdown_reads_as_time_a_person_recognises() -> None:
+    check(team_launcher._countdown(600) == "10m00s", team_launcher._countdown(600))
+    check(team_launcher._countdown(95) == "1m35s", team_launcher._countdown(95))
+    check(team_launcher._countdown(9) == "9s", team_launcher._countdown(9))
+    check(team_launcher._countdown(-3) == "0s",
+          "a step past its deadline shows negative time remaining")
 
 
 def main() -> int:

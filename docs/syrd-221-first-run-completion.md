@@ -157,3 +157,107 @@ No survivors. Four survived a first pass and each named a real gap rather than a
 missing assertion -- among them an assertion about naming the owner account that
 was being satisfied by the warning's prefix rather than by the resume sentence
 it was supposed to be about.
+
+## Reopened: the wait was still silent
+
+User acceptance on a freshly provisioned `test3` reported the same thing again:
+stopped in a standalone Claude window. It had, and the reason is that the fix
+above changed *which* window it stopped in rather than removing the stop.
+
+What was never measured the first time is what Claude does **after** the theme
+question is answered. Driving a fresh account on a pty and actually answering
+it:
+
+```
+[ 0.5s] Welcome to Claude Code v2.1.270 / Choose the text style...  onboarding=None theme=None
+[12.0s] >>> pressed Enter to accept the highlighted theme
+[12.5s] "...Select login method: ❯ Claude account with subscription"  onboarding=None theme=None
+final state: onboarding=None theme=None
+```
+
+Two things follow from that transcript.
+
+**The `theme` half of the completion check was dead.** `_claude_account_setup_complete`
+accepted either `hasCompletedOnboarding` or a non-empty `theme`. Answering the
+theme prompt writes **neither** -- not during the session, not after it exits.
+And a genuinely onboarded account on this host has no top-level `theme` key at
+all; it carries `hasCompletedOnboarding: true` and `lastOnboardingVersion`. So
+`theme` never fires for a real first run, and had some path written one
+mid-flow it would have reported success while the account was still half set up
+-- which is the original defect wearing a different hat. It is gone, and a test
+pins that a theme alone is not a completed first run.
+
+**Which means the step necessarily waits for a full interactive sign-in.**
+`hasCompletedOnboarding` is written at the end of the whole flow, sign-in
+included. Before this change the step printed its instruction, started Claude,
+and then said nothing at all for up to `FOREGROUND_COMPLETION_TIMEOUT_SECONDS`
+-- ten minutes -- before giving up.
+
+Ten silent minutes is precisely what this ticket forbids: setup must have "an
+explicit purpose and completion lifecycle", and where it cannot continue
+Switchyard must "keep the controlling command alive long enough to report the
+exact incomplete step and a resumable next action rather than silently leaving
+one unrelated window". Correctly recognising the question and then waiting in
+silence is indistinguishable, from the far side of the screen, from having hung
+-- and it lasts a hundred times longer than the six-second close it replaced.
+
+### Making the wait speak
+
+Claude draws inline, and it draws continuously, so anything Switchyard writes to
+that terminal is scribbled over by the next redraw. The terminal **title** is
+the one channel the CLI does not contend for -- measured in the section above,
+Claude claims a title only once it reaches its ordinary prompt, which is exactly
+the moment this wait ends.
+
+So the wait now republishes the title every five seconds with the time left:
+
+```
+Switchyard setup (temporary): claude first run
+Switchyard setup: answer claude's prompts to the end -- 9m32s left
+Switchyard setup: answer claude's prompts to the end -- 9m27s left
+...
+```
+
+It says what is wanted ("answer claude's prompts to the end"), and the countdown
+says the thing a static title cannot: that this is still running, and how long
+it will keep running. A window that is counting down is not a window that has
+hung. The countdown is written the way a person reads a clock -- `9m32s`, then
+`45s` near the end -- rather than as a raw number of seconds.
+
+Giving up used to say only that the clock had run out. It now names what was
+outstanding:
+
+> claude did not record its first run, so it was still asking for something when
+> time ran out -- most often the sign-in that follows the theme question. The
+> CLI was ended and the run continues; the step and how to resume it are
+> reported below.
+
+That is the "exact incomplete step" the ticket asks for, and it hands off to the
+resume instruction that was already there. The run then continues to the
+presentation rather than stopping, so the User ends up in front of Switchyard
+with a report, not alone in somebody else's CLI.
+
+### Verification of the reopened fix
+
+`tests/first_run_setup_completion_test.py`, now 79 checks, adds three cases: a
+theme alone is not a completed first run; the window says what it is waiting for
+while it waits, republishing as the countdown falls and ending with a give-up
+message that names the sign-in and a way to resume; and the countdown reads as
+time a person recognises.
+
+Driven against the **real** `claude` on a pty with a throwaway `HOME` and a
+shortened deadline, the titles the window actually claimed, in order:
+
+```
+Switchyard setup (temporary): claude first run
+Switchyard setup: answer claude's prompts to the end -- 16s left
+Switchyard setup: answer claude's prompts to the end -- 11s left
+Switchyard setup: answer claude's prompts to the end -- 6s left
+Switchyard setup: answer claude's prompts to the end -- 1s left
+Switchyard
+```
+
+Mutation coverage over the new behaviour: accepting a theme alone, never
+publishing the status, publishing it once and then going quiet, a countdown
+stuck at zero, and a give-up message that says only that the clock ran out. All
+five killed, no survivors.

@@ -13899,12 +13899,38 @@ def _visible_text(raw: str) -> str:
     return "".join(_ANSI_ESCAPE.sub("", raw).split()).casefold()
 
 
-#: What the window is called while a temporary first-run step owns the
-#: terminal. Measured rather than hoped: Claude sets no title of its own while
-#: its first-run screens are up -- it only claims one when it reaches its
-#: ordinary prompt -- so a title set here survives exactly the window the User
-#: needs to be able to tell apart from the presentation (SYRD-221).
-SETUP_WINDOW_TITLE = "Switchyard setup (temporary): {cli} first run"
+#: What the window is called while a temporary setup step owns the terminal,
+#: and which of them it is: a fresh tenant meets one of these per provider for
+#: the first run, per provider for a sign-in, and one PER WORKTREE for folder
+#: trust. Naming only the first is how a User counting windows concludes the
+#: launch stopped in a standalone CLI (SYRD-221).
+#:
+#: Measured rather than hoped: Claude sets no title of its own while its setup
+#: screens are up, and it CLEARS the title when it starts -- an empty `OSC 0`.
+#: So a name set once before the CLI starts does not survive it; only the
+#: republished one below does.
+SETUP_WINDOW_TITLE = "Switchyard setup (temporary): {cli} {purpose}"
+#: The steps a person can be sat in front of, worded as the thing they are
+#: being asked to finish rather than as the function that runs it.
+SETUP_PURPOSE_FIRST_RUN = "first run"
+SETUP_PURPOSE_SIGN_IN = "sign-in"
+SETUP_PURPOSE_FOLDER_TRUST = "folder trust"
+#: What did not happen, per step, so giving up names the answer that is still
+#: outstanding instead of only the clock. Keyed by the purpose above.
+SETUP_STEP_STALLED_DETAIL = {
+    SETUP_PURPOSE_FIRST_RUN: (
+        "{cli} did not record its first run, so it was still asking for something when "
+        "time ran out -- most often the sign-in that follows the theme question."
+    ),
+    SETUP_PURPOSE_SIGN_IN: (
+        "{cli} did not record a signed-in account, so the sign-in was still unfinished "
+        "when time ran out -- most often an authorization code that was never pasted back."
+    ),
+    SETUP_PURPOSE_FOLDER_TRUST: (
+        "{cli} did not record trust for that directory, so it was still asking whether "
+        "to trust it when time ran out."
+    ),
+}
 #: What the window says it is waiting for while the provider owns the screen.
 #: The title is the only channel available: this CLI draws inline rather than
 #: on the alternate screen, so anything written to stdout lands in the middle
@@ -14129,6 +14155,74 @@ def _countdown(seconds: float) -> str:
     return f"{whole}s"
 
 
+class _SetupWindowNarrator:
+    """Keep a temporary setup window saying what it is for, and that it is live.
+
+    Every foreground provider step has the same problem: the CLI owns the
+    screen and redraws it, so anything Switchyard prints is scribbled over,
+    and a step that is waiting for a person looks exactly like one that has
+    hung. The title is the one channel the CLI does not contend for -- and it
+    has to be republished, because Claude clears it on the way in.
+
+    The countdown is the part that cannot be faked by a static name: it says
+    the wait is still running and how much of it is left. A window that is
+    counting down is not a window that has stopped.
+    """
+
+    def __init__(
+        self,
+        *,
+        cli: str,
+        purpose: str,
+        deadline: float,
+        monotonic: Callable[[], float] = time.monotonic,
+        write: Callable[[str], Any] | None = None,
+        interval: float = SETUP_WINDOW_TITLE_INTERVAL_SECONDS,
+    ) -> None:
+        self._cli = cli
+        self._purpose = purpose
+        self._deadline = deadline
+        self._monotonic = monotonic
+        self._write = write
+        self._interval = interval
+        self._last = monotonic()
+
+    def opened(self) -> None:
+        """Name the window before the CLI takes it."""
+        set_terminal_title(
+            SETUP_WINDOW_TITLE.format(cli=self._cli, purpose=self._purpose),
+            write=self._write,
+        )
+
+    def tick(self) -> None:
+        """Republish the name and the time left, if it is due."""
+        now = self._monotonic()
+        if now - self._last < self._interval:
+            return
+        set_terminal_title(
+            SETUP_WINDOW_WAITING_TITLE.format(
+                cli=self._cli, remaining=_countdown(self._deadline - now)
+            ),
+            write=self._write,
+        )
+        self._last = now
+
+    def stalled(self, *, watching: str, timeout_seconds: float) -> str:
+        """What to say when the deadline passed with the answer still missing."""
+        detail = SETUP_STEP_STALLED_DETAIL.get(
+            self._purpose, "{cli} did not record what this step waits for."
+        ).format(cli=self._cli)
+        return (
+            f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
+            f"{detail} The CLI was ended and the run continues; the step and how to "
+            "resume it are reported below."
+        )
+
+    def closed(self) -> None:
+        """Give the name back, so a finished window stops claiming to be setup."""
+        set_terminal_title(SETUP_WINDOW_TITLE_DONE, write=self._write)
+
+
 def run_provider_first_run_session(
     *,
     cli: str,
@@ -14143,6 +14237,7 @@ def run_provider_first_run_session(
     monotonic: Callable[[], float] = time.monotonic,
     quiet_seconds: float = PROVIDER_READY_QUIET_SECONDS,
     timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+    purpose: str = SETUP_PURPOSE_FIRST_RUN,
     print_func: Callable[[str], None] = print,
 ) -> bool:
     """Run a provider's own first run and end it as soon as it is finished.
@@ -14165,14 +14260,16 @@ def run_provider_first_run_session(
     reading an OAuth code box or a theme list is never cut off however long they
     take.
     """
-    # Named before it starts, because once the CLI owns the screen the only
-    # thing that still says what this window is for is its title.
-    set_terminal_title(SETUP_WINDOW_TITLE.format(cli=cli), write=output_write)
     session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
     deadline = monotonic() + timeout_seconds
+    # Named before it starts, because once the CLI owns the screen the only
+    # thing that still says what this window is for is its title.
+    window = _SetupWindowNarrator(
+        cli=cli, purpose=purpose, deadline=deadline, monotonic=monotonic, write=output_write
+    )
+    window.opened()
     recent = ""
     last_output = monotonic()
-    last_title = monotonic()
     ended_by_us = False
     try:
         while True:
@@ -14215,13 +14312,7 @@ def run_provider_first_run_session(
                 # waiting" on its own reads as a Switchyard fault when the
                 # usual cause is a sign-in nobody finished. The resumable
                 # command follows in the report below, with the account named.
-                print_func(
-                    f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
-                    f"{cli} did not record its first run, so it was still asking for "
-                    "something when time ran out -- most often the sign-in that follows "
-                    "the theme question. The CLI was ended and the run continues; the "
-                    "step and how to resume it are reported below."
-                )
+                print_func(window.stalled(watching=watching, timeout_seconds=timeout_seconds))
                 ended_by_us = True
                 break
             # The window says what it is waiting for, continuously, because a
@@ -14229,15 +14320,7 @@ def run_provider_first_run_session(
             # exactly how this step was reported: "stopped in a standalone
             # Claude window". It had not stopped; it was waiting for a sign-in
             # nobody had been told was still outstanding (SYRD-221).
-            now = monotonic()
-            if now - last_title >= SETUP_WINDOW_TITLE_INTERVAL_SECONDS:
-                set_terminal_title(
-                    SETUP_WINDOW_WAITING_TITLE.format(
-                        cli=cli, remaining=_countdown(deadline - now)
-                    ),
-                    write=output_write,
-                )
-                last_title = now
+            window.tick()
             sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
         if ended_by_us:
             exit_input = PROVIDER_SESSION_EXIT_INPUT.get(cli, "")
@@ -14260,7 +14343,7 @@ def run_provider_first_run_session(
         close = getattr(session, "close", None)
         if close is not None:
             close()
-        set_terminal_title(SETUP_WINDOW_TITLE_DONE, write=output_write)
+        window.closed()
 
 
 def _run_owner_cli_until(
@@ -14282,6 +14365,17 @@ def _run_owner_cli_until(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     timeout_seconds: float = FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
+    #: Which step this is, for the window's own name. These are the windows a
+    #: fresh tenant meets most -- folder trust runs once per worktree -- and
+    #: until SYRD-221 they were the unnamed, silent ones.
+    purpose: str = SETUP_PURPOSE_FOLDER_TRUST,
+    #: Whose prompts the person is being asked to answer. The caller knows it;
+    #: falling back to the command keeps a caller that does not from having to
+    #: invent one.
+    cli: str = "",
+    #: Where the window's name is written. None means the real terminal, which
+    #: is the live path; a test passes its own to read back what was claimed.
+    title_write: Callable[[str], Any] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> bool:
     """Run one interactive step and take the terminal back when it is done.
@@ -14307,6 +14401,19 @@ def _run_owner_cli_until(
         return True
     process = (popen or subprocess.Popen)(args, **kwargs)
     deadline = monotonic() + timeout_seconds
+    # The same narration the first-run step got, because this is the same
+    # window to the person in front of it -- and there are more of these: one
+    # sign-in per provider, one folder trust per worktree. Naming only the
+    # first of them is how a launch that is working still reads as one that
+    # stopped in a standalone CLI (SYRD-221).
+    window = _SetupWindowNarrator(
+        cli=cli or (Path(command[0]).name if command else "the provider"),
+        purpose=purpose,
+        deadline=deadline,
+        monotonic=monotonic,
+        write=title_write,
+    )
+    window.opened()
     try:
         while True:
             if process.poll() is not None:
@@ -14323,13 +14430,13 @@ def _run_owner_cli_until(
                 # CLI about where the answer is kept, and silence about it is
                 # what made one look like a hang.
                 print_func(
-                    f"warning: switchyard: gave up waiting {timeout_seconds:g}s for {watching}. "
-                    "The CLI was ended and the run continues; the step is reported as "
-                    "outstanding below. If the CLI showed no prompt at all, it already "
-                    "considers this done and Switchyard is reading the wrong state -- say so, "
-                    "because that is a defect here and not something to answer again."
+                    window.stalled(watching=watching, timeout_seconds=timeout_seconds)
+                    + " If the CLI showed no prompt at all, it already considers this"
+                    " done and Switchyard is reading the wrong state -- say so, because"
+                    " that is a defect here and not something to answer again."
                 )
                 break
+            window.tick()
             sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
     finally:
         if process.poll() is None:
@@ -14338,6 +14445,7 @@ def _run_owner_cli_until(
                 process.wait(timeout=10)
             except Exception:
                 process.kill()
+        window.closed()
     return is_complete()
 
 
@@ -15117,6 +15225,8 @@ def run_first_run_auth_phase(
             command=login_command,
             is_complete=lambda cli=step.cli: _signed_in(cli),
             watching=f"{step.cli} to record a signed-in account for {effective_owner}",
+            purpose=SETUP_PURPOSE_SIGN_IN,
+            cli=step.cli,
             runner=injected_runner,
             transform=foreground_transform,
             print_func=print_func,
@@ -15151,6 +15261,8 @@ def run_first_run_auth_phase(
                 cli, owner_home=effective_home, workdir=workdir
             ),
             watching=f"{step.cli} to record trust for {step.workdir}",
+            purpose=SETUP_PURPOSE_FOLDER_TRUST,
+            cli=step.cli,
             runner=injected_runner,
             transform=foreground_transform,
             print_func=print_func,

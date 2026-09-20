@@ -637,6 +637,222 @@ def test_the_countdown_reads_as_time_a_person_recognises() -> None:
           "a step past its deadline shows negative time remaining")
 
 
+# --- the OTHER setup windows, which outnumber the first one ----------------
+#
+# `a55fc2b` narrated `run_provider_first_run_session`. That is one window per
+# provider. The same phase then runs a sign-in per provider and a folder-trust
+# step PER WORKTREE, all through `_run_owner_cli_until`, and those were still
+# unnamed and silent -- measured against the real CLI, the only title event in
+# a trust step was Claude clearing the title to empty. So a fresh multi-role
+# tenant met one narrated window followed by a run of anonymous ones, which is
+# what "stopped in a standalone Claude window" describes.
+
+
+class StubProcess:
+    """A CLI that sits there until it is ended, like the real ones do."""
+
+    def __init__(self) -> None:
+        self._returncode: int | None = None
+        self.terminated = False
+
+    def poll(self):
+        return self._returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._returncode = -15
+
+    def wait(self, timeout=None):
+        return self._returncode
+
+    def kill(self) -> None:
+        self._returncode = -9
+
+
+def run_bounded_step(*, is_complete, purpose, cli="claude", timeout=60.0):
+    """Drive the real bounded runner with a fake clock and a captured title."""
+    ticks = iter(range(0, 10_000))
+    printed: list[str] = []
+    titles: list[str] = []
+    finished = team_launcher._run_owner_cli_until(
+        owner_user=team_launcher.current_user_name(),
+        owner_home=Path("/tmp"),
+        cwd=Path("/tmp"),
+        command=[cli],
+        is_complete=is_complete,
+        watching=f"{cli} to record something for somebody",
+        popen=lambda args, **kwargs: StubProcess(),
+        sleep=lambda _seconds: None,
+        monotonic=lambda: next(ticks),
+        timeout_seconds=timeout,
+        purpose=purpose,
+        cli=cli,
+        title_write=titles.append,
+        print_func=printed.append,
+    )
+    return finished, printed, "".join(titles)
+
+
+def titles_in(written: str) -> list[str]:
+    return [chunk.split("\a")[0] for chunk in written.split("\033]0;")[1:]]
+
+
+def test_every_setup_window_says_which_step_it_is() -> None:
+    """One narrated window and four anonymous ones is not a distinguishable set.
+
+    The ticket asks that the temporary setup window be told apart from the
+    presentation "in both terminal output and window title". A window named
+    only "Switchyard" -- or, as measured, named nothing at all because the CLI
+    cleared it -- is not told apart from anything.
+    """
+    seen = {}
+    for purpose in (
+        team_launcher.SETUP_PURPOSE_SIGN_IN,
+        team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+    ):
+        _finished, _printed, written = run_bounded_step(
+            is_complete=lambda: False, purpose=purpose, timeout=3.0
+        )
+        names = titles_in(written)
+        check(names, f"the {purpose} window set no terminal title at all")
+        check(any("Switchyard setup" in n and "temporary" in n for n in names),
+              f"the {purpose} window does not say it is temporary setup: {names[:2]}")
+        opening = next(n for n in names if "temporary" in n)
+        check(purpose in opening,
+              f"the title does not say which step this is: {opening!r}")
+        seen[purpose] = opening
+    check(len(set(seen.values())) == len(seen),
+          f"two different steps claim the same window name: {seen}")
+    # And the first run, which already had a name, still says which step it is.
+    _f, _p, first_run = run_session(
+        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=3.0
+    )
+    check(team_launcher.SETUP_PURPOSE_FIRST_RUN in first_run,
+          "the first-run window stopped naming its own step")
+
+
+def test_a_bounded_step_counts_down_like_the_first_run_does() -> None:
+    """Republished, because the CLI clears the title on its way in.
+
+    Measured on the real CLI: starting `claude` emits an empty `OSC 0`, which
+    wipes any name set before it. A name published once would be gone; the
+    countdown is what puts it back and keeps it there.
+    """
+    _finished, printed, written = run_bounded_step(
+        is_complete=lambda: False,
+        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+        timeout=60.0,
+    )
+    names = titles_in(written)
+    waiting = [n for n in names if "answer" in n and "left" in n]
+    check(waiting, f"the trust window never said what it was waiting for: {names[:3]}")
+    check(len(waiting) > 1, f"the status was published only once: {len(waiting)}")
+    check(any(re.search(r"\d+m\d\ds left|\d+s left", n) for n in waiting),
+          f"the status carries no remaining time: {waiting[:2]}")
+    check(names[-1] == team_launcher.SETUP_WINDOW_TITLE_DONE,
+          f"the window was left still claiming to be setup: {names[-1]!r}")
+    check(any("gave up waiting" in m for m in printed),
+          f"nothing was said when the trust step ran out of time: {printed}")
+
+
+def test_giving_up_names_the_step_that_did_not_finish() -> None:
+    """"Outstanding" without saying what is not a way out of anything."""
+    wanted = {
+        team_launcher.SETUP_PURPOSE_FIRST_RUN: "did not record its first run",
+        team_launcher.SETUP_PURPOSE_SIGN_IN: "did not record a signed-in account",
+        team_launcher.SETUP_PURPOSE_FOLDER_TRUST: "did not record trust",
+    }
+    messages = {}
+    for purpose, phrase in wanted.items():
+        _finished, printed, _written = run_bounded_step(
+            is_complete=lambda: False, purpose=purpose, timeout=3.0
+        )
+        gave_up = [m for m in printed if "gave up waiting" in m]
+        check(gave_up, f"the {purpose} step said nothing when it ran out of time")
+        check(phrase in gave_up[0],
+              f"the {purpose} message does not name what was missing: {gave_up[0]}")
+        check("resume" in gave_up[0],
+              f"the {purpose} message does not point at how to resume: {gave_up[0]}")
+        messages[purpose] = gave_up[0]
+    check(len(set(messages.values())) == len(messages),
+          f"different steps give the same explanation: {messages}")
+
+
+def test_a_step_that_completes_is_not_reported_as_stalled() -> None:
+    """The narration must not cost the success path anything."""
+    reads = {"n": 0}
+
+    def is_complete() -> bool:
+        reads["n"] += 1
+        return reads["n"] > 3
+
+    finished, printed, written = run_bounded_step(
+        is_complete=is_complete,
+        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
+        timeout=600.0,
+    )
+    check(finished is True, "a completed bounded step was not reported as complete")
+    check(not any("gave up waiting" in m for m in printed),
+          f"a step that completed still reported a timeout: {printed}")
+    check(titles_in(written)[-1] == team_launcher.SETUP_WINDOW_TITLE_DONE,
+          "a finished step left the window claiming to be setup")
+
+
+def test_the_phase_tells_each_bounded_step_which_window_it_is() -> None:
+    """The wiring, not just the runner.
+
+    `_run_owner_cli_until` can narrate perfectly and still produce anonymous
+    windows if the phase never tells it which step it is running. Both callers
+    are checked here because they are the ones a fresh tenant actually meets:
+    a sign-in per provider, and a folder trust per worktree.
+    """
+    calls: list[dict] = []
+    real = team_launcher._run_owner_cli_until
+
+    def recording(**kwargs):
+        calls.append(kwargs)
+        return real(**kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="syrd221-purpose.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        config = _mixed_tenant(tmp_path)
+        runner = FirstRunAuthRunner(authenticated_after_login=True)
+        team_launcher._run_owner_cli_until = recording
+        try:
+            team_launcher.run_first_run_auth_phase(
+                config,
+                owner_user="otto-agent",
+                owner_home=owner_home,
+                runner=runner,
+                print_func=lambda _message: None,
+            )
+        finally:
+            team_launcher._run_owner_cli_until = real
+
+    check(calls, "the phase ran no bounded steps at all; this case tests nothing")
+    for call in calls:
+        check(call.get("purpose"),
+              f"a bounded step was run with no window name: {call.get('watching')}")
+        check(call.get("cli"),
+              f"a bounded step was run without naming its provider: {call.get('watching')}")
+        # The name has to match the step, or it is just a different wrong name.
+        watching = call["watching"]
+        expected = (
+            team_launcher.SETUP_PURPOSE_FOLDER_TRUST
+            if "trust" in watching
+            else team_launcher.SETUP_PURPOSE_SIGN_IN
+        )
+        check(call["purpose"] == expected,
+              f"{watching!r} ran in a window called {call['purpose']!r}")
+        check(call["cli"] in watching,
+              f"the window names {call['cli']!r} but the step is {watching!r}")
+    purposes = {call["purpose"] for call in calls}
+    check(len(purposes) > 1,
+          f"every bounded step claims the same window name: {purposes}")
+
+
 def main() -> int:
     for name, case in sorted(globals().items()):
         if name.startswith("test_") and callable(case):

@@ -261,3 +261,131 @@ Mutation coverage over the new behaviour: accepting a theme alone, never
 publishing the status, publishing it once and then going quiet, a countdown
 stuck at zero, and a give-up message that says only that the clock ran out. All
 five killed, no survivors.
+
+## Reopened again: one narrated window out of several
+
+User acceptance rejected the repair-and-resume path outright: acceptance is a
+brand-new tenant, provisioned from nothing by `switchyard new`, completing each
+provider's first run once and opening the full presentation. Reusing `test2` or
+`test3` does not count.
+
+Asking what a brand-new tenant meets that the section above does not cover
+finds it immediately. `set_terminal_title` was called in exactly one function,
+`run_provider_first_run_session` — and `run_first_run_auth_phase` runs three
+kinds of foreground provider step:
+
+| step | runner | per | narrated before this |
+|---|---|---|---|
+| `provider_setup_steps` | `run_provider_first_run_session` | provider | yes |
+| `login_steps` | `_run_owner_cli_until` | provider | **no** |
+| `folder_trust_steps` | `_run_owner_cli_until` | **worktree** | **no** |
+
+`_first_run_trust_command` is `list(role.cli)` — a bare `claude`. So the trust
+step opens a plain standalone Claude window, once per role, each able to sit for
+`FOREGROUND_COMPLETION_TIMEOUT_SECONDS` = 600s.
+
+Measured by driving `_run_owner_cli_until` exactly as the trust step calls it,
+against the real CLI on a pty with a throwaway `HOME` and a 20s deadline:
+
+```
+captured 2732 bytes in 20.1s
+--- terminal titles claimed, in order ---
+   OSC 0 | (empty)
+--- did it say anything while waiting? ---
+   'gave up waiting': 1
+   'Switchyard setup': 0
+   'left':            0
+   'resume':          0
+```
+
+Three things in that.
+
+**The window never says it is temporary setup.** The ticket asks for the setup
+window to be distinguishable from the presentation "in both terminal output and
+window title"; for two of the three step kinds it was not distinguished at all.
+
+**The one title event is Claude *clearing* the title** — an empty `OSC 0`. The
+window is left with no name whatsoever, which is worse than a wrong one: there
+is nothing to tell it from any other terminal. It also settles a design
+question. A name set once before the CLI starts does not survive it. Only a
+republished name does, which means the countdown is not decoration on top of
+the title — it is the mechanism that makes the title exist at all.
+
+**Giving up carried no resumable action**, only the generic "the step is
+reported as outstanding below".
+
+So the earlier fix narrated one window out of several, and the silent ones
+outnumber it because folder trust is per worktree. A fresh multi-role tenant met
+one window that explained itself followed by a run of anonymous ones — which is
+what "stopped in a standalone Claude window" describes.
+
+### One narrator, three windows
+
+The behaviour is now a single `_SetupWindowNarrator` rather than three copies:
+`opened()` names the step, `tick()` republishes the name with the time left,
+`stalled()` composes the give-up message, `closed()` gives the name back. Both
+`run_provider_first_run_session` and `_run_owner_cli_until` drive it.
+
+The title carries which step it is, because "Switchyard setup" repeated five
+times does not tell somebody how far through they are:
+
+```
+Switchyard setup (temporary): claude first run
+Switchyard setup (temporary): claude sign-in
+Switchyard setup (temporary): claude folder trust
+```
+
+and giving up names the answer that is still missing, per step — not the clock:
+
+```
+first run    -> did not record its first run ... most often the sign-in that
+                follows the theme question
+sign-in      -> did not record a signed-in account ... most often an
+                authorization code that was never pasted back
+folder trust -> did not record trust for that directory
+```
+
+The same measurement against the real CLI, after the change:
+
+```
+--- terminal titles claimed, in order ---
+   OSC 0 | (empty)                                    <- Claude clearing it
+   OSC 0 | Switchyard setup (temporary): claude folder trust
+   OSC 0 | Switchyard setup: answer claude's prompts to the end -- 14s left
+   OSC 0 | Switchyard setup: answer claude's prompts to the end -- 9s left
+   OSC 0 | Switchyard setup: answer claude's prompts to the end -- 4s left
+   OSC 0 | Switchyard
+--- did it say anything while waiting? ---
+   'Switchyard setup': 4
+   'left':             3
+   'resume':           1
+```
+
+### Verification
+
+`tests/first_run_setup_completion_test.py`, now 123 checks. The new cases drive
+the real bounded runner rather than the narrator in isolation: every setup
+window says which step it is and no two steps claim the same name; a bounded
+step counts down and gives the name back; giving up names the step that did not
+finish and points at a way to resume, differently for each step; and a step that
+completes is not reported as stalled.
+
+One case drives the **phase**, not the runner, with `_run_owner_cli_until`
+recorded: a runner that narrates perfectly still produces anonymous windows if
+the phase never tells it which step it is running, so both call sites are
+checked for a purpose that matches what the step actually is.
+
+Mutation: 20 mutants across the narrator, both call sites, the phase wiring, the
+countdown, the per-step explanations and the structural question detector. No
+survivors. Among them: a sign-in window claiming to be folder trust, the phase
+passing no provider name, and `opened()` returning without writing — each of
+which leaves the User looking at exactly the window this ticket is about.
+
+### What this does not do
+
+It makes every setup window legible. It does not remove the need for one.
+Claude writes `hasCompletedOnboarding` only after an interactive sign-in, so a
+brand-new tenant still requires somebody to sit at that window and finish it,
+and folder trust is still asked once per worktree. If the acceptance criterion
+is a fresh tenant reaching its presentation with no human step at all, that is a
+different change and is not in this layer.

@@ -15117,6 +15117,26 @@ def _prepare_first_run_auth_worktrees(
     ensure_project_worktrees(config, refresh=True, runner=worktree_runner)
 
 
+class _NoRunnerInjected:
+    """The difference between "nobody injected a runner" and "somebody injected
+    `subprocess.run`".
+
+    It is a real difference and it decides whether a person gets a watched
+    setup window or an unwatched one, but `subprocess.run` is also the obvious
+    default for a command that shells out for a dozen other things. Both live
+    entry points therefore declared `runner = subprocess.run`, passed it on,
+    and the phase -- correctly, by its own contract -- read that as "the caller
+    is driving the interactive steps itself" and fired every one of them
+    unwatched. Three candidates' worth of watching, narrating and bounding were
+    live-path code that the live path never reached (SYRD-221).
+
+    A sentinel keeps the two apart where the two matter.
+    """
+
+
+NO_RUNNER_INJECTED = _NoRunnerInjected()
+
+
 def run_first_run_auth_phase(
     config: ProjectConfig,
     *,
@@ -15130,9 +15150,18 @@ def run_first_run_auth_phase(
     #: because the desktop branch below rebinds this name and comparing against
     #: it afterwards said "injected" on every tenant with a pane (SYRD-191).
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    #: Who drives the interactive steps. This used to be `runner` itself, which
+    #: meant a caller could not ask for "probe with this, but WATCH the windows
+    #: a person sits in front of" -- and every live caller wanted exactly that
+    #: and got the opposite (SYRD-221). `None` is the watched path; a runner
+    #: here is a suite driving the steps; the sentinel means "same as `runner`",
+    #: which is what every existing caller expects.
+    foreground_runner: Callable[..., subprocess.CompletedProcess[Any]] | None | _NoRunnerInjected = (
+        NO_RUNNER_INJECTED
+    ),
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
-    injected_runner = runner
+    injected_runner = runner if isinstance(foreground_runner, _NoRunnerInjected) else foreground_runner
     runner = runner or subprocess.run
     foreground_transform: Callable[..., Any] | None = None
     if config.desktop_access is not None:
@@ -15420,17 +15449,61 @@ def stop_before_launch_for_missing_owner_clis(
     return True
 
 
+def run_first_run_auth_for_launch(
+    config: ProjectConfig,
+    *,
+    owner_user: str,
+    owner_home: Path,
+    validate_models: bool,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | _NoRunnerInjected,
+    print_func: Callable[[str], None] = print,
+) -> FirstRunAuthReport:
+    """The phase as a live command must call it.
+
+    One place decides, because the decision is invisible at a call site and
+    getting it wrong is silent: probes go through `runner`, and the windows a
+    person sits in front of are WATCHED unless a caller injected a runner to
+    drive them. Spelling that out at each command is how both of them came to
+    pass `subprocess.run` and unwatch every setup window (SYRD-221).
+    """
+    if runner is subprocess.run:
+        # The ambiguity itself, refused. `subprocess.run` here is
+        # indistinguishable from "nobody injected anything", and resolving it
+        # the wrong way silently unwatches every window a person sits in front
+        # of -- which shipped four times without a single test going red,
+        # because the branch that ships is the one no suite can afford to take
+        # (SYRD-221). A caller that wants the live path injects nothing.
+        raise ValueError(
+            "run_first_run_auth_for_launch: pass NO_RUNNER_INJECTED for the live path "
+            "rather than subprocess.run -- the two cannot be told apart here, and "
+            "guessing wrong leaves the User in an unwatched provider window."
+        )
+    injected = None if isinstance(runner, _NoRunnerInjected) else runner
+    return run_first_run_auth_phase(
+        config,
+        owner_user=owner_user,
+        owner_home=owner_home,
+        validate_models=validate_models,
+        runner=injected or subprocess.run,
+        foreground_runner=injected,
+        print_func=print_func,
+    )
+
+
 def run_switchyard_launch_first_run_auth(
     config: ProjectConfig,
     *,
     validate_models: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    #: Defaulted to the sentinel rather than to `subprocess.run`, so that a
+    #: caller who injects nothing gets the watched setup windows and a suite
+    #: that injects a runner still drives every step itself (SYRD-221).
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | _NoRunnerInjected = NO_RUNNER_INJECTED,
     print_func: Callable[[str], None] = print,
 ) -> FirstRunAuthReport:
     owner_user = (config.run_as_user or current_user_name()).strip()
     if not owner_user:
         return FirstRunAuthReport({}, [])
-    return run_first_run_auth_phase(
+    return run_first_run_auth_for_launch(
         config,
         owner_user=owner_user,
         owner_home=_owner_home_for_auth(owner_user),
@@ -20299,7 +20372,10 @@ def switchyard_new_command(
     agy_credential_settings_path: Path | None = None,
     home_base: Path = Path("/home"),
     euid_getter: Callable[[], int] = os.geteuid,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    #: The sentinel, not `subprocess.run`: injecting nothing has to stay
+    #: distinguishable from injecting the default, because that is what
+    #: decides whether the person gets a watched setup window (SYRD-221).
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | _NoRunnerInjected = NO_RUNNER_INJECTED,
     port_in_use: Callable[[int], bool] = _tcp_port_in_use,
     socket_exists: Callable[[Path], bool] = _path_exists,
     session_dir_exists: Callable[[Path], bool] | None = None,
@@ -20317,6 +20393,16 @@ def switchyard_new_command(
     agent_cli_policy: str = "",
     agent_cli_sources: Sequence[str] | None = None,
 ) -> int:
+    # One statement, deliberately. Whether anything was injected is what
+    # decides if the setup windows are watched, and a capture-then-resolve
+    # pair is one editing accident away from capturing the RESOLVED value and
+    # silently unwatching every window again -- which is the defect this
+    # ticket spent three candidates not fixing (SYRD-221). Everything below
+    # wants the plain runner it always had; only the first-run phase wants to
+    # know what the caller actually passed.
+    first_run_runner, runner = runner, (
+        subprocess.run if isinstance(runner, _NoRunnerInjected) else runner
+    )
     if from_artifact is not None:
         artifact = load_project_design_artifact(from_artifact)
         resolved_slug = artifact.project
@@ -20670,12 +20756,12 @@ def switchyard_new_command(
     config = prepare_project_desktop(config, runner=runner)
     _register_switchyard_project(config_path, registry_dir=registry_dir)
     _prepare_first_run_auth_worktrees(config, runner=runner)
-    first_run_auth_report = run_first_run_auth_phase(
+    first_run_auth_report = run_first_run_auth_for_launch(
         config,
         owner_user=owner_user,
         owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
         validate_models=True,
-        runner=runner,
+        runner=first_run_runner,
         print_func=print_func,
     )
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report, print_func=print_func):

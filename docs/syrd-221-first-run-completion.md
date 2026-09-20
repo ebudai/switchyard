@@ -508,3 +508,129 @@ first run.
 One mutant survived a first pass: the blind-session adapter inventing output.
 It could not be killed because that adapter was reachable only from tests, and
 the answer was to delete it rather than to assert around it.
+
+## Reopened a fourth time: none of the above ever ran
+
+`test5`, a brand-new tenant on the previous candidate, failed identically to
+`test4`: the Claude process reached its ordinary Auto-mode prompt and stayed
+there, and — the detail that gives it away — "the title remained `✳ Claude
+Code` with no republished Switchyard setup countdown."
+
+No countdown means no narrator. No narrator means the watched session was never
+constructed. Everything the three previous sections describe was live-path code
+that the live path never reached.
+
+### The mechanism
+
+`run_first_run_auth_phase` reads its `runner` argument as *"the caller is
+driving these steps itself"*:
+
+```python
+injected_runner = runner
+runner = runner or subprocess.run
+...
+if runner is not None:          # in the foreground step runners
+    runner(args, **kwargs)      # fired and forgotten
+    return is_complete()
+```
+
+Its own docstring said so: *"None means the live path: probes run through
+`subprocess.run`, and the foreground steps are bounded rather than fired and
+forgotten."*
+
+But both live entry points passed a runner, because their own parameter
+**defaulted to `subprocess.run`**:
+
+- `switchyard_new_command(..., runner = subprocess.run)` → `run_first_run_auth_phase(..., runner=runner)`
+- `run_switchyard_launch_first_run_auth(..., runner = subprocess.run)` → the same
+
+So on a real launch every foreground provider step was a plain blocking
+`subprocess.run` with inherited stdio. No pty. No watcher. No title. No
+countdown. No quiet-screen classification. No deadline. It returned when the
+CLI exited — and an interactive Claude at its ordinary prompt does not exit
+until somebody types `/exit`, which is the one thing this ticket forbids asking
+for.
+
+Demonstrated by driving the real phase over a stub CLI that prints a prompt,
+claims the title `✳ Claude Code`, and sits there:
+
+```
+--- runner=subprocess.run   (what `switchyard new` passed) ---
+  Switchyard titles    : 0
+--- runner=None            (the documented live path) ---
+  Switchyard titles    : 1
+      | Switchyard setup (temporary): claude first run
+```
+
+### Why three rounds of testing missed it
+
+Every phase test injects a runner, because that is how a suite avoids launching
+a real CLI. So the injected branch was covered twice over and the branch that
+ships had no coverage at the phase boundary at all.
+
+My own measurements had the same shape: I drove `_run_owner_cli_until` and the
+session directly with `runner=None`, so I was exercising the live path's code
+while production took the other branch. Every result was real and none of it
+was reachable.
+
+### The change
+
+`runner` conflated two questions — which runner probes use, and who drives the
+interactive steps. A live command needs the first and not the second, and had
+no way to say so. They are now separate: `run_first_run_auth_phase` takes
+`foreground_runner`, defaulting to a sentinel meaning "same as `runner`" so
+every existing caller and suite is unaffected.
+
+Both live commands go through one helper, `run_first_run_auth_for_launch`,
+because the decision is invisible at a call site and getting it wrong is
+silent. Spelling it out at each command is how both of them came to pass
+`subprocess.run`.
+
+The entry points default `runner` to a sentinel rather than `subprocess.run`,
+so "nobody injected anything" stays distinguishable from "somebody injected the
+default". And in `switchyard_new_command` the capture and the resolution are a
+single statement, because a capture-then-resolve pair is one editing accident
+away from capturing the resolved value and unwatching everything again.
+
+Finally, the ambiguity is refused rather than guessed at: passing
+`subprocess.run` to `run_first_run_auth_for_launch` raises, naming what to pass
+instead and what goes wrong. A loud failure on the launch beats a User sitting
+in a window nothing is watching.
+
+### Verification
+
+157 checks. The ones that matter are at the boundary that had none:
+
+- the phase does not hand the foreground to the probe runner — driven with a
+  real (stubbed) provider on the owner's PATH so the watched branch genuinely
+  runs, asserting that the bare CLI and the vendors' login commands never reach
+  the injected runner;
+- the shipped launch watches its setup windows, and an injected runner still
+  drives every step, so no suite starts launching real CLIs;
+- one place decides, tested both ways;
+- neither entry point can confuse "no runner" with "the default one";
+- the ambiguous runner is refused.
+
+Mutation: 13 mutants, 12 killed. The survivor is recorded honestly below.
+
+A first pass had three survivors, all in this area, and they were the point: my
+first attempt tested only what the wrapper *passed*, not what the phase *did*
+with it, and not the `switchyard new` path at all — the same blind spot one
+layer up. The phase-level case also silently tested nothing at first, because
+its stub runner reported the CLI as not installed and the phase skipped every
+interactive step; and once it did run them it launched a real `codex login`
+OAuth server, because only `claude` had been stubbed. Both are fixed: the
+runner reports installed-but-unauthenticated, and every provider is stubbed.
+
+### The one mutant still standing
+
+Reordering the capture and resolution inside `switchyard_new_command` — so it
+keeps the resolved runner and unwatches every window — is **not** killed by any
+test. That function creates Unix accounts and repositories, so driving it far
+enough to reach the phase call is not possible in a unit test here.
+
+What bounds it: the decision itself now lives in one covered helper, the
+reorder-prone pair is a single statement, and the wrong value is refused at the
+boundary with an error rather than silently accepted. If that line is ever got
+wrong again the launch fails loudly instead of stranding somebody in an
+unwatched window.

@@ -13846,6 +13846,15 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|
 #: and a theme picker are both perfectly silent while somebody reads them, and
 #: ending a step there would cut the User off mid-answer, which is worse than
 #: the wait it replaces.
+#: The glyphs these CLIs put beside the option a person is on. Claude uses the
+#: first for both its menu cursor and its empty input box, which is why what
+#: follows it is what matters rather than its presence.
+PROVIDER_SELECTION_CURSORS: tuple[str, ...] = ("\u276f", "\u203a")
+
+#: A menu line: a number, a dot, and the option. No ordinary prompt draws one,
+#: and a code listing's line numbers have no dot after them.
+_NUMBERED_OPTION = re.compile(r"^\d+\.\S")
+
 PROVIDER_PENDING_ANSWER_MARKERS: tuple[str, ...] = (
     "paste code here",
     "press enter to continue",
@@ -13890,17 +13899,94 @@ def _visible_text(raw: str) -> str:
     return "".join(_ANSI_ESCAPE.sub("", raw).split()).casefold()
 
 
+#: What the window is called while a temporary first-run step owns the
+#: terminal. Measured rather than hoped: Claude sets no title of its own while
+#: its first-run screens are up -- it only claims one when it reaches its
+#: ordinary prompt -- so a title set here survives exactly the window the User
+#: needs to be able to tell apart from the presentation (SYRD-221).
+SETUP_WINDOW_TITLE = "Switchyard setup (temporary): {cli} first run"
+#: And what it goes back to afterwards, so a finished setup window does not
+#: keep claiming to be one.
+SETUP_WINDOW_TITLE_DONE = "Switchyard"
+
+
+def set_terminal_title(text: str, *, write: Callable[[str], Any] | None = None) -> None:
+    """Name the terminal window, when there is one to name.
+
+    Silent on anything that is not a terminal: this is decoration for a person
+    watching, and writing escape bytes into a captured stream would corrupt
+    output that something else is parsing.
+    """
+    if write is None:
+        stream = sys.stdout
+        if not stream or not hasattr(stream, "isatty") or not stream.isatty():
+            return
+        write = stream.write
+    write(f"\033]0;{text}\a")
+
+
+def _visible_lines(raw: str) -> list[str]:
+    """The same reduction as `_visible_text`, but keeping the lines.
+
+    Structure needs lines. `_visible_text` deliberately throws whitespace away
+    so a word positioned by cursor-moves still matches a phrase, and that also
+    throws away which line each word was on -- which is the whole signal here.
+    """
+    lines = []
+    for line in _ANSI_ESCAPE.sub("", raw).splitlines():
+        collapsed = "".join(line.split())
+        if collapsed:
+            lines.append(collapsed)
+    return lines
+
+
+def _provider_screen_offers_a_choice(recent_output: str) -> bool:
+    """Is this screen a list of options with one of them selected?
+
+    Asked of the shape rather than the wording, because the wording is the
+    vendor's and it changes. Claude Code v2.1.270 opens its first run with
+    "Choose the text style that looks best with your terminal" -- a phrase list
+    written against an earlier release looked for "select a theme", matched
+    nothing, and Switchyard closed the window while the question was still on
+    it (SYRD-221 live UAT).
+
+    Two shapes, both of which an ordinary prompt does not have:
+
+    * a selection cursor sitting on an option. The cursor alone is not enough
+      -- Claude draws the same glyph for its empty input box -- so it counts
+      only when there is something after it, which is the highlighted choice;
+    * a numbered menu, which nothing at an ordinary prompt draws.
+    """
+    lines = _visible_lines(recent_output)
+    for line in lines:
+        for cursor in PROVIDER_SELECTION_CURSORS:
+            if line.startswith(cursor) and line[len(cursor):]:
+                return True
+    return sum(1 for line in lines if _NUMBERED_OPTION.match(line)) >= 2
+
+
 def provider_is_waiting_for_an_answer(recent_output: str) -> bool:
     """Is this screen asking the person something, or is it ready?
 
-    Read from what the provider actually printed rather than from a clock. The
-    markers are the affordances a question has and a ready prompt does not.
+    Read from what the provider actually printed rather than from a clock.
+
+    Two independent readings, because either alone has been wrong here. The
+    phrases catch a question with no visible structure -- an OAuth box is just
+    "Paste code here if prompted >" -- and the structure catches a question
+    whose wording has moved on, which is what stranded a fresh tenant.
+
+    Both are evidence FOR a question, never against one, and that asymmetry is
+    deliberate: a false positive makes Switchyard wait a little longer for
+    somebody who has already finished, and a false negative closes the window
+    while they are still reading it.
     """
     text = _visible_text(recent_output)
-    return any(
+    if any(
         "".join(marker.split()).casefold() in text
         for marker in PROVIDER_PENDING_ANSWER_MARKERS
-    )
+    ):
+        return True
+    return _provider_screen_offers_a_choice(recent_output)
 
 
 class PtyForegroundSession:
@@ -14061,6 +14147,9 @@ def run_provider_first_run_session(
     reading an OAuth code box or a theme list is never cut off however long they
     take.
     """
+    # Named before it starts, because once the CLI owns the screen the only
+    # thing that still says what this window is for is its title.
+    set_terminal_title(SETUP_WINDOW_TITLE.format(cli=cli), write=output_write)
     session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
     deadline = monotonic() + timeout_seconds
     recent = ""
@@ -14132,6 +14221,7 @@ def run_provider_first_run_session(
         close = getattr(session, "close", None)
         if close is not None:
             close()
+        set_terminal_title(SETUP_WINDOW_TITLE_DONE, write=output_write)
 
 
 def _run_owner_cli_until(
@@ -14210,21 +14300,6 @@ def _run_owner_cli_until(
             except Exception:
                 process.kill()
     return is_complete()
-
-
-def _run_owner_cli_interactive(
-    *,
-    owner_user: str,
-    owner_home: Path,
-    cwd: Path,
-    command: Sequence[str],
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> subprocess.CompletedProcess[Any]:
-    args = _owner_command_env_args(owner_user, owner_home, command)
-    try:
-        return runner(args, cwd=str(cwd), env=_pane_identity_scrubbed_env())
-    except OSError as exc:
-        return subprocess.CompletedProcess(args, 127, stderr=str(exc))
 
 
 def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> bool:
@@ -14952,6 +15027,17 @@ def run_first_run_auth_phase(
             incomplete_setup.append((step.cli, list(step.roles)))
 
     authenticated_now: dict[str, list[str]] = {}
+    #: What the completion check last read, so the phase does not ask twice for
+    #: the same answer: the bounded step below already probes to know when it
+    #: is finished, and that probe is the phase's answer too.
+    observed_auth: dict[str, str] = {}
+
+    def _signed_in(cli: str) -> bool:
+        observed_auth[cli] = _cli_auth_status(
+            cli, owner_user=effective_owner, owner_home=effective_home, runner=runner
+        )
+        return observed_auth[cli] == "authenticated"
+
     for step in manifest.login_steps:
         # Asked again first. That provider's own first run may have signed in
         # as part of itself, and live Zorin UAT showed the cost of not
@@ -14968,14 +15054,36 @@ def run_first_run_auth_phase(
             authenticated_now.setdefault(step.cli, list(step.roles))
             continue
         login_command = list(step.command)
-        _run_owner_cli_interactive(
+        # Bounded, like the setup and folder-trust steps beside it. This was a
+        # bare `subprocess.run`, with no watcher, no timeout and nothing to
+        # say when it was done -- so on a fresh tenant `claude auth login`
+        # printed "Paste code here if prompted >" to a session with no browser
+        # to complete the flow, and held the entire launch there. Measured: it
+        # does not exit on its own. That is the standalone window a User was
+        # left in, and the reason no presentation ever opened (SYRD-221).
+        #
+        # What finishes it is the state it exists to produce, read back the
+        # same way the phase reads it below.
+        _run_owner_cli_until(
             owner_user=effective_owner,
             owner_home=effective_home,
             cwd=effective_home,
             command=login_command,
-            runner=runner,
+            is_complete=lambda cli=step.cli: _signed_in(cli),
+            watching=f"{step.cli} to record a signed-in account for {effective_owner}",
+            runner=injected_runner,
+            transform=foreground_transform,
+            print_func=print_func,
         )
-        auth_status = _cli_auth_status(step.cli, owner_user=effective_owner, owner_home=effective_home, runner=runner)
+        # What the completion check already read, rather than asking again.
+        # `is None` rather than a falsy test: every status this returns is a
+        # non-empty word, so `or` here would be a test that never fires and
+        # would quietly re-probe if one ever were empty.
+        auth_status = observed_auth.get(step.cli)
+        if auth_status is None:
+            auth_status = _cli_auth_status(
+                step.cli, owner_user=effective_owner, owner_home=effective_home, runner=runner
+            )
         if auth_status == "not_installed":
             missing_cli_roles[step.cli] = list(step.roles)
         elif auth_status != "authenticated":
@@ -15022,12 +15130,39 @@ def run_first_run_auth_phase(
         manifest.stale_codex_hook_trust,
         missing_cli_roles,
         model_validation_failures,
+        # Named whenever the report will tell somebody to run something as
+        # that account. An incomplete provider setup now carries a resumable
+        # command, and "run this as the owner account" without saying which
+        # account is not a way out of anything (SYRD-221).
         owner_user=effective_owner
-        if missing_cli_roles or manifest.stale_codex_hook_trust or manifest.owner_shell_issue
+        if (
+            missing_cli_roles
+            or manifest.stale_codex_hook_trust
+            or manifest.owner_shell_issue
+            or incomplete_setup
+        )
         else "",
         owner_shell_issue=manifest.owner_shell_issue,
         authenticated_now=authenticated_now,
         incomplete_provider_setup=incomplete_setup,
+    )
+
+
+def _resumable_next_action(cli: str, *, owner_user: str) -> str:
+    """What to do next, as a command, and what to do after doing it.
+
+    A step that did not finish has to leave somebody able to finish it. The
+    report used to say only which step was outstanding, which is a description
+    of a problem rather than a way out of it -- and on a fresh tenant the one
+    thing a person needed to know was that the launch could simply be run
+    again once the provider's own question was answered (SYRD-221).
+    """
+    command = " ".join(FIRST_RUN_AUTH_LOGIN_COMMANDS.get(cli, [cli])[:1])
+    owner = owner_user or "the owner account"
+    return (
+        f"To resume: run `{command}` as {owner}, answer its own prompts to the end, "
+        "then run the same switchyard launch again -- it picks up from whatever is "
+        "already recorded and does not repeat the steps that are done."
     )
 
 
@@ -15056,7 +15191,8 @@ def report_first_run_auth_warnings(
     for cli, roles in report.incomplete_provider_setup:
         print_func(
             f"warning: switchyard: {cli}'s own first run is still not complete{owner_detail}; "
-            f"affected roles: {', '.join(roles)}; each of their panes will open it instead of a prompt"
+            f"affected roles: {', '.join(roles)}; each of their panes will open it instead of a prompt. "
+            + _resumable_next_action(cli, owner_user=report.owner_user)
         )
     for cli, role, workdir in report.untrusted_roles:
         print_func(f"warning: switchyard: {cli} workspace still untrusted for {role}: {workdir}")

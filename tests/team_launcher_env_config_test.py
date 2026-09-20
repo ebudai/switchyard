@@ -463,11 +463,18 @@ def test_owner_cli_probe_and_interactive_strip_caller_pane_identity() -> None:
                 command=["agy", "--model", "gemini-3.7-flash-high", "-p", "model-ok"],
                 runner=runner,
             )
-            interactive = team_launcher._run_owner_cli_interactive(
+            # The bounded runner, which is what ships: the unbounded
+            # `_run_owner_cli_interactive` it replaced had no completion
+            # predicate and held a fresh tenant's launch open indefinitely
+            # (SYRD-221). Its environment handling is the property under test
+            # here, and that had to move with it.
+            interactive = team_launcher._run_owner_cli_until(
                 owner_user=owner,
                 owner_home=owner_home,
                 cwd=owner_home,
                 command=["claude", "login"],
+                is_complete=lambda: True,
+                watching="claude to record a signed-in account",
                 runner=runner,
             )
         finally:
@@ -478,7 +485,7 @@ def test_owner_cli_probe_and_interactive_strip_caller_pane_identity() -> None:
                     os.environ[key] = value
 
     assert probe.returncode == 0
-    assert interactive.returncode == 0
+    assert interactive is True
     owner_path = team_launcher._prepend_paths(
         team_launcher.DEFAULT_PANE_BASE_PATH,
         [str(owner_home / "bin"), str(owner_home / ".local" / "bin")],

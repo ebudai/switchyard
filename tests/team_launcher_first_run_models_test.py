@@ -278,6 +278,10 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         "have a private copy, let switchyard promote that executable to a root-owned host-wide "
         "copy when it offers, which every later project reuses.",
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
+        # SYRD-221 UAT (test9): the sign-in step says what it is as it starts.
+        "switchyard: codex will now run in this terminal as otto-agent to sign in. "
+        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
+        "terminal for others; the terminal comes back on its own once the account is set up.",
     ]
 
 def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_role() -> None:
@@ -408,10 +412,19 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         # Each foreground step says what it is about to do with the terminal,
         # and how to hand it back, before it takes it (SYRD-191).
         "switchyard: claude will now run in this terminal as otto-agent. Answer its own "
-        "prompts -- a theme, then the sign-in it asks for even though credentials exist, "
-        "because that flow does not consult them. The terminal comes back on its own as soon "
-        "as it is recorded; you do not have to exit anything. It is asked once for the "
-        "account, not once per role, and no pane will ask again.",
+        "prompts to the end -- a theme, the sign-in it asks for even though credentials "
+        "exist, because that flow does not consult them, and whether to trust this folder. "
+        "The terminal comes back on its own once nothing is left to answer; you do not have "
+        "to exit anything. It is asked once for the account, not once per role, and no pane "
+        "will ask again.",
+        # And each sign-in says what it is as it starts, as the steps either side
+        # of it do (SYRD-221 UAT, test9).
+        *(
+            f"switchyard: {cli} will now run in this terminal as otto-agent to sign in. "
+            "Complete what it asks -- a browser sign-in for some providers, a choice in the "
+            "terminal for others; the terminal comes back on its own once the account is set up."
+            for cli in ("claude", "codex", "agy")
+        ),
         f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'designer'} as this "
         "project's owner so it can be trusted once for designer. Answer the trust "
         "prompt; the terminal comes back on its own once the answer is recorded.",
@@ -466,6 +479,9 @@ def test_first_run_auth_phase_handles_hermes_model_setup() -> None:
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
+        "switchyard: hermes will now run in this terminal as otto-agent to sign in. "
+        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
+        "terminal for others; the terminal comes back on its own once the account is set up.",
     ]
 
 def test_first_run_auth_phase_accepts_hermes_resolved_api_key_without_model_setup() -> None:

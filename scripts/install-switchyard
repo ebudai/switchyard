@@ -229,6 +229,48 @@ switchyard_exec_with_root() {
     exit 1
 }
 
+# 'new' needs root, and root has no screen: it starts every pane but cannot
+# open the window they are shown in. Run as a replacement for this process, it
+# left nothing behind that could -- which is how test10 came up complete and
+# invisible (SYRD-221 UAT). So 'new' runs as a child, reports the project it
+# made into a file this account created and owns, and this process then opens
+# it the ordinary way, as the person who asked: the same verb, over the same
+# control bridge, that opens every other launch's window.
+switchyard_new_then_open() {
+    local result slug status=0
+    if [[ ! -x "\$SWITCHYARD_DEFAULT_TARGET" ]]; then
+        switchyard_exec_with_root "\$@"
+    fi
+    if ! result="\$(mktemp "\${TMPDIR:-/tmp}/switchyard-new.XXXXXX" 2>/dev/null)"; then
+        switchyard_exec_with_root "\$@"
+    fi
+    if ! "\$SWITCHYARD_SUDO_BIN" -n -v >/dev/null 2>&1 && ! switchyard_user_can_prompt_for_sudo; then
+        rm -f -- "\$result"
+        switchyard_exec_with_root "\$@"
+    fi
+    "\$SWITCHYARD_SUDO_BIN" env PYTHONDONTWRITEBYTECODE="\$PYTHONDONTWRITEBYTECODE" SWITCHYARD_NEW_RESULT_FILE="\$result" "\$SWITCHYARD_DEFAULT_TARGET" "\$@" || status=\$?
+    slug="\$(head -c 64 -- "\$result" 2>/dev/null || true)"
+    rm -f -- "\$result"
+    if [[ "\$status" -ne 0 ]]; then
+        exit "\$status"
+    fi
+    # Empty is an answer: the window was already opened, or the launch was
+    # deferred and there is nothing to show yet. Either way 'new' said so.
+    if [[ -z "\$slug" ]]; then
+        exit 0
+    fi
+    # Checked here as well as where it was written: this process runs it.
+    if [[ ! "\$slug" =~ ^[a-z0-9][a-z0-9_]{0,39}\$ ]]; then
+        printf 'switchyard: new reported a project name this will not run; open the window with: switchyard <project>\n' >&2
+        exit 1
+    fi
+    if [[ ! -x "\$SWITCHYARD_USER_TARGET" ]]; then
+        printf 'switchyard: %s is up; open its window with: switchyard %s\n' "\$slug" "\$slug" >&2
+        exit 0
+    fi
+    exec "\$SWITCHYARD_USER_TARGET" "\$slug"
+}
+
 if [[ "\${EUID:-\$(id -u)}" -ne 0 ]]; then
     case "\${1:-}" in
         -h|--help|help)
@@ -241,6 +283,9 @@ if [[ "\${EUID:-\$(id -u)}" -ne 0 ]]; then
             ;;
     esac
     if switchyard_invocation_requires_root "\$@"; then
+        if [[ "\${1:-}" == "new" ]]; then
+            switchyard_new_then_open "\$@"
+        fi
         switchyard_exec_with_root "\$@"
     fi
     if [[ ! -x "\$SWITCHYARD_USER_TARGET" ]]; then

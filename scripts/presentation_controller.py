@@ -986,6 +986,14 @@ def _configure_display_session(
     _configure_recovery_hook(config, slot, role_name, status, runner=runner)
 
 
+def _exact_target_args(args: list[str]) -> list[str]:
+    """The shared viewer command, with its `-t` target made exact."""
+    exact = list(args)
+    index = exact.index("-t") + 1
+    exact[index] = _exact_tmux_target(exact[index])
+    return exact
+
+
 def _viewer_observer_attach(session: str) -> str:
     """Viewer pane command that attaches to a display slot as an observer.
 
@@ -1289,6 +1297,11 @@ def _launch_viewer(
     ])
     if proc.returncode != 0:
         raise SystemExit(f"switchyard: could not create viewer {viewer}")
+    # Before the splits, or tmux 3.2a builds them in an 80x23 window and the
+    # fourth fails for want of rows (SYRD-221 UAT, test11).
+    proc = runner(_exact_target_args(team_launcher.tmux_viewer_pin_size_args(viewer)))
+    if proc.returncode != 0:
+        raise SystemExit(f"switchyard: could not size viewer {viewer}")
     for session in rest:
         proc = runner([
             "tmux", "split-window", "-t", _exact_tmux_target(f"{viewer}:0"),
@@ -1312,15 +1325,21 @@ def _launch_viewer(
                 height=team_launcher.DEFAULT_VIEWER_ROWS,
             ),
         ],
-        # And keep it matching the window's shape, not just its first shape:
-        # tmux scales a layout on resize and never re-derives it (SYRD-216).
-        team_launcher.tmux_viewer_relayout_hook_args(viewer),
         *_viewer_frame_commands(viewer),
     )
     for args in commands:
         proc = runner(args)
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not configure viewer {viewer}")
+    # And keep it matching the window's shape, not just its first shape: tmux
+    # scales a layout on resize and never re-derives it (SYRD-216). A tmux too
+    # old for the hook says so and keeps its viewer (SYRD-221 UAT).
+    if team_launcher.install_viewer_relayout_hook(viewer, runner=runner) != 0:
+        raise SystemExit(f"switchyard: could not configure viewer {viewer}")
+    # Built: from here its size is the window's that shows it (SYRD-216).
+    proc = runner(_exact_target_args(team_launcher.tmux_viewer_unpin_size_args(viewer)))
+    if proc.returncode != 0:
+        raise SystemExit(f"switchyard: could not release viewer {viewer} to its window")
     _reconcile_viewer_observers(config, runner=runner)
     for slot in range(state["slot_count"]):
         role = state["slots"][str(slot)] or "hidden"

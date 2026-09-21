@@ -224,6 +224,16 @@ class FakeRunner:
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
+        if args[-4:] == ["claude", "auth", "status", "--json"]:
+            # Signed in, like every other provider this fake already reports:
+            # `codex login status` and the rest pass on a bare exit 0, and
+            # Claude's probe alone parses JSON, so an empty answer read as
+            # "not signed in" purely by accident. That difference did not
+            # matter while an unfinished sign-in was only a warning; it does
+            # now that a role whose provider has no credentials is refused a
+            # launch, which is what these suites were unknowingly relying on
+            # (SYRD-221).
+            return subprocess.CompletedProcess(args, 0, '{"loggedIn": true}', "")
         if args[:2] == ["git", "-C"] and args[3:5] == ["rev-parse", "--verify"]:
             # Exactly the form the release resolver asks: which commit is being
             # installed is a real question about a real repository, and stubbing

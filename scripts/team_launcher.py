@@ -14017,15 +14017,52 @@ def _provider_screen_offers_a_choice(recent_output: str) -> bool:
     return sum(1 for line in lines if _NUMBERED_OPTION.match(line)) >= 2
 
 
+#: A screen that has handed the person a sign-in to complete somewhere else.
+#: It is quiet, it asks nothing, and it is the furthest thing from finished:
+#: `codex login` prints its URL and then waits on a browser callback that may
+#: be minutes away. Reading that as "at its ordinary prompt" is what killed the
+#: login mid-flow on test7 and launched three Codex roles with no credentials
+#: (SYRD-221).
+#: Every one of these is a line from a recording in `tests/fixtures`, not a
+#: wording written from memory. This ticket has been reopened twice over
+#: guessed phrases, and a marker nobody has seen is a guess however plausible
+#: it reads. Claude's own sign-in is already caught by the OAuth box in
+#: `PROVIDER_PENDING_ANSWER_MARKERS`, so it needs nothing here.
+#:
+#: Two lines of the same screen, deliberately: either could be reworded, and
+#: the cost of the other still matching is that Switchyard waits for somebody
+#: who has already finished, which is the side to be wrong on.
+PROVIDER_WAITING_ON_SIGN_IN_MARKERS = (
+    "starting local login server",
+    "navigate to this url to authenticate",
+)
+
+
+def _provider_screen_is_waiting_on_a_sign_in(recent_output: str) -> bool:
+    """Has the provider handed the sign-in to a browser and gone quiet?
+
+    Evidence FOR waiting, like every other reading here. Nothing about a
+    sign-in screen distinguishes it from an idle prompt by silence alone --
+    that is precisely the shape that has to be recognised by what it says.
+    """
+    text = _visible_text(recent_output)
+    return any(
+        "".join(marker.split()).casefold() in text
+        for marker in PROVIDER_WAITING_ON_SIGN_IN_MARKERS
+    )
+
+
 def provider_is_waiting_for_an_answer(recent_output: str) -> bool:
     """Is this screen asking the person something, or is it ready?
 
     Read from what the provider actually printed rather than from a clock.
 
-    Two independent readings, because either alone has been wrong here. The
+    Three independent readings, because each alone has been wrong here. The
     phrases catch a question with no visible structure -- an OAuth box is just
-    "Paste code here if prompted >" -- and the structure catches a question
-    whose wording has moved on, which is what stranded a fresh tenant.
+    "Paste code here if prompted >" -- the structure catches a question whose
+    wording has moved on, which is what stranded a fresh tenant, and the
+    sign-in markers catch a screen that is not asking anything at all because
+    it is waiting on a browser somewhere else.
 
     Both are evidence FOR a question, never against one, and that asymmetry is
     deliberate: a false positive makes Switchyard wait a little longer for
@@ -14037,6 +14074,8 @@ def provider_is_waiting_for_an_answer(recent_output: str) -> bool:
         "".join(marker.split()).casefold() in text
         for marker in PROVIDER_PENDING_ANSWER_MARKERS
     ):
+        return True
+    if _provider_screen_is_waiting_on_a_sign_in(recent_output):
         return True
     return _provider_screen_offers_a_choice(recent_output)
 
@@ -14207,6 +14246,10 @@ class PtyForegroundSession:
     def __init__(self, args: Sequence[str], **kwargs: Any) -> None:
         import pty
 
+        import codecs
+
+        #: Holds a character that arrives split across two reads.
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._master, slave = pty.openpty()
         os.set_blocking(self._master, False)
         # A pty opened cold is 80x24 whatever the window is, so a full-screen
@@ -14280,7 +14323,12 @@ class PtyForegroundSession:
             return ""
         except OSError:
             return ""
-        return chunk.decode("utf-8", "replace")
+        # Decoded across reads, not within one. A read lands wherever the
+        # kernel has bytes, and a character the provider drew in three of them
+        # -- the prompt glyph is one -- arrives split. Decoding each read on
+        # its own turns that into replacement characters on the screen, which
+        # is the malformed boundary the live run reported (SYRD-221).
+        return self._decoder.decode(chunk)
 
     def write(self, text: str) -> None:
         try:
@@ -15695,6 +15743,39 @@ def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
         "offer is made before launch."
     )
     return "\n".join(lines)
+
+
+def stop_before_launch_for_unauthenticated_providers(
+    report: FirstRunAuthReport,
+    *,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """A role whose provider has no credentials must not be started.
+
+    The ticket asks for each unique provider to be authenticated once, before
+    any pane. Until now an unfinished sign-in was a warning printed AFTER the
+    launch: test7 started three Codex roles and then said "codex is still
+    unauthenticated; affected roles: main, app, ops", which is a report of the
+    thing that was supposed to be prevented. A role started without
+    credentials cannot do its work, and it cannot say why in a way anybody
+    reads (SYRD-221).
+    """
+    if not report.unauthenticated_roles:
+        return False
+    lines = [
+        "switchyard: not starting any role yet -- a provider's sign-in did not "
+        "finish, so those roles would come up unable to do anything:"
+    ]
+    for cli, roles in sorted(report.unauthenticated_roles.items()):
+        lines.append(f"  {cli}: {', '.join(roles)}")
+    owner = report.owner_user or "the owner account"
+    lines.append(
+        f"Finish it by running the provider's own sign-in as {owner}, then run the "
+        "same switchyard command again -- it picks up from whatever is already "
+        "recorded and does not repeat the steps that are done."
+    )
+    print_func("\n".join(lines))
+    return True
 
 
 def stop_before_launch_for_missing_owner_clis(
@@ -20994,6 +21075,10 @@ def switchyard_new_command(
         print_func=print_func,
     )
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report, print_func=print_func):
+        return 1
+    if stop_before_launch_for_unauthenticated_providers(
+        first_run_auth_report, print_func=print_func
+    ):
         return 1
     if first_run_auth_report.model_validation_failures:
         report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
@@ -30015,6 +30100,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     config = prepare_project_desktop(config)
     first_run_auth_report = run_switchyard_launch_first_run_auth(config)
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report):
+        return 1
+    if stop_before_launch_for_unauthenticated_providers(first_run_auth_report):
         return 1
     launch_result = launch_project(
         config,

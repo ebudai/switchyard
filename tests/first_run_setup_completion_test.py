@@ -1335,13 +1335,20 @@ def test_workflow_prepare_role_probes_with_its_runner_and_still_watches() -> Non
 
 def drive_through_a_real_terminal(
     script: str, *, size=(40, 100), resize_to=None, seconds=8.0, quiet=True,
-    own_session=False, kill_with=None,
+    own_session=False, kill_with=None, focus_after=None,
 ):
     """Run a stub CLI behind the watched session, in front of a terminal that
     answers queries the way a real one does.
 
     Returns everything that reached the screen, plus whether the terminal was
     handed back in the mode it was lent in.
+
+    `focus_after` makes it a terminal the person leaves and comes back to:
+    that many seconds after a sign-in box is drawn it reports focus-out -- the
+    person has gone to the browser -- and once Switchyard has handed the
+    terminal back it reports focus-in. Only while focus reporting is actually
+    switched on, read from what reached the screen, because that is the only
+    time a real terminal sends either (SYRD-221 UAT, test8).
     """
     import fcntl
     import struct as _struct
@@ -1421,6 +1428,12 @@ def drive_through_a_real_terminal(
         fcntl.ioctl(fd, termios.TIOCSWINSZ, _struct.pack("HHHH", size[0], size[1], 0, 0))
         captured = b""
         start_at = time.time()
+        box_at = None
+        focus_out_sent = focus_in_sent = False
+
+        def reporting_focus() -> bool:
+            return captured.rfind(b"\x1b[?1004h") > captured.rfind(b"\x1b[?1004l")
+
         pid_alive = True
         deadline = time.time() + seconds + 12
         while time.time() < deadline:
@@ -1459,6 +1472,18 @@ def drive_through_a_real_terminal(
                     time.sleep(0.1)
                 captured += f"EXITED={gone}\n".encode()
                 break
+            if focus_after is not None:
+                if box_at is None and b"Paste code here" in captured:
+                    box_at = time.time()
+                if (box_at is not None and not focus_out_sent
+                        and time.time() - box_at >= focus_after):
+                    focus_out_sent = True
+                    if reporting_focus():
+                        os.write(fd, b"\x1b[O")
+                if b"RESTORED=" in captured and not focus_in_sent:
+                    focus_in_sent = True
+                    if reporting_focus():
+                        os.write(fd, b"\x1b[I")
             ready, _, _ = select.select([fd], [], [], 0.4)
             if not ready:
                 continue
@@ -2052,6 +2077,334 @@ def test_a_character_split_across_two_reads_survives_the_relay() -> None:
             session._process.wait(timeout=5)
         except Exception:
             pass
+
+
+
+# --- test8: the sign-in box has to survive the person leaving for the browser
+#
+# Live UAT on test8 at 565152f: while the User was in the browser approving the
+# Claude sign-in, Switchyard printed "claude has finished its first run and is
+# at its ordinary prompt" with "Paste code here if prompted >" still on the
+# screen, and `^[[...` appeared in the terminal.
+#
+# Recorded against the real CLI (v2.1.278, throwaway HOME): the sign-in box is
+# drawn once, and the moment the window loses focus Claude writes twenty bytes
+# that only reassert its keyboard modes -- `focus-out-reassert.txt`. The watcher
+# took that for a new screen, forgot the box, and closed it six seconds later.
+
+
+class ClockedSession:
+    """A provider that prints recorded chunks at given times on a fake clock.
+
+    Unlike `ReplaySession` this one has a timeline, because the defect is about
+    WHEN the second chunk arrives: long enough after the box to count as a new
+    screen under the old rule.
+    """
+
+    def __init__(self, timeline, clock) -> None:
+        self._timeline = list(timeline)
+        self._clock = clock
+        self.written: list[str] = []
+        self.terminated = False
+        self._returncode = None
+
+    def poll(self):
+        return self._returncode
+
+    def read(self) -> str:
+        due = [text for at, text in self._timeline if at <= self._clock.now]
+        self._timeline = [(at, text) for at, text in self._timeline if at > self._clock.now]
+        return "".join(due)
+
+    def relay_from(self, fd) -> None:
+        return None
+
+    def write(self, text: str) -> None:
+        self.written.append(text)
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._returncode = -15
+
+    def wait(self, timeout=None):
+        return self._returncode
+
+    def close(self) -> None:
+        return None
+
+
+class FakeClock:
+    """Time that moves only when the watcher sleeps or waits."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def watch_timeline(timeline, *, timeout=30.0, quiet=6.0):
+    clock = FakeClock()
+    built: list[ClockedSession] = []
+
+    def factory(args, **kwargs):
+        session = ClockedSession(timeline, clock)
+        built.append(session)
+        return session
+
+    printed: list[str] = []
+    out: list[str] = []
+    team_launcher.run_provider_first_run_session(
+        cli="claude",
+        args=["claude"],
+        kwargs={},
+        is_complete=lambda: False,
+        watching="claude first run",
+        session_factory=factory,
+        input_fd=None,
+        output_write=out.append,
+        sleep=clock.sleep,
+        monotonic=lambda: clock.now,
+        quiet_seconds=quiet,
+        timeout_seconds=timeout,
+        print_func=printed.append,
+    )
+    return built[0], "\n".join(printed), "".join(out)
+
+
+def test_the_recorded_sign_in_box_is_a_question() -> None:
+    box = screen("sign-in-box")
+    # Read through `_visible_text`: Claude places each word with a cursor-move,
+    # so the phrase is not in the raw bytes at all.
+    check("pastecodehereifprompted" in team_launcher._visible_text(box),
+          "the recording is not the sign-in box any more")
+    check(team_launcher.provider_is_waiting_for_an_answer(box),
+          "Claude's own sign-in box is not recognised as a question")
+
+
+def test_the_focus_out_reassertion_draws_nothing() -> None:
+    """The twenty bytes are all escape sequences and a shift-in.
+
+    Before SYRD-221's UAT fix `_visible_text` left `[<u[>5u[>4;2m` and `(B`
+    behind, because CSI parameters were only `[0-9;?]` and a charset
+    designation was not recognised at all -- so this read as text.
+    """
+    focus = screen("focus-out-reassert")
+    check(len(focus) == 20, f"the recording is not the focus-out chunk: {focus!r}")
+    check(team_launcher._visible_text(focus) == "",
+          f"escape residue is read as text: {team_launcher._visible_text(focus)!r}")
+    check(not team_launcher._draws_something(focus),
+          "a chunk that only reasserts keyboard modes counts as drawing something")
+
+
+def test_leaving_for_the_browser_does_not_close_the_sign_in() -> None:
+    """test8, on the recorded bytes and the timing the User actually had."""
+    session, printed, _out = watch_timeline(
+        [(0.0, screen("sign-in-box")), (7.0, screen("focus-out-reassert"))],
+    )
+    check("ordinary prompt" not in printed,
+          f"the sign-in box was taken for an ordinary prompt: {printed!r}")
+    check("did not record its first run" in printed,
+          f"the step did not end by waiting out the sign-in: {printed!r}")
+
+
+def test_a_stalled_step_types_nothing_into_the_screen() -> None:
+    """Whatever it is still asking, `/exit` would be taken as the answer.
+
+    On Claude's sign-in box it is pasted as the authorization code. Before this
+    fix the deadline path typed it exactly as the finished path does.
+    """
+    session, printed, _out = watch_timeline([(0.0, screen("sign-in-box"))], timeout=20.0)
+    check("did not record its first run" in printed, f"the step did not stall: {printed!r}")
+    check(not any("/exit" in text for text in session.written),
+          f"the exit input was typed into an unanswered sign-in: {session.written!r}")
+    check(session.terminated, "a stalled provider was left running")
+
+
+def test_a_real_ordinary_prompt_is_still_closed_after_a_focus_change() -> None:
+    """The other side: a focus event must not make a FINISHED step wait forever."""
+    session, printed, _out = watch_timeline(
+        [(0.0, screen("ordinary-prompt")), (3.0, screen("focus-out-reassert"))],
+    )
+    check("ordinary prompt" in printed,
+          f"a finished first run was not recognised after a focus change: {printed!r}")
+    check("/exit\r" in session.written, "the finished provider was not sent its own exit")
+
+
+def test_what_the_provider_switched_on_is_switched_off() -> None:
+    """The modes in the recordings, and nothing that was not switched on."""
+    ledger = team_launcher._TerminalModeLedger()
+    ledger.feed(screen("theme-menu"))
+    ledger.feed(screen("focus-out-reassert"))
+    handback = ledger.handback()
+    for undo in ("\x1b[?1004l", "\x1b[?2004l", "\x1b[>4m"):
+        check(undo in handback, f"{undo!r} missing from the handback: {handback!r}")
+    check(re.search(r"\x1b\[<[1-9][0-9]*u", handback),
+          f"the kitty keyboard push is not popped: {handback!r}")
+    check("\x1b[?1049l" not in handback,
+          "the main screen is 'restored' on a terminal that never left it")
+
+    clean = team_launcher._TerminalModeLedger()
+    clean.feed("\x1b[?1004h\x1b[?2004h\x1b[>5u\x1b[>4;2m")
+    clean.feed("\x1b[?1004l\x1b[?2004l\x1b[<u\x1b[>4m")
+    check(clean.handback() == "", f"a clean exit is 'undone' again: {clean.handback()!r}")
+
+
+
+def _every_split(text: str):
+    return [(text[:cut], text[cut:]) for cut in range(1, len(text))]
+
+
+def test_a_split_focus_reassertion_still_draws_nothing() -> None:
+    """DAT on 43cc2ec: 15 of the 19 two-part splits of the recorded chunk left
+    printable residue -- `(B`, `[<u`, `>4;2m` -- when each read was judged on
+    its own. Every split, through the same stream the watcher reads.
+    """
+    focus = screen("focus-out-reassert")
+    splits = _every_split(focus)
+    check(len(splits) == 19, f"the recording is not the twenty-byte chunk: {focus!r}")
+    for first, second in splits:
+        stream = team_launcher._TerminalStream()
+        drawn = [team_launcher._draws_something(stream.feed(part)) for part in (first, second)]
+        check(not any(drawn), f"split {first!r} | {second!r} was read as drawing: {drawn}")
+
+
+def test_a_split_escape_does_not_swallow_what_follows_it() -> None:
+    """The carry must give the text back, or the next screen is never read."""
+    stream = team_launcher._TerminalStream()
+    check(stream.feed("\x1b[>4;") == "", "an unfinished sequence was released early")
+    check(stream.feed("2mPaste code here") == "\x1b[>4;2mPaste code here",
+          "text after a completed split sequence was lost")
+    check(stream.feed("\x1b(") == "", "a half charset designation was released early")
+    check(stream.feed("Bok") == "\x1b(Bok", "a completed charset designation was lost")
+
+
+
+def test_an_osc_split_on_its_st_terminator_draws_nothing() -> None:
+    """DAT on 4f43684: `ESC]0;title ESC` then `\\` released the title as text.
+
+    An OSC is the one sequence with an ESC inside it -- the `ESC \\` string
+    terminator -- so a read ending on that bare ESC made the terminator's ESC
+    the last one, and only it was held.
+    """
+    stream = team_launcher._TerminalStream()
+    first = stream.feed("\x1b]0;Switchyard setup\x1b")
+    second = stream.feed("\\")
+    check(not team_launcher._draws_something(first),
+          f"the unterminated title was released as text: {first!r}")
+    check(not team_launcher._draws_something(second),
+          f"the completed title reads as drawing: {second!r}")
+    check(first + second == "\x1b]0;Switchyard setup\x1b\\",
+          f"the sequence was not returned whole once complete: {first + second!r}")
+
+
+def test_every_split_of_an_osc_draws_nothing_and_nothing_is_stranded() -> None:
+    """Both terminators, every cut -- and the carry is empty afterwards, so a
+    held sequence is never kept back from what follows it."""
+    for seq in ("\x1b]0;Switchyard setup\x1b\\", "\x1b]0;Switchyard setup\x07"):
+        for first, second in _every_split(seq):
+            stream = team_launcher._TerminalStream()
+            pieces = [stream.feed(first), stream.feed(second)]
+            check(not any(team_launcher._draws_something(piece) for piece in pieces),
+                  f"split {first!r} | {second!r} was read as drawing: {pieces!r}")
+            check("".join(pieces) == seq,
+                  f"split {first!r} | {second!r} was not returned whole: {pieces!r}")
+
+
+def test_text_after_a_split_osc_is_returned_for_judging() -> None:
+    stream = team_launcher._TerminalStream()
+    check(stream.feed("\x1b]0;title\x1b") == "", "an unterminated OSC was released early")
+    after = stream.feed("\\Paste code here if prompted >")
+    check(after == "\x1b]0;title\x1b\\Paste code here if prompted >",
+          f"the text after the OSC was not returned: {after!r}")
+    check(team_launcher.provider_is_waiting_for_an_answer(after),
+          "the sign-in box after a title change was not read as a question")
+
+
+def test_leaving_for_the_browser_survives_every_split_of_the_focus_chunk() -> None:
+    """test8 again, with the focus-out arriving in two reads at every cut point."""
+    for first, second in _every_split(screen("focus-out-reassert")):
+        _session, printed, _out = watch_timeline(
+            [(0.0, screen("sign-in-box")), (7.0, first), (7.5, second)],
+        )
+        check("ordinary prompt" not in printed,
+              f"split {first!r} | {second!r} closed the sign-in box: {printed!r}")
+
+
+def test_an_escape_split_across_reads_is_still_seen() -> None:
+    ledger = team_launcher._TerminalModeLedger()
+    for piece in ("\x1b[?10", "04h", "\x1b", "[?2004h"):
+        ledger.feed(piece)
+    check("\x1b[?1004l" in ledger.handback() and "\x1b[?2004l" in ledger.handback(),
+          f"a split escape was missed: {ledger.handback()!r}")
+
+
+def test_a_killed_provider_s_modes_are_handed_back_through_the_same_channel() -> None:
+    session, _printed, out = watch_timeline(
+        [(0.0, "\x1b[?1004h\x1b[>5u" + screen("sign-in-box"))], timeout=10.0,
+    )
+    check(session.terminated, "the provider was not ended")
+    handed_back = out.rfind("\x1b[?1004l\x1b[<1u")
+    check(handed_back > out.rfind("\x1b[?1004h"),
+          f"the terminal was left reporting focus for a provider that is gone: {out[-80:]!r}")
+
+
+#: test8 as a stub: take the terminal the way Claude does, draw the sign-in box,
+#: and reassert the keyboard modes whenever anything arrives -- which is what
+#: the real CLI does on a focus change. Every byte it is sent is logged, so a
+#: `/exit` typed into the box is caught.
+def _signs_in_like_claude(log: Path) -> str:
+    return (
+        "#!/bin/sh\n"
+        "stty raw -echo\n"
+        "printf '\\033[?1004h\\033[?2004h\\033[>5u\\033[>4;2m'\n"
+        "printf \"Browser didn't open? Use the url below to sign in (c to copy)\\r\\n\\r\\n\"\n"
+        "printf 'https://claude.com/cai/oauth/authorize?code=true\\r\\n\\r\\n'\n"
+        "printf 'Paste code here if prompted > '\n"
+        f": > '{log}'\n"
+        "while :; do\n"
+        f"  before=$(wc -c < '{log}')\n"
+        f"  dd bs=64 count=1 >> '{log}' 2>/dev/null\n"
+        f"  [ \"$(wc -c < '{log}')\" = \"$before\" ] && exit 0\n"
+        "  printf '\\033(B\\017\\033[<u\\033[>5u\\033[>4;2m'\n"
+        "done\n"
+    )
+
+
+_TEST8: dict = {}
+
+
+def _test8_run() -> tuple[str, str]:
+    """One live run shared by the cases below; it takes twenty-odd seconds."""
+    if not _TEST8:
+        with tempfile.TemporaryDirectory(prefix="syrd221-test8.") as tmp:
+            log = Path(tmp) / "typed"
+            screen_text = drive_through_a_real_terminal(
+                _signs_in_like_claude(log), seconds=12.0, quiet=False, focus_after=1.5,
+            )
+            _TEST8["screen"] = screen_text
+            _TEST8["typed"] = log.read_bytes().decode("utf-8", "replace") if log.exists() else ""
+    return _TEST8["screen"], _TEST8["typed"]
+
+
+def test_test8_the_sign_in_survives_the_browser_on_a_real_terminal() -> None:
+    screen_text, typed = _test8_run()
+    check("PROBEFAIL" not in screen_text, f"the probe never ran: {screen_text[-300:]!r}")
+    check("Paste code here" in screen_text, "the stub never drew its sign-in box")
+    check("\x1b[O" in typed, f"the focus-out never reached the provider: {typed!r}")
+    check("ordinary prompt" not in screen_text,
+          "the sign-in box was closed as an ordinary prompt while the person was away")
+    check("/exit" not in typed, f"`/exit` was typed into the sign-in box: {typed!r}")
+
+
+def test_test8_nothing_is_echoed_when_the_person_comes_back() -> None:
+    screen_text, _typed = _test8_run()
+    check("RESTORED=True" in screen_text,
+          f"the terminal was not handed back as it was lent: {screen_text[-200:]!r}")
+    check(screen_text.rfind("\x1b[?1004l") > screen_text.rfind("\x1b[?1004h"),
+          "the terminal was handed back still reporting focus")
+    echoed = re.findall(r"\^\[[\[\]][0-9;?>]*[A-Za-z~]?", screen_text)
+    check(not echoed, f"terminal traffic was echoed onto the screen: {echoed[:6]}")
 
 
 def main() -> int:

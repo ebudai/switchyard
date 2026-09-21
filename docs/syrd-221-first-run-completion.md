@@ -917,3 +917,93 @@ the session work is applied to whatever is spawned — `sudo` becomes the sessio
 leader owning the pty before it execs the provider, so the CLI inherits that
 controlling terminal. That is reasoning, not measurement, and the VM is where
 it can be measured.
+
+## test7: three Codex roles started with no credentials
+
+The Claude half now works on a fresh tenant. `test7` provisioned, launched, and
+then said:
+
+```
+warning: switchyard: codex is still unauthenticated; affected roles: main, app, ops
+```
+
+A report, after the fact, of the thing it was supposed to prevent.
+
+### One fix made the other defect
+
+`codex login` draws this and then waits on a browser callback that may be
+minutes away — recorded from the real CLI, in
+`tests/fixtures/claude-first-run/codex-login-waiting.txt`:
+
+```
+Starting local login server on http://localhost:1455.
+If your browser did not open, navigate to this URL to authenticate:
+https://auth.openai.com/oauth/authorize?response_type=code&client_id=...
+On a remote or headless machine? Use `codex login --device-auth` instead.
+```
+
+It asks nothing. It has no menu, no cursor, no prompt — and it says nothing at
+all while it waits. So the quiet-screen path, the one added two sections ago to
+stop Claude's folder-trust step hanging for ten minutes, read it as "at its
+ordinary prompt", closed it after six seconds, and carried on. The sign-in never
+completed.
+
+That is worth stating plainly: the third answer — *gone quiet, asking nothing,
+therefore done* — is right for a CLI sitting at its prompt and exactly wrong for
+one waiting on a browser. Both look identical by silence alone, which is why the
+difference has to be read from what the screen says.
+
+A screen that has handed the sign-in somewhere else is now recognised as
+waiting. Both markers are lines from the recording, and they are deliberately
+two: either could be reworded, and the cost of the other still matching is that
+Switchyard waits for somebody who has already finished — the side to be wrong
+on.
+
+A test now requires every marker to appear in some recorded screen. This ticket
+has been reopened twice over phrases written from memory, and a marker nobody
+has seen is a guess however plausible it reads. Writing the first version of
+this list I added four such phrases; the grounding test is what makes that
+impossible rather than merely discouraged.
+
+### A role with no credentials must not start
+
+The unfinished sign-in was reported as a warning *after* the launch. It is now a
+gate before it, on both live paths — `switchyard new` and the daily `switchyard
+<slug>` — naming the provider, the roles, whose account to finish it on, and
+that re-running picks up from whatever is already recorded.
+
+The first version of that gate read `report.unauthenticated`, a field that does
+not exist; the real one is `unauthenticated_roles`. It would have raised
+`AttributeError` at launch. The test caught it before anything else did, which
+is the whole argument for writing the test alongside the gate rather than after.
+
+### A character split across two reads
+
+The captured output began `❯<?>switchyard:`. `read()` decoded each read on its
+own, and a read lands wherever the kernel has bytes:
+
+```
+bytes of ❯: b'\xe2\x9d\xaf'
+decoded as two reads: '��'
+decoded whole       : '❯'
+```
+
+The relay now decodes across reads with an incremental decoder, so a character
+drawn in three bytes survives arriving in two pieces.
+
+### Verification
+
+222 checks. Mutation: 9 mutants over this round, 8 killed.
+
+The survivor removes one of the two sign-in markers. It survives because the
+recorded screen matches both, which is the redundancy described above rather
+than a gap — and a mutant that *adds* an ungrounded marker is killed by the
+grounding test.
+
+### Still not verified here
+
+The `sudo -u <owner>` boundary. This host does not authorise sudo from a
+candidate, so the cross-user behaviour of the sign-in steps — whether `codex
+login` run as another user records its credentials where the probe reads them —
+remains the VM's to confirm. What can be said from here is that the step is no
+longer closed while it waits, and that no role starts without credentials.

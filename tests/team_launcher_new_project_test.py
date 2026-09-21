@@ -1554,7 +1554,7 @@ def test_fresh_project_launches_without_a_role_account_handoff() -> None:
 
 
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    run_team_launcher_tests(globals(), first=(), provider_setup_is_done=True)
     print("team_launcher_new_project_test: ok")
     return 0
 

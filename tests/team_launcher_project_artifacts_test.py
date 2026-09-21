@@ -896,7 +896,7 @@ def test_project_artifact_rejects_non_bool_include_audit() -> None:
     assert "field 'project.include_audit' must be a JSON boolean" in message
 
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    run_team_launcher_tests(globals(), first=(), provider_setup_is_done=True)
     print("team_launcher_project_artifacts_test: ok")
     return 0
 

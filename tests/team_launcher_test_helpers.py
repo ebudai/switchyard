@@ -224,6 +224,16 @@ class FakeRunner:
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(args)
+        if args[-4:] == ["claude", "auth", "status", "--json"]:
+            # Signed in, like every other provider this fake already reports:
+            # `codex login status` and the rest pass on a bare exit 0, and
+            # Claude's probe alone parses JSON, so an empty answer read as
+            # "not signed in" purely by accident. That difference did not
+            # matter while an unfinished sign-in was only a warning; it does
+            # now that a role whose provider has no credentials is refused a
+            # launch, which is what these suites were unknowingly relying on
+            # (SYRD-221).
+            return subprocess.CompletedProcess(args, 0, '{"loggedIn": true}', "")
         if args[:2] == ["git", "-C"] and args[3:5] == ["rev-parse", "--verify"]:
             # Exactly the form the release resolver asks: which commit is being
             # installed is a real question about a real repository, and stubbing
@@ -1237,7 +1247,37 @@ def _write_matching_codex_hook_trust(owner_home: Path) -> None:
         )
     config_path.write_text("\n".join(lines), encoding="utf-8")
 
-def run_team_launcher_tests(module_globals: dict[str, object], *, first: tuple[str, ...] = ()) -> None:
+def run_team_launcher_tests(
+    module_globals: dict[str, object],
+    *,
+    first: tuple[str, ...] = (),
+    provider_setup_is_done: bool = False,
+) -> None:
+    """Run a suite's tests.
+
+    `provider_setup_is_done` says this suite is not about first-run
+    authentication. Its fixtures name owner accounts that do not exist, whose
+    homes it cannot write, so a provider's own first run can never be recorded
+    -- and a launch now refuses, correctly, to open panes for a provider that
+    is not set up. Stubbing the phase states that outright, instead of letting
+    these suites quietly depend on a launch proceeding regardless (SYRD-221).
+    """
+    if not provider_setup_is_done:
+        _run_team_launcher_tests(module_globals, first=first)
+        return
+    from scripts import team_launcher as _launcher
+
+    original = _launcher.run_first_run_auth_phase
+    _launcher.run_first_run_auth_phase = (
+        lambda *_args, **_kwargs: _launcher.FirstRunAuthReport({}, [])
+    )
+    try:
+        _run_team_launcher_tests(module_globals, first=first)
+    finally:
+        _launcher.run_first_run_auth_phase = original
+
+
+def _run_team_launcher_tests(module_globals: dict[str, object], *, first: tuple[str, ...] = ()) -> None:
     from scripts import presentation_controller
 
     live_session_snapshot = snapshot_paths(LIVE_PANE_SESSION_PATHS)

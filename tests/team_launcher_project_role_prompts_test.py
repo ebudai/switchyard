@@ -339,7 +339,7 @@ def test_switchyard_new_rejects_role_choices_without_required_director() -> None
     assert not (home_base / "atlas-agent" / "Projects" / "atlas-project").exists()
 
 def main() -> int:
-    run_team_launcher_tests(globals(), first=())
+    run_team_launcher_tests(globals(), first=(), provider_setup_is_done=True)
     print("team_launcher_project_role_prompts_test: ok")
     return 0
 

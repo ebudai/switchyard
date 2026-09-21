@@ -1815,6 +1815,215 @@ def test_the_provider_is_launched_across_the_user_boundary_it_ships_with() -> No
           f"the provider is no longer what ends up being run: {across}")
 
 
+# --- test7: three Codex roles started with no credentials -------------------
+#
+# The fresh run provisioned, launched, and then said "codex is still
+# unauthenticated; affected roles: main, app, ops" -- a report of the thing it
+# was supposed to prevent.
+#
+# `codex login` prints a URL and waits on a browser callback that may be
+# minutes away. It asks nothing and says nothing while it waits, so the
+# quiet-screen path -- the one added to stop Claude's trust step hanging --
+# read it as "at its ordinary prompt", closed it, and carried on. The account
+# was never signed in. One fix made the other defect.
+
+
+def test_a_sign_in_waiting_on_a_browser_is_not_an_ordinary_prompt() -> None:
+    """Recorded from the real `codex login`, not written from memory."""
+    waiting = screen("codex-login-waiting")
+    check("auth.openai.com" in waiting,
+          "the recording does not contain the sign-in it is supposed to be about")
+    check(team_launcher.provider_is_waiting_for_an_answer(waiting),
+          "a sign-in handed to a browser reads as a finished prompt")
+    # It has no question in it at all -- that is the whole difficulty.
+    check(not team_launcher._provider_screen_offers_a_choice(waiting),
+          "this screen has structure after all; the case is testing the wrong thing")
+    # And the ordinary prompt must still be ready, or the cure is worse.
+    check(not team_launcher.provider_is_waiting_for_an_answer(
+              screen("ordinary-prompt-auto-mode")),
+          "the ordinary prompt stopped being recognised as ready")
+
+
+def test_every_sign_in_marker_is_a_line_somebody_recorded() -> None:
+    """No marker that no recording justifies.
+
+    This ticket has been reopened twice over phrases written from memory. A
+    marker nobody has seen on a real screen is a guess however plausible it
+    reads, and it is invisible until the day it matches something it should
+    not.
+    """
+    recordings = "\n".join(
+        team_launcher._visible_text(path.read_text())
+        for path in SCREENS.glob("*.txt")
+    )
+    for marker in team_launcher.PROVIDER_WAITING_ON_SIGN_IN_MARKERS:
+        flattened = "".join(marker.split()).casefold()
+        check(flattened in recordings,
+              f"{marker!r} matches no recorded screen, so nothing says a real "
+              "provider ever printed it")
+
+
+def test_the_window_is_not_closed_while_a_sign_in_is_outstanding() -> None:
+    """Driven through the real watcher, not just the predicate."""
+    finished, printed, _written = run_session(
+        "codex-login-waiting", is_complete=lambda: False, quiet=0.0, timeout=30.0
+    )
+    check(finished is False, "an unfinished sign-in was reported as complete")
+    closed = [m for m in printed if "ordinary prompt" in m]
+    check(not closed,
+          f"the sign-in was closed as 'finished' while it waited: {closed}")
+    check(any("gave up waiting" in m for m in printed),
+          f"the step neither waited nor reported running out of time: {printed}")
+
+
+def test_a_role_is_not_started_when_its_provider_has_no_credentials() -> None:
+    """The ticket's own requirement, enforced before panes rather than after."""
+    report = team_launcher.FirstRunAuthReport(
+        {"codex": ["main", "app", "ops"]}, [], owner_user="test7-agent",
+    )
+    said: list[str] = []
+    stopped = team_launcher.stop_before_launch_until_providers_are_ready(
+        report, print_func=said.append
+    )
+    check(stopped is True,
+          "the launch went ahead with a provider that has no credentials")
+    joined = "\n".join(said)
+    for role in ("main", "app", "ops"):
+        check(role in joined, f"the message does not name {role}: {joined}")
+    check("codex" in joined, f"the message does not name the provider: {joined}")
+    check("test7-agent" in joined,
+          f"the message does not say whose account to finish it on: {joined}")
+    check("again" in joined,
+          f"the message does not say what to do next: {joined}")
+    # And a report with nothing outstanding must not stop anything.
+    check(team_launcher.stop_before_launch_until_providers_are_ready(
+              team_launcher.FirstRunAuthReport({}, []), print_func=said.append) is False,
+          "a launch with every provider signed in was stopped anyway")
+
+
+def test_the_phase_names_the_owner_on_a_real_unfinished_sign_in() -> None:
+    """From the phase, not from a dataclass written by hand.
+
+    The gate can only say "as the owner account" if the report it is handed
+    forgot who the owner is -- and a hand-built report with the owner filled in
+    proves nothing about the path that produces one. The owner used to be
+    attached only for some outcomes, and an unfinished sign-in was not among
+    them.
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd221-owner.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        # Claude's own first run already recorded, so the only thing left
+        # outstanding is the sign-in -- the exact shape that lost the name.
+        (owner_home / ".claude.json").write_text(
+            json.dumps({"hasCompletedOnboarding": True}), encoding="utf-8"
+        )
+        config = _mixed_tenant(tmp_path)
+        runner = FirstRunAuthRunner(authenticated_after_login=False)
+        report = team_launcher.run_first_run_auth_phase(
+            config,
+            owner_user="otto-agent",
+            owner_home=owner_home,
+            runner=runner,
+            print_func=lambda _message: None,
+        )
+
+    check(report.unauthenticated_roles,
+          "nothing was left unauthenticated, so this case tests nothing")
+    check(not report.incomplete_provider_setup,
+          f"the setup step is also outstanding, so the owner would be named by "
+          f"the old path anyway: {report.incomplete_provider_setup}")
+    check(report.owner_user == "otto-agent",
+          f"the report forgot whose account to finish the sign-in on: "
+          f"{report.owner_user!r}")
+
+    said: list[str] = []
+    check(team_launcher.stop_before_launch_until_providers_are_ready(
+              report, print_func=said.append) is True,
+          "a real unfinished sign-in did not stop the launch")
+    joined = "\n".join(said)
+    check("otto-agent" in joined,
+          f"the launch could only say 'the owner account': {joined}")
+
+
+def test_an_unfinished_first_run_also_stops_the_launch() -> None:
+    """The other half of "not ready", which the first gate let through.
+
+    A report with an incomplete provider setup and nothing unauthenticated
+    used to pass the gate, so panes opened after a provider's own first run
+    was abandoned -- against the ticket's "launch the complete presentation
+    only after all required provider setup succeeds".
+    """
+    report = team_launcher.FirstRunAuthReport(
+        {}, [], owner_user="test7-agent",
+        incomplete_provider_setup=[("claude", ["designer"])],
+    )
+    said: list[str] = []
+    check(team_launcher.stop_before_launch_until_providers_are_ready(
+              report, print_func=said.append) is True,
+          "panes were opened after a provider's first run did not finish")
+    joined = "\n".join(said)
+    check("claude" in joined and "designer" in joined,
+          f"the message does not name the step or the role: {joined}")
+    check("first run" in joined,
+          f"the message does not say which half is outstanding: {joined}")
+    check("test7-agent" in joined,
+          f"the message does not say whose account to finish it on: {joined}")
+
+
+def test_the_launch_actually_consults_that_gate() -> None:
+    """A gate nothing calls is a comment.
+
+    Both live entry points are checked, because the one that failed UAT was
+    `switchyard new` and the one people run every day is `switchyard <slug>`.
+    """
+    # Structural on purpose: both of these provision accounts or start real
+    # panes, so neither can be driven to its launch from a unit test here.
+    # Naming the path that is ungated beats counting occurrences.
+    for name in ("switchyard_new_command", "switchyard_main"):
+        body = inspect.getsource(getattr(team_launcher, name))
+        check("stop_before_launch_until_providers_are_ready(" in body,
+              f"{name} starts panes without checking that every provider is "
+              "signed in, which is how three Codex roles came up with no "
+              "credentials")
+        # And the gate has to be able to stop it, not merely be mentioned.
+        check("return 1" in body.split(
+                  "stop_before_launch_until_providers_are_ready(")[1][:200],
+              f"{name} consults the gate but carries on regardless")
+
+
+def test_a_character_split_across_two_reads_survives_the_relay() -> None:
+    """The malformed boundary the live run reported.
+
+    A read lands wherever the kernel has bytes. The prompt glyph is three of
+    them, and decoding each read on its own turns a split one into replacement
+    characters -- `❯` became `❯<?>` in the captured output.
+    """
+    session = team_launcher.PtyForegroundSession(["sleep", "5"])
+    try:
+        readable, writable = os.pipe()
+        session._master = readable                  # read from something we control
+        glyph = "❯".encode("utf-8")
+        check(len(glyph) == 3, "the glyph under test is not multi-byte")
+        os.write(writable, glyph[:2])
+        first = session.read()
+        os.write(writable, glyph[2:])
+        second = session.read()
+        os.close(writable)
+        os.close(readable)
+        check("\ufffd" not in first + second,
+              f"a split character was relayed as a replacement: {first + second!r}")
+        check(first + second == "❯",
+              f"the character did not survive being split: {first + second!r}")
+    finally:
+        session._process.kill()
+        try:
+            session._process.wait(timeout=5)
+        except Exception:
+            pass
+
+
 def main() -> int:
     for name, case in sorted(globals().items()):
         if name.startswith("test_") and callable(case):

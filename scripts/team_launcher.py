@@ -13840,7 +13840,23 @@ FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 600.0
 #: Terminal control sequences, taken out before any of this reads a screen: a
 #: provider draws its interface with them, and matching against the raw stream
 #: would match escape codes as often as words.
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+#: Every escape sequence a provider draws with, so what is left is what a
+#: person would see. CSI parameters are the whole ECMA-48 range `0-?`, not only
+#: digits: Claude's keyboard and key-reporting modes are `ESC[<u`, `ESC[>5u` and
+#: `ESC[>4;2m`, and a class of `[0-9;?]` left all three behind as "text". So did
+#: the charset designation `ESC(B`. That is not tidiness either -- a chunk made
+#: of nothing else was read as a new screen, which is how test8's sign-in box
+#: was forgotten while the User was in the browser (SYRD-221 UAT).
+_ANSI_ESCAPE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[()*+\-./][ -~]"
+    r"|\x1b[0-~]"
+)
+#: Control characters that move nothing a person can read -- shift-in after a
+#: charset reset, the bell. Whitespace is left to the callers, who each decide
+#: what a line is.
+_INVISIBLE_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 
 #: Output a provider prints while it is waiting for the PERSON, rather than
 #: sitting ready for work. Quiet alone cannot mean "finished": an OAuth code box
@@ -13897,7 +13913,20 @@ def _visible_text(raw: str) -> str:
     alone and "paste code here" is nowhere in it. Measured against bytes
     captured from the live flow, not imagined (SYRD-211).
     """
-    return "".join(_ANSI_ESCAPE.sub("", raw).split()).casefold()
+    return "".join(_INVISIBLE_CONTROLS.sub("", _ANSI_ESCAPE.sub("", raw)).split()).casefold()
+
+
+def _draws_something(chunk: str) -> bool:
+    """Does this output put anything on the screen a person could read?
+
+    A provider also writes output that only reconfigures the terminal. Claude
+    does it every time the window loses or regains focus: `ESC(B SI ESC[<u
+    ESC[>5u ESC[>4;2m`, twenty bytes that draw nothing. Recorded against the
+    real CLI sat on its sign-in box -- the focus-out arrives the moment the
+    person switches to the browser to sign in, which is the one moment the box
+    has to be remembered. A chunk like that is not a new screen (SYRD-221 UAT).
+    """
+    return bool(_visible_text(chunk))
 
 
 #: What the window is called while a temporary setup step owns the terminal,
@@ -13985,7 +14014,7 @@ def _visible_lines(raw: str) -> list[str]:
     throws away which line each word was on -- which is the whole signal here.
     """
     lines = []
-    for line in _ANSI_ESCAPE.sub("", raw).splitlines():
+    for line in _INVISIBLE_CONTROLS.sub("", _ANSI_ESCAPE.sub("", raw)).splitlines():
         collapsed = "".join(line.split())
         if collapsed:
             lines.append(collapsed)
@@ -14141,6 +14170,90 @@ def _own_the_terminal() -> None:
         pass
 
 
+#: Private modes a provider switches on in the OUTER terminal by printing
+#: through the proxy, and the state each one has to be left in. Every one of
+#: these is in a recording of the real CLI (tests/fixtures/claude-first-run).
+#: Left on after the provider is gone, they belong to nobody: focus reporting
+#: makes the terminal type `^[[I` / `^[[O` into the person's shell every time
+#: they switch windows, and mouse reporting does the same for every click --
+#: the raw `^[[...` test8 showed after its sign-in was closed (SYRD-221 UAT).
+TERMINAL_PRIVATE_MODES_AT_REST: dict[str, str] = {
+    "1000": "l",  # mouse: clicks
+    "1002": "l",  # mouse: drags
+    "1003": "l",  # mouse: all motion
+    "1006": "l",  # mouse: SGR encoding
+    "1004": "l",  # focus in/out reporting
+    "2004": "l",  # bracketed paste
+    "2031": "l",  # colour-scheme change notifications
+    "1049": "l",  # alternate screen
+    "25": "h",    # cursor visible
+}
+_PRIVATE_MODE = re.compile(r"\x1b\[\?([0-9;]+)([hl])")
+_KITTY_KEYBOARD = re.compile(r"\x1b\[([<>])([0-9]*)u")
+_MODIFY_OTHER_KEYS = re.compile(r"\x1b\[>4(?:;([0-9]*))?m")
+_COMPLETE_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+class _TerminalModeLedger:
+    """What a provider has switched on in the outer terminal, so it can be undone.
+
+    The proxy passes every byte through, which is what makes it faithful -- and
+    also means a provider's `ESC[?1004h` reaches the person's own terminal, not
+    only its pty. A provider that exits cleanly switches its modes off again on
+    the way out. One that is ended by Switchyard, or killed on a deadline, does
+    not, and the terminal is then handed back still configured for an
+    application that no longer exists.
+
+    Read from the output itself rather than assumed, so only what was actually
+    turned on is turned off: writing `ESC[?1049l` to a terminal that never left
+    its main screen restores a saved cursor position nobody saved.
+    """
+
+    def __init__(self) -> None:
+        self._modes: dict[str, str] = {}
+        self._kitty_pushes = 0
+        self._modify_other_keys = False
+        # An escape split across two reads is the normal case for a stream, not
+        # an edge: keep the unfinished tail and read it with the next chunk.
+        self._carry = ""
+
+    def feed(self, chunk: str) -> None:
+        text = self._carry + chunk
+        self._carry = ""
+        start = text.rfind("\x1b")
+        if start != -1:
+            tail = text[start:]
+            # Only control sequences are read here, so only an unfinished one
+            # waits: `ESC` alone, or `ESC[` with no final byte yet.
+            if tail == "\x1b" or (tail.startswith("\x1b[") and not _COMPLETE_CSI.match(tail)):
+                text, self._carry = text[:start], tail[-64:]
+        for match in _PRIVATE_MODE.finditer(text):
+            for mode in match.group(1).split(";"):
+                if mode in TERMINAL_PRIVATE_MODES_AT_REST:
+                    self._modes[mode] = match.group(2)
+        for match in _KITTY_KEYBOARD.finditer(text):
+            count = int(match.group(2) or 0)
+            if match.group(1) == ">":
+                self._kitty_pushes += 1
+            else:
+                self._kitty_pushes = max(0, self._kitty_pushes - max(count, 1))
+        for match in _MODIFY_OTHER_KEYS.finditer(text):
+            self._modify_other_keys = bool(int(match.group(1) or 0))
+
+    def handback(self) -> str:
+        """The bytes that put back everything still switched on. Empty if nothing is."""
+        parts = []
+        for mode, rest in TERMINAL_PRIVATE_MODES_AT_REST.items():
+            state = self._modes.get(mode)
+            if state is not None and state != rest:
+                parts.append(f"\x1b[?{mode}{rest}")
+        if self._kitty_pushes:
+            parts.append(f"\x1b[<{self._kitty_pushes}u")
+        if self._modify_other_keys:
+            parts.append("\x1b[>4m")
+        return "".join(parts)
+
+
 class _RawTerminal:
     """The outer terminal, made byte-transparent while a provider owns it.
 
@@ -14193,6 +14306,11 @@ class _RawTerminal:
         self.restore()
         return False
 
+    @property
+    def engaged(self) -> bool:
+        """Is a real terminal being held raw right now?"""
+        return self._saved is not None
+
     def _catch_fatal_signals(self) -> None:
         for number in self.FATAL_SIGNALS:
             try:
@@ -14228,7 +14346,11 @@ class _RawTerminal:
             return
         saved, self._saved = self._saved, None
         try:
-            termios.tcsetattr(self._fd, termios.TCSADRAIN, saved)
+            # FLUSH, not DRAIN: whatever the terminal typed at the provider and
+            # nobody has read yet -- an answer to its last query, a focus event
+            # -- would otherwise be read by the person's shell in cooked mode
+            # and echoed as `^[[...` (SYRD-221 UAT).
+            termios.tcsetattr(self._fd, termios.TCSAFLUSH, saved)
         except (termios.error, OSError, ValueError):
             pass
 
@@ -14557,101 +14679,154 @@ def run_provider_first_run_session(
     closing_message = ""
     session = None
     window = None
+    #: What the provider has switched on in the person's terminal through us,
+    #: so it can be switched off again however the provider ends.
+    modes = _TerminalModeLedger()
+
+    def show(chunk: str) -> None:
+        modes.feed(chunk)
+        if output_write is not None:
+            output_write(chunk)
+        else:
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+
     # The terminal is taken BEFORE the provider is started, not after. A CLI
     # asks its questions in the first milliseconds it is alive, and a reply
     # that lands while the outer tty is still echoing is drawn on the screen --
     # which is the corruption, arriving in the one window where raw mode was
     # not yet on. Found by the regression test for it, not by reasoning
     # (SYRD-221).
+    #
+    # And it is held until the provider is GONE, for the same reason at the
+    # other end. It used to be handed back first and the provider ended after,
+    # still alive, still with focus reporting on -- so every reply and focus
+    # event in between reached a cooked, echoing terminal as `^[[...`, which is
+    # what test8 showed (SYRD-221 UAT).
     terminal = _RawTerminal(input_fd)
     try:
         with terminal:
-            session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
-            deadline = monotonic() + timeout_seconds
-            # Named before it starts, because once the CLI owns the screen the
-            # only thing that still says what this window is for is its title.
-            window = _SetupWindowNarrator(
-                cli=cli, purpose=purpose, deadline=deadline, monotonic=monotonic,
-                write=output_write,
-            )
-            window.opened()
-            recent = ""
-            last_output = monotonic()
-            ended_by_us = False
-            while True:
-                if session.poll() is not None:
-                    return is_complete()
-                chunk = session.read()
-                if chunk:
+            try:
+                session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
+                deadline = monotonic() + timeout_seconds
+                # Named before it starts, because once the CLI owns the screen the
+                # only thing that still says what this window is for is its title.
+                window = _SetupWindowNarrator(
+                    cli=cli, purpose=purpose, deadline=deadline, monotonic=monotonic,
+                    write=output_write,
+                )
+                window.opened()
+                recent = ""
+                last_output = monotonic()
+                last_drawn = last_output
+                #: Only a provider OBSERVED to be finished is sent its exit input.
+                #: Typed into anything else it is an answer: into Claude's
+                #: "Paste code here" box, `/exit` is pasted as the sign-in code.
+                at_prompt = False
+                while True:
+                    if session.poll() is not None:
+                        return is_complete()
+                    chunk = session.read()
+                    if chunk:
+                        show(chunk)
+                        now = monotonic()
+                        # A new screen replaces the old one rather than piling on
+                        # it -- but only output that DRAWS something is a screen.
+                        # Claude reasserts its keyboard modes whenever the window
+                        # loses focus, and that arrives exactly when the person
+                        # goes to the browser to sign in. Counting it as a screen
+                        # forgot the sign-in box and closed it six seconds later.
+                        if _draws_something(chunk):
+                            if now - last_drawn >= PROVIDER_SCREEN_RESET_SECONDS:
+                                recent = chunk
+                            else:
+                                recent = (recent + chunk)[-4096:]
+                            last_drawn = now
+                        last_output = now
+                    if input_fd is not None:
+                        session.relay_from(input_fd)
+                    if is_complete():
+                        sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                        at_prompt = True
+                        break
+                    quiet_for = monotonic() - last_output
+                    if (
+                        recent
+                        and quiet_for >= quiet_seconds
+                        and not provider_is_waiting_for_an_answer(recent)
+                    ):
+                        closing_message = window.done_at_prompt()
+                        at_prompt = True
+                        break
+                    if monotonic() >= deadline:
+                        # Specific about what did not happen, because "gave up
+                        # waiting" on its own reads as a Switchyard fault when the
+                        # usual cause is a sign-in nobody finished. The resumable
+                        # command follows in the report below, with the account
+                        # named. Nothing is typed into it: whatever it is still
+                        # asking, the exit input would be taken as the answer.
+                        closing_message = window.stalled(
+                            watching=watching, timeout_seconds=timeout_seconds
+                        )
+                        break
+                    # The window says what it is waiting for, continuously, because a
+                    # silent one is indistinguishable from a stopped one -- which is
+                    # exactly how this step was reported: "stopped in a standalone
+                    # Claude window". It had not stopped; it was waiting for a sign-in
+                    # nobody had been told was still outstanding (SYRD-221).
+                    window.tick()
+                    # A window dragged mid-setup must not leave the provider
+                    # drawing to the one it started in.
+                    follow = getattr(session, "sync_window_size", None)
+                    if follow is not None:
+                        follow()
+                    # Wait on the descriptors when the session can, so a keystroke
+                    # is passed on the moment it is typed rather than at the next
+                    # tick. A session that cannot be waited on -- the shape suites
+                    # drive -- keeps the plain interval.
+                    wait = getattr(session, "wait_for_activity", None)
+                    if wait is None:
+                        sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+                    else:
+                        wait(FOREGROUND_COMPLETION_POLL_SECONDS, input_fd)
+                exit_input = PROVIDER_SESSION_EXIT_INPUT.get(cli, "") if at_prompt else ""
+                if exit_input and session.poll() is None:
+                    # Its own way out first, so it writes whatever it keeps for the
+                    # account before it goes -- and switches its own modes off,
+                    # which is why what it prints on the way out is still shown.
+                    session.write(exit_input)
+                    for _ in range(20):
+                        if session.poll() is not None:
+                            break
+                        chunk = session.read()
+                        if chunk:
+                            show(chunk)
+                        sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
+            finally:
+                if session is not None and session.poll() is None:
+                    session.terminate()
+                    try:
+                        session.wait(timeout=10)
+                    except Exception:
+                        pass
+                # Whatever it left switched on, switched off, through the same
+                # channel it was switched on through. A provider that exited
+                # cleanly has left nothing and this writes nothing.
+                handback = modes.handback()
+                if handback:
                     if output_write is not None:
-                        output_write(chunk)
+                        output_write(handback)
                     else:
-                        sys.stdout.write(chunk)
+                        sys.stdout.write(handback)
                         sys.stdout.flush()
-                    now = monotonic()
-                    # A new screen replaces the old one rather than piling on it.
-                    if now - last_output >= PROVIDER_SCREEN_RESET_SECONDS:
-                        recent = chunk
-                    else:
-                        recent = (recent + chunk)[-4096:]
-                    last_output = now
-                if input_fd is not None:
-                    session.relay_from(input_fd)
-                if is_complete():
-                    sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
-                    ended_by_us = True
-                    break
-                quiet_for = monotonic() - last_output
-                if (
-                    recent
-                    and quiet_for >= quiet_seconds
-                    and not provider_is_waiting_for_an_answer(recent)
-                ):
-                    closing_message = window.done_at_prompt()
-                    ended_by_us = True
-                    break
-                if monotonic() >= deadline:
-                    # Specific about what did not happen, because "gave up
-                    # waiting" on its own reads as a Switchyard fault when the
-                    # usual cause is a sign-in nobody finished. The resumable
-                    # command follows in the report below, with the account named.
-                    closing_message = window.stalled(
-                        watching=watching, timeout_seconds=timeout_seconds
-                    )
-                    ended_by_us = True
-                    break
-                # The window says what it is waiting for, continuously, because a
-                # silent one is indistinguishable from a stopped one -- which is
-                # exactly how this step was reported: "stopped in a standalone
-                # Claude window". It had not stopped; it was waiting for a sign-in
-                # nobody had been told was still outstanding (SYRD-221).
-                window.tick()
-                # A window dragged mid-setup must not leave the provider
-                # drawing to the one it started in.
-                follow = getattr(session, "sync_window_size", None)
-                if follow is not None:
-                    follow()
-                # Wait on the descriptors when the session can, so a keystroke
-                # is passed on the moment it is typed rather than at the next
-                # tick. A session that cannot be waited on -- the shape suites
-                # drive -- keeps the plain interval.
-                wait = getattr(session, "wait_for_activity", None)
-                if wait is None:
-                    sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
-                else:
-                    wait(FOREGROUND_COMPLETION_POLL_SECONDS, input_fd)
+                    if terminal.engaged:
+                        # A focus event the terminal sent before it read the
+                        # handback is still in flight; let it land so the flush
+                        # on restore discards it rather than the person's shell
+                        # echoing it.
+                        sleep(0.05)
         if closing_message:
             print_func(closing_message)
-        if ended_by_us:
-            exit_input = PROVIDER_SESSION_EXIT_INPUT.get(cli, "")
-            if exit_input and session.poll() is None:
-                # Its own way out first, so it writes whatever it keeps for the
-                # account before it goes.
-                session.write(exit_input)
-                for _ in range(20):
-                    if session.poll() is not None:
-                        break
-                    sleep(FOREGROUND_COMPLETION_POLL_SECONDS)
         return is_complete()
     finally:
         if session is not None:

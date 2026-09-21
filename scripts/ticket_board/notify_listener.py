@@ -617,6 +617,38 @@ def display_message(message: str) -> str:
     )
 
 
+#: How much of a notice has to reappear on the pane to count as delivered.
+#: Taken from the start of the first line, because that is what survives every
+#: way directorctl can deliver it: typed directly, collapsed and truncated for
+#: the director, or staged behind a pointer line that quotes the first 120
+#: characters.
+DELIVERY_FINGERPRINT_CHARS = 48
+#: How far back the pane is read for proof. Deep enough that a notice cannot
+#: scroll out of the window between the reading before the send and the one
+#: after it, which would make a delivered notice look like a missing one.
+DELIVERY_PROOF_HISTORY_LINES = 2000
+#: Unconfirmed sends of one notification before it is dead-lettered. There is
+#: no other ceiling on a requeued notice, so without one a pane that renders
+#: the text in some way this cannot read would be sent the same notice forever.
+DELIVERY_UNCONFIRMED_LIMIT = 3
+SEND_UNCONFIRMED = "send_unconfirmed"
+SEND_UNVERIFIABLE = "send_unverifiable"
+DELIVERY_UNCONFIRMED = "delivery_unconfirmed"
+
+
+def delivery_fingerprint(message: str) -> str:
+    """The part of a notice that has to be visible for it to count as shown."""
+    first = next((line for line in message.splitlines() if line.strip()), "")
+    return " ".join(first.split())[:DELIVERY_FINGERPRINT_CHARS].casefold()
+
+
+def delivery_fingerprint_count(pane_text: str, fingerprint: str) -> int:
+    """How many times a notice appears on a pane, however it was wrapped."""
+    if not fingerprint:
+        return 0
+    return " ".join(pane_text.split()).casefold().count(fingerprint)
+
+
 def composer_snapshot_from_pane_text(pane_text: str) -> ComposerSnapshot:
     if not pane_text:
         return ComposerSnapshot(False, error="empty_capture")
@@ -1084,6 +1116,25 @@ class PaneActivityGate:
                 return ActivityTrace(True, "pane_content_changed", region_digest=probe.digest)
         return ActivityTrace(False, "working_timer_idle", region_digest=probes[-1].digest)
 
+    def pane_text(self, target: str) -> str | None:
+        """What the pane shows, with enough history to prove a delivery.
+
+        None when it cannot be read at all, which is different from a pane
+        that can be read and does not show the notice.
+        """
+        try:
+            proc = self.capture_pane_runner(
+                ["tmux", "capture-pane", "-p", "-J", "-S", f"-{DELIVERY_PROOF_HISTORY_LINES}",
+                 "-t", target],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout if isinstance(proc.stdout, str) else None
+
     def composer_snapshot(self, target: str) -> ComposerSnapshot:
         try:
             proc = self.capture_pane_runner(
@@ -1532,6 +1583,8 @@ class TicketBoardNotifyListener:
         self.conninfo = conninfo
         self.channel = channel
         self.sender = sender or DirectorctlSender()
+        #: Unconfirmed sends per notification, for DELIVERY_UNCONFIRMED_LIMIT.
+        self._unconfirmed_sends: dict[int, int] = {}
         self.activity_gate = activity_gate or PaneActivityGate().is_working
         self.connector = connector
         self.reconnect_seconds = reconnect_seconds
@@ -1649,6 +1702,55 @@ FROM ticket_board.claim_notification()
             if isinstance(trace, ActivityTrace):
                 return trace
         return ActivityTrace(pane_busy, "busy" if pane_busy else "idle")
+
+    #: Returned when there is no pane reader at all -- a gate that cannot read
+    #: panes -- as distinct from one that tried and failed.
+    NO_PANE_READER = object()
+
+    def _pane_text(self, target: str) -> Any:
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        reader = getattr(gate_owner, "pane_text", None)
+        if not callable(reader):
+            return self.NO_PANE_READER
+        try:
+            text = reader(target)
+        except Exception:
+            return None
+        return text if isinstance(text, str) else None
+
+    def _delivery_proof(self, target: str, fingerprint: str, before: Any) -> tuple[str, dict[str, Any]]:
+        """Whether a notice that was sent can be shown to have arrived.
+
+        `directorctl` returning is proof that a command was accepted, not that
+        anybody can see the result: it types, submits, and reports "delivered"
+        without reading anything back. Live on SYRD-221, a DAT kickback was
+        sent into a pane holding a previous turn's child processes, the send
+        returned, and the notice was acked -- while the composer read empty
+        before and after and the User saw nothing (SYRD-225).
+
+        Proof is the notice appearing MORE times after the send than before.
+        Merely appearing is not enough: a kickback's text is the same every
+        time the same ticket comes back, so the line from an earlier stint can
+        still be in the scrollback, and "it is on screen" would report the new
+        handoff as shown on the strength of the old one.
+        """
+        if before is self.NO_PANE_READER:
+            return "unavailable", {}
+        if before is None:
+            return SEND_UNVERIFIABLE, {"phase": "before_send"}
+        seen_before = delivery_fingerprint_count(before, fingerprint)
+        seen_after = seen_before
+        for check in range(5):
+            after = self._pane_text(target)
+            if after is None or after is self.NO_PANE_READER:
+                return SEND_UNVERIFIABLE, {"phase": "after_send", "seen_before": seen_before}
+            seen_after = delivery_fingerprint_count(after, fingerprint)
+            if seen_after > seen_before:
+                return "visible", {"seen_before": seen_before, "seen_after": seen_after}
+            if check < 4:
+                # A CLI draws what it was given a moment after it is given it.
+                self.sleeper(0.3)
+        return SEND_UNCONFIRMED, {"seen_before": seen_before, "seen_after": seen_after}
 
     def _composer_snapshot(self, target: str) -> ComposerSnapshot:
         gate_owner = getattr(self.activity_gate, "__self__", None)
@@ -3156,8 +3258,13 @@ WHERE (r.definition->>'active')::boolean
                 ):
                     continue
             directorctl_diagnostic: dict[str, Any] = {}
+            delivered_text = display_message(message)
+            fingerprint = delivery_fingerprint(delivered_text)
+            # Read last, immediately before the send, so nothing the pane drew
+            # in between is counted as the notice arriving.
+            pane_before = self._pane_text(target)
             try:
-                sender_result = self.sender(target, display_message(message))
+                sender_result = self.sender(target, delivered_text)
                 if isinstance(sender_result, dict):
                     directorctl_diagnostic = sender_result
             except (subprocess.SubprocessError, OSError) as exc:
@@ -3211,6 +3318,60 @@ WHERE (r.definition->>'active')::boolean
                     self._requeue_notification(conn, notification_id, attempts, failure_reason)
                 continue
             composer_after = self._composer_snapshot(target)
+            proof, proof_detail = self._delivery_proof(target, fingerprint, pane_before)
+            if proof in {SEND_UNCONFIRMED, SEND_UNVERIFIABLE}:
+                # Not acked. The command was accepted and nothing shows the
+                # notice arrived, so the queue keeps it -- a retry, or a
+                # dead-letter that says so, rather than a success nobody saw.
+                self._unconfirmed_sends[notification_id] = self._unconfirmed_sends.get(notification_id, 0) + 1
+                unconfirmed = self._unconfirmed_sends[notification_id]
+                self.logger.warning(
+                    "Notification %s for %s was sent to %s but cannot be shown to have arrived (%s, %d of %d)",
+                    notification_id, ticket_id, target, proof, unconfirmed, DELIVERY_UNCONFIRMED_LIMIT,
+                )
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event=SEND_UNCONFIRMED,
+                    pane_busy=pane_busy,
+                    busy_reason=proof,
+                    region_digest=activity_trace.region_digest,
+                    detail={
+                        **self._delivery_diagnostic_detail(
+                            target=target,
+                            message=message,
+                            attempts=attempts,
+                            activity_trace=activity_trace,
+                            before=composer_before,
+                            after=composer_after,
+                            decision=proof,
+                            reason=activity_trace.reason,
+                            directorctl_diagnostic=directorctl_diagnostic,
+                        ),
+                        "delivery_proof": proof,
+                        "proof": proof_detail,
+                        "fingerprint": fingerprint,
+                        "unconfirmed_sends": unconfirmed,
+                    },
+                )
+                if unconfirmed >= DELIVERY_UNCONFIRMED_LIMIT:
+                    self._unconfirmed_sends.pop(notification_id, None)
+                    self._dead_letter_notification(
+                        conn,
+                        notification_id,
+                        DELIVERY_UNCONFIRMED,
+                        target=target,
+                        message=message,
+                        attempts=attempts,
+                        payload=payload,
+                    )
+                else:
+                    self._requeue_notification(conn, notification_id, attempts, proof)
+                continue
+            self._unconfirmed_sends.pop(notification_id, None)
             self._trace_notification(
                 conn,
                 notification_id=notification_id,
@@ -3231,7 +3392,7 @@ WHERE (r.definition->>'active')::boolean
                     decision="send",
                     reason=activity_trace.reason,
                     directorctl_diagnostic=directorctl_diagnostic,
-                ),
+                ) | {"delivery_proof": proof, "proof": proof_detail},
             )
             self._trace_notification(
                 conn,

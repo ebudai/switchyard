@@ -51,6 +51,13 @@ LISTENER_CLI = ROOT / "scripts" / "ticket-board-notify-listener"
 SERVICE_SCRIPT = ROOT / "scripts" / "ticket-board-service.sh"
 
 
+from typed_pane import listener_whose_panes_show_what_they_are_sent  # noqa: E402
+
+#: With panes that show what they are sent, as real ones do: the listener acks
+#: a notice only once it can show it arrived (SYRD-225).
+TicketBoardNotifyListener = listener_whose_panes_show_what_they_are_sent(TicketBoardNotifyListener)
+
+
 def unit_environment(unit_text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in unit_text.splitlines():

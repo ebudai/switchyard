@@ -64,6 +64,13 @@ CANONICAL = json.loads((ROOT / "examples/workflows/inspection.json").read_text()
 # --------------------------------------------------------------------------
 
 
+from typed_pane import listener_whose_panes_show_what_they_are_sent  # noqa: E402
+
+#: With panes that show what they are sent, as real ones do: the listener acks
+#: a notice only once it can show it arrived (SYRD-225).
+TicketBoardNotifyListener = listener_whose_panes_show_what_they_are_sent(TicketBoardNotifyListener)
+
+
 def document(*, ephemeral: tuple[str, ...] = (), runtimes: dict[str, str] | None = None) -> dict[str, Any]:
     """The canonical example, retargeted at the listener's default project."""
     cfg = copy.deepcopy(CANONICAL)

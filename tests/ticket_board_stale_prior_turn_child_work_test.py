@@ -129,6 +129,14 @@ class TurnProcessTree:
         return tuple(rows)
 
 
+from typed_pane import listener_whose_panes_show_what_they_are_sent  # noqa: E402
+
+#: The listener under test, with panes that show what they are sent. The
+#: unwrapped class is kept for the cases that need a pane which does not.
+RealTicketBoardNotifyListener = TicketBoardNotifyListener
+TicketBoardNotifyListener = listener_whose_panes_show_what_they_are_sent(TicketBoardNotifyListener)
+
+
 def pane_pid_runner(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess([], 0, stdout=f"{PANE_PID}\n")
 

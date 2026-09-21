@@ -1235,6 +1235,15 @@ notification_candidates AS (
           AND trace.kind = 'transition'
           AND trace.event = 'send'
           AND trace.ticket_state_at_event = notification_scope.state
+          -- This generation's handoff only. Ticket, role and state together
+          -- do not tell one stint in a stage from the next: a DAT kickback
+          -- returns a ticket to the same implementer in the same state it
+          -- left, so the send from its EARLIER stint matched and reported
+          -- the new handoff as delivered when it had not been (SYRD-225).
+          -- Rows from before the board recorded when a ticket entered its
+          -- stage keep the old reading rather than losing theirs.
+          AND (notification_scope.entered_current_state_at IS NULL
+               OR trace.ts >= notification_scope.entered_current_state_at)
     ) sent ON true
 ),
 active_work AS (

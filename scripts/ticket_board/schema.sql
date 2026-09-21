@@ -7809,7 +7809,7 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.perform_workflow_action_as(
     p_actor text, p_narrator text, id text, action text, payload jsonb DEFAULT '{}'::jsonb)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=ticket_board,pg_temp AS $$
-DECLARE cfg jsonb:=ticket_board.declared_workflow(); t ticket_board.tickets; tr jsonb; actor text:=p_actor; candidates int; handoff text; source_stage jsonb;
+DECLARE cfg jsonb:=ticket_board.declared_workflow(); t ticket_board.tickets; tr jsonb; actor text:=p_actor; candidates int; handoff text; source_stage jsonb; acted_at timestamptz;
 BEGIN
     IF ticket_board.current_actor_role()<>'ticket_board_service' OR actor IS NULL THEN RAISE EXCEPTION 'workflow action requires registered service actor' USING ERRCODE='42501'; END IF;
     SELECT * INTO STRICT t FROM ticket_board.tickets WHERE tickets.id=perform_workflow_action_as.id FOR UPDATE;
@@ -7900,9 +7900,20 @@ BEGIN
     PERFORM set_config('ticket_board.held_review_target','',true);
     PERFORM set_config('ticket_board.workflow_action',action,true);
     PERFORM set_config('ticket_board.workflow_actor',actor,true);
+    -- SYRD-225: a transition is activity, and it is stamped in the SAME update
+    -- that moves the ticket. The triggers that fire on this update -- the
+    -- notification state and the queued transition notice -- read the row's
+    -- `updated_at` as the time this happened, and they read it now, not after
+    -- some later touch. Left unstamped, a DAT kickback handed the implementer a
+    -- notice timed to their own earlier submission, and the notification state
+    -- recorded the ticket entering Implementation twelve minutes before it did.
+    acted_at:=clock_timestamp();
     UPDATE ticket_board.tickets SET state=tr->>'to',
         assignee=coalesce(nullif(payload->>'assignee',''),assignee),
-        commit_hash=coalesce(payload->>'commit_hash',commit_hash)
+        commit_hash=coalesce(payload->>'commit_hash',commit_hash),
+        updated_at=acted_at,
+        updated_text=ticket_board.utc_text(acted_at),
+        row_updated_at=now()
         WHERE tickets.id=t.id;
     PERFORM set_config('ticket_board.workflow_action','',true);
     PERFORM set_config('ticket_board.workflow_actor','',true);

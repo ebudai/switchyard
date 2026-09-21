@@ -695,6 +695,13 @@ SET last_transition_notified_at = clock_timestamp() + interval '3 hours',
     last_nudged_at = NULL
 WHERE ticket_id = 'PGU-406';
 
+-- SYRD-225: a send only counts for the stint it was made in, so it has to come
+-- after the ticket entered that state. These tickets were inserted just now but
+-- their sends are dated July, which would make every send precede the stint it
+-- delivered. Backdated together, so the order they entered in is unchanged.
+UPDATE ticket_board.ticket_notification_state
+SET entered_current_state_at = entered_current_state_at - interval '100 days';
+
 INSERT INTO ticket_board.notification_trace (
     ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
 ) VALUES

@@ -281,6 +281,14 @@ class FakeLogger:
         self.warning(message, *args)
 
 
+from typed_pane import listener_whose_panes_show_what_they_are_sent  # noqa: E402
+
+#: The listener under test, with panes that show what they are sent. The
+#: unwrapped class is kept for the cases that need a pane which does not.
+RealTicketBoardNotifyListener = TicketBoardNotifyListener
+TicketBoardNotifyListener = listener_whose_panes_show_what_they_are_sent(TicketBoardNotifyListener)
+
+
 def queue_row(
     notification_id: int,
     ticket_id: str,

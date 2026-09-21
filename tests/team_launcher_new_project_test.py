@@ -1548,7 +1548,14 @@ def test_fresh_project_launches_without_a_role_account_handoff() -> None:
 
     assert not any("were not started" in line for line in printed), printed
     assert not any("porter-role-accounts.sh" in line for line in printed), printed
-    assert any("full pane window started" in line for line in printed), printed
+    # The launch is reported as one. Which words depend on the layout this
+    # environment resolves to: a layout that opens its own window says so, and
+    # the viewer -- which root cannot show -- says every pane is up and where the
+    # window opens (SYRD-221 UAT, test10).
+    assert any(
+        "full pane window started for porter" in line or "every pane of porter is up" in line
+        for line in printed
+    ), printed
     assert len(polled) == 1, polled
     assert any("design" in line for line in printed), printed
 

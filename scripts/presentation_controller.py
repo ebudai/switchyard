@@ -811,7 +811,7 @@ def _proxy_command(
         recovery = f"switchyard present {config.project} recover {role_name}"
         message = f"{config.project}: {role_name} disconnected; use `{recovery}`"
         attach = shlex.join(worker_attach_argv(config, role, observer=observer))
-        script = f"{attach}; printf '%s\\n' {shlex.quote(message)}; exec sleep 2147483647"
+        script = f"{attach}; {_status_script(message)}"
         return role.workdir, shlex.join(["sh", "-lc", script])
     state = role_status.get("state", "unavailable")
     recovery = " (resume available)" if role_status.get("resumable") else ""
@@ -819,9 +819,25 @@ def _proxy_command(
     return role.workdir if role is not None else str(Path.home()), _status_command(message)
 
 
+def _status_script(message: str) -> str:
+    """A slot's status screen: the message at the top, redrawn on every resize.
+
+    Printed once and left, a message is reflowed by tmux when its slot is
+    resized, and tmux keeps the cursor row -- so a slot narrowed after the
+    message was drawn pushes its first line into history, and the person reads
+    "over app`" with the recovery command scrolled away. Slots follow their
+    window now, so they are resized whenever it is (SYRD-221 UAT, test12).
+    Trapping WINCH redraws it instead; checked under bash and dash, Ubuntu's
+    /bin/sh, with one sleeping child whatever the number of resizes.
+    """
+    return (
+        f"show() {{ printf '\\033[H\\033[2J%s\\n' {shlex.quote(message)}; }}; trap show WINCH; show; "
+        "while :; do sleep 2147483647 & pid=$!; wait $pid; kill $pid 2>/dev/null; done"
+    )
+
+
 def _status_command(message: str) -> str:
-    script = f"printf '%s\\n' {shlex.quote(message)}; exec sleep 2147483647"
-    return shlex.join(["sh", "-lc", script])
+    return shlex.join(["sh", "-lc", _status_script(message)])
 
 
 def _recovery_hook_index(project: str, slot: int) -> int:
@@ -986,8 +1002,58 @@ def _configure_display_session(
     _configure_recovery_hook(config, slot, role_name, status, runner=runner)
 
 
-def _viewer_observer_attach(session: str) -> str:
+def _exact_target_args(args: list[str]) -> list[str]:
+    """The shared viewer command, with its `-t` target made exact."""
+    exact = list(args)
+    index = exact.index("-t") + 1
+    exact[index] = _exact_tmux_target(exact[index])
+    return exact
+
+
+def _clients_by_tty(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> dict[str, str]:
+    """Every attached client on this server, by terminal, with its session."""
+    return {tty: session for tty, (session, _flags) in _client_table(runner=runner).items()}
+
+
+def _client_table(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> dict[str, tuple[str, str]]:
+    """Every attached client: terminal -> (session, flags)."""
+    proc = runner(
+        ["tmux", "list-clients", "-F", "#{client_tty}\t#{client_session}\t#{client_flags}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return {}
+    clients: dict[str, tuple[str, str]] = {}
+    for line in str(proc.stdout or "").splitlines():
+        tty, _, rest = line.partition("\t")
+        session, _, flags = rest.partition("\t")
+        if tty and session:
+            clients[tty] = (session, flags)
+    return clients
+
+
+def _viewer_observer_attach(session: str, *, sizing: bool = False) -> str:
     """Viewer pane command that attaches to a display slot as an observer.
+
+    `sizing` says whether this pane is what sizes the slot. SYRD-27 meant
+    `ignore-size` to stop a viewer shrinking a slot that a separate window is
+    showing, "while tmux still sizes a slot from the viewer pane when that pane
+    is the slot's only client". tmux does not do the second half: it ignores a
+    flagged client whenever ANY unflagged client is attached anywhere on the
+    server -- the person's own window, every slot's proxy -- so in the viewer
+    layout nothing ever sized a slot. Measured on tmux 3.2a, 3.4 and 3.7c alike:
+    the viewer maximized to 240x70 and each slot stayed 80x24 inside an 80x34
+    pane, the dotted space test12 showed (SYRD-221 UAT). So the viewer decides
+    it itself, per slot: a pane that is the slot's only view attaches without
+    the flag, and the slot and its worker follow it.
 
     tmux runs a pane command through `default-shell`, so the exact-target `=`
     prefix has to reach tmux quoted: a zsh default-shell would otherwise read
@@ -996,7 +1062,8 @@ def _viewer_observer_attach(session: str) -> str:
     """
     attach = shlex.join(
         [
-            "env", "TMUX=", "tmux", "attach", "-f", VIEWER_OBSERVER_CLIENT_FLAGS,
+            "env", "TMUX=", "tmux", "attach",
+            "-f", f"!{VIEWER_OBSERVER_CLIENT_FLAGS}" if sizing else VIEWER_OBSERVER_CLIENT_FLAGS,
             "-t", _exact_tmux_target(session),
         ]
     )
@@ -1025,19 +1092,55 @@ def _reconcile_viewer_observers(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
-    """Keep an already-running viewer from resizing the slots it watches.
+    """Let each viewer pane size its slot -- unless a real window shows it too.
 
-    Bootstrap attaches these panes with ``ignore-size``.  Reconciliation
-    repeats the flag on the live clients so a viewer started by an earlier
-    build, or reattached since, also stops shrinking display slots that a
-    separate window is showing at its own size.
+    SYRD-27's rule, applied per slot rather than hoped for from tmux: an
+    observer never resizes what a real window is showing, and a pane that is a
+    slot's only view is what sizes it. A separate window on the slot turns the
+    viewer's client for it into `ignore-size`; with none, the flag is cleared
+    and the slot and its worker follow the pane (SYRD-221 UAT, test12).
+
+    A viewer pane whose client has not attached yet -- or has gone -- is left
+    to the flag it attached with.
     """
-    viewer = team_launcher.viewer_session_for_project(config.project)
-    for tty in sorted(_session_pane_ttys(viewer, runner=runner)):
-        # A viewer pane may have detached between listing and refresh; the
-        # attach flag already covers every client the viewer creates later.
+    reconcile_viewer_observer_flags(
+        team_launcher.viewer_session_for_project(config.project), runner=runner
+    )
+
+
+def reconcile_viewer_observer_flags(
+    viewer: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    """The per-slot decision itself, from nothing but the viewer's name.
+
+    Separate so that tmux can run it too: the viewer's `client-attached` and
+    `client-detached` hooks call it through `switchyard-viewer-layout
+    --observers`, because a window opened on a slot after the viewer was built
+    must be yielded to at once -- not at the next reconcile, by which time the
+    viewer has resized it (SYRD-27's real-client test, SYRD-221).
+    """
+    own = _session_pane_ttys(viewer, runner=runner)
+    if not own:
+        return
+    clients = _client_table(runner=runner)
+    shown_elsewhere = {session for tty, (session, _f) in clients.items() if tty not in own}
+    for tty in sorted(own):
+        if tty not in clients:
+            continue
+        session, current = clients[tty]
+        ignore = session in shown_elsewhere
+        # Touched only when the flag must change. Every refresh makes tmux
+        # recalculate sizes, and a slot resized while its recovery message is
+        # being drawn reflows that message off the top of its own screen --
+        # which is what a refresh on every client event did (SYRD-221).
+        if ignore == (VIEWER_OBSERVER_CLIENT_FLAGS in current.split(",")):
+            continue
+        flags = VIEWER_OBSERVER_CLIENT_FLAGS if ignore else f"!{VIEWER_OBSERVER_CLIENT_FLAGS}"
+        # A viewer pane may have detached between listing and refresh.
         runner(
-            ["tmux", "refresh-client", "-f", VIEWER_OBSERVER_CLIENT_FLAGS, "-t", tty],
+            ["tmux", "refresh-client", "-f", flags, "-t", tty],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1281,18 +1384,27 @@ def _launch_viewer(
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not replace viewer {viewer}")
     sessions = [display_session_name(config.project, slot) for slot in range(state["slot_count"])]
+    # Which slots a real window already shows, decided before any pane attaches:
+    # a client that has not finished attaching when the viewer is reconciled
+    # keeps the flag it attached with, so that flag has to be right.
+    shown_elsewhere = set(_clients_by_tty(runner=runner).values())
     first, *rest = sessions
-    attach = _viewer_observer_attach(first)
+    attach = _viewer_observer_attach(first, sizing=first not in shown_elsewhere)
     proc = runner([
         "tmux", "new-session", "-d", "-x", str(team_launcher.DEFAULT_VIEWER_COLUMNS),
         "-y", str(team_launcher.DEFAULT_VIEWER_ROWS), "-s", viewer, attach,
     ])
     if proc.returncode != 0:
         raise SystemExit(f"switchyard: could not create viewer {viewer}")
+    # Before the splits, or tmux 3.2a builds them in an 80x23 window and the
+    # fourth fails for want of rows (SYRD-221 UAT, test11).
+    proc = runner(_exact_target_args(team_launcher.tmux_viewer_pin_size_args(viewer)))
+    if proc.returncode != 0:
+        raise SystemExit(f"switchyard: could not size viewer {viewer}")
     for session in rest:
         proc = runner([
             "tmux", "split-window", "-t", _exact_tmux_target(f"{viewer}:0"),
-            _viewer_observer_attach(session),
+            _viewer_observer_attach(session, sizing=session not in shown_elsewhere),
         ])
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not populate viewer {viewer}")
@@ -1312,13 +1424,27 @@ def _launch_viewer(
                 height=team_launcher.DEFAULT_VIEWER_ROWS,
             ),
         ],
-        # And keep it matching the window's shape, not just its first shape:
-        # tmux scales a layout on resize and never re-derives it (SYRD-216).
-        team_launcher.tmux_viewer_relayout_hook_args(viewer),
         *_viewer_frame_commands(viewer),
     )
     for args in commands:
         proc = runner(args)
+        if proc.returncode != 0:
+            raise SystemExit(f"switchyard: could not configure viewer {viewer}")
+    # And keep it matching the window's shape, not just its first shape: tmux
+    # scales a layout on resize and never re-derives it (SYRD-216). A tmux too
+    # old for the hook says so and keeps its viewer (SYRD-221 UAT).
+    if team_launcher.install_viewer_relayout_hook(viewer, runner=runner) != 0:
+        raise SystemExit(f"switchyard: could not configure viewer {viewer}")
+    # Built: from here its size is the window's that shows it (SYRD-216).
+    proc = runner(_exact_target_args(team_launcher.tmux_viewer_unpin_size_args(viewer)))
+    if proc.returncode != 0:
+        raise SystemExit(f"switchyard: could not release viewer {viewer} to its window")
+    # And whenever a window opens or closes on a slot, re-decide which pane
+    # sizes it -- both hooks exist on tmux 3.2a (SYRD-221 UAT).
+    for event in ("client-attached", "client-detached"):
+        proc = runner(team_launcher.tmux_viewer_observer_hook_args(
+            viewer, event, index=_recovery_hook_index(config.project, -1)
+        ))
         if proc.returncode != 0:
             raise SystemExit(f"switchyard: could not configure viewer {viewer}")
     _reconcile_viewer_observers(config, runner=runner)

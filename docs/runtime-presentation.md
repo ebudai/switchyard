@@ -167,10 +167,14 @@ forwards a title forwards the project's window title instead (SYRD-141).
 
 Sizing follows the window an operator is actually looking at:
 
-- Viewer panes attach to their display slot with the `ignore-size` client flag.
-  A viewer that is smaller than a separate window showing the same slot no
-  longer shrinks that slot, and when the viewer pane is a slot's only client
-  tmux still sizes the slot from it.
+- A viewer pane is the sizing client of the slot it shows when it is that
+  slot's only view, so the slot -- and the worker behind it -- follows the viewer
+  as its window is resized or maximized. When a separate window also shows the
+  slot, the viewer's client for it carries `ignore-size` and leaves that window's
+  geometry alone. The viewer sets this per slot itself: tmux ignores a flagged
+  client whenever any unflagged client is attached anywhere on the server, so a
+  flag set once did not leave the slot sized by its only viewer, as earlier
+  releases assumed. Measured on tmux 3.2a, 3.4 and 3.7c (SYRD-221).
 - A display slot attaches to its worker as that worker's sizing client, so the
   worker follows the presentation window as it is resized. When the worker is
   already attached to a client of its own — an ordinary project window that is
@@ -179,8 +183,8 @@ Sizing follows the window an operator is actually looking at:
 
 Reconciliation applies both rules, so `show`, `swap`, `hide`, `restore` and
 `recover` repair a running presentation instead of leaving the policy to the
-next bootstrap. Reconciliation also re-applies `ignore-size` to the viewer's
-live clients, which repairs a viewer that an earlier build started.
+next bootstrap. Reconciliation also re-decides the viewer's live clients slot
+by slot, which repairs a viewer that an earlier build started.
 
 `list` distinguishes missing or dead workers from disconnected display
 clients, reports whether a resume record exists, and lists configured roles

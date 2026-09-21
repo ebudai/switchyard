@@ -44,9 +44,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", help="the viewer window, as <session>:<window>")
     parser.add_argument("--socket", default="", help="tmux socket path, when not the ambient one")
+    parser.add_argument(
+        "--observers", action="store_true",
+        help="re-decide which viewer panes size their slots, instead of re-laying the viewer",
+    )
     args = parser.parse_args(argv)
 
     socket = args.socket or None
+    if args.observers:
+        # A window has opened or closed somewhere on this server. Each slot is
+        # sized by its viewer pane unless a real window now shows it (SYRD-221).
+        from scripts.presentation_controller import reconcile_viewer_observer_flags
+
+        def runner(command: list[str], **kwargs):  # type: ignore[no-untyped-def]
+            if command and command[0] == "tmux" and socket:
+                command = ["tmux", "-S", socket, *command[1:]]
+            return subprocess.run(command, **kwargs)
+
+        reconcile_viewer_observer_flags(args.target.split(":", 1)[0], runner=runner)
+        return 0
     measured = tmux(
         socket, "display-message", "-p", "-t", args.target,
         "#{window_width} #{window_height} #{window_panes}",

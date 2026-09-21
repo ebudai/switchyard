@@ -75,6 +75,10 @@ class PresentationRunner:
         # already displays a worker session on its own.
         self.pane_ttys: dict[str, list[str]] = {}
         self.session_clients: dict[str, list[str]] = {}
+        #: Client flags by terminal, kept current by `refresh-client -f` the
+        #: way tmux keeps them, so a reconcile that only touches a client whose
+        #: flag must change can be seen doing exactly that (SYRD-221).
+        self.client_flags: dict[str, str] = {}
 
     @staticmethod
     def _session(target: str) -> str:
@@ -122,6 +126,25 @@ class PresentationRunner:
             return subprocess.CompletedProcess(
                 args, 0, stdout="".join(f"{tty}\n" for tty in self.pane_ttys.get(session, []))
             )
+        if command == "list-clients" and "-t" not in args:
+            # Every client on the server, with the session it is attached to:
+            # how the viewer decides which slots a real window shows (SYRD-221).
+            return subprocess.CompletedProcess(args, 0, stdout="".join(
+                f"{tty}\t{client_session}\t{self.client_flags.get(tty, 'attached')}\n"
+                for client_session, ttys in self.session_clients.items()
+                for tty in ttys
+            ))
+        if command == "refresh-client" and "-f" in args:
+            tty = args[args.index("-t") + 1] if "-t" in args else ""
+            flags = [flag for flag in self.client_flags.get(tty, "attached").split(",") if flag]
+            for change in args[args.index("-f") + 1].split(","):
+                name = change.lstrip("!")
+                if change.startswith("!"):
+                    flags = [flag for flag in flags if flag != name]
+                elif name not in flags:
+                    flags.append(name)
+            self.client_flags[tty] = ",".join(flags)
+            return subprocess.CompletedProcess(args, 0)
         if command == "list-clients":
             if session not in self.sessions:
                 return subprocess.CompletedProcess(args, 1, stdout="")
@@ -825,9 +848,13 @@ def test_presentation_frames_drop_their_status_bar_and_yield_worker_geometry() -
             or call[:2] == ["tmux", "split-window"]
         ]
         assert [shlex.split(command)[:2] for command in viewer_panes] == [["sh", "-lc"], ["sh", "-lc"]]
+        # No window shows either slot, so each viewer pane is what sizes its
+        # slot: it attaches WITHOUT `ignore-size`. tmux ignores a flagged
+        # client whenever any unflagged one is attached on the server, so with
+        # the flag nothing sized the slots at all (SYRD-221 UAT, test12).
         assert [shlex.split(shlex.split(command)[2]) for command in viewer_panes] == [
-            ["env", "TMUX=", "tmux", "attach", "-f", "ignore-size", "-t", "=porter-display-0"],
-            ["env", "TMUX=", "tmux", "attach", "-f", "ignore-size", "-t", "=porter-display-1"],
+            ["env", "TMUX=", "tmux", "attach", "-f", "!ignore-size", "-t", "=porter-display-0"],
+            ["env", "TMUX=", "tmux", "attach", "-f", "!ignore-size", "-t", "=porter-display-1"],
         ]
         # No worker is displayed anywhere else yet, so each slot stays the
         # client that sizes the worker it presents.
@@ -851,6 +878,14 @@ def test_presentation_frames_drop_their_status_bar_and_yield_worker_geometry() -
         runner.session_clients = {
             "porter-director": ["/dev/pts/100"],
             "porter-app": ["/dev/pts/101", "/dev/pts/9"],
+            # The viewer's own panes observe the slots; no window shows a slot.
+            "porter-display-0": ["/dev/pts/200"],
+            "porter-display-1": ["/dev/pts/201"],
+        }
+        # As an earlier build left them: every viewer client `ignore-size`.
+        runner.client_flags = {
+            "/dev/pts/200": "attached,ignore-size",
+            "/dev/pts/201": "attached,ignore-size",
         }
         runner.calls.clear()
         presentation.presentation_action(
@@ -875,8 +910,26 @@ def test_presentation_frames_drop_their_status_bar_and_yield_worker_geometry() -
             "=porter-display-1:": "off",
             "=porter-viewer:": "off",
         }
+        # Reconciliation re-decides each viewer pane per slot: with no window
+        # on either slot, both panes size their slots.
         for tty in ("/dev/pts/200", "/dev/pts/201"):
-            assert ["tmux", "refresh-client", "-f", "ignore-size", "-t", tty] in runner.calls
+            assert ["tmux", "refresh-client", "-f", "!ignore-size", "-t", tty] in runner.calls
+
+        # A window opened on slot 1 takes that slot; the viewer yields it and
+        # keeps sizing slot 0 (SYRD-27's rule, per slot).
+        runner.session_clients["porter-display-1"] = ["/dev/pts/201", "/dev/pts/7"]
+        runner.calls.clear()
+        presentation.presentation_action(
+            config, config_path=config_path, state_path=state_path, action="restore",
+            layout="default", environ=DIRECTOR_ENV, runner=runner,
+        )
+        assert ["tmux", "refresh-client", "-f", "ignore-size", "-t", "/dev/pts/201"] in runner.calls
+        # And slot 0, already sizing, is not touched again: every refresh makes
+        # tmux recalculate sizes (SYRD-221).
+        assert not any(
+            call[:2] == ["tmux", "refresh-client"] and "/dev/pts/200" in call
+            for call in runner.calls
+        ), [call for call in runner.calls if call[:2] == ["tmux", "refresh-client"]]
 
 
 def test_isolated_tmux_clients_preserve_visible_sizes_and_a_single_status_bar() -> None:
@@ -1217,8 +1270,10 @@ def test_isolated_tmux_swap_hide_show_preserves_worker_pid_and_typed_composer() 
             runner(["tmux", "send-keys", "-t", app.target, "C-u"], check=True)
             runner(["tmux", "send-keys", "-t", app.target, "exit", "Enter"], check=True)
             for _attempt in range(40):
+                # Joined: the slot has its viewer pane's width now, so the
+                # recovery line wraps, and a person reads it whole (SYRD-221).
                 recovery_surface = runner(
-                    ["tmux", "capture-pane", "-p", "-t", "porter-display-0:0.0"],
+                    ["tmux", "capture-pane", "-p", "-J", "-t", "porter-display-0:0.0"],
                     check=True, text=True, stdout=subprocess.PIPE,
                 ).stdout
                 if "app disconnected" in recovery_surface:

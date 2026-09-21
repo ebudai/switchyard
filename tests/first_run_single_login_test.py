@@ -431,13 +431,20 @@ def test_an_account_that_records_its_first_run_ends_the_session_at_once() -> Non
 
     class _RecordsThenSitsThere:
         def __init__(self, _args, **_kwargs) -> None:
-            self.frames = ["Select\x1b[8Ga\x1b[10Gtheme"]
+            # The question, then what a real CLI draws once it is answered.
+            # This used to record with the question still the last screen and
+            # require an immediate close anyway; Claude does record while its
+            # trust question is up, and closing there is what test9 rejected
+            # (SYRD-221 UAT). The property is unchanged: recorded and not
+            # asking closes at once, without waiting for quiet.
+            self.frames = ["Select\x1b[8Ga\x1b[10Gtheme", "\x1b[2J\x1b[H> "]
             self.closed_at: float | None = None
 
         def read(self) -> str:
             if self.frames:
-                # Answering the question is what records it.
-                recorded["done"] = True
+                if len(self.frames) == 1:
+                    # Answering the question is what records it.
+                    recorded["done"] = True
                 return self.frames.pop(0)
             return ""
 

@@ -67,6 +67,9 @@ def test_first_run_auth_phase_reports_hermes_without_resolved_api_key_as_unauthe
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login hermes: roles bulk; interactive account setup running hermes model as otto-agent",
+        "switchyard: hermes will now run in this terminal as otto-agent to sign in. "
+        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
+        "terminal for others; the terminal comes back on its own once the account is set up.",
     ]
 
 def test_first_run_trust_handles_detached_roles_and_persists_for_later_launches() -> None:
@@ -209,7 +212,16 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
     # The manifest is printed in full first; each foreground step then says what
     # it is about to do with the terminal, immediately before taking it.
     instructions = [line for line in printed if "will now run in" in line]
-    assert len(instructions) == 4, instructions
+    # The provider's first run and three worktrees' trust, plus one for each
+    # sign-in that actually ran.
+    steps = [line for line in instructions if "to sign in. " not in line]
+    assert len(steps) == 4, steps
+    # This fake records nothing, so every login still runs after its re-read:
+    # Claude, Codex and agy, each announced (SYRD-221 UAT, test9).
+    sign_ins = [line for line in instructions if "to sign in. " in line]
+    assert [line.split("switchyard: ", 1)[1].split(" ", 1)[0] for line in sign_ins] == [
+        "claude", "codex", "agy",
+    ], sign_ins
     # The User answers the provider's own prompts and nothing else.
     assert all("comes back on its own" in line for line in instructions), instructions
     assert not any("/exit" in line for line in instructions), instructions
@@ -257,9 +269,19 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
     )
     assert last_manifest_print_index < first_interactive_index
     # And each step that takes the terminal for an interactive flow -- the
-    # provider's own first run, and each worktree's trust -- is announced
-    # immediately before it, not after. A login needs no such notice: it
-    # returns on its own when the sign-in completes.
+    # provider's own first run, each sign-in, and each worktree's trust -- is
+    # announced immediately before it, not after. Sign-ins used to be exempt,
+    # on the grounds that a login returns on its own. test9 showed the cost:
+    # `codex login` started silently under a finished Claude's trust question,
+    # and the User answered that question into it (SYRD-221 UAT).
+    for index, (kind, value) in enumerate(events):
+        if kind == "print" and "will now run in this terminal as" in str(value) and "to sign in. " in str(value):
+            cli = str(value).split("switchyard: ", 1)[1].split(" ", 1)[0]
+            ran = next(v for k, v in events[index + 1:] if k == "run")
+            # The command itself, wherever the environment wrapping ends.
+            assert cli in ran, (value, ran)
+            command = ran[len(ran) - 1 - ran[::-1].index(cli):]
+            assert "status" not in command and command[1:2] != ["models"], (value, command)
     first_instruction_index = min(
         index
         for index, (kind, value) in enumerate(events)

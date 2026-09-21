@@ -518,6 +518,10 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
         "switchyard: first-run setup manifest for owner user otto-agent: "
         "1 login step(s), 0 provider setup step(s), 0 folder trust step(s), 0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login codex: roles ops; interactive account setup running codex login as otto-agent",
+        # SYRD-221 UAT (test9): the sign-in step says what it is as it starts.
+        "switchyard: codex will now run in this terminal as otto-agent to sign in. "
+        "Complete what it asks -- a browser sign-in for some providers, a choice in the "
+        "terminal for others; the terminal comes back on its own once the account is set up.",
     ]
     assert 127 not in runner.returncodes
     assert all(

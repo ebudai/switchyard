@@ -7145,7 +7145,9 @@ def refresh_generated_project_runtime_artifacts(
 
     migrated_fields: list[str] = []
     try:
-        tenant_plan = _project_board_provision_from_json(tenant_plan_path, migrated=migrated_fields)
+        tenant_plan = _project_board_provision_from_json(
+            tenant_plan_path, migrated=migrated_fields, supplied=replacements
+        )
     except SystemExit as exc:
         return LauncherUpgradeResult(
             False,
@@ -7268,6 +7270,7 @@ def refresh_generated_project_runtime_artifacts(
         tenant_data,
         source_repo=source_repo,
         operator_commit_git_dir=commit_git_dir is not None,
+        supplied=replacements,
     )
     if baseline is None:
         return LauncherUpgradeResult(bool(changed), reason)
@@ -7643,6 +7646,7 @@ def _privileged_baseline_plan(
     *,
     source_repo: Path | None = None,
     operator_commit_git_dir: bool = False,
+    supplied: Mapping[str, str] | None = None,
 ) -> tuple[ProjectBoardProvision | None, str]:
     """Root's baseline: its own stored copy, or one it reconstructs for a legacy tenant.
 
@@ -7654,7 +7658,10 @@ def _privileged_baseline_plan(
     baseline_path = privileged_baseline_plan_path(config.project)
     if baseline_path.is_file():
         try:
-            return _project_board_provision_from_json(baseline_path), ""
+            # Root's own copy can be as old as the tenant's. What the operator
+            # supplied is the operator's, not the tenant's, so it may fill a
+            # field root's copy predates (SYRD-226).
+            return _project_board_provision_from_json(baseline_path, supplied=supplied), ""
         except SystemExit as exc:
             return None, f"switchyard: {config.project} root-owned runtime baseline {baseline_path} is unusable: {exc}"
     return reconstruct_privileged_baseline(
@@ -10056,7 +10063,10 @@ def _plan_migration_reference(raw: Mapping[str, Any]) -> ProjectBoardProvision |
 
 
 def _project_board_provision_from_json(
-    path: Path, *, migrated: list[str] | None = None
+    path: Path,
+    *,
+    migrated: list[str] | None = None,
+    supplied: Mapping[str, str] | None = None,
 ) -> ProjectBoardProvision:
     """Parse a plan written by this release, or by an older one.
 
@@ -10064,12 +10074,27 @@ def _project_board_provision_from_json(
     current strict shape made every already provisioned tenant unupgradable the
     moment one was added. Fields the document predates are filled in first, and
     the caller is told which ones so it can report the migration (SYRD-52).
+
+    `supplied` is what the operator gave on the command line -- `--commit-git-dir`,
+    `--source-repo`. It fills a field the document is MISSING, before anything
+    is judged unresolved, and never replaces one the document records: the
+    tenant's recorded choices stand, and the caller applies the operator's
+    values over the parsed plan afterwards exactly as before. Without it, the
+    documented repair `switchyard upgrade <project> --commit-git-dir <path>`
+    was refused for the one plan it exists to repair: mefp's plan predates
+    `commit_git_dir`, its reference plan could not be built, and the parse gave
+    up before the operator's value was ever consulted (SYRD-226).
     """
     raw = _load_json(path)
     document = dict(raw)
     owner_home = _recorded_owner_home(document)
     if owner_home:
         document.setdefault("owner_home", owner_home)
+    from_operator: list[str] = []
+    for name, value in (supplied or {}).items():
+        if name in plan_field_names() and document.get(name) in (None, "") and value:
+            document[name] = value
+            from_operator.append(name)
     fields, added, unresolved = migrate_plan_document(
         document, reference=_plan_migration_reference(document)
     )
@@ -10078,6 +10103,15 @@ def _project_board_provision_from_json(
             f"switchyard: {path} is missing provision field 'owner_home' and it cannot be "
             "derived from board_root"
         )
+    if "commit_git_dir" in unresolved:
+        # Never regenerated, so no reference plan could ever supply it: it names
+        # where this tenant's commits are verified. Advising a re-provision --
+        # which would discard the tenant, its tickets and its resumable state --
+        # sent operators away from the one supported repair (SYRD-226).
+        raise SystemExit(
+            f"switchyard: {path} is missing provision field 'commit_git_dir', which no reference "
+            "plan can supply: give it with `switchyard upgrade <project> --commit-git-dir <path>`"
+        )
     if unresolved:
         raise SystemExit(
             f"switchyard: {path} is missing provision field {unresolved[0]!r} and no reference "
@@ -10085,6 +10119,7 @@ def _project_board_provision_from_json(
         )
     if migrated is not None:
         migrated.extend(added)
+        migrated.extend(f"{name} (from the command line)" for name in from_operator)
     return ProjectBoardProvision(**{name: fields[name] for name in plan_field_names()})
 
 

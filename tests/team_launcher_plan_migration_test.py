@@ -290,6 +290,141 @@ def unprivileged_migration() -> None:
         assert "migrated" not in again.message, again.message
 
 
+# --- SYRD-226: the documented repair must work on the plan it exists for ----
+#
+# Live mefp dry-run: "plan.json is missing provision field 'commit_git_dir' and
+# no reference plan can be built for it; re-provision the project", while
+# `switchyard upgrade <project> --commit-git-dir <path>` is the documented
+# repair. `commit_git_dir` is a baseline field -- missing, it is unresolved
+# whether or not a reference plan exists -- and the operator's value was only
+# applied AFTER the parse had refused the document.
+
+COMMIT_STORE = "/data/git/porter-fixpatch.git"
+
+
+def _legacy_without_commit_store(plan_path: Path) -> dict:
+    """An old plan with no commit_git_dir, whose reference plan also fails.
+
+    The reference fails for an unrelated recorded value: a project name the
+    current validator rejects (a tab, which older releases let through). So the
+    only way this document can be completed is from the command line.
+    """
+    stored = json.loads(plan_path.read_text(encoding="utf-8"))
+    del stored["commit_git_dir"]
+    stored["project_name"] = "Porter\tFixpatch"
+    plan_path.write_text(json.dumps(stored, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    assert launcher._plan_migration_reference(stored) is None, "the reference plan was built"
+    return stored
+
+
+def unprivileged_commit_store_repair() -> None:
+    project = "porter"
+    owner = pwd.getpwuid(os.geteuid()).pw_name
+    with tempfile.TemporaryDirectory(prefix="plan-migration-commit-store.") as tmp:
+        root = Path(tmp)
+        provision, config_path, _plan = _fixture_tenant(root, owner, project=project)
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(root / "etc-switchyard")
+        plan_path = provision / "plan.json"
+        legacy = _legacy_without_commit_store(plan_path)
+        config = launcher.load_project_config(project, config_path)
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def refresh(**kwargs):
+            return launcher.refresh_generated_project_runtime_artifacts(
+                config, config_path=config_path, runner=runner, print_func=lambda _t: None, **kwargs
+            )
+
+        # Without the operator's value it is still refused -- that is correct.
+        outcome = refresh(dry_run=True)
+        assert not outcome.changed
+        assert "missing provision field 'commit_git_dir'" in outcome.message, outcome.message
+        # And it names the supported repair rather than a re-provision, which
+        # would discard the tenant it is meant to keep.
+        assert "--commit-git-dir" in outcome.message, outcome.message
+        assert "re-provision" not in outcome.message, outcome.message
+
+        # With it: the dry run says what it would persist and writes nothing.
+        before = plan_path.read_bytes()
+        outcome = refresh(dry_run=True, commit_git_dir=COMMIT_STORE)
+        assert not outcome.changed, outcome.message
+        assert "cannot be refreshed" not in outcome.message, outcome.message
+        assert "commit_git_dir (from the command line)" in outcome.message, outcome.message
+        assert plan_path.read_bytes() == before, "the dry run rewrote the plan"
+
+        # Apply persists it, and keeps every choice the tenant recorded.
+        outcome = refresh(commit_git_dir=COMMIT_STORE)
+        assert outcome.changed, outcome.message
+        stored = json.loads(plan_path.read_text(encoding="utf-8"))
+        assert stored["commit_git_dir"] == COMMIT_STORE, stored.get("commit_git_dir")
+        for field in ("project_name", "port", "ticket_prefix", "database", "owner_user", "board_root"):
+            assert stored[field] == legacy[field], (field, stored[field], legacy[field])
+
+        # Repaired for good: a plain upgrade no longer needs the flag.
+        again = refresh(dry_run=True)
+        assert "cannot be refreshed" not in again.message, again.message
+
+
+def privileged_commit_store_repair(owner: str) -> None:
+    """At root: a baseline as old as the plan, repaired from the command line."""
+    project = "porter"
+    assert os.geteuid() == 0
+    with tempfile.TemporaryDirectory(prefix="plan-migration-commit-store-root.") as tmp:
+        root = Path(tmp)
+        root.chmod(0o755)
+        provision, config_path, plan = _fixture_tenant(root, owner, project=project)
+        privileged_root = root / "etc-switchyard"
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(privileged_root)
+        subprocess.run(["chown", "-R", f"{owner}:{owner}", str(provision)], check=True)
+        config = launcher.load_project_config(project, config_path)
+        plan_path = provision / "plan.json"
+        mirror = privileged_root / project
+
+        def runner(args, **kwargs):
+            if args[0] == "chown":
+                return subprocess.run(args, **kwargs)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def refresh(**kwargs):
+            return launcher.refresh_generated_project_runtime_artifacts(
+                config, config_path=config_path, runner=runner, print_func=lambda _t: None, **kwargs
+            )
+
+        # Root's own baseline exists -- then both documents are rolled back to
+        # a release that predates commit_git_dir.
+        assert refresh().changed
+        baseline_path = mirror / "plan.json"
+        _legacy_without_commit_store(plan_path)
+        root_doc = json.loads(baseline_path.read_text(encoding="utf-8"))
+        del root_doc["commit_git_dir"]
+        baseline_path.write_text(json.dumps(root_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        outcome = refresh()
+        assert "missing provision field 'commit_git_dir'" in outcome.message, outcome.message
+
+        staged = {path.name: path.read_bytes() for path in mirror.iterdir() if path.is_file()}
+        outcome = refresh(dry_run=True, commit_git_dir=COMMIT_STORE)
+        assert "unusable" not in outcome.message and "cannot be refreshed" not in outcome.message, (
+            outcome.message)
+        assert {path.name: path.read_bytes() for path in mirror.iterdir() if path.is_file()} == staged, (
+            "the dry run changed root's staged artifacts")
+
+        outcome = refresh(commit_git_dir=COMMIT_STORE)
+        assert outcome.changed, outcome.message
+        assert json.loads(baseline_path.read_text(encoding="utf-8"))["commit_git_dir"] == COMMIT_STORE
+        assert json.loads(plan_path.read_text(encoding="utf-8"))["commit_git_dir"] == COMMIT_STORE
+        unit = (mirror / plan.board_unit).read_text(encoding="utf-8")
+        assert f"TICKET_BOARD_COMMIT_GIT_DIR={COMMIT_STORE}" in unit, unit
+        carriers = sorted(
+            path.name for path in mirror.iterdir()
+            if path.is_file() and COMMIT_STORE in path.read_text(encoding="utf-8", errors="replace")
+        )
+        print(f"  commit store staged in: {carriers}")
+        assert any(name.endswith(".sh") for name in carriers), (
+            "the generated operator sequence does not carry the repaired store", carriers)
+
+
 def privileged_migration(owner: str) -> None:
     """The root branch: the mirror is staged from root's own baseline."""
     project = "porter"
@@ -548,8 +683,9 @@ def main() -> int:
     test_the_migration_is_derived_rather_than_hardcoded()
     test_a_document_that_is_not_a_plan_is_still_refused()
     unprivileged_migration()
+    unprivileged_commit_store_repair()
     owner = pwd.getpwuid(os.geteuid()).pw_name
-    for entry in ("--root-child", "--two-pass-child"):
+    for entry in ("--root-child", "--two-pass-child", "--commit-store-child"):
         command = [sys.executable, str(Path(__file__).resolve()), entry, owner]
         if os.geteuid() != 0:
             # --mount so the grant can be installed at its real pinned path on a
@@ -571,6 +707,8 @@ def _private_tenant_control_root() -> None:
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--root-child":
         privileged_migration(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == "--commit-store-child":
+        privileged_commit_store_repair(sys.argv[2])
     elif len(sys.argv) == 3 and sys.argv[1] == "--two-pass-child":
         _private_tenant_control_root()
         two_pass_controller(sys.argv[2])

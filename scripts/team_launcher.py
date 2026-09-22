@@ -1250,14 +1250,35 @@ def default_gui_user() -> str:
     return current_user_name()
 
 
+def pinned_presentation_gui_user(config: "ProjectConfig") -> str:
+    """The desktop account this tenant's recorded Wayland policy grants, or "".
+
+    The policy is the tenant's own consent record, validated when it was
+    installed: it names one account whose compositor these panes may reach. A
+    window for this project belongs on that desktop and nowhere else, so where
+    a policy names one, it is the answer -- not whoever the environment says
+    ran the command (SYRD-233).
+    """
+    policy = getattr(config, "desktop_access", None)
+    if not isinstance(policy, Mapping) or policy.get("mode") != "wayland":
+        return ""
+    user = str(policy.get("gui_user") or "").strip()
+    return "" if user == "root" else user
+
+
 def presentation_gui_user(config: "ProjectConfig") -> str:
     """The desktop account a presentation window for this project belongs to.
 
     The owner account owns the sessions; it does not necessarily own a screen.
-    When a desktop identity is known -- configured, through sudo, or carried by
-    the control bridge -- the window belongs to that person's session, and the
-    owner is the fallback for a tenant driven from its own desktop (SYRD-65).
+    A recorded Wayland policy names the account whose screen that is, and wins
+    (SYRD-233). Otherwise, when a desktop identity is known -- configured,
+    through sudo, or carried by the control bridge -- the window belongs to that
+    person's session, and the owner is the fallback for a tenant driven from its
+    own desktop (SYRD-65).
     """
+    pinned = pinned_presentation_gui_user(config)
+    if pinned:
+        return pinned
     for name in (GUI_USER_ENV, LEGACY_GUI_USER_ENV, "SUDO_USER", TENANT_CONTROL_CALLER_ENV):
         candidate = os.environ.get(name, "").strip()
         # Never root. A presentation window opened as root is a root shell
@@ -6719,18 +6740,146 @@ def desktop_presentation_layout_path(
     return desktop_state_dir(config.project, user) / f"{config.project}-presentation-layout.json"
 
 
+def desktop_layout_destination_problem(path: Path, *, gui_user: str, project: str) -> str:
+    """Why `path` is not the one place a layout for this project may cross to, or "".
+
+    Exactly `~<gui_user>/.local/state/switchyard/projects/<project>/<file>`: the
+    pinned desktop account's own state root for this project. Anything else is
+    root being asked to write somewhere it was not told it could (SYRD-233).
+    """
+    if not project:
+        return "no project was named for a layout that has to cross into another account"
+    expected = desktop_state_dir(project, gui_user)
+    if Path(os.path.normpath(path)).parent != expected or path.name in {"", ".", ".."}:
+        return f"{path} is not in {gui_user}'s own state directory for {project} ({expected})"
+    return ""
+
+
+def _open_owned_directory_chain(
+    home: Path, relative: Sequence[str], *, uid: int, gid: int
+) -> tuple[int, str, list[str]]:
+    """Open `home/relative` without following anything, creating what is missing.
+
+    Every component from the home down has to be a real directory owned by
+    `uid`: a symlink anywhere in the chain would move root's write to wherever
+    it points, and a component owned by somebody else is one that account did
+    not create and cannot be assumed to control. Missing components are created
+    0700 and given to `uid` as they are made, from an open descriptor, so there
+    is no path lookup between making one and owning it.
+    """
+    created: list[str] = []
+    try:
+        fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            return -1, f"{home} is a symlink or not a directory", created
+        return -1, f"{home} cannot be opened ({exc.strerror})", created
+    walked = home
+    try:
+        if os.fstat(fd).st_uid != uid:
+            owner = os.fstat(fd).st_uid
+            os.close(fd)
+            return -1, f"{home} is owned by uid {owner}, not by uid {uid}", created
+        for component in relative:
+            walked = walked / component
+            try:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(component, 0o700, dir_fd=fd)
+                created.append(str(walked))
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.fchown(child, uid, gid)
+                os.fchmod(child, 0o700)
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    os.close(fd)
+                    return -1, f"{walked} is a symlink or not a directory", created
+                raise
+            owner = os.fstat(child).st_uid
+            if owner != uid:
+                os.close(child)
+                os.close(fd)
+                return -1, f"{walked} is owned by uid {owner}, not by uid {uid}", created
+            os.close(fd)
+            fd = child
+    except OSError as exc:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return -1, f"{walked} cannot be prepared ({exc.strerror})", created
+    return fd, "", created
+
+
+def _write_crossing_desktop_layout(
+    path: Path, payload: dict[str, Any], *, gui_user: str, uid: int, project: str
+) -> str:
+    """Root's write of one layout into another account's own state directory."""
+    problem = desktop_layout_destination_problem(path, gui_user=gui_user, project=project)
+    if problem:
+        return f"refusing to write the presentation layout: {problem}"
+    try:
+        gid = pwd.getpwnam(gui_user).pw_gid
+    except KeyError:
+        return f"{gui_user} is not a local account"
+    home = Path(_gui_home(gui_user))
+    relative = Path(os.path.normpath(path)).parent.relative_to(home).parts
+    fd, problem, _created = _open_owned_directory_chain(home, relative, uid=uid, gid=gid)
+    if fd < 0:
+        return f"refusing to write the presentation layout: {problem}"
+    staged = f".{path.name}.{os.getpid()}.tmp"
+    try:
+        try:
+            existing = os.lstat(path.name, dir_fd=fd)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
+                return f"refusing to write the presentation layout: {path} is not a regular file"
+            if existing.st_uid != uid:
+                return (
+                    f"refusing to write the presentation layout: {path} is owned by uid "
+                    f"{existing.st_uid}, not by uid {uid}"
+                )
+        body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        descriptor = os.open(
+            staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd
+        )
+        try:
+            os.write(descriptor, body)
+            os.fchown(descriptor, uid, gid)
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
+        os.replace(staged, path.name, src_dir_fd=fd, dst_dir_fd=fd)
+    except OSError as exc:
+        try:
+            os.unlink(staged, dir_fd=fd)
+        except OSError:
+            pass
+        return f"cannot give {gui_user} the presentation layout {path}: {exc.strerror or exc}"
+    finally:
+        os.close(fd)
+    return ""
+
+
 def write_desktop_layout(
     path: Path,
     payload: dict[str, Any],
     *,
     gui_user: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    project: str = "",
 ) -> str:
     """Write the layout and hand it to the desktop account; say why if it cannot.
 
     A refusal is returned rather than raised so the caller can say what a human
     should do instead. Launching a terminal at a file it cannot read is the
     failure this exists to prevent, and it fails as an abort with an empty log.
+
+    Crossing into another account is root writing inside somebody else's home,
+    so it goes through `_write_crossing_desktop_layout`, which walks that home
+    without following anything and refuses what it does not expect (SYRD-233).
     """
     uid = uid_for_user(gui_user) if gui_user else None
     if uid is None:
@@ -6740,6 +6889,10 @@ def write_desktop_layout(
         return (
             f"this invocation cannot give {gui_user} a readable layout: it is running as "
             f"{current_user_name()}, and only root can write into another account's state directory"
+        )
+    if crossing:
+        return _write_crossing_desktop_layout(
+            path, payload, gui_user=gui_user, uid=uid, project=project
         )
     created = [parent for parent in reversed(path.parents) if not parent.exists()]
     try:
@@ -9187,6 +9340,198 @@ def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
         raise
 
 
+@dataclass(frozen=True)
+class LegacyPresentationMigration:
+    """What giving a legacy tenant the desktop-account presentation would do.
+
+    A tenant provisioned before `switchyard new` wrote a `presentation` section
+    has none, so its launch takes the fallback that hands the terminal a layout
+    in the owner's own 0700 state directory. That works when the desktop account
+    IS the owner and cannot work otherwise: the terminal runs as the desktop
+    account and cannot enter the directory (SYRD-233, live on mefp).
+    """
+
+    #: Whether the tenant needs the section at all.
+    needed: bool
+    #: The section to add, built from the tenant's own configured slots.
+    section: dict[str, Any]
+    #: Where its presentation window will read its layout from, once migrated.
+    destination: Path | None
+    gui_user: str
+    #: Why the migration must not happen, when it must not.
+    refusal: str = ""
+    #: Why nothing is needed, for the report.
+    reason: str = ""
+
+    def describe(self) -> str:
+        roles = ", ".join(
+            f"{slot}={role}" for slot, role in sorted(
+                self.section.get("layouts", {}).get("default", {}).items(), key=lambda item: int(item[0])
+            )
+        )
+        return (
+            f"a presentation section ({self.section.get('slot_count')} slot(s): {roles}), so its window "
+            f"reads its layout from {self.gui_user}'s own state directory ({self.destination}) instead "
+            "of the tenant's private one"
+        )
+
+
+def legacy_presentation_section(config: "ProjectConfig") -> dict[str, Any]:
+    """The section `switchyard new` writes, from this tenant's configured slots.
+
+    The configured slots, not a fresh enumeration: a tenant whose roles sit at
+    0, 1, 2 and 3 keeps exactly those, and one with a gap keeps the gap. The
+    presentation controller derives its default mapping from the same role
+    slots, so the two cannot disagree about who is where.
+    """
+    mapping = {
+        str(role.slot): role.role
+        for role in config.roles
+        if not role.detached and role.slot is not None
+    }
+    slot_count = max((int(slot) for slot in mapping), default=-1) + 1
+    return {"slot_count": slot_count, "layouts": {"default": mapping}}
+
+
+def legacy_presentation_migration(
+    config: "ProjectConfig", *, config_path: Path
+) -> LegacyPresentationMigration:
+    """Decide whether this tenant's presentation has to move, and where to."""
+    from scripts import presentation_controller
+
+    gui_user = pinned_presentation_gui_user(config)
+    owner = config.run_as_user or current_user_name()
+    empty = {"slot_count": 0, "layouts": {"default": {}}}
+    if not gui_user:
+        return LegacyPresentationMigration(
+            False, empty, None, "", reason="no Wayland desktop is granted, so nothing is presented"
+        )
+    if gui_user == owner:
+        return LegacyPresentationMigration(
+            False, empty, None, gui_user,
+            reason=f"the desktop account is the tenant owner {owner}, whose own state it can read",
+        )
+    if presentation_controller.presentation_enabled(config, config_path=config_path):
+        return LegacyPresentationMigration(
+            False, empty, None, gui_user,
+            reason="it already presents through the desktop account's own state directory",
+        )
+    section = legacy_presentation_section(config)
+    if section["slot_count"] < 1:
+        return LegacyPresentationMigration(
+            False, section, None, gui_user, reason="it has no visible role to present"
+        )
+    if section["slot_count"] > MAX_VISIBLE_PANES_PER_WINDOW:
+        return LegacyPresentationMigration(
+            True, section, None, gui_user,
+            refusal=(
+                f"its roles occupy slots up to {section['slot_count'] - 1}, and a presentation "
+                f"window has {MAX_VISIBLE_PANES_PER_WINDOW}"
+            ),
+        )
+    destination = desktop_presentation_layout_path(config, config_path=config_path, gui_user=gui_user)
+    problem = desktop_layout_destination_problem(
+        destination, gui_user=gui_user, project=config.project
+    )
+    if not problem:
+        problem = _desktop_state_root_problem(gui_user, config.project)
+    return LegacyPresentationMigration(
+        True, section, destination, gui_user, refusal=problem
+    )
+
+
+def _desktop_state_root_problem(gui_user: str, project: str) -> str:
+    """Why the desktop account's state root cannot safely receive a layout, or "".
+
+    Read-only, so a dry run can report it: the same walk the write makes, stopped
+    at the first component that does not yet exist -- absent is fine, the write
+    creates it; a symlink or somebody else's directory is not.
+    """
+    uid = uid_for_user(gui_user)
+    if uid is None:
+        return f"{gui_user} is not a local account"
+    home = Path(_gui_home(gui_user))
+    walked = home
+    for component in (None, *desktop_state_dir(project, gui_user).relative_to(home).parts):
+        if component is not None:
+            walked = walked / component
+        try:
+            info = os.lstat(walked)
+        except FileNotFoundError:
+            return ""
+        except OSError as exc:
+            return f"{walked} cannot be inspected ({exc.strerror})"
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            return f"{walked} is a symlink or not a directory"
+        if info.st_uid != uid:
+            return f"{walked} is owned by uid {info.st_uid}, not by {gui_user} (uid {uid})"
+    return ""
+
+
+def migrate_legacy_presentation(
+    config: "ProjectConfig",
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> tuple["ProjectConfig", bool]:
+    """Give a legacy tenant the presentation section before it is declared ready.
+
+    Returns the (possibly reloaded) configuration and whether the upgrade may
+    go on. Nothing under the tenant's home is loosened: the tenant's config
+    gains one section, and the layout goes to the desktop account's own state
+    directory when the window is next opened (SYRD-233).
+    """
+    migration = legacy_presentation_migration(config, config_path=config_path)
+    if migration.refusal:
+        print_func(
+            f"switchyard: {config.project}'s presentation window cannot be moved to "
+            f"{migration.gui_user or 'the desktop account'}'s own state directory: {migration.refusal}. "
+            "Its roles would start and its window would fail to open, so this upgrade stops "
+            "before declaring it ready. Nothing was changed."
+        )
+        return config, False
+    if not migration.needed:
+        return config, True
+    if dry_run:
+        print_func(f"switchyard: would give {config.project} {migration.describe()}; nothing written")
+        return config, True
+    payload = _load_json(config_path)
+    if payload.get("project") != config.project:
+        print_func(
+            f"switchyard: {config_path} names project {payload.get('project')!r}, not "
+            f"{config.project!r}; refusing to add a presentation section to it."
+        )
+        return config, False
+    payload["presentation"] = migration.section
+    _write_json_atomic(config_path, payload, owner_user=config.run_as_user or current_user_name())
+    print_func(f"switchyard: gave {config.project} {migration.describe()}")
+    return load_project_config(config.project, config_path), True
+
+
+def legacy_presentation_refusal(config: "ProjectConfig", *, output_path: Path) -> str:
+    """Why the fallback window must not be opened, or "" when it may.
+
+    The fallback hands the terminal `output_path`, which lives in the owner's
+    own state directory. The terminal runs as the desktop account. When those
+    are different accounts the file cannot be read, so the only honest outcome
+    is to say so, with the command that fixes it, and leave the workers be.
+    """
+    gui_user = presentation_gui_user(config)
+    owner = config.run_as_user or current_user_name()
+    if not gui_user or gui_user == owner:
+        return ""
+    return (
+        f"switchyard: {config.project}'s roles are running, but its presentation window was not "
+        f"opened: the layout it would be handed, {output_path}, is in {owner}'s private state "
+        f"directory and the window runs as {gui_user}, who cannot read it. This tenant predates "
+        f"presenting through the desktop account's own state directory. Run `sudo switchyard "
+        f"upgrade {config.project}` to move it there, then `switchyard {config.project}` to open "
+        f"the window over the running roles; `switchyard attach {config.project} <role>` reaches "
+        "any role now. Nothing under the tenant's home was loosened."
+    )
+
+
 def launch_project(
     config: ProjectConfig,
     *,
@@ -9612,13 +9957,23 @@ def launch_project(
             # not, and Konsole started from here goes nowhere (SYRD-211).
             launch_result = 0
         else:
-            launch_result = launch_konsole_window(
-                output_path,
-                project=config.project,
-                window_title=window_title,
-                runner=runner,
-                process_launcher=konsole_process_launcher,
-            )
+            refusal = legacy_presentation_refusal(config, output_path=output_path)
+            if refusal:
+                # The workers are up and stay up; only the window is refused.
+                # Handing the terminal this path is the defect itself: it is in
+                # the owner's 0700 state directory and the terminal runs as the
+                # desktop account, so it aborts with "A problem occurred when
+                # loading the Layout" and nothing says why (SYRD-233).
+                print_func(refusal)
+                launch_result = 1
+            else:
+                launch_result = launch_konsole_window(
+                    output_path,
+                    project=config.project,
+                    window_title=window_title,
+                    runner=runner,
+                    process_launcher=konsole_process_launcher,
+                )
     if launch_result != 0:
         return launch_result
     # A window opened by an earlier release can still be running as root, and
@@ -25586,6 +25941,28 @@ def upgrade_project_command(
     if desktop_policy is not None or config.desktop_access is not None:
         config = configure_project_desktop(config, config_path=config_path, policy_path=desktop_policy,
             dry_run=dry_run, helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
+        # Once the desktop account is known, and before any phase can declare the
+        # tenant ready to restart: a legacy tenant presenting to a different
+        # account needs the presentation section new tenants are born with, or
+        # its workers start and its window cannot read its own layout (SYRD-233).
+        # A dry run's policy was not persisted, so it is carried in by hand.
+        planned = config
+        if dry_run and desktop_policy is not None:
+            from scripts import desktop_access as _desktop
+
+            raw_policy = (
+                {"mode": "headless"} if str(desktop_policy) == "headless" else _load_json(desktop_policy)
+            )
+            planned = replace(config, desktop_access=_desktop.validate_policy(
+                raw_policy, project=config.project, tenant=config.run_as_user or current_user_name()
+            ))
+        planned, presentation_ready = migrate_legacy_presentation(
+            planned, config_path=config_path, dry_run=dry_run, print_func=print_func
+        )
+        if not presentation_ready:
+            return 1
+        if not dry_run:
+            config = planned
 
     repatriated, repatriation_problems = repatriate_role_runtime_state(
         config, config_path=config_path, dry_run=dry_run, runner=runner

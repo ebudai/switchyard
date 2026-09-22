@@ -454,6 +454,30 @@ The upgrade checks the same things read-only before it changes anything, and
 stops -- non-zero, before readiness -- when one fails. Nothing under the
 tenant's home is loosened by any of it.
 
+**And it is given the display bridge its window's tabs cross.** A window whose
+desktop account is not the tenant owner opens one tab per slot, and each tab runs
+`sudo -n /usr/local/lib/switchyard/<project>/switchyard-display-attach <project>
+<slot>`. That program admits its caller only when root's `control-grant.json`
+names them, and sudo runs it without a password only when
+`/etc/sudoers.d/49-<project>-tenant-control` says so. Provisioning installs both;
+no root phase of the upgrade ever did, so live mefp's first migrated window opened
+four tabs that each exited "sudo: a password is required".
+
+The upgrade now installs them for the pinned desktop account, with the same
+commands provisioning uses -- the grant first, the rule through `visudo -c`
+before it is live -- and reads both back rather than trusting the exit status.
+It does this on **every** upgrade of a tenant whose window crosses accounts, not
+only the one that adds the section, because a tenant moved by an earlier run can
+still lack it. A grant that already names somebody else is not taken over: the
+upgrade stops and says whose it is. A dry run reports the install and writes
+nothing; a rerun finds both files present and runs nothing.
+
+The launch checks the half it can see -- the grant is world-readable, the rule is
+not -- before it opens anything: a missing grant, or one naming somebody else,
+means no window, the reason, `sudo switchyard upgrade <project>` to fix it, and
+the roles left running. A caller that arrived through the tenant-control bridge
+was admitted by that same grant, and opens its own window.
+
 A tenant nobody has upgraded yet still reaches the fallback. It no longer hands
 the terminal a layout the desktop account cannot read: once the workers are up
 it says the window was not opened, why, and to run `sudo switchyard upgrade

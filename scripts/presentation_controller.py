@@ -1635,6 +1635,23 @@ def _launch_separate(
     # (SYRD-90).
     if _hand_off_desktop_half(config, state, gui_user=gui_user):
         return
+    # After the handoff: a caller that reached this process through the
+    # tenant-control bridge was admitted by the very grant the tabs need, and
+    # opens its own window. This is the path where this process opens it.
+    #
+    # Before anything opens: a window whose every tab will be refused is worse
+    # than no window, because it looks like a presentation and answers nothing.
+    # Live mefp opened four tabs that each exited "sudo: a password is
+    # required" (SYRD-233). The workers are already up; only the window stops.
+    if gui_user and gui_user != (config.run_as_user or team_launcher.current_user_name()):
+        bridge = team_launcher.display_bridge_launch_problem(config, gui_user=gui_user)
+        if bridge:
+            raise SystemExit(
+                f"switchyard: not opening {config.project}'s presentation window: {bridge}. "
+                f"Its roles are running. Run `sudo switchyard upgrade {config.project}` to install "
+                f"the display bridge for {gui_user}, then `switchyard {config.project}` to open "
+                f"the window; `switchyard attach {config.project} <role>` reaches any role now."
+            )
     output = output_path or team_launcher.desktop_presentation_layout_path(
         config, config_path=config_path, gui_user=gui_user
     )

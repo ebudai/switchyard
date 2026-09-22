@@ -495,8 +495,15 @@ def test_the_migrated_start_opens_the_desktop_path_without_touching_workers() ->
             opened: list[Path] = []
             written: list[Path] = []
             calls: list[list[str]] = []
-            saved = (team_launcher.launch_konsole_window, team_launcher.write_desktop_layout)
+            saved = (
+                team_launcher.launch_konsole_window,
+                team_launcher.write_desktop_layout,
+                team_launcher.display_bridge_launch_problem,
+            )
             try:
+                # Which path is chosen is this case's subject; whether the tabs
+                # can cross is the bridge cases' below.
+                team_launcher.display_bridge_launch_problem = lambda *_a, **_k: ""
                 team_launcher.launch_konsole_window = lambda output, **_k: opened.append(Path(output)) or 0
                 # Crossing needs root; this case is about which path is chosen
                 # and which sessions are touched, so the handover is stood down.
@@ -511,7 +518,11 @@ def test_the_migrated_start_opens_the_desktop_path_without_touching_workers() ->
                     runner=fake_runner(calls),
                 )
             finally:
-                team_launcher.launch_konsole_window, team_launcher.write_desktop_layout = saved
+                (
+                    team_launcher.launch_konsole_window,
+                    team_launcher.write_desktop_layout,
+                    team_launcher.display_bridge_launch_problem,
+                ) = saved
             expected = team_launcher.desktop_presentation_layout_path(
                 migrated, config_path=config_path, gui_user=GUI
             )
@@ -529,11 +540,219 @@ def test_the_migrated_start_opens_the_desktop_path_without_touching_workers() ->
 
 
 # --------------------------------------------------------------------------
+# The display bridge the window's tabs cross (the UAT finding)
+# --------------------------------------------------------------------------
+#
+# Live UAT of the first candidate: the window opened at the readable layout,
+# and every tab ran `sudo -n /usr/local/lib/switchyard/mefp/switchyard-display-attach
+# mefp <slot>` and exited "sudo: a password is required". mefp has no
+# control-grant.json and no 49-mefp-tenant-control rule: provisioning installs
+# them, and no root phase of `switchyard upgrade` ever did.
+
+
+def bridge_dirs(tmp: Path) -> dict:
+    grants = tmp / "lib-switchyard"
+    sudoers = tmp / "sudoers.d"
+    grants.mkdir(exist_ok=True)
+    sudoers.mkdir(exist_ok=True)
+    # A sandbox cannot make root-owned files, so the owner the grant must have
+    # is named explicitly -- never defaulted to the caller.
+    return {"grant_root": grants, "sudoers_dir": sudoers, "grant_owner_uid": os.getuid()}
+
+
+def stage_bridge(dirs: dict, *, authorized: str = GUI, owner: str = OWNER, project: str = PROJECT,
+                 rule: bool = True) -> None:
+    from scripts.ticket_board.project_provision import tenant_control_sudoers_document
+
+    grant = dirs["grant_root"] / PROJECT / "control-grant.json"
+    grant.parent.mkdir(parents=True, exist_ok=True)
+    grant.write_text(json.dumps({"project": project, "owner": owner, "authorized_user": authorized}))
+    grant.chmod(0o644)
+    if rule:
+        (dirs["sudoers_dir"] / f"49-{PROJECT}-tenant-control").write_text(
+            tenant_control_sudoers_document(PROJECT, authorized) + "\n"
+        )
+
+
+def test_a_tenant_with_no_grant_is_owed_the_bridge_provisioning_installs() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-none.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **bridge_dirs(tmp))
+    check(state.action == "install", f"no grant means the bridge is owed: {state}")
+    script = "\n".join(state.commands)
+    check(
+        f"{GUI} ALL=(root) NOPASSWD: /usr/local/lib/switchyard/{PROJECT}/switchyard-display-attach" in script,
+        f"for the pinned desktop account, and only the display helper: {script}",
+    )
+    check("visudo -c -f" in script, "validated before it is live")
+    check(
+        script.index("control-grant.json") < script.index("sudo mv"),
+        "and the grant lands before the rule is live",
+    )
+
+
+def test_a_complete_matching_bridge_is_left_alone() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-ok.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        stage_bridge(dirs)
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **dirs)
+        check(state.action == "present", f"{state}")
+        ran: list = []
+        check(
+            team_launcher.ensure_display_bridge(
+                config, gui_user=GUI, runner=lambda *a, **k: ran.append(a), print_func=lambda _l: None, **dirs
+            ),
+            "and ensuring it is a yes",
+        )
+        check(ran == [], f"that runs nothing: {ran}")
+
+
+def test_a_grant_without_its_rule_is_reinstalled() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-norule.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        stage_bridge(dirs, rule=False)
+        check(
+            team_launcher.display_bridge_state(config, gui_user=GUI, **dirs).action == "install",
+            "a grant with no sudoers rule still leaves every tab asking for a password",
+        )
+
+
+def test_a_grant_naming_somebody_else_is_not_taken_over() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-other.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        stage_bridge(dirs, authorized="alice")
+        before = (dirs["grant_root"] / PROJECT / "control-grant.json").read_bytes()
+        printed: list[str] = []
+        ok = team_launcher.ensure_display_bridge(
+            config, gui_user=GUI, runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)),
+            print_func=printed.append, **dirs,
+        )
+        output = "\n".join(printed)
+        check(not ok, output)
+        check("authorizes alice" in output and f"names {GUI}" in output, output)
+        check("stops before declaring it ready" in output, output)
+        check(
+            (dirs["grant_root"] / PROJECT / "control-grant.json").read_bytes() == before,
+            "and the grant is untouched",
+        )
+
+
+def test_a_grant_that_is_not_roots_is_not_an_authority() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-notroot.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = {**bridge_dirs(tmp), "grant_owner_uid": 0}
+        stage_bridge(dirs)
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **dirs)
+        check(state.action == "refuse" and "not a root-owned" in state.detail, f"{state}")
+        (tmp / "w").mkdir()
+        writable = bridge_dirs(tmp / "w")
+        stage_bridge(writable)
+        (writable["grant_root"] / PROJECT / "control-grant.json").chmod(0o666)
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **writable)
+        check(state.action == "refuse", f"nor is one anybody can rewrite: {state}")
+
+
+def test_a_grant_for_another_owner_or_project_is_refused() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-mismatch.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        stage_bridge(dirs, owner="somebody")
+        check(
+            "names owner" in team_launcher.display_bridge_state(config, gui_user=GUI, **dirs).detail,
+            "another owner",
+        )
+        stage_bridge(dirs, project="otherproj")
+        check(
+            "different project" in team_launcher.display_bridge_state(config, gui_user=GUI, **dirs).detail,
+            "another project",
+        )
+
+
+def test_ensuring_the_bridge_dry_runs_installs_and_reads_back() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-ensure.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        ran: list = []
+        printed: list[str] = []
+        check(
+            team_launcher.ensure_display_bridge(
+                config, gui_user=GUI, dry_run=True, runner=lambda *a, **k: ran.append(a),
+                print_func=printed.append, **dirs,
+            ),
+            "a dry run of an owed bridge is not a refusal",
+        )
+        check(ran == [], f"and runs nothing: {ran}")
+        check("would install the display bridge" in "\n".join(printed), printed)
+        check(list(dirs["grant_root"].rglob("*")) == [], "and writes nothing")
+
+        # An install that "succeeds" and leaves nothing behind is caught by the
+        # read-back, rather than reported and left for the window to find.
+        printed.clear()
+        check(
+            not team_launcher.ensure_display_bridge(
+                config, gui_user=GUI,
+                runner=lambda args, **k: ran.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
+                print_func=printed.append, **dirs,
+            ),
+            "an install that did not land is not a yes",
+        )
+        check(ran and ran[-1][:2] == ["sh", "-euc"], f"it ran the provisioning commands: {ran}")
+        check("does not read back as present" in "\n".join(printed), printed)
+
+
+def test_the_launch_refuses_a_window_whose_tabs_cannot_cross() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-launch-bridge.") as raw:
+        tmp = Path(raw)
+        config, config_path = legacy_config(tmp)
+        # The real root: the launch reads where the helper reads, and no
+        # tenant called `stellar` exists on any host this runs on.
+        check(not Path(f"/usr/local/lib/switchyard/{PROJECT}").exists(), "no real grant to trip over")
+        with sandboxed_homes(tmp) as homes:
+            migrated, _ready = team_launcher.migrate_legacy_presentation(
+                config, config_path=config_path, print_func=lambda _l: None
+            )
+            opened: list = []
+            saved = team_launcher.launch_konsole_window
+            try:
+                team_launcher.launch_konsole_window = lambda output, **_k: opened.append(output) or 0
+                try:
+                    presentation.launch_presentation(
+                        migrated,
+                        config_path=config_path,
+                        state_path=tmp / "owner-state" / "presentation.json",
+                        layout="separate",
+                        runner=fake_runner([]),
+                    )
+                except SystemExit as exc:
+                    refusal = str(exc)
+                else:
+                    refusal = ""
+            finally:
+                team_launcher.launch_konsole_window = saved
+            written = list(homes[GUI].rglob("*presentation-layout.json"))
+    check("not opening" in refusal and "no display bridge is installed for eric" in refusal, refusal)
+    check(f"sudo switchyard upgrade {PROJECT}" in refusal, f"it names the repair: {refusal}")
+    check("Its roles are running" in refusal, refusal)
+    check(opened == [], f"no window with four dead tabs: {opened}")
+    check(written == [], f"and no layout was staged for one: {written}")
+
+
+# --------------------------------------------------------------------------
 # Through the real upgrade, not only the helper it calls
 # --------------------------------------------------------------------------
 
 
-def _upgrade_dry_run(tmp: Path, *, attack: bool = False):
+def _upgrade_dry_run(tmp: Path, *, attack: bool = False, already_migrated: bool = False):
     """Run `upgrade_project_command` as root, dry, with a Wayland policy supplied.
 
     The call site is what this proves: a helper that is right and never called
@@ -546,6 +765,13 @@ def _upgrade_dry_run(tmp: Path, *, attack: bool = False):
     me = team_launcher.current_user_name()
     policy_path = tmp / "policy.json"
     policy_path.write_text(json.dumps(wayland_policy(tenant=me, project="porter")), encoding="utf-8")
+    if already_migrated:
+        # mefp's live state after the first UAT run: the section is there, the
+        # bridge its tabs need is not.
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        payload["presentation"] = {"slot_count": 6, "layouts": {"default": {}}}
+        config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     before = config_path.read_bytes()
     printed: list[str] = []
     saved = (
@@ -553,6 +779,7 @@ def _upgrade_dry_run(tmp: Path, *, attack: bool = False):
         team_launcher.local_account_exists,
         team_launcher._open_board_url,
     )
+    check(not Path("/usr/local/lib/switchyard/porter").exists(), "no real grant to trip over")
     with sandboxed_homes(tmp) as homes:
         if attack:
             (tmp / "elsewhere").mkdir()
@@ -594,6 +821,25 @@ def test_the_upgrade_dry_run_reports_the_presentation_migration() -> None:
         output.index("would give porter a presentation section") < output.index("upgrade phases"),
         "it is reported before any phase, so before anything is declared ready",
     )
+    check(
+        "would install the display bridge so eric may attach this project's display tabs" in output,
+        f"and so is the bridge the window's tabs cross: {output[-3000:]}",
+    )
+    check(
+        output.index("would install the display bridge") < output.index("upgrade phases"),
+        "also before any phase",
+    )
+
+
+def test_a_tenant_already_moved_is_still_given_its_bridge() -> None:
+    # The state live UAT left mefp in. A step that ran only on the upgrade that
+    # adds the section would never reach it again.
+    with tempfile.TemporaryDirectory(prefix="syrd233-upgrade-moved.") as raw:
+        tmp = Path(raw)
+        _result, output, unchanged, _tree = _upgrade_dry_run(tmp, already_migrated=True)
+    check("would give porter" not in output, "the section is not added twice")
+    check("would install the display bridge" in output, output[-3000:])
+    check(unchanged, "and a dry run still writes nothing")
 
 
 def test_the_upgrade_stops_before_readiness_when_the_destination_is_unsafe() -> None:
@@ -785,6 +1031,94 @@ def test_the_kernel_agrees_about_who_can_read_which_layout() -> None:
         f"and the file it pointed at is untouched and still the owner's: {leaf}",
     )
     check(attacks["rerun"] == {"first": "", "second": ""}, f"a rerun is idempotent: {attacks['rerun']}")
+
+
+BRIDGE_CHILD = r'''
+import importlib.machinery, importlib.util, json, os, stat, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from scripts import team_launcher
+
+# Root's real locations, each a fresh tmpfs inside this mount namespace only.
+for place in ("/usr/local/lib/switchyard", "/etc/sudoers.d"):
+    subprocess.run(["mount", "-t", "tmpfs", "tmpfs", place], check=True)
+# `sudo` from root to root is the identity; the generated commands say sudo
+# because an operator runs them, and here root already is.
+stubs = Path(sys.argv[2]); stubs.mkdir()
+(stubs / "sudo").write_text('#!/bin/sh\nexec "$@"\n'); (stubs / "sudo").chmod(0o755)
+os.environ["PATH"] = f"{stubs}:{os.environ.get('PATH', '/usr/bin:/bin')}"
+
+config_path = Path(sys.argv[3])
+config = team_launcher.load_project_config("stellar", config_path)
+printed = []
+first = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
+state = team_launcher.display_bridge_state(config, gui_user="eric")
+grant = Path("/usr/local/lib/switchyard/stellar/control-grant.json")
+rule = Path("/etc/sudoers.d/49-stellar-tenant-control")
+before = (grant.read_bytes(), rule.read_bytes())
+ran = []
+second = team_launcher.ensure_display_bridge(
+    config, gui_user="eric",
+    runner=lambda args, **k: ran.append(args) or subprocess.CompletedProcess(args, 1, "", "rerun ran"),
+    print_func=printed.append,
+)
+
+# The real helper's own check of the grant it will be handed.
+loader = importlib.machinery.SourceFileLoader("display_attach", str(Path(sys.argv[1]) / "scripts" / "switchyard-display-attach"))
+spec = importlib.util.spec_from_loader("display_attach", loader)
+helper = importlib.util.module_from_spec(spec); loader.exec_module(helper)
+loaded = helper.load_grant("stellar")
+
+# And a grant naming somebody else is left exactly as it is.
+grant.write_text(json.dumps({"project": "stellar", "owner": "stellaris-agent", "authorized_user": "alice"}))
+grant.chmod(0o644)
+taken = grant.read_bytes()
+refused = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
+
+print(json.dumps({
+    "first": first, "second": second, "second_ran": len(ran), "state": state.action,
+    "grant_uid": os.stat(grant).st_uid, "grant_mode": oct(stat.S_IMODE(os.stat(grant).st_mode)),
+    "rule_mode": oct(stat.S_IMODE(os.stat(rule).st_mode)), "rule": before[1].decode(),
+    "helper_authorized": loaded.get("authorized_user"), "helper_owner": loaded.get("owner"),
+    "unchanged_rerun": before == (before[0], rule.read_bytes()),
+    "refused_other": refused, "other_untouched": grant.read_bytes() == taken,
+    "printed": printed,
+}))
+'''
+
+
+def test_the_real_install_commands_leave_a_bridge_the_real_helper_accepts() -> None:
+    """Root's real paths, real `install` and `visudo`, in a mount namespace."""
+    for tool in ("unshare", "visudo", "install"):
+        check(bool(shutil.which(tool)), f"{tool} is required for the real install")
+    with tempfile.TemporaryDirectory(prefix="syrd233-bridge-kernel.") as raw:
+        tmp = Path(raw)
+        _config, config_path = legacy_config(tmp)
+        child = tmp / "bridge_child.py"
+        child.write_text(BRIDGE_CHILD, encoding="utf-8")
+        proc = subprocess.run(
+            ["unshare", "--user", "--map-auto", "--map-root-user", "--mount",
+             sys.executable, str(child), str(ROOT), str(tmp / "stubs"), str(config_path)],
+            capture_output=True, text=True, timeout=120,
+        )
+        check(proc.returncode == 0, f"the namespace child ran: {proc.stderr[-2000:]}")
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+    check(result["first"] and result["state"] == "present", f"installed and read back: {result}")
+    check(result["grant_uid"] == 0 and result["grant_mode"] == "0o644", f"root's, readable: {result}")
+    check(result["rule_mode"] == "0o440", f"the rule is 0440: {result}")
+    check(
+        result["rule"].rstrip().endswith(
+            "eric ALL=(root) NOPASSWD: /usr/local/lib/switchyard/stellar/switchyard-display-attach"
+        ),
+        f"naming exactly the display helper for exactly the pinned account: {result['rule']}",
+    )
+    check(
+        result["helper_authorized"] == "eric" and result["helper_owner"] == OWNER,
+        f"and the real display-attach helper accepts it: {result}",
+    )
+    check(result["second"] and result["second_ran"] == 0, f"a rerun runs nothing: {result}")
+    check(result["unchanged_rerun"], "and changes nothing")
+    check(not result["refused_other"] and result["other_untouched"], f"another person's grant stands: {result}")
 
 
 def main() -> int:

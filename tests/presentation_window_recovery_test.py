@@ -652,7 +652,12 @@ def test_a_bridged_window_is_opened_on_the_callers_display_not_the_owners() -> N
     owner = f"{PROJECT}-owner"
     assert team_launcher.uid_for_user(owner) is None, "the fixture owner must not be a real account"
     original = dict(os.environ)
+    original_bridge = team_launcher.display_bridge_launch_problem
     try:
+        # Which desktop and which layout path is this case's subject; whether
+        # that desktop account holds the display bridge its tabs cross is a
+        # precondition covered in legacy_presentation_migration_test (SYRD-233).
+        team_launcher.display_bridge_launch_problem = lambda *_a, **_k: ""
         os.environ.clear()
         os.environ.update(_bridged_environment(caller, owner))
         with tempfile.TemporaryDirectory(prefix="syrd65-bridge-window.") as tmp:
@@ -721,6 +726,7 @@ def test_a_bridged_window_is_opened_on_the_callers_display_not_the_owners() -> N
     finally:
         os.environ.clear()
         os.environ.update(original)
+        team_launcher.display_bridge_launch_problem = original_bridge
 
 
 def test_the_native_layout_is_written_where_its_terminal_can_read_it() -> None:

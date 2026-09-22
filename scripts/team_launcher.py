@@ -9376,6 +9376,12 @@ class LegacyPresentationMigration:
         )
 
 
+def presentation_controller_enabled(config: "ProjectConfig", *, config_path: Path) -> bool:
+    from scripts import presentation_controller
+
+    return presentation_controller.presentation_enabled(config, config_path=config_path)
+
+
 def legacy_presentation_section(config: "ProjectConfig") -> dict[str, Any]:
     """The section `switchyard new` writes, from this tenant's configured slots.
 
@@ -9466,6 +9472,187 @@ def _desktop_state_root_problem(gui_user: str, project: str) -> str:
         if info.st_uid != uid:
             return f"{walked} is owned by uid {info.st_uid}, not by {gui_user} (uid {uid})"
     return ""
+
+
+@dataclass(frozen=True)
+class DisplayBridgeState:
+    """Whether the desktop account's tabs can reach this tenant's display sessions.
+
+    A presentation window that crosses accounts opens one tab per slot, and each
+    tab runs `sudo -n switchyard-display-attach <project> <slot>`. That program
+    admits its caller only when root's `control-grant.json` names them, and sudo
+    lets them run it without a password only when `49-<project>-tenant-control`
+    says so. Provisioning installs both; a tenant older than the bridge has
+    neither, and every tab of its window dies with "a password is required"
+    (SYRD-233, live on mefp).
+    """
+
+    #: "not needed", "present", "install" or "refuse".
+    action: str
+    detail: str = ""
+    commands: tuple[str, ...] = ()
+
+
+def display_bridge_state(
+    config: "ProjectConfig",
+    *,
+    gui_user: str,
+    grant_root: Path | None = None,
+    sudoers_dir: Path = Path("/etc/sudoers.d"),
+    grant_owner_uid: int = 0,
+) -> DisplayBridgeState:
+    """Read root's grant and sudoers rule and say what, if anything, is owed.
+
+    `grant_owner_uid` is the account the grant has to belong to: root's, on a
+    host. It is a parameter rather than the caller's own uid because the
+    question is about the file, not about who is asking (and a sandbox would
+    otherwise make every file look like root's).
+    """
+    from scripts.ticket_board.project_provision import (
+        TENANT_CONTROL_GRANT_NAME,
+        TENANT_CONTROL_ROOT,
+        tenant_control_commands,
+        tenant_control_sudoers_document,
+    )
+
+    owner = config.run_as_user or current_user_name()
+    user = (gui_user or "").strip()
+    if not user or user == owner:
+        return DisplayBridgeState("not needed", "the window and the sessions belong to one account")
+    # The fixed root, not the staging seam: the install commands write there and
+    # switchyard-display-attach reads from there, and a check that looked
+    # anywhere else could report a bridge the helper will never see.
+    grant = Path(grant_root or TENANT_CONTROL_ROOT) / config.project / TENANT_CONTROL_GRANT_NAME
+    install = DisplayBridgeState(
+        "install",
+        f"{user} may attach this project's display tabs: {grant} and "
+        f"{sudoers_dir / f'49-{config.project}-tenant-control'}",
+        tuple(tenant_control_commands(config.project, owner, user)),
+    )
+    try:
+        info = os.lstat(grant)
+    except FileNotFoundError:
+        return install
+    except OSError as exc:
+        return DisplayBridgeState("refuse", f"{grant} cannot be inspected ({exc.strerror})")
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != grant_owner_uid or info.st_mode & 0o022:
+        return DisplayBridgeState(
+            "refuse",
+            f"{grant} is not a root-owned, root-writable file, so it is not an authority "
+            "and will not be overwritten without an operator looking at it",
+        )
+    try:
+        payload = json.loads(grant.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return DisplayBridgeState("refuse", f"{grant} is unreadable ({exc})")
+    recorded = str(payload.get("authorized_user") or "").strip() if isinstance(payload, dict) else ""
+    if not isinstance(payload, dict) or payload.get("project") != config.project:
+        return DisplayBridgeState("refuse", f"{grant} names a different project")
+    if str(payload.get("owner") or "").strip() != owner:
+        return DisplayBridgeState(
+            "refuse", f"{grant} names owner {payload.get('owner')!r}, and this tenant's owner is {owner}"
+        )
+    if recorded != user:
+        # Never taken over: the grant decides who may cross into the owner
+        # account, and a second person running an upgrade must not quietly
+        # become that person (SYRD-50).
+        return DisplayBridgeState(
+            "refuse",
+            f"{grant} authorizes {recorded or 'nobody'}, and the desktop policy names {user}; "
+            "the window's tabs would be refused. Decide which account controls this tenant "
+            "and record that one",
+        )
+    rule = sudoers_dir / f"49-{config.project}-tenant-control"
+    expected = tenant_control_sudoers_document(config.project, user) + "\n"
+    try:
+        current = rule.read_text(encoding="utf-8")
+    except OSError:
+        current = None
+    if current == expected:
+        return DisplayBridgeState("present", f"{user} already holds the display bridge")
+    return install
+
+
+def display_bridge_launch_problem(
+    config: "ProjectConfig",
+    *,
+    gui_user: str,
+    grant_root: Path | None = None,
+    grant_owner_uid: int = 0,
+) -> str:
+    """Why a crossing window's tabs would all be refused, as far as a launch can tell.
+
+    The grant is world-readable and the sudoers rule is not, so this judges the
+    half it can see: a missing grant, or one naming somebody else, means every
+    tab dies with "a password is required" (SYRD-233). A grant that is right is
+    not second-guessed over a rule this process cannot read.
+    """
+    state = display_bridge_state(
+        config, gui_user=gui_user, grant_root=grant_root, grant_owner_uid=grant_owner_uid,
+        sudoers_dir=Path("/nonexistent-sudoers-unreadable-here"),
+    )
+    if state.action == "refuse":
+        return state.detail
+    if state.action == "install":
+        from scripts.ticket_board.project_provision import TENANT_CONTROL_GRANT_NAME, TENANT_CONTROL_ROOT
+
+        grant = Path(grant_root or TENANT_CONTROL_ROOT) / config.project / TENANT_CONTROL_GRANT_NAME
+        if not grant.exists():
+            return (
+                f"no display bridge is installed for {gui_user}: {grant} does not exist, so "
+                "`sudo -n switchyard-display-attach` in each tab asks for a password and exits"
+            )
+    return ""
+
+
+def ensure_display_bridge(
+    config: "ProjectConfig",
+    *,
+    gui_user: str,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+    **locations: Any,
+) -> bool:
+    """Install the display bridge a crossing window needs, the way provisioning does.
+
+    The same commands `switchyard new` and the role-account migration run --
+    visudo before the rule is live, the grant before the rule -- so a repaired
+    tenant and a fresh one hold the same bytes. Returns whether the window can
+    work.
+    """
+    state = display_bridge_state(config, gui_user=gui_user, **locations)
+    if state.action in {"not needed", "present"}:
+        return True
+    if state.action == "refuse":
+        print_func(
+            f"switchyard: {config.project}'s presentation window would open with every tab "
+            f"refused: {state.detail}. This upgrade stops before declaring it ready. Nothing "
+            "was changed."
+        )
+        return False
+    if dry_run:
+        print_func(f"switchyard: would install the display bridge so {state.detail}; nothing written")
+        return True
+    script = "\n".join(line for line in state.commands if line and not line.startswith("#"))
+    result = runner(["sh", "-euc", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        print_func(
+            f"switchyard: could not install {config.project}'s display bridge for {gui_user} "
+            f"(exit {result.returncode}): {(str(result.stderr).strip() or 'no output')[:400]}"
+        )
+        return False
+    # Read back rather than trusted: an install that exited 0 and left nothing
+    # behind is the failure that would otherwise reach the window.
+    after = display_bridge_state(config, gui_user=gui_user, **locations)
+    if after.action != "present":
+        print_func(
+            f"switchyard: installed {config.project}'s display bridge, but it does not read "
+            f"back as present: {after.detail}"
+        )
+        return False
+    print_func(f"switchyard: installed the display bridge so {state.detail}")
+    return True
 
 
 def migrate_legacy_presentation(
@@ -25961,6 +26148,19 @@ def upgrade_project_command(
         )
         if not presentation_ready:
             return 1
+        # Every upgrade, not only the one that adds the section: a tenant moved
+        # onto the desktop-account window by an earlier run can still lack the
+        # bridge its tabs cross, which is the state live mefp was left in
+        # (SYRD-233). Asked only when the window will cross accounts.
+        pinned = pinned_presentation_gui_user(planned)
+        if pinned and (
+            presentation_controller_enabled(planned, config_path=config_path)
+            or legacy_presentation_migration(planned, config_path=config_path).needed
+        ):
+            if not ensure_display_bridge(
+                planned, gui_user=pinned, dry_run=dry_run, runner=runner, print_func=print_func
+            ):
+                return 1
         if not dry_run:
             config = planned
 

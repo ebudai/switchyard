@@ -79,6 +79,12 @@ class _Desktop:
         self._gui_home = team_launcher._gui_home
         self._gui_user = team_launcher.presentation_gui_user
         self._uid_for_user = team_launcher.uid_for_user
+        self._bridge = team_launcher.display_bridge_launch_problem
+        # Whether the desktop account holds this tenant's display bridge is a
+        # precondition these cases do not model -- they are about which layout
+        # path is chosen. It has its own cases in
+        # legacy_presentation_migration_test (SYRD-233).
+        team_launcher.display_bridge_launch_problem = lambda *_a, **_k: ""
         team_launcher._gui_home = lambda user: (
             str(self.home) if user == self.user else self._gui_home(user)
         )
@@ -94,6 +100,7 @@ class _Desktop:
         team_launcher._gui_home = self._gui_home
         team_launcher.presentation_gui_user = self._gui_user
         team_launcher.uid_for_user = self._uid_for_user
+        team_launcher.display_bridge_launch_problem = self._bridge
         return False
 
 

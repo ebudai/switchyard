@@ -1316,6 +1316,94 @@ def test_the_upgrade_writes_that_artifact_when_the_accounts_are_missing() -> Non
         assert all("run_as_user" not in role for role in payload["roles"])
 
 
+class _OwnerHomeAt:
+    """Put the owner's home where the fixture keeps its board root."""
+
+    def __init__(self, home: Path) -> None:
+        self.home = home
+
+    def __enter__(self):
+        self.original = team_launcher.home_dir_for_user
+        team_launcher.home_dir_for_user = lambda _user: self.home
+        return self
+
+    def __exit__(self, *exc):
+        team_launcher.home_dir_for_user = self.original
+
+
+def test_an_unpublishable_release_root_withholds_the_sequence() -> None:
+    """Live mefp: `ready`, a printed sequence, and a deploy that could not write (SYRD-231)."""
+    with tempfile.TemporaryDirectory(prefix="release-root-unwritable.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+        releases = board_root / "releases"
+        releases.chmod(0o555)
+        try:
+            with _OwnerHomeAt(Path(tmp)):
+                output, deploys = _cut_over(config_path, source_repo, board_root, accounts)
+        finally:
+            releases.chmod(0o755)
+        assert deploys == [], deploys
+        assert "matching-release deployment sequence" not in output, output
+        assert "withholding porter's release deploy sequence" in output, output
+        assert "no listener needs stopping" in output, output
+        assert str(releases) in output, output
+        config = team_launcher.load_project_config("porter", config_path)
+        trusted = team_launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+        assert team_launcher.upgrade_phase_state(trusted, "release") == "blocked", trusted
+        assert (board_root / "current").resolve().name == "1" * 40
+
+
+def test_the_printed_sequence_says_how_to_recover_a_stopped_listener() -> None:
+    with tempfile.TemporaryDirectory(prefix="release-root-recovery.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+        with _OwnerHomeAt(Path(tmp)):
+            output, _deploys = _cut_over(config_path, source_repo, board_root, accounts)
+        assert "matching-release deployment sequence" in output, output
+        recovery = [line for line in output.splitlines() if "if a step fails" in line]
+        assert recovery, output
+        assert "switchyard release-status porter" in recovery[0], recovery
+        assert "listener" in recovery[0] and "start" in recovery[0], recovery
+        assert "sudo switchyard upgrade porter" in recovery[0], recovery
+
+
+def test_finish_upgrade_withholds_the_sequence_the_owner_could_not_run() -> None:
+    with tempfile.TemporaryDirectory(prefix="release-root-finish.") as tmp:
+        config_path, source_repo, board_root, accounts = _tenant_before_cutover(Path(tmp))
+        with _OwnerHomeAt(Path(tmp)):
+            _cut_over(config_path, source_repo, board_root, accounts)
+        config = team_launcher.load_project_config("porter", config_path)
+        releases = board_root / "releases"
+        releases.chmod(0o555)
+        printed: list[str] = []
+        original_migrate = team_launcher.migrate_declarative_director_onboarding
+        original_opener = team_launcher._open_board_url
+        original_exists = team_launcher.local_account_exists
+        try:
+            team_launcher.migrate_declarative_director_onboarding = (
+                lambda config, **kwargs: _mark_projection_migrated(config_path) or True
+            )
+            team_launcher._open_board_url = _board_with_marker(True)
+            team_launcher.local_account_exists = lambda account: account in accounts
+            with _OwnerHomeAt(Path(tmp)), _RunningTenant(config_path, account_uid=os.getuid()) as tenant:
+                result = team_launcher.finish_upgrade_command(
+                    config, config_path=config_path, source_repo=source_repo,
+                    runner=_deploying_runner(
+                        tenant.runner(), board_root=board_root, deploys=[], deploy=False
+                    ),
+                    print_func=printed.append,
+                )
+        finally:
+            releases.chmod(0o755)
+            team_launcher.migrate_declarative_director_onboarding = original_migrate
+            team_launcher._open_board_url = original_opener
+            team_launcher.local_account_exists = original_exists
+        finished = "\n".join(printed)
+        assert result != 0, finished
+        assert "matching-release deployment sequence" not in finished, finished
+        assert "withholding porter's release deploy sequence" in finished, finished
+        assert f"cannot write {releases}" in finished, finished
+
+
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_upgrade_cutover_test: ok")

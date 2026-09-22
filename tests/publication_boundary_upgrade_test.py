@@ -559,10 +559,23 @@ def test_the_whole_operator_sequence_runs_including_its_last_command() -> None:
     for gone in ("the forge has never seen it", "Register it as a WRITE key for porter",
                  "publication boundary"):
         assert gone not in text, (gone, text)
-    # What IS still said is about the account's own identity, which is the whole
-    # credential story now: if the forge does not accept it, publishing is what
-    # stops working, so the upgrade says so and names the key to register.
-    assert "cannot publish to GitHub" in text or "can publish to GitHub" in text, text
+    # What is said about the account's own identity follows where this tenant
+    # publishes. This fixture's forge is `example.invalid`, not GitHub, so no
+    # GitHub identity is selected, configured or checked, and the upgrade says
+    # why instead of reporting a GitHub verdict (SYRD-229). A GitHub tenant's
+    # identity report is covered by local_publication_identity_test and the
+    # owner-identity suites.
+    assert "not GitHub, so no owner GitHub identity is selected" in text, text
+    assert "publish to GitHub" not in text, text
+    # And `--publish-remote` is remembered by root, end to end: the real
+    # `sudo switchyard upgrade ... --publish-remote` recorded it, and the real
+    # `sudo switchyard set-owner-identity porter --clear --dry-run` found it
+    # (SYRD-229, the live mefp refusal).
+    assert report["publish_remote_pinned"] == "git@example.invalid:owner/repo.git", report
+    assert report["publish_remote_pin_uid"] == 0, report
+    cleared = report["clear_dry_run_text"]
+    assert "not established" not in cleared, cleared
+    assert "publishes to git@example.invalid:owner/repo.git, not GitHub" in cleared, cleared
     # Nor is the shared credential's authority asserted either way. It is the
     # User's to grant on the forge, and this run checked nothing (SYRD-116).
     assert "shared project credential still has write authority" not in text, text

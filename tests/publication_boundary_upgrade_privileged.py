@@ -743,6 +743,15 @@ def main() -> int:
     report["upgrade_step"] = real_step
     report["upgrade_exit"] = real.returncode
     report["upgrade_text"] = f"{real.stdout}\n{real.stderr}"
+    # The remote the upgrade was given is root's record from now on, and what
+    # reads it later finds it -- through the public CLI, as an operator would.
+    # Live on mefp, `--clear` refused for want of this pin right after an
+    # upgrade given `--publish-remote` (SYRD-229).
+    pin = provision / "publish-remote"
+    report["publish_remote_pinned"] = pin.read_text(encoding="utf-8").strip() if pin.is_file() else ""
+    report["publish_remote_pin_uid"] = pin.stat().st_uid if pin.is_file() else -1
+    _, _clear_step, cleared = run_step("sudo switchyard set-owner-identity porter --clear --dry-run")
+    report["clear_dry_run_text"] = f"{cleared.stdout}\n{cleared.stderr}"
     report["upgrade_pin_reselected"] = json.loads(
         (provision / "upgrade-source.json").read_text()
     )["deploy_ref"] == new_commit

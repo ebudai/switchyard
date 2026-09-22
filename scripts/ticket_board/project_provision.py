@@ -1144,6 +1144,81 @@ def owner_github_selection_commands(
     ]
 
 
+def publication_remote_host(remote: str) -> str:
+    """The host a git remote names, or "" for a local repository.
+
+    `/data/git/fixpatch`, `file:///srv/x.git` and `../x.git` are local; so is a
+    path that merely contains a colon after a slash. `git@host:path`,
+    `ssh://git@host/path` and `https://host/path` name `host`.
+    """
+    value = remote.strip()
+    if not value:
+        return ""
+    if "://" in value:
+        scheme, _, rest = value.partition("://")
+        if scheme.lower() == "file":
+            return ""
+        netloc = rest.split("/", 1)[0]
+        return netloc.rsplit("@", 1)[-1].split(":", 1)[0].lower()
+    if value.startswith(("/", "./", "../", "~")):
+        return ""
+    head, colon, _tail = value.partition(":")
+    if not colon or "/" in head:
+        return ""
+    return head.rsplit("@", 1)[-1].lower()
+
+
+def publication_uses_github(remote: str, *, recorded_host_alias: str = "") -> bool | None:
+    """Whether a tenant's publication remote is GitHub, so its owner identity applies.
+
+    None when there is no remote to judge -- the caller keeps its GitHub
+    behaviour then, because skipping a real GitHub tenant's identity is the worse
+    mistake. A local repository is never GitHub. A host is GitHub when it is
+    github.com, one of its subdomains, the host alias the tenant's identity
+    records, or a `github-...` alias of the kind Switchyard's managed block
+    answers to (SYRD-229).
+    """
+    if not remote.strip():
+        return None
+    host = publication_remote_host(remote)
+    if not host:
+        return False
+    alias = recorded_host_alias.strip().lower()
+    return (
+        host == DEFAULT_GITHUB_HOST
+        or host.endswith("." + DEFAULT_GITHUB_HOST)
+        or (bool(alias) and host == alias)
+        or host.startswith("github-")
+    )
+
+
+def owner_github_block_removal_commands(owner_user: str, owner_home: str) -> list[str]:
+    """Remove Switchyard's managed GitHub block, and nothing else, as the owner.
+
+    The inverse of `owner_github_selection_commands`, with the same care: run as
+    the owner in the owner's own directory, so no root write lands on a path the
+    tenant controls. Everything outside the markers is preserved byte for byte,
+    and a config without the block is not rewritten at all (SYRD-229).
+    """
+    _refuse_unnormalized(owner_home, what="the owner home")
+    config = f"{owner_home.rstrip('/')}/.ssh/config"
+    q_owner = shell_quote(owner_user)
+    return [
+        f"sudo -u {q_owner} sh -c "
+        + shell_quote(
+            "set -e; "
+            f"config={shell_quote(config)}; "
+            '[ -f "$config" ] || exit 0; '
+            f"grep -qx {shell_quote(GITHUB_IDENTITY_BEGIN)} \"$config\" || exit 0; "
+            'tmp="$(mktemp)"; '
+            f"sed {shell_quote(f'/^{GITHUB_IDENTITY_BEGIN}$/,/^{GITHUB_IDENTITY_END}$/d')} "
+            '"$config" > "$tmp"; '
+            'install -m 0600 "$tmp" "$config"; '
+            'rm -f "$tmp"'
+        ),
+    ]
+
+
 def role_tooling_staging_dir(project: str, *, root: Path | str | None = None) -> str:
     """Where a role account reaches this tenant's root-owned tooling."""
     return f"{root if root is not None else tenant_control_root()}/{project}"

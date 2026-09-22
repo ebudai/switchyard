@@ -466,6 +466,18 @@ four tabs that each exited "sudo: a password is required".
 The upgrade now installs them for the pinned desktop account, with the same
 commands provisioning uses -- the grant first, the rule through `visudo -c`
 before it is live -- and reads both back rather than trusting the exit status.
+
+Both files are judged on their metadata, not only their bytes, and the rule is
+opened without following. sudo ignores a file in `sudoers.d` that is group- or
+world-writable and will not use one that is not root's, so a rule whose text is
+exactly right can still leave every tab asking for a password. A symlink, a rule
+another account owns, or one anybody but root can rewrite is **refused and left
+alone**: overwriting somebody else's file is not a repair, and writing "the same
+bytes" through their symlink is worse. A rule that is root's, that nobody else
+can change, and whose text or mode has merely drifted is root-attributable and
+is reinstalled to exactly `0440 root:root`. The read-back after an install runs
+the same checks, so an install that exits 0 and leaves an unsafe rule is
+reported rather than believed.
 It does this on **every** upgrade of a tenant whose window crosses accounts, not
 only the one that adds the section, because a tenant moved by an earlier run can
 still lack it. A grant that already names somebody else is not taken over: the

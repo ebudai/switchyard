@@ -555,9 +555,15 @@ def bridge_dirs(tmp: Path) -> dict:
     sudoers = tmp / "sudoers.d"
     grants.mkdir(exist_ok=True)
     sudoers.mkdir(exist_ok=True)
-    # A sandbox cannot make root-owned files, so the owner the grant must have
-    # is named explicitly -- never defaulted to the caller.
-    return {"grant_root": grants, "sudoers_dir": sudoers, "grant_owner_uid": os.getuid()}
+    # A sandbox cannot make root-owned files, so the identity both files must
+    # have is named explicitly -- never defaulted to the caller. The namespace
+    # case at the bottom does the same checks with the real uid 0.
+    return {
+        "grant_root": grants,
+        "sudoers_dir": sudoers,
+        "grant_owner_uid": os.getuid(),
+        "grant_owner_gid": os.getgid(),
+    }
 
 
 def stage_bridge(dirs: dict, *, authorized: str = GUI, owner: str = OWNER, project: str = PROJECT,
@@ -569,9 +575,12 @@ def stage_bridge(dirs: dict, *, authorized: str = GUI, owner: str = OWNER, proje
     grant.write_text(json.dumps({"project": project, "owner": owner, "authorized_user": authorized}))
     grant.chmod(0o644)
     if rule:
-        (dirs["sudoers_dir"] / f"49-{PROJECT}-tenant-control").write_text(
-            tenant_control_sudoers_document(PROJECT, authorized) + "\n"
-        )
+        path = dirs["sudoers_dir"] / f"49-{PROJECT}-tenant-control"
+        path.unlink(missing_ok=True)
+        path.write_text(tenant_control_sudoers_document(PROJECT, authorized) + "\n")
+        # As `install -m 0440` leaves it: the metadata is part of what makes a
+        # rule one sudo will load.
+        path.chmod(0o440)
 
 
 def test_a_tenant_with_no_grant_is_owed_the_bridge_provisioning_installs() -> None:
@@ -620,6 +629,139 @@ def test_a_grant_without_its_rule_is_reinstalled() -> None:
             team_launcher.display_bridge_state(config, gui_user=GUI, **dirs).action == "install",
             "a grant with no sudoers rule still leaves every tab asking for a password",
         )
+
+
+def rule_path(dirs: dict) -> Path:
+    return dirs["sudoers_dir"] / f"49-{PROJECT}-tenant-control"
+
+
+def test_a_symlinked_rule_is_refused_and_never_written_through() -> None:
+    # Exact bytes, and sudo will not load it -- and writing "the same bytes"
+    # would write wherever it points instead (SYRD-233 DAT).
+    with tempfile.TemporaryDirectory(prefix="syrd233-rule-symlink.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        stage_bridge(dirs)
+        real = rule_path(dirs)
+        elsewhere = tmp / "elsewhere-rule"
+        elsewhere.write_bytes(real.read_bytes())
+        elsewhere.chmod(0o440)
+        real.unlink()
+        real.symlink_to(elsewhere)
+        before = elsewhere.read_bytes()
+
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **dirs)
+        check(state.action == "refuse", f"{state}")
+        check("is a symlink" in state.detail, state.detail)
+        printed: list[str] = []
+        ok = team_launcher.ensure_display_bridge(
+            config, gui_user=GUI,
+            runner=lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)),
+            print_func=printed.append, **dirs,
+        )
+        check(not ok and "stops before declaring it ready" in "\n".join(printed), printed)
+        check(elsewhere.read_bytes() == before, "and what it pointed at is untouched")
+        check(real.is_symlink(), "the symlink itself is left for an operator to see")
+
+
+def test_a_rule_somebody_else_owns_is_refused_without_replacing_it() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-rule-owner.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        # Everything this process made is, by the declared root identity's
+        # reckoning, somebody else's -- including the rule.
+        dirs = {**bridge_dirs(tmp), "grant_owner_uid": 0, "grant_owner_gid": 0}
+        stage_bridge(dirs)
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **dirs)
+        check(state.action == "refuse", f"{state}")
+        check(
+            "control-grant.json is not a root-owned" in state.detail,
+            f"the grant is judged first: {state.detail}",
+        )
+        # And with a grant that is root's, the rule is judged on its own.
+        grant_ok = {**dirs, "grant_owner_uid": os.getuid(), "grant_owner_gid": os.getgid()}
+        stage_bridge(grant_ok)
+        rule_only = {**grant_ok, "sudoers_dir": dirs["sudoers_dir"]}
+        state = team_launcher.display_bridge_state(
+            config, gui_user=GUI, **{**rule_only, "grant_owner_uid": os.getuid()}
+        )
+        check(state.action == "present", f"a rule of ours is fine: {state}")
+
+
+def test_a_writable_rule_is_refused_because_sudo_ignores_it() -> None:
+    with tempfile.TemporaryDirectory(prefix="syrd233-rule-writable.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        for mode in (0o660, 0o444 | 0o002):
+            stage_bridge(dirs)
+            rule_path(dirs).chmod(mode)
+            state = team_launcher.display_bridge_state(config, gui_user=GUI, **dirs)
+            check(state.action == "refuse", f"mode {mode:04o}: {state}")
+            check("lets an account other than root rewrite it" in state.detail, state.detail)
+            check("Remove or repair it deliberately" in state.detail, state.detail)
+
+
+def test_a_root_owned_rule_in_the_wrong_mode_is_normalized() -> None:
+    # Root's own file, nobody else's to change: that is ours to put right,
+    # rather than refuse and leave a tenant stuck.
+    with tempfile.TemporaryDirectory(prefix="syrd233-rule-legacy.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+        stage_bridge(dirs)
+        rule_path(dirs).chmod(0o400)
+        state = team_launcher.display_bridge_state(config, gui_user=GUI, **dirs)
+        check(state.action == "install", f"{state}")
+        check("mode 0400" in state.detail and "not 0440" in state.detail, state.detail)
+
+        ran: list = []
+
+        def install(args, **_kwargs):
+            ran.append(args)
+            rule_path(dirs).chmod(0o600)
+            from scripts.ticket_board.project_provision import tenant_control_sudoers_document
+
+            rule_path(dirs).write_text(tenant_control_sudoers_document(PROJECT, GUI) + "\n")
+            rule_path(dirs).chmod(0o440)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        printed: list[str] = []
+        check(
+            team_launcher.ensure_display_bridge(
+                config, gui_user=GUI, runner=install, print_func=printed.append, **dirs
+            ),
+            "\n".join(printed),
+        )
+        check(len(ran) == 1, f"it reinstalled once: {ran}")
+        check(
+            team_launcher.display_bridge_state(config, gui_user=GUI, **dirs).action == "present",
+            "and reads back present",
+        )
+
+
+def test_the_read_back_uses_the_same_validation_as_the_check() -> None:
+    # exit 0 plus unsafe metadata must not count as present (SYRD-233 DAT).
+    with tempfile.TemporaryDirectory(prefix="syrd233-rule-readback.") as raw:
+        tmp = Path(raw)
+        config, _ = legacy_config(tmp)
+        dirs = bridge_dirs(tmp)
+
+        def sloppy(args, **_kwargs):
+            stage_bridge(dirs)
+            rule_path(dirs).chmod(0o666)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        printed: list[str] = []
+        check(
+            not team_launcher.ensure_display_bridge(
+                config, gui_user=GUI, runner=sloppy, print_func=printed.append, **dirs
+            ),
+            "an install that left a rule sudo ignores is not a yes",
+        )
+        check("does not read back as present" in "\n".join(printed), printed)
+        check("rewrite it" in "\n".join(printed), printed)
 
 
 def test_a_grant_naming_somebody_else_is_not_taken_over() -> None:
@@ -1069,6 +1211,37 @@ spec = importlib.util.spec_from_loader("display_attach", loader)
 helper = importlib.util.module_from_spec(spec); loader.exec_module(helper)
 loaded = helper.load_grant("stellar")
 
+# The rule's metadata, judged with the real uid 0 -- not only as this install
+# leaves it, but as an older release or somebody else may have left it.
+def rule_verdict():
+    s = team_launcher.display_bridge_state(config, gui_user="eric")
+    return [s.action, s.detail]
+
+rule_cases = {}
+good = rule.read_bytes()
+# Owned by the tenant, exact bytes: refused, and not replaced.
+os.chown(rule, 1002, 1002)
+rule_cases["tenant_owned"] = rule_verdict()
+refused_owner = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
+rule_cases["tenant_owned_left"] = [refused_owner, os.stat(rule).st_uid == 1002, rule.read_bytes() == good]
+os.chown(rule, 0, 0)
+# Root's, but writable by others: sudo ignores it, and it is not ours to fix.
+os.chmod(rule, 0o646)
+rule_cases["writable"] = rule_verdict()
+refused_mode = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
+rule_cases["writable_left"] = [refused_mode, oct(stat.S_IMODE(os.stat(rule).st_mode))]
+# Root's, nobody else's to change, wrong mode: normalized by a real reinstall.
+os.chmod(rule, 0o400)
+rule_cases["legacy_mode"] = rule_verdict()
+fixed = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
+rule_cases["legacy_mode_fixed"] = [fixed, oct(stat.S_IMODE(os.stat(rule).st_mode)), rule.read_bytes() == good]
+# A symlink with the right bytes: refused, and what it points at is untouched.
+target = Path("/etc/sudoers.d/elsewhere"); target.write_bytes(good); os.chmod(target, 0o440)
+rule.unlink(); rule.symlink_to(target)
+rule_cases["symlink"] = rule_verdict()
+refused_link = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
+rule_cases["symlink_left"] = [refused_link, rule.is_symlink(), target.read_bytes() == good]
+
 # And a grant naming somebody else is left exactly as it is.
 grant.write_text(json.dumps({"project": "stellar", "owner": "stellaris-agent", "authorized_user": "alice"}))
 grant.chmod(0o644)
@@ -1076,6 +1249,7 @@ taken = grant.read_bytes()
 refused = team_launcher.ensure_display_bridge(config, gui_user="eric", runner=subprocess.run, print_func=printed.append)
 
 print(json.dumps({
+    "rule_cases": rule_cases,
     "first": first, "second": second, "second_ran": len(ran), "state": state.action,
     "grant_uid": os.stat(grant).st_uid, "grant_mode": oct(stat.S_IMODE(os.stat(grant).st_mode)),
     "rule_mode": oct(stat.S_IMODE(os.stat(rule).st_mode)), "rule": before[1].decode(),
@@ -1119,6 +1293,24 @@ def test_the_real_install_commands_leave_a_bridge_the_real_helper_accepts() -> N
     check(result["second"] and result["second_ran"] == 0, f"a rerun runs nothing: {result}")
     check(result["unchanged_rerun"], "and changes nothing")
     check(not result["refused_other"] and result["other_untouched"], f"another person's grant stands: {result}")
+
+    rules = result["rule_cases"]
+    check(rules["tenant_owned"][0] == "refuse" and "owned by uid 1002" in rules["tenant_owned"][1],
+          f"a rule the tenant owns is refused: {rules['tenant_owned']}")
+    check(rules["tenant_owned_left"] == [False, True, True],
+          f"and is neither replaced nor chowned: {rules['tenant_owned_left']}")
+    check(rules["writable"][0] == "refuse" and "rewrite it" in rules["writable"][1],
+          f"a rule others can rewrite is refused: {rules['writable']}")
+    check(rules["writable_left"] == [False, "0o646"],
+          f"and left for an operator, not silently re-moded: {rules['writable_left']}")
+    check(rules["legacy_mode"][0] == "install" and "mode 0400" in rules["legacy_mode"][1],
+          f"root's own rule in the wrong mode is ours to normalize: {rules['legacy_mode']}")
+    check(rules["legacy_mode_fixed"] == [True, "0o440", True],
+          f"and a real reinstall puts it right without changing its text: {rules['legacy_mode_fixed']}")
+    check(rules["symlink"][0] == "refuse" and "is a symlink" in rules["symlink"][1],
+          f"a symlinked rule is refused: {rules['symlink']}")
+    check(rules["symlink_left"] == [False, True, True],
+          f"and nothing was written through it: {rules['symlink_left']}")
 
 
 def main() -> int:

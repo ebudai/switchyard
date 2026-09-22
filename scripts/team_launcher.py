@@ -9493,6 +9493,73 @@ class DisplayBridgeState:
     commands: tuple[str, ...] = ()
 
 
+#: The mode `install -m 0440` leaves, and the only one this rule is left in.
+SUDOERS_RULE_MODE = 0o440
+
+
+def sudoers_rule_state(
+    rule: Path, *, expected: str, root_uid: int = 0, root_gid: int = 0
+) -> tuple[str, str]:
+    """Whether a sudoers rule is the one we mean, and safe for sudo to load.
+
+    Text alone is not the question. sudo ignores a file in sudoers.d that is
+    group- or world-writable and will not follow one that is not root's, so a
+    rule whose bytes are exactly right can still leave every tab asking for a
+    password -- and reporting it present is how an upgrade would declare a
+    tenant ready over exactly that (SYRD-233 DAT).
+
+    Three answers. "refuse" for anything an untrusted account could have put
+    there or could still change -- a symlink, another owner, a writable mode --
+    which is never replaced, because overwriting somebody else's file is not a
+    repair and writing through their symlink is worse. "install" for a rule
+    that is root's and not writable by anyone else but whose bytes or mode have
+    drifted: that is ours to normalize. "present" only for the exact bytes in
+    the exact mode.
+
+    The file is opened without following, and its metadata read from the open
+    descriptor, so what is checked and what is read are the same file.
+    """
+    try:
+        descriptor = os.open(rule, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return "install", ""
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            return "refuse", (
+                f"{rule} is a symlink; sudo will not load it and replacing it would write "
+                "wherever it points"
+            )
+        return "refuse", f"{rule} cannot be read ({exc.strerror})"
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return "refuse", f"{rule} is not a regular file"
+        if info.st_uid != root_uid:
+            return "refuse", (
+                f"{rule} is owned by uid {info.st_uid}, not by uid {root_uid}; sudo will not "
+                "load it and it is not this upgrade's to replace"
+            )
+        if info.st_mode & 0o022:
+            return "refuse", (
+                f"{rule} is mode {stat.S_IMODE(info.st_mode):04o}, which lets an account other "
+                "than root rewrite it; sudo ignores such a file. Remove or repair it deliberately"
+            )
+        try:
+            current = os.read(descriptor, len(expected.encode("utf-8")) + 1).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return "refuse", f"{rule} cannot be read ({exc})"
+    finally:
+        os.close(descriptor)
+    if current != expected:
+        return "install", "its text has drifted"
+    if stat.S_IMODE(info.st_mode) != SUDOERS_RULE_MODE or info.st_gid != root_gid:
+        return "install", (
+            f"it is root's but mode {stat.S_IMODE(info.st_mode):04o} group {info.st_gid}, "
+            f"not {SUDOERS_RULE_MODE:04o} group {root_gid}"
+        )
+    return "present", ""
+
+
 def display_bridge_state(
     config: "ProjectConfig",
     *,
@@ -9500,6 +9567,7 @@ def display_bridge_state(
     grant_root: Path | None = None,
     sudoers_dir: Path = Path("/etc/sudoers.d"),
     grant_owner_uid: int = 0,
+    grant_owner_gid: int = 0,
 ) -> DisplayBridgeState:
     """Read root's grant and sudoers rule and say what, if anything, is owed.
 
@@ -9564,13 +9632,14 @@ def display_bridge_state(
         )
     rule = sudoers_dir / f"49-{config.project}-tenant-control"
     expected = tenant_control_sudoers_document(config.project, user) + "\n"
-    try:
-        current = rule.read_text(encoding="utf-8")
-    except OSError:
-        current = None
-    if current == expected:
-        return DisplayBridgeState("present", f"{user} already holds the display bridge")
-    return install
+    verdict, detail = sudoers_rule_state(
+        rule, expected=expected, root_uid=grant_owner_uid, root_gid=grant_owner_gid
+    )
+    if verdict == "refuse":
+        return DisplayBridgeState("refuse", detail)
+    if verdict == "install":
+        return replace(install, detail=f"{install.detail} ({detail})") if detail else install
+    return DisplayBridgeState("present", f"{user} already holds the display bridge")
 
 
 def display_bridge_launch_problem(

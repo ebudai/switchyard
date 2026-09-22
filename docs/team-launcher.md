@@ -424,6 +424,42 @@ decides; both the bootstrap and the ordinary launch ask it, rather than the
 ordinary one deriving a path beside the presentation state it happened to be
 holding (SYRD-90).
 
+**A legacy tenant is moved onto that path by its upgrade.** A tenant provisioned
+before `switchyard new` wrote a `presentation` section has none, and its launch
+takes a fallback that writes `<project>-team-layout.json` into the *owner's* own
+state directory. That is fine while the desktop account is the owner and cannot
+work otherwise: on mefp the owner is `stellaris-agent`, the desktop account is
+`eric`, and Konsole running as eric cannot enter `/home/stellaris-agent` at all
+(SYRD-233).
+
+So `switchyard upgrade`, once the desktop policy is settled and before any phase
+can declare the tenant ready to restart, gives such a tenant the section new
+tenants are born with -- built from its own configured slots, so four roles stay
+four at the slots they were at, and a gap stays a gap. `--dry-run` says what it
+would add and where the window will read its layout from, and writes nothing. A
+rerun finds the section and does nothing. The next start then presents through
+`_launch_separate`, which stages the layout in the desktop account's own state
+directory, and opens one window over the roles that are already running; it does
+not start, stop or respawn a worker.
+
+The desktop account is the one the recorded Wayland policy names. That policy
+is the tenant's consent for one account's compositor, so the window belongs on
+that desktop and not on whichever account the environment says ran the command.
+
+Root's write into that account's tree walks it from the home down without
+following anything, and refuses a symlink anywhere in the chain, a directory or
+file owned by anyone but that account, a destination that is a symlink, and any
+destination other than `~<desktop>/.local/state/switchyard/projects/<project>/`.
+The upgrade checks the same things read-only before it changes anything, and
+stops -- non-zero, before readiness -- when one fails. Nothing under the
+tenant's home is loosened by any of it.
+
+A tenant nobody has upgraded yet still reaches the fallback. It no longer hands
+the terminal a layout the desktop account cannot read: once the workers are up
+it says the window was not opened, why, and to run `sudo switchyard upgrade
+<project>` and then `switchyard <project>`, and it exits non-zero. The workers
+stay up and `switchyard attach <project> <role>` reaches any of them.
+
 A window opened by an earlier release can still be running as root, and the
 tenant cannot signal it. `switchyard <project>`, `switchyard status` and
 `switchyard upgrade` look for one and refuse to report the project safely

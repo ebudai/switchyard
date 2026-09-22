@@ -1513,7 +1513,13 @@ def _launch_separate(
         config, config_path=config_path, gui_user=gui_user
     )
     refusal = team_launcher.write_desktop_layout(
-        output, layout, gui_user=gui_user or team_launcher.current_user_name(), runner=runner
+        output,
+        layout,
+        gui_user=gui_user or team_launcher.current_user_name(),
+        runner=runner,
+        # Named so a crossing write can be held to this project's own state
+        # root under the desktop account and nowhere else (SYRD-233).
+        project=config.project,
     )
     if refusal:
         # Named precisely, because the two ways to arrive here need different

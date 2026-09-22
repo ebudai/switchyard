@@ -7404,6 +7404,42 @@ def refresh_generated_project_runtime_artifacts(
             f"{tenant_plan_path}: owner_home {tenant_plan.owner_home!r} cannot contain the paths "
             f"this plan derives from it: {exc}. Re-provision the project so root generates its own.",
         )
+    # A tenant provisioned by an older release as root: its provision directory
+    # is root-owned, which is the one owner fact reconstruction trusts, and root
+    # has no baseline of its own yet. Establish the owner from root-controlled
+    # host records and hand back only the generated files -- described in a dry
+    # run, done in an apply -- before anything below writes there (SYRD-227).
+    established_owner = ""
+    ownership_note = ""
+    if (
+        os.geteuid() == 0
+        and not privileged_baseline_plan_path(config.project).is_file()
+        and _provision_owner(provision_dir)[1].endswith("is owned by root and so does not identify a tenant")
+    ):
+        owner, evidence, owner_problem = legacy_owner_from_host_records(config.project, provision_dir)
+        if not owner:
+            return LauncherUpgradeResult(
+                False,
+                f"switchyard: {config.project}'s provision directory {provision_dir} is owned by root, "
+                f"and its owner cannot be established from root-controlled host records: "
+                f"{owner_problem}. Nothing was changed; the tenant is left as it is.",
+            )
+        repair, repair_problem = repair_legacy_provision_ownership(
+            provision_dir,
+            owner,
+            [*tenant_rendered, config_path.name],
+            dry_run=dry_run,
+        )
+        if repair_problem:
+            return LauncherUpgradeResult(False, f"switchyard: {repair_problem}. Nothing was changed.")
+        established_owner = owner
+        ownership_note = (
+            f"; {'would return' if dry_run else 'returned'} {config.project}'s legacy root-owned "
+            f"provision directory to {owner}, established by: " + "; ".join(evidence)
+            + ". Entries: " + ", ".join(repair)
+        )
+    # Reported in every outcome below, dry run included.
+    migration_note += ownership_note
     for name in sorted(tenant_rendered):
         if _tenant_copy_is_current(provision_dir / name, tenant_rendered[name]):
             continue
@@ -7442,9 +7478,10 @@ def refresh_generated_project_runtime_artifacts(
         source_repo=source_repo,
         operator_commit_git_dir=commit_git_dir is not None,
         supplied=replacements,
+        established_owner=established_owner,
     )
     if baseline is None:
-        return LauncherUpgradeResult(bool(changed), reason)
+        return LauncherUpgradeResult(bool(changed), reason + ownership_note)
     plan, added_roles, refused = authoritative_refresh_plan(baseline, tenant_data)
     # The stored baseline was written before the operator installed the bridge,
     # so the controller is re-derived here too. From the grant only: the tenant
@@ -7551,6 +7588,224 @@ def _provision_owner(provision_dir: Path) -> tuple[str, str]:
         return pwd.getpwuid(info.st_uid).pw_name, ""
     except KeyError:
         return "", f"{provision_dir} is owned by uid {info.st_uid}, which is not a local account"
+
+
+#: Where root's systemd units are read from when establishing a legacy tenant's
+#: owner. A constant rather than an environment variable: this feeds a
+#: decision root makes, and nothing in the caller's environment may steer it.
+SYSTEMD_SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+
+
+def _root_controlled_record(path: Path) -> tuple[bytes | None, str]:
+    """A file only root could have written: root-owned, not writable by others.
+
+    Read without following a link at the file itself, so a record is what it
+    says it is.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        return None, f"{path} cannot be read ({exc.strerror})"
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return None, f"{path} is not a regular file"
+        if info.st_uid != 0:
+            return None, f"{path} is not owned by root"
+        if info.st_mode & 0o022:
+            return None, f"{path} is writable by accounts other than root"
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks), ""
+    finally:
+        os.close(descriptor)
+
+
+def _unit_environment(unit_text: str) -> dict[str, list[str]]:
+    """Every `Environment=` assignment in a unit, by name, in order."""
+    found: dict[str, list[str]] = {}
+    for line in unit_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("Environment="):
+            continue
+        for assignment in shlex.split(stripped[len("Environment="):]):
+            name, sep, value = assignment.partition("=")
+            if sep:
+                found.setdefault(name, []).append(value)
+    return found
+
+
+def legacy_owner_from_host_records(
+    project: str,
+    provision_dir: Path,
+    *,
+    unit_dir: Path | None = None,
+    registry_dir: Path | None = None,
+) -> tuple[str, list[str], str]:
+    """The owner of a registered tenant whose provision directory root owns.
+
+    An older release created mefp's provision directory as root, and ownership
+    of that directory was the only owner fact reconstruction trusted -- so a
+    registered, running tenant could not be upgraded in place (SYRD-227).
+    Nothing the tenant can edit is consulted here, and no account is inferred
+    from a pathname. The owner comes from root-controlled host records:
+
+    * the tenant's board unit, root-owned: its `TICKET_BOARD_TENANT_USER` when
+      it names one, and its `HOME`, resolved through the passwd database to the
+      one account whose home it is;
+    * the registry entry, root-owned, which must name THIS provision directory,
+      inside that account's home;
+    * the board root the unit runs from, whose owner -- set only by root --
+      must be that account when the directory exists.
+
+    Every present source must agree and at least one must name the account.
+    Returns (owner, the evidence that established it, why not).
+    """
+    units = unit_dir or SYSTEMD_SYSTEM_UNIT_DIR
+    registry = registry_dir or switchyard_registry_dir()
+    evidence: list[str] = []
+    unit_path = units / f"{project}-ticket-board.service"
+    unit_bytes, problem = _root_controlled_record(unit_path)
+    if unit_bytes is None:
+        return "", evidence, f"its board unit is not a root-controlled record: {problem}"
+    environment = _unit_environment(unit_bytes.decode("utf-8", "replace"))
+    candidates: dict[str, str] = {}
+    tenant_users = {value.strip() for value in environment.get("TICKET_BOARD_TENANT_USER", []) if value.strip()}
+    if len(tenant_users) > 1:
+        return "", evidence, f"{unit_path} names more than one tenant user: {sorted(tenant_users)}"
+    if tenant_users:
+        candidates["TICKET_BOARD_TENANT_USER"] = next(iter(tenant_users))
+    homes = {value.strip() for value in environment.get("HOME", []) if value.strip()}
+    if len(homes) > 1:
+        return "", evidence, f"{unit_path} sets more than one HOME: {sorted(homes)}"
+    if homes:
+        home = next(iter(homes))
+        holders = sorted(entry.pw_name for entry in pwd.getpwall() if entry.pw_dir.rstrip("/") == home.rstrip("/"))
+        if len(holders) != 1:
+            return "", evidence, (
+                f"{unit_path} sets HOME={home}, which is the home of "
+                + (f"{len(holders)} accounts ({', '.join(holders)})" if holders else "no account")
+            )
+        candidates["HOME"] = holders[0]
+    if not candidates:
+        return "", evidence, f"{unit_path} names neither a tenant user nor a HOME"
+    if len(set(candidates.values())) != 1:
+        return "", evidence, (
+            f"{unit_path} is contradictory: "
+            + ", ".join(f"{source} -> {owner}" for source, owner in sorted(candidates.items()))
+        )
+    owner = next(iter(candidates.values()))
+    evidence.extend(f"{unit_path} {source} -> {owner}" for source, owner in sorted(candidates.items()))
+    try:
+        account = pwd.getpwnam(owner)
+    except KeyError:
+        return "", evidence, f"{owner}, named by {unit_path}, is not a local account"
+    if account.pw_uid == 0:
+        return "", evidence, f"{unit_path} names root as the tenant owner"
+    owner_home = Path(account.pw_dir).resolve(strict=False)
+
+    registry_path = registry / f"{project}.json"
+    registry_bytes, problem = _root_controlled_record(registry_path)
+    if registry_bytes is None:
+        return "", evidence, f"it is not a registered tenant: {problem}"
+    try:
+        record = json.loads(registry_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return "", evidence, f"{registry_path} is not a registry record: {exc}"
+    registered = Path(str(record.get("config_path") or "")).expanduser()
+    if str(record.get("slug") or "") != project or not registered.is_absolute():
+        return "", evidence, f"{registry_path} does not register {project} at an absolute path"
+    if registered.parent.resolve(strict=False) != provision_dir.resolve(strict=False):
+        return "", evidence, (
+            f"{registry_path} registers {registered.parent}, not {provision_dir}"
+        )
+    if owner_home not in registered.resolve(strict=False).parents:
+        return "", evidence, (
+            f"{registry_path} registers {registered}, which is not inside {owner}'s home {owner_home}"
+        )
+    evidence.append(f"{registry_path} registers {registered}, inside {owner}'s home")
+
+    board_root = Path(account.pw_dir) / f"{project}-ticketboard-live"
+    try:
+        info = os.stat(board_root, follow_symlinks=False)
+    except OSError:
+        info = None
+    if info is not None:
+        if info.st_uid != account.pw_uid:
+            return "", evidence, (
+                f"{board_root} is owned by uid {info.st_uid}, not by {owner}"
+            )
+        evidence.append(f"{board_root} is owned by {owner}")
+    return owner, evidence, ""
+
+
+def repair_legacy_provision_ownership(
+    provision_dir: Path,
+    owner: str,
+    names: Sequence[str],
+    *,
+    dry_run: bool,
+) -> tuple[list[str], str]:
+    """Give a root-owned legacy provision directory back to its owner.
+
+    Bounded to the directory itself and the generated files named, never
+    recursive: anything else in it is left exactly as found and listed. Every
+    path component is opened without following a link, and a file is changed
+    only if it is a regular file with one link, so a symlink or a hard link the
+    tenant planted cannot redirect root's chown (SYRD-227).
+
+    Returns (what was -- or, in a dry run, would be -- changed, why not).
+    """
+    account = pwd.getpwnam(owner)
+    relative = Path(str(provision_dir).lstrip("/")) / "_"
+    dir_fd, problem = _walk_no_follow(Path(provision_dir.anchor or "/"), relative)
+    if dir_fd < 0:
+        return [], f"refusing to repair {provision_dir}: {problem}"
+    changes: list[str] = []
+    try:
+        info = os.fstat(dir_fd)
+        if info.st_uid != 0:
+            return [], f"{provision_dir} is not root-owned; nothing to repair"
+        changes.append(f"{provision_dir}/ -> {owner}")
+        targets: list[tuple[str, int]] = []
+        for name in sorted(set(names)):
+            if "/" in name or name in ("", ".", ".."):
+                return [], f"refusing to repair {provision_dir}: {name!r} is not a file name"
+            try:
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    return [], f"refusing to repair {provision_dir / name}: it is a symbolic link"
+                return [], f"refusing to repair {provision_dir / name}: {exc.strerror}"
+            entry = os.fstat(descriptor)
+            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+                os.close(descriptor)
+                return [], (
+                    f"refusing to repair {provision_dir / name}: not a regular file with one link"
+                )
+            targets.append((name, descriptor))
+            changes.append(f"{provision_dir / name} -> {owner}")
+        try:
+            if not dry_run:
+                os.fchown(dir_fd, account.pw_uid, account.pw_gid)
+                for _name, descriptor in targets:
+                    os.fchown(descriptor, account.pw_uid, account.pw_gid)
+        finally:
+            for _name, descriptor in targets:
+                os.close(descriptor)
+    except OSError as exc:
+        return [], f"could not repair {provision_dir}: {exc}"
+    finally:
+        os.close(dir_fd)
+    return changes, ""
 
 
 def _validated_role_names(value: Any, field: str, objections: list[str]) -> tuple[str, ...]:
@@ -7666,6 +7921,7 @@ def reconstruct_privileged_baseline(
     *,
     source_repo: Path | None = None,
     operator_commit_git_dir: bool = False,
+    established_owner: str = "",
 ) -> tuple[ProjectBoardProvision | None, str]:
     """Build root's baseline from facts root holds, not from the tenant's document.
 
@@ -7683,7 +7939,9 @@ def reconstruct_privileged_baseline(
     nothing root runs: the display name, the port, the ticket prefix, whether a
     designer or auditor exists, and role NAMES (SYRD-39).
     """
-    owner_user, problem = _provision_owner(provision_dir)
+    # A legacy tenant whose provision directory root owns has its owner
+    # established from root-controlled host records instead (SYRD-227).
+    owner_user, problem = (established_owner, "") if established_owner else _provision_owner(provision_dir)
     if not owner_user:
         return None, problem
     try:
@@ -7818,6 +8076,7 @@ def _privileged_baseline_plan(
     source_repo: Path | None = None,
     operator_commit_git_dir: bool = False,
     supplied: Mapping[str, str] | None = None,
+    established_owner: str = "",
 ) -> tuple[ProjectBoardProvision | None, str]:
     """Root's baseline: its own stored copy, or one it reconstructs for a legacy tenant.
 
@@ -7841,6 +8100,7 @@ def _privileged_baseline_plan(
         tenant_data,
         source_repo=source_repo,
         operator_commit_git_dir=operator_commit_git_dir,
+        established_owner=established_owner,
     )
 
 

@@ -9534,11 +9534,21 @@ def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
         _write_json_atomic(config_path, payload, owner_user=owner_user)
         _write_json_atomic(config_path.parent / "desktop-policy.json", policy, owner_user=owner_user)
         return configured
-    except (Exception, SystemExit):
+    except (Exception, SystemExit) as exc:
         if installed_new:
             desktop.uninstall(policy)
         if previous and previous.get("mode") == "wayland" and previous != policy:
             desktop.install(previous, helper=helper or Path(__file__).resolve().with_name("desktop_access.py"))
+        if isinstance(exc, desktop.DesktopAccessError):
+            # Said, not dumped. A privileged install that cannot reach the GUI
+            # session is an operator's problem to act on, and a traceback out
+            # of `switchyard upgrade` reads as a crash in the middle of it --
+            # which, since this runs before any phase, it is not (SYRD-232).
+            raise SystemExit(
+                f"switchyard: {config.project}'s desktop policy could not be installed: {exc}. "
+                "Nothing was recorded and the previous policy is back in place; the upgrade "
+                "stopped before any phase, so no board, listener or role session was touched."
+            ) from exc
         raise
 
 
@@ -25859,6 +25869,12 @@ def upgrade_phase_report(
     config_path: Path,
     cutover: RoleAccountCutover,
     journal: Mapping[str, Any],
+    #: The policy this upgrade leaves the tenant with. Passed rather than read
+    #: from the configuration, because a dry run records nothing: read from the
+    #: file, a dry run given a valid choice would report the tenant as missing
+    #: the very policy it was just handed (SYRD-232).
+    desktop_policy: Mapping[str, Any] | None = None,
+    dry_run: bool = False,
 ) -> list[str]:
     """One line per phase: who owns it, and whether it is done."""
     lines = [f"switchyard: {config.project} upgrade phases"]
@@ -25869,6 +25885,20 @@ def upgrade_phase_report(
         if phase == "director" and not director_phase_required(config, config_path=config_path):
             state = "not required"
         lines.append(f"  {phase:<11} {owner:<8} {state:<12} {detail}")
+    # Not a journaled phase -- nothing is deployed for it -- but a launch
+    # readiness the operator has to be able to see, because a tenant can finish
+    # every phase above and still be unable to start a single role (SYRD-232).
+    policy = desktop_policy
+    if policy and policy.get("mode") in {"headless", "wayland"}:
+        detail = (f"role launches would use the {policy['mode']} policy supplied for "
+                  f"{config.project}; a dry run records nothing"
+                  if dry_run else
+                  f"role launches use the {policy['mode']} policy recorded for {config.project}")
+        lines.append(f"  {'desktop':<11} {'operator':<8} {'ready':<12} {detail}")
+    else:
+        lines.append(f"  {'desktop':<11} {'operator':<8} {'missing':<12} "
+                     f"choose one with `switchyard upgrade {config.project} --desktop-policy "
+                     "headless|FILE` before any role is started")
     return lines
 
 
@@ -26724,6 +26754,46 @@ def repatriate_role_runtime_state(
     return True, []
 
 
+def upgrade_desktop_policy_decision(
+    config: ProjectConfig,
+    desktop_policy: Path | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """What stands between this tenant and a desktop policy its roles can launch with.
+
+    The policy the upgrade will leave the tenant with, and nothing standing in
+    the way -- or no policy, and why not. Valid means valid for THIS project and
+    tenant. Never filled in: Wayland access is per tenant, a policy
+    cannot be inferred from another project, and headless is a choice somebody
+    has to make rather than a default this can pick for them (SYRD-232).
+    """
+    from scripts import desktop_access as desktop
+
+    tenant = config.run_as_user or current_user_name()
+    if desktop_policy is None and config.desktop_access is None:
+        return None, [
+            f"{config.project} has no desktop policy, and every role launch needs one. "
+            "An operator has to choose it for this tenant: it is never copied from another "
+            "project, and Wayland access is never assumed.",
+            f"  headless -- no desktop access for any role:  "
+            f"switchyard upgrade {config.project} --desktop-policy headless",
+            f"  Wayland  -- an approved policy scoped to project {config.project!r} and tenant "
+            f"{tenant!r}, carrying this tenant's own recorded consent:  "
+            f"switchyard upgrade {config.project} --desktop-policy FILE",
+        ]
+    try:
+        if desktop_policy is not None:
+            raw = ({"mode": "headless"} if str(desktop_policy) == "headless"
+                   else _load_json(desktop_policy))
+        else:
+            raw = config.desktop_access
+        policy = desktop.validate_policy(raw, project=config.project, tenant=tenant)
+    except (desktop.DesktopAccessError, OSError, ValueError) as exc:
+        where = (f"the policy supplied with --desktop-policy ({desktop_policy})"
+                 if desktop_policy is not None else f"{config.project}'s recorded policy")
+        return None, [f"{where} cannot be used for {config.project}: {exc}"]
+    return policy, []
+
+
 def upgrade_project_command(
     config: ProjectConfig,
     *,
@@ -26755,6 +26825,24 @@ def upgrade_project_command(
     own -- creating the accounts, and the director's own board write -- are
     reported rather than attempted (SYRD-45).
     """
+    # First, before anything is recorded or repaired and before any phase.
+    # Every role launch needs a desktop policy, and a legacy tenant can predate
+    # them: live on mefp the upgrade ran to completion, reported nothing left to
+    # do, and the pane restart it was followed by suspended a working tenant and
+    # then refused to start it. Some phases restart roles themselves, so finding
+    # out later would strand them down mid-upgrade. Asked here, the answer costs
+    # nothing and changes nothing (SYRD-232).
+    desktop_choice, desktop_problems = upgrade_desktop_policy_decision(config, desktop_policy)
+    if desktop_problems:
+        for problem in desktop_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: {'this dry run shows the upgrade would ' if dry_run else ''}"
+            f"{'stop' if dry_run else 'stopping'} before any phase, so {config.project} is not "
+            "declared ready and no pane restart should follow. Nothing was changed: no "
+            "artifact, account, release, access grant, board, listener or role session."
+        )
+        return 1
     # Before the source is used for anything, because everything the later
     # phases deploy is decided by it. An operator who pinned a release on the
     # outer command gets the same release in every phase that follows, whether
@@ -27393,6 +27481,8 @@ def upgrade_project_command(
                     config_path=config_path,
                     cutover=cutover,
                     journal=read_upgrade_journal(config, config_path=config_path, trusted=True),
+                    desktop_policy=desktop_choice,
+                    dry_run=dry_run,
                 ):
                     print_func(line)
                 return cutover_result
@@ -27486,6 +27576,8 @@ def upgrade_project_command(
         config_path=config_path,
         cutover=final_cutover,
         journal=trusted_journal,
+        desktop_policy=desktop_choice,
+        dry_run=dry_run,
     ):
         print_func(line)
     # What exit 0 means, said before the operator reads it as "done". Preparing

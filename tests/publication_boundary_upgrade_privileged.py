@@ -732,6 +732,41 @@ def main() -> int:
         (provision / "upgrade-source.json").read_text()
     )["deploy_ref"] == old_commit
 
+    # A PIN THAT CANNOT BE KEPT, through the public CLI: the real command with a
+    # remote that is not one, and then with the pin's place blocked. Each must
+    # stop before anything changes, exit non-zero and claim nothing (SYRD-229
+    # review). Run before the real run, so every assertion about the stale
+    # starting state below still holds -- which is itself the proof.
+    def _tree() -> dict[str, tuple[int, bytes]]:
+        state: dict[str, tuple[int, bytes]] = {}
+        for root in (provision, tenant_dir):
+            for entry in sorted(root.rglob("*")):
+                info = entry.lstat()
+                state[str(entry)] = (info.st_mode, entry.read_bytes() if entry.is_file() else b"")
+        return state
+
+    remote_arg = f"--publish-remote {REMOTE}"
+    assert remote_arg in last, last
+    pin_failures = {}
+    for label, command, blocked in (
+        ("malformed", last.replace(remote_arg, "--publish-remote 'not a remote'"), False),
+        ("blocked", last, True),
+    ):
+        blocker = provision / "publish-remote"
+        if blocked:
+            blocker.mkdir()
+        before = (_tree(), _boundary_state(install_root))
+        _, _step, failed = run_step(command)
+        after = (_tree(), _boundary_state(install_root))
+        if blocked:
+            blocker.rmdir()
+        pin_failures[label] = {
+            "exit": failed.returncode,
+            "text": f"{failed.stdout}\n{failed.stderr}",
+            "changed_nothing": before == after,
+        }
+    report["pin_failures"] = pin_failures
+
     # THE REAL RUN, first against a host whose keys cannot be read. The boundary
     # must install what it can, refuse to claim what it could not, and record the
     # phase as incomplete rather than done.
@@ -743,6 +778,15 @@ def main() -> int:
     report["upgrade_step"] = real_step
     report["upgrade_exit"] = real.returncode
     report["upgrade_text"] = f"{real.stdout}\n{real.stderr}"
+    # The remote the upgrade was given is root's record from now on, and what
+    # reads it later finds it -- through the public CLI, as an operator would.
+    # Live on mefp, `--clear` refused for want of this pin right after an
+    # upgrade given `--publish-remote` (SYRD-229).
+    pin = provision / "publish-remote"
+    report["publish_remote_pinned"] = pin.read_text(encoding="utf-8").strip() if pin.is_file() else ""
+    report["publish_remote_pin_uid"] = pin.stat().st_uid if pin.is_file() else -1
+    _, _clear_step, cleared = run_step("sudo switchyard set-owner-identity porter --clear --dry-run")
+    report["clear_dry_run_text"] = f"{cleared.stdout}\n{cleared.stderr}"
     report["upgrade_pin_reselected"] = json.loads(
         (provision / "upgrade-source.json").read_text()
     )["deploy_ref"] == new_commit

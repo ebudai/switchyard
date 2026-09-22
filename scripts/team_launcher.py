@@ -12055,6 +12055,156 @@ def _plan_with_selection(document: PlanDocument, key_name: str, host_alias: str)
     return (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
+def clear_owner_github_identity_command(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+    registration_root: Path | None = None,
+) -> int:
+    """Undo a GitHub identity recorded for a tenant that does not publish to GitHub.
+
+    The repair for what SYRD-229 found on mefp: an upgrade told the operator to
+    run set-owner-identity on a local-only tenant, and following it recorded a
+    key in both plan authorities and wrote a github.com block into the owner's
+    ssh config. This clears exactly those two plan fields, in both authorities
+    or in neither, and removes only Switchyard's managed block -- as the owner,
+    preserving every other stanza. The publication remote and commit_git_dir
+    are not touched. Refused for a tenant that does publish to GitHub, whose
+    identity is in use.
+    """
+    from scripts.ticket_board.project_provision import (
+        GITHUB_IDENTITY_BEGIN,
+        owner_github_block_removal_commands,
+        publication_remote_host,
+        publication_uses_github,
+    )
+    from scripts.ticket_board.publication_boundary import resolve_pinned_remote
+
+    project = config.project
+    remote, remote_problem = resolve_pinned_remote(
+        project,
+        registration_root=registration_root or switchyard_privileged_provision_root(),
+        declared_remote="",
+    )
+    # The remote first: it is what decides whether there is anything to clear,
+    # and it is root's alone, so it is judged before the tenant's documents.
+    tenant_plan = config_path.parent / "plan.json"
+    root_plan = privileged_baseline_plan_path(project)
+    # Decided without reading anything the tenant controls. A local remote
+    # needs no alias at all. For a hosted one, the only alias consulted is
+    # root's own, opened the careful way -- never the tenant's plan, which this
+    # privileged command must not follow a link into (SYRD-229 review).
+    applies = publication_uses_github(remote)
+    if applies is False and publication_remote_host(remote):
+        root_document, _problem = read_plan_no_follow(root_plan, require_root_owned=True)
+        if root_document is not None:
+            applies = publication_uses_github(
+                remote,
+                recorded_host_alias=str(root_document.data.get("owner_github_host_alias") or ""),
+            )
+    if applies is not False:
+        print_func(
+            f"switchyard: refusing to clear {project}'s GitHub identity: "
+            + (f"it publishes to {remote}, which is GitHub, so the identity is in use."
+               if applies else f"its publication remote is not established ({remote_problem}).")
+            + " Nothing was changed."
+        )
+        return 1
+    print_func(f"switchyard: {project} publishes to {remote}, not GitHub")
+    documents: list[PlanDocument] = []
+    for path, require_root in ((root_plan, True), (tenant_plan, False)):
+        document, problem = read_plan_no_follow(path, require_root_owned=require_root)
+        if document is None:
+            print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: {project}'s publication identity is recorded in two places and both "
+                "have to be readable to clear it. Nothing was changed."
+            )
+            return 1
+        documents.append(document)
+
+    identity = trusted_owner_identity(project)
+    if not identity.trusted:
+        for problem in identity.problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: refusing to clear {project}'s GitHub identity: root cannot establish "
+            "whose it is. Nothing was changed."
+        )
+        return 1
+    owner, owner_home = identity.owner_user, identity.owner_home
+    ssh_config = Path(owner_home) / ".ssh" / "config"
+    # Asked as the owner: root does not read into the owner's home.
+    probe = runner(
+        ["sudo", "-u", owner, "sh", "-c",
+         f"[ -f {shlex.quote(str(ssh_config))} ] && grep -qx {shlex.quote(GITHUB_IDENTITY_BEGIN)} "
+         f"{shlex.quote(str(ssh_config))}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    has_block = getattr(probe, "returncode", 1) == 0
+    pending = [(document, _plan_with_selection(document, "", "")) for document in documents]
+
+    if dry_run:
+        for document, body in pending:
+            print_func(
+                f"switchyard:   {document.path} "
+                + ("would have owner_github_key_name and owner_github_host_alias cleared"
+                   if body is not None else "records no GitHub identity")
+            )
+        print_func(
+            f"switchyard:   {ssh_config}: "
+            + ("would have Switchyard's managed GitHub block removed, as "
+               f"{owner}, every other stanza kept" if has_block else "has no Switchyard GitHub block")
+        )
+        print_func("switchyard: nothing was written")
+        return 0
+    if os.geteuid() != 0:
+        print_func(
+            f"switchyard: clearing {project}'s GitHub identity writes root's own plan. Run: "
+            f"sudo switchyard set-owner-identity {project} --clear"
+        )
+        return 1
+
+    written: list[PlanDocument] = []
+    for document, body in pending:
+        if body is None:
+            continue
+        problem = write_plan_no_follow(document, body)
+        if problem:
+            print_func(f"switchyard: {problem}")
+            for done in reversed(written):
+                restored = write_plan_no_follow(done, done.raw)
+                print_func(
+                    f"switchyard: {done.path} "
+                    + (f"could not be put back: {restored}" if restored else "was put back as it was")
+                )
+            print_func(
+                f"switchyard: {project}'s GitHub identity was not cleared, and neither plan was "
+                "left disagreeing with the other."
+            )
+            return 1
+        written.append(document)
+        print_func(f"switchyard: cleared the GitHub identity recorded in {document.path}")
+    if has_block:
+        script = "set -eu\n" + "\n".join(owner_github_block_removal_commands(owner, str(owner_home)))
+        removed = runner(["sh", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if getattr(removed, "returncode", 1) != 0:
+            print_func(
+                f"switchyard: both plans are cleared, but Switchyard's GitHub block could not be "
+                f"removed from {ssh_config} (exit {removed.returncode}): "
+                f"{(str(getattr(removed, 'stderr', '') or '').strip() or 'no output')[:300]}. "
+                "It is inert for a local remote; run this again to remove it."
+            )
+            return 1
+        print_func(f"switchyard: removed Switchyard's GitHub block from {ssh_config}; nothing else in it changed")
+    if not written and not has_block:
+        print_func(f"switchyard: {project} records no GitHub identity; nothing to clear")
+    return 0
+
+
 def set_owner_github_identity_command(
     config: ProjectConfig,
     *,
@@ -23082,6 +23232,92 @@ def record_release_rollback(
     return []
 
 
+def record_publication_remote(
+    project: str,
+    remote: str,
+    *,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> tuple[bool, str, list[str]]:
+    """Root's own record of where this tenant publishes, from `--publish-remote`.
+
+    `resolve_pinned_remote` has always read this file, but the only thing that
+    wrote it was the publication boundary's installer, and the boundary was
+    retired -- so `switchyard upgrade <project> --publish-remote <url>` stopped
+    being remembered, and everything that decides by the remote found none.
+    Live on mefp: `set-owner-identity mefp --clear` refused for want of a pin
+    right after an upgrade that had been given one (SYRD-229). Written here
+    alone, in root's private provision directory; nothing of the boundary is
+    recreated. An unchanged value is left as it is.
+
+    Returns (whether it was changed, what it replaced -- "" for nothing --, and
+    why not). The upgrade calls this before its first write and treats any
+    problem as fatal, so a failed pin never follows a half-done upgrade.
+    """
+    from scripts.ticket_board.publication_boundary import publish_remote_registration_path
+
+    value = remote.strip()
+    if not value or len(value) > 1024 or any(ch.isspace() or not ch.isprintable() for ch in value):
+        return False, "", [
+            f"{remote!r} is not a single git remote, so it cannot be recorded as {project}'s "
+            "publication remote"
+        ]
+    path = publish_remote_registration_path(project, switchyard_privileged_provision_root())
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        return False, "", [f"{path} is not a regular file, so {project}'s publication remote cannot be recorded there"]
+    try:
+        current = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    except OSError as exc:
+        return False, "", [f"{path} cannot be read ({exc.strerror})"]
+    if current == value:
+        print_func(f"switchyard: {project}'s publication remote is already recorded as {value}")
+        return False, current, []
+    if dry_run:
+        print_func(
+            f"switchyard: would record {project}'s publication remote as {value} in {path}"
+            + (f" (replacing {current})" if current else "")
+        )
+        return False, current, []
+    if os.geteuid() != 0:
+        return False, current, [
+            f"recording {project}'s publication remote is root's; run the upgrade with sudo"
+        ]
+    problem = _write_publication_remote(path, value)
+    if problem:
+        return False, current, [problem]
+    print_func(f"switchyard: recorded {project}'s publication remote as {value} in {path}")
+    return True, current, []
+
+
+def _write_publication_remote(path: Path, value: str) -> str:
+    try:
+        ensure_privileged_provision_dir(path.parent)
+        staged = path.with_name(f".{path.name}.new")
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(descriptor, (value + "\n").encode("utf-8"))
+        finally:
+            os.close(descriptor)
+        os.replace(staged, path)
+    except OSError as exc:
+        return f"could not record the publication remote at {path}: {exc}"
+    return ""
+
+
+def restore_publication_remote(project: str, previous: str) -> str:
+    """Put the pin back as it was, after a later step of the same upgrade refused."""
+    from scripts.ticket_board.publication_boundary import publish_remote_registration_path
+
+    path = publish_remote_registration_path(project, switchyard_privileged_provision_root())
+    if previous:
+        return _write_publication_remote(path, previous)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"could not remove {path}: {exc}"
+    return ""
+
+
 def release_rollback_commands(project: str, *, publish_remote: str = "") -> list[str]:
     """The exact way back, from root's own note. Empty when there is nothing to say."""
     path = release_rollback_path(project)
@@ -25041,6 +25277,24 @@ def upgrade_project_command(
             "recorded. The generated continuation will say so, and the privileged rerun has to "
             "carry --source-repo, --commit-git-dir and --deploy-ref itself."
         )
+    # Where this tenant publishes, recorded before anything else is written:
+    # everything after it decides by this remote, and a pin that cannot be kept
+    # has to stop the upgrade while nothing has changed yet. A warning printed
+    # after the phases, with the run carrying on and exiting 0, is what the
+    # first version of this did (SYRD-229 review).
+    pin_changed, pin_previous = False, ""
+    if publish_remote.strip():
+        pin_changed, pin_previous, pin_problems = record_publication_remote(
+            config.project, publish_remote, dry_run=dry_run, print_func=print_func
+        )
+        if pin_problems:
+            for problem in pin_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: refusing to upgrade {config.project}: its publication remote could "
+                "not be recorded, and everything after this decides by it. Nothing was changed."
+            )
+            return 1
     if pinned_explicitly:
         durability = record_upgrade_source(
             config,
@@ -25056,6 +25310,11 @@ def upgrade_project_command(
             # about, and accepting the pin anyway would schedule it (SYRD-61).
             for problem in durability:
                 print_func(f"switchyard: {problem}")
+            if pin_changed:
+                # So that "Nothing was changed" below stays true.
+                restored = restore_publication_remote(config.project, pin_previous)
+                if restored:
+                    print_func(f"switchyard: {restored}")
             print_func(
                 f"switchyard: refusing to upgrade {config.project} with a release it cannot keep. "
                 "Its accounts phase hands the upgrade back through sudo, which carries neither "
@@ -25364,12 +25623,43 @@ def upgrade_project_command(
     # at it, and left the tenant unable to push with the deploy key it had been
     # using for weeks (SYRD-100).
     plan_data = _plan_data_from_config(config, config_path)
+    # Only a tenant that publishes to GitHub has a GitHub identity to manage.
+    # mefp publishes to a local bare repository, and this ran anyway: it warned
+    # that no GitHub key was selected and sent the operator to
+    # set-owner-identity, which then wrote a github.com block onto a local-only
+    # tenant and reported an authentication failure against a forge it never
+    # uses (SYRD-229). The remote is root's, never the tenant's git config.
+    from scripts.ticket_board.project_provision import publication_uses_github
+    from scripts.ticket_board.publication_boundary import resolve_pinned_remote
+
+    effective_remote, _remote_problem = resolve_pinned_remote(
+        config.project,
+        registration_root=switchyard_privileged_provision_root(),
+        declared_remote=publish_remote,
+    )
+    github_applies = publication_uses_github(
+        effective_remote,
+        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
+    )
     selected_identity = resolve_owner_github_identity(
         str(owner_home_for_identity),
         recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
         recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
     )
-    if not selected_identity.resolved:
+    if github_applies is False:
+        print_func(
+            f"switchyard: {config.project} publishes to {effective_remote}, not GitHub, so no "
+            "owner GitHub identity is selected, configured or checked"
+        )
+        if str(plan_data.get("owner_github_key_name") or "") or str(
+            plan_data.get("owner_github_host_alias") or ""
+        ):
+            print_func(
+                f"switchyard: {config.project}'s plan still records a GitHub identity it does not "
+                f"use; clear it with `sudo switchyard set-owner-identity {config.project} --clear` "
+                "(try --dry-run first)"
+            )
+    elif not selected_identity.resolved:
         # Nothing is rendered, nothing is generated, and the managed block is
         # left exactly as it is. Choosing among the owner's keys, or making a
         # new one beside them, is the substitution this must not perform.
@@ -25385,7 +25675,7 @@ def upgrade_project_command(
             f"{owner_github_key_path(str(owner_home_for_identity), key_name=selected_identity.key_name)}, "
             f"from {selected_identity.source}"
         )
-    if selected_identity.resolved and not dry_run and os.geteuid() == 0:
+    if github_applies is not False and selected_identity.resolved and not dry_run and os.geteuid() == 0:
         identity_script = "set -eu\n" + "\n".join(
             owner_github_identity_commands(
                 owner_for_identity,
@@ -25405,7 +25695,7 @@ def upgrade_project_command(
                 f"(exit {applied.returncode}): "
                 f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
             )
-    if selected_identity.resolved and not dry_run:
+    if github_applies is not False and selected_identity.resolved and not dry_run:
         # Read back against the same key the block selects. Checking the default
         # while the block names another is a readiness answer about a key nobody
         # publishes with.
@@ -30688,8 +30978,16 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         parser.add_argument("project", help="registered project name or slug")
         parser.add_argument(
             "--key-name",
-            required=True,
+            default="",
             help="file name of an existing key pair in the owner's ~/.ssh, without a path",
+        )
+        parser.add_argument(
+            "--clear",
+            action="store_true",
+            help=(
+                "for a tenant that does not publish to GitHub: clear a recorded GitHub identity "
+                "from both plans and remove Switchyard's managed block"
+            ),
         )
         parser.add_argument(
             "--host-alias",
@@ -30699,8 +30997,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         parser.add_argument("--host", default="github.com", help="forge host, default github.com")
         parser.add_argument("--dry-run", action="store_true", help="say what would change")
         args = parser.parse_args(argv[1:])
+        if args.clear == bool(args.key_name):
+            parser.error("give exactly one of --key-name or --clear")
         entry = _resolve_switchyard_project(args.project)
         config = _load_switchyard_project_config_for_command(entry, argv)
+        if args.clear:
+            return clear_owner_github_identity_command(
+                config, config_path=entry.config_path, dry_run=args.dry_run
+            )
         return set_owner_github_identity_command(
             config,
             config_path=entry.config_path,

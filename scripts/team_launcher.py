@@ -18938,6 +18938,36 @@ def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
     return "\n".join(lines)
 
 
+def report_models_were_not_probed(
+    config: ProjectConfig, *, print_func: Callable[[str], None] = print
+) -> None:
+    """Say that nothing checked the models, because nothing did.
+
+    A launch that quietly stopped probing would be a launch that silently
+    claims less than it used to while looking the same. The ticket is explicit:
+    do not claim model capability was verified when no probe ran. So this says
+    the opposite out loud, once, and names the command that does ask.
+
+    Said only when there is something it could have asked about. A tenant whose
+    roles configure no model has nothing to report and no reason to be told
+    about a diagnostic it does not need (SYRD-246).
+    """
+    configured = sorted(
+        {
+            f"{_role_cli_name(role)} {role.model}".strip()
+            for role in config.roles
+            if str(getattr(role, "model", "") or "").strip()
+        }
+    )
+    if not configured:
+        return
+    print_func(
+        "switchyard: the configured models were NOT checked; nothing here asked them to "
+        "prove anything. If one is wrong the provider says so in that role's own pane, in "
+        f"its own words. To ask on purpose: `switchyard validate-models {config.project}`."
+    )
+
+
 def stop_before_launch_for_unauthenticated_providers(
     report: FirstRunAuthReport,
     *,
@@ -24836,11 +24866,24 @@ def switchyard_new_command(
     config = prepare_project_desktop(config, runner=runner)
     _register_switchyard_project(config_path, registry_dir=registry_dir)
     _prepare_first_run_auth_worktrees(config, runner=runner)
+    # No live model probe here, deliberately. This used to ask every configured
+    # role's model to read a file and prove it had, once per role and again when
+    # the answer came back without the token -- up to 180 seconds an attempt on
+    # the critical path of a first launch, and a launch refused outright when a
+    # capable model simply answered without reaching for the tool. On test17
+    # that is exactly what happened: Codex answered twice without reading
+    # `switchyard-model-probe.txt`, and a tenant whose login and trust were both
+    # complete was returned to the shell with no panes (SYRD-246).
+    #
+    # What stays is what is cheap and certain: the CLI is installed for the
+    # owner, and the account is authenticated. Those are the two things that
+    # make a pane unusable before it starts. Whether a model can call a tool is
+    # the provider's own answer to give, in the pane, in its own words -- and
+    # `switchyard validate-models` still asks it on purpose.
     first_run_auth_report = run_first_run_auth_phase(
         config,
         owner_user=owner_user,
         owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
-        validate_models=True,
         runner=runner,
         foreground_runner=foreground_runner_for(first_run_runner),
         print_func=print_func,
@@ -24851,9 +24894,7 @@ def switchyard_new_command(
         first_run_auth_report, print_func=print_func
     ):
         return 1
-    if first_run_auth_report.model_validation_failures:
-        report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
-        return 1
+    report_models_were_not_probed(config, print_func=print_func)
     launch_runner = _owner_project_git_runner(
         owner_user=owner_user,
         project_dir=project_dir,

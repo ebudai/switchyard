@@ -30,6 +30,17 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
+from scripts.ticket_board import runtime_catalog
+from scripts.ticket_board import terminal_select
+from scripts.ticket_board.prompt_schema import (
+    KIND_MULTI,
+    KIND_SINGLE,
+    Choice,
+    Field,
+    Schema,
+    review_lines,
+    with_existing_value,
+)
 from scripts.ticket_board.project_provision import (
     DEFAULT_PRIVILEGED_PROVISION_ROOT,
     DEFAULT_PROJECT_IMPLEMENTER_ROLES,
@@ -920,6 +931,16 @@ class ProjectDesignArtifact:
     push_policy: str
     gates: dict[str, bool]
     capability_grants: dict[str, object]
+    #: What each role was chosen to run on, by stable identifier. Optional, so
+    #: every artifact written before these existed still loads, and absent means
+    #: "not chosen" rather than "no model" -- the launcher reads a missing model
+    #: as the runtime's own default (SYRD-115).
+    role_models: tuple[tuple[str, str], ...] = ()
+    role_efforts: tuple[tuple[str, str], ...] = ()
+    #: Which version of the recorded option catalog those identifiers were
+    #: chosen from. A label may be reworded and a catalog may gain entries
+    #: without changing what this project runs; this says what it was read off.
+    catalog_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -2471,6 +2492,29 @@ def _require_new_project_roles(role_clis: Sequence[tuple[str, str]]) -> None:
         raise SystemExit(f"switchyard: required roles missing: {', '.join(missing)}")
 
 
+def _artifact_role_value_pairs(
+    raw: object, *, path: Path, field: str
+) -> tuple[tuple[str, str], ...]:
+    """A role -> value map out of an artifact, or nothing.
+
+    Absent is the ordinary case: every artifact written before these fields
+    existed has no such key, and that must load rather than fail. What is
+    refused is a key that is present and is not a map of strings, because a
+    half-understood one would be written back out as though it were read.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{path} {field} must be a mapping of role to value")
+    pairs: list[tuple[str, str]] = []
+    for role, value in raw.items():
+        if not isinstance(role, str) or not isinstance(value, str):
+            raise SystemExit(f"{path} {field} must map role names to strings")
+        if value.strip():
+            pairs.append((role, value.strip()))
+    return tuple(pairs)
+
+
 def _artifact_role_cli_pairs(
     raw: Any,
     *,
@@ -2625,6 +2669,13 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         include_audit=bool(audit_roles),
         audit_roles=audit_roles,
     )
+    role_models = _artifact_role_value_pairs(
+        project_raw.get("role_models"), path=artifact_path, field="project.role_models"
+    )
+    role_efforts = _artifact_role_value_pairs(
+        project_raw.get("role_efforts"), path=artifact_path, field="project.role_efforts"
+    )
+    catalog_version = project_raw.get("catalog_version")
     push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
     gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
     capability_grants = _artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
@@ -2641,6 +2692,9 @@ def load_project_design_artifact(path: Path, *, expected_project: str | None = N
         implementer_roles=implementer_roles,
         audit_roles=audit_roles,
         role_clis=role_clis,
+        role_models=role_models,
+        role_efforts=role_efforts,
+        catalog_version=int(catalog_version) if isinstance(catalog_version, int) else 0,
         include_designer=include_designer_raw,
         include_audit=bool(audit_roles),
         push_policy=push_policy,
@@ -2667,6 +2721,9 @@ def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str
             "include_designer": artifact.include_designer,
             "include_audit": artifact.include_audit,
             "role_clis": _role_cli_map(artifact.role_clis),
+            **({"role_models": dict(artifact.role_models)} if artifact.role_models else {}),
+            **({"role_efforts": dict(artifact.role_efforts)} if artifact.role_efforts else {}),
+            **({"catalog_version": artifact.catalog_version} if artifact.catalog_version else {}),
             "push_policy": artifact.push_policy,
             "gates": artifact.gates,
             "capability_grants": artifact.capability_grants,
@@ -10625,21 +10682,282 @@ def _prompt_bool(
     raise SystemExit(f"switchyard: too many invalid answers for {label}")
 
 
+def _runtime_choices() -> tuple[Choice, ...]:
+    """The runtimes, in the order `switchyard new` offers them.
+
+    Taken from the catalog and narrowed to what `switchyard new` supports, so
+    the list an operator sees cannot drift from the list the validator accepts.
+    """
+    described = {choice.value: choice for choice in runtime_catalog.RUNTIMES}
+    return tuple(
+        described.get(name, Choice(name)) for name in SUPPORTED_NEW_PROJECT_CLIS
+    )
+
+
+def _runtime_field(role: str, *, default: str, configured: str = "") -> Field:
+    choices = _runtime_choices()
+    if configured:
+        choices = with_existing_value(choices, configured)
+    return Field(
+        name="runtime",
+        kind=KIND_SINGLE,
+        title=f"{role} runtime",
+        choices=choices,
+        default=configured or default,
+    )
+
+
+def _validate_model_identifier(value: str) -> str:
+    """A model named by hand still has to be a model identifier.
+
+    There is no catalog to check it against -- that is why it was typed -- so
+    what can be checked is checked: something, on one line, with no spaces in
+    it. "Custom" must not become the one entry that accepts anything (SYRD-115).
+    """
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("a model identifier cannot be empty")
+    if len(cleaned.split()) > 1:
+        raise ValueError(f"a model identifier is one word; {cleaned!r} is several")
+    return cleaned
+
+
+def _model_field(
+    role: str,
+    *,
+    configured: str = "",
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    owner_args: Sequence[str] = (),
+    print_func: Callable[[str], None] = print,
+) -> Field:
+    """The models for whichever runtime was chosen a moment ago.
+
+    A callable rather than a list, because this is the dependent half of the
+    pair: choosing a different runtime has to produce a different catalog, not
+    the previous runtime's models with a new label.
+    """
+    announced: set[str] = set()
+
+    def choices(answers: Mapping[str, Any]) -> tuple[Choice, ...]:
+        runtime = str(answers.get("runtime") or "")
+        found = runtime_catalog.model_catalog(
+            runtime, configured=configured, runner=runner, owner_args=owner_args
+        )
+        if runtime not in announced:
+            # Where the list came from, said once per runtime: a recorded
+            # catalog and a live one are not equally trustworthy, and an
+            # operator choosing from the first should know it (SYRD-115).
+            announced.add(runtime)
+            print_func(f"  ({found.note})")
+        return with_existing_value(found.choices, configured)
+
+    return Field(
+        name="model",
+        kind=KIND_SINGLE,
+        title=f"{role} model",
+        choices=choices,
+        depends_on=("runtime",),
+        default=configured or None,
+        allow_custom=True,
+        custom_title="A model not listed here",
+        validate=_validate_model_identifier,
+        required=False,
+    )
+
+
+def _effort_field(role: str, *, configured: str = "") -> Field:
+    def choices(answers: Mapping[str, Any]) -> tuple[Choice, ...]:
+        found = runtime_catalog.effort_catalog(str(answers.get("runtime") or ""))
+        return with_existing_value(found.choices, configured)
+
+    return Field(
+        name="effort",
+        kind=KIND_SINGLE,
+        title=f"{role} effort",
+        choices=choices,
+        depends_on=("runtime",),
+        default=configured or None,
+        allow_custom=True,
+        custom_title="An effort level not listed here",
+        validate=_validate_model_identifier,
+        required=False,
+    )
+
+
 def _prompt_cli(
     role: str,
     *,
     default: str,
     input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
 ) -> str:
+    """Choose a role's runtime from the list, rather than recall one.
+
+    This used to render the alternatives into the prompt text -- `director CLI
+    (claude/codex/agy/hermes)` -- and read back whatever was typed. The set was
+    always finite and always known; it just was not shown as a set (SYRD-115).
+    """
     default_cli = _validate_new_project_cli(default, context=f"default CLI for {role}")
-    choices = "/".join(SUPPORTED_NEW_PROJECT_CLIS)
-    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
-        raw = _prompt_text(f"{role} CLI ({choices})", default=default_cli, input_func=input_func)
-        try:
-            return _validate_new_project_cli(raw, context=f"CLI for {role}")
-        except SystemExit as exc:
-            print(exc)
-    raise SystemExit(f"switchyard: too many invalid answers for {role} CLI")
+    try:
+        return terminal_select.select_one(
+            _runtime_field(role, default=default_cli),
+            input_func=input_func,
+            print_func=print_func,
+        )
+    except terminal_select.Cancelled:
+        raise SystemExit(f"switchyard: too many invalid answers for {role} CLI") from None
+
+
+@dataclass(frozen=True)
+class RoleSelection:
+    """One role, fully chosen: what runs it, on which model, at what effort."""
+
+    role: str
+    cli: str
+    model: str = ""
+    effort: str = ""
+
+
+def _implementer_roles_field() -> Field:
+    """The conventional roles as things to pick, not a string to compose.
+
+    The list was already printed -- and then the answer was read as one
+    comma-separated line, so a typo in the middle of it was a role nobody asked
+    for and a role nobody noticed was missing. The same names, selectable, with
+    the conventional pair as the default and a deliberate path to a role of
+    one's own (SYRD-115).
+    """
+    def validate(value: str) -> str:
+        return _validate_new_project_implementer_role(value, context="implementer role")
+
+    return Field(
+        name="roles",
+        kind=KIND_MULTI,
+        title="Implementer roles",
+        choices=tuple(
+            Choice(role, role, description)
+            for role, description in NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES
+        ),
+        default=tuple(NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES),
+        allow_custom=True,
+        custom_title="A role of your own",
+        validate=validate,
+    )
+
+
+def _prompt_role_runtime_plan(
+    role: str,
+    *,
+    default_cli: str,
+    configured: RoleSelection | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    owner_args: Sequence[str] = (),
+    interactive: bool = True,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> RoleSelection:
+    """One guided path for a role: runtime, then model, then effort.
+
+    In that order because each one narrows the next. The models offered are the
+    chosen runtime's, and the effort question is not asked at all for a runtime
+    that discards it -- `agy` drops an effort level before it reaches the
+    command line, and a question whose answer is thrown away should not be
+    asked (SYRD-115).
+    """
+    held = configured or RoleSelection(role=role, cli="")
+    schema = Schema(
+        (
+            _runtime_field(role, default=default_cli, configured=held.cli),
+            _model_field(
+                role, configured=held.model, runner=runner,
+                owner_args=owner_args, print_func=print_func,
+            ),
+            _effort_field(role, configured=held.effort),
+        )
+    )
+    answers: dict[str, Any] = {}
+    runtime_field, model_field, effort_field = schema.fields
+    answers["runtime"] = terminal_select.select_one(
+        runtime_field, answers, interactive=interactive,
+        input_func=input_func, print_func=print_func,
+    )
+    model = ""
+    if model_field.choices_for(answers) or model_field.allow_custom:
+        model = terminal_select.select_one(
+            model_field, answers, interactive=interactive,
+            input_func=input_func, print_func=print_func,
+        )
+    answers["model"] = model
+    effort = ""
+    if runtime_catalog.runtime_takes_effort(answers["runtime"]):
+        effort = terminal_select.select_one(
+            effort_field, answers, interactive=interactive,
+            input_func=input_func, print_func=print_func,
+        )
+    return RoleSelection(role=role, cli=answers["runtime"], model=model, effort=effort)
+
+
+def _prompt_switchyard_role_plan(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> tuple[RoleSelection, ...]:
+    """Every role of a new project, chosen rather than typed."""
+    include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
+    include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
+    fixed: list[str] = []
+    if include_designer:
+        fixed.append("designer")
+    fixed.append("director")
+    if include_audit:
+        fixed.append("audit")
+
+    try:
+        implementers = terminal_select.select_many(
+            _implementer_roles_field(), input_func=input_func, print_func=print_func
+        )
+    except terminal_select.Cancelled:
+        raise SystemExit("switchyard: too many invalid answers for implementer roles") from None
+    if not implementers:
+        raise SystemExit("switchyard: at least one implementer role is required")
+
+    plan: list[RoleSelection] = []
+    for role in fixed:
+        plan.append(
+            _prompt_role_runtime_plan(
+                role,
+                default_cli=NEW_PROJECT_ROLE_CLI_DEFAULTS.get(role, "claude"),
+                runner=runner, input_func=input_func, print_func=print_func,
+            )
+        )
+    for role in implementers:
+        plan.append(
+            _prompt_role_runtime_plan(
+                role, default_cli="codex", runner=runner,
+                input_func=input_func, print_func=print_func,
+            )
+        )
+    return tuple(plan)
+
+
+def print_role_plan_review(
+    plan: Sequence[RoleSelection], *, print_func: Callable[[str], None] = print
+) -> None:
+    """The summary shown before anything is created.
+
+    Every role, its runtime, its model and its effort, in one place and before
+    the first account exists. A provisioning run that only reveals what it chose
+    by creating it is one an operator cannot check (SYRD-115).
+    """
+    print_func("switchyard: roles to create:")
+    for selection in plan:
+        parts = [selection.cli]
+        if selection.model:
+            parts.append(selection.model)
+        if selection.effort:
+            parts.append(f"effort {selection.effort}")
+        print_func(f"  {selection.role}: {' -> '.join(parts)}")
 
 
 def _prompt_switchyard_role_choices(
@@ -10647,41 +10965,13 @@ def _prompt_switchyard_role_choices(
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> tuple[tuple[str, str], ...]:
-    include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
-    include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
-    role_clis: list[tuple[str, str]] = []
-    if include_designer:
-        role_clis.append(
-            ("designer", _prompt_cli("designer", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"], input_func=input_func))
+    """The role/runtime pairs, for callers that want only those."""
+    return tuple(
+        (selection.role, selection.cli)
+        for selection in _prompt_switchyard_role_plan(
+            input_func=input_func, print_func=print_func
         )
-    role_clis.append(("director", _prompt_cli("director", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["director"], input_func=input_func)))
-    if include_audit:
-        role_clis.append(("audit", _prompt_cli("audit", default=NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"], input_func=input_func)))
-    print_func("Conventional implementer roles:")
-    for role, description in NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES:
-        print_func(f"  {role}: {description}")
-    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
-        raw_roles = _prompt_text(
-            "Implementer roles (comma-separated)",
-            default=", ".join(NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES),
-            input_func=input_func,
-        )
-        roles: list[str] = []
-        try:
-            for item in _comma_list(raw_roles):
-                role = _validate_new_project_implementer_role(item, context="implementer role")
-                if role not in roles:
-                    roles.append(role)
-            if not roles:
-                raise SystemExit("at least one implementer role is required")
-            break
-        except SystemExit as exc:
-            print(exc)
-    else:
-        raise SystemExit("switchyard: too many invalid answers for implementer roles")
-    for role in roles:
-        role_clis.append((role, _prompt_cli(role, default="codex", input_func=input_func)))
-    return tuple(role_clis)
+    )
 
 
 def _comma_list(value: str) -> list[str]:
@@ -10743,7 +11033,24 @@ def design_project_command(
     repo = repository or Path(_prompt_text("Code location", input_func=input_func))
     resolved_remote = remote or _prompt_text("Remote", default="origin", input_func=input_func)
     resolved_branch = default_branch or _prompt_text("Default branch", default="main", input_func=input_func)
-    resolved_policy = worktree_policy or _prompt_text("Worktree policy (shared/isolated)", default="shared", input_func=input_func)
+    # A declared set, so it is shown as one. Push policy and owner shell are
+    # left as text on purpose: neither has a vocabulary anywhere in this
+    # codebase, and a selector whose options somebody invented to fill the list
+    # out is worse than a text field -- it looks authoritative (SYRD-115).
+    resolved_policy = worktree_policy or terminal_select.select_one(
+        Field(
+            name="worktree_policy",
+            kind=KIND_SINGLE,
+            title="Worktree policy",
+            choices=(
+                Choice("shared", "shared", "every role works in one checkout"),
+                Choice("isolated", "isolated", "a worktree per role"),
+            ),
+            default="shared",
+        ),
+        input_func=input_func,
+        print_func=print_func,
+    )
     if resolved_policy not in WORKTREE_POLICIES:
         raise SystemExit(f"worktree policy must be one of {sorted(WORKTREE_POLICIES)}")
     resolved_owner = _owner_user_verbatim(
@@ -10899,6 +11206,12 @@ def _new_project_launcher_config_payload(
     director_onboarding: Path | None = None,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     role_clis: Sequence[tuple[str, str]] | None = None,
+    #: What each role was chosen to run on, when it was chosen rather than
+    #: defaulted. An absent model is left out of the payload rather than written
+    #: as an empty string: the launcher reads a missing `model` as "the
+    #: runtime's own default", and an empty one would be a value (SYRD-115).
+    role_models: Mapping[str, str] | None = None,
+    role_efforts: Mapping[str, str] | None = None,
     include_designer: bool = True,
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
@@ -10939,6 +11252,12 @@ def _new_project_launcher_config_payload(
             "workdir": str(worktree_base / role),
             "yolo": True,
         }
+        chosen_model = str((role_models or {}).get(role, "")).strip()
+        if chosen_model:
+            role_payload["model"] = chosen_model
+        chosen_effort = str((role_efforts or {}).get(role, "")).strip()
+        if chosen_effort:
+            role_payload["effort"] = chosen_effort
         if index < MAX_VISIBLE_PANES_PER_WINDOW:
             role_payload["slot"] = index
         else:
@@ -11062,6 +11381,8 @@ def write_new_project_launcher_artifacts(
     director_onboarding: Path | None = None,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     role_clis: Sequence[tuple[str, str]] | None = None,
+    role_models: Mapping[str, str] | None = None,
+    role_efforts: Mapping[str, str] | None = None,
     include_designer: bool = True,
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
@@ -11105,6 +11426,8 @@ def write_new_project_launcher_artifacts(
                 director_onboarding=director_onboarding,
                 implementer_roles=implementer_roles,
                 role_clis=role_defs,
+                role_models=role_models,
+                role_efforts=role_efforts,
                 include_designer=include_designer,
                 include_audit=include_audit,
                 audit_roles=audit_roles,
@@ -12169,6 +12492,11 @@ def new_project_command(
     enable_owner_linger: bool = True,
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    #: Chosen per role by the selectors, when this came from an interactive
+    #: `switchyard new`. A scripted run passes neither and the generated
+    #: configuration carries no model or effort, exactly as before (SYRD-115).
+    role_models: Mapping[str, str] | None = None,
+    role_efforts: Mapping[str, str] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
     if execute and dry_run:
@@ -12188,6 +12516,11 @@ def new_project_command(
         design_document = design_artifact.design_document if design_artifact.include_designer else None
         implementer_roles = design_artifact.implementer_roles
         role_clis = design_artifact.role_clis
+        # A checked-in artifact reproduces the whole choice, not just the
+        # runtime: an explicit argument still wins, so nothing a caller passes
+        # is overridden by the file (SYRD-115).
+        role_models = role_models or dict(design_artifact.role_models)
+        role_efforts = role_efforts or dict(design_artifact.role_efforts)
         include_designer = design_artifact.include_designer
         include_audit = design_artifact.include_audit
         audit_roles = design_artifact.audit_roles
@@ -12300,6 +12633,8 @@ def new_project_command(
         director_onboarding=director_onboarding,
         implementer_roles=implementer_roles,
         role_clis=role_clis,
+        role_models=role_models,
+        role_efforts=role_efforts,
         include_designer=include_designer,
         include_audit=include_audit,
         audit_roles=audit_roles,
@@ -15583,6 +15918,8 @@ def _write_initial_switchyard_project_artifact(
     owner_shell: str,
     implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
     role_clis: Sequence[tuple[str, str]] | None = None,
+    role_models: Mapping[str, str] | None = None,
+    role_efforts: Mapping[str, str] | None = None,
     include_designer: bool = True,
     include_audit: bool = True,
     audit_roles: Sequence[str] | None = None,
@@ -15614,6 +15951,9 @@ def _write_initial_switchyard_project_artifact(
                 audit_roles=resolved_audit_roles,
             )
         ),
+        role_models=tuple(sorted((role_models or {}).items())),
+        role_efforts=tuple(sorted((role_efforts or {}).items())),
+        catalog_version=runtime_catalog.CATALOG_VERSION if (role_models or role_efforts) else 0,
         include_designer=include_designer,
         include_audit=bool(resolved_audit_roles),
         push_policy="director-main-only",
@@ -23523,10 +23863,28 @@ def switchyard_new_command(
     )
     if euid_getter() != 0:
         raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
+    selected_role_models: dict[str, str] = {}
+    selected_role_efforts: dict[str, str] = {}
     if from_artifact is None:
-        selected_role_clis = _dedupe_role_cli_pairs(
-            role_clis if role_clis is not None else _prompt_switchyard_role_choices(input_func=input_func, print_func=print_func)
-        )
+        if role_clis is not None:
+            chosen_pairs: Sequence[tuple[str, str]] = role_clis
+        else:
+            # One guided path per role -- runtime, then that runtime's models,
+            # then the effort levels it actually renders -- instead of four
+            # identifiers to recall and a comma-separated line to compose
+            # (SYRD-115).
+            role_plan = _prompt_switchyard_role_plan(
+                runner=runner, input_func=input_func, print_func=print_func
+            )
+            chosen_pairs = [(entry.role, entry.cli) for entry in role_plan]
+            selected_role_models = {
+                entry.role: entry.model for entry in role_plan if entry.model
+            }
+            selected_role_efforts = {
+                entry.role: entry.effort for entry in role_plan if entry.effort
+            }
+            print_role_plan_review(role_plan, print_func=print_func)
+        selected_role_clis = _dedupe_role_cli_pairs(chosen_pairs)
         _require_new_project_roles(selected_role_clis)
         selected_implementer_roles = tuple(
             role for role, _cli in selected_role_clis if role not in NEW_PROJECT_RESERVED_ROLE_NAMES
@@ -23672,6 +24030,8 @@ def switchyard_new_command(
             owner_shell=owner_shell,
             implementer_roles=selected_implementer_roles,
             role_clis=selected_role_clis,
+            role_models=selected_role_models,
+            role_efforts=selected_role_efforts,
             include_designer=include_designer,
             include_audit=include_audit,
             audit_roles=selected_audit_roles,
@@ -23771,6 +24131,8 @@ def switchyard_new_command(
         socket_exists=socket_exists,
         require_owner_user=False,
         enable_owner_linger=False,
+        role_models=selected_role_models,
+        role_efforts=selected_role_efforts,
         print_func=print_func,
     )
     if result != 0:
@@ -30643,7 +31005,7 @@ def add_project_role_command(
     *,
     config_path: Path,
     role_name: str,
-    cli: str = "codex",
+    cli: str = "",
     detached: bool = False,
     slot: int | None = None,
     relayout: bool = False,
@@ -30656,7 +31018,21 @@ def add_project_role_command(
     # A new role can only be started once the Unix account it must run as
     # exists; injectable so tests can state that precondition explicitly.
     account_exists: Callable[[str], bool] = local_account_exists,
+    interactive: bool | None = None,
+    input_func: Callable[[str], str] = input,
 ) -> int:
+    if not cli:
+        # The same list `switchyard new` and a runtime switch offer. A flag
+        # still decides it for a script; what changes is that an operator at a
+        # terminal no longer has to know the four names (SYRD-115).
+        if sys.stdin.isatty() if interactive is None else interactive:
+            cli = terminal_select.select_one(
+                _runtime_field(role_name, default="codex"),
+                input_func=input_func,
+                print_func=print_func,
+            )
+        else:
+            cli = "codex"
     role = (
         _validate_new_project_audit_role(role_name, context="audit role")
         if audit_role
@@ -32643,7 +33019,15 @@ def _build_switchyard_add_role_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard add-role", description="Add a role to an existing Switchyard project.")
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("role", help="new role name")
-    parser.add_argument("--cli", default="codex", help="CLI runtime for the role (default: codex)")
+    parser.add_argument(
+        "--cli",
+        default="",
+        choices=sorted(SUPPORTED_CONFIG_CLI_NAMES),
+        help=(
+            "CLI runtime for the role; omit it at a terminal to choose from the "
+            "runtimes this host supports (default: codex)"
+        ),
+    )
     parser.add_argument("--audit", action="store_true", help="add the role as an auditor instead of an implementer")
     parser.add_argument("--slot", type=int, help="visible layout slot; generated layouts append automatically when omitted")
     parser.add_argument("--detached", action="store_true", help="start the role as a headless tmux session")
@@ -32736,9 +33120,12 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
     parser.add_argument("role", help="existing role whose runtime changes")
     parser.add_argument(
         "--cli",
-        required=True,
+        default="",
         choices=sorted(SUPPORTED_CONFIG_CLI_NAMES),
-        help="agent runtime the role should run from now on",
+        help=(
+            "agent runtime the role should run from now on; omit it at a terminal "
+            "to choose from the runtimes this host supports"
+        ),
     )
     parser.add_argument(
         "--force",
@@ -32750,26 +33137,77 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _role_named(config: ProjectConfig, role_name: str) -> RoleConfig | None:
+    for role in config.roles:
+        if role.role == role_name:
+            return role
+    return None
+
+
 def set_project_role_runtime_command(
     config: ProjectConfig,
     *,
     config_path: Path,
     role_name: str,
-    runtime: str,
+    runtime: str = "",
     force: bool = False,
     reason: str = "",
     dry_run: bool = False,
     pane_state_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    interactive: bool | None = None,
+    input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
     from scripts import role_runtime
+
+    existing = _role_named(config, role_name)
+    current_runtime = _role_cli_name(existing) if existing is not None else ""
+    can_ask = (sys.stdin.isatty() if interactive is None else interactive)
+    if not runtime:
+        if not can_ask:
+            raise SystemExit(
+                "switchyard: set-role-runtime needs --cli when there is no terminal to choose at"
+            )
+        # The same selector `switchyard new` uses, over the same list: a runtime
+        # switch is the third place this choice was made and the third list of
+        # runtimes somebody had to keep in step (SYRD-115).
+        runtime = terminal_select.select_one(
+            _runtime_field(role_name, default=current_runtime or "codex"),
+            input_func=input_func,
+            print_func=print_func,
+        )
+
+    # The model is the dependent half of this choice. Recalculated whenever the
+    # runtime actually changes, because a model name belongs to the runtime that
+    # advertises it: a role moved from Codex to Claude used to keep `gpt-5.5`,
+    # and the new runtime was started with the old one's model (SYRD-115).
+    chosen_model: str | None = None
+    if existing is not None and current_runtime and runtime != current_runtime:
+        configured_model = str(getattr(existing, "model", "") or "")
+        if configured_model:
+            print_func(
+                f"switchyard: {role_name}'s model {configured_model} belongs to "
+                f"{current_runtime}; {runtime} advertises its own"
+            )
+        if can_ask:
+            chosen_model = terminal_select.select_one(
+                _model_field(role_name, runner=runner, print_func=print_func),
+                {"runtime": runtime},
+                input_func=input_func,
+                print_func=print_func,
+            )
+        elif configured_model:
+            # Nobody to ask, so the honest move is to leave the role on the new
+            # runtime's own default rather than on a model it does not have.
+            chosen_model = ""
 
     result = role_runtime.switch_role_runtime(
         config,
         config_path=config_path,
         role_name=role_name,
         runtime=runtime,
+        model=chosen_model,
         force=force,
         reason=reason,
         dry_run=dry_run,

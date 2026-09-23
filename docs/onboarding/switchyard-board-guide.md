@@ -336,6 +336,31 @@ not the destination.
 Getting this wrong writes one pane's state into another's record, and in the worst case
 relaunches a role onto a session that is already in use.
 
+### Recursive deletion always names a guarded target
+
+Never write a recursive delete whose target comes from a variable without a guard:
+
+```bash
+rm -rf -- "${TARGET:?TARGET must be set}"
+```
+
+`${TARGET:?}` fails the command when the variable is unset **or empty**. Without it,
+`rm -rf -- "$TARGET"` with an empty `TARGET` becomes a deletion with no operand, and
+`rm -rf "$TARGET"/sub` becomes `/sub` — the filesystem root rather than your tree. Quote
+the expansion too: unquoted, a target with a space becomes two targets.
+
+This is not only about the damage. Claude stops and asks before a recursive removal whose
+target is a critical path — `/`, `/etc`, a home directory, the working directory, or an
+expansion that could become one — and **that confirmation is not skipped by bypass
+permissions**. A role pane has nobody to press Enter, so an unguarded delete does not run
+dangerously; it stops the role until somebody notices. Switchyard installs a hook that
+answers that prompt for a pane already running in bypass mode, but the guard is what keeps
+the question from being asked at all, and it is the only part that protects you when the
+variable really is wrong.
+
+The same shape applies to anything that walks a tree: `find "${ROOT:?}" -delete`,
+`git clean -xdf -- "${DIR:?}"`, `rsync --delete` into `"${DEST:?}"`.
+
 ---
 
 ## Notifications

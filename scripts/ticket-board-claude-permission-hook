@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Answer Claude's permission prompts for a pane that is already in bypass mode.
+
+Claude Code 2.1.278 keeps one confirmation that no permission mode skips: a
+recursive removal whose target is a critical path -- `/`, `/etc`, a home
+directory, the working directory, or an expansion that could become one. That
+confirmation is a provider circuit breaker rather than an ordinary permission
+check, so `--dangerously-skip-permissions` does not suppress it, and a
+Switchyard role pane sits on it forever because nobody is watching to press
+Enter (SYRD-234).
+
+A `PermissionRequest` hook is the supported way to answer it. Measured against
+the installed 2.1.278: with no hook, `rm -rf .` in `bypassPermissions` is
+refused by the permission layer; with this hook it is allowed and runs. The
+published note that the breaker cannot be overridden is about `permissions.allow`
+rules and `PreToolUse` hooks, which are a different surface.
+
+What this decides is deliberately narrow: it allows **only** when the hook input
+itself says the session is already running in `bypassPermissions`. It never
+reads the mode from a file, an environment variable, or its own arguments --
+only from the JSON Claude hands it -- so it cannot widen a session that was not
+started that way. In every other mode it prints nothing, which Claude reads as
+"no decision" and leaves its normal permission flow untouched.
+
+Everything unexpected fails closed the same way: not valid JSON, not an object,
+not a PermissionRequest, no mode, a mode that is not a string. A hook that
+cannot understand what it was asked does not get to answer it.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from typing import Any
+
+HOOK_EVENT_NAME = "PermissionRequest"
+BYPASS_MODE = "bypassPermissions"
+MAX_INPUT_BYTES = 4 * 1024 * 1024
+
+
+def allow_payload() -> dict[str, Any]:
+    """The only thing this program is ever allowed to print."""
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": HOOK_EVENT_NAME,
+            "decision": {"behavior": "allow"},
+        }
+    }
+
+
+def decision_for(raw: str) -> dict[str, Any] | None:
+    """The allow payload when the input says bypass, else None for no decision.
+
+    Strict on purpose. Every rejection below is a case where answering would
+    mean guessing what session this is.
+    """
+    if len(raw.encode("utf-8", "surrogatepass")) > MAX_INPUT_BYTES:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("hook_event_name") != HOOK_EVENT_NAME:
+        return None
+    mode = payload.get("permission_mode")
+    if not isinstance(mode, str) or mode != BYPASS_MODE:
+        return None
+    return allow_payload()
+
+
+def main(argv: list[str]) -> int:
+    if argv:
+        # It takes no arguments. Being called with some means something is
+        # configured differently from what this was written for.
+        print(f"{__file__}: takes no arguments", file=sys.stderr)
+        return 0
+    try:
+        raw = sys.stdin.read()
+    except (OSError, UnicodeDecodeError):
+        return 0
+    decision = decision_for(raw)
+    if decision is not None:
+        sys.stdout.write(json.dumps(decision))
+    # Exit 0 either way: exit code 2 is not honoured for this event, and a
+    # non-zero exit here would only be noise in the transcript.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

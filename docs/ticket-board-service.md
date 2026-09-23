@@ -308,7 +308,9 @@ target from ambient tmux state. The required state transitions are:
 
 - Claude Code: `SessionStart` writes initial `idle` and records the resume
   session id; `Notification` with matcher `idle_prompt` writes `idle`;
-  `UserPromptSubmit` and `Stop` write `busy`.
+  `UserPromptSubmit` and `Stop` write `busy`; `Notification` with matcher
+  `permission_prompt` writes `blocked`, and a `PermissionRequest` hook answers
+  the prompts a bypass pane must not stop on (below).
 - Codex: `SessionStart` records the resume session id when Codex emits it, but
   interactive Codex 0.150.1 can defer that event until the first prompt instead
   of firing it during idle startup. `Stop` writes `idle`; `UserPromptSubmit`
@@ -468,6 +470,42 @@ That command copies the standalone writer to
 - Claude: `~/.claude/settings.json`
 - Codex: `~/.codex/hooks.json`
 - Agy/Gemini config tree: `~/.gemini/config/hooks.json`
+
+### The permission prompt a bypass pane cannot answer
+
+Claude Code 2.1.278 keeps one confirmation that **no permission mode skips**: a
+recursive removal whose target is a critical path -- `/`, `/etc`, a home
+directory, the working directory, or an expansion that could become one. It is a
+provider circuit breaker rather than an ordinary permission check, so
+`--dangerously-skip-permissions` does not suppress it, and a role pane with
+nobody watching stops there until a person notices.
+
+So the installer registers `ticket-board-claude-permission-hook` on
+`PermissionRequest`, with no matcher, and it **allows only when the hook input
+itself says `permission_mode` is `bypassPermissions`**. In every other mode --
+and on malformed input, a wrong event, a missing or non-string mode -- it prints
+nothing, which Claude reads as "no decision" and leaves its normal permission
+flow untouched. It never reads the mode from a file, an environment variable or
+its own arguments, so it cannot widen a session that was not started that way.
+
+The helper is **staged root-owned** in `/usr/local/lib/switchyard/<project>/`
+and the hook entry points there, not at a copy in the role's home: a role that
+could rewrite it could make it answer for a session that is not in bypass.
+
+Measured against the installed 2.1.278 rather than taken from the documentation,
+which says a hook cannot override the breaker -- true of `permissions.allow`
+rules and `PreToolUse`, and not of `PermissionRequest`. With no hook, `rm -rf .`
+in bypass mode is refused by the permission layer; with the hook it is allowed
+and reaches `rm`.
+
+Anything the helper does not answer still stops the pane, and that is now said
+out loud: the `permission_prompt` notification writes `blocked`, and the
+listener tells the Director once per episode, after a short grace
+(`TICKET_BOARD_PERMISSION_PROMPT_GRACE_SECONDS`, default 120). Before this, a
+pane waiting on a prompt read as *busy* to the activity gate and notifications
+simply queued behind it, so the role looked like it was working for as long as
+nobody looked. Every other generator fires off the idle path, and a pane stopped
+on a prompt never goes idle.
 
 Project provisioning passes `--seed-codex-hook-trust-if-new` so a fresh owner
 does not need a redundant Codex `/hooks` approval for hooks Switchyard just

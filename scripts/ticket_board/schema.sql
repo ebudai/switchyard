@@ -11524,3 +11524,107 @@ END;
 $$;
 
 
+
+
+-- SYRD-234: tell the Director about a pane stopped on a permission prompt.
+--
+-- A Claude role launched in bypass mode still meets one confirmation that no
+-- permission mode skips: a recursive removal aimed at a critical path. A hook
+-- answers that for a pane already in bypass, but anything it does not answer
+-- leaves the pane waiting on a human who is not watching. The pane hook records
+-- `blocked`, and the listener's activity gate reads blocked as busy and requeues
+-- behind it -- so the role looks like it is working, for as long as nobody
+-- looks. Every existing generator fires off the idle path, and a pane stopped on
+-- a prompt never goes idle, so none of them ever fire for it.
+--
+-- This is the one that does. Deliberately the `escalation` kind, which is
+-- already director-bound and already an allowed kind: what is missing is a
+-- generator, not a new sort of notification.
+CREATE OR REPLACE FUNCTION ticket_board.notify_permission_prompt_waits(
+    -- {role: ISO-8601 instant the pane went blocked on a prompt}
+    p_blocked_since jsonb,
+    p_now timestamptz,
+    -- The same staged-recovery shape the unresolved-turn escalation uses: a
+    -- prompt answered quickly by a passing human is not worth the Director's
+    -- attention, and one that is not is exactly what this exists for.
+    p_grace interval DEFAULT interval '2 minutes'
+)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    waiting record;
+    enqueued integer := 0;
+    blocked_since timestamptz;
+    identity text;
+BEGIN
+    PERFORM ticket_board.require_ticket_board_listener('notify_permission_prompt_waits');
+    FOR waiting IN
+        SELECT
+            key AS role,
+            value #>> '{}' AS since
+        FROM jsonb_each(coalesce(p_blocked_since, '{}'::jsonb))
+        ORDER BY key
+    LOOP
+        BEGIN
+            blocked_since := waiting.since::timestamptz;
+        EXCEPTION WHEN others THEN
+            -- An unparseable instant is not a reason to escalate; it is a
+            -- reason to say nothing about a pane nobody can describe.
+            CONTINUE;
+        END;
+        CONTINUE WHEN blocked_since > p_now - p_grace;
+        FOR identity IN
+            SELECT t.id
+            FROM ticket_board.tickets t
+            WHERE t.assignee = waiting.role
+              AND ticket_board.transition_target_role(t.state, t.assignee) = waiting.role
+            ORDER BY t.id
+        LOOP
+            -- One per role per blocked episode. The key carries the instant the
+            -- pane went blocked, so a prompt answered and re-raised later is a
+            -- new episode and a repeat of the same one is not.
+            CONTINUE WHEN EXISTS (
+                SELECT 1
+                FROM ticket_board.ticket_notification_queue q
+                WHERE q.dedupe_key = format('permission-prompt:%s:%s', waiting.role, waiting.since)
+            ) OR EXISTS (
+                -- The queue row is gone once it is delivered and acknowledged,
+                -- so the queue alone would let the same episode be reported
+                -- again on the next pass. The trace outlives the row, and the
+                -- dedupe key is carried in its detail (SYRD-133's lesson).
+                SELECT 1
+                FROM ticket_board.notification_trace tr
+                WHERE tr.event = 'enqueue'
+                  AND tr.detail ->> 'dedupe_key'
+                      = format('permission-prompt:%s:%s', waiting.role, waiting.since)
+            );
+            PERFORM ticket_board.enqueue_notification(
+                identity,
+                'escalation',
+                'director',
+                format(
+                    '%s is stopped on a permission prompt in its pane and cannot answer it '
+                    || 'itself. It has been waiting since %s. Nothing it was asked to do is '
+                    || 'progressing until somebody answers the prompt or restarts the role.',
+                    waiting.role, waiting.since
+                ),
+                jsonb_build_object(
+                    'kind', 'escalation',
+                    'reason', 'permission_prompt',
+                    'role', waiting.role,
+                    'target_role', 'director',
+                    'blocked_since', waiting.since,
+                    'ticket_id', identity
+                ),
+                format('permission-prompt:%s:%s', waiting.role, waiting.since)
+            );
+            enqueued := enqueued + 1;
+        END LOOP;
+    END LOOP;
+    RETURN enqueued;
+END;
+$$;

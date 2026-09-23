@@ -171,6 +171,15 @@ SUPERSEDABLE_REMINDER_KINDS = frozenset({"idle_reminder", "nudge", "escalation"}
 #: stopped -- so without this the Director's copy resolves to the owner, is
 #: judged stale, and is dropped before delivery (SYRD-194).
 DIRECTOR_BOUND_KINDS = frozenset({"escalation", "unresolved_turn"})
+#: Pane-hook sources that mean a prompt is on screen with nobody to answer it.
+#: Deliberately not in TRUSTED_IDLE_SOURCES: a pane waiting on a prompt is not
+#: idle, and treating it as idle would deliver into a stopped pane (SYRD-234).
+#: Seconds a pane may sit on a prompt before the Director hears about it.
+PERMISSION_PROMPT_GRACE_SECONDS = 120
+PERMISSION_PROMPT_BLOCK_SOURCES = frozenset({
+    "claude.Notification.permission_prompt",
+    "codex.PermissionRequest",
+})
 #: Distinct from `stale_notification`, which means the ticket moved, and from
 #: `pane busy`, which means delivery was only postponed. This one means the
 #: reminder was answered before it could be delivered.
@@ -1465,6 +1474,24 @@ class PaneActivityGate:
             self._reset_director_startup_hold()
         return self._idle_cursor_trace(target, state, check_trusted_working=check_trusted_working)
 
+    def permission_prompt_waits(self) -> dict[str, str]:
+        """Roles whose pane is stopped on a permission prompt, and since when.
+
+        On the gate rather than the listener because this is a question about
+        pane state, which is what the gate holds. Read straight from the hook
+        state: the hook writes `blocked` with its own source when Claude raises
+        a prompt nothing answered (SYRD-234).
+        """
+        waiting: dict[str, str] = {}
+        for role, target in sorted(self.role_targets.items()):
+            state = self.state_store.read(target)
+            if state is None or state.state != "blocked":
+                continue
+            if state.source not in PERMISSION_PROMPT_BLOCK_SOURCES:
+                continue
+            waiting[role] = datetime.fromtimestamp(state.updated_at, tz=timezone.utc).isoformat()
+        return waiting
+
     def is_busy(self, target: str) -> bool:
         return self._record_trace(target, self._full_activity_trace(target, check_trusted_working=False))
 
@@ -1561,6 +1588,13 @@ class TicketBoardNotifyListener:
         self.unresolved_turn_grace_seconds = int(
             os.environ.get("TICKET_BOARD_UNRESOLVED_TURN_GRACE_SECONDS", "") or
             UNRESOLVED_TURN_GRACE_SECONDS
+        )
+        # How long a pane may sit on a permission prompt before the Director is
+        # told. Short, because unlike an unresolved turn there is nobody in the
+        # pane who can clear it: the role is stopped, not slow (SYRD-234).
+        self.permission_prompt_grace_seconds = int(
+            os.environ.get("TICKET_BOARD_PERMISSION_PROMPT_GRACE_SECONDS", "") or
+            PERMISSION_PROMPT_GRACE_SECONDS
         )
         self._consumed_present_idle_since_by_role: dict[str, str] = {}
         self._work_observed_at_by_role: dict[str, str] = {}
@@ -2174,6 +2208,50 @@ SELECT ticket_board.record_notification_trace(
             self._consumed_present_idle_since_by_role[role] = idle_since
         return fresh_idle_since
 
+    def _process_permission_prompt_waits(self, conn: Any) -> int:
+        """SYRD-234: a pane stopped on a prompt is waiting, not working.
+
+        Every other generator here fires off the idle path. A pane stopped on a
+        permission prompt never goes idle -- the activity gate reads `blocked`
+        as busy and requeues behind it -- so without this the role looks like it
+        is working for as long as nobody looks at it.
+        """
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        if gate_owner is None or not hasattr(gate_owner, "permission_prompt_waits"):
+            # No gate means no pane state to read, which is "cannot tell" --
+            # and cannot tell is not the same as nobody is waiting.
+            return 0
+        waiting = gate_owner.permission_prompt_waits()
+        if not waiting:
+            return 0
+        try:
+            result = conn.execute(
+                "SELECT ticket_board.notify_permission_prompt_waits("
+                "%s::jsonb, clock_timestamp(), %s::interval)",
+                (
+                    json.dumps(waiting, sort_keys=True),
+                    f"{self.permission_prompt_grace_seconds} seconds",
+                ),
+            )
+            row = result.fetchone()
+        except Exception as exc:
+            self.logger.warning("Failed to enqueue permission-prompt waits: %s", exc)
+            return 0
+        if row is None:
+            return 0
+        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        try:
+            enqueued = int(value)
+        except (TypeError, ValueError):
+            return 0
+        if enqueued:
+            self.logger.info(
+                "Told the director about %s pane(s) stopped on a permission prompt: %s",
+                enqueued,
+                ", ".join(sorted(waiting)),
+            )
+        return enqueued
+
     def _process_unresolved_turn_end(self, conn: Any, idle_since: dict[str, str]) -> int:
         """SYRD-194: tell the Director when an owner stopped without resolving.
 
@@ -2253,6 +2331,10 @@ SELECT ticket_board.record_notification_trace(
             # correctly, the grace expired, and the Director heard nothing until
             # some OTHER role happened to end a turn (SYRD-207).
             self._process_unresolved_turn_end(conn, {})
+            # Same reasoning as the line above, and the same trap: a pane
+            # stopped on a prompt produces no turn ends at all, so returning
+            # before this would make the case it exists for unreachable.
+            self._process_permission_prompt_waits(conn)
             return 0
         # The same two inputs the stall generator beside this one has taken
         # since SYRD-58. A turn ending says the previous turn finished, not that
@@ -2295,6 +2377,7 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
         # stopped without resolving is reported whether or not a reminder was
         # due, and whether or not one was enqueued (SYRD-194).
         self._process_unresolved_turn_end(conn, idle_since)
+        self._process_permission_prompt_waits(conn)
         return enqueued
 
     def process_serial_focus_queue_wakeups(self, conn: Any) -> int:

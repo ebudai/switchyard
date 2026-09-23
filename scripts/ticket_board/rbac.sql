@@ -145,6 +145,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.notify_idle_turn_end_nudges(jsonb, timest
 -- grants one, because a continuation is the owner's statement, not the
 -- listener's.
 GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval) TO ticket_board_listener;
+-- SYRD-234: the generator that tells the Director about a pane stopped on a
+-- permission prompt. The listener is the only thing that can see a pane state.
+GRANT EXECUTE ON FUNCTION ticket_board.notify_permission_prompt_waits(jsonb, timestamptz, interval) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.consume_turn_continuation(text, text) TO ticket_board_listener;
 GRANT SELECT ON ticket_board.turn_continuation_lease TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_serial_focus_queue_wakeups(timestamptz) TO ticket_board_listener;

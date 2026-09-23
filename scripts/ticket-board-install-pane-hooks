@@ -22,6 +22,10 @@ from ticket_board.codex_hook_trust import (
 
 HOOK_BASENAME = "ticket-board-pane-idle-hook"
 LEGACY_HOOK_BASENAME = "pgu-ticket-board-pane-idle-hook"
+# Answers Claude's own permission prompts; staged root-owned beside this
+# program rather than copied into the role's home, because a role that could
+# rewrite it could widen its own session (SYRD-234).
+CLAUDE_PERMISSION_HOOK_BASENAME = "ticket-board-claude-permission-hook"
 DEFAULT_PROJECT = os.environ.get("TICKET_BOARD_PROJECT", "").strip() or os.environ.get("PGU_TICKET_BOARD_PROJECT", "").strip() or "pgu"
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -111,7 +115,11 @@ def _contains_managed_hook(value: Any) -> bool:
         return any(_contains_managed_hook(child) for child in value.values())
     if isinstance(value, list):
         return any(_contains_managed_hook(child) for child in value)
-    return isinstance(value, str) and (HOOK_BASENAME in value or LEGACY_HOOK_BASENAME in value)
+    return isinstance(value, str) and (
+        HOOK_BASENAME in value
+        or LEGACY_HOOK_BASENAME in value
+        or CLAUDE_PERMISSION_HOOK_BASENAME in value
+    )
 
 
 def _hook_entry(command: str, *, matcher: str = "") -> dict[str, Any]:
@@ -164,7 +172,7 @@ def _install_hook_binary(source: Path, destination: Path) -> None:
     destination.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
+def _install_claude_hooks(home: Path, hook_bin: Path, permission_hook: Path) -> Path:
     path = home / ".claude" / "settings.json"
     config = _load_json(path)
     state_dir = DEFAULT_PANE_STATE_DIR
@@ -190,6 +198,9 @@ def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
             )
         ],
     )
+    # Both Notification matchers are merged in ONE call: `_merge_hook_entries`
+    # drops every managed entry for the event before appending, so a second
+    # call would silently remove the first (SYRD-234).
     _merge_hook_entries(
         config,
         "Notification",
@@ -208,7 +219,24 @@ def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
                     ]
                 ),
                 matcher="idle_prompt",
-            )
+            ),
+            # Whatever the permission helper did not answer is a pane waiting on
+            # a human. Say so, rather than leaving it looking busy for hours.
+            _hook_entry(
+                _shell_command(
+                    [
+                        hook_bin,
+                        "blocked",
+                        "--source",
+                        "claude.Notification.permission_prompt",
+                        "--state-dir",
+                        state_dir,
+                        "--session-dir",
+                        session_dir,
+                    ]
+                ),
+                matcher="permission_prompt",
+            ),
         ],
     )
     _merge_hook_entries(
@@ -241,6 +269,14 @@ def _install_claude_hooks(home: Path, hook_bin: Path) -> Path:
                 )
             )
         ],
+    )
+    # No matcher: the prompt this exists for is a Bash removal, but a pane
+    # launched in bypass mode must not stall on any tool's prompt, and the
+    # helper decides by the mode in its own input rather than by tool.
+    _merge_hook_entries(
+        config,
+        "PermissionRequest",
+        [_hook_entry(_shell_command([permission_hook]))],
     )
     _write_json(path, config)
     return path
@@ -542,11 +578,14 @@ def install(args: argparse.Namespace) -> int:
     home = Path(args.home).expanduser()
     hook_source = Path(args.hook_source).expanduser()
     hook_bin = Path(args.bin_path).expanduser()
+    permission_hook = Path(args.claude_permission_hook).expanduser()
+    if not permission_hook.is_file():
+        raise SystemExit(f"claude permission hook not found: {permission_hook}")
     had_codex_hooks = (home / ".codex" / "hooks.json").exists()
     had_codex_trust_records = bool(codex_trusted_hashes(home))
     _install_hook_binary(hook_source, hook_bin)
     written = [
-        _install_claude_hooks(home, hook_bin),
+        _install_claude_hooks(home, hook_bin, permission_hook),
         _install_codex_hooks(home, hook_bin),
         _install_gemini_hooks(home, hook_bin),
         _install_hermes_hooks(home, hook_bin),
@@ -595,6 +634,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--bin-path",
         default=str(Path.home() / ".local" / "bin" / HOOK_BASENAME),
         help="installed hook binary path",
+    )
+    install_parser.add_argument(
+        "--claude-permission-hook",
+        default=str(Path(__file__).resolve().parent / CLAUDE_PERMISSION_HOOK_BASENAME),
+        help=(
+            "helper that answers Claude permission prompts; defaults to the copy "
+            "staged beside this program, so a role cannot rewrite what decides for it"
+        ),
     )
     install_parser.add_argument(
         "--seed-codex-hook-trust-if-new",

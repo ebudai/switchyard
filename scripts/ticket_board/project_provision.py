@@ -709,6 +709,11 @@ RETIRED_STAGED_EXECUTABLES: tuple[str, ...] = (
 ROLE_STAGED_EXECUTABLES: tuple[str, ...] = (
     "ticket-board-pane-idle-hook",
     "ticket-board-install-pane-hooks",
+    # Answers Claude's own permission prompts for a pane already running in
+    # bypass mode. Staged rather than copied into the role's home like the idle
+    # hook: a role that could rewrite this could make it answer "allow" for a
+    # session that is not in bypass at all (SYRD-234).
+    "ticket-board-claude-permission-hook",
     "switchyard-board-skill",
     # SYRD-123: publishing a candidate is a push again. The account every role
     # runs as holds the project's GitHub credential, so this needs no grant, no

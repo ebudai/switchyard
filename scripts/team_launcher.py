@@ -14489,6 +14489,10 @@ def _write_switchyard_onboarding_files(
                     "The board and full pane window already exist; use tickets for follow-up implementation work.",
                     "Do not create workflow stages or workflow transitions in the artifact.",
                     "This project directory is the user-visible checkout and is not reset or cleaned by launch.",
+                    # An empty variable turns `rm -rf "$TARGET"/x` into `/x`, and Claude
+                    # stops to ask before a recursive delete of a critical path even in
+                    # bypass mode -- which stalls a pane nobody is watching (SYRD-234).
+                    "Recursive deletion always names a guarded target: rm -rf -- \"${TARGET:?}\", never an unguarded \"$TARGET\".",
                     "Implementation panes run from managed role worktrees outside this directory.",
                     "The initial git remote named origin points at this local repository as a bootstrap placeholder.",
                     "Replace origin with the project's real remote before expecting fetches to detect upstream changes.",
@@ -14508,6 +14512,7 @@ def _write_switchyard_onboarding_files(
                 "",
                 "The privileged provisioning and full pane window were started by switchyard new.",
                 "Use the live board to onboard the team and reshape stages or roles later if the user asks.",
+                "Recursive deletion always names a guarded target: rm -rf -- \"${TARGET:?}\", never an unguarded \"$TARGET\".",
                 "",
             ]
         ),
@@ -24607,6 +24612,86 @@ def refresh_staged_role_tooling(
     return []
 
 
+def tenant_hook_accounts(config: ProjectConfig) -> list[str]:
+    """Every account whose CLI configuration this tenant's roles read.
+
+    Modern tenants run every role as the project account, so this is usually
+    one name; a tenant still on per-role accounts has one per role.
+    """
+    accounts: list[str] = []
+    for name in [config.run_as_user or "", *(role_run_as_user(config, role) for role in config.roles)]:
+        name = str(name or "").strip()
+        if name and name not in accounts:
+            accounts.append(name)
+    return accounts
+
+
+def refresh_role_pane_hooks(
+    config: ProjectConfig,
+    *,
+    staging_root: Path | None = None,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Re-run the pane-hook installer in every account this tenant's roles use.
+
+    Staging refreshes the root-owned tooling; it does not touch the per-account
+    CLI configuration that points at it. Those registrations were written when
+    the account was created and never again, so an existing tenant keeps
+    exactly the set of hooks its provisioning run happened to write -- and can
+    never gain a new one. That is how a tenant would take this release and
+    still stall on a permission prompt, with the helper that answers it staged
+    and unreferenced (SYRD-234).
+
+    The installer merges rather than replaces and is safe to run repeatedly, so
+    this is idempotent by construction: it is the same program provisioning
+    runs, pointed at an account that already exists.
+    """
+    staged = _staged_tooling_dir(config, staging_root)
+    installer = staged / "ticket-board-install-pane-hooks"
+    hook_source = staged / "ticket-board-pane-idle-hook"
+    problems: list[str] = []
+    for account in tenant_hook_accounts(config):
+        home = home_dir_for_user(account)
+        if home is None:
+            problems.append(f"{account} is not an account on this host, so its pane hooks were not refreshed")
+            continue
+        if dry_run:
+            print_func(
+                f"switchyard: would refresh {config.project}'s pane hooks for {account} in {home}, "
+                f"from {installer}; nothing written"
+            )
+            continue
+        args = [
+            "env",
+            f"TICKET_BOARD_PROJECT={config.project}",
+            f"TICKET_BOARD_PANE_SESSION_DIR={config.session_dir}",
+            str(installer),
+            "install",
+            "--home",
+            str(home),
+            "--hook-source",
+            str(hook_source),
+            "--bin-path",
+            str(home / ".local" / "bin" / "ticket-board-pane-idle-hook"),
+        ]
+        # As the account, never as root: these files are the account's own, and
+        # root writing them leaves what the account cannot rewrite afterwards.
+        if current_user_name() != account:
+            args = ["sudo", "-u", account, "-H", *args]
+        result = runner(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if getattr(result, "returncode", 1) != 0:
+            detail = (str(getattr(result, "stderr", "") or "").strip() or "no output")[:400]
+            problems.append(
+                f"could not refresh {config.project}'s pane hooks for {account} "
+                f"(exit {result.returncode}): {detail}"
+            )
+            continue
+        print_func(f"switchyard: refreshed {config.project}'s pane hooks for {account} in {home}")
+    return problems
+
+
 def _staged_tooling_dir(config: ProjectConfig, staging_root: Path | None) -> Path:
     return Path(role_tooling_staging_dir(config.project, root=staging_root))
 
@@ -27119,6 +27204,9 @@ def upgrade_project_command(
             f"switchyard: would stage {config.project} role tooling in "
             f"{_staged_tooling_dir(config, tooling_root)} from {effective_source_repo}"
         )
+        refresh_role_pane_hooks(
+            config, staging_root=tooling_root, dry_run=True, runner=runner, print_func=print_func,
+        )
         previewed_release, preview_problems = resolve_trusted_upgrade_release(
             effective_source_repo, deploy_ref or "", dry_run=True, ref_is_pinned=deploy_ref_chosen, runner=runner
         )
@@ -27221,6 +27309,24 @@ def upgrade_project_command(
             record_upgrade_phase(
                 config, config_path=config_path, phase="artifacts", state="blocked",
                 detail="; ".join(staging_problems),
+            )
+            return 1
+        # After staging, because the hooks it writes point at what staging just
+        # put there; and on every upgrade, because an existing tenant otherwise
+        # keeps the hook set its account-creation run wrote (SYRD-234).
+        hook_problems = refresh_role_pane_hooks(
+            config, staging_root=tooling_root, runner=runner, print_func=print_func,
+        )
+        if hook_problems:
+            for problem in hook_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any later phase: {config.project}'s roles would come "
+                "back without the hooks this release stages for them."
+            )
+            record_upgrade_phase(
+                config, config_path=config_path, phase="artifacts", state="blocked",
+                detail="; ".join(hook_problems),
             )
             return 1
         publication_problems = remove_tenant_publication_boundary(

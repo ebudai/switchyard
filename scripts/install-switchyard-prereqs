@@ -92,6 +92,38 @@ run_root_cmd() {
     fi
 }
 
+#: Prove the ticket board entry point imports and builds its argument surface,
+#: without printing that surface. `--help` is what an operator gets when they
+#: ask for it; printing 29 lines of argparse in the middle of a privileged
+#: install transcript made a healthy install read as a command rejected for a
+#: wrong parameter, and buried the diagnostics either side of it (SYRD-215).
+#:
+#: The probe itself is unchanged, so what is proved is unchanged: the failure
+#: path prints exactly what the entry point said and stops.
+verify_ticket_board_entry_point() {
+    local python="$1"
+    local privileged="${2:-0}"
+    local -a command=("$python" "$SCRIPT_DIR/ticket-board.py" --help)
+    # The same privilege this probe always ran with, and the same printed line:
+    # only what it does with the OUTPUT changes.
+    if [[ "$privileged" == "1" ]] && ! { is_root_context && [[ -z "${SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX:-}" ]]; }; then
+        command=("$SUDO_BIN" "${command[@]}")
+    fi
+    local output status=0
+    printf '+'
+    printf ' %q' "${command[@]}"
+    printf '\n'
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        return 0
+    fi
+    output="$("${command[@]}" 2>&1)" || status=$?
+    if (( status != 0 )); then
+        printf '%s\n' "$output" >&2
+        die "the ticket board entry point did not load with $python (exit $status); the error above is its own"
+    fi
+    printf 'Ticket board entry point loads with %s.\n' "$python"
+}
+
 #: The package managers install a PostgreSQL server; only one of them leaves a
 #: cluster behind. This runs in both branches so a fresh host is either ready
 #: for `switchyard new` or stopped here with the procedure, rather than at the
@@ -125,7 +157,7 @@ case "$manager" in
         printf 'Verifying ticket board runtime dependencies under the shared Switchyard Python venv.\n'
         run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
         printf 'Verifying the ticket board entry point loads under the shared Switchyard Python venv.\n'
-        run_root_cmd "$SWITCHYARD_PYTHON_VENV/bin/python" "$SCRIPT_DIR/ticket-board.py" --help
+        verify_ticket_board_entry_point "$SWITCHYARD_PYTHON_VENV/bin/python" 1
         ;;
     pacman)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
@@ -139,6 +171,6 @@ case "$manager" in
         printf 'Verifying ticket board runtime dependencies with %s, the interpreter generated services use.\n' "$verify_python"
         run_cmd "$verify_python" -c "import psycopg, PIL; print(psycopg.__version__, PIL.__version__)"
         printf 'Verifying the ticket board entry point loads with %s.\n' "$verify_python"
-        run_cmd "$verify_python" "$SCRIPT_DIR/ticket-board.py" --help
+        verify_ticket_board_entry_point "$verify_python"
         ;;
 esac

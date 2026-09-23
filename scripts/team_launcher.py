@@ -293,6 +293,10 @@ SWITCHYARD_COMMANDS = (
     "teardown",
     "status",
     "validate-models",
+    # Hands ONE image from the desktop owner's clipboard to one role, because on
+    # a compositor without a data-control protocol no provider can read that
+    # clipboard itself. Run by the owner, never by a role (SYRD-247).
+    "paste-image",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
 # and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
@@ -333,9 +337,17 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # prompt for a read. The root-owned registry, release and journal records
     # this reports are world-readable by design; anything it cannot read is
     # named as unavailable instead (SYRD-241).
+    #
+    # `paste-image` must run as the DESKTOP OWNER and as nobody else. It reads
+    # that owner's clipboard, which is exactly the authority it is passing on,
+    # one image at a time. Escalating it would read root's clipboard -- there
+    # isn't one -- and running it as the tenant is the thing it refuses by
+    # identity, because that would be a clipboard read primitive for every role
+    # sharing that UID (SYRD-247, SYRD-98).
     {
         "present", "attach", "board-skill", "role-prompt", "set-role-runtime",
         "finish-upgrade", "worker-pool", "privileged-action", "status",
+        "paste-image",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -24278,6 +24290,61 @@ def switchyard_status_command(
     return 0
 
 
+def switchyard_paste_image_command(
+    project: str,
+    role_name: str,
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    sender: Callable[[str, str], Any] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Hand one clipboard image to one role's pane.
+
+    The provider cannot read the desktop clipboard on a compositor that offers
+    no data-control protocol, and the policy deliberately leaves X11
+    unreachable. So the owner passes one image across instead of anything being
+    granted a clipboard (SYRD-247).
+    """
+    from scripts import image_handoff
+
+    entry = _resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
+    config = load_project_config(entry.slug, entry.config_path)
+    owner = str(config.run_as_user or "").strip()
+    owner_uid = _uid_for_user(owner) if owner else -1
+    delivery = sender if sender is not None else _paste_image_sender(runner=runner)
+    try:
+        return image_handoff.hand_image_to_role(
+            config,
+            role_name=role_name,
+            owner_uid=owner_uid,
+            live_cli=lambda role: live_cli_for_role(role, runner=runner),
+            sender=delivery,
+            print_func=print_func,
+        )
+    except image_handoff.ImageHandoffError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _paste_image_sender(
+    *, runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run
+) -> Callable[[str, str], Any]:
+    """Type the reference into the pane, through the path that already does it."""
+
+    from scripts.ticket_board.notify_listener import DEFAULT_DIRECTORCTL
+
+    def send(target: str, message: str) -> Any:
+        return runner(
+            [str(DEFAULT_DIRECTORCTL), "send", target, message],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    return send
+
+
 def switchyard_validate_models_command(
     project: str,
     *,
@@ -34413,6 +34480,7 @@ Commands:
   release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
+  paste-image      hand one clipboard image from the desktop owner to a role
 
 Bare project names start or attach the project. Recognized commands: {commands}.
 """
@@ -35766,6 +35834,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             entry = _resolve_switchyard_project(selection)
             return switchyard_status_command(json_output=args.json, project=entry.slug)
         return switchyard_status_command(json_output=args.json)
+    if argv[0].casefold() == "paste-image":
+        if len(argv) != 3:
+            raise SystemExit(
+                "switchyard paste-image requires <project> <role>; run it as the desktop "
+                "owner, with the image already copied"
+            )
+        return switchyard_paste_image_command(argv[1], argv[2])
     if argv[0].casefold() == "validate-models":
         if len(argv) < 2:
             raise SystemExit("switchyard validate-models requires <project>")

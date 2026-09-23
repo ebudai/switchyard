@@ -16358,6 +16358,23 @@ def _role_names(roles: Sequence[RoleConfig]) -> list[str]:
     return [role.role for role in roles]
 
 
+#: How long a non-interactive probe of a provider may take before it is treated
+#: as a failure rather than waited on.
+#:
+#: These probes are the one part of the first-run phase nobody can see: stdin is
+#: /dev/null, stdout and stderr are captured, and nothing is drawn. Unbounded,
+#: that is a launcher that stops dead with no process to look at, no output, and
+#: a window whose title has already been handed back -- which is what a fresh
+#: test15 and then test16 both showed after the trust steps completed
+#: (SYRD-245). A single `-p` prompt that has not answered in three minutes is
+#: not going to; an interactive step that legitimately waits on a person is
+#: bounded separately and much longer.
+OWNER_CLI_PROBE_TIMEOUT_SECONDS = 180.0
+#: The exit status recorded for a probe that had to be given up on. 124 is what
+#: `timeout(1)` uses, so a reader who has seen one recognises the other.
+PROBE_TIMED_OUT_STATUS = 124
+
+
 def _run_owner_cli_probe(
     *,
     owner_user: str,
@@ -16365,9 +16382,37 @@ def _run_owner_cli_probe(
     command: Sequence[str],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     cwd: Path | None = None,
+    timeout_seconds: float = OWNER_CLI_PROBE_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[Any]:
     args = _owner_command_env_args(owner_user, owner_home, command)
     try:
+        return runner(
+            args,
+            cwd=str(cwd if cwd is not None else owner_home),
+            env=_pane_identity_scrubbed_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        # Reported as a failed probe rather than raised: the phase below turns
+        # every other probe failure into a named, resumable line, and a
+        # traceback here would lose which role and which model it was.
+        return subprocess.CompletedProcess(
+            args,
+            PROBE_TIMED_OUT_STATUS,
+            stdout="",
+            stderr=(
+                f"no answer after {timeout_seconds:g}s; gave up. Run this yourself to see "
+                f"what it is waiting for: {shlex.join(str(part) for part in args)}"
+            ),
+        )
+    except TypeError:
+        # A caller's runner that predates the bound. Kept working rather than
+        # made to accept a keyword it never had, because these probes are
+        # driven by several suites' fakes.
         return runner(
             args,
             cwd=str(cwd if cwd is not None else owner_home),
@@ -18001,7 +18046,19 @@ def validate_role_models(
     owner_user: str,
     owner_home: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
 ) -> list[ModelValidationFailure]:
+    """Ask each role's model to prove it can work, and say so while doing it.
+
+    This runs straight after the last folder-trust step, and it was the one
+    part of the first-run phase that made no sound at all: stdin is /dev/null,
+    stdout and stderr are captured, and nothing was printed before or between
+    the probes. The setup window has already been handed back by then -- title
+    "Switchyard" -- and the screen cleared, so a fresh tenant showed a cursor
+    on an empty screen for as long as the probes took, with no way to tell a
+    slow model from a stopped launcher. test15 and then test16 both stopped
+    here, and both were read as a stall (SYRD-245).
+    """
     failures: list[ModelValidationFailure] = []
     workspace = _ModelProbeWorkspace()
     try:
@@ -18010,6 +18067,12 @@ def validate_role_models(
             command = _model_validation_command(role, workspace.root)
             if command is None:
                 continue
+            named_model = role.model or f"{cli}'s default model"
+            print_func(
+                f"switchyard: checking {role.role}'s model ({named_model}) with {cli}; "
+                f"this asks it one question and waits up to "
+                f"{OWNER_CLI_PROBE_TIMEOUT_SECONDS:g}s for the answer"
+            )
             proc, history = _probe_role_model(
                 command=command,
                 owner_user=owner_user,
@@ -18747,6 +18810,7 @@ def run_first_run_auth_phase(
             owner_user=effective_owner,
             owner_home=effective_home,
             runner=runner,
+            print_func=print_func,
         )
 
     return FirstRunAuthReport(

@@ -49,7 +49,16 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
         )
 
     assert report.model_validation_failures == []
-    assert messages == []
+    # SYRD-245: a phase that probes models in silence is how a fresh tenant read
+    # as stalled -- the setup window is already handed back and the screen
+    # cleared by this point, so nothing on it says a probe is running. What must
+    # still hold is that a phase with nothing wrong reports no PROBLEM, which is
+    # asserted directly below and on the report itself.
+    checking = [line for line in messages if line.startswith("switchyard: checking ")]
+    assert len(checking) == len(role_models), (checking, role_models)
+    for role, model in role_models.items():
+        assert any(f"{role}'s model ({model})" in line for line in checking), (role, checking)
+    assert [line for line in messages if line not in checking] == []
     # One probe directory for the whole phase, and every model probe runs in it
     # rather than in the owner's home: the file the prompt names has to be in
     # the working directory the CLI is given (SYRD-111).
@@ -286,6 +295,11 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         "switchyard: codex will now run in this terminal as otto-agent to sign in. "
         "Complete what it asks -- a browser sign-in for some providers, a choice in the "
         "terminal for others; the terminal comes back on its own once the account is set up.",
+        # SYRD-245: the one role still probed says so before it is probed. The
+        # two skipped above say nothing, which is what keeps this list short.
+        "switchyard: checking bulk's model (openrouter/missing) with hermes; this asks it "
+        f"one question and waits up to {team_launcher.OWNER_CLI_PROBE_TIMEOUT_SECONDS:g}s "
+        "for the answer",
     ]
 
 def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_role() -> None:

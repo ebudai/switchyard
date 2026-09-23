@@ -307,6 +307,110 @@ def test_the_ordinary_step_still_shows_the_provider_and_records_the_answer() -> 
           f"with no failure claimed: {said}")
 
 
+# --- the wait after the trust steps -----------------------------------------
+#
+# test16, on the release carrying the fix above, halted again -- and after
+# Claude trust was reported COMPLETE. By then the setup window has been handed
+# back (its title is literally "Switchyard") and the screen cleared, and what
+# runs next is model validation: one provider invocation per role, stdin at
+# /dev/null, stdout and stderr captured, nothing printed before or between
+# them, and no timeout on any of it. A launcher waiting there is silent by
+# construction, which is the shape both fresh tenants showed.
+
+
+def test_a_probe_that_never_answers_is_given_up_on_rather_than_waited_on() -> None:
+    """The bound. Without it this call cannot return."""
+    asked: list[float] = []
+
+    def never_answers(args, **kwargs):
+        asked.append(kwargs.get("timeout", -1.0))
+        raise subprocess.TimeoutExpired(cmd=list(args), timeout=kwargs.get("timeout", 0))
+
+    proc = team_launcher._run_owner_cli_probe(
+        owner_user=OWNER,
+        owner_home=Path(f"/home/{OWNER}"),
+        command=["claude", "-p", "prove it"],
+        runner=never_answers,
+        timeout_seconds=12.0,
+    )
+
+    check(asked == [12.0], f"the probe was given a bound to run under: {asked}")
+    check(proc.returncode == team_launcher.PROBE_TIMED_OUT_STATUS,
+          f"and giving up is recorded as a failure, not a pass: {proc.returncode}")
+    check("gave up" in proc.stderr, f"saying it gave up: {proc.stderr}")
+    check("12s" in proc.stderr, f"after how long: {proc.stderr}")
+    check("sudo -u test15-agent" in proc.stderr,
+          f"and the command to run by hand: {proc.stderr}")
+
+
+def test_a_model_that_never_answers_becomes_a_named_failure() -> None:
+    """A stalled probe reaches the operator as a role, a CLI and a model."""
+    def never_answers(args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=list(args), timeout=kwargs.get("timeout", 0))
+
+    with tempfile.TemporaryDirectory(prefix="syrd245-probe.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / OWNER
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path, roles=[("director", "claude")],
+                role_models={"director": "claude-opus-5"},
+            ),
+        )
+        said: list[str] = []
+        failures = team_launcher.validate_role_models(
+            config.roles, owner_user=OWNER, owner_home=owner_home,
+            runner=never_answers, print_func=said.append,
+        )
+
+    check(len(failures) == 1, f"the role is reported rather than waited on: {failures}")
+    failure = failures[0]
+    check((failure.role, failure.cli, failure.model) == ("director", "claude", "claude-opus-5"),
+          f"named by role, CLI and model: {failure}")
+    check("gave up" in failure.reason or "gave up" in " ".join(failure.evidence),
+          f"and the reason says it was given up on: {failure.reason} {failure.evidence}")
+
+
+def test_the_phase_says_which_model_it_is_checking_before_it_checks() -> None:
+    """No silent gap between the last trust step and the panes.
+
+    The window has been handed back and the screen cleared by this point, so a
+    probe that says nothing leaves a cursor on an empty screen -- indisting-
+    uishable from a launcher that has stopped, which is exactly how test15 and
+    test16 were read.
+    """
+    answered = subprocess.CompletedProcess([], 0, stdout="model-ok\n", stderr="")
+
+    def answers(args, **_kwargs):
+        return answered
+
+    with tempfile.TemporaryDirectory(prefix="syrd245-progress.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / OWNER
+        owner_home.mkdir(parents=True)
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path, roles=[("director", "claude"), ("audit", "claude")],
+                role_models={"director": "claude-opus-5", "audit": "claude-opus-5"},
+            ),
+        )
+        said: list[str] = []
+        team_launcher.validate_role_models(
+            config.roles, owner_user=OWNER, owner_home=owner_home,
+            runner=answers, print_func=said.append,
+        )
+
+    check(len(said) == 2, f"one line per role, before its probe: {said}")
+    check(all("checking" in line for line in said), f"each says what it is doing: {said}")
+    check(any("director's model (claude-opus-5)" in line for line in said),
+          f"naming the role and the model: {said}")
+    check(all(str(int(team_launcher.OWNER_CLI_PROBE_TIMEOUT_SECONDS)) in line for line in said),
+          f"and how long it may take: {said}")
+
+
 def main() -> int:
     for name, case in sorted(globals().items()):
         if name.startswith("test_") and callable(case):

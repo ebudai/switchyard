@@ -134,3 +134,90 @@ change; it is called out here rather than done quietly.
 **`test15` is untouched.** No sudo was run, no live configuration read or
 written, and the tenant and its artifacts are preserved for diagnosis. The
 authoritative fresh Zorin end-to-end acceptance remains SYRD-222.
+
+---
+
+# The wait that was actually there
+
+The fix above shipped, and `test16` — a fresh Zorin tenant on the release
+carrying it — halted again, **after Claude trust was reported complete**. Title
+"Switchyard", no prompt, no progress.
+
+That is not the failure the first half of this note describes, and the title
+says so. `SETUP_WINDOW_TITLE_DONE` is literally `"Switchyard"`: the setup window
+had been *handed back*. The trust step did not fail to start a provider — it
+finished, cleared the screen (`\x1b[H\x1b[2J`) on its way out, and gave the
+terminal up. Whatever the run was waiting for came after.
+
+What comes after is model validation, and it is silent by construction:
+
+* one provider invocation per role, run through `_run_owner_cli_probe`;
+* `stdin=subprocess.DEVNULL`, `stdout=PIPE`, `stderr=PIPE` — so nothing the
+  provider prints reaches the screen;
+* **no `timeout`** anywhere in that path. The only probe timeout in the file,
+  `STATUS_PROBE_TIMEOUT_SECONDS`, belongs to `switchyard status`;
+* and the phase printed nothing before, between or after the probes.
+
+So: window handed back, screen cleared, cursor at home, and then up to one
+provider invocation per role that can wait forever while showing nothing. A
+cursor on an empty screen under a window titled "Switchyard" is precisely what
+both fresh tenants reported, and it is what this code does on purpose.
+
+## What changed
+
+**The probes are bounded.** `_run_owner_cli_probe` takes a timeout, defaulting
+to `OWNER_CLI_PROBE_TIMEOUT_SECONDS` (180s). A probe that does not answer is
+recorded as exit `124` — what `timeout(1)` uses — with a reason that says it
+gave up, after how long, and the exact command to run by hand. It becomes a
+named model-validation failure carrying the role, the CLI and the model, which
+the phase already knows how to report and resume from. It is not raised, because
+a traceback out of this phase loses which of several roles it was.
+
+A `TypeError` fallback re-runs without the keyword, so a caller's runner that
+predates the bound keeps working rather than being broken by a keyword it never
+accepted.
+
+**The phase says what it is doing.** Before each probe:
+
+    switchyard: checking director's model (claude-opus-5) with claude; this asks
+    it one question and waits up to 180s for the answer
+
+One line per role, before the thing that can take time. The screen is never
+blank with something running behind it.
+
+## Verification
+
+`tests/first_run_trust_step_silence_test.py` grows to 32 checks: a probe that
+never answers is given up on rather than waited on, with the bound it was given
+and the command in the message; a model that never answers becomes a failure
+named by role, CLI and model; and the phase says which model it is checking
+before it checks, one line per role, including how long it may take.
+
+Mutation over the new decisions, 3 mutants, all killed: dropping the `timeout`
+keyword; catching a different exception so a timeout escapes; and silencing the
+progress line. Two earlier attempts were discarded rather than counted — one
+whose anchor matched four places, and one that only produced a `SyntaxError`,
+which proves nothing about the test suite.
+
+Suites re-run per case against a clean worktree at the published base
+`f28a78f`: `first_run_setup_completion_test`,
+`team_launcher_first_run_models_test`, `team_launcher_model_tool_call_probe_test`,
+`model_probe_tool_call_evidence_test`, `first_run_login_inheritance_test` and
+`first_run_single_login_test` all pass in both trees.
+
+One assertion changed and it is worth naming: `team_launcher_first_run_models_test`
+asserted `messages == []` for a healthy phase — it pinned the silence this
+ticket is about. It now asserts one `checking` line per probed role, naming the
+role and its model, and that nothing else is said. What it protected, that a
+phase with nothing wrong reports no *problem*, is asserted directly and on the
+report itself.
+
+## Still open, and honestly
+
+I have still not observed the live `test16` wait. The desktop-side launcher's
+process state was requested and is pending, and until somebody captures it, that
+this unbounded silent probe is *the* wait remains an inference — a strong one,
+because it sits exactly where the run stops, produces exactly the described
+screen, and can wait forever by construction. If the pending process check shows
+a provider alive at the stall, this bound turns it into a named failure with the
+command to reproduce it, which is the evidence that check is trying to get.

@@ -91,7 +91,15 @@ def main(argv: list[str]) -> int:
             detail=": ".join(part for part in (args.label, args.detail) if part),
         )
         print(f"{PROGRAM}: recorded {attempt.attempt} in {directory}", flush=True)
-        return 0 if (args.exit_status in (None, 0)) else 1
+        # This program's own outcome, and nothing else. It used to mirror the
+        # exit status it had just been handed, which reads as "the recorder
+        # failed" to anybody checking a return code -- and that is exactly how
+        # a correctly recorded failed start came back as `boundary record
+        # failed: recorder exited 1` on a live host (SYRD-213). The status it
+        # records is in the record; the caller supplied it and already knows
+        # it. What a caller cannot know without this is whether the journal
+        # entry was written, so that is what is returned.
+        return 0
     boundary = rest.index("--")
     args = parser.parse_args(rest[:boundary])
     command = rest[boundary + 1 :]

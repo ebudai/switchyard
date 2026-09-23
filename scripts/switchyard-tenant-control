@@ -69,6 +69,13 @@ OPERATIONS: dict[str, tuple[object, ...]] = {
     "start": (PROJECT_ARGUMENT,),           # bare `switchyard <project>` starts or attaches
     "stop": ("stop", PROJECT_ARGUMENT),     # `switchyard stop <project>`
     "status": ("status", PROJECT_ARGUMENT), # `switchyard status <project>`
+    # Recovering the DIRECTOR's display slot, and only that slot. The role is
+    # written out here rather than taken from the caller, so this stays one
+    # fixed verb: `recover-display` cannot be aimed at another role any more
+    # than it can be aimed at another tenant. It exists because the ordinary
+    # recovery is gated to the Director's own pane, which is precisely what has
+    # gone away when somebody needs this (SYRD-239).
+    "recover-display": ("present", PROJECT_ARGUMENT, "recover", "director"),
 }
 PROJECT_SLUG = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 GRANT_ROOT = Path("/usr/local/lib/switchyard")

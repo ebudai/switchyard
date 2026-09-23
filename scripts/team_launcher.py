@@ -248,6 +248,12 @@ SWITCHYARD_COMMANDS = (
     # Reads the root-owned record of a privileged provisioning or upgrade run.
     # A role reads it directly rather than the User pasting output (SYRD-128).
     "rollout-log",
+    # Recovers a disconnected Director display slot from the desktop session
+    # that owns the screen. It runs through the tenant-control bridge, which
+    # authenticates the operator from SUDO_UID against the tenant's root-owned
+    # grant -- the ordinary recovery is gated to the Director's own pane, and
+    # that pane is what has gone away (SYRD-239).
+    "recover-display",
     # The one front door onto a bounded privileged operation: a catalogued
     # action name and typed values, pre-flown against the installed policy and
     # then asked for through pkexec. It replaces handing a sudo command to the
@@ -34181,7 +34187,7 @@ def _switchyard_user_can_prompt_for_sudo() -> bool:
 #: Lifecycle verbs the tenant control bridge will run. Everything else keeps
 #: the operator path: the bridge exists for start/stop/status, not for
 #: provisioning, upgrade or teardown.
-TENANT_CONTROL_OPERATIONS = {"start", "stop", "status"}
+TENANT_CONTROL_OPERATIONS = {"start", "stop", "status", "recover-display"}
 TENANT_CONTROL_ROOT = Path("/usr/local/lib/switchyard")
 
 

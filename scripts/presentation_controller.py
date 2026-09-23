@@ -342,15 +342,104 @@ def _validate_role_namespace(config: team_launcher.ProjectConfig) -> None:
             )
 
 
-def _require_director(config: team_launcher.ProjectConfig, environ: Mapping[str, str]) -> str:
+#: How an operator recovery is written in the presentation history. Prefixed
+#: rather than bare, so it can never be mistaken for a role name.
+OPERATOR_ACTOR_PREFIX = "operator:"
+
+
+def operator_recovery_caller(
+    config: team_launcher.ProjectConfig,
+    environ: Mapping[str, str],
+    *,
+    grant_root: Path | None = None,
+) -> str:
+    """The desktop operator this run was authorized for, or "".
+
+    The one bounded way a runtime presentation change happens without an
+    attached Director pane. It is not a second way to be the Director: it
+    authorizes exactly one action on exactly one slot, and everything it rests
+    on was decided by root before this process started.
+
+    `SWITCHYARD_TENANT_CONTROL_CALLER` is not a role the caller claims. The
+    tenant-control bridge is root-owned, reached through one NOPASSWD grant
+    naming that program, and it resolves the caller from SUDO_UID -- which the
+    kernel sets -- before checking it against the authorized user in this
+    tenant's root-owned grant file. This re-reads that same grant and requires
+    the two to agree, so a name that does not match the tenant's registered
+    operator authorizes nothing.
+
+    What this is NOT is a security boundary against the tenant's own accounts.
+    A modern tenant runs every role as the project account, so the account that
+    could set this variable is the account that already owns these sessions --
+    the same reason `_require_director` is an honesty gate rather than a
+    barrier (SYRD-112). The authentication that matters happens at the sudoers
+    boundary in the bridge; this is the tenant-side half agreeing with it.
+    """
+    caller = (environ.get(team_launcher.TENANT_CONTROL_CALLER_ENV) or "").strip()
+    if not caller:
+        return ""
+    # `_tenant_control_grant` already answers {} for a grant that is missing,
+    # unreadable, malformed, or that names another tenant -- so an empty
+    # `authorized_user` is every one of those cases, and re-checking them here
+    # would be unreachable code claiming to be a safeguard.
+    grant = team_launcher._tenant_control_grant(config.project, root=grant_root)
+    authorized = str(grant.get("authorized_user") or "").strip()
+    if not authorized or caller != authorized:
+        return ""
+    return caller
+
+
+def _require_director(
+    config: team_launcher.ProjectConfig,
+    environ: Mapping[str, str],
+    *,
+    operator_recovery: bool = False,
+    grant_root: Path | None = None,
+) -> str:
+    """Who may change this project's presentation at runtime.
+
+    `operator_recovery` is passed only by the one action that needs it: the
+    recovery of a disconnected Director slot. Every other runtime presentation
+    change stays Director-only, because every other one is an ordinary
+    operation the attached Director can perform -- while this one is the
+    action whose precondition is that the Director's slot is gone (SYRD-239).
+    """
     actor = (environ.get("TICKET_BOARD_CALLER_ROLE") or environ.get("PGU_TICKET_BOARD_CALLER_ROLE") or "").strip().lower()
-    if actor != DIRECTOR_ROLE:
+    operator = (
+        operator_recovery_caller(config, environ, grant_root=grant_root)
+        if operator_recovery and actor != DIRECTOR_ROLE
+        else ""
+    )
+    if actor != DIRECTOR_ROLE and not operator:
+        if operator_recovery:
+            # The catch-22 this replaces: the screen told the operator to run a
+            # command gated to the pane that had just disconnected. Name the
+            # one they can actually run instead of the variable they were
+            # previously left to work out and set by hand.
+            raise SystemExit(
+                "switchyard: recovering a disconnected Director slot needs either the "
+                f"Director's own pane or {config.project}'s registered operator. Run "
+                f"`switchyard recover-display {config.project}` from the desktop session "
+                "that owns the screen"
+            )
         raise SystemExit("switchyard: runtime presentation changes require TICKET_BOARD_CALLER_ROLE=director")
+    # Checked for the operator too, and against the project this config is for.
+    # The bridge pins the project from root-owned data, so this cannot normally
+    # disagree -- and a recovery aimed at another tenant is exactly the thing
+    # that must not work if it ever does.
     selected_project = (environ.get("TICKET_BOARD_PROJECT") or "").strip()
     if selected_project and selected_project != config.project:
         raise SystemExit(
             f"switchyard: refusing cross-project presentation change from {selected_project!r} to {config.project!r}"
         )
+    if operator:
+        # Named for what it is. The presentation history records this string,
+        # and recording an operator's recovery as `director` would put one
+        # party's action in another's name -- the same false attribution a
+        # relayed decision is careful to avoid. A reader of the history can
+        # tell the Director's own move from the recovery somebody else had to
+        # make because the Director's pane was gone.
+        return f"{OPERATOR_ACTOR_PREFIX}{operator}"
     return actor
 
 
@@ -808,15 +897,35 @@ def _proxy_command(
         return str(Path.home()), _status_command(message)
     role = _role_by_name(config, role_name)
     if role is not None and role_status.get("live"):
-        recovery = f"switchyard present {config.project} recover {role_name}"
+        recovery = _recovery_instruction(config, role_name)
         message = f"{config.project}: {role_name} disconnected; use `{recovery}`"
         attach = shlex.join(worker_attach_argv(config, role, observer=observer))
         script = f"{attach}; {_status_script(message)}"
         return role.workdir, shlex.join(["sh", "-lc", script])
     state = role_status.get("state", "unavailable")
     recovery = " (resume available)" if role_status.get("resumable") else ""
-    message = f"{config.project}: {role_name} is {state}{recovery}; use `switchyard present {config.project} recover {role_name}`"
+    message = (
+        f"{config.project}: {role_name} is {state}{recovery}; "
+        f"use `{_recovery_instruction(config, role_name)}`"
+    )
     return role.workdir if role is not None else str(Path.home()), _status_command(message)
+
+
+def _recovery_instruction(config: team_launcher.ProjectConfig, role_name: str) -> str:
+    """The command the person reading this slot can actually run.
+
+    A disconnected DIRECTOR slot is the catch-22 this exists for: the screen
+    used to name `switchyard present <project> recover director`, which is
+    gated to the Director pane that had just gone away, so the desktop operator
+    reading it was told to run the one command they could not (SYRD-239). They
+    get the operator entry point instead.
+
+    Every other slot keeps the Director's own command, because for those the
+    Director is still attached and it is still their call.
+    """
+    if (role_name or "").strip().lower() == DIRECTOR_ROLE:
+        return f"switchyard recover-display {config.project}"
+    return f"switchyard present {config.project} recover {role_name}"
 
 
 def _status_script(message: str) -> str:
@@ -861,7 +970,7 @@ def _configure_recovery_hook(
         assert role is not None
         message = (
             f"{config.project}: {role_name} disconnected; use "
-            f"`switchyard present {config.project} recover {role_name}`"
+            f"`{_recovery_instruction(config, role_name)}`"
         )
         respawn = shlex.join(
             [
@@ -1840,7 +1949,11 @@ def presentation_action(
 ) -> dict[str, Any]:
     config = runtime_assignment_config(config)
     _validate_role_namespace(config)
-    actor = _require_director(config, environ)
+    # Narrow on purpose: the operator path opens for the recovery of the
+    # DIRECTOR's slot and nothing else. A disconnected app or ops slot is still
+    # the Director's to recover, because the Director is still there to do it.
+    operator_recovery = action == "recover" and (role_name or "").strip().lower() == DIRECTOR_ROLE
+    actor = _require_director(config, environ, operator_recovery=operator_recovery)
     owner_runner = _tmux_runner(config, runner)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
 

@@ -961,12 +961,18 @@ def test_a_bounded_step_ends_when_the_cli_goes_back_to_its_prompt() -> None:
           "a step whose state was never recorded reported itself complete")
     check(not any("gave up waiting" in m for m in printed),
           f"the step burned its whole deadline instead of reading the screen: {printed}")
-    done = [m for m in printed if "ordinary prompt" in m]
-    check(done, f"nothing said the CLI had nothing left to ask: {printed}")
-    check("carrying on" in done[0],
-          f"the step did not say it was continuing: {done[0]}")
-    check("do not have to exit" in done[0],
-          f"the step still leaves the User wondering about /exit: {done[0]}")
+    said = [m for m in printed if "ordinary prompt" in m]
+    check(said, f"nothing said the CLI had nothing left to ask: {printed}")
+    # And it does not call that finished. The step returns False, so a launch
+    # will refuse the roles using this provider; announcing "done, carrying on"
+    # as well is the pair of statements the sbs operator was given -- "nothing
+    # left to ask, so this step is done", then "sign-in not finished" (SYRD-221).
+    check("carrying on" not in said[0],
+          f"the step announced itself done while reporting it was not: {said[0]}")
+    check("not recorded" in said[0],
+          f"the message does not say the account still lacks it: {said[0]}")
+    check("run the same switchyard command again" in said[0],
+          f"the message does not say how to finish it: {said[0]}")
 
 
 def test_a_step_says_what_it_observed_rather_than_what_it_assumed() -> None:
@@ -981,7 +987,7 @@ def test_a_step_says_what_it_observed_rather_than_what_it_assumed() -> None:
     check(done, "the trust step said nothing when it saw the prompt")
     check("first run" not in done[0],
           f"a folder-trust step claims to have finished a first run: {done[0]}")
-    check("directory" in done[0],
+    check("folder trust" in done[0],
           f"the message does not say what was being waited on: {done[0]}")
     # And the first run still says its own thing, rather than borrowing this one.
     _f, first_printed, _w = run_session(
@@ -991,6 +997,170 @@ def test_a_step_says_what_it_observed_rather_than_what_it_assumed() -> None:
     check(first_done, "the first-run step no longer reports reaching the prompt")
     check("first run" in first_done[0],
           f"the first-run step stopped naming its own step: {first_done[0]}")
+
+
+# --- the fourth answer: the account, once the provider has gone -------------
+#
+# Live UAT on a fresh `sbs` tenant, one new project owner account. Switchyard
+# said of AGY that it was "at its ordinary prompt with nothing left to ask, so
+# this step is done", then refused to launch with `agy: audit (sign-in not
+# finished)`, and closed by reporting `claude: designer, director (first-run
+# setup did not complete)`. The operator was asked to authenticate Claude three
+# times for that one owner account.
+#
+# Both halves are the same fault: the screen was treated as the authority. The
+# screen is evidence that the provider has nothing left to ask and nothing
+# more. What a role needs to start is what the ACCOUNT recorded -- which has to
+# be read after the provider has gone, because a CLI writes it on the way out.
+
+
+def run_session_that_records_on_exit(*, records_on_exit: bool):
+    """Drive the real watcher over a provider that leaves at its prompt.
+
+    `records_on_exit` is the only difference between the two live outcomes: a
+    CLI that writes its first run as it goes, and one that was never signed in
+    and writes nothing.
+    """
+    ticks = iter(range(0, 10_000))
+    printed: list[str] = []
+    written: list[str] = []
+    account = {"recorded": False}
+
+    class _LeavesWhenItIsTold(ReplaySession):
+        def write(self, text: str) -> None:
+            written.append(text)
+            # Its own way out: it writes what it keeps for the account and
+            # then exits, in that order, which is the ordering the closing
+            # line has to be reconciled against.
+            if records_on_exit:
+                account["recorded"] = True
+            self._returncode = 0
+
+    def factory(args, **kwargs):
+        return _LeavesWhenItIsTold(args, _screen="ordinary-prompt", **kwargs)
+
+    finished = team_launcher.run_provider_first_run_session(
+        cli="claude",
+        args=["claude"],
+        kwargs={},
+        is_complete=lambda: account["recorded"],
+        watching="claude first run",
+        session_factory=factory,
+        input_fd=None,
+        output_write=lambda _text: None,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: next(ticks),
+        quiet_seconds=0.0,
+        timeout_seconds=600.0,
+        print_func=printed.append,
+    )
+    return finished, printed, written
+
+
+def test_a_first_run_recorded_on_the_way_out_is_reported_as_finished() -> None:
+    """The good path the reconciliation must not cost.
+
+    Claude writes `hasCompletedOnboarding` as it exits. A step that read the
+    account only before sending `/exit` would call a finished first run
+    unfinished and refuse every role using that provider.
+    """
+    finished, printed, written = run_session_that_records_on_exit(records_on_exit=True)
+    check(written == ["/exit\r"],
+          f"the provider was not offered its own way out first: {written}")
+    check(finished is True,
+          "a first run the account recorded on exit was reported as unfinished")
+    said = [line for line in printed if "ordinary prompt" in line]
+    check(said, f"nothing was said about reaching the prompt: {printed}")
+    check("carrying on" in said[0],
+          f"a finished step did not say it was carrying on: {said[0]}")
+
+
+def test_a_step_never_says_done_while_returning_not_done() -> None:
+    """The sbs contradiction itself.
+
+    "Nothing left to ask, so this step is done" and "sign-in not finished" were
+    printed about the same provider in the same run. Whichever way it goes, the
+    closing line and the returned result have to be one statement.
+    """
+    for records_on_exit in (False, True):
+        finished, printed, _written = run_session_that_records_on_exit(
+            records_on_exit=records_on_exit
+        )
+        said = [line for line in printed if "ordinary prompt" in line]
+        check(said, f"nothing was said about reaching the prompt: {printed}")
+        check(("carrying on" in said[0]) is finished,
+              f"the closing line and the result disagree: said={said[0]!r} returned={finished}")
+        if not finished:
+            check("not recorded" in said[0],
+                  f"an unrecorded step did not say what is still missing: {said[0]}")
+            check("run the same switchyard command again" in said[0],
+                  f"an unrecorded step did not say how to finish it: {said[0]}")
+
+
+def test_an_unfinished_first_run_is_not_reopened_by_a_model_probe() -> None:
+    """Three prompts for one account, through the phase that produced them.
+
+    Claude's own first run does not finish. A model probe after it starts the
+    CLI itself, which shows that unfinished first run rather than answering the
+    probe -- so the operator is asked the same sign-in again, and the role is
+    then reported as having a broken model. The provider's own login step is a
+    different command and is still asked, exactly once: an account whose
+    welcome flow signs nobody in would otherwise be stranded (SYRD-191).
+    """
+    with tempfile.TemporaryDirectory(prefix="syrd221-thrice.") as tmp:
+        tmp_path = Path(tmp)
+        owner_home = tmp_path / "home" / "otto-agent"
+        owner_home.mkdir(parents=True)
+        # Models configured and validation on, because the probe is the step
+        # that reopens the unfinished first run: with it off this case would
+        # assert about a probe that was never going to run.
+        config = load_project_config(
+            "otto",
+            _write_first_run_auth_config(
+                tmp_path,
+                roles=[("director", "claude"), ("main", "claude"), ("ops", "codex")],
+                role_models={"director": "sonnet", "main": "sonnet", "ops": "gpt-5.5"},
+            ),
+        )
+        runner = FirstRunAuthRunner(authenticated_after_login=True)
+        messages: list[str] = []
+        report = team_launcher.run_first_run_auth_phase(
+            config, owner_user="otto-agent", owner_home=owner_home,
+            validate_models=True, runner=runner, print_func=messages.append,
+        )
+
+    def calls_of(*command: str) -> list[list[str]]:
+        return [call for call in runner.calls if call[-len(command):] == list(command)]
+
+    # Nothing records Claude's first run here -- the runner answers its prompts
+    # and writes no `.claude.json` -- which is the state the live tenant was in.
+    check(any(cli == "claude" for cli, _roles in report.incomplete_provider_setup),
+          f"this case needs Claude's first run to be unfinished: {report.incomplete_provider_setup}")
+    # Its own first run, identified by where it was run: once for the account,
+    # not once per role. The per-worktree trust runs are a different question
+    # in a different directory, and the User confirmed those were not what
+    # repeated.
+    owner_runs = [
+        call for call, kwargs in zip(runner.calls, runner.call_kwargs)
+        if call[-1:] == ["claude"] and str(kwargs.get("cwd")) == str(owner_home)
+    ]
+    check(len(owner_runs) == 1,
+          f"Claude's own first run was started {len(owner_runs)} times for one account")
+    check(len(calls_of("claude", "auth", "login")) == 1,
+          f"the account's own sign-in was not asked exactly once: "
+          f"{calls_of('claude', 'auth', 'login')}")
+    probes = [call for call in runner.calls if call[0] == "claude" or call[3:4] == ["claude"]]
+    model_probes = [call for call in probes if "-p" in call]
+    check(model_probes == [],
+          f"a model probe reopened the unfinished first run: {model_probes}")
+    check(report.model_validation_failures == [],
+          f"an account that has not finished its first run was reported as a bad model: "
+          f"{report.model_validation_failures}")
+    check(report.unauthenticated_roles == {},
+          f"the account was signed in by its own login step: {report.unauthenticated_roles}")
+    # Narrow: the provider whose first run was never in question is untouched.
+    check(calls_of("codex", "login") != [],
+          f"the other provider on the tenant was skipped too: {runner.calls}")
 
 
 def test_a_question_still_holds_the_window_open() -> None:

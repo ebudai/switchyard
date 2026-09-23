@@ -1007,3 +1007,111 @@ candidate, so the cross-user behaviour of the sign-in steps — whether `codex
 login` run as another user records its credentials where the probe reads them —
 remains the VM's to confirm. What can be said from here is that the step is no
 longer closed while it waits, and that no role starts without credentials.
+
+## sbs: "this step is done", and then "sign-in not finished"
+
+Live UAT on a fresh `sbs` tenant, one new project owner account. Switchyard
+said of AGY that it was at its ordinary prompt with nothing left to ask, so the
+step was done — and then refused to start any role, because `agy: audit
+(sign-in not finished)`. The same run ended `claude: designer, director
+(first-run setup did not complete)`, after the operator had authenticated
+Claude three times. The User confirmed those three were login prompts, not
+per-worktree trust prompts.
+
+Both halves are one fault: **the screen was being treated as the authority.**
+
+A quiet, settled screen is evidence of exactly one thing — the provider has
+nothing left to ask. It is not evidence that the account recorded anything.
+What a role needs in order to start is what the account recorded, and the step
+already read that; it just said something else on the way out.
+
+### Reconciled after the provider has gone, not before
+
+`run_provider_first_run_session` broke out of its watch loop with a closing
+message chosen from the screen, sent the provider its own exit input, and then
+returned `is_complete()`. The message and the return value were decided at
+different moments from different sources, so they could disagree — and on sbs
+they did.
+
+They are now decided together, once, after the provider has exited:
+
+```python
+finished = is_complete()
+if at_prompt and not finished:
+    closing_message = window.at_prompt_but_unrecorded()
+```
+
+The ordering matters in both directions. Reading the account *after* the exit is
+what lets a CLI that writes its state on the way out — Claude writes
+`hasCompletedOnboarding` as it goes — be reported as finished rather than
+refused. Reading it *at all* is what stops a step announcing itself done when
+the account still has nothing.
+
+`at_prompt_but_unrecorded()` is said instead of `done_at_prompt()`, never as
+well as it, and it says the three things the operator needed and was not given:
+what is still missing, that nothing was lost, and that re-running picks up from
+whatever is already recorded.
+
+### The third prompt was a model probe
+
+With the first run unfinished, model validation still ran. A probe starts the
+CLI itself, so what it gets is that unfinished first run rather than an answer —
+which asks the operator the same sign-in again, and then reports the role's
+*model* as broken, a problem the account does not have.
+
+Roles whose provider's own first run did not finish are therefore left out of
+model validation, alongside the roles already skipped for an unauthenticated or
+missing CLI.
+
+### What was deliberately not deduplicated
+
+Two steps were considered and left alone, because removing them would strand
+accounts rather than stop a repeat:
+
+* **The provider's own login.** `claude auth login` is a different command with
+  its own flow. An account whose welcome flow signs nobody in still needs it —
+  which is what SYRD-191's `first_run_login_inheritance_test` exists to protect.
+  Gating it on an unfinished first run made that suite's fresh tenant sign in
+  nobody at all.
+* **Folder trust.** It is a separate question per worktree, and the User's own
+  report rules it out: the repeats were login prompts, *not* per-worktree trust
+  prompts.
+
+### Verification
+
+`first_run_setup_completion_test`: 488 checks, and the three cases added here
+drive the real phase and the real watcher rather than a stand-in:
+
+* a first run recorded on the way out is reported as **finished** (the good
+  path the reconciliation must not cost);
+* a step never says "done" while returning not-done, asserted both ways round —
+  the closing line and the returned result must be one statement;
+* an unfinished first run is not reopened by a model probe, with the provider's
+  own login still asked exactly once.
+
+Mutation, 4 mutants over this round, all killed:
+
+| mutant | killed by |
+| --- | --- |
+| drop the `at_prompt` guard on the reconciliation | the stalled step, which then borrows the prompt wording it never earned |
+| `finished = at_prompt or is_complete()` | a step whose state was never recorded reporting itself complete |
+| drop `unfinished_first_run` from the model-probe skip | the probe reopening the unfinished first run |
+| the new message reverts to the old wording | the step announcing itself done while reporting it was not |
+
+The third of those first **survived**. The case asserting it did not pass
+`validate_models=True`, so no probe would have run either way and the assertion
+could not fail. Given real models and validation switched on, it kills the
+mutant.
+
+### Base
+
+Implemented on `c2796da` and compared against it, then rebased onto `d3c1cdc`
+with no conflicts. The intervening commits — `2ef2e6a` (report-only credential),
+`ed9efeb` (PostgreSQL cluster readiness), `d3c1cdc` (caller CLI discovery) — add
+732 lines to `team_launcher.py`, none of them inside the first-run region and
+none referenced by it: `classify_agent_cli`, `agent_cli_binary`,
+`AgentCliAvailability`, `promote_agent_cli*` and `_selected_release_commit`
+appear zero times between `run_provider_first_run_session` and
+`_resumable_next_action`. No overlap, so no broader sweep was repeated after the
+rebase; the focused suite and the four other suites this change touches were
+re-run on the rebased tree and all pass.

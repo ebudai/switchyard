@@ -200,7 +200,10 @@ def test_setup_runs_before_the_logins_it_can_make_unnecessary() -> None:
     login_at = phase.index("for step in manifest.login_steps:")
     check(setup_at < login_at,
           "the provider's own first run is attempted before any login step")
-    between = phase[login_at:login_at + 900]
+    # Anchored on the credential itself rather than a character count: what has
+    # to hold is that nothing between entering the loop and building the login
+    # command asks for a credential without re-reading the account first.
+    between = phase[login_at:phase.index("login_command = list(step.command)", login_at)]
     check("_cli_auth_status(" in between,
           "and each login re-reads the account before asking for a credential")
 
@@ -291,10 +294,15 @@ def test_a_provider_at_its_ordinary_prompt_is_ended_by_switchyard() -> None:
           f"well before the ten-minute bound: {clock['now']}s")
     check(not any("gave up waiting" in line for line in said),
           f"so the bound was never reached: {said}")
-    check(any("ordinary prompt" in line and "carrying on" in line for line in said),
+    check(any("ordinary prompt" in line for line in said),
           f"and it says why it closed: {said}")
-    check(any("do not have to exit anything" in line for line in said),
-          f"telling the person they need do nothing: {said}")
+    # The account never recorded it, so the closing line may not say the step is
+    # done -- the screen is not the authority (SYRD-221).
+    check(not any("carrying on" in line for line in said),
+          f"without claiming the step finished: {said}")
+    check(any("not recorded" in line and "switchyard command again" in line
+              for line in said),
+          f"telling the person what is still missing and how to finish it: {said}")
     check(completed is False,
           "the account still has not recorded it, and that is reported honestly")
 

@@ -150,6 +150,10 @@ def test_first_run_auth_phase_reports_bad_models_with_agy_suggestions_and_no_cat
             empty_success_models={("hermes", "openrouter/missing")},
         )
         runner.login_seen.update({"agy", "claude", "codex", "hermes"})
+        # Past its providers' first runs, which is the only tenant whose models
+        # are probed: an unfinished first run is what the CLI shows a probe
+        # instead of answering it (SYRD-221).
+        _mark_first_run_setup_complete(owner_home, config)
 
         report = team_launcher.run_first_run_auth_phase(
             config,

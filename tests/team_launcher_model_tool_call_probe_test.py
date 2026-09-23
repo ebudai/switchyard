@@ -44,6 +44,11 @@ def _config(tmp: Path, roles: list[tuple[str, str]], models: dict[str, str]) -> 
 
 
 def _validate(config, runner, owner_home: Path) -> list[object]:
+    # A tenant that has been through its providers' first runs, which is the
+    # only one whose models are probed at all: an unfinished first run is what
+    # the CLI shows a probe instead of answering it, so the phase leaves those
+    # roles alone rather than reporting their model as broken (SYRD-221).
+    _mark_first_run_setup_complete(owner_home, config)
     return team_launcher.run_first_run_auth_phase(
         config,
         owner_user="otto-agent",
@@ -147,6 +152,7 @@ def test_the_operator_message_names_the_role_and_the_model() -> None:
         config = _config(tmp_path, [("director", "claude")], {"director": "talks-only"})
         runner = FirstRunAuthRunner(tool_blind_models={("claude", "talks-only")})
         runner.login_seen.add("claude")
+        _mark_first_run_setup_complete(owner_home, config)
         messages: list[str] = []
         report = team_launcher.run_first_run_auth_phase(
             config, owner_user="otto-agent", owner_home=owner_home,
@@ -183,6 +189,7 @@ def test_the_three_failures_do_not_read_alike() -> None:
             unauthenticated_clis={"codex"},
         )
         runner.login_seen.update({"claude", "agy"})
+        _mark_first_run_setup_complete(owner_home, config)
         report = team_launcher.run_first_run_auth_phase(
             config, owner_user="otto-agent", owner_home=owner_home,
             validate_models=True, runner=runner,

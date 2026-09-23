@@ -16696,6 +16696,26 @@ class _SetupWindowNarrator:
             "carrying on. You do not have to exit anything.",
         ).format(cli=self._cli)
 
+    def at_prompt_but_unrecorded(self) -> str:
+        """The screen said finished and the account does not agree.
+
+        Said instead of `done_at_prompt`, never as well as it. The two used to
+        be decided at different moments -- the message while the provider was
+        still running, the result after it had gone -- so a step announced
+        itself done at an ordinary prompt and then blocked the launch as
+        unauthenticated. Live on sbs: "agy is at its ordinary prompt with
+        nothing left to ask, so this step is done", and then "agy: audit
+        (sign-in not finished)". Both cannot be true, and the account is the
+        one that decides (SYRD-221).
+        """
+        return (
+            f"switchyard: {self._cli} went back to its ordinary prompt, but its "
+            f"{self._purpose} is still not recorded for this account, so no role using "
+            f"{self._cli} can start yet. Nothing was lost: finish it by running {self._cli} "
+            "as that account, then run the same switchyard command again -- it picks up "
+            "from whatever is already recorded."
+        )
+
     def stalled(self, *, watching: str, timeout_seconds: float) -> str:
         """What to say when the deadline passed with the answer still missing."""
         detail = SETUP_STEP_STALLED_DETAIL.get(
@@ -16945,9 +16965,16 @@ def run_provider_first_run_session(
                     else:
                         sys.stdout.write(SETUP_STEP_CLEAR_SCREEN)
                         sys.stdout.flush()
+        # Reconciled here, with the provider gone: a CLI can write what it
+        # recorded on the way out, and the message has to agree with the result
+        # this returns rather than with what the screen looked like a moment
+        # before (SYRD-221).
+        finished = is_complete()
+        if at_prompt and not finished:
+            closing_message = window.at_prompt_but_unrecorded()
         if closing_message:
             print_func(closing_message)
-        return is_complete()
+        return finished
     finally:
         if session is not None:
             if session.poll() is None:
@@ -17841,6 +17868,21 @@ def run_first_run_auth_phase(
         )
         if not completed:
             incomplete_setup.append((step.cli, list(step.roles)))
+    #: Providers whose own first run did not finish in this pass. A model probe
+    #: for such a provider starts the CLI itself, which shows that unfinished
+    #: first run rather than answering the probe -- so it asks the operator the
+    #: same sign-in again and then reports the role's MODEL as broken, which is
+    #: a problem the account does not have. Live on sbs one owner account was
+    #: asked to authenticate Claude three times -- login prompts, confirmed by
+    #: the User as not per-worktree trust prompts -- and the run still ended
+    #: saying its first-run setup had not completed (SYRD-221).
+    #:
+    #: Two steps are deliberately NOT gated on this. The provider's own login
+    #: is a different command with its own flow, and an account whose welcome
+    #: flow signs nobody in would be stranded without it (SYRD-191). Folder
+    #: trust is a separate question per worktree, and the User confirmed those
+    #: prompts were not what repeated.
+    unfinished_first_run = {cli for cli, _roles in incomplete_setup}
 
     authenticated_now: dict[str, list[str]] = {}
     #: What the completion check last read, so the phase does not ask twice for
@@ -17936,7 +17978,11 @@ def run_first_run_auth_phase(
 
     model_validation_failures: list[ModelValidationFailure] = []
     if validate_models:
-        skipped_clis = set(unauthenticated) | set(missing_cli_roles)
+        # A provider whose first run is unfinished cannot answer a model probe
+        # either; running one asks the same unfinished question a third time
+        # and reports a model failure for an account that is simply not signed
+        # in yet (SYRD-221).
+        skipped_clis = set(unauthenticated) | set(missing_cli_roles) | unfinished_first_run
         model_roles = [role for role in config.roles if _role_cli_name(role) not in skipped_clis]
         model_validation_failures = validate_role_models(
             model_roles,

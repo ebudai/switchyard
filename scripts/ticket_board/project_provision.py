@@ -18,9 +18,11 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
 
 try:
+    from . import privileged_install
     from .board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
     from .commit_repos import commit_git_dir_env_for_project
 except ImportError:  # pragma: no cover - supports direct script execution
+    import privileged_install
     from board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
     from commit_repos import commit_git_dir_env_for_project
 
@@ -1422,6 +1424,21 @@ def role_tooling_staging_commands(
     """
     staging = role_tooling_staging_dir(project, root=staging_root)
     commands = [f"sudo install -d -m 0755 -o root -g root {shell_quote(staging)}"]
+    # The bounded privileged action boundary, installed and repaired from the
+    # same selected release as everything else here (SYRD-112). Host-wide
+    # rather than per tenant, and re-runnable, so every tenant's staging pass
+    # is also a repair of it: a helper whose mode drifted, a policy somebody
+    # removed and a release that never installed one are the same fix. It is
+    # here rather than only in the operator script because the operator script
+    # runs once, at provisioning, and an existing tenant would otherwise keep
+    # whatever its original provisioning happened to write -- the same way
+    # pane hooks were stranded on SYRD-234.
+    boundary_root, boundary_policy_dir = privileged_install.roots_for(staging_root)
+    commands.extend(
+        privileged_install.install_commands(
+            release_root, root=boundary_root, policy_dir=boundary_policy_dir
+        )
+    )
 
     def stage(source: str, target: str, mode: str) -> list[str]:
         """Stage what this release has, and take away what it does not.

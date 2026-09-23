@@ -223,6 +223,16 @@ SWITCHYARD_COMMANDS = (
     # Reads the root-owned record of a privileged provisioning or upgrade run.
     # A role reads it directly rather than the User pasting output (SYRD-128).
     "rollout-log",
+    # The one front door onto a bounded privileged operation: a catalogued
+    # action name and typed values, pre-flown against the installed policy and
+    # then asked for through pkexec. It replaces handing a sudo command to the
+    # User through chat (SYRD-112).
+    "privileged-action",
+    # Repoints /opt/switchyard/current at an already-built release, by commit
+    # alone: the bounded version of the bare `ln -sfn` the operator packet used
+    # to carry. Records the previous target before it moves anything, verifies
+    # what landed, and puts the previous target back if it does not (SYRD-112).
+    "install-shared-release",
     # Compares the shared release, the tenant's deployed board, the live build
     # and both upgrade journals, and -- only as root, and only after re-proving
     # the deployment from the running board -- closes the release phase. Its
@@ -276,9 +286,17 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # shell behind `worker-pool <project> attach <worker>`, which is precisely
     # the thing SYRD-76 exists to keep out from behind an operator's terminal
     # (SYRD-37).
+    #
+    # `privileged-action` is the sharpest case of all. It escalates itself,
+    # through pkexec, for one catalogued action at a time -- and the root-owned
+    # helper then proves the CALLER is the control role's registered pane by
+    # walking its own ancestry up to a tmux parent. A wrapper that ran this
+    # under sudo would put a privileged shell in the middle of that walk and
+    # change the identity being proved, so the boundary would be asked about
+    # the wrong process. It runs unprivileged, exactly as typed (SYRD-112).
     {
         "present", "attach", "board-skill", "role-prompt", "set-role-runtime",
-        "finish-upgrade", "worker-pool",
+        "finish-upgrade", "worker-pool", "privileged-action",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -31601,6 +31619,112 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_install_shared_release_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard install-shared-release",
+        description=(
+            "Make an already-built release this host's current one. Takes a full "
+            "content-addressed commit and nothing else: the release is resolved against "
+            "root's own cache under /opt/switchyard/releases, and a caller never names a "
+            "path. The previous target is recorded before anything moves, the pointer is "
+            "swapped atomically, what landed is verified, and the previous target is put "
+            "back if it does not verify."
+        ),
+    )
+    parser.add_argument("--commit", default="", help="the full 40-character commit to activate")
+    parser.add_argument(
+        "--rollback",
+        action="store_true",
+        help="return to the target recorded by the last activation",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="report and change nothing")
+    return parser
+
+
+def switchyard_install_shared_release_command(
+    commit: str,
+    *,
+    rollback: bool = False,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Activate a shared release, as root, with a way back recorded first."""
+    from scripts.ticket_board import privileged_actions, shared_release_activation
+
+    if rollback and commit:
+        print_func("switchyard: give either --commit or --rollback, not both")
+        return 2
+    if not rollback:
+        try:
+            commit = privileged_actions.action_for("install-shared-release").validate(
+                {"commit": commit}
+            )["commit"]
+        except privileged_actions.ArgumentError as exc:
+            print_func(f"switchyard: {exc}")
+            return 2
+    if os.geteuid() != 0:
+        # Not a refusal on principle: without root the pointer cannot move, and
+        # a message saying so beats a permission error from three frames down.
+        print_func(
+            "switchyard: install-shared-release changes /opt/switchyard/current and must "
+            "run as root. It is reached through `switchyard privileged-action <project> "
+            "install-shared-release commit=<sha>`, which asks polkit for it"
+        )
+        return 1
+    if dry_run:
+        record = shared_release_activation.recorded_rollback()
+        current = shared_release_activation.read_pointer()
+        print_func(f"switchyard: current points at {current or 'nothing'}")
+        print_func(
+            "switchyard: would activate "
+            + (f"the recorded previous target {record.get('previous_target') or 'nothing'}"
+               if rollback else commit)
+        )
+        return 0
+    try:
+        if rollback:
+            result = shared_release_activation.rollback(print_func=print_func)
+        else:
+            result = shared_release_activation.activate(commit, print_func=print_func)
+    except shared_release_activation.ActivationFailed as exc:
+        print_func(f"switchyard: {exc}")
+        return 1
+    print_func(f"switchyard: {result.describe()}")
+    return 0
+
+
+def _build_switchyard_privileged_action_parser() -> argparse.ArgumentParser:
+    from scripts.ticket_board import privileged_actions
+
+    known = ", ".join(action.name for action in privileged_actions.CATALOGUE)
+    parser = argparse.ArgumentParser(
+        prog="switchyard privileged-action",
+        description=(
+            "Run one bounded privileged Switchyard operation. An action is a name from a "
+            "fixed catalogue plus typed values -- never a program, a path, a command string "
+            "or an environment -- and polkit is asked only whether one installed, root-owned "
+            "helper may run that named action. Use --dry-run first: it reports the exact "
+            "action, the validated arguments, the installed policy, what root would run and "
+            "the rollback path, and asks for no privilege at all. "
+            f"Catalogued actions: {known}."
+        ),
+    )
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument("action", help="a catalogued action name")
+    parser.add_argument(
+        "values",
+        nargs="*",
+        metavar="key=value",
+        help="typed values for the action; anything undeclared is refused",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be asked for and stop, without requesting privilege",
+    )
+    return parser
+
+
 def _build_switchyard_rollout_log_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard rollout-log",
@@ -33726,6 +33850,30 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             publish_remote=getattr(args, "publish_remote", ""),
             upstream_report_url=getattr(args, "upstream_report_url", "") or "",
             upstream_report_token_file=getattr(args, "upstream_report_token_file", "") or "",
+        )
+    if argv[0].casefold() == "install-shared-release":
+        args = _build_switchyard_install_shared_release_parser().parse_args(argv[1:])
+        return switchyard_install_shared_release_command(
+            args.commit, rollback=args.rollback, dry_run=args.dry_run
+        )
+    if argv[0].casefold() == "privileged-action":
+        args = _build_switchyard_privileged_action_parser().parse_args(argv[1:])
+        values: dict[str, str] = {}
+        for item in args.values:
+            key, sep, value = item.partition("=")
+            if not sep or not key:
+                raise SystemExit(f"switchyard: expected key=value, got {item!r}")
+            if key in values:
+                raise SystemExit(f"switchyard: {key} was given twice")
+            values[key] = value
+        from scripts.ticket_board import privileged_front_door
+
+        return privileged_front_door.privileged_action_command(
+            args.project,
+            args.action,
+            values,
+            dry_run=args.dry_run,
+            rollback_commands=lambda project: release_rollback_commands(project),
         )
     if argv[0].casefold() == "rollout-log":
         args = _build_switchyard_rollout_log_parser().parse_args(argv[1:])

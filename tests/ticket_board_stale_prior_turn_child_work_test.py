@@ -38,6 +38,7 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from scripts.ticket_board.notify_listener import (
+    PRIOR_TURN_CHILD_WORK,
     STALE_PRIOR_TURN_CHILD_WORK,
     WORK_EVIDENCE_REASONS,
     PaneActivityGate,
@@ -287,7 +288,7 @@ def test_a_long_task_from_before_the_idle_hook_is_not_interrupted() -> None:
 
         busy, reason = pane.verdict()
         assert busy is True, reason
-        assert reason == "pane_child_work", reason
+        assert reason == PRIOR_TURN_CHILD_WORK, reason
 
 
 def test_a_sibling_leaving_cannot_hide_a_survivor_still_working() -> None:
@@ -317,7 +318,7 @@ def test_a_sibling_leaving_cannot_hide_a_survivor_still_working() -> None:
 
         busy, reason = pane.verdict()
         assert busy is True, reason
-        assert reason == "pane_child_work", reason
+        assert reason == PRIOR_TURN_CHILD_WORK, reason
         # And the survivor is still there, doing the work it was doing.
         assert set(pane.tree.living) == {3351479}, pane.tree.living
 
@@ -359,7 +360,7 @@ def test_a_stale_child_that_goes_back_to_work_is_busy_again() -> None:
         pane.tree.burn(6100)
         busy, reason = pane.verdict()
         assert busy is True, reason
-        assert reason == "pane_child_work", reason
+        assert reason == PRIOR_TURN_CHILD_WORK, reason
 
 
 def test_a_restart_with_the_leftovers_already_there_reaches_the_same_verdict() -> None:

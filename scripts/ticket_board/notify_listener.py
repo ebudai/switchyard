@@ -132,6 +132,16 @@ DEFAULT_CHILD_WORK_SAMPLE_DELAY_SECONDS = 0.6
 #: as idle. A resting runtime with a helper subprocess ticks a little; a test,
 #: build or mutation sweep does not stay under this.
 DEFAULT_CHILD_WORK_CPU_TICKS = 2
+#: How many consecutive probes a prior turn's descendant must keep using CPU on
+#: before it is believed to be progressing rather than waking. See
+#: `ORPHANED_PRIOR_TURN_WAITER` (SYRD-212).
+#: How long a handoff may wait behind a FINISHED turn's descendants before it
+#: is delivered anyway and the wait is escalated in the record. Fifteen minutes:
+#: long enough that an ordinary verification run started before the turn-end
+#: hook finishes inside it, short enough that nobody loses most of an hour to a
+#: poll loop nothing will ever satisfy. The live stall ran 38 minutes and was
+#: ended by a human (SYRD-212).
+DEFAULT_PRIOR_TURN_HOLD_MAX_SECONDS = 900.0
 MIN_RECOVERABLE_HOOK_EPOCH_SECONDS = 1_700_000_000.0
 DEFAULT_PANE_STATE_DIR = (
     Path(os.environ["TICKET_BOARD_PANE_STATE_DIR"]).expanduser()
@@ -189,6 +199,37 @@ SUPERSEDED_BY_AWAITING_ROLE = "superseded_by_awaiting_role"
 #: `pane_child_work`, which is this turn's work and still holds delivery; from
 #: the hook's own busy verdict; and from a human at the composer (SYRD-101).
 STALE_PRIOR_TURN_CHILD_WORK = "stale_prior_turn_child_work"
+#: A descendant of a finished turn that is still spending CPU, but only in the
+#: bursts a poll loop spends it in: awake on one probe, asleep on the next.
+#:
+#: SYRD-101 classified a prior turn's leftovers by lifecycle and made an
+#: exception for progress, so that an hour-long sweep from before the turn-end
+#: hook keeps its pane quiet. The exception was tested only for whether ANY
+#: survivor's CPU had risen, and a shell polling a task-output file every ten
+#: seconds raises it too. So the exception swallowed the rule: routing SYRD-211
+#: to App on 2026-09-18, notification 2842 sat undelivered for 38 minutes
+#: against a pane whose trusted hook had said idle at 21:02, because a SYRD-210
+#: poll loop started at 20:49 woke often enough to look like work (SYRD-212).
+#:
+#: The difference is not what the process is called; it is whether it is making
+#: progress or waiting. A build advances on every probe. A waiter advances on
+#: some and not others, which is what this reason names.
+ORPHANED_PRIOR_TURN_WAITER = "orphaned_prior_turn_waiter"
+#: A prior turn's descendant that IS progressing: CPU rising on consecutive
+#: probes, not in bursts. Held as work, exactly as SYRD-101 requires, but said
+#: with its own name so that a trace can tell it apart from this turn's work
+#: and from a waiter (SYRD-212).
+PRIOR_TURN_CHILD_WORK = "prior_turn_child_work"
+#: The holds a later handoff may not wait behind indefinitely: both come from a
+#: turn the runtime has already declared finished. `pane_child_work` is absent
+#: on purpose -- that is the CURRENT turn working, and interrupting it is what
+#: the activity gate exists to prevent.
+PRIOR_TURN_HOLD_REASONS = frozenset({PRIOR_TURN_CHILD_WORK, ORPHANED_PRIOR_TURN_WAITER})
+#: Why a queued handoff was dropped instead of delivered: the owner reached the
+#: ticket without it, so delivering would hand them the same assignment twice.
+OWNER_ALREADY_ACTED = "owner_already_acted"
+PRIOR_TURN_HOLD_DELIVER = "deliver"
+PRIOR_TURN_HOLD_DISCARD = "discard"
 #: The one stage a board with no declared workflow serialises, and the roles a
 #: static workflow never serialises in it. Both were written inline before a
 #: document could say otherwise; they are named here so it is visible that they
@@ -311,6 +352,9 @@ WORK_EVIDENCE_REASONS = frozenset(
         # A turn whose verification is still running is work, whether or not
         # anything reaches the screen (SYRD-58).
         "pane_child_work",
+        # The same, from a turn that has already ended: still work, still
+        # holding, and distinguishable in a trace (SYRD-212).
+        PRIOR_TURN_CHILD_WORK,
     }
 )
 
@@ -906,6 +950,7 @@ class PaneActivityGate:
         self.process_table_reader = process_table_reader
         self.child_work_sample_delay_seconds = max(0.0, child_work_sample_delay_seconds)
         self.child_work_cpu_ticks = max(0, child_work_cpu_ticks)
+
         self._child_work_memory_by_target: dict[str, ChildWorkMemory] = {}
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
@@ -1208,13 +1253,41 @@ class PaneActivityGate:
         anything else in the tree leaving. Arrivals need no accounting here:
         a tree that grew is handled as movement in its own right.
         """
+        return bool(self._survivors_that_advanced(first, second))
+
+    def _survivors_that_advanced(
+        self, first: ChildWorkSample, second: ChildWorkSample
+    ) -> frozenset[int]:
+        """WHICH survivors used the CPU, not merely whether any did.
+
+        A sum cannot say whose it was, and that is the whole of SYRD-212: a poll
+        loop left behind by a finished turn contributed the same few ticks a
+        working child would, so "something advanced" settled the verdict before
+        the prior-turn classification could be applied. Attributing the ticks
+        lets the two be told apart without naming either process.
+        """
         before = dict(first.cpu_by_pid)
+        advanced: set[int] = set()
+        for pid, cpu in second.cpu_by_pid:
+            if pid in before and cpu - before[pid] > self.child_work_cpu_ticks:
+                advanced.add(pid)
+        if advanced:
+            return frozenset(advanced)
+        # The tree as a whole may still have moved by less than any single
+        # process's allowance -- several helpers each ticking once. Kept as it
+        # was, attributed to whoever contributed, so no existing verdict
+        # changes for a tree that has no prior-turn children in it.
         used = sum(
             max(0, cpu - before[pid])
             for pid, cpu in second.cpu_by_pid
             if pid in before
         )
-        return used > self.child_work_cpu_ticks
+        if used > self.child_work_cpu_ticks:
+            return frozenset(
+                pid for pid, cpu in second.cpu_by_pid
+                if pid in before and cpu > before[pid]
+            )
+        return frozenset()
 
     def _prior_turn_children(
         self, sample: ChildWorkSample, trusted_idle_at: float | None
@@ -1270,7 +1343,8 @@ class PaneActivityGate:
         # Only arrivals are movement. A tree that shrinks is a turn finishing,
         # and treating that as work would make every turn end busy.
         appeared = second.pids - known
-        advanced = self._survivors_advanced(first, second)
+        advancing = self._survivors_that_advanced(first, second)
+        advanced = bool(advancing)
         arrived = (
             (remembered.arrived if remembered is not None else frozenset()) | appeared
         ) & second.pids
@@ -1295,6 +1369,16 @@ class PaneActivityGate:
             # the previous turn started and that is still running is real work,
             # whatever its age, and this is what keeps the ticket's "do not
             # interrupt a legitimate long task" requirement true without a clock.
+            #
+            # Which turn started it decides only what the trace is CALLED, not
+            # whether it holds. Naming it is the point: a hold that comes from a
+            # finished turn's descendant is the one that can starve a later
+            # handoff, and until SYRD-212 it was indistinguishable in the record
+            # from this turn's own work. The bound that stops it starving
+            # anything is the listener's, not this probe's -- a probe cannot
+            # know how long a build should be allowed to run.
+            if advancing and advancing <= prior_turn:
+                return ActivityTrace(True, PRIOR_TURN_CHILD_WORK)
             return ActivityTrace(True, "pane_child_work")
         if holding and not appeared and holding <= prior_turn:
             # Everything that would have held this pane predates the turn's own
@@ -1538,6 +1622,11 @@ class TicketBoardNotifyListener:
         requeue_base_seconds: float = DEFAULT_REQUEUE_BASE_SECONDS,
         requeue_max_seconds: float = DEFAULT_REQUEUE_MAX_SECONDS,
         busy_requeue_seconds: float = DEFAULT_BUSY_REQUEUE_SECONDS,
+        prior_turn_hold_max_seconds: float = DEFAULT_PRIOR_TURN_HOLD_MAX_SECONDS,
+        #: Injectable so a fixture can age a handoff without sleeping. Monotonic
+        #: because this measures how long a wait has lasted, and a wall clock
+        #: that steps backwards would shorten or erase it.
+        monotonic: Callable[[], float] = time.monotonic,
         idle_stall_grace_seconds: float = DEFAULT_IDLE_STALL_GRACE_SECONDS,
         idle_stall_nudge_cadence_seconds: float = DEFAULT_IDLE_STALL_NUDGE_CADENCE_SECONDS,
         idle_stall_escalate_after: int = DEFAULT_IDLE_STALL_ESCALATE_AFTER,
@@ -1566,6 +1655,12 @@ class TicketBoardNotifyListener:
         self.requeue_base_seconds = requeue_base_seconds
         self.requeue_max_seconds = requeue_max_seconds
         self.busy_requeue_seconds = busy_requeue_seconds
+        self.prior_turn_hold_max_seconds = max(0.0, prior_turn_hold_max_seconds)
+        self.monotonic = monotonic
+        #: When each still-queued handoff first waited behind a finished turn's
+        #: descendants. Keyed by notification, because the bound belongs to the
+        #: handoff that is waiting rather than to the pane it waits on.
+        self._prior_turn_hold_started_at: dict[int, float] = {}
         self.idle_stall_grace_seconds = idle_stall_grace_seconds
         self.idle_stall_nudge_cadence_seconds = idle_stall_nudge_cadence_seconds
         self.idle_stall_escalate_after = idle_stall_escalate_after
@@ -2022,6 +2117,107 @@ SELECT ticket_board.record_notification_trace(
 
     def _ack_notification(self, conn: Any, notification_id: int) -> None:
         conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
+
+    def _release_prior_turn_hold(
+        self,
+        conn: Any,
+        *,
+        notification_id: int,
+        ticket_id: str,
+        target_role: str,
+        kind: str,
+        activity_trace: ActivityTrace,
+    ) -> str:
+        """Decide whether a handoff has waited behind a finished turn too long.
+
+        Returns "" to leave the ordinary gate alone, `PRIOR_TURN_HOLD_DISCARD`
+        when the owner has already reached this ticket without us, and
+        `PRIOR_TURN_HOLD_DELIVER` when the wait is over the bound and the
+        handoff should go out with the wait recorded against it.
+
+        Only holds from a turn that has ENDED are bounded. This turn's own work
+        is not: interrupting it is precisely what the activity gate exists to
+        prevent, and no clock here may override that.
+        """
+        if activity_trace is None or activity_trace.reason not in PRIOR_TURN_HOLD_REASONS:
+            # Whatever is holding it now, it is not a finished turn's leftovers.
+            # Forgetting the wait is deliberate: a pane that went back to work
+            # for its CURRENT turn starts the bound again if it later falls back
+            # to a prior-turn hold.
+            self._prior_turn_hold_started_at.pop(notification_id, None)
+            return ""
+        now = self.monotonic()
+        started = self._prior_turn_hold_started_at.setdefault(notification_id, now)
+        held = now - started
+        if held < self.prior_turn_hold_max_seconds:
+            return ""
+        notified_at = self._owner_already_notified_at(conn, ticket_id, target_role)
+        if notified_at:
+            self._drop_superseded_notification(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                detail={
+                    "held_seconds": round(held, 1),
+                    "held_reason": activity_trace.reason,
+                    "owner_notified_at": notified_at,
+                },
+                phase="prior_turn_hold",
+                reason=OWNER_ALREADY_ACTED,
+            )
+            self._prior_turn_hold_started_at.pop(notification_id, None)
+            return PRIOR_TURN_HOLD_DISCARD
+        self.logger.warning(
+            "Delivering notification %s for %s past a finished turn's %s held %.0fs",
+            notification_id, ticket_id, activity_trace.reason, held,
+        )
+        self._trace_notification(
+            conn,
+            notification_id=notification_id,
+            ticket_id=ticket_id,
+            target_role=target_role,
+            kind=kind,
+            event="gate_escalate",
+            pane_busy=True,
+            busy_reason=ORPHANED_PRIOR_TURN_WAITER,
+            detail={
+                "held_seconds": round(held, 1),
+                "held_reason": activity_trace.reason,
+                "bound_seconds": self.prior_turn_hold_max_seconds,
+            },
+        )
+        self._prior_turn_hold_started_at.pop(notification_id, None)
+        return PRIOR_TURN_HOLD_DELIVER
+
+    def _owner_already_notified_at(self, conn: Any, ticket_id: str, target_role: str) -> str:
+        """When this ticket's owner was last sent this assignment, if ever.
+
+        The board's own `active_work_notified_at`: the newest successful send of
+        a transition for this ticket, to this role, in the state it is in now.
+        Read here rather than assumed, because it is the difference between a
+        handoff nobody has seen -- which must go out -- and a second copy of one
+        they already have (SYRD-212).
+        """
+        result = conn.execute(
+            """
+SELECT max(trace.ts)::text AS last_sent_at
+FROM ticket_board.notification_trace trace
+JOIN ticket_board.tickets t ON t.id = trace.ticket_id
+WHERE trace.ticket_id = %s
+  AND trace.target_role = %s
+  AND trace.kind = 'transition'
+  AND trace.event = 'send'
+  AND trace.ticket_state_at_event = t.state
+""",
+            (ticket_id, target_role),
+        )
+        row = result.fetchone()
+        if row is None:
+            return ""
+        value = row["last_sent_at"] if isinstance(row, dict) else row[0]
+        return self._decode_text(value).strip()
 
     def _discard_notification(self, conn: Any, notification_id: int, reason: str) -> None:
         """Remove a queued notification that was never delivered.
@@ -3081,7 +3277,26 @@ WHERE (r.definition->>'active')::boolean
                 continue
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target)
             composer_before = self._composer_snapshot(target)
-            if self._should_defer_for_activity(activity_trace):
+            # A hold that comes from a turn which has already ended is the one
+            # that can starve a handoff assigned after that turn-end. SYRD-101
+            # was right that it must not be broken by a clock -- an hour-long
+            # sweep has to keep its pane quiet -- but "not by a clock" cannot
+            # mean "for ever": notification 2842 sat undelivered for 38 minutes
+            # behind a SYRD-210 poll loop while App's own hook had said idle,
+            # and only a human stopping that process group released it. The
+            # probe still decides what is work; the bound lives here, where the
+            # age of the HANDOFF is known (SYRD-212).
+            release = self._release_prior_turn_hold(
+                conn,
+                notification_id=notification_id,
+                ticket_id=ticket_id,
+                target_role=target_role,
+                kind=kind,
+                activity_trace=activity_trace,
+            )
+            if release == PRIOR_TURN_HOLD_DISCARD:
+                continue
+            if self._should_defer_for_activity(activity_trace) and release != PRIOR_TURN_HOLD_DELIVER:
                 if self._reminder_is_stale_for_activity(kind, activity_trace):
                     self._drop_stale_reminder(
                         conn,
@@ -3133,7 +3348,13 @@ WHERE (r.definition->>'active')::boolean
                     break
             pane_busy, activity_trace = self._activity_state_for_notification(kind, target, pre_send_recheck=True)
             composer_before = self._composer_snapshot(target)
-            if self._should_defer_for_activity(activity_trace):
+            # The same release the first gate honoured. Without it the recheck a
+            # moment later re-imposes the hold this handoff has already waited
+            # out, and the bound buys nothing (SYRD-212).
+            if self._should_defer_for_activity(activity_trace) and not (
+                release == PRIOR_TURN_HOLD_DELIVER
+                and activity_trace.reason in PRIOR_TURN_HOLD_REASONS
+            ):
                 if self._reminder_is_stale_for_activity(kind, activity_trace):
                     self._drop_stale_reminder(
                         conn,

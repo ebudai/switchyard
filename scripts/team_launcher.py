@@ -12852,6 +12852,13 @@ class ModelValidationFailure:
     model: str
     reason: str
     suggestion: str
+    #: One bounded, token-free line per probe attempt. Kept so an operator can
+    #: tell a model that never tried to read the file from one whose read
+    #: failed, from a provider error -- which the reason alone cannot do, and
+    #: which is what sent a fresh Zorin run looking for a model change it may
+    #: not have needed (SYRD-244). Defaulted so every existing construction of
+    #: this record keeps working unchanged.
+    evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -13906,6 +13913,28 @@ MODEL_PROBE_NO_TOOL_CALL_REASON = (
     "model answered but completed no tool call: the reply did not carry the token from "
     f"{MODEL_PROBE_FILENAME}"
 )
+#: How many times a model that ANSWERS but returns no token is asked again.
+#:
+#: One prose reply does not establish that a model cannot call tools. A model
+#: that answers from the prompt on one turn and reads the file on the next is a
+#: model that can call tools, and declaring otherwise sent an operator to change
+#: a model that was fine (SYRD-244). Deliberately small: the probe is a live
+#: model round trip on the critical path of `switchyard new`, so every extra
+#: attempt is time a person spends watching a terminal.
+#:
+#: Only the ambiguous outcome is retried. A non-zero exit already carries the
+#: vendor's own message -- an unauthenticated CLI or an unknown model name --
+#: and asking again produces the same message more slowly.
+MODEL_PROBE_TOOL_CALL_ATTEMPTS = 2
+#: How much of one attempt's output is kept as evidence, per stream.
+#:
+#: Enough to tell the four outcomes apart -- no attempt, a failed read, a
+#: provider error, a later success -- and short enough that a preflight warning
+#: stays readable. The token is removed before anything is kept: it appears in
+#: BOTH streams on a healthy codex run, which is exactly how a transcript of a
+#: successful probe would otherwise carry the one value the probe's whole
+#: meaning rests on being unguessable.
+MODEL_PROBE_EVIDENCE_CHARS = 240
 
 
 #: What a selected CLI is, from the point of view of a tenant owner that does
@@ -17828,6 +17857,107 @@ def _model_probe_called_a_tool(proc: subprocess.CompletedProcess[Any], token: st
     return token in str(getattr(proc, "stdout", "") or "")
 
 
+@dataclass(frozen=True)
+class ModelProbeAttempt:
+    """What one probe round trip showed, with nothing secret kept.
+
+    The four outcomes SYRD-244 asks to be told apart are read off these:
+    a token means a tool ran; a sentinel without a token means the model
+    answered without reading; a non-zero exit carries the provider's own
+    message; and a later attempt carrying the token means the earlier one was
+    a transient reply rather than a limit of the model.
+    """
+
+    attempt: int
+    exit_status: int
+    answered: bool
+    called_tool: bool
+    evidence: str
+
+    def describe(self) -> str:
+        if self.called_tool:
+            outcome = "read the file"
+        elif self.answered:
+            outcome = "answered without reading the file"
+        else:
+            outcome = "did not answer"
+        detail = f": {self.evidence}" if self.evidence else ""
+        return f"attempt {self.attempt} (exit {self.exit_status}) {outcome}{detail}"
+
+
+def _model_probe_evidence(
+    proc: subprocess.CompletedProcess[Any], token: str, *, limit: int = MODEL_PROBE_EVIDENCE_CHARS
+) -> str:
+    """One bounded, token-free line describing what the probe got back.
+
+    The token is removed FIRST and from both streams. A healthy codex run
+    echoes it to stdout and stderr alike, so evidence kept before redaction
+    would publish the one value the probe depends on being unguessable -- into
+    a warning an operator may well paste somewhere.
+
+    stderr before stdout: when a probe fails, the reason is almost always
+    there, while stdout is empty or a partial answer.
+    """
+    parts: list[str] = []
+    for stream in ("stderr", "stdout"):
+        raw = getattr(proc, stream, "") or ""
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        text = str(raw)
+        if token:
+            text = text.replace(token, "<token>")
+        collapsed = " ".join(text.split())
+        if collapsed:
+            parts.append(f"{stream}: {collapsed}")
+    joined = " | ".join(parts)
+    if len(joined) > limit:
+        joined = joined[: limit - 1].rstrip() + "\u2026"
+    return joined
+
+
+def _probe_role_model(
+    *,
+    command: Sequence[str],
+    owner_user: str,
+    owner_home: Path,
+    workspace: "_ModelProbeWorkspace",
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    attempts: int = MODEL_PROBE_TOOL_CALL_ATTEMPTS,
+) -> tuple[subprocess.CompletedProcess[Any], list[ModelProbeAttempt]]:
+    """Ask until the model reads the file, or until the attempts run out.
+
+    Returns the LAST process and every attempt's evidence. Only the ambiguous
+    outcome -- answered, no token -- is retried; a non-zero exit is the
+    provider telling us something deterministic, and repeating it just makes
+    the operator wait twice for the same sentence.
+    """
+    history: list[ModelProbeAttempt] = []
+    proc: subprocess.CompletedProcess[Any] | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        proc = _run_owner_cli_probe(
+            owner_user=owner_user,
+            owner_home=owner_home,
+            command=command,
+            runner=runner,
+            cwd=workspace.root,
+        )
+        answered = _model_validation_passed(proc)
+        called_tool = answered and _model_probe_called_a_tool(proc, workspace.token)
+        history.append(
+            ModelProbeAttempt(
+                attempt=attempt,
+                exit_status=int(getattr(proc, "returncode", 1) or 0),
+                answered=answered,
+                called_tool=called_tool,
+                evidence=_model_probe_evidence(proc, workspace.token),
+            )
+        )
+        if called_tool or not answered:
+            break
+    assert proc is not None
+    return proc, history
+
+
 def validate_role_models(
     roles: Sequence[RoleConfig],
     *,
@@ -17843,22 +17973,28 @@ def validate_role_models(
             command = _model_validation_command(role, workspace.root)
             if command is None:
                 continue
-            proc = _run_owner_cli_probe(
+            proc, history = _probe_role_model(
+                command=command,
                 owner_user=owner_user,
                 owner_home=owner_home,
-                command=command,
+                workspace=workspace,
                 runner=runner,
-                cwd=workspace.root,
             )
-            tool_call_missing = False
-            if _model_validation_passed(proc):
-                if _model_probe_called_a_tool(proc, workspace.token):
-                    continue
-                tool_call_missing = True
+            # A later attempt that reads the file settles it: the model can call
+            # tools, and the earlier reply was a reply rather than a limit.
+            if any(entry.called_tool for entry in history):
+                continue
+            tool_call_missing = history[-1].answered
             if tool_call_missing:
                 # Distinct from an unauthenticated CLI, which fails non-zero
                 # with the vendor's own message, and from an unknown model,
-                # which fails the same way with a name in it. This one answered.
+                # which fails the same way with a name in it. This one answered
+                # -- every time it was asked.
+                # Left exactly as SYRD-111 defined it. The string is the
+                # identifier for this outcome and other code compares against
+                # it; how many times the model was asked belongs in the
+                # evidence below, which is printed with it and says "attempt 1"
+                # and "attempt 2" in as many words.
                 reason = MODEL_PROBE_NO_TOOL_CALL_REASON
                 suggestion = _tool_call_failure_suggestion(cli, role.model)
             else:
@@ -17878,6 +18014,7 @@ def validate_role_models(
                     model=role.model,
                     reason=reason,
                     suggestion=suggestion,
+                    evidence=tuple(entry.describe() for entry in history),
                 )
             )
     finally:
@@ -18653,6 +18790,12 @@ def report_first_run_auth_warnings(
             f"warning: switchyard: model validation failed for role {failure.role} "
             f"(cli {failure.cli}, model {failure.model}): {failure.reason}; {failure.suggestion}"
         )
+        # What actually came back, per attempt. Without it the reader is told a
+        # conclusion and given nothing to check it against -- which is how a
+        # fresh Zorin run ended with a model change nobody could confirm was
+        # the right remedy (SYRD-244). Token-free by construction.
+        for line in failure.evidence:
+            print_func(f"warning: switchyard:   probe {line}")
     if report.github_identity is not None:
         remedy = github_identity_remedy(report.github_identity)
         if remedy:

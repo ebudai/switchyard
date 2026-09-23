@@ -293,6 +293,10 @@ SWITCHYARD_COMMANDS = (
     "teardown",
     "status",
     "validate-models",
+    # Hands ONE image from the desktop owner's clipboard to one role, because on
+    # a compositor without a data-control protocol no provider can read that
+    # clipboard itself. Run by the owner, never by a role (SYRD-247).
+    "paste-image",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
 # and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
@@ -333,9 +337,17 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # prompt for a read. The root-owned registry, release and journal records
     # this reports are world-readable by design; anything it cannot read is
     # named as unavailable instead (SYRD-241).
+    #
+    # `paste-image` must run as the DESKTOP OWNER and as nobody else. It reads
+    # that owner's clipboard, which is exactly the authority it is passing on,
+    # one image at a time. Escalating it would read root's clipboard -- there
+    # isn't one -- and running it as the tenant is the thing it refuses by
+    # identity, because that would be a clipboard read primitive for every role
+    # sharing that UID (SYRD-247, SYRD-98).
     {
         "present", "attach", "board-skill", "role-prompt", "set-role-runtime",
         "finish-upgrade", "worker-pool", "privileged-action", "status",
+        "paste-image",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -24278,6 +24290,74 @@ def switchyard_status_command(
     return 0
 
 
+def switchyard_paste_image_command(
+    project: str,
+    role_name: str,
+    *,
+    config_dir: Path | None = None,
+    registry_dir: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Leave one clipboard image where one role's own listener will collect it.
+
+    Run by the desktop owner. It deposits and grants; it does not deliver,
+    because the desktop owner holds no grant to run tmux as the tenant -- that
+    belongs to the project owner account, which is the side that collects
+    (SYRD-247 review).
+    """
+    from scripts import desktop_access, image_handoff
+
+    entry = _resolve_switchyard_project(project, config_dir=config_dir, registry_dir=registry_dir)
+    config = load_project_config(entry.slug, entry.config_path)
+    tenant = str(config.run_as_user or "").strip()
+    tenant_uid = _uid_for_user(tenant) if tenant else None
+    if tenant_uid is None:
+        raise SystemExit(
+            f"switchyard: {entry.slug} records no owner account, so there is nobody to grant "
+            "an image to"
+        )
+    gui_runtime = _paste_image_gui_runtime(config)
+    try:
+        return image_handoff.hand_image_to_role(
+            config,
+            role_name=role_name,
+            tenant_uid=tenant_uid,
+            gui_runtime=gui_runtime,
+            # The real thing, in the shipped path. The first version defaulted
+            # this and granted nothing, and only a test's injected fake made it
+            # look wired (SYRD-247 review).
+            grant=lambda path, uid, perms: desktop_access.grant(path, uid, perms),
+            print_func=print_func,
+        )
+    except image_handoff.ImageHandoffError as exc:
+        raise SystemExit(str(exc)) from None
+
+
+def _paste_image_gui_runtime(config: ProjectConfig) -> Path:
+    """The GUI runtime this project's desktop grant already reaches into.
+
+    Read from the approved policy rather than from this process's environment,
+    so a handoff cannot be aimed at another session by exporting a variable.
+    """
+    access = getattr(config, "desktop_access", None)
+    if access is None:
+        raise SystemExit(
+            f"switchyard: {config.project} is installed headless, so it has no desktop "
+            "clipboard to hand an image from"
+        )
+    gui_user = str(getattr(access, "gui_user", "") or "").strip()
+    if not gui_user:
+        raise SystemExit(
+            f"switchyard: {config.project}'s desktop policy names no GUI user, so there is no "
+            "clipboard to read"
+        )
+    uid = _uid_for_user(gui_user)
+    if uid is None:
+        raise SystemExit(f"switchyard: {config.project}'s desktop policy names {gui_user}, who does not exist")
+    return Path(f"/run/user/{uid}")
+
+
 def switchyard_validate_models_command(
     project: str,
     *,
@@ -34413,6 +34493,7 @@ Commands:
   release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
+  paste-image      hand one clipboard image from the desktop owner to a role
 
 Bare project names start or attach the project. Recognized commands: {commands}.
 """
@@ -35766,6 +35847,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             entry = _resolve_switchyard_project(selection)
             return switchyard_status_command(json_output=args.json, project=entry.slug)
         return switchyard_status_command(json_output=args.json)
+    if argv[0].casefold() == "paste-image":
+        if len(argv) != 3:
+            raise SystemExit(
+                "switchyard paste-image requires <project> <role>; run it as the desktop "
+                "owner, with the image already copied"
+            )
+        return switchyard_paste_image_command(argv[1], argv[2])
     if argv[0].casefold() == "validate-models":
         if len(argv) < 2:
             raise SystemExit("switchyard validate-models requires <project>")

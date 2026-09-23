@@ -110,8 +110,9 @@ Commands:
   release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
+  paste-image      hand one clipboard image from the desktop owner to a role
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, release-status, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, start, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, release-status, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, start, teardown, status, validate-models, paste-image.
 ```
 
 <!-- switchyard-help:end -->

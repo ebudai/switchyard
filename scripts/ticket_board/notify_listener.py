@@ -1613,6 +1613,9 @@ class TicketBoardNotifyListener:
         *,
         conninfo: str,
         project: str = DEFAULT_PROJECT,
+        #: Where the desktop owner leaves a clipboard image for a role. None on
+        #: a tenant with no approved desktop, which is most of them.
+        clipboard_handoff_dir: Path | None = None,
         channel: str = CHANNEL,
         sender: Callable[[str, str], None] | None = None,
         activity_gate: Callable[[str], bool] | None = None,
@@ -1645,6 +1648,11 @@ class TicketBoardNotifyListener:
         self.ephemeral_roles: set[str] = set()
         self.role_runtimes: dict[str, str] = {}
         self.project = project
+        #: Where the desktop owner leaves an image for one of this project's
+        #: roles, or None when this tenant has no approved desktop. Resolved
+        #: once from the environment the owner's policy established, never from
+        #: a caller's argument (SYRD-247).
+        self.clipboard_handoff_dir = clipboard_handoff_dir
         self.conninfo = conninfo
         self.channel = channel
         self.sender = sender or DirectorctlSender()
@@ -3574,6 +3582,33 @@ WHERE (r.definition->>'active')::boolean
         else:
             self.logger.info("Pane hook state present for all notification targets")
 
+    def process_clipboard_image_handoffs(self) -> list[str]:
+        """Collect images the desktop owner left for this project's roles.
+
+        This account is the one that can. On a compositor without a data-control
+        protocol no provider can read the desktop clipboard, so the owner deposits
+        one bounded image into their own runtime and grants this account read on
+        it -- and only this account holds the sudoers grant to run tmux as the
+        roles, which is why the delivery is here and not in the owner's command
+        (SYRD-247).
+
+        Runs on the same loop as everything else, which is what makes the
+        cleanup guarantee true without an acknowledgement protocol: a handoff is
+        delivered and removed, expires and is removed, or cannot be read and is
+        removed.
+        """
+        directory = self.clipboard_handoff_dir
+        if directory is None:
+            return []
+        from scripts import image_handoff
+
+        return image_handoff.collect_pending_handoffs(
+            directory,
+            send=lambda target, message: self.sender(target, message),
+            now=time.time(),
+            log=self.logger.info,
+        )
+
     def listen_once(self, *, max_notifications: int | None = None) -> int:
         delivered_before = self.delivered_count
         with self.connector(self.conninfo, **self._connector_kwargs()) as conn:
@@ -3585,6 +3620,7 @@ WHERE (r.definition->>'active')::boolean
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 self.process_serial_focus_queue_wakeups(conn)
+                self.process_clipboard_image_handoffs()
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:
                     break

@@ -209,8 +209,19 @@ if [[ "$send_file_stdout" != "directorctl: delivered to pgu-main:0.0 (22 chars, 
     echo "FAIL: send-file success output mismatch: $send_file_stdout" >&2
     exit 1
 fi
-if ! grep -q -- "please read /tmp/directorctl_payload\..* (first line) and follow the instructions therein" "$TMUX_LOG"; then
+if ! grep -q -- "please read /tmp/directorctl_payload\..* (first line)" "$TMUX_LOG"; then
     echo "FAIL: send-file did not use the staged pointer path" >&2
+    cat "$TMUX_LOG" >&2
+    exit 1
+fi
+# SYRD-230: the pointer ends after the path and the first-line preview. The
+# imperative tail it used to carry is an artifact of the earliest directorctl
+# protocol -- the staged file and its preview already identify the handoff, and
+# an instruction appended to a transport pointer reads like a directive of its
+# own. Asserted on what was actually sent to the pane, so it covers the message
+# a role receives rather than the string a caller passed in.
+if grep -q -- "and follow the instructions therein" "$TMUX_LOG"; then
+    echo "FAIL: the staged pointer still carries the obsolete instruction suffix" >&2
     cat "$TMUX_LOG" >&2
     exit 1
 fi

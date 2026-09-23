@@ -428,7 +428,7 @@ composer to settle, then verify that Enter actually submitted:
 For payloads longer than 200 characters or containing newlines, directorctl
 does NOT paste into the codex composer. It stages the payload in a temp file
 and sends a short one-line pointer instead:
-  please read /tmp/directorctl_payload.XXXXXX.txt and follow the instructions therein
+  please read /tmp/directorctl_payload.XXXXXX.txt (<first line of the payload>)
 
 Environment:
   DIRECTORCTL_ENTER_DELAY         Seconds to sleep between payload and
@@ -575,7 +575,7 @@ send_payload() {
         local first_line
         first_line="$(echo "$payload" | head -n 1)"
         first_line="$(echo "$first_line" | sed -E 's/[[:space:]]+/ /g;s/^[[:space:]]+//;s/[[:space:]]+$//' | cut -c1-120)"
-        pointer_payload="please read $staged_path ($first_line) and follow the instructions therein"
+        pointer_payload="please read $staged_path ($first_line)"
         submit_short_line "$target" "$pointer_payload"
     else
         submit_short_line "$target" "$payload"

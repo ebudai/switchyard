@@ -3117,6 +3117,45 @@ def _quote_command(args: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
+_KONSOLE_SAFE_CHARACTER = re.compile(r"[A-Za-z0-9_@%+=:,./-]")
+_KONSOLE_SAFE_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
+
+
+def _konsole_quote(value: str) -> str:
+    """Quote one argument for a Konsole layout's `Command`.
+
+    NOT `shlex.quote`. A layout command is split by Konsole, which is not a
+    shell, and the two disagree on exactly one construction: the `'\\''` idiom
+    POSIX quoting uses for an embedded apostrophe. Konsole leaves a stray `'`
+    behind and hands it to the LAST argument on the line, so mefp -- whose
+    project title is `Morfane's Epic Fix Patch` -- opened four panes that each
+    ran `switchyard-display-attach mefp 0'` and exited `slot must be a number
+    or viewer` (SYRD-233 live UAT).
+
+    So an apostrophe is escaped with a backslash instead of closed and
+    reopened, which both parsers read the same way. Measured against the
+    installed Konsole rather than reasoned about; the case that measures it
+    runs the real one.
+
+    Control characters cannot be carried by ANY quoting here: Konsole drops a
+    tab even inside quotes, and a newline truncates the rest of the command
+    line. They are collapsed to a space so the argument that arrives is the one
+    this returned, minus that substitution.
+    """
+    value = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in str(value))
+    if _KONSOLE_SAFE_WORD.match(value):
+        return value
+    if "'" not in value:
+        return f"'{value}'"
+    return "".join(
+        ch if _KONSOLE_SAFE_CHARACTER.match(ch) else f"\\{ch}" for ch in value
+    )
+
+
+def _konsole_command(args: Sequence[str]) -> str:
+    return " ".join(_konsole_quote(str(arg)) for arg in args)
+
+
 def _env_prefix(env: dict[str, str]) -> list[str]:
     return [
         f"{key}={value}"
@@ -6033,6 +6072,100 @@ def recorded_provider_state_generation(config: ProjectConfig, role: RoleConfig) 
     return str(record.get("generation") or "")
 
 
+def _provider_state_store_account(
+    config: ProjectConfig, *, geteuid: Callable[[], int] = os.geteuid
+) -> object | None:
+    """The account the record is actually written as, or None for this process.
+
+    Root does not write there itself -- `record_provider_state_generation` drops
+    to the project owner first -- so root asking whether the store works would
+    get its own answer, which is yes for a directory the owner cannot write.
+    """
+    owner = str(config.run_as_user or "").strip()
+    if geteuid() != 0 or not owner or owner == "root":
+        return None
+    return pwd.getpwnam(owner)
+
+
+def provider_state_store_problem(
+    config: ProjectConfig,
+    role: RoleConfig,
+    *,
+    geteuid: Callable[[], int] = os.geteuid,
+    drop: Callable[[int, int], None] = _drop_to_account,
+) -> str:
+    """Why this role's provider-state record cannot be read or written, or "".
+
+    Absent is not a problem: nothing has been recorded yet, and one restart
+    settles that. A record that cannot be READ, or a store that cannot be
+    WRITTEN, is a different answer entirely -- it means the comparison below
+    cannot be made and its result cannot be kept, so a restart would end a live
+    pane and change nothing, and the next launch would do it again.
+
+    Both questions are asked as the account that does the writing, which is the
+    project owner even when root is running the launch.
+
+    Live on mefp: `<session dir>/roles/main` and `.../roles/ops` were root's
+    after a root-run launch created them, the project account got `permission
+    denied` on both, and two panes that had been up for hours were killed and
+    brought back (SYRD-233 live UAT).
+    """
+    path = _provider_state_record_path(config, role)
+    directory = path.parent
+    probe = directory if directory.exists() else _nearest_existing_parent(directory)
+    try:
+        account = _provider_state_store_account(config, geteuid=geteuid)
+    except KeyError:
+        return (
+            f"this role's provider state is written as {config.run_as_user}, which is not an "
+            "account on this host, so it cannot be recorded"
+        )
+
+    def readable() -> None:
+        path.read_text(encoding="utf-8")
+
+    def writable() -> None:
+        if probe is None or not os.access(probe, os.W_OK | os.X_OK):
+            raise PermissionError(str(probe))
+
+    def ask(question: Callable[[], None]) -> bool:
+        if account is None:
+            try:
+                question()
+            except OSError:
+                return False
+            return True
+        return _run_as_account(
+            account.pw_uid, account.pw_gid, question, geteuid=geteuid, drop=drop
+        )
+
+    who = account.pw_name if account is not None else current_user_name()
+    if path.exists() and not ask(readable):
+        return f"{path} cannot be read by {who}"
+    if not ask(writable):
+        owner = _path_owner_name(probe) if probe is not None else ""
+        belongs = f", which belongs to {owner}" if owner else ""
+        return (
+            f"{directory} cannot be written by {who}{belongs}, so this role's "
+            "provider state cannot be recorded"
+        )
+    return ""
+
+
+def _nearest_existing_parent(path: Path) -> Path | None:
+    for candidate in (path, *path.parents):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _path_owner_name(path: Path) -> str:
+    try:
+        return pwd.getpwuid(path.stat().st_uid).pw_name
+    except (OSError, KeyError):
+        return ""
+
+
 def record_provider_state_generation(
     config: ProjectConfig,
     role: RoleConfig,
@@ -6115,11 +6248,30 @@ def roles_with_stale_provider_runtime(
         cli = _role_cli_name(role)
         if not cli:
             continue
+        # A store this process cannot read or write answers nothing, and a
+        # restart over it would end a live pane and leave the same question
+        # for the next launch (SYRD-233).
+        if provider_state_store_problem(config, role):
+            continue
         if recorded_provider_state_generation(config, role) != provider_state_generation(
             cli, owner_home=owner_home
         ):
             stale.append(role)
     return stale
+
+
+def unreadable_provider_state_roles(
+    config: ProjectConfig, running_roles: Sequence[RoleConfig]
+) -> list[tuple[RoleConfig, str]]:
+    """Live roles whose provider-state store cannot be read or written, and why."""
+    found: list[tuple[RoleConfig, str]] = []
+    for role in running_roles:
+        if not _role_cli_name(role):
+            continue
+        problem = provider_state_store_problem(config, role)
+        if problem:
+            found.append((role, problem))
+    return found
 
 
 def _drop_roles_with_stale_provider_runtime(
@@ -6145,6 +6297,15 @@ def _drop_roles_with_stale_provider_runtime(
     no record is stale by definition: nothing says what its runtime was started
     against, and one restart settles it (SYRD-191).
     """
+    # Said once, before anything is ended: these roles are left exactly as they
+    # are, and the reason is a repair rather than a restart.
+    for role, problem in unreadable_provider_state_roles(config, running_roles):
+        print_func(
+            f"team-launcher: leaving {role.role} running: {problem}. Its runtime is not "
+            f"checked against the account's provider state, and restarting it would settle "
+            f"nothing. Run `sudo switchyard upgrade {config.project}` to give the tenant "
+            "account its own role state back."
+        )
     stale = roles_with_stale_provider_runtime(config, running_roles, owner_home=owner_home)
     if not stale:
         return list(running_roles), set()
@@ -6388,7 +6549,8 @@ def inert_pane_command(
     """
     window_args = ["--window-title", window_title] if window_title.strip() else []
     title_args = ["--title", title] if title.strip() else []
-    return _quote_command([str(program), *window_args, *title_args, *args])
+    # Konsole's own splitter, not a shell's: see `_konsole_quote`.
+    return _konsole_command([str(program), *window_args, *title_args, *args])
 
 
 def failed_role_command(role: RoleConfig, reason: str, *, window_title: str = "") -> str:
@@ -6403,7 +6565,9 @@ def failed_role_command(role: RoleConfig, reason: str, *, window_title: str = ""
     )
     # `sleep 30` used to hand the tab back to the shell that opened the window.
     # A failed role is exactly when someone reaches for that prompt (SYRD-43).
-    return _quote_command(
+    # The inner script is a shell's, so its own quoting stays POSIX; the line
+    # around it is Konsole's to split.
+    return _konsole_command(
         ["sh", "-c", f"{naming}printf '%s\\n' {shlex.quote(message)}; exec sleep infinity"]
     )
 
@@ -6611,6 +6775,44 @@ def presentation_slot_titles(config: ProjectConfig, slot_count: int) -> list[str
         if 0 <= role.slot < len(titles):
             titles[role.slot] = pane_split_title(config, role)
     return titles
+
+
+def presentation_pane_program_problem(
+    config: "ProjectConfig",
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    """Why this tenant's window cannot be opened at all, or "".
+
+    Every tab of the window runs one program: the `switchyard-pane-window` that
+    ships beside this tenant's configured pane launcher. Konsole runs a tab's
+    `Command` directly, and when it cannot start one it falls back to the
+    profile's shell -- silently, with no error anywhere. Live mefp opened four
+    tabs and every one of them was an ordinary shell instead of the role's CLI
+    (SYRD-233 live UAT).
+
+    The bridge handoff has always checked this program before letting the
+    desktop half run it; the path root takes to open the window itself did not.
+    The same check, for the same reason: it is a program another account is
+    about to run in every tab.
+    """
+    program = pane_window_program(switchyard_pane_launcher_for(config))
+    if not program.exists() or not os.access(program, os.X_OK):
+        return (
+            f"the program each tab runs, {program}, is not there. This release's pane window "
+            "ships beside the tenant's pane launcher, and Konsole falls back to a plain shell "
+            "when it cannot start a tab's command"
+        )
+    if config.pane_launcher is None:
+        # A checkout running its own panes: the program is this tree's, owned by
+        # whoever cloned it. `_verify_pane_launcher_path` draws the line in the
+        # same place -- a configured launcher is a provisioned tenant's, and a
+        # provisioned tenant's is root's.
+        return ""
+    reasons = untrusted_root_executable_reasons(program, owner_uid=0, runner=runner)
+    if reasons:
+        return f"the program each tab runs, {program}, is not pinned to root: {reasons[0]}"
+    return ""
 
 
 def render_presentation_handoff(
@@ -25883,13 +26085,476 @@ def _copy_tree_without_overwrite(
                 os.chown(destination, *owner)
 
 
-def _assign_tree_owner(path: Path, owner: tuple[int, int] | None) -> None:
-    if owner is None or not path.exists():
+STATE_TREE_MAX_DEPTH = 64
+
+
+def _open_tenant_state_root(root: Path) -> tuple[int, str]:
+    """Open `root` as a directory, following nothing the tenant could have set.
+
+    Every component is opened with O_NOFOLLOW from its parent's descriptor. A
+    symlink is allowed only where root itself put it -- the link and the
+    directory holding it are root's, and nobody else can write that directory
+    -- because a chown walk that follows a link the tenant can create or swap
+    reaches whatever the tenant aims it at, however carefully the final chown
+    is written. `follow_symlinks=False` protects the last component and nothing
+    above it (SYRD-233 DAT).
+
+    Returns (fd, "") for a directory, (-1, "") when it is simply not there, and
+    (-1, reason) when it is refused. The caller owns the descriptor.
+    """
+    try:
+        fd = os.open(root.anchor or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        return -1, f"{root.anchor or '/'} cannot be opened ({exc.strerror})"
+    walked = Path(root.anchor or "/")
+    try:
+        for component in root.relative_to(walked).parts:
+            walked = walked / component
+            try:
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=fd,
+                )
+            except FileNotFoundError:
+                return -1, ""
+            except OSError as exc:
+                if exc.errno not in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                    return -1, f"{walked} cannot be opened ({exc.strerror})"
+                allowed = _root_placed_link(component, dir_fd=fd)
+                if allowed:
+                    return -1, allowed
+                try:
+                    child = os.open(
+                        component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd
+                    )
+                except OSError as followed:
+                    return -1, f"{walked} cannot be opened ({followed.strerror})"
+            os.close(fd)
+            fd = child
+    except OSError as exc:  # pragma: no cover - defensive
+        _close_quietly(fd)
+        return -1, f"{walked} cannot be opened ({exc.strerror})"
+    except BaseException:
+        _close_quietly(fd)
+        raise
+    return fd, ""
+
+
+def _root_placed_link(component: str, *, dir_fd: int) -> str:
+    """"" when this symlink is root's own layout, else why it is refused."""
+    try:
+        info = os.lstat(component, dir_fd=dir_fd)
+    except OSError as exc:
+        return f"{component} cannot be inspected ({exc.strerror})"
+    if not stat.S_ISLNK(info.st_mode):
+        return f"{component} is not a directory"
+    holder = os.fstat(dir_fd)
+    if info.st_uid != 0 or holder.st_uid != 0 or holder.st_mode & 0o022:
+        return (
+            f"{component} is a symlink that root did not place (it belongs to uid "
+            f"{info.st_uid}, in a directory owned by uid {holder.st_uid}), and a root-run "
+            "chown does not follow one"
+        )
+    return ""
+
+
+def _close_quietly(fd: int) -> None:
+    if fd < 0:
         return
-    os.chown(path, *owner)
-    if path.is_dir():
-        for child in path.rglob("*"):
-            os.chown(child, *owner)
+    try:
+        os.close(fd)
+    except OSError:  # pragma: no cover - defensive
+        pass
+
+
+def _walk_tenant_state_tree(
+    root: Path, act: Callable[[Path, os.stat_result, Callable[[int, int], None]], str]
+) -> tuple[list[tuple[Path, str]], list[tuple[Path, str]]]:
+    """Visit `root` and everything beneath it without following any symlink.
+
+    `act` is called for each path with its `lstat` and a `chown(uid, gid)` that
+    acts through the descriptor the path was just read through, so nothing can
+    be swapped between deciding about a path and changing it; it returns a
+    reason to report, or "". A symlink is visited as the link itself and never
+    descended into, so it cannot become a traversal root.
+
+    Returns (findings, refusals). A refusal is a root that could not be walked
+    safely, which is a reason to stop rather than a path to fix.
+    """
+    findings: list[tuple[Path, str]] = []
+    refusals: list[tuple[Path, str]] = []
+    fd, problem = _open_tenant_state_root(root)
+    if problem:
+        return findings, [(root, problem)]
+    if fd < 0:
+        return findings, refusals
+
+    def visit(display: Path, directory: int, depth: int) -> None:
+        if depth > STATE_TREE_MAX_DEPTH:
+            refusals.append((display, f"is nested deeper than {STATE_TREE_MAX_DEPTH} directories"))
+            return
+        try:
+            names = sorted(entry.name for entry in os.scandir(directory))
+        except OSError as exc:
+            findings.append((display, f"cannot be listed ({exc.strerror})"))
+            return
+        for name in names:
+            child = display / name
+            try:
+                info = os.lstat(name, dir_fd=directory)
+            except OSError as exc:
+                findings.append((child, f"cannot be inspected ({exc.strerror})"))
+                continue
+
+            def chown(uid: int, gid: int, _name: str = name, _fd: int = directory) -> None:
+                os.chown(_name, uid, gid, dir_fd=_fd, follow_symlinks=False)
+
+            reason = act(child, info, chown)
+            if reason:
+                findings.append((child, reason))
+            if not stat.S_ISDIR(info.st_mode):
+                continue
+            try:
+                below = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=directory,
+                )
+            except OSError as exc:
+                findings.append((child, f"cannot be opened ({exc.strerror})"))
+                continue
+            try:
+                visit(child, below, depth + 1)
+            finally:
+                os.close(below)
+
+    try:
+        info = os.fstat(fd)
+
+        def chown_root(uid: int, gid: int, _fd: int = fd) -> None:
+            os.fchown(_fd, uid, gid)
+
+        reason = act(root, info, chown_root)
+        if reason:
+            findings.append((root, reason))
+        visit(root, fd, 1)
+    finally:
+        os.close(fd)
+    return findings, refusals
+
+
+def role_state_roots(config: ProjectConfig) -> list[Path]:
+    """The session store and each role's store, deduplicated, in walk order."""
+    roots = [config.session_dir.expanduser()]
+    for role in config.roles:
+        directory = role_session_dir(config, role).expanduser()
+        if directory not in roots:
+            roots.append(directory)
+    return roots
+
+
+def _assign_tree_owner(path: Path, owner: tuple[int, int] | None) -> str:
+    """Give `path` and everything under it to `owner`. "" or why it was refused.
+
+    Through the same no-following walk the ownership repair uses: this runs as
+    root over a tree the tenant controls, so a symlink at the root of it, or a
+    symlinked directory inside it, would otherwise carry a root-run chown
+    wherever it points (SYRD-233 DAT).
+    """
+    if owner is None:
+        return ""
+    uid, gid = owner
+    _findings, refusals = _walk_tenant_state_tree(
+        path, lambda _p, _i, chown: (chown(uid, gid), "")[1]
+    )
+    if refusals:
+        return f"{refusals[0][0]} {refusals[0][1]}"
+    return ""
+
+
+def role_state_ownership_problems(
+    config: ProjectConfig,
+) -> tuple[list[tuple[Path, str]], list[tuple[Path, str]]]:
+    """(wrong owner, refused) for this tenant's role state store.
+
+    Read-only, so an upgrade can report them before it repairs them, and so a
+    launch can say why it is leaving a role alone. The store is the tenant's
+    own: every directory and file under it belongs to the project account, and
+    anything that does not is something a privileged run left behind
+    (SYRD-233).
+
+    A refusal is not a path to chown. It is a store root that is a symlink, or
+    is not a directory, or cannot be walked without following one, and it stops
+    the repair rather than redirecting it (SYRD-233 DAT).
+    """
+    owner = config.run_as_user or current_user_name()
+    try:
+        wanted = pwd.getpwnam(owner).pw_uid
+    except KeyError:
+        return [], []
+    found: list[tuple[Path, str]] = []
+    refused: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+
+    def inspect(path: Path, info: os.stat_result, _chown: Callable[[int, int], None]) -> str:
+        if path in seen:
+            return ""
+        seen.add(path)
+        if info.st_uid != wanted:
+            return f"is owned by {_uid_owner_name(info.st_uid) or info.st_uid}, not {owner}"
+        return ""
+
+    for root in role_state_roots(config):
+        findings, refusals = _walk_tenant_state_tree(root, inspect)
+        found.extend(findings)
+        refused.extend(refusals)
+    return found, refused
+
+
+def _uid_owner_name(uid: int) -> str:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return ""
+
+
+def repair_role_state_ownership(
+    config: ProjectConfig,
+    *,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """Give the tenant account its own role state back. Root's to do.
+
+    `ensure_owner_state_dirs` assigns the store's two top-level directories and
+    is not recursive, and repatriation -- which does walk the per-role ones --
+    returns immediately for a tenant already on isolated state with no legacy
+    account bindings. So a role directory created by a root-run launch stays
+    root's, and the project account cannot record that role's provider state
+    ever again (SYRD-233 live UAT).
+    """
+    owner = config.run_as_user or current_user_name()
+    problems, refusals = role_state_ownership_problems(config)
+    if refusals:
+        # Before anything is changed, and whoever is asking: a store root that
+        # is a symlink is not a store this may walk, and repairing "what it
+        # points at" is how a root-run chown ends up outside the tenant's tree.
+        path, reason = refusals[0]
+        print_func(
+            f"switchyard: refusing to touch {config.project}'s role state: {path} {reason}. "
+            f"No ownership was changed. Make it a real directory under {owner}'s state store, "
+            f"then run `sudo switchyard upgrade {config.project}` again."
+        )
+        return False
+    if not problems:
+        return True
+    if os.geteuid() != 0:
+        print_func(
+            f"switchyard: {config.project}'s role state is not all {owner}'s "
+            f"({len(problems)} path(s), first: {problems[0][0]} {problems[0][1]}), and only root "
+            f"can give it back. Run `sudo switchyard upgrade {config.project}`."
+        )
+        return False
+    if dry_run:
+        print_func(
+            f"switchyard: would give {owner} back {len(problems)} path(s) of {config.project}'s "
+            f"role state, starting with {problems[0][0]} ({problems[0][1]}); nothing written"
+        )
+        return True
+    try:
+        ids = pwd.getpwnam(owner)
+    except KeyError:
+        print_func(f"switchyard: {owner} is not a local account; {config.project}'s role state was left alone")
+        return False
+    failures: list[str] = []
+
+    def give_back(path: Path, info: os.stat_result, chown: Callable[[int, int], None]) -> str:
+        if info.st_uid == ids.pw_uid:
+            return ""
+        try:
+            # Through the descriptor this path was just read through, and never
+            # through what a symlink points at: the link itself is the tenant's,
+            # its target may be anywhere at all.
+            chown(ids.pw_uid, ids.pw_gid)
+        except OSError as exc:
+            failures.append(f"switchyard: could not give {path} back to {owner}: {exc.strerror}")
+        return ""
+
+    for root in role_state_roots(config):
+        _findings, denied = _walk_tenant_state_tree(root, give_back)
+        if denied:
+            failures.append(f"switchyard: could not walk {denied[0][0]}: {denied[0][1]}")
+        if failures:
+            print_func(failures[0])
+            return False
+    remaining, still_refused = role_state_ownership_problems(config)
+    if still_refused:
+        print_func(
+            f"switchyard: {config.project}'s role state could not be re-read after the repair: "
+            f"{still_refused[0][0]} {still_refused[0][1]}"
+        )
+        return False
+    if remaining:
+        print_func(
+            f"switchyard: {config.project}'s role state still has {len(remaining)} path(s) that "
+            f"are not {owner}'s, starting with {remaining[0][0]}"
+        )
+        return False
+    print_func(
+        f"switchyard: gave {owner} back {len(problems)} path(s) of {config.project}'s role state, "
+        "so its roles can record what their runtimes were started against"
+    )
+    return True
+
+
+def _interrupted_provider_state_roles(
+    config: ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    owner_home: Path,
+) -> list[tuple[RoleConfig, int, str]]:
+    """Live roles whose provider-state record the broken store stopped.
+
+    Captured BEFORE the repair, because that is the only moment the evidence
+    exists: afterwards the store is writable and a missing record is
+    indistinguishable from a role that has never run. The record is not
+    reconstructed from a guess -- the role has to be running its own configured
+    CLI right now, which is what the record is about.
+
+    Deliberately narrow. A role qualifies only while all four hold: its store is
+    provably unusable, it has no record that can be read at all, its pane has a
+    pid, and that pid's process tree is running the CLI the role is configured
+    for. Anything else keeps SYRD-191's rule that a missing record is stale.
+
+    Every pane question is asked through `role_process_runner_for`, because the
+    command that gets here is `sudo switchyard upgrade <project>`: a bare `tmux`
+    from root addresses ROOT's server, where the tenant has no sessions at all.
+    Asked that way each pane answers pid 0, nothing is ever captured, the
+    upgrade repairs ownership and stops, and the next launch restarts the very
+    workers this exists to keep (SYRD-233 post-DAT).
+    """
+    captured: list[tuple[RoleConfig, int, str]] = []
+    for role in config.roles:
+        cli = _role_cli_name(role)
+        if not cli:
+            continue
+        if not provider_state_store_problem(config, role):
+            continue
+        if recorded_provider_state_generation(config, role):
+            continue
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        pane_pid = pane_pid_for_role(role, runner=role_runner)
+        if pane_pid <= 0 or not live_command_matches_role(role, runner=role_runner):
+            continue
+        captured.append((role, pane_pid, provider_state_generation(cli, owner_home=owner_home)))
+    return captured
+
+
+def _finish_interrupted_provider_state(
+    config: ProjectConfig,
+    captured: Sequence[tuple[RoleConfig, int, str]],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    owner_home: Path,
+    print_func: Callable[[str], None],
+) -> bool:
+    """Write the record each captured role could not write, or stop.
+
+    The upgrade repaired the store; a record is still absent, and absent is
+    stale, so the very next launch would end exactly the panes the repair was
+    meant to save. Finishing the interrupted write is what makes the repair
+    worth anything -- but only for a role that has not moved underneath the
+    transaction. Anything unexpected stops the upgrade rather than seeding a
+    generation for a runtime nobody checked.
+    """
+    for role, pane_pid, generation in captured:
+        cli = _role_cli_name(role)
+        # The same crossing the capture used: root's own tmux server would show
+        # every one of these panes as gone and stop the upgrade on that alone.
+        role_runner = role_process_runner_for(config, role, runner=runner)
+        now = pane_pid_for_role(role, runner=role_runner)
+        if now != pane_pid:
+            print_func(
+                f"switchyard: {role.role} is no longer the process this upgrade found "
+                f"(pane pid {pane_pid} is now {now or 'gone'}); its provider-state record was "
+                "left unwritten and the upgrade stopped rather than vouch for a runtime it "
+                "did not see"
+            )
+            return False
+        if not live_command_matches_role(role, runner=role_runner):
+            print_func(
+                f"switchyard: {role.role} is no longer running {cli}; its provider-state record "
+                "was left unwritten and the upgrade stopped"
+            )
+            return False
+        if provider_state_generation(cli, owner_home=owner_home) != generation:
+            print_func(
+                f"switchyard: {cli}'s provider state changed while {config.project}'s role state "
+                f"was being repaired; {role.role}'s record was left unwritten and the upgrade "
+                "stopped, so the next launch decides with a fresh reading"
+            )
+            return False
+        problem = provider_state_store_problem(config, role)
+        if problem:
+            # Not a reason to fail the upgrade. The repair changes ownership; it
+            # does not conjure a store that is missing or unreachable for some
+            # other reason, and nothing was claimed about this role. It stays
+            # exactly as it was -- left running, and not judged -- which is what
+            # the launch already does for a store it cannot use.
+            print_func(
+                f"switchyard: {role.role}'s provider state still cannot be recorded after the "
+                f"repair: {problem}. It keeps running and is still not checked against the "
+                "account's provider state"
+            )
+            continue
+        record_provider_state_generation(config, role, generation)
+        if recorded_provider_state_generation(config, role) != generation:
+            print_func(
+                f"switchyard: {role.role}'s provider-state record did not read back as what was "
+                "just written; the upgrade stopped rather than report a role as settled"
+            )
+            return False
+        print_func(
+            f"switchyard: finished the provider-state record {role.role} could not write, so its "
+            f"live {cli} (pid {pane_pid}) is not restarted by the next launch"
+        )
+    return True
+
+
+def restore_interrupted_role_state(
+    config: ProjectConfig,
+    *,
+    dry_run: bool = False,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+    owner_home: Path | None = None,
+) -> bool:
+    """Give the role state back AND finish what the broken store interrupted.
+
+    Ownership alone is half a repair. A role left running because its store was
+    unusable still has no record, `roles_with_stale_provider_runtime` calls a
+    missing record stale, and the ordinary launch that follows the upgrade ends
+    the very panes this was protecting -- the restart postponed by one command
+    rather than avoided (SYRD-233 post-DAT).
+    """
+    if owner_home is None:
+        owner_home = home_dir_for_user(config.run_as_user or current_user_name()) or Path.home()
+    captured = _interrupted_provider_state_roles(config, runner=runner, owner_home=owner_home)
+    if dry_run and captured:
+        for role, pane_pid, _generation in captured:
+            print_func(
+                f"switchyard: would finish the provider-state record {role.role} could not write, "
+                f"so its live {_role_cli_name(role)} (pid {pane_pid}) would not be restarted; "
+                "nothing written"
+            )
+    if not repair_role_state_ownership(config, dry_run=dry_run, print_func=print_func):
+        return False
+    if dry_run:
+        return True
+    return _finish_interrupted_provider_state(
+        config, captured, runner=runner, owner_home=owner_home, print_func=print_func
+    )
 
 
 def repatriate_role_runtime_state(
@@ -26022,7 +26687,10 @@ def repatriate_role_runtime_state(
             )
             if not ok:
                 problems.append(f"{role.role}: copied session {migrated_id} is not resumable: {reason}")
-        _assign_tree_owner(target_session_dir, owner_ids)
+        refused = _assign_tree_owner(target_session_dir, owner_ids)
+        if refused:
+            problems.append(f"{role.role}: {refused}")
+            continue
     if problems:
         return False, problems
 
@@ -26232,6 +26900,15 @@ def upgrade_project_command(
                 return 1
         if not dry_run:
             config = planned
+
+    # Every tenant, desktop or not: a role whose own state directory is not the
+    # tenant account's cannot record what its runtime was started against, and
+    # every launch would then end that role's live pane over an answer it could
+    # not keep (SYRD-233).
+    if not restore_interrupted_role_state(
+        config, dry_run=dry_run, runner=runner, print_func=print_func
+    ):
+        return 1
 
     repatriated, repatriation_problems = repatriate_role_runtime_state(
         config, config_path=config_path, dry_run=dry_run, runner=runner

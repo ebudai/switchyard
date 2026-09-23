@@ -973,6 +973,33 @@ def test_the_upgrade_dry_run_reports_the_presentation_migration() -> None:
     )
 
 
+def test_the_upgrade_stops_when_the_role_state_cannot_be_given_back() -> None:
+    # The repair is root's and it is not optional: a tenant whose roles cannot
+    # record what their runtimes were started against has every launch ending
+    # their live panes over an answer it could not keep (SYRD-233 live UAT).
+    with tempfile.TemporaryDirectory(prefix="syrd233-upgrade-state.") as raw:
+        tmp = Path(raw)
+        calls: list[tuple] = []
+        saved = team_launcher.repair_role_state_ownership
+
+        def refuse(config, *, dry_run=False, print_func=print):
+            calls.append((config.project, dry_run))
+            print_func("switchyard: porter's role state is not all switchyard-agent's")
+            return False
+
+        try:
+            team_launcher.repair_role_state_ownership = refuse
+            result, output, unchanged, _tree = _upgrade_dry_run(tmp)
+        finally:
+            team_launcher.repair_role_state_ownership = saved
+    check(calls and calls[0][0] == "porter", f"the upgrade asks for the repair: {calls}")
+    check(calls[0][1] is True, f"and a dry run asks for a dry one: {calls}")
+    check(result == 1, f"a refusal stops the upgrade: {result}")
+    check("is not all switchyard-agent's" in output, output[-1500:])
+    check("upgrade phases" not in output, "and no phase report follows it")
+    check(unchanged, "and nothing was changed")
+
+
 def test_a_tenant_already_moved_is_still_given_its_bridge() -> None:
     # The state live UAT left mefp in. A step that ran only on the upgrade that
     # adds the section would never reach it again.

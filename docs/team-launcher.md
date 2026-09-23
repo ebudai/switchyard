@@ -414,6 +414,31 @@ The tenant owner is given no traversal or write access into anybody's home, and
 the bridge gained no caller-controlled path, environment or copy channel
 (SYRD-90).
 
+**The tab's command is quoted for Konsole, which is not a shell.** A layout's
+`Command` is one string, and Konsole splits it itself. It agrees with POSIX
+quoting on almost everything and disagrees on exactly one construction: the
+`'\''` idiom POSIX uses to put an apostrophe inside a single-quoted word.
+Konsole leaves a stray `'` behind and appends it to the **last** argument on the
+line.
+
+mefp's project title is `Morfane's Epic Fix Patch`. Its four panes therefore ran
+`switchyard-display-attach mefp 0'` -- and `1'`, `2'`, `3'` -- and each exited
+`slot must be a number or viewer`, so the window opened with four inert tabs
+(SYRD-233 live UAT). `shlex.split` round-trips that same string perfectly, which
+is why it was staged for so long without anything noticing.
+
+So a pane command escapes an apostrophe with a backslash rather than closing and
+reopening the quote, which both splitters read the same way. That is measured
+against the installed Konsole rather than reasoned about: the covering test
+writes a real layout, opens a real offscreen Konsole on it, and has each pane
+report the argv it actually received.
+
+The same measurement says a control character cannot be carried by any quoting
+at all -- Konsole drops a tab even inside quotes, and a newline truncates the
+rest of the command line, which would silently take the slot argument with it.
+They are collapsed to a space before quoting, so the argument that arrives is
+the one the staged command names.
+
 **The layout goes where the terminal can read it.** Konsole is handed a `--layout`
 path and opens it as the desktop account. The tenant's project-state directory is
 0700 and its files 0600, both owned by the project owner, so a layout written
@@ -505,6 +530,106 @@ replacement as the desktop account. It never touches a worker session -- losing
 a role's session loses that role's work, which is worse than the window -- and it
 lists what was running before and after so that is checkable rather than
 promised.
+
+**A role whose state stopped being the tenant's is left alone, not restarted.**
+Every role records the provider generation its runtime was started against, in
+`<session state>/roles/<role>/<role>.provider-state.json`, and a launch ends a
+runtime whose record does not match the account's current providers. On live
+mefp two of those directories had come to be owned by root, so the tenant could
+neither read the record nor write one. An unanswerable question was read as a
+stale answer: Main and Ops were killed and respawned, four live panes became
+two new pids, and the restart settled nothing, because the replacement runtime
+could not record its generation either and the next launch would kill it again.
+
+So the staleness check now separates *no record* -- the ordinary first-run case,
+which is fine -- from *the store does not work*: a record that cannot be read,
+or a directory that the owner cannot write. A role in the second state is not
+judged and not ended. The launch says which path is the problem and who owns it,
+that the role is being left running, and that `sudo switchyard upgrade
+<project>` is what gives the account its own role state back. Roles whose stores
+are healthy are still judged and still restarted in the same run.
+
+**Root gives that state back; nothing is loosened to reach it.** Before it
+repatriates any runtime state, the upgrade walks the tenant's session directory
+and each role directory under it, reports every path whose owner is not the
+project owner, and `chown`s them back -- without changing a single mode bit. A
+tenant home that is 0700 stays 0700; the fix is that the files inside it belong
+to the account again. The paths are read back afterwards, and an upgrade whose
+repair did not take stops non-zero before any phase can declare the tenant
+ready. `--dry-run` reports the same paths and changes nothing. A tenant whose
+state is already its own is reported as such and nothing is written.
+
+**And the upgrade finishes the record the broken store interrupted.** Giving
+the directories back is only half of it. The role is still running, its record
+is still absent, and `roles_with_stale_provider_runtime` calls an absent record
+stale -- correctly, for a role nobody knows anything about. So the ordinary
+`switchyard <project>` that follows the upgrade would end exactly the panes the
+first half protected: the restart postponed by one command rather than avoided,
+and the live acceptance requirement that every worker pid survives the sequence
+failed.
+
+While the store is still provably broken -- before the repair, because
+afterwards the evidence is gone and an absent record is indistinguishable from a
+role that has never run -- the upgrade captures the roles it can vouch for. A
+role qualifies only when all four hold: its store is unusable, it has no record
+that can be read at all, its pane has a pid, and that pid's process tree is
+running the CLI the role is configured for. Then the ownership is repaired, and
+for each captured role the upgrade re-reads the pane, the running command and
+the account's generation, and writes the record **as the tenant account** before
+reading it back.
+
+**Every one of those pane questions crosses to the project account.** The
+command that gets here is `sudo switchyard upgrade <project>`, so this code is
+root, and a bare `tmux` from root addresses *root's* server -- where the tenant
+has no sessions at all. Asked that way each pane answers "gone", nothing is
+ever captured, the upgrade repairs ownership and stops there, and the next
+ordinary launch applies the absent-record rule and restarts the very workers
+the repair existed to keep. Both the capture and the re-check therefore go
+through `role_process_runner_for`, the same boundary the launch already uses to
+end a session, so they reach the server the panes are actually on.
+
+Anything that moved in between stops the upgrade rather than seeding a
+generation for a runtime nobody looked at: a pane that is a different process, a
+pane no longer running that CLI, a provider generation that changed while the
+repair ran, a store still unwritable, or a record that does not read back as
+what was written. A dry run says which records it would finish and writes
+nothing. Nothing here widens SYRD-191's rule -- a role whose store was fine and
+whose record is merely missing is still stale, and is still restarted.
+
+**The walk never follows a symlink, and a store root that is one is refused.**
+`follow_symlinks=False` on the `chown` protects the last component of a path
+and nothing above it. The store roots are paths the tenant controls, and
+`Path.is_dir()` follows a symlink while `Path.rglob` enumerates what it points
+at, so a walk that treats those roots as directories can be aimed at any tree on
+the host and root will chown what it finds there.
+
+So every root -- the session directory and each role directory -- is opened
+component by component with `O_NOFOLLOW` from its parent's descriptor, and the
+walk below it descends only into entries that `lstat` says are real
+directories. A symlink is visited as the link itself and given back as a link;
+what it points at is never read, never descended into and never chowned. Each
+`chown` goes through the descriptor the path was read through, so nothing can
+be swapped in between deciding about a path and changing it. A root that is a
+symlink, or is not a directory, is **refused before anything is changed** --
+not repaired, and not followed -- and the refusal names it and stops the
+upgrade, because a root-run chown pointed out of the tenant's tree is a worse
+outcome than an unrepaired store.
+
+The one symlink that is followed is one root itself placed: the link and the
+directory holding it are root's, and nobody else can write that directory. That
+keeps a host whose layout root built out of symlinks working, while nothing the
+tenant can create or swap is ever followed.
+
+**A tab with no pane program is a shell, so the window does not open.** Konsole
+falls back to a login shell for a tab whose `command` is missing or not
+executable, which is how a migrated mefp window came up as four ordinary
+terminals instead of four agent CLIs. `_launch_separate` now checks the program
+before it stages a layout: absent or non-executable means no window, the reason,
+and the upgrade-then-launch pair that fixes it, with the roles left running and
+reachable by `switchyard attach`. A tenant that configures its own pane launcher
+is held to the same pinning as any other program root's window runs -- a regular
+file owned by root that nobody else can rewrite -- so a tenant-writable program
+cannot be what a cross-account tab executes.
 
 ## Attaching to a role
 

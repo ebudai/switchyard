@@ -260,8 +260,11 @@ def test_a_failed_role_pane_stays_inert_instead_of_returning_to_a_shell() -> Non
         config, _config_path = _config_for(Path(tmp))
         command = team_launcher.failed_role_command(config.roles[0], "checkout busy")
     assert "sleep 30" not in command, command
-    assert command.startswith("sh -c "), command
-    assert "exec sleep infinity" in command, command
+    # Quoted for Konsole's splitter, not a shell's (SYRD-233): assert the
+    # script it parses to rather than the rendering around it.
+    parsed = shlex.split(command)
+    assert parsed[:2] == ["sh", "-c"], command
+    assert "exec sleep infinity" in parsed[2], command
 
 
 def test_the_display_proxy_window_also_ends_inert() -> None:

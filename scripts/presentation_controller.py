@@ -1643,6 +1643,18 @@ def _launch_separate(
     # than no window, because it looks like a presentation and answers nothing.
     # Live mefp opened four tabs that each exited "sudo: a password is
     # required" (SYRD-233). The workers are already up; only the window stops.
+    # A tab whose program will not start is a shell, not a pane: Konsole falls
+    # back to the profile's shell with no error, so four roles become four
+    # ordinary prompts (SYRD-233 live UAT). Checked before the layout is
+    # written, for the same reason the bridge handoff checks it.
+    program_problem = team_launcher.presentation_pane_program_problem(config, runner=runner)
+    if program_problem:
+        raise SystemExit(
+            f"switchyard: not opening {config.project}'s presentation window: {program_problem}. "
+            f"Its roles are running. Run `sudo switchyard upgrade {config.project}` to stage this "
+            f"release's pane program, then `switchyard {config.project}` to open the window; "
+            f"`switchyard attach {config.project} <role>` reaches any role now."
+        )
     if gui_user and gui_user != (config.run_as_user or team_launcher.current_user_name()):
         bridge = team_launcher.display_bridge_launch_problem(config, gui_user=gui_user)
         if bridge:

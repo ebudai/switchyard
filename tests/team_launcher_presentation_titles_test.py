@@ -46,6 +46,7 @@ import pwd
 import re
 import stat
 import shutil
+import shlex
 import subprocess
 import time
 
@@ -292,10 +293,16 @@ def test_a_pane_that_failed_to_start_still_names_the_window() -> None:
         leaves = team_launcher._layout_leaves(json.loads(output.read_text(encoding="utf-8")))
 
     failed = leaves[ROLE_SLOTS.index("ops")]["Command"]
-    assert "checkout is dirty" in failed, failed
-    assert "\\033]2;%s\\007" in failed and "Switchyard" in failed, failed
+    # The line is quoted for KONSOLE's splitter, not a shell's, so an
+    # apostrophe in the script is backslash-escaped rather than closed and
+    # reopened (SYRD-233). What this case is about is the script Konsole parses
+    # out of it; tests/legacy_presentation_launch_test.py drives a real Konsole
+    # over that rendering.
+    script = shlex.split(failed)[2]
+    assert "checkout is dirty" in script, script
+    assert "\\033]2;%s\\007" in script and "Switchyard" in script, script
     # It is still inert, which is the older rule this must not break (SYRD-43).
-    assert "exec sleep infinity" in failed, failed
+    assert "exec sleep infinity" in script, script
 
 
 def _wrapper_output(args: list[str], *, settle: float = 3.0) -> tuple[str, int | None]:

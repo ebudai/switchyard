@@ -527,6 +527,253 @@ def test_the_gate_runs_before_the_first_mutation() -> None:
         )
 
 
+# --- a launcher is not a promotable artifact --------------------------------
+#
+# Live on a fresh host, promoting Hermes: `p` copied
+# /home/santiago/.local/bin/hermes, and verification as the future owner
+# sbs-agent exited 126 -- the copy still exec'd
+# /home/santiago/.hermes/hermes-agent/venv/bin/python, which that account
+# cannot traverse. The copy was the pointer, not the runtime.
+#
+# Two things were wrong. It was offered as the one-keystroke default when its
+# first two lines already said it could not serve a tenant; and the copy was
+# installed before it was verified, so a host that already had a working
+# host-wide CLI lost it to a promotion that then failed.
+
+
+def a_launcher_in_a_private_home(root: Path, cli: str = "hermes"):
+    """The live shape: a launcher whose runtime is inside a 0700 home."""
+    import os
+
+    private = root / "home" / "santiago"
+    venv = private / f".{cli}/{cli}-agent/venv/bin"
+    venv.mkdir(parents=True)
+    interpreter = venv / "python"
+    interpreter.write_text("#!/bin/sh\necho '" + cli + " 9.9'\n")
+    interpreter.chmod(0o755)
+    (private / ".local/bin").mkdir(parents=True)
+    launcher = private / ".local/bin" / cli
+    launcher.write_text(f"#!{interpreter}\n")
+    launcher.chmod(0o755)
+    # What makes a stranger's exec fail with 126, and what neither the owner
+    # nor root can notice by trying it.
+    os.chmod(private, 0o700)
+    return launcher, interpreter
+
+
+def test_reachability_is_read_from_the_bits_not_from_this_account() -> None:
+    """The account that asks is never the account that has the problem.
+
+    The operator owns the home, and root bypasses the check; the future tenant
+    is neither, and does not exist yet to be asked.
+    """
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        launcher, interpreter = a_launcher_in_a_private_home(root)
+        assert os.access(interpreter, os.X_OK), "this account cannot reach it, so nothing is proven"
+        problems = team_launcher.agent_cli_unreachable_dependencies(launcher)
+        assert [str(path) for path, _why in problems] == [str(interpreter)], problems
+        assert "not searchable by other accounts" in problems[0][1], problems
+
+        # The positive control has to open the WHOLE chain: a temporary
+        # directory is 0700 itself, so nothing beneath it is reachable by a
+        # stranger either -- which is the check working, not a false alarm.
+        for parent in [root, *reversed(interpreter.parents)]:
+            if parent == root or parent.is_relative_to(root):
+                os.chmod(parent, 0o755)
+        assert team_launcher.agent_cli_unreachable_dependencies(launcher) == [], (
+            "an executable every account can reach was still called unreachable"
+        )
+
+
+def test_a_wrapper_that_execs_a_private_runtime_is_caught_too() -> None:
+    """The other launcher shape, and the more common one.
+
+    `#!/bin/sh` is reachable by everyone, so the shebang says nothing. What a
+    tenant cannot reach is the interpreter the wrapper execs on the next line.
+    """
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _launcher, interpreter = a_launcher_in_a_private_home(root)
+        wrapper = root / "hermes-wrapper"
+        wrapper.write_text(f'#!/bin/sh\nexec {interpreter} -m hermes "$@"\n')
+        wrapper.chmod(0o755)
+
+        problems = team_launcher.agent_cli_unreachable_dependencies(wrapper)
+        assert [str(path) for path, _why in problems] == [str(interpreter)], problems
+        # /bin/sh itself is reachable and must not be reported.
+        assert not any("/bin/sh" in str(path) for path, _why in problems), problems
+        os.chmod(root / "home" / "santiago", 0o700)
+        assert team_launcher.agent_cli_source_is_self_contained("hermes", wrapper), (
+            "a wrapper around a private runtime was called self-contained"
+        )
+
+
+def test_a_launcher_into_a_private_home_is_not_offered_as_promotable() -> None:
+    """Checked before it is offered, not after root has been asked for."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        launcher, interpreter = a_launcher_in_a_private_home(root)
+
+        def which(binary: str, path: str | None = None):
+            if path == PANE_PATH:
+                return "/usr/local/bin/claude" if binary == "claude" else None
+            if binary == "claude":
+                return "/usr/local/bin/claude"
+            return str(launcher) if binary == "hermes" else None
+
+        rec = Recorder(answers=["a"])
+        try:
+            require_agent_clis_for_new_tenant(
+                (("main", "hermes"),), owner_user="sbs-agent", which=which,
+                input_func=rec.input, print_func=rec.print, promoter=rec.promoter,
+            )
+        except AgentCliUnavailable as exc:
+            assert "aborted" in str(exc), exc
+        else:
+            raise AssertionError("the abort choice did not abort")
+
+        assert "[p] promote" not in rec.text, f"a launcher was offered as promotable: {rec.text}"
+        assert str(interpreter) in rec.text, f"the reason does not name what a tenant cannot reach: {rec.text}"
+        assert "not a self-contained hermes" in rec.text, rec.text
+        assert rec.installed == [], rec.installed
+        # And the supported alternatives are still there.
+        assert "[l] promote a local executable" in rec.text, rec.text
+        assert "[s] switch the affected roles" in rec.text, rec.text
+        assert any("[l/s/a]" in prompt for prompt in rec.prompts), rec.prompts
+
+
+def test_a_resumed_tenant_is_not_offered_a_launcher_either() -> None:
+    """The same artifact, the other entry point.
+
+    A resumed tenant has an owner already, so there is no alternative CLI to
+    switch to here -- the honest answer is to say why it cannot be promoted and
+    leave the host and the running tenant alone.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        launcher, interpreter = a_launcher_in_a_private_home(Path(tmp))
+
+        def which(binary: str, path: str | None = None):
+            if path == PANE_PATH:
+                return None
+            return str(launcher) if binary == "hermes" else None
+
+        rec = Recorder(answers=["p"])  # would accept, if it were offered
+        promoted = team_launcher.offer_host_wide_promotion_before_launch(
+            "sbs", which=which, input_func=rec.input, print_func=rec.print,
+            promoter=rec.promoter,
+        )
+        assert promoted == [], f"a launcher was promoted for a resumed tenant: {promoted}"
+        assert rec.installed == [], rec.installed
+        assert "[p] promote" not in rec.text, f"it was offered anyway: {rec.text}"
+        assert rec.prompts == [], f"an unanswerable question was asked: {rec.prompts}"
+        assert str(interpreter) in rec.text, rec.text
+        assert "continues unchanged" in rec.text, rec.text
+
+
+def test_a_launcher_is_refused_before_sudo_is_asked_for() -> None:
+    """Refused locally: no password prompt to learn what its first line says."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        launcher, _interpreter = a_launcher_in_a_private_home(Path(tmp))
+        ran: list[list[str]] = []
+
+        def runner(args, **_kwargs):
+            ran.append([str(a) for a in args])
+            raise AssertionError("sudo was asked for")
+
+        try:
+            team_launcher.promote_agent_cli_through_sudo(
+                "hermes", launcher, project="sbs", runner=runner, print_func=lambda _t: None,
+            )
+        except SystemExit as exc:
+            assert "not a self-contained hermes" in str(exc), exc
+        else:
+            raise AssertionError("a launcher was promoted through sudo")
+        assert ran == [], f"something was run before the refusal: {ran}"
+
+
+def test_a_failed_verification_leaves_the_existing_host_wide_copy_alone() -> None:
+    """The failure and the damage used to be the same step."""
+    import subprocess as sp
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bindir = root / "usr-local-bin"
+        bindir.mkdir()
+        working = bindir / "codex"
+        working.write_text("#!/bin/sh\necho 'the copy every tenant is using'\n")
+        working.chmod(0o755)
+        before = working.read_bytes()
+
+        candidate = root / "codex-that-cannot-run"
+        candidate.write_text("#!/bin/sh\nexit 1\n")
+        candidate.chmod(0o755)
+
+        def runner(args, **_kwargs):
+            return sp.CompletedProcess(args, 126, "exec: permission denied", "")
+
+        try:
+            team_launcher.promote_agent_cli_host_wide(
+                "codex", candidate, bin_dir=bindir, runner=runner,
+                which=lambda *_a, **_k: str(working), print_func=lambda _t: None,
+                chown=lambda *_a: None,
+            )
+        except SystemExit as exc:
+            assert "tenant context" in str(exc), exc
+        else:
+            raise AssertionError("an executable that cannot run in a tenant context was installed")
+
+        assert working.read_bytes() == before, "a failed promotion replaced the working copy"
+        leftovers = [path.name for path in bindir.iterdir() if path.name != "codex"]
+        assert leftovers == [], f"a staging file was left behind: {leftovers}"
+
+
+def test_a_self_contained_executable_is_still_promoted() -> None:
+    """The control: the cases above must not pass by refusing everything."""
+    import subprocess as sp
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bindir = root / "usr-local-bin"
+        bindir.mkdir()
+        source = root / "codex"
+        source.write_text("#!/bin/sh\necho 'codex 1.2.3'\n")
+        source.chmod(0o755)
+
+        verified: list[list[str]] = []
+
+        def runner(args, **_kwargs):
+            verified.append([str(a) for a in args])
+            return sp.CompletedProcess(args, 0, "codex 1.2.3\n", "")
+
+        said: list[str] = []
+        verdict = team_launcher.promote_agent_cli_host_wide(
+            "codex", source, bin_dir=bindir, runner=runner,
+            which=lambda binary, path=None: str(bindir / binary),
+            print_func=said.append, chown=lambda *_a: None,
+        )
+        assert verdict.serves_a_new_owner, verdict
+        assert (bindir / "codex").read_text() == source.read_text()
+        assert verified and verified[0][0] != str(bindir / "codex"), (
+            f"it was verified after being installed, not before: {verified}"
+        )
+        assert "codex 1.2.3" in "\n".join(said), said
+
+
 def _run() -> None:
     """Report an escaping SystemExit against the test that raised it.
 

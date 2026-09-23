@@ -13744,6 +13744,11 @@ def offer_host_wide_promotion_before_launch(
                 # the place to make a host-wide installation decision on
                 # somebody's behalf, so this says what is available and goes on
                 # to launch.
+                unpromotable = agent_cli_detected_path_problems(verdict.cli, verdict.caller_path)
+                if unpromotable:
+                    for line in unpromotable:
+                        print_func(line)
+                    continue
                 if policy != AGENT_CLI_POLICY_PROMOTE_LOCAL:
                     print_func(
                         f"switchyard: {verdict.cli} is installed at {verdict.caller_path}, which "
@@ -13759,6 +13764,20 @@ def offer_host_wide_promotion_before_launch(
                     f"{current_user_name()} can reach. {project} runs as its own owner account, "
                     "which does not inherit it, and no later tenant would either"
                 )
+                unpromotable = agent_cli_detected_path_problems(verdict.cli, verdict.caller_path)
+                if unpromotable:
+                    # Not offered at all. There is nothing here an answer could
+                    # fix: the artifact cannot serve a tenant whoever promotes
+                    # it, so the honest move is to say why and leave the host
+                    # and the running tenant alone (SYRD-210).
+                    for line in unpromotable:
+                        print_func(line)
+                    print_func(
+                        f"switchyard: install a self-contained {verdict.cli} host-wide, or give "
+                        f"{project}'s roles a CLI that is already host-wide; this launch "
+                        "continues unchanged"
+                    )
+                    continue
                 print_func(
                     f"switchyard:   [p] promote {verdict.caller_path} to a root-owned host-wide "
                     "copy, reused by every later project; no credentials, config or session "
@@ -13892,6 +13911,12 @@ def require_agent_clis_for_new_tenant(
         # machine keeps PGU-904's boundary intact and leaves the operator owning
         # which version every tenant runs (SYRD-210).
         detected = verdict.caller_path
+        # Checked before it is offered, not after root has been asked for.
+        unpromotable = agent_cli_detected_path_problems(cli, detected)
+        if unpromotable:
+            for line in unpromotable:
+                print_func(line)
+            detected = ""
         while True:
             print_func(f"switchyard: choose how to proceed for {cli}:")
             if detected:
@@ -14041,6 +14066,121 @@ class AgentCliSourceRejected(AgentCliUnavailable):
     """The offered local artifact is not something to put on every tenant's PATH."""
 
 
+#: How much of a candidate executable is read to see what it depends on. A
+#: launcher script is a few lines; anything longer is not one.
+AGENT_CLI_SCRIPT_SAMPLE_BYTES = 65536
+
+
+def _reachable_by_a_stranger(path: Path) -> str:
+    """Why an account that owns nothing here could not use `path`, or ''.
+
+    Read from the permission bits rather than by trying it. Trying it answers
+    for whoever is asking, and the two accounts that do the asking are the two
+    that cannot see the problem: the operator, who owns the home in question,
+    and root, who bypasses the check entirely. A future tenant is neither, and
+    it does not exist yet to be asked (SYRD-210).
+    """
+    for parent in reversed(path.parents):
+        try:
+            mode = parent.stat().st_mode
+        except OSError as exc:
+            return f"{parent} cannot be examined: {exc}"
+        if not mode & stat.S_IXOTH:
+            return f"{parent} is not searchable by other accounts"
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        return f"{path} cannot be examined: {exc}"
+    if not mode & stat.S_IROTH:
+        return f"{path} is not readable by other accounts"
+    return ""
+
+
+def agent_cli_unreachable_dependencies(executable: Path) -> list[tuple[Path, str]]:
+    """The files this artifact needs that a future tenant could not reach.
+
+    A per-user install is often a launcher: a few lines whose interpreter is a
+    virtualenv inside the operator's own home. Copying the launcher host-wide
+    copies the pointer, not the runtime, and every tenant then execs a path
+    under an account it cannot enter -- exit 126, at somebody's first pane.
+    Live on a fresh host: promoting `hermes` produced a copy still running
+    `/home/santiago/.hermes/hermes-agent/venv/bin/python` (SYRD-210).
+
+    Only text is inspected. A compiled executable's private shared libraries
+    are a real version of the same hazard and are NOT detected here; what
+    catches those is the verification the promotion now runs before installing
+    anything.
+    """
+    try:
+        head = executable.open("rb").read(AGENT_CLI_SCRIPT_SAMPLE_BYTES)
+    except OSError:
+        return []
+    if not head.startswith(b"#!"):
+        return []
+    try:
+        text = head.decode("utf-8")
+    except UnicodeDecodeError:
+        text = head.decode("utf-8", "replace")
+    candidates: list[Path] = []
+    shebang = text.splitlines()[0][2:].strip().split()
+    if shebang:
+        interpreter = Path(shebang[0])
+        # `/usr/bin/env X` depends on the PATH it is run with rather than on a
+        # path here; that is the verification's question, not this one.
+        if interpreter.name != "env":
+            candidates.append(interpreter)
+    for match in re.findall(r"(?<![\w-])/[A-Za-z0-9_./+-]{3,}", text):
+        candidate = Path(match)
+        if candidate not in candidates and candidate.exists():
+            candidates.append(candidate)
+    unreachable: list[tuple[Path, str]] = []
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        reason = _reachable_by_a_stranger(candidate)
+        if reason:
+            unreachable.append((candidate, reason))
+    return unreachable
+
+
+def agent_cli_detected_path_problems(cli: str, caller_path: str | Path | None) -> list[str]:
+    """Why the executable we found cannot be promoted, or nothing.
+
+    Asked before it is offered. Offering a launcher as the one-keystroke
+    default and discovering at verification that no tenant can run it costs an
+    operator a sudo prompt and a failed provisioning to learn what its first
+    two lines already said (SYRD-210).
+    """
+    if not caller_path:
+        return []
+    candidate = Path(caller_path)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return []
+    return agent_cli_source_is_self_contained(cli, resolved)
+
+
+def agent_cli_source_is_self_contained(cli: str, resolved: Path) -> list[str]:
+    """Empty when this artifact can serve a tenant, or why it cannot."""
+    unreachable = agent_cli_unreachable_dependencies(resolved)
+    if not unreachable:
+        return []
+    lines = [
+        f"switchyard: {resolved} is a launcher, not a self-contained {cli}: it runs files "
+        "that belong to the account it was installed for, and a tenant is a different "
+        "account that cannot read them:",
+    ]
+    for path, reason in unreachable[:4]:
+        lines.append(f"switchyard:   {path} -- {reason}")
+    lines.append(
+        f"switchyard: copying it host-wide would copy the pointer and not the runtime, and "
+        f"every tenant would fail to exec it. Nothing has been created and nothing was "
+        f"installed."
+    )
+    return lines
+
+
 def resolve_agent_cli_source(cli: str, source: str | Path) -> Path:
     """The real executable behind an offered path, or a refusal saying why.
 
@@ -14064,6 +14204,13 @@ def resolve_agent_cli_source(cli: str, source: str | Path) -> Path:
         raise AgentCliSourceRejected(f"switchyard: {offered} is not a regular file")
     if not os.access(resolved, os.X_OK):
         raise AgentCliSourceRejected(f"switchyard: {resolved} is not executable")
+    # Before sudo, deliberately. `promote_agent_cli_through_sudo` resolves here
+    # first precisely so an answerable mistake is a sentence rather than a
+    # password prompt followed by one -- and an artifact that cannot serve a
+    # tenant is answerable now, by choosing another source or another CLI.
+    not_self_contained = agent_cli_source_is_self_contained(cli, resolved)
+    if not_self_contained:
+        raise AgentCliSourceRejected("\n".join(not_self_contained))
     return resolved
 
 
@@ -14106,6 +14253,13 @@ def promote_agent_cli_host_wide(
             raise AgentCliUnavailable(
                 f"switchyard: promoting {cli} needs root so the result is root-owned: {exc}"
             ) from exc
+        # Run it BEFORE it is installed, not after. The copy was verified where
+        # it had already replaced whatever was there, so a tenant that had a
+        # working host-wide CLI lost it to a promotion that then failed -- the
+        # failure and the damage were the same step. Verified while it is still
+        # a staging file, an artifact that cannot run in a tenant's context
+        # never becomes the one every tenant runs (SYRD-210).
+        version = _agent_cli_version_in_tenant_context(staged, runner=runner)
         os.replace(staged, destination)
     except AgentCliUnavailable:
         _unlink_quietly(staged)
@@ -14117,7 +14271,6 @@ def promote_agent_cli_host_wide(
         ) from exc
 
     print_func(f"switchyard: promoted {resolved} to {destination}, owned by root")
-    version = _agent_cli_version_in_tenant_context(destination, runner=runner)
     verdict = classify_agent_cli(cli, which=which)
     if not verdict.serves_a_new_owner:
         raise AgentCliUnavailable(

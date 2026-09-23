@@ -307,8 +307,14 @@ def test_the_board_comes_from_root_owned_registration_not_from_the_caller() -> N
 
     signature = inspect.signature(ph.board_url_for)
     check(
-        list(signature.parameters) == ["project", "registry_dir", "load"],
+        list(signature.parameters) == ["project", "registry_dir"],
         f"it takes a project and where to look, never a URL: {list(signature.parameters)}",
+    )
+    # And no reader either. A boundary whose read can be replaced is a boundary
+    # whose read can be replaced with one that follows symlinks (SYRD-242).
+    check(
+        "load" not in signature.parameters,
+        "the only read it makes is the no-follow one",
     )
     check(
         signature.parameters["registry_dir"].default == ph.DEFAULT_REGISTRY_DIR,

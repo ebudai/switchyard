@@ -3009,10 +3009,27 @@ def process_authority_board_compatibility(
     return True, "process authority ready"
 
 
-def load_project_config(project: str, config_path: Path | None = None) -> ProjectConfig:
+def load_project_config(
+    project: str,
+    config_path: Path | None = None,
+    *,
+    document: Mapping[str, Any] | None = None,
+) -> ProjectConfig:
     project_slug = _validate_project_slug(project)
     path = config_path or DEFAULT_CONFIG_DIR / f"{project_slug}.json"
-    config = _load_json(path)
+    if document is None and os.geteuid() == 0:
+        # Root reads a document in a directory the tenant owns, and the upgrade
+        # re-reads it at every phase. `Path.read_text` follows whatever is
+        # there, so one planted symlink sent root to read a file of the
+        # tenant's choosing -- and a file that was not JSON came back as a
+        # traceback rather than a refusal (SYRD-228). Unprivileged callers read
+        # their own file as before.
+        document, problem = read_tenant_document_no_follow(
+            path, what=f"{project_slug}'s generated configuration"
+        )
+        if problem:
+            raise SystemExit(f"switchyard: {problem}. Nothing was changed.")
+    config = dict(document) if document is not None else _load_json(path)
     config_project = _validate_project_slug(str(config.get("project") or project_slug))
     if config_project != project_slug:
         raise SystemExit(f"config project {config_project!r} does not match requested project {project_slug!r}")
@@ -7539,7 +7556,15 @@ def upgrade_generated_project_config(
             message=f"switchyard: {config.project} layout template is already current",
         )
     if session_dir_upgrade is not None or pane_launcher_upgrade is not None or roles_need_directorctl_upgrade:
-        raw_config = _load_json(config_path)
+        # Root rewrites this document, so it must be the tenant's own and not a
+        # link to somebody else's file (SYRD-228).
+        raw_config, config_problem = read_tenant_document_no_follow(
+            config_path, what=f"{config.project}'s generated configuration"
+        )
+        if config_problem:
+            return LauncherUpgradeResult(
+                changed=False, message=f"switchyard: {config_problem}. Nothing was changed."
+            )
         if session_dir_upgrade is not None:
             raw_config["session_dir"] = str(session_dir_upgrade)
         if pane_launcher_upgrade is not None:
@@ -7680,17 +7705,33 @@ def refresh_generated_project_runtime_artifacts(
     only thing the tenant's plan is allowed to contribute is a role the workflow
     projection added, under that role's own canonical account (SYRD-39).
     """
-    provision_dir = config_path.expanduser().resolve(strict=False).parent
+    # Absolute, never resolved: `Path.resolve()` follows a symlink the tenant
+    # planted at any component, and the whole of this function -- the documents
+    # it reads and the ownership repair it runs -- would then be pointed at
+    # wherever that link leads. Every component is judged instead, unfollowed,
+    # by the reads and by the repair below (SYRD-228).
+    provision_dir = Path(os.path.abspath(str(config_path.expanduser()))).parent
     tenant_plan_path = provision_dir / "plan.json"
-    if not tenant_plan_path.is_file():
-        return LauncherUpgradeResult(False, f"switchyard: {config.project} has no generated runtime plan; leaving artifacts unchanged")
+    # Read before anything decides anything, and without following a link at
+    # any component: this runs as root against a directory the tenant owns, and
+    # `is_file()` on a planted symlink answers for whatever it points at
+    # (SYRD-228). The bounded ownership repair below still runs afterwards --
+    # this refuses only the document, never the repair's own no-follow work.
+    plan_document, plan_problem = read_tenant_document_no_follow(
+        tenant_plan_path, what=f"{config.project}'s generated runtime plan"
+    )
+    if plan_problem:
+        if f"{tenant_plan_path} does not exist" in plan_problem:
+            return LauncherUpgradeResult(False, f"switchyard: {config.project} has no generated runtime plan; leaving artifacts unchanged")
+        return LauncherUpgradeResult(False, f"switchyard: {plan_problem}. Nothing was changed.")
     replacements = _plan_replacements(source_repo, commit_git_dir)
     changed: list[str] = []
 
     migrated_fields: list[str] = []
     try:
         tenant_plan = _project_board_provision_from_json(
-            tenant_plan_path, migrated=migrated_fields, supplied=replacements
+            tenant_plan_path, migrated=migrated_fields, supplied=replacements,
+            document=plan_document,
         )
     except SystemExit as exc:
         return LauncherUpgradeResult(
@@ -7734,10 +7775,7 @@ def refresh_generated_project_runtime_artifacts(
     # anything below republishes it. Root judges the document it found: a value
     # rewritten by the tenant-copy refresh below would otherwise be laundered
     # past the divergence refusal (SYRD-52).
-    try:
-        tenant_data = _load_json(tenant_plan_path)
-    except SystemExit as exc:
-        return LauncherUpgradeResult(False, f"switchyard: {config.project} runtime plan cannot be read: {exc}")
+    tenant_data = dict(plan_document or {})
     # The controller is regenerated from the installed root-owned grant rather
     # than read back from either document, so a bridge installed by the
     # operator's first pass is recorded on the second and its files are
@@ -11412,6 +11450,7 @@ def _project_board_provision_from_json(
     *,
     migrated: list[str] | None = None,
     supplied: Mapping[str, str] | None = None,
+    document: Mapping[str, Any] | None = None,
 ) -> ProjectBoardProvision:
     """Parse a plan written by this release, or by an older one.
 
@@ -11430,7 +11469,9 @@ def _project_board_provision_from_json(
     `commit_git_dir`, its reference plan could not be built, and the parse gave
     up before the operator's value was ever consulted (SYRD-226).
     """
-    raw = _load_json(path)
+    # `document` is a plan a privileged caller already read without following
+    # anything; `path` then names it for diagnostics only (SYRD-228).
+    raw = dict(document) if document is not None else _load_json(path)
     document = dict(raw)
     owner_home = _recorded_owner_home(document)
     if owner_home:
@@ -12800,7 +12841,12 @@ class PlanDocument:
 
 
 def read_plan_no_follow(
-    path: Path, *, require_root_owned: bool, require_owner_uids: Sequence[int] | None = None
+    path: Path,
+    *,
+    require_root_owned: bool,
+    require_owner_uids: Sequence[int] | None = None,
+    require_single_link: bool = False,
+    require_not_shared_writable: bool = False,
 ) -> tuple[PlanDocument | None, str]:
     """Read one plan authority by fd, refusing symlinks at every component.
 
@@ -12825,6 +12871,19 @@ def read_plan_no_follow(
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
                 return None, f"{path} is not a regular file"
+            if require_not_shared_writable and info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                return None, (
+                    f"{path} is mode {stat.S_IMODE(info.st_mode):04o}, which anybody in its "
+                    "group or beyond can write"
+                )
+            if require_single_link and info.st_nlink != 1:
+                # A second link is a second name for somebody else's file, and
+                # the owner check passes on the file it points at rather than on
+                # the document the tenant is entitled to write (SYRD-228).
+                return None, (
+                    f"{path} has {info.st_nlink} links, so it is another file under a second "
+                    "name rather than this project's own document"
+                )
             if require_owner_uids is not None:
                 # Root reads a tenant's own document here, so the question is
                 # not whether root owns it but whether it belongs to somebody
@@ -12865,11 +12924,77 @@ def read_plan_no_follow(
         os.close(dir_fd)
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return None, f"{path} is not readable as a plan document: {exc}"
+    except UnicodeDecodeError:
+        # Why, never what: this may be a file the tenant pointed root at, and a
+        # decoder message quotes the bytes it choked on (SYRD-228).
+        return None, f"{path} is not readable as a plan document: it is not UTF-8 text"
+    except json.JSONDecodeError as exc:
+        return None, (
+            f"{path} is not readable as a plan document: it is not JSON "
+            f"(line {exc.lineno}, column {exc.colno})"
+        )
     if not isinstance(data, dict):
         return None, f"{path} is not a plan document"
     return PlanDocument(path, data, raw, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)), ""
+
+
+def _directory_owner_no_follow(directory: Path) -> tuple[os.stat_result | None, str]:
+    """A directory's own stat, reached without following a link on the way."""
+    relative = Path(str(directory).lstrip("/")) / "_"
+    dir_fd, problem = _walk_no_follow(Path(directory.anchor or "/"), relative)
+    if dir_fd < 0:
+        return None, f"{directory}: {problem}"
+    try:
+        info = os.fstat(dir_fd)
+    finally:
+        os.close(dir_fd)
+    if not stat.S_ISDIR(info.st_mode):
+        return None, f"{directory} is not a directory"
+    return info, ""
+
+
+def read_tenant_document_no_follow(path: Path, *, what: str) -> tuple[dict[str, Any] | None, str]:
+    """Read a tenant's own generated document as root, following nothing.
+
+    The privileged upgrade reads the tenant's plan and its generated
+    configuration from a directory the tenant owns. `Path.read_text` follows
+    whatever is there, so a symlink planted at either name sent root to read a
+    file of the tenant's choosing -- reported, if it was not JSON, as a raw
+    traceback rather than as a refusal (SYRD-228). The SYRD-227 ownership
+    repair already opened these paths this way; the reads that ran BEFORE it
+    did not.
+
+    Entitled means the directory's own owner or root, because only root can
+    change an owner: a file somebody else owns, one anybody else can write, one
+    that is a second link to another file, and a symlink at any component are
+    all refused. Returns (document, why not).
+    """
+    directory, problem = _directory_owner_no_follow(path.parent)
+    if directory is None:
+        return None, f"refusing to read {what} at {path}: {problem}"
+    if directory.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return None, (
+            f"refusing to read {what} at {path}: {path.parent} is mode "
+            f"{stat.S_IMODE(directory.st_mode):04o}, so anybody in its group or beyond can "
+            "replace what is in it"
+        )
+    # Who may have put the file there is a question about the directory. Only
+    # root can write into a root-owned directory, so a file it holds is one
+    # root placed -- provisioning writes the tenant's own documents there and
+    # gives them to the owner, which is exactly that shape. A directory the
+    # tenant owns is one the tenant can fill with anything, so there the
+    # document has to belong to that owner or to root.
+    permitted = None if directory.st_uid == 0 else sorted({0, directory.st_uid})
+    document, problem = read_plan_no_follow(
+        path,
+        require_root_owned=False,
+        require_owner_uids=permitted,
+        require_single_link=True,
+        require_not_shared_writable=True,
+    )
+    if document is None:
+        return None, f"refusing to read {what} at {path}: {problem}"
+    return dict(document.data), ""
 
 
 def write_plan_no_follow(document: PlanDocument, body: bytes) -> str:
@@ -29926,12 +30051,13 @@ def _loaded_plan_field(plan_data: dict[str, Any], key: str, default: Any) -> Any
 
 def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str, Any]:
     plan_path = config_path.parent / "plan.json"
-    try:
-        raw = _load_json(plan_path)
-    except OSError:
-        raw = {}
-    except SystemExit:
-        raw = {}
+    # Following nothing, and falling back to what the configuration itself says
+    # rather than to whatever a planted link names. A document that cannot be
+    # read safely is absent as far as this is concerned (SYRD-228).
+    document, _problem = read_tenant_document_no_follow(
+        plan_path, what=f"{config.project}'s generated runtime plan"
+    )
+    raw = dict(document or {})
     if raw:
         return raw
     port = None
@@ -33652,6 +33778,7 @@ def _require_switchyard_project_owner_or_root(config: ProjectConfig, argv: Seque
 def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> ProjectConfig:
     _require_switchyard_owner_hint_or_root(entry, argv)
     try:
+        # Root's read of this path is the no-follow one, inside the loader.
         config = load_project_config(entry.slug, entry.config_path)
     except PermissionError:
         if os.geteuid() != 0:

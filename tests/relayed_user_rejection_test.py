@@ -74,6 +74,16 @@ def legacy_document(cfg: dict) -> dict:
         dict(tr)
         for tr in stripped["transitions"]
         if not tr.get("relays_decision_of")
+        # A board that predates relaying also predates the Director's own
+        # withdrawal from user review, which arrived later still (SYRD-237).
+        # Leaving it in would furnish this era with a correction path it never
+        # had, and the assertion below -- that the Director had no way back at
+        # all -- is the whole of the regression this suite reproduces.
+        and not (
+            tr.get("from") == "user_review"
+            and tr.get("primitive") == "return"
+            and "user" not in (tr.get("actors") or [])
+        )
     ]
     for tr in stripped["transitions"]:
         tr.pop("relays_decision_of", None)

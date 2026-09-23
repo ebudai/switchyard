@@ -793,6 +793,24 @@
       "relays_decision_of": "user"
     },
     {
+      "from": "user_review",
+      "to": "in_progress",
+      "action": "director_withdraw",
+      "label": "Withdraw the candidate (Director found a defect)",
+      "actors": [
+        "director"
+      ],
+      "primitive": "return",
+      "owner_scoped": false,
+      "require_commit": false,
+      "require_reason": true,
+      "clear_signoffs": [
+        "audit_signoff",
+        "user_signoff"
+      ],
+      "allow_no_code": false
+    },
+    {
       "from": "director_review",
       "to": "in_progress",
       "action": "director_kick_back",

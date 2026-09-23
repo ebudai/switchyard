@@ -22,14 +22,25 @@ So the offer has to happen on the unprivileged outer side, before the bridge:
   created here, so refusing must not strand a tenant that already exists;
 * nothing is offered for a CLI that is already host-wide.
 
-What cannot be asked from out here is which CLIs this tenant actually selected:
-that lives in its configuration under the owner's home, which this account
-cannot read, and that boundary is working as intended. So the question asked is
-the one that can be answered -- which agent CLIs exist for this operator alone.
+What cannot be READ from out here is which CLIs this tenant selected: that lives
+in its configuration under the owner's home, which this account cannot read, and
+that boundary is working as intended.
+
+SYRD-220 narrowed what follows from that. Answering the question that could be
+answered -- which agent CLIs exist for this operator alone -- meant the launch
+offered every one of them, so the `test` tenant was asked at every start to
+promote a Hermes none of its roles uses. The selection is now RECORDED where the
+operator can read it, in the project's root-owned registry entry, and the offer
+is made only for the CLIs it names. Every case below is therefore about a tenant
+that does use the CLI in question; `tests/tenant_launch_unused_cli_test.py`
+covers the tenant that does not.
 """
 
 from __future__ import annotations
 
+import atexit
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -40,6 +51,30 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import team_launcher as launcher  # noqa: E402
+
+#: The tenant these cases drive, recorded the way root records one: it uses
+#: every CLI they offer it, so each case is about the promotion itself rather
+#: than about the selection. Pointed at through the environment variable the
+#: launcher itself reads, so the calls below exercise the real lookup rather
+#: than a parameter only a test passes (SYRD-220).
+_REGISTRY = tempfile.TemporaryDirectory(prefix="syrd211-registry.")
+atexit.register(_REGISTRY.cleanup)
+Path(_REGISTRY.name, "test.json").write_text(
+    json.dumps(
+        {
+            "schema": launcher.SWITCHYARD_REGISTRY_SCHEMA,
+            "slug": "test",
+            "name": "test",
+            "config_path": "/home/test-agent/Projects/test/.switchyard/provision/test.json",
+            launcher.SWITCHYARD_REGISTRY_AGENT_CLIS_KEY: ["agy", "claude", "codex", "hermes"],
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    + "\n",
+    encoding="utf-8",
+)
+os.environ[launcher.SWITCHYARD_REGISTRY_DIR_ENV] = _REGISTRY.name
 
 CHECKS = 0
 

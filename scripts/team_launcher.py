@@ -28,7 +28,7 @@ import tomllib
 import unicodedata
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 from scripts.ticket_board.project_provision import (
     DEFAULT_PRIVILEGED_PROVISION_ROOT,
@@ -86,6 +86,10 @@ def switchyard_registry_dir() -> Path:
     configured = os.environ.get(SWITCHYARD_REGISTRY_DIR_ENV, "").strip()
     return Path(configured).expanduser() if configured else DEFAULT_SWITCHYARD_REGISTRY_DIR
 SWITCHYARD_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
+#: The agent CLIs a registered tenant's roles are configured with. Optional, so
+#: a record written before it existed still reads; absent means "not recorded",
+#: never "none" (SYRD-220).
+SWITCHYARD_REGISTRY_AGENT_CLIS_KEY = "agent_clis"
 SWITCHYARD_NAME = "switchyard"
 TEAM_LAUNCHER_NAME = "team-launcher"
 # SYRD-43: the program Konsole runs for a pane, so a detach never lands on a shell.
@@ -14036,9 +14040,40 @@ def promote_agent_cli_through_sudo(
     return verdict
 
 
+def registered_tenant_agent_clis(
+    project: str, *, registry_dir: Path | None = None
+) -> frozenset[str] | None:
+    """Which agent CLIs this tenant's roles are configured with, or None.
+
+    Read from the project's registry entry: root-owned, world-readable, one
+    file per project, and already the record this unprivileged side consults
+    before it crosses the tenant control boundary. The tenant's own
+    configuration lives under the owner's home and stays unreadable from here,
+    which is the boundary working -- so the selection it describes is recorded
+    out here when root registers the project, rather than guessed at launch.
+
+    `None` means no selection is recorded, which is not the same as an empty
+    one: a tenant registered before this record existed says nothing about its
+    CLIs, and a caller must not read silence as "uses none of them" any more
+    than SYRD-211 could read it as "uses all of them" (SYRD-220).
+    """
+    entry_path = (registry_dir or switchyard_registry_dir()) / f"{project}.json"
+    try:
+        raw = json.loads(entry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or str(raw.get("schema") or "") != SWITCHYARD_REGISTRY_SCHEMA:
+        return None
+    recorded = raw.get(SWITCHYARD_REGISTRY_AGENT_CLIS_KEY)
+    if not isinstance(recorded, list):
+        return None
+    return frozenset(str(cli).strip() for cli in recorded if str(cli).strip())
+
+
 def resolvable_agent_cli_promotions(
     *,
     which: Callable[..., str | None] = caller_aware_which,
+    selected: Collection[str] | None = None,
 ) -> list[AgentCliAvailability]:
     """Agent CLIs this operator has privately and no tenant owner can reach.
 
@@ -14057,6 +14092,12 @@ def resolvable_agent_cli_promotions(
     """
     offers: list[AgentCliAvailability] = []
     for cli in sorted(FIRST_RUN_AUTH_STATUS_COMMANDS):
+        if selected is not None and cli not in selected:
+            # Not this tenant's. Promoting it would install something on the
+            # host for a tenant that will never run it, and asking about it is
+            # a question whose only useful answer is "no" -- which is what the
+            # `test` tenant was asked, every launch (SYRD-220).
+            continue
         verdict = classify_agent_cli(cli, which=which)
         if verdict.scope == AGENT_CLI_SCOPE_CALLER_ONLY and verdict.caller_path:
             offers.append(verdict)
@@ -14074,6 +14115,7 @@ def offer_host_wide_promotion_before_launch(
     print_func: Callable[[str], None] = print,
     promoter: Callable[..., AgentCliAvailability] | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    registry_dir: Path | None = None,
 ) -> list[str]:
     """Offer, before crossing the bridge. Never block the launch.
 
@@ -14087,7 +14129,16 @@ def offer_host_wide_promotion_before_launch(
 
     Returns the CLIs promoted, for the caller to report.
     """
-    offers = resolvable_agent_cli_promotions(which=which)
+    selected = registered_tenant_agent_clis(project, registry_dir=registry_dir)
+    #: Registered before the selection was recorded. Nothing out here can say
+    #: which CLIs such a tenant uses, and SYRD-211's answer -- offer every
+    #: caller-only CLI on the host -- is what asked the `test` tenant to promote
+    #: a Hermes no role of its uses, at every launch. So nothing is offered and
+    #: nothing is promoted; what a CLI cannot do is still diagnosed below, and a
+    #: role that genuinely needs one is still named by the launch itself past
+    #: the bridge, where the configuration can be read (SYRD-220).
+    unrecorded_selection = selected is None
+    offers = resolvable_agent_cli_promotions(which=which, selected=selected)
     if not offers:
         return []
     # A resume runs unprivileged, so the default here is the boundary-crossing
@@ -14109,6 +14160,10 @@ def offer_host_wide_promotion_before_launch(
                 if unpromotable:
                     for line in unpromotable:
                         print_func(line)
+                    continue
+                if unrecorded_selection:
+                    # Unattended, so not even a line to read: this run makes no
+                    # decision and leaves the launch as it was (SYRD-220).
                     continue
                 if policy != AGENT_CLI_POLICY_PROMOTE_LOCAL:
                     print_func(
@@ -14137,6 +14192,16 @@ def offer_host_wide_promotion_before_launch(
                         f"switchyard: install a self-contained {verdict.cli} host-wide, or give "
                         f"{project}'s roles a CLI that is already host-wide; this launch "
                         "continues unchanged"
+                    )
+                    continue
+                if unrecorded_selection:
+                    # Said rather than asked: starting a tenant is not the
+                    # moment to make somebody guess whether it uses this
+                    # (SYRD-220).
+                    print_func(
+                        f"switchyard: not offering to promote {verdict.cli} for {project}: which "
+                        f"agent CLIs its roles use is not recorded. `sudo switchyard upgrade "
+                        f"{project}` records it, and then a CLI this tenant needs is offered here"
                     )
                     continue
                 print_func(
@@ -20317,6 +20382,68 @@ def _check_switchyard_registration_available(
         raise SystemExit(collision)
 
 
+def refresh_registered_agent_clis(
+    config: "ProjectConfig",
+    *,
+    registry_dir: Path | None = None,
+    dry_run: bool = False,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """Record this tenant's CLI selection where a launch can read it.
+
+    Registration writes it, but every tenant registered before it existed has a
+    record that says nothing -- and a launch that cannot tell which CLIs a
+    tenant uses cannot offer a promotion for one without guessing. There is no
+    other moment: a launch runs unprivileged and this file is root's.
+
+    Narrow on purpose. Only this one key is written, only when it differs from
+    the configuration, and a record that is missing or is not a registry
+    document is left exactly as found -- repairing one is not this command's
+    decision (SYRD-220).
+    """
+    slug = str(config.project or "").strip()
+    if not slug:
+        return ["a project with no slug cannot have its CLI selection recorded"]
+    registry_path = (registry_dir or switchyard_registry_dir()) / f"{slug}.json"
+    try:
+        raw = json.loads(registry_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"{registry_path} cannot be read to record {slug}'s CLI selection: {exc}"]
+    if not isinstance(raw, dict) or str(raw.get("schema") or "") != SWITCHYARD_REGISTRY_SCHEMA:
+        return [f"{registry_path} is not a registry record; {slug}'s CLI selection was not recorded"]
+    configured = _configured_agent_clis(config)
+    if raw.get(SWITCHYARD_REGISTRY_AGENT_CLIS_KEY) == configured:
+        return []
+    if dry_run:
+        print_func(
+            f"switchyard: would record {slug}'s agent CLIs ({', '.join(configured) or 'none'}) "
+            f"in {registry_path}"
+        )
+        return []
+    raw[SWITCHYARD_REGISTRY_AGENT_CLIS_KEY] = configured
+    try:
+        registry_path.write_text(
+            json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        registry_path.chmod(0o644)
+    except OSError as exc:
+        return [f"{slug}'s CLI selection could not be recorded in {registry_path}: {exc}"]
+    print_func(
+        f"switchyard: recorded {slug}'s agent CLIs ({', '.join(configured) or 'none'}) in "
+        f"{registry_path}; a launch now offers a promotion only for those"
+    )
+    return []
+
+
+def _configured_agent_clis(config: "ProjectConfig") -> list[str]:
+    """The distinct agent CLIs this project's roles are configured with."""
+    return sorted({
+        name for role in config.roles if (name := _role_cli_name(role))
+    })
+
+
 def _register_switchyard_project(
     config_path: Path,
     *,
@@ -20329,7 +20456,7 @@ def _register_switchyard_project(
     if not raw_slug:
         raise SystemExit(f"switchyard: cannot register {resolved_config_path}: project slug is empty")
     slug = _validate_project_slug(raw_slug)
-    load_project_config(slug, resolved_config_path)
+    config = load_project_config(slug, resolved_config_path)
     name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
     registry_dir = registry_dir or switchyard_registry_dir()
     registry_path = registry_dir / f"{slug}.json"
@@ -20347,6 +20474,13 @@ def _register_switchyard_project(
         "slug": slug,
         "name": name,
         "config_path": str(resolved_config_path),
+        # Recorded here because this is the last moment the configuration and a
+        # root-owned, world-readable file are both in reach: afterwards the
+        # configuration is under the owner's home, and a launch cannot read it
+        # from the operator's side of the boundary. Without it a launch has to
+        # guess which CLIs a tenant uses, and guessing "all of them" asked the
+        # `test` tenant to promote a Hermes no role of its uses (SYRD-220).
+        SWITCHYARD_REGISTRY_AGENT_CLIS_KEY: _configured_agent_clis(config),
     }
     try:
         registry_dir.mkdir(parents=True, exist_ok=True)
@@ -28078,6 +28212,12 @@ def upgrade_project_command(
     )
     report_problems = report_link_problems + refresh_upstream_report_credential(
         config, dry_run=dry_run, registry_dir=registry_dir, print_func=print_func,
+    )
+    # A tenant registered before its CLI selection was recorded cannot be
+    # offered a promotion at launch without guessing, and guessing is what
+    # asked the `test` tenant about a Hermes no role of its uses (SYRD-220).
+    report_problems += refresh_registered_agent_clis(
+        config, registry_dir=registry_dir, dry_run=dry_run, print_func=print_func,
     )
     if report_problems:
         for problem in report_problems:

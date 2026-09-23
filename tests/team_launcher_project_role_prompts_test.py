@@ -27,7 +27,16 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
         source_repo = tmp_path / "source-repo"
         source_repo.mkdir()
         prompts: list[str] = []
-        answers = iter(["n", "n", "claude", "code-review, runtime", "agy", "codex"])
+        # Two roles of the operator's own, each added through the deliberate
+        # custom entry rather than typed into one comma-separated line, and
+        # every runtime chosen from its list (SYRD-115).
+        answers = iter([
+            "n", "n",                                  # no designer, no audit
+            "c", "code-review", "c", "runtime", "",    # two roles of one's own
+            "claude", "", "",                          # director: runtime, model, effort
+            "agy", "",                                 # code-review: agy renders no effort
+            "codex", "", "",                           # runtime: runtime, model, effort
+        ])
         runner = PromptedRoleRunner()
         process_launcher = RecordingProcessLauncher()
         stdout = StringIO()
@@ -72,11 +81,22 @@ def test_switchyard_new_prompts_roles_and_skips_designer_when_absent() -> None:
     assert prompts == [
         "Include designer role [Y/n]: ",
         "Include audit role [Y/n]: ",
-        "director CLI (claude/codex/agy/hermes) [claude]: ",
-        "Implementer roles (comma-separated) [main, ops]: ",
-        "code-review CLI (claude/codex/agy/hermes) [codex]: ",
-        "runtime CLI (claude/codex/agy/hermes) [codex]: ",
-    ]
+        "Implementer roles [main, ops]: ",
+        "Implementer roles (exact value): ",
+        "Implementer roles [main, ops]: ",
+        "Implementer roles (exact value): ",
+        "Implementer roles [main, ops]: ",
+        "director runtime [Claude Code]: ",
+        "director model [Opus 5]: ",
+        "director effort [high]: ",
+        "code-review runtime [Codex]: ",
+        "code-review model [Gemini 3.7 Flash High]: ",
+        "runtime runtime [Codex]: ",
+        "runtime model [GPT-5.6 Sol]: ",
+        "runtime effort [high]: ",
+    ], prompts
+    # agy renders no effort level, so it is not asked for one.
+    assert not any(prompt.startswith("code-review effort") for prompt in prompts)
     assert artifact["project"]["include_designer"] is False
     assert artifact["project"]["include_audit"] is False
     assert artifact["project"]["audit_roles"] == []
@@ -135,7 +155,11 @@ def test_switchyard_new_accepts_role_defaults_and_includes_ops() -> None:
         source_repo.mkdir()
         prompts: list[str] = []
         output: list[str] = []
-        answers = iter(["", "", "", "", "", "", "", ""])
+        # Every answer is Enter. A whole project configured without typing one
+        # constrained identifier is the ticket's first acceptance criterion
+        # (SYRD-115): designer, audit, the conventional role pair, and then
+        # each role's runtime, model and effort straight off its list.
+        answers = iter([""] * 20)
         runner = PromptedRoleRunner()
         process_launcher = RecordingProcessLauncher()
 
@@ -177,13 +201,23 @@ def test_switchyard_new_accepts_role_defaults_and_includes_ops() -> None:
     assert prompts == [
         "Include designer role [Y/n]: ",
         "Include audit role [Y/n]: ",
-        "designer CLI (claude/codex/agy/hermes) [claude]: ",
-        "director CLI (claude/codex/agy/hermes) [claude]: ",
-        "audit CLI (claude/codex/agy/hermes) [claude]: ",
-        "Implementer roles (comma-separated) [main, ops]: ",
-        "main CLI (claude/codex/agy/hermes) [codex]: ",
-        "ops CLI (claude/codex/agy/hermes) [codex]: ",
-    ]
+        "Implementer roles [main, ops]: ",
+        "designer runtime [Claude Code]: ",
+        "designer model [Opus 5]: ",
+        "designer effort [high]: ",
+        "director runtime [Claude Code]: ",
+        "director model [Opus 5]: ",
+        "director effort [high]: ",
+        "audit runtime [Claude Code]: ",
+        "audit model [Opus 5]: ",
+        "audit effort [high]: ",
+        "main runtime [Codex]: ",
+        "main model [GPT-5.6 Sol]: ",
+        "main effort [high]: ",
+        "ops runtime [Codex]: ",
+        "ops model [GPT-5.6 Sol]: ",
+        "ops effort [high]: ",
+    ], prompts
     assert "switchyard: project name: Porter System" in output
     assert "switchyard: slug: porter" in output
     assert "switchyard: owner user: otto-agent" in output
@@ -283,32 +317,47 @@ def test_prompt_cli_caps_invalid_retries() -> None:
         except SystemExit as exc:
             message = str(exc)
 
+    # SYRD-115: the runtimes are a list now rather than four names rendered
+    # into the prompt text, so what a wrong answer is told is that it matches
+    # none of the choices it can see. The bound itself is unchanged, which is
+    # what this case exists to hold.
     assert message == "switchyard: too many invalid answers for director CLI"
-    assert stdout.getvalue().count("CLI for director must be one of claude, codex, agy, hermes") == (
-        team_launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS
+    assert stdout.getvalue().count("no choice matches 'vim'") == (
+        team_launcher.terminal_select.MAX_ATTEMPTS
     )
 
-def test_switchyard_role_choices_caps_comma_only_implementer_retries() -> None:
+def test_switchyard_role_choices_caps_unmatched_implementer_retries() -> None:
+    """The bound survives the interaction change.
+
+    There is no comma-separated line to leave empty any more -- roles are
+    picked -- so the way to answer this question wrongly is to keep naming
+    something that is not on the list. What must still hold is that it ends
+    (SYRD-115).
+    """
     stdout = StringIO()
     calls = 0
 
-    def input_func(_prompt: str) -> str:
+    def input_func(prompt: str) -> str:
         nonlocal calls
         calls += 1
         if calls > 20:
             raise AssertionError("prompt retry cap did not terminate")
-        return "" if calls <= 5 else ","
+        if prompt.startswith("Include "):
+            return "n"
+        return "no-such-role"
 
     with redirect_stdout(stdout):
         try:
-            team_launcher._prompt_switchyard_role_choices(input_func=input_func)
+            team_launcher._prompt_switchyard_role_choices(
+                input_func=input_func, print_func=lambda line: print(line)
+            )
             raise AssertionError("expected prompt retry cap")
         except SystemExit as exc:
             message = str(exc)
 
     assert message == "switchyard: too many invalid answers for implementer roles"
-    assert stdout.getvalue().count("at least one implementer role is required") == (
-        team_launcher.SWITCHYARD_PROMPT_MAX_ATTEMPTS
+    assert stdout.getvalue().count("no choice matches 'no-such-role'") == (
+        team_launcher.terminal_select.MAX_ATTEMPTS
     )
 
 def test_switchyard_new_rejects_role_choices_without_required_director() -> None:

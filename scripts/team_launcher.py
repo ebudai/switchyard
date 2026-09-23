@@ -143,6 +143,11 @@ DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
 #: Root's note of what a host was running before an upgrade replaced it.
 RELEASE_ROLLBACK_SCHEMA = "switchyard.release-rollback.v1"
+#: The workflow seed of a tenant that keeps schema.sql's own workflow and
+#: declares no per-project document. Such a tenant is not a legacy tenant: it
+#: has nothing to adopt and no scaffold onboarding to migrate away from, so the
+#: no-workflow detection has to leave it alone (SYRD-240).
+NON_DECLARATIVE_WORKFLOW_SEED = "pgu-full"
 BOARD_SKILL_NAME = "switchyard-board"
 BOARD_SKILL_INSTALLER_NAME = "switchyard-board-skill"
 
@@ -212,6 +217,11 @@ SWITCHYARD_COMMANDS = (
     # an operator authorizing it through Polkit and the whole decision in the
     # rollout journal (SYRD-166).
     "adopt-workflow",
+    # Installs root's declared workflow onto a tenant whose board is running
+    # none. A legacy tenant keeps stages and roles as table rows with no
+    # workflow document, so /api/workflow answers null and its Director keeps
+    # receiving provisioning-scaffold onboarding (SYRD-240).
+    "migrate-workflow",
     # Finishes a project whose `switchyard new` stopped before it was
     # registered, so the installation that already exists can be completed
     # instead of started again: root's artifacts first (SYRD-147), then the
@@ -22055,6 +22065,307 @@ def switchyard_repair_boundary_command(
         attempt.close(status=status, exit_status=exit_status, detail=detail)
 
 
+@dataclass(frozen=True)
+class WorkflowMigration:
+    """What installing a declared workflow on a legacy tenant would do."""
+
+    project: str
+    document: dict | None = None
+    digest: str = ""
+    source: str = ""
+    board_revision: int = 0
+    board_has_document: bool = False
+    already_installed: bool = False
+    problems: tuple[str, ...] = ()
+
+    @property
+    def installable(self) -> bool:
+        return self.document is not None and not self.problems and not self.already_installed
+
+
+def read_board_workflow_state(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[int, dict | None, str]:
+    """The board's workflow revision AND document, over its own socket.
+
+    `read_board_declared_workflow` answers only the document, and the revision
+    is what makes an install safe: it is the `expected_revision` the database
+    compares under an advisory lock, so a board that changed underneath this is
+    a refused write rather than a lost one.
+    """
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/workflow")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        if response.status != 200:
+            return 0, None, f"the board answered HTTP {response.status} for its workflow"
+        payload = json.loads(body)
+    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
+        return 0, None, f"the board's workflow could not be read: {exc}"
+    if not isinstance(payload, dict):
+        return 0, None, "the board's workflow response is not a document"
+    document = payload.get("document")
+    revision = payload.get("revision")
+    return (
+        int(revision) if isinstance(revision, int) else 0,
+        document if isinstance(document, dict) else None,
+        "",
+    )
+
+
+def plan_workflow_migration(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    board_reader: Callable[[ProjectConfig], tuple[int, dict | None, str]] | None = None,
+) -> WorkflowMigration:
+    """Resolve the document root would install, and what the board runs now.
+
+    The document comes only from sources root vouches for: its own recorded
+    copy first, then the workflow on its own baseline plan. The tenant's
+    `plan.json` is deliberately NOT one of them -- it is the file the account
+    every role runs as can write, and the document decides which roles exist
+    and what each may call. Adopting it is a separate, operator-authorized
+    decision (`adopt-workflow`), and this installs only what that decision
+    already produced (SYRD-165, SYRD-166).
+    """
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    problems: list[str] = []
+    reader = board_reader or read_board_workflow_state
+    revision, live, board_problem = reader(config)
+    if board_problem:
+        return WorkflowMigration(project=config.project, problems=(board_problem,))
+
+    document, recorded_problem = recorded_declared_workflow(config.project)
+    source = f"root's recorded workflow at {workflow_record_path(config.project)}"
+    if document is None:
+        baseline = privileged_baseline_plan_path(config.project)
+        holder, baseline_problem = read_plan_no_follow(baseline, require_root_owned=True)
+        candidate = holder.data.get("workflow") if holder is not None else None
+        if isinstance(candidate, dict):
+            document, source = candidate, f"root's baseline plan at {baseline}"
+        else:
+            problems.append(recorded_problem)
+            if holder is None:
+                problems.append(baseline_problem)
+            problems.append(
+                f"root holds no declared workflow for {config.project} to install. An operator "
+                f"records one with `pkexec switchyard adopt-workflow {config.project}`; on a "
+                "board that is running no workflow at all that needs "
+                "`--despite-board '<why>'`, because there is nothing for the tenant's copy to "
+                "be corroborated against"
+            )
+            return WorkflowMigration(
+                project=config.project,
+                board_revision=revision,
+                board_has_document=live is not None,
+                problems=tuple(problems),
+            )
+
+    try:
+        try:
+            from scripts.ticket_board.workflow_config import validate
+        except ImportError:  # pragma: no cover - direct execution
+            from ticket_board.workflow_config import validate
+
+        validated = validate(document, project=config.project)
+    except (ValueError, SystemExit) as exc:
+        return WorkflowMigration(
+            project=config.project,
+            board_revision=revision,
+            board_has_document=live is not None,
+            problems=(f"{source} carries a workflow this release will not accept: {exc}",),
+        )
+
+    digest = workflow_document_digest(validated)
+    already = live is not None and workflow_document_digest(live) == digest
+    if live is not None and not already:
+        problems.append(
+            f"{config.project}'s board is already running a declared workflow with a different "
+            f"digest ({workflow_document_digest(live)} rather than {digest}). This installs a "
+            "workflow onto a board that has none; changing one that exists is "
+            "`switchyard role-prompt` or a reviewed `workflow_manage apply`"
+        )
+    return WorkflowMigration(
+        project=config.project,
+        document=validated,
+        digest=digest,
+        source=source,
+        board_revision=revision,
+        board_has_document=live is not None,
+        already_installed=already,
+        problems=tuple(problems),
+    )
+
+
+def switchyard_migrate_workflow_command(
+    slug: str,
+    *,
+    apply: bool = False,
+    registry_dir: Path | None = None,
+    config_path: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    board_reader: Callable[[ProjectConfig], tuple[int, dict | None, str]] | None = None,
+    euid_getter: Callable[[], int] = os.geteuid,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Install root's declared workflow onto a tenant whose board is running none.
+
+    This is the bounded migration SYRD-240 asks for. A legacy tenant -- one
+    provisioned before declarative workflows -- runs stages, transitions and
+    roles as table rows with no `workflow_configuration` document, so
+    `/api/workflow` answers null and its Director keeps receiving the
+    provisioning-scaffold onboarding rather than the migrated one.
+
+    It drives `workflow_manage apply`, which already does every hard part and
+    is the same path `role-prompt` takes: schema validation, the
+    director-onboarding backfill that sets the marker the pane hook reads, a
+    writability precheck on the projection, optimistic concurrency on
+    `expected_revision`, a dry run before the real write, and the rollback
+    journal. Reimplementing any of that here would be a second copy of the one
+    path that must not have two.
+
+    Idempotent because the database makes it so: `apply_declared_workflow`
+    returns the existing revision unchanged when the document it is given
+    already equals the one in force, so a rerun inserts no rows. This refuses
+    before writing anyway, so a rerun does not even reach it.
+    """
+    slug = _validate_project_slug(slug)
+    if config_path is not None:
+        resolved_config = config_path
+    else:
+        resolved_config = _resolve_switchyard_project(
+            slug, registry_dir=registry_dir
+        ).config_path
+    config = load_project_config(slug, resolved_config)
+    migration = plan_workflow_migration(
+        config, config_path=resolved_config, board_reader=board_reader
+    )
+
+    print_func(f"switchyard: {slug} declared workflow migration")
+    print_func(
+        f"  board            revision {migration.board_revision}, "
+        + ("running a declared workflow" if migration.board_has_document else "running NONE")
+    )
+    if migration.document is not None:
+        print_func(f"  document         {migration.digest}")
+        print_func(f"  source           {migration.source}")
+        print_func(
+            f"  roles            {len(migration.document.get('roles') or [])}; "
+            f"stages {len(migration.document.get('stages') or [])}; "
+            f"transitions {len(migration.document.get('transitions') or [])}"
+        )
+    for problem in migration.problems:
+        print_func(f"  problem          {problem}")
+
+    if migration.already_installed:
+        print_func(
+            f"switchyard: {slug}'s board is already running exactly this workflow "
+            f"(digest {migration.digest}). Nothing to do."
+        )
+        return 0
+    if not migration.installable:
+        print_func(f"switchyard: nothing was changed.")
+        return 1
+    if not apply:
+        print_func(
+            "switchyard: installing a declared workflow is not reversible to 'no declared "
+            "workflow': the board can be moved between documents afterwards, but there is no "
+            "way back to running none."
+        )
+        print_func(
+            f"switchyard: dry run; nothing was written. Install it with "
+            f"`pkexec switchyard migrate-workflow {slug} --apply`."
+        )
+        return 0
+    if euid_getter() != 0:
+        print_func(
+            f"switchyard: installing {slug}'s declared workflow rewrites the tenant's generated "
+            f"launcher configuration as well as the board's workflow. Run: "
+            f"pkexec switchyard migrate-workflow {slug} --apply"
+        )
+        return 1
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-migrate-{slug}.") as raw:
+        document_path = Path(raw) / "document.json"
+        document_path.write_text(
+            json.dumps(migration.document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        board_root = (
+            str(config.board_url or "")
+            .rstrip("/")
+            .removesuffix("/api/tickets")
+            .removesuffix("/api")
+        )
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve().parent / "workflow_manage.py"),
+            "apply",
+            "--config",
+            str(resolved_config),
+            "--board-url",
+            board_root,
+            "--document",
+            str(document_path),
+            # First activation demands an explicit validated baseline to
+            # return to. There is no "no workflow" to return to, so the
+            # baseline is this same document -- which is exactly what the
+            # irreversibility note above says out loud.
+            "--rollback-document",
+            str(document_path),
+            "--expected-revision",
+            str(migration.board_revision),
+        ]
+        result = runner(command, capture_output=True, text=True)
+    for stream in (getattr(result, "stdout", ""), getattr(result, "stderr", "")):
+        for line in str(stream or "").splitlines():
+            print_func(f"  {line}")
+    if getattr(result, "returncode", 1) != 0:
+        print_func(f"switchyard: {slug}'s workflow was not installed.")
+        return 1
+
+    revision, live, problem = (board_reader or read_board_workflow_state)(config)
+    if live is None:
+        print_func(
+            f"switchyard: the write reported success but {slug}'s board still reports no "
+            f"declared workflow{(' (' + problem + ')') if problem else ''}. Nothing can be "
+            "claimed for this migration."
+        )
+        return 1
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    if workflow_document_digest(live) != migration.digest:
+        print_func(
+            f"switchyard: {slug}'s board now runs a workflow, but not the one that was "
+            f"installed (digest {workflow_document_digest(live)} rather than {migration.digest})."
+        )
+        return 1
+    print_func(
+        f"switchyard: {slug} is running its declared workflow at revision {revision} "
+        f"(digest {migration.digest})."
+    )
+    print_func(
+        f"switchyard: restart {slug}'s roles for the director to receive the migrated "
+        f"onboarding: `switchyard stop {slug}` then `switchyard start {slug}`."
+    )
+    return 0
+
+
 def switchyard_adopt_workflow_command(
     slug: str,
     *,
@@ -26480,12 +26791,146 @@ def upgrade_phase_state(journal: Mapping[str, Any], phase: str) -> str:
     return str(entry.get("state") or "") if isinstance(entry, Mapping) else ""
 
 
-def director_phase_required(config: ProjectConfig, *, config_path: Path) -> bool:
-    """Whether a board write only the director may make applies to this tenant."""
+@dataclass(frozen=True)
+class DeclaredWorkflowPresence:
+    """Where a declared workflow exists for this tenant, asked of each source.
+
+    One boolean cannot answer this. "The tenant's local config has no workflow
+    key" and "this tenant has no workflow" are different statements, and
+    treating the first as the second is the regression: a legacy tenant, whose
+    workflow was never projected locally because it predates declarative
+    workflows entirely, was declared exempt from the Director phase without the
+    board ever being asked (SYRD-240).
+
+    So each source is recorded separately, and `unreadable` is kept apart from
+    absent -- a config that cannot be parsed is not a tenant that needs
+    nothing.
+    """
+
+    project: str
+    #: The tenant's generated launcher config, which is what used to decide
+    #: this on its own.
+    config_declares: bool = False
+    config_unreadable: str = ""
+    #: Root's own recorded copy, the one `plan_workflow_from_root` prefers.
+    root_records: bool = False
+    #: The tenant's plan, which is where `propose_workflow_adoption` reads from.
+    plan_declares: bool = False
+    #: What the running board is actually enforcing, and why it could not say.
+    board_document: bool = False
+    board_problem: str = ""
+    #: A tenant that keeps the workflow seeded by schema.sql and declares no
+    #: per-project document. `pgu` is the one, and it is not a legacy tenant:
+    #: it has nothing to adopt and nothing to migrate.
+    non_declarative_by_design: bool = False
+
+    @property
+    def declared_somewhere(self) -> bool:
+        """Whether any source says this tenant has a declared workflow."""
+        return self.config_declares or self.root_records or self.plan_declares or self.board_document
+
+    @property
+    def board_runs_none(self) -> bool:
+        """The board is reachable and carries no document.
+
+        Not the same as "the board could not be read": an unreachable board is
+        unknown, and reporting unknown as absent is how a transient failure
+        would become a migration.
+        """
+        return not self.board_document and "no declared workflow" in self.board_problem
+
+    @property
+    def legacy_without_workflow(self) -> bool:
+        """The condition this ticket exists for.
+
+        The board a tenant is running is enforcing no declared workflow. That
+        tenant's Director is on provisioning-scaffold onboarding by
+        construction -- the pane hook's scaffold branch is gated on
+        `TICKET_BOARD_ROLE_ONBOARDING_MIGRATED`, which exists only when a
+        workflow document carries the migration marker -- and it is the state
+        the upgrade used to close over.
+
+        Deliberately NOT conditioned on some other source already declaring a
+        workflow. A tenant provisioned before declarative workflows existed has
+        one nowhere, which is precisely why it needs the migration; requiring a
+        declaration first would exempt every tenant this ticket is about.
+
+        The one exclusion is a tenant that declares none by design, which has
+        no document to install and no scaffold to migrate away from.
+        """
+        return self.board_runs_none and not self.non_declarative_by_design
+
+
+def declared_workflow_presence(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    board_reader: Callable[[ProjectConfig], tuple[dict | None, str]] | None = None,
+) -> DeclaredWorkflowPresence:
+    """Ask every source that can hold a declared workflow, and keep the answers apart."""
+    config_declares = False
+    config_unreadable = ""
     try:
-        return bool(_load_json(config_path).get("workflow"))
-    except SystemExit:
+        config_declares = bool(_load_json(config_path).get("workflow"))
+    except (SystemExit, OSError, ValueError) as exc:
+        # Deliberately NOT "False". An unreadable config used to be
+        # indistinguishable from an exempt tenant, which is the same wrong
+        # answer for a completely different reason.
+        config_unreadable = f"{config_path} could not be read ({exc})"
+
+    recorded, _problem = recorded_declared_workflow(config.project)
+
+    plan_declares = False
+    non_declarative = False
+    try:
+        plan = _load_json(config_path.parent / "plan.json")
+        plan_declares = bool(plan.get("workflow"))
+        non_declarative = str(plan.get("workflow_seed") or "") == NON_DECLARATIVE_WORKFLOW_SEED
+    except (SystemExit, OSError, ValueError):
+        plan_declares = False
+
+    reader = board_reader or read_board_declared_workflow
+    document, board_problem = reader(config)
+    return DeclaredWorkflowPresence(
+        project=config.project,
+        config_declares=config_declares,
+        config_unreadable=config_unreadable,
+        root_records=recorded is not None,
+        plan_declares=plan_declares,
+        board_document=document is not None,
+        board_problem=board_problem,
+        non_declarative_by_design=non_declarative,
+    )
+
+
+def director_phase_required(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    presence: DeclaredWorkflowPresence | None = None,
+) -> bool:
+    """Whether a board write only the director may make applies to this tenant.
+
+    This used to be `bool(local_config["workflow"])` and nothing else, so a
+    legacy tenant -- one whose workflow was never projected into its launcher
+    config because it predates declarative workflows -- answered "no" and the
+    whole Director phase was declared not required, without the board being
+    asked at all. Its `except SystemExit: return False` made an unreadable
+    config give the same answer for a different reason (SYRD-240).
+
+    Now it is required whenever ANY source declares a workflow, or whenever the
+    config could not be read at all. Only a tenant that every source agrees has
+    no workflow is exempt -- and for that tenant there is genuinely no document
+    to install and no migrated onboarding to receive.
+    """
+    state = presence or declared_workflow_presence(config, config_path=config_path)
+    if state.non_declarative_by_design and not state.declared_somewhere:
         return False
+    return (
+        state.declared_somewhere
+        or state.legacy_without_workflow
+        or bool(state.config_unreadable)
+    )
 
 
 def _document_director_onboarding_marker(document: Any) -> bool:
@@ -26500,6 +26945,7 @@ def director_onboarding_state(
     *,
     config_path: Path,
     opener: Callable[[str], Any] | None = None,
+    presence: DeclaredWorkflowPresence | None = None,
 ) -> tuple[str, str]:
     """Whether the director migration is done, and if not, what is in the way.
 
@@ -26508,12 +26954,23 @@ def director_onboarding_state(
     predates the phase-one schema returns, and that board has to receive the
     compatibility release before the migration can be accepted at all -- the
     exact state this tenant is in (SYRD-45).
+
+    The `not required` exit below is the one this ticket narrowed. It used to
+    be reachable for any tenant whose LOCAL config carried no workflow key,
+    which is every legacy tenant -- so the board was never asked and the
+    "pending" answer three lines further down, which was already correct, was
+    never reached (SYRD-240).
     """
-    if not director_phase_required(config, config_path=config_path):
+    if not director_phase_required(config, config_path=config_path, presence=presence):
         return "not required", ""
-    projected = _document_director_onboarding_marker(
-        (_load_json(config_path) or {}).get("workflow")
-    )
+    try:
+        projected = _document_director_onboarding_marker(
+            (_load_json(config_path) or {}).get("workflow")
+        )
+    except (SystemExit, OSError, ValueError) as exc:
+        # The projection is one of the two things "done" rests on, so a config
+        # that cannot be read is not a state this can report on.
+        return "unknown", f"{config_path} could not be read ({exc})"
     board_root = config.board_url.rstrip("/").removesuffix("/api/tickets").removesuffix("/api")
     open_url = opener or _open_board_url
     try:
@@ -26820,6 +27277,13 @@ class ReleaseAlignment:
     #: The tenant's readable copy, and any unprivileged note beside it.
     tenant_release_state: str = ""
     tenant_observation: str = ""
+    #: Whether the running board is enforcing a declared workflow, and -- when
+    #: it is not -- whether that is this tenant's legacy state rather than its
+    #: design. A release phase closed over a board running no workflow is how a
+    #: tenant ends up upgraded, "done", and still serving its Director the
+    #: provisioning scaffold (SYRD-240).
+    board_runs_declared_workflow: bool = True
+    legacy_without_workflow: bool = False
     #: Why a reading is missing, per fact.
     errors: tuple[str, ...] = ()
 
@@ -26874,6 +27338,21 @@ class ReleaseAlignment:
                 f"the deployed release is {self.deployed_release}, but this upgrade was pinned "
                 f"to {self.pinned_release}; closing the phase would claim a deploy that did not "
                 "happen"
+            )
+        if self.legacy_without_workflow:
+            # The release can be perfectly deployed and this still be wrong.
+            # Every check above compares bytes on disk with what the board
+            # reports running; none of them asks whether the board is
+            # enforcing a workflow at all, so a legacy tenant closed cleanly
+            # while its Director kept provisioning-scaffold onboarding and
+            # `/api/workflow` kept answering null (SYRD-240).
+            refusals.append(
+                f"{self.project}'s board is running no declared workflow, so its director is "
+                "still on provisioning-scaffold onboarding and /api/workflow answers null. "
+                f"Closing the release phase would record a migration that has not happened. "
+                f"Run `switchyard migrate-workflow {self.project}` to see what would be "
+                "installed, and `pkexec switchyard migrate-workflow "
+                f"{self.project} --apply` to install it"
             )
         return refusals
 
@@ -26955,6 +27434,11 @@ def release_alignment(
         )
     tenant_journal = read_upgrade_journal(config, config_path=config_path)
     observation = upgrade_phase_observation(tenant_journal, "release")
+    # Read from the running board like every other fact here, rather than from
+    # anything written about it.
+    presence = declared_workflow_presence(config, config_path=config_path)
+    if presence.board_problem and not presence.board_document:
+        errors.append(presence.board_problem)
     return ReleaseAlignment(
         project=config.project,
         shared_release=shared,
@@ -26965,6 +27449,8 @@ def release_alignment(
         trusted_readable=trusted_readable,
         tenant_release_state=upgrade_phase_state(tenant_journal, "release"),
         tenant_observation=str(observation.get("state") or ""),
+        board_runs_declared_workflow=presence.board_document,
+        legacy_without_workflow=presence.legacy_without_workflow,
         errors=tuple(errors),
     )
 
@@ -26987,6 +27473,12 @@ def format_release_alignment(alignment: ReleaseAlignment) -> list[str]:
         f"  pinned release   {_format_release_sha(alignment.pinned_release)}",
         f"  trusted journal  {trusted}",
         f"  tenant journal   {tenant}",
+        "  declared workflow "
+        + (
+            "installed"
+            if alignment.board_runs_declared_workflow
+            else "NONE -- the board is running no declared workflow"
+        ),
     ]
     for error in alignment.errors:
         lines.append(f"  note             {error}")
@@ -27088,12 +27580,28 @@ def upgrade_phase_report(
 ) -> list[str]:
     """One line per phase: who owns it, and whether it is done."""
     lines = [f"switchyard: {config.project} upgrade phases"]
+    # Asked once, not once per phase: this reaches the running board, and the
+    # loop below would otherwise open a socket for every row it prints.
+    presence: DeclaredWorkflowPresence | None = None
     for phase, owner, detail in UPGRADE_PHASES:
         state = upgrade_phase_state(journal, phase) or "pending"
         if phase == "accounts" and cutover.is_complete:
             state = "done"
-        if phase == "director" and not director_phase_required(config, config_path=config_path):
-            state = "not required"
+        if phase == "director":
+            if presence is None:
+                presence = declared_workflow_presence(config, config_path=config_path)
+            if not director_phase_required(config, config_path=config_path, presence=presence):
+                state = "not required"
+            elif presence.legacy_without_workflow:
+                # The regression in one line: this row used to read
+                # "not required" over a board running no workflow at all.
+                state = "pending"
+                detail = (
+                    f"{detail}; the board is running no declared workflow, so the director "
+                    f"is still on provisioning-scaffold onboarding. "
+                    f"Run `switchyard migrate-workflow {config.project}` to see what would "
+                    "be installed"
+                )
         lines.append(f"  {phase:<11} {owner:<8} {state:<12} {detail}")
     # Not a journaled phase -- nothing is deployed for it -- but a launch
     # readiness the operator has to be able to see, because a tenant can finish
@@ -31779,6 +32287,26 @@ def _build_switchyard_approve_desktop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_migrate_workflow_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard migrate-workflow",
+        description=(
+            "Install root's declared workflow onto a tenant whose board is running none. "
+            "A tenant provisioned before declarative workflows keeps its stages, "
+            "transitions and roles as table rows with no workflow document, so "
+            "/api/workflow answers null and its director keeps receiving the "
+            "provisioning-scaffold onboarding instead of the migrated one. Reports what "
+            "would be installed and changes nothing without --apply."
+        ),
+    )
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument(
+        "--apply", action="store_true", help="install the workflow; requires root"
+    )
+    parser.add_argument("--config", dest="config_path", type=Path, default=None)
+    return parser
+
+
 def _build_switchyard_adopt_workflow_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard adopt-workflow",
@@ -34088,6 +34616,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             reference=args.reference,
             show=args.show,
             revoke=args.revoke,
+        )
+    if argv[0].casefold() == "migrate-workflow":
+        args = _build_switchyard_migrate_workflow_parser().parse_args(argv[1:])
+        return switchyard_migrate_workflow_command(
+            args.project, apply=args.apply, config_path=args.config_path
         )
     if argv[0].casefold() == "adopt-workflow":
         args = _build_switchyard_adopt_workflow_parser().parse_args(argv[1:])

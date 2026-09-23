@@ -11201,6 +11201,60 @@ def _system_unit_file_exists(unit: str, *, runner: Callable[..., subprocess.Comp
     return bool(stdout and not stdout.startswith("0 unit files listed"))
 
 
+#: The unit every generated board unit already declares `Wants=`, and the
+#: socket directory the generated connection strings use.
+POSTGRES_SERVICE_UNIT = "postgresql.service"
+POSTGRES_ADMIN_SOCKET_DIR = "/var/run/postgresql"
+
+
+def postgres_cluster_script() -> Path:
+    """The helper that initializes or starts the local cluster, in this tree."""
+    return Path(__file__).resolve().parent / "ensure-postgres-cluster"
+
+
+def postgres_availability_remedy(
+    *, runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run
+) -> str:
+    """Why the local cluster did not answer, and the command that repairs it.
+
+    A fresh Arch-family host installs the PostgreSQL package without a cluster:
+    the service cannot start, and the first thing to notice was this preflight,
+    which printed only psql's `No such file or directory` for the socket after
+    every provisioning answer had been collected (SYRD-235). The raw error says
+    what failed and nothing about what to do, so the state is read here --
+    package, service, socket -- and the matching repair is named.
+    """
+    script = postgres_cluster_script()
+    lines: list[str] = []
+    if not _system_unit_file_exists(POSTGRES_SERVICE_UNIT, runner=runner):
+        lines.append(
+            f"this host has no {POSTGRES_SERVICE_UNIT}, so no PostgreSQL server is installed."
+        )
+        lines.append("  install the host packages first: sudo scripts/install-switchyard-prereqs")
+        return "\n".join(lines)
+    if not _system_unit_is_active(POSTGRES_SERVICE_UNIT, runner=runner):
+        lines.append(
+            f"{POSTGRES_SERVICE_UNIT} is installed but not running, so nothing is serving "
+            f"{POSTGRES_ADMIN_SOCKET_DIR}."
+        )
+        lines.append(
+            f"  initialize the cluster if this host has none, then start the service: sudo {script}"
+        )
+        lines.append(
+            f"  it is idempotent, never re-initializes an existing cluster, and verifies the same "
+            f"socket this check uses."
+        )
+        return "\n".join(lines)
+    lines.append(
+        f"{POSTGRES_SERVICE_UNIT} is active, but the admin connection over "
+        f"{POSTGRES_ADMIN_SOCKET_DIR} did not answer."
+    )
+    lines.append(f"  read why: sudo systemctl status {POSTGRES_SERVICE_UNIT} --no-pager")
+    lines.append(f"  and: sudo journalctl -u {POSTGRES_SERVICE_UNIT} -n 50 --no-pager")
+    lines.append(f"  then re-verify the socket: sudo {script}")
+    return "\n".join(lines)
+
+
 def _database_exists(database: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
     escaped = database.replace("'", "''")
     command = [
@@ -11220,11 +11274,19 @@ def _database_exists(database: str, *, runner: Callable[..., subprocess.Complete
             text=True,
         )
     except OSError as exc:
-        raise SystemExit(f"team-launcher: cannot verify PostgreSQL database availability: {exc}") from exc
+        raise SystemExit(
+            f"team-launcher: cannot verify PostgreSQL database availability: {exc}\n"
+            f"team-launcher: {postgres_availability_remedy(runner=runner)}\n"
+            "team-launcher: nothing was created; re-run `switchyard new` once that answers."
+        ) from exc
     if result.returncode != 0:
         stderr = str(getattr(result, "stderr", "") or "").strip()
         detail = f": {stderr}" if stderr else ""
-        raise SystemExit(f"team-launcher: cannot verify PostgreSQL database availability{detail}")
+        raise SystemExit(
+            f"team-launcher: cannot verify PostgreSQL database availability{detail}\n"
+            f"team-launcher: {postgres_availability_remedy(runner=runner)}\n"
+            "team-launcher: nothing was created; re-run `switchyard new` once that answers."
+        )
     return str(getattr(result, "stdout", "") or "").strip() == "1"
 
 

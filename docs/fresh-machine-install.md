@@ -74,6 +74,39 @@ The installer runs `apt-get update` before apt installs and prints that refresh.
 It does not run `pacman -Sy`; Arch-family systems should use the full
 `pacman -Syu` upgrade first to avoid partial-upgrade breakage.
 
+## PostgreSQL Cluster
+
+Installing the server package is not the same as having a database. On
+Arch-family hosts `pacman -S postgresql` leaves no cluster at all: the data
+directory is empty, `postgresql.service` refuses to start, and `switchyard new`
+stops at its database preflight with psql reporting no socket at
+`/var/run/postgresql`. Debian-family packages create a cluster in their
+postinstall, so there the server is usually already running.
+
+`sudo ./install` runs `scripts/ensure-postgres-cluster` after the packages, so a
+supported install leaves this ready or stops with the procedure rather than
+reporting success. That helper is idempotent and safe to run on its own:
+
+```bash
+sudo scripts/ensure-postgres-cluster            # initialize if needed, start, verify
+sudo scripts/ensure-postgres-cluster --dry-run  # say what it would do, change nothing
+```
+
+It runs `initdb` only into a directory that holds neither a cluster nor any
+other file. An existing cluster is started, never re-initialized, and a
+directory with other contents in it stops the run instead. Done by hand on
+Arch, the same steps are:
+
+```bash
+sudo runuser -u postgres -- initdb --locale=C.UTF-8 --encoding=UTF8 -D /var/lib/postgres/data
+sudo systemctl enable --now postgresql.service
+sudo runuser -u postgres -- psql -XAtq 'postgresql:///postgres?host=/var/run/postgresql' -c 'SELECT 1'
+```
+
+On Debian/Ubuntu the cluster stays the distro's; create one with
+`sudo pg_createcluster --start <version> main` if `pg_lsclusters` shows none,
+and start the service with `sudo systemctl enable --now postgresql.service`.
+
 Konsole is not a base dependency. On KDE or when forcing the separate-window
 layout, also install it explicitly:
 

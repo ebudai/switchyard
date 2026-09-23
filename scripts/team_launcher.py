@@ -308,9 +308,17 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # under sudo would put a privileged shell in the middle of that walk and
     # change the identity being proved, so the boundary would be asked about
     # the wrong process. It runs unprivileged, exactly as typed (SYRD-112).
+    #
+    # `status` reads and prints; it changes nothing. Escalating it asked an
+    # operator to cross a privileged mutation boundary to look at their own
+    # host, and after a legacy cutover -- when the tenant's configuration moved
+    # into an account the desktop operator is not -- that ask became a password
+    # prompt for a read. The root-owned registry, release and journal records
+    # this reports are world-readable by design; anything it cannot read is
+    # named as unavailable instead (SYRD-241).
     {
         "present", "attach", "board-skill", "role-prompt", "set-role-runtime",
-        "finish-upgrade", "worker-pool", "privileged-action",
+        "finish-upgrade", "worker-pool", "privileged-action", "status",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -23115,7 +23123,22 @@ def _runtime_release_copy_status(
     source_repo: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> SwitchyardRuntimeCopyStatus | None:
-    status = tenant_release_status(config, source_repo=source_repo, deploy_ref=worktree_ref(config), runner=runner)
+    try:
+        status = tenant_release_status(
+            config, source_repo=source_repo, deploy_ref=worktree_ref(config), runner=runner
+        )
+    except (SystemExit, OSError) as exc:
+        # One optional detail, not the command. A tenant whose release state
+        # cannot be derived from here -- an owner_home this account may not
+        # read, a plan it may not open -- is reported as unavailable rather
+        # than ending a read-only status (SYRD-241).
+        reason = " ".join(str(exc).split()).removeprefix("switchyard: ")
+        return SwitchyardRuntimeCopyStatus(
+            project=config.project,
+            copy="tenant release",
+            path=Path(str(_tenant_board_root_from_config(config) or "-")),
+            status=f"unavailable: {reason}",
+        )
     if status is None:
         return None
     if status.resolve_error:
@@ -23415,6 +23438,64 @@ def switchyard_project_statuses(
     return statuses
 
 
+def root_recorded_tenant_facts(
+    slug: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    journal_root: Path | None = None,
+) -> tuple[bool | None, str]:
+    """What root's own records say about a tenant, readable by anybody.
+
+    The registry, the installed system unit and the rollout journal are
+    root-owned and world-readable by design, and none of them lives in the
+    tenant's home. So a tenant whose configuration this account may not read
+    can still be reported on -- which is what keeps a read-only status useful
+    without asking an operator to cross a mutation boundary (SYRD-241).
+
+    Returns (board unit active, the last rollout line). `None` is "not
+    answered", which is not the same as inactive.
+    """
+    from scripts.ticket_board import rollout_journal
+
+    # The same name provisioning renders and the deploy script derives, from
+    # the slug alone: the tenant's own document is exactly what is unreadable.
+    unit = f"{slug}-ticket-board.service"
+    active: bool | None = None
+    try:
+        result = runner(
+            ["systemctl", "is-active", "--quiet", unit],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=STATUS_PROBE_TIMEOUT_SECONDS,
+        )
+        code = getattr(result, "returncode", None)
+        if code in (0, 3):
+            active = code == 0
+    except (OSError, subprocess.SubprocessError):
+        active = None
+    last = ""
+    index = rollout_journal.index_path(slug, root=journal_root)
+    try:
+        with index.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    last = line
+    except OSError:
+        return active, ""
+    if not last:
+        return active, ""
+    try:
+        record = json.loads(last)
+    except json.JSONDecodeError:
+        return active, ""
+    if not isinstance(record, dict):
+        return active, ""
+    detail = " ".join(str(record.get("detail") or "").split())[:160]
+    described = (
+        f"last rollout {record.get('attempt') or 'unknown'} at {record.get('at') or 'an unknown time'}"
+        f" ({record.get('status') or 'unknown'})"
+    )
+    return active, f"{described}: {detail}" if detail else described
+
+
 def _switchyard_project_status_payload(status: SwitchyardProjectStatus) -> dict[str, Any]:
     return {
         "name": status.name,
@@ -23503,6 +23584,40 @@ def switchyard_status_command(
             f"{row[0]:<{widths[0]}}  {row[1]:<{widths[1]}}  {row[2]:<{widths[2]}}  "
             f"{row[3]:<{widths[3]}}  {row[4]}"
         )
+    # A tenant whose configuration this account cannot read still has a row --
+    # its registration, release and journal state come from root-owned records
+    # -- but its pane and viewer detail is its owner's to show. Naming that,
+    # and how to see it, is the difference between a status an operator can use
+    # unprivileged and one that used to demand root for the whole command
+    # (SYRD-241).
+    unreadable = [
+        status for status in statuses
+        if status.state == "unknown" and (project or status.error)
+    ]
+    if unreadable:
+        print_func("")
+        caller = current_user_name() or "this account"
+        for status in unreadable:
+            owner = _project_config_path_owner_user(status.config_path)
+            reason = " ".join(str(status.error or "").split()) or "it could not be read"
+            print_func(
+                f"switchyard: {status.slug}'s pane and viewer state is unavailable to {caller}: "
+                f"{reason}. Everything above for {status.slug} comes from root-owned records and "
+                "is complete."
+            )
+            active, journal = root_recorded_tenant_facts(status.slug, runner=runner)
+            recorded = []
+            if active is not None:
+                recorded.append(f"board service {'active' if active else 'inactive'}")
+            if journal:
+                recorded.append(journal)
+            if recorded:
+                print_func(f"switchyard:   from root-owned records: {'; '.join(recorded)}")
+            as_owner = f" as {owner}" if owner and owner != caller else ""
+            print_func(
+                f"switchyard:   to see the rest, run `switchyard status {status.slug}`{as_owner}, "
+                f"or `sudo switchyard status {status.slug}`"
+            )
     unsafe = [status for status in statuses if status.root_windows]
     if unsafe:
         print_func("")
@@ -34902,11 +35017,13 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             # recorded human reach it over the control bridge without a
             # password. The unscoped listing still reads every tenant, so it
             # still takes the root path (SYRD-50 rollout review).
+            # Resolved, not loaded: loading the tenant's configuration here
+            # would cross to its owner -- or re-exec under root when the file
+            # cannot be read -- for a command that only reports. The status
+            # itself reads what this account may read and says what it may not
+            # (SYRD-241).
             entry = _resolve_switchyard_project(selection)
-            _load_switchyard_project_config_for_command(entry, argv)
             return switchyard_status_command(json_output=args.json, project=entry.slug)
-        if os.geteuid() != 0:
-            _switchyard_exec_with_root(argv)
         return switchyard_status_command(json_output=args.json)
     if argv[0].casefold() == "validate-models":
         if len(argv) < 2:

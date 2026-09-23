@@ -434,10 +434,16 @@ def test_switchyard_status_lists_unreadable_config_as_unknown() -> None:
             == 0
         )
 
-    assert lines == [
+    assert lines[:2] == [
         "NAME            SLUG     STATE    PANES  VIEWER",
         "Private Tenant  private  unknown  ?/?    -",
     ]
+    # And then what is unavailable, and how to see it: the row alone told an
+    # operator nothing about why, which is what made `status` look like it
+    # needed root (SYRD-241).
+    rest = "\n".join(lines[2:])
+    assert "private's pane and viewer state is unavailable" in rest, rest
+    assert "to see the rest, run `switchyard status private`" in rest, rest
 
 def test_switchyard_status_ignores_tmux_server_new_session_argv_with_pane_target() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-switchyard-status-tmux-server.") as tmp:

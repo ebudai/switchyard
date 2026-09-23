@@ -407,7 +407,10 @@ def test_the_classifier_defers_only_for_a_grant_that_names_the_caller() -> None:
         assert team_launcher.switchyard_invocation_requires_root(["stop", "other"])
         assert team_launcher.switchyard_invocation_requires_root(["upgrade", PROJECT])
         assert team_launcher.switchyard_invocation_requires_root(["teardown", PROJECT])
-        assert team_launcher.switchyard_invocation_requires_root(["status"])
+        # Not `status`: it reads and prints, and SYRD-241 removed the root
+        # requirement that put a password prompt in front of a read. The bridge
+        # still matters for the lifecycle verbs around it.
+        assert not team_launcher.switchyard_invocation_requires_root(["status"])
         assert team_launcher.switchyard_invocation_requires_root(["stop", PROJECT, "--force"])
         assert team_launcher.switchyard_invocation_requires_root(["stop", "../etc"])
 

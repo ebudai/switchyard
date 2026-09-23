@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts import presentation_controller, team_launcher
+from scripts.ticket_board import runtime_catalog
 from scripts.ticket_board.write_client import DEFAULT_BOARD_URL, TicketBoardWriteClient
 
 DIRECTOR_ROLE = "director"
@@ -316,6 +317,7 @@ def _write_runtime_projection(
     role_name: str,
     runtime: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    model: str | None = None,
 ) -> team_launcher.ProjectConfig:
     """Point the launcher config at the new runtime, leaving everything else."""
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -341,6 +343,19 @@ def _write_runtime_projection(
             entry.pop(key, None)
             if runtime in table:
                 entry[key] = table[runtime]
+        # A model belongs to the runtime exactly as resume semantics do, and it
+        # was the one thing left behind: a role moved from Codex to Claude kept
+        # `gpt-5.5`, so the new runtime was started with the old one's model
+        # name. `model=None` means the caller had nothing to say and the value
+        # stays; `model=""` means it does not belong here any more (SYRD-115).
+        if model is not None:
+            entry.pop("model", None)
+            if model:
+                entry["model"] = model
+        if not runtime_catalog.runtime_takes_effort(runtime):
+            # agy drops an effort level before it reaches the command line, so
+            # one recorded for the runtime being left is now noise at best.
+            entry.pop("effort", None)
         break
     else:
         raise RoleRuntimeRefusal(f"switchyard: {config_path} has no role {role_name!r}")
@@ -533,6 +548,10 @@ def switch_role_runtime(
     config_path: Path,
     role_name: str,
     runtime: str,
+    #: The model the role should run on the NEW runtime. None leaves whatever
+    #: is configured; "" drops it, which is what a move between runtimes means
+    #: for a model name that belonged to the one being left (SYRD-115).
+    model: str | None = None,
     force: bool = False,
     reason: str = "",
     dry_run: bool = False,
@@ -624,7 +643,8 @@ def switch_role_runtime(
         journal.write(journal_path)
 
         updated = _write_runtime_projection(
-            config, config_path=config_path, role_name=role_name, runtime=runtime, runner=runner
+            config, config_path=config_path, role_name=role_name, runtime=runtime,
+            runner=runner, model=model,
         )
         journal.record("projection")
         journal.write(journal_path)

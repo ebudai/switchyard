@@ -17317,6 +17317,28 @@ class _SetupWindowNarrator:
             "from whatever is already recorded."
         )
 
+    def could_not_start(self, *, args: Sequence[str], cwd: object, exc: BaseException) -> str:
+        """What to say when the provider never ran at all.
+
+        The gap this fills is not a wrong message, it is no message. A fresh
+        `test15` was told "claude will now run in .../audit ... Answer the trust
+        prompt", and then nothing: no provider process, no prompt, a cursor on a
+        window still titled "Switchyard". The step had taken the terminal, the
+        spawn had failed, and the failure went out as a bare exception with
+        nothing naming which worktree or which CLI it was (SYRD-245).
+
+        Says the three things an operator needs to act: which step, what was
+        actually run, and what the system said about it.
+        """
+        where = f" in {cwd}" if cwd else ""
+        return (
+            f"warning: switchyard: {self._cli} could not be started{where} for its "
+            f"{self._purpose}, so that step recorded nothing: {exc}. Nothing was "
+            f"asked of you and nothing is waiting. The command was: "
+            f"{shlex.join(str(part) for part in args)}. The step and how to resume "
+            "it are reported below; run that command yourself to see what it says."
+        )
+
     def stalled(self, *, watching: str, timeout_seconds: float) -> str:
         """What to say when the deadline passed with the answer still missing."""
         detail = SETUP_STEP_STALLED_DETAIL.get(
@@ -17410,15 +17432,30 @@ def run_provider_first_run_session(
     try:
         with terminal:
             try:
-                session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
                 deadline = monotonic() + timeout_seconds
-                # Named before it starts, because once the CLI owns the screen the
-                # only thing that still says what this window is for is its title.
+                # Named BEFORE the provider is started, not after it has been
+                # handed the screen. The title is the only thing that says what
+                # this window is for, and a step that never gets a provider at
+                # all needs it most: on test15 the terminal was already raw, the
+                # spawn produced nothing, and the window still read "Switchyard"
+                # with a cursor and no prompt. Nothing on the screen said which
+                # step it was, what it was waiting for, or that it was waiting
+                # (SYRD-245).
                 window = _SetupWindowNarrator(
                     cli=cli, purpose=purpose, deadline=deadline, monotonic=monotonic,
                     write=output_write,
                 )
                 window.opened()
+                try:
+                    session = (session_factory or PtyForegroundSession)(list(args), **kwargs)
+                except OSError as exc:
+                    # The provider could not be started. Said here, bounded, and
+                    # returned as "not recorded" rather than raised: the phase
+                    # below reports which roles are still missing what, and a
+                    # traceback out of a raw terminal tells an operator nothing
+                    # about which of a dozen worktrees failed (SYRD-245).
+                    print_func(window.could_not_start(args=args, cwd=kwargs.get("cwd"), exc=exc))
+                    return is_complete()
                 recent = ""
                 last_output = monotonic()
                 last_drawn = last_output
@@ -18665,6 +18702,18 @@ def run_first_run_auth_phase(
 
     untrusted: list[tuple[str, str, str]] = []
     for step in manifest.folder_trust_steps:
+        # Re-read before announcing it. The manifest was built before the
+        # provider's own first run, and that run records trust for whatever
+        # directory it was answered in -- so by the time this loop reaches that
+        # worktree the step can already be done. Telling somebody to answer a
+        # trust prompt and then not showing one is how a step that is simply
+        # finished reads as a stall (SYRD-245).
+        if _workdir_is_trusted(step.cli, owner_home=effective_home, workdir=step.workdir):
+            print_func(
+                f"switchyard: {step.cli} already trusts {step.workdir} for this account, "
+                "so that step is done; nothing to answer."
+            )
+            continue
         print_func(_folder_trust_instruction(step.cli, step.workdir, step.roles or (step.role,)))
         trusted = _run_owner_cli_until(
             owner_user=effective_owner,

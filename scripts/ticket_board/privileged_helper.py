@@ -38,6 +38,7 @@ from typing import Any, Callable, Mapping, Sequence
 if __package__ in (None, ""):  # pragma: no cover - direct execution as a program
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ticket_board import (
+        no_follow,
         peer_identity,
         privileged_actions,
         privileged_install,
@@ -46,6 +47,7 @@ if __package__ in (None, ""):  # pragma: no cover - direct execution as a progra
     )
 else:
     from . import (
+        no_follow,
         peer_identity,
         privileged_actions,
         privileged_install,
@@ -109,38 +111,42 @@ def _uid_of(pid: int, *, proc_root: Path = PROC_ROOT) -> int | None:
     return None
 
 
-def board_url_for(
-    project: str, *, registry_dir: Path = DEFAULT_REGISTRY_DIR,
-    load: Callable[[Path], Any] = None,
-) -> str:
+def board_url_for(project: str, *, registry_dir: Path = DEFAULT_REGISTRY_DIR) -> str:
     """The project's board, from root-owned registration state.
 
     Deliberately not an argument. A caller that could name the board could name
     one that would happily agree it is the Director.
+
+    And deliberately not read with `Path.read_text`, which follows every link.
+    The registration record is root's, but the configuration it names lives in
+    a directory the tenant owns: a symlink there pointed this read at a file of
+    the tenant's choosing, and the board URL taken from it is the one this
+    helper then authorizes against (SYRD-242). Both documents are opened
+    without following anything, and there is no seam to inject a reader that
+    would -- the only read this boundary makes is the safe one.
     """
-    loader = load or _load_json
     entry = registry_dir / f"{project}.json"
-    try:
-        record = loader(entry)
-    except (OSError, ValueError) as exc:
-        raise Refused(f"{project} is not registered on this host ({exc})") from None
+    record, problem = no_follow.read_root_document(entry, what=f"{project}'s registration")
+    if problem:
+        if "does not exist" in problem:
+            raise Refused(f"{project} is not registered on this host ({entry} does not exist)")
+        raise Refused(problem)
     if not isinstance(record, dict):
         raise Refused(f"{entry} is not a registration record")
     config_path = str(record.get("config_path") or "").strip()
     if not config_path:
         raise Refused(f"{entry} records no configuration for {project}")
-    try:
-        config = loader(Path(config_path))
-    except (OSError, ValueError) as exc:
-        raise Refused(f"{project}'s configuration cannot be read ({exc})") from None
-    board_url = str((config or {}).get("board_url") or "").strip()
+    config, problem = no_follow.read_tenant_document(
+        Path(config_path), what=f"{project}'s registered configuration"
+    )
+    if problem:
+        raise Refused(problem)
+    if not isinstance(config, dict):
+        raise Refused(f"{config_path} is not a configuration document")
+    board_url = str(config.get("board_url") or "").strip()
     if not board_url:
         raise Refused(f"{project}'s configuration records no board URL")
     return board_url
-
-
-def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def require_registered_control_caller(

@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# Make the local PostgreSQL cluster serve the socket `switchyard new` uses, or
+# stop with the procedure an operator can run by hand.
+#
+# A fresh Arch-family host installs the `postgresql` package with no cluster at
+# all: the package ships no data directory, `postgresql.service` refuses to
+# start without one, and the first thing that notices is `switchyard new`'s
+# database preflight, which reported only
+#   psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed
+# after collecting every provisioning answer (SYRD-235). Debian-family hosts
+# create a cluster in the package postinstall, so there the job is to say when
+# the service is stopped or failed, never to build a second cluster.
+#
+# `initdb` is run only into a directory that has no cluster in it and no other
+# contents. An existing cluster is served, never re-initialized: the data
+# directory is somebody's database.
+set -euo pipefail
+
+DRY_RUN=0
+SUDO_BIN="${SWITCHYARD_SUDO_BIN:-sudo}"
+PG_SERVICE="${SWITCHYARD_PG_SERVICE:-postgresql.service}"
+PG_SOCKET_DIR="${SWITCHYARD_PG_SOCKET_DIR:-/var/run/postgresql}"
+PG_ADMIN_USER="${SWITCHYARD_PG_ADMIN_USER:-postgres}"
+#: Where the Arch package's own unit puts a cluster when nothing says otherwise.
+PACMAN_DEFAULT_PGDATA="${SWITCHYARD_PACMAN_DEFAULT_PGDATA:-/var/lib/postgres/data}"
+#: `systemctl start` returns before the server is accepting connections.
+PG_WAIT_SECONDS="${SWITCHYARD_PG_WAIT_SECONDS:-30}"
+ASSUME_MANAGER="${SWITCHYARD_PREREQS_ASSUME_MANAGER:-}"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/ensure-postgres-cluster [--dry-run]
+
+Verifies that the local PostgreSQL cluster serves the admin socket that
+`switchyard new` connects to. On Arch-family hosts it initializes the cluster
+once when there is none, then enables and starts the service. It never writes
+into a directory that already holds a cluster or any other files.
+
+--dry-run prints the commands it would run and changes nothing.
+EOF
+}
+
+say() {
+    printf 'ensure-postgres-cluster: %s\n' "$*"
+}
+
+die() {
+    printf 'ensure-postgres-cluster: ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+while (($#)); do
+    case "$1" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+    shift
+done
+
+is_root_context() {
+    [[ "${EUID:-$(id -u)}" -eq 0 && -z "${SWITCHYARD_PREREQS_FORCE_SUDO_PREFIX:-}" ]]
+}
+
+#: Run a command as root. In a dry run it is printed and not run, so this is
+#: only ever used for the steps that change the host.
+run_root_cmd() {
+    local -a command=()
+    if is_root_context; then
+        command=("$@")
+    else
+        command=("$SUDO_BIN" "$@")
+    fi
+    printf '+'
+    printf ' %q' "${command[@]}"
+    printf '\n'
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        return 0
+    fi
+    "${command[@]}"
+}
+
+#: Read-only, and it runs in a dry run too, because what this script would do
+#: depends on what is already there. Non-interactive: a probe that stops for a
+#: password would hang an unattended install, and an unanswered probe is
+#: reported as unknown rather than guessed.
+probe_root() {
+    if is_root_context; then
+        "$@" >/dev/null 2>&1
+    else
+        "$SUDO_BIN" -n "$@" >/dev/null 2>&1
+    fi
+}
+
+probe_root_out() {
+    if is_root_context; then
+        "$@" 2>/dev/null
+    else
+        "$SUDO_BIN" -n "$@" 2>/dev/null
+    fi
+}
+
+detect_manager() {
+    if [[ -n "$ASSUME_MANAGER" ]]; then
+        printf '%s\n' "$ASSUME_MANAGER"
+        return
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        printf 'apt\n'
+    elif command -v pacman >/dev/null 2>&1; then
+        printf 'pacman\n'
+    else
+        printf 'unknown\n'
+    fi
+}
+
+#: The data directory this host's own unit uses, asked of the unit rather than
+#: assumed: the Arch unit carries PGROOT and starts `postgres -D $PGROOT/data`.
+pg_data_dir() {
+    if [[ -n "${SWITCHYARD_PGDATA:-}" ]]; then
+        printf '%s\n' "$SWITCHYARD_PGDATA"
+        return
+    fi
+    local environment pgdata="" pgroot="" token
+    environment="$(systemctl show -p Environment --value "$PG_SERVICE" 2>/dev/null || true)"
+    for token in $environment; do
+        case "$token" in
+            PGDATA=*) pgdata="${token#PGDATA=}" ;;
+            PGROOT=*) pgroot="${token#PGROOT=}" ;;
+        esac
+    done
+    if [[ -n "$pgdata" ]]; then
+        printf '%s\n' "$pgdata"
+    elif [[ -n "$pgroot" ]]; then
+        printf '%s/data\n' "$pgroot"
+    else
+        printf '%s\n' "$PACMAN_DEFAULT_PGDATA"
+    fi
+}
+
+admin_url() {
+    printf 'postgresql:///postgres?host=%s\n' "$PG_SOCKET_DIR"
+}
+
+#: The exact connection `switchyard new` makes: the admin account over the
+#: local socket. Anything less proves less than the thing that failed.
+server_answers() {
+    probe_root runuser -u "$PG_ADMIN_USER" -- psql -XAtq "$(admin_url)" -c 'SELECT 1'
+}
+
+wait_for_server() {
+    local waited=0
+    while (( waited < PG_WAIT_SECONDS )); do
+        if server_answers; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    server_answers
+}
+
+#: initialized | empty | occupied | unknown
+cluster_state() {
+    local dir="$1"
+    if probe_root test -f "$dir/PG_VERSION"; then
+        printf 'initialized\n'
+        return
+    fi
+    if ! probe_root test -e "$dir"; then
+        # Absent and empty are the same decision, and an unreadable probe is
+        # neither: say so rather than initdb on a guess.
+        if probe_root test -d "$(dirname "$dir")"; then
+            printf 'empty\n'
+        else
+            printf 'unknown\n'
+        fi
+        return
+    fi
+    local entries
+    entries="$(probe_root_out find "$dir" -mindepth 1 -maxdepth 1 -print -quit || true)"
+    if [[ -z "$entries" ]]; then
+        printf 'empty\n'
+    else
+        printf 'occupied\n'
+    fi
+}
+
+service_start_remedy() {
+    cat >&2 <<EOF
+ensure-postgres-cluster: $PG_SERVICE did not start. Read why, then start it again:
+  $SUDO_BIN systemctl status $PG_SERVICE --no-pager
+  $SUDO_BIN journalctl -u $PG_SERVICE -n 50 --no-pager
+  $SUDO_BIN systemctl enable --now $PG_SERVICE
+Then verify the socket \`switchyard new\` uses:
+  $SUDO_BIN runuser -u $PG_ADMIN_USER -- psql -XAtq '$(admin_url)' -c 'SELECT 1'
+EOF
+}
+
+debian_cluster_remedy() {
+    cat >&2 <<EOF
+ensure-postgres-cluster: on Debian-family hosts the cluster belongs to the distribution. List it, create one only if there is none, and start the service:
+  $SUDO_BIN pg_lsclusters
+  $SUDO_BIN pg_createcluster --start \$(pg_lsclusters -h | awk 'NR==1{print \$1}') main
+  $SUDO_BIN systemctl enable --now $PG_SERVICE
+  $SUDO_BIN systemctl status $PG_SERVICE --no-pager
+EOF
+}
+
+manual_initdb_remedy() {
+    local dir="$1"
+    cat >&2 <<EOF
+ensure-postgres-cluster: initialize the cluster once, as $PG_ADMIN_USER, then start the service:
+  $SUDO_BIN runuser -u $PG_ADMIN_USER -- initdb --locale=C.UTF-8 --encoding=UTF8 -D $dir
+  $SUDO_BIN systemctl enable --now $PG_SERVICE
+  $SUDO_BIN runuser -u $PG_ADMIN_USER -- psql -XAtq '$(admin_url)' -c 'SELECT 1'
+EOF
+}
+
+#: A dry run describes and never refuses: the state it reads may be exactly
+#: the state the real run repairs, and an operator asking what would happen
+#: must not be told the install has failed.
+stop() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        say "dry run: nothing was changed."
+        exit 0
+    fi
+    exit 1
+}
+
+manager="$(detect_manager)"
+data_dir="$(pg_data_dir)"
+service_started=0
+
+if server_answers; then
+    say "PostgreSQL is already serving $PG_SOCKET_DIR as $PG_ADMIN_USER; leaving the cluster alone."
+    exit 0
+fi
+
+if [[ "$manager" == "apt" ]]; then
+    # Debian-family packages create the cluster in their postinstall and manage
+    # it with pg_createcluster. A second cluster built here would listen on
+    # another port and shadow the one pg_lsclusters knows about, so this path
+    # only ever starts what the distribution made.
+    say "the cluster is the distribution's on this host; starting $PG_SERVICE without touching it."
+    if ! run_root_cmd systemctl enable --now "$PG_SERVICE"; then
+        debian_cluster_remedy
+        stop
+    fi
+    service_started=1
+else
+    state="$(cluster_state "$data_dir")"
+    case "$state" in
+        occupied)
+            printf 'ensure-postgres-cluster: ERROR: %s holds files but no PG_VERSION, so it is not a cluster this may initialize. Nothing was changed.\n' "$data_dir" >&2
+            printf 'ensure-postgres-cluster: move or remove that directory yourself, or point this host at its real cluster, then re-run.\n' >&2
+            stop
+            ;;
+        unknown)
+            say "cannot read $data_dir to see whether a cluster is there; not guessing."
+            manual_initdb_remedy "$data_dir"
+            stop
+            ;;
+        empty)
+            say "no cluster at $data_dir; initializing it once as $PG_ADMIN_USER."
+            if ! run_root_cmd runuser -u "$PG_ADMIN_USER" -- initdb --locale=C.UTF-8 --encoding=UTF8 -D "$data_dir"; then
+                manual_initdb_remedy "$data_dir"
+                stop
+            fi
+            ;;
+        initialized)
+            say "a cluster is already initialized at $data_dir; starting it without touching its data."
+            ;;
+    esac
+fi
+
+if [[ "$service_started" -eq 0 ]] && ! run_root_cmd systemctl enable --now "$PG_SERVICE"; then
+    service_start_remedy
+    stop
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    say "dry run: would then verify $(admin_url) as $PG_ADMIN_USER."
+    exit 0
+fi
+
+if ! wait_for_server; then
+    service_start_remedy
+    exit 1
+fi
+
+say "PostgreSQL is serving $PG_SOCKET_DIR as $PG_ADMIN_USER."

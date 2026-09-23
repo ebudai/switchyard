@@ -92,6 +92,22 @@ run_root_cmd() {
     fi
 }
 
+#: The package managers install a PostgreSQL server; only one of them leaves a
+#: cluster behind. This runs in both branches so a fresh host is either ready
+#: for `switchyard new` or stopped here with the procedure, rather than at the
+#: database preflight after every provisioning answer has been collected
+#: (SYRD-235).
+ensure_postgres_cluster() {
+    local -a args=()
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        args+=(--dry-run)
+    fi
+    printf 'Ensuring the local PostgreSQL cluster serves the socket switchyard new connects to.\n'
+    if ! "$SCRIPT_DIR/ensure-postgres-cluster" "${args[@]}"; then
+        die "PostgreSQL is not ready for switchyard new. Run the procedure above, then re-run this installer; both are idempotent."
+    fi
+}
+
 manager="$(detect_manager)"
 case "$manager" in
     apt)
@@ -100,6 +116,7 @@ case "$manager" in
         run_root_cmd apt-get install -y \
             python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl
         printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
+        ensure_postgres_cluster
         printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
         printf 'Using a system-site-packages venv avoids Debian/Ubuntu PEP 668 restrictions while keeping distro Pillow visible.\n'
         run_root_cmd install -d -m 0755 "$(dirname "$SWITCHYARD_PYTHON_VENV")"
@@ -115,6 +132,7 @@ case "$manager" in
         run_cmd "$SUDO_BIN" pacman -S --needed \
             python postgresql tmux git curl python-pillow python-psycopg acl
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
+        ensure_postgres_cluster
         printf 'Installing psycopg from the distribution package python-psycopg, which satisfies %s.\n' "$PIP_SPEC"
         printf 'Arch-family Python is externally managed under PEP 668, so a user pip install is refused rather than merely discouraged.\n'
         verify_python="$(service_python)"

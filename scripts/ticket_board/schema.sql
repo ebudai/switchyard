@@ -7702,8 +7702,23 @@ BEGIN
         RAISE EXCEPTION 'unauthorized configured transition: % / %',actor,action_name USING ERRCODE='42501'; END IF;
     SELECT x INTO source_stage FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=previous.state;
     IF (source_stage->>'terminal')::boolean AND tr->>'primitive'<>'reopen' THEN RAISE EXCEPTION 'terminal exit requires reopen'; END IF;
-    IF tr->>'primitive' NOT IN ('return','reopen') AND ticket_board.ticket_has_unresolved_blockers(previous.id) THEN
-        RAISE EXCEPTION 'unresolved blocker prevents forward promotion'; END IF;
+    -- A blocker stops work going FORWARD. Putting work down is not going
+    -- forward: a parking stage is not terminal, owns nobody and notifies
+    -- nobody, so nothing is promoted by landing there and the blocker is
+    -- exactly the reason to park. Refusing it forced the director to clear the
+    -- blocker, defer, and restore it -- three writes, a window where the ticket
+    -- looked unblocked, and a blocked ticket holding an implementer's serial
+    -- slot in the meantime (SYRD-192).
+    --
+    -- Keyed on the DESTINATION's shape rather than on an action name, because
+    -- the name is the tenant's: `declared_parking_stage` is the same predicate
+    -- `workflow_config.parking_stage_names` uses, so a tenant that calls it
+    -- something other than `backlog` gets this for free.
+    IF tr->>'primitive' NOT IN ('return','reopen')
+       AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       AND ticket_board.ticket_has_unresolved_blockers(previous.id) THEN
+        RAISE EXCEPTION 'unresolved blocker prevents forward promotion: %',
+            ticket_board.unresolved_blocker_list(previous.id); END IF;
     IF (tr->>'require_commit')::boolean AND btrim(proposed.commit_hash)='' AND NOT proposed.commit_exempt THEN
         RAISE EXCEPTION 'commit required'; END IF;
     IF tr->>'primitive'='approve' THEN doc:=ticket_board.set_workflow_flag(doc,source_stage->>'signoff',true);

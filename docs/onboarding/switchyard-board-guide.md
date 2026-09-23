@@ -249,6 +249,35 @@ carry those values in their launcher config as `upstream_report_url` and
 putting the token value on the process command line. If `TICKET_BOARD_REPORT_ORIGIN_PROJECT`
 is set, `--origin-project` is optional and defaults to the current tenant slug.
 
+**If the variables are not there, the tenant was never given them.** They are exported
+only for a project whose launcher config names the upstream board, and for a long time
+those two keys could only be supplied to `switchyard new` — so a project provisioned
+before the feature, or one whose upstream board moved, had no way to acquire them and its
+Director had to pass the URL and token path by hand every time. An upgrade records them
+now:
+
+```bash
+sudo switchyard upgrade <project> --upstream-report-url http://127.0.0.1:23326
+```
+
+That is stated once. The credential path defaults to
+`~/.config/<project>/upstream-report.env`, both are written into the tenant's config, and
+the next launch carries `TICKET_BOARD_REPORT_URL`, `TICKET_BOARD_REPORT_ORIGIN_PROJECT`
+and `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE` to every pane.
+
+**The credential is refreshed on every upgrade, because it goes stale silently.** The
+board compares a submitted report token against one configured string, minted when that
+board's own environment file is first written — so a cutover mints a new one and every
+credential handed out before it stops working. Nothing notices, because the thing that
+would notice is a tenant trying to report that something is wrong. MEFP's copy was from
+2026-08-31 and its Director could not file at all (SYRD-238).
+
+Each upgrade resolves the upstream board from the host registry, reads that board's
+current report token, and writes it into the tenant's credential file atomically, 0600 and
+owned by the tenant. Only the report token is ever copied: a write token sitting beside it
+in the board's environment does not travel, and the token value is never put in the
+launcher config, which every role can read. Running it again writes nothing.
+
 An upstream report lands in `analysis`, assigned to `unassigned`. Directors identify it
 by the detail metadata: `Origin: <tenant>` and, when supplied,
 `External Source: <tenant-local-ref>`. The report token can only create this report; it

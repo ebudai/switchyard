@@ -123,7 +123,11 @@ def test_a_caller_only_cli_is_refused_and_never_printed_as_a_bare_installer() ->
         raise AssertionError("a caller-only CLI must not provision silently")
 
     assert "/home/eric/.local/bin/codex" in rec.text
-    assert "reachable" in rec.text and "only by the account running this command" in rec.text
+    # Named rather than "the account running this command": under sudo that
+    # account is root, and the one that can reach this copy is the human who
+    # typed the command (SYRD-236).
+    assert "reachable" in rec.text and "only by " in rec.text
+    assert team_launcher.invoking_account().user in rec.text, rec.text
     assert "curl -fsSL" not in rec.text, (
         "printing the vendor installer here is the original defect: run as printed it "
         "installs for the operator, not the owner"

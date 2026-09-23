@@ -205,6 +205,10 @@ def test_switchyard_registry_registers_pointer_and_survives_checkout_clean() -> 
             "slug": "otto",
             "name": "Otto System",
             "config_path": str(otto_config.resolve(strict=False)),
+            # The tenant's CLI selection, recorded where a launch can read it:
+            # the configuration itself lives under the owner's home, which the
+            # operator launching cannot read (SYRD-220).
+            "agent_clis": ["claude"],
         }
         assert (registry_dir / "otto.json").stat().st_mode & 0o777 == 0o644
         assert team_launcher._resolve_switchyard_project("otto", config_dir=checkout_config_dir, registry_dir=registry_dir).config_path == otto_config

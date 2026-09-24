@@ -7762,7 +7762,14 @@ BEGIN
     IF (tr->>'require_commit')::boolean AND btrim(proposed.commit_hash)='' AND NOT proposed.commit_exempt THEN
         RAISE EXCEPTION 'commit required'; END IF;
     IF tr->>'primitive'='approve' THEN doc:=ticket_board.set_workflow_flag(doc,source_stage->>'signoff',true);
+    -- A sign-off gates leaving a review FORWARD. Parking is not a verdict: the
+    -- stage owns nobody, notifies nobody and promotes nothing, and the review's
+    -- record rides along untouched -- no sign-off is granted, none is cleared,
+    -- the commit stays. Requiring the missing sign-off made an unaccepted User
+    -- Review impossible to put down without deciding it (SYRD-263). Keyed on
+    -- the destination's shape, like the blocker exemption above (SYRD-192).
     ELSIF source_stage->>'signoff' IS NOT NULL AND tr->>'primitive' NOT IN ('return','reopen')
+       AND NOT ticket_board.declared_parking_stage(tr->>'to')
        AND NOT ticket_board.workflow_flag(doc,source_stage->>'signoff',cfg) THEN RAISE EXCEPTION 'stage signoff required'; END IF;
     FOR reset IN SELECT jsonb_array_elements_text(tr->'clear_signoffs') LOOP
         doc:=ticket_board.set_workflow_flag(doc,reset,false);

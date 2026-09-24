@@ -160,8 +160,13 @@ def test_the_fix_lives_in_both_bodies_and_they_do_not_drift() -> None:
     A fix in only one of them works on exactly half the tenants, and which half
     depends on when they were provisioned.
     """
+    from schema_function_drift import owning_migration
+
+    # The copy an upgraded board runs is the NEWEST migration that defines the
+    # function, which stops being this one as soon as a later fix redefines it
+    # (SYRD-263 did); the exemption this ticket added has to survive there.
     schema_body = function_body(SCHEMA_PATH.read_text())
-    migration_body = function_body(MIGRATION_PATH.read_text())
+    migration_body = function_body(owning_migration("enforce_declared_ticket_update").read_text())
     check(schema_body == migration_body, "the two bodies are identical")
     for label, body in (("schema.sql", schema_body), ("the migration", migration_body)):
         check("declared_parking_stage(tr->>'to')" in body, f"{label} carries the exemption")

@@ -23475,9 +23475,13 @@ def install_handed_off_workflow(
     config_path: Path,
     caller_role: str,
     board_reader: Callable[[ProjectConfig], tuple[int, dict | None, str]] | None = None,
+    dry_run: bool = False,
     print_func: Callable[[str], None] = print,
 ) -> bool | None:
     """The director's first write of a workflow root reviewed.
+
+    With dry_run, every check below is made and the write is only described:
+    True then means "would install" (SYRD-254).
 
     Returns None when there is nothing to do (the board already runs a
     workflow, or root handed nothing over), True once the board serves exactly
@@ -23514,6 +23518,14 @@ def install_handed_off_workflow(
             "made over the socket."
         )
         return False
+    if dry_run:
+        print_func(
+            f"switchyard: would install {config.project}'s handed-off workflow over "
+            f"{config.board_socket} at board revision {revision} (digest "
+            f"{handed.effective_digest}; reviewed by root as {handed.reviewed_digest}). "
+            "This is the one-way step: the board cannot go back to running none."
+        )
+        return True
     import contextlib
     import io as _io
 
@@ -32004,11 +32016,16 @@ def finish_upgrade_command(
             )
             return 1
     if dry_run:
-        print_func(
-            f"switchyard: would migrate {config.project}'s declarative director onboarding as "
-            f"{current_user_name()}"
+        return _finish_upgrade_preview(
+            config,
+            config_path=config_path,
+            director=director,
+            source_repo=source_repo,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            runner=runner,
+            print_func=print_func,
         )
-        return 0
     # A legacy board runs no workflow at all, so there is nothing for the
     # onboarding migration below to migrate. Root may have handed over the one
     # it reviewed; installing it is this command's job, because only the
@@ -32088,6 +32105,79 @@ def finish_upgrade_command(
         )
         return 1
     return 0
+
+
+def _finish_upgrade_preview(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    director: str,
+    source_repo: Path | None,
+    commit_git_dir: str | None,
+    deploy_ref: str | None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    print_func: Callable[[str], None],
+) -> int:
+    """finish-upgrade's steps in apply's order: every read made, every write described.
+
+    Its verdict is apply's verdict. On MEFP the dry run stopped at its first
+    line and exited 0, and apply then made the one-way workflow write before
+    failing on a release it could not resolve -- a read-only check the dry run
+    never reached (SYRD-254). The release step here is the same function apply
+    runs, so the two cannot disagree about it.
+    """
+    stops: list[str] = []
+
+    def verdict() -> int:
+        if stops:
+            print_func(
+                f"switchyard: dry run: apply would not complete for {config.project}: "
+                + "; ".join(stops)
+                + ". Nothing was written."
+            )
+            return 1
+        print_func(
+            f"switchyard: dry run: every check apply makes for {config.project} passes. "
+            "Nothing was written."
+        )
+        return 0
+
+    installed = install_handed_off_workflow(
+        config, config_path=config_path, caller_role=director, dry_run=True, print_func=print_func
+    )
+    if installed is False:
+        stops.append("the handed-off workflow would be refused")
+    print_func(
+        f"switchyard: would migrate {config.project}'s declarative director onboarding as "
+        f"{current_user_name()}, then record the director phase from what the board serves"
+    )
+    cutover = role_account_cutover(config, runner=runner)
+    if not cutover.is_complete:
+        print_func(
+            f"switchyard: apply would stop after the director phase: {config.project}'s "
+            "per-role accounts are not in place yet, so no release step follows"
+        )
+        return verdict()
+    root_problems = owner_release_root_problems(config)
+    if root_problems:
+        for problem in root_problems:
+            print_func(f"switchyard: {problem}")
+        stops.append("the owner's release root needs repair first")
+        return verdict()
+    print_func(f"switchyard: the release step apply would report for {config.project}:")
+    release_status = report_tenant_release_upgrade(
+        config,
+        config_path=config_path,
+        source_repo=(source_repo or _repo_root()).expanduser().resolve(strict=False),
+        commit_git_dir=commit_git_dir,
+        deploy_ref=deploy_ref,
+        runner=runner,
+        print_func=lambda line: print_func(f"  {line}"),
+    )
+    blocked = release_update_blocked(release_status)
+    if blocked:
+        stops.append(f"its release phase would not complete: {blocked}")
+    return verdict()
 
 
 def director_release_divergence_report(

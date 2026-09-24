@@ -3040,12 +3040,37 @@ def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: d
     return env
 
 
+def role_git_template_env(project: str) -> dict[str, str]:
+    """The Git template a role's new repositories are created from, once staged.
+
+    Implementers make their own source checkouts from their panes, with a plain
+    `git clone`, and nothing Switchyard installs reached them: those clones had
+    no pre-commit hook, so the size warning never fired (SYRD-257). Naming the
+    root-staged template here gives every clone or init made from a role pane
+    the warning-only policy before its first commit, and every worktree linked
+    to it shares that clone's hooks. Only new repositories are affected, and
+    only those a role makes -- this is not a global hooksPath. Unset until the
+    template is staged, so a pane never points Git at a directory that is not
+    there.
+    """
+    from scripts.ticket_board.project_provision import GIT_TEMPLATE_DIR_NAME
+
+    template = Path(role_tooling_staging_dir(project)) / GIT_TEMPLATE_DIR_NAME
+    if (template / "hooks" / "pre-commit").is_file():
+        return {"GIT_TEMPLATE_DIR": str(template)}
+    return {}
+
+
 def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> list[RoleConfig]:
     session_role_map = {role.tmux_session: role.role for role in roles}
+    git_env = role_git_template_env(config.project)
     return [
         replace(
             role,
             env={
+                # Beneath the role's own env: a template a role's config names
+                # on purpose is not overridden.
+                **git_env,
                 **role.env,
                 **_role_board_env(config, role, session_role_map),
             },

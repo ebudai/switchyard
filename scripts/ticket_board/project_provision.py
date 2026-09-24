@@ -1396,6 +1396,13 @@ def staged_role_tooling_problems(
     for module in entry_point_module_dependencies(source_root=source / "scripts"):
         if (source / "scripts" / f"{module}.py").is_file():
             _owned(staging / f"{module}.py", f"the companion module {module}", executable=False)
+    template_files = git_template_files(str(source))
+    if Path(template_files[0][0]).is_file():
+        for source_file, relative, _mode in template_files:
+            _owned(staging / GIT_TEMPLATE_DIR_NAME / relative, f"the Git template's {relative}",
+                   executable=True)
+    else:
+        _absent(staging / GIT_TEMPLATE_DIR_NAME, "the Git template")
     for tree, what in ((staging / "ticket_board", "the ticket_board package"),
                        (staging / SKILLS_DIR_NAME, f"the canonical {SKILLS_DIR_NAME} tree")):
         if not tree.is_dir():
@@ -1537,6 +1544,56 @@ def role_tooling_staging_commands(
     # release that does not contain it, which is precisely the false provenance
     # the marker exists to prevent (SYRD-60).
     commands.append(f"    sudo rm -f {shell_quote(marker_staged)}")
+    commands.append("fi")
+    commands.extend(git_template_staging_commands(release_root, staging))
+    return commands
+
+
+#: A Git template for the repositories roles create. Role panes name it in
+#: GIT_TEMPLATE_DIR, so a source checkout a role clones -- and every worktree
+#: linked to it -- has the warning-only size policy before its first commit,
+#: with no global hooksPath and nothing done to repositories roles did not
+#: make (SYRD-257).
+GIT_TEMPLATE_DIR_NAME = "git-template"
+
+
+def git_template_files(release_root: str) -> list[tuple[str, str, str]]:
+    """(release source, path under the template, mode) for the staged template."""
+    try:
+        from scripts.repository_hooks import PRE_COMMIT_HELPERS, TEMPLATE_PRE_COMMIT
+    except ImportError:  # pragma: no cover - direct execution beside the module
+        from repository_hooks import PRE_COMMIT_HELPERS, TEMPLATE_PRE_COMMIT
+
+    return [
+        (f"{release_root}/scripts/{TEMPLATE_PRE_COMMIT}", "hooks/pre-commit", "0755"),
+        *(
+            (f"{release_root}/scripts/{source}", f"hooks/{name}", "0755")
+            for name, source in PRE_COMMIT_HELPERS
+        ),
+    ]
+
+
+def git_template_staging_commands(release_root: str, staging: str) -> list[str]:
+    """Stage the template whole, or not at all.
+
+    A release that predates it has no template hook; staging its helpers
+    alone would give roles a template that copies scripts nothing runs, so the
+    template is removed instead -- which is also what a rollback to such a
+    release needs.
+    """
+    template = f"{staging}/{GIT_TEMPLATE_DIR_NAME}"
+    files = git_template_files(release_root)
+    commands = [f"sudo rm -rf {shell_quote(template)}"]
+    commands.append(f"if [ -f {shell_quote(files[0][0])} ]; then")
+    commands.append(
+        f"    sudo install -d -m 0755 -o root -g root {shell_quote(template)} "
+        f"{shell_quote(f'{template}/hooks')}"
+    )
+    for source, relative, mode in files:
+        commands.append(
+            f"    sudo install -m {mode} -o root -g root {shell_quote(source)} "
+            f"{shell_quote(f'{template}/{relative}')}"
+        )
     commands.append("fi")
     return commands
 

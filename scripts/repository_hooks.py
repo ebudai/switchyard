@@ -105,31 +105,44 @@ def _preserve_existing_hook(hook: Path, *, replace_warning_only: bool = False) -
     return upstream
 
 
-def install_local_warning(repository: Path, *, source_root: Path, line_limit: int = DEFAULT_LINE_LIMIT) -> Path:
-    if line_limit <= 0:
-        raise ValueError("line limit must be positive")
-    hooks = _hooks_path(repository)
-    owner = _owner(hooks)
-    hooks.mkdir(parents=True, exist_ok=True)
-    os.chown(hooks, *owner)
-    helper = hooks / "warn-file-size-limit.py"
-    shared = hooks / "report_file_size_limit.py"
-    worktree_helper = hooks / "warn-worktree-count.py"
-    _install_file(source_root / "scripts" / "warn_file_size_limit.py", helper, owner=owner)
-    _install_file(source_root / "scripts" / "report_file_size_limit.py", shared, owner=owner)
-    _install_file(source_root / "scripts" / "warn_worktree_count.py", worktree_helper, owner=owner)
-    hook = hooks / "pre-commit"
-    upstream = _preserve_existing_hook(hook, replace_warning_only=True)
-    text = f"""#!/usr/bin/env bash
+#: The helpers the pre-commit hook runs, by the name they have beside it and
+#: the release script each is copied from.
+PRE_COMMIT_HELPERS = (
+    ("warn-file-size-limit.py", "warn_file_size_limit.py"),
+    ("report_file_size_limit.py", "report_file_size_limit.py"),
+    ("warn-worktree-count.py", "warn_worktree_count.py"),
+)
+
+#: The hook a Switchyard Git template carries, as committed in the release.
+#: Root stages it with the helpers into each tenant's role tooling, and role
+#: panes point GIT_TEMPLATE_DIR at that, so a repository a role clones or
+#: creates has the policy before its first commit (SYRD-257).
+TEMPLATE_PRE_COMMIT = "git_template_pre_commit"
+
+#: Where the hook finds its helpers and its preserved upstream hook, when
+#: those were copied beside it -- which a template's copy always is.
+_OWN_DIRECTORY = '"$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"'
+
+
+def render_pre_commit(*, hook_dir: str, line_limit: int = DEFAULT_LINE_LIMIT) -> str:
+    """The managed pre-commit hook, for helpers in `hook_dir` (a bash word).
+
+    One body for both forms, so the installed hook and the template's cannot
+    drift: they differ only in whether the directory is written in or found.
+    The upstream hook runs first and its status is the hook's; the warnings
+    never block.
+    """
+    return f"""#!/usr/bin/env bash
 set -u
 {MANAGED_MARKER}
 
+readonly HOOK_DIR={hook_dir}
 readonly FILE_SIZE_LIMIT={line_limit}
-readonly FILE_SIZE_HELPER={shlex.quote(str(helper))}
+readonly FILE_SIZE_HELPER="$HOOK_DIR/warn-file-size-limit.py"
 readonly WORKTREE_TOTAL_LIMIT={DEFAULT_WORKTREE_TOTAL_LIMIT}
 readonly WORKTREE_RECLAIMABLE_LIMIT={DEFAULT_WORKTREE_RECLAIMABLE_LIMIT}
-readonly WORKTREE_COUNT_HELPER={shlex.quote(str(worktree_helper))}
-readonly UPSTREAM_HOOK={shlex.quote(str(upstream))}
+readonly WORKTREE_COUNT_HELPER="$HOOK_DIR/warn-worktree-count.py"
+readonly UPSTREAM_HOOK="$HOOK_DIR/pre-commit.switchyard-upstream"
 
 upstream_status=0
 if [[ -x "$UPSTREAM_HOOK" ]]; then
@@ -143,6 +156,26 @@ if [[ -x "$WORKTREE_COUNT_HELPER" ]]; then
 fi
 exit "$upstream_status"
 """
+
+
+def render_template_pre_commit() -> str:
+    return render_pre_commit(hook_dir=_OWN_DIRECTORY)
+
+
+def install_local_warning(repository: Path, *, source_root: Path, line_limit: int = DEFAULT_LINE_LIMIT) -> Path:
+    if line_limit <= 0:
+        raise ValueError("line limit must be positive")
+    hooks = _hooks_path(repository)
+    owner = _owner(hooks)
+    hooks.mkdir(parents=True, exist_ok=True)
+    os.chown(hooks, *owner)
+    for installed_name, source_name in PRE_COMMIT_HELPERS:
+        _install_file(source_root / "scripts" / source_name, hooks / installed_name, owner=owner)
+    hook = hooks / "pre-commit"
+    upstream = _preserve_existing_hook(hook, replace_warning_only=True)
+    if upstream != hooks / "pre-commit.switchyard-upstream":
+        raise RuntimeError(f"unexpected preserved hook path {upstream}")
+    text = render_pre_commit(hook_dir=shlex.quote(str(hooks)), line_limit=line_limit)
     _atomic_install_text(hook, text, owner=owner)
     return hook
 

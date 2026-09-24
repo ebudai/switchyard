@@ -40,6 +40,7 @@ from scripts.ticket_board.board_skill import (
     SKILLS_DIR_NAME,
 )
 from scripts.ticket_board.project_provision import (
+    GIT_TEMPLATE_DIR_NAME,
     ROLE_STAGED_EXECUTABLES,
     build_plan,
     entry_point_module_dependencies,
@@ -182,8 +183,15 @@ def staged_bundle_runs_for_a_fresh_role_home() -> None:
             "ticket_board",
             SKILLS_DIR_NAME,
             RELEASE_MARKER_NAME,
+            # The Git template role panes name for the clones roles make (SYRD-257).
+            GIT_TEMPLATE_DIR_NAME,
         }
         assert staged == expected, staged.symmetric_difference(expected)
+        template_hooks = STAGING / GIT_TEMPLATE_DIR_NAME / "hooks"
+        for hook in template_hooks.iterdir():
+            info = hook.stat()
+            assert info.st_uid == 0 and info.st_mode & 0o111 and not info.st_mode & 0o022, hook
+        assert (template_hooks / "pre-commit").is_file(), sorted(template_hooks.iterdir())
         for name in ROLE_STAGED_EXECUTABLES:
             info = (STAGING / name).stat()
             assert info.st_uid == 0 and info.st_mode & 0o111, name

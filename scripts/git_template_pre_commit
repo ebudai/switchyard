@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -u
+# switchyard-managed-repository-hook-v1
+
+readonly HOOK_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly FILE_SIZE_LIMIT=1250
+readonly FILE_SIZE_HELPER="$HOOK_DIR/warn-file-size-limit.py"
+readonly WORKTREE_TOTAL_LIMIT=300
+readonly WORKTREE_RECLAIMABLE_LIMIT=100
+readonly WORKTREE_COUNT_HELPER="$HOOK_DIR/warn-worktree-count.py"
+readonly UPSTREAM_HOOK="$HOOK_DIR/pre-commit.switchyard-upstream"
+
+upstream_status=0
+if [[ -x "$UPSTREAM_HOOK" ]]; then
+    "$UPSTREAM_HOOK" "$@" || upstream_status=$?
+fi
+if [[ -x "$FILE_SIZE_HELPER" ]]; then
+    "$FILE_SIZE_HELPER" --line-limit "$FILE_SIZE_LIMIT" || true
+fi
+if [[ -x "$WORKTREE_COUNT_HELPER" ]]; then
+    "$WORKTREE_COUNT_HELPER" --total-threshold "${SWITCHYARD_WORKTREE_TOTAL_WARNING_THRESHOLD:-$WORKTREE_TOTAL_LIMIT}" --reclaimable-threshold "${SWITCHYARD_WORKTREE_RECLAIMABLE_WARNING_THRESHOLD:-$WORKTREE_RECLAIMABLE_LIMIT}" || true
+fi
+exit "$upstream_status"

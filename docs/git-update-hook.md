@@ -31,6 +31,29 @@ hook until a project was provisioned. It is installed as the human who ran the
 installer rather than as root, so the hooks and the local Git configuration stay
 theirs to change; a `--dry-run` install reports the command and installs nothing.
 
+Source checkouts that roles make for themselves are the other half. An
+implementer's own `git clone` of the product repository, and every worktree
+linked to it, never passed through either installer, so the warning did not
+reach the commits where it mattered (SYRD-257). Each tenant's root-staged role
+tooling (`/usr/local/lib/switchyard/<project>/git-template/`) now carries a Git
+template holding the same managed `pre-commit` hook and its helpers, and role
+panes name it in `GIT_TEMPLATE_DIR`. A repository a role clones or initializes
+from its pane therefore has the policy before its first commit, and its linked
+worktrees share it. This is not a global `core.hooksPath`: only new repositories
+made from a role pane are affected, existing ones are left as they are, and a
+`GIT_TEMPLATE_DIR` a role's own configuration sets is not overridden. The
+template is restaged from the selected release on every upgrade, and removed
+when that release predates it. Panes pick it up when they are restarted. The
+installed hook and the template's are rendered from one body
+(`render_pre_commit`), so they cannot drift.
+
+**Who sees the warning.** Only the committer: it is printed on that commit's
+stderr, once per oversized staged path, on every commit, and never blocks. It
+is not a message to the Director. Nothing records it on the board, and the
+optional push-time reporter (`report_file_size_limit.py`) is not installed on
+the Switchyard repository and reports once per file, not per commit. A
+durable Director notice would be a separate decision and a separate change.
+
 `switchyard upgrade` repairs the same policy for a project's repositories,
 reinstalling hooks that are missing or stale. The repair is idempotent -- running
 it over an already-correct checkout leaves the hook byte-identical and does not

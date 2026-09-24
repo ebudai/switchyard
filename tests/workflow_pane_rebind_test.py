@@ -91,8 +91,10 @@ def tenant_config(scratch: Path):
         "roles": [
             {"role": role, "cli": [f"/usr/local/bin/{cli}"], "slot": slot,
              "workdir": str(scratch / "worktrees" / role)}
-            for role, cli, slot in (("director", "codex", 1), ("main", "codex", 2),
-                                    ("ops", "codex", 5), ("audit", "claude", 4))
+            # MEFP's four-pane window: slots 0-3, as the tenant ran it before
+            # the migration copied the example's 1/2/5/4 over them.
+            for role, cli, slot in (("director", "codex", 0), ("main", "codex", 1),
+                                    ("ops", "codex", 2), ("audit", "claude", 3))
         ],
     }), encoding="utf-8")
     return path, tl.load_project_config(PROJECT, path)
@@ -109,9 +111,12 @@ def revision_three(config) -> dict:
         panes={role.role: tl.role_pane_declaration(role) for role in config.roles},
     ).document
     bad = copy.deepcopy(good)
+    example_slots = {"director": 1, "main": 2, "ops": 5, "audit": 4}
     for role in bad["roles"]:
         if role["name"] in {"director", "ops"}:
             role["runtime"] = "claude"
+        if role["name"] in example_slots:
+            role["slot"] = example_slots[role["name"]]
         if role["name"] == "designer":
             role["runtime"], role["target"] = "claude", f"{PROJECT}-designer:0.0"
     return validate(bad, project=PROJECT)
@@ -218,7 +223,7 @@ INTENDED = {"director": "codex", "ops": "codex"}
 
 
 def run_command(board, plan, verified, config, *, apply=False, expect="", journal=None,
-                euid=0, operator=OPERATOR, resolver=True, runtimes=INTENDED):
+                euid=0, operator=OPERATOR, resolver=True, runtimes=INTENDED, slots=None):
     said: list[str] = []
     ran: list[list[str]] = []
     record_at_sql: list[str] = []
@@ -234,7 +239,7 @@ def run_command(board, plan, verified, config, *, apply=False, expect="", journa
         return subprocess.run(real, **kwargs)
 
     code = tl.switchyard_rebind_workflow_panes_command(
-        PROJECT, apply=apply, expect=expect, runtimes=runtimes,
+        PROJECT, apply=apply, expect=expect, runtimes=runtimes, slots=slots,
         euid_getter=lambda: euid, operator_resolver=lambda: operator,
         tenant_resolver=(lambda *a, **k: (plan, verified, config)) if resolver else (lambda *a, **k: None),
         board_reader=lambda _c: live_state(board) + ("",),
@@ -401,8 +406,9 @@ def main_board_cases() -> None:
             check("designer" not in "".join(l for l in said.splitlines() if l.startswith("  changes")),
                   f"a role the operator did not name is not rebound: {said}")
             check("operator         director: runtime codex (the operator's decision)" in said, said)
-            check("evidence       configuration now: claude" in said, f"the record's value is shown: {said}")
-            check("tenant journal before its last workflow write: codex (in workflow-before-0.json)" in said,
+            check("evidence       configuration now: runtime claude, slot 1" in said,
+                  f"the record's value is shown: {said}")
+            check("tenant journal before its last workflow write: runtime codex, slot 0 (in workflow-before-0.json)" in said,
                   f"the tenant's pre-migration choice is shown as evidence: {said}")
             check("evidence       live registration: codex/mefp-director:0.0" in said, said)
             sections: dict[str, list[str]] = {}
@@ -500,6 +506,63 @@ def main_board_cases() -> None:
             rc, said = director_write(2)
             check(rc == "0" and "DIRECTOR-WRITE-OK" in said,
                   f"and the SAME Director pane has its authority back, with no restart: {said}")
+
+            # -- the slots, which the same defect copied from the example --------
+            # After the runtime repair the declaration and the reconciled record
+            # still say 1/2/5/4; the four-pane window shows 0-3. The operator
+            # states the layout; the runtimes just repaired must not move.
+            layout = {"director": 0, "main": 1, "ops": 2, "audit": 3}
+            config = tl.load_project_config(PROJECT, config_path)
+            for slots, expected in (({"director": 7}, "is not a visible slot"),
+                                    ({"intruder": 0}, "is not a pane role"),
+                                    ({"director": 2}, "visible slots must be unique")):
+                code, said, ran = run_command(board, plan, verified, config, runtimes={}, slots=slots)
+                check(code == 1 and not ran and expected in said, f"{slots} is refused: {said}")
+            code, said, ran = run_command(board, plan, verified, config, runtimes={}, slots=layout)
+            check(code == 0 and not ran, f"the slot preview writes nothing: {said}")
+            check("director: slot 1 -> 0" in said and "ops: slot 5 -> 2" in said and "audit: slot 4 -> 3" in said,
+                  f"each move is shown: {said}")
+            check("operator         director: slot 0 (the operator's decision)" in said,
+                  f"as the operator's decision, not an inference: {said}")
+            check("tenant journal before its last workflow write: runtime codex, slot 2 (in workflow-before-0.json)" in said,
+                  f"with the pre-migration layout as evidence: {said}")
+            sections = {}
+            current = ""
+            for line in said.splitlines():
+                if line.startswith("  | --- "):
+                    current = line[len("  | --- "):]
+                elif line.startswith("  | ") and current and line[4:5] in "+-" and not line[4:].startswith("+++"):
+                    sections.setdefault(current, []).append(line[4:])
+            check(sections.get("declared") and all('"slot"' in l for l in sections["declared"]),
+                  f"the document diff touches only slots: {sections.get('declared')}")
+            check(all('"slot"' in l for l in sections.get(str(config_path)) or ['"slot"']),
+                  f"and so does the record's: {sections.get(str(config_path))}")
+            slot_review = said.split("--expect ")[-1].strip()
+            before = snapshot(board)
+            code, said, ran = run_command(board, plan, verified, config, runtimes={}, slots=layout,
+                                          apply=True, expect=slot_review)
+            check(code == 0 and len(ran) == 1, f"the reviewed layout is applied: {said}")
+            _, placed = live_state(board)
+            declared = {r["name"]: r for r in placed["roles"]}
+            check({name: declared[name]["slot"] for name in layout} == layout,
+                  f"the declaration shows the four-pane layout: {[(n, declared[n]['slot']) for n in layout]}")
+            check(declared["director"]["runtime"] == "codex" and declared["ops"]["runtime"] == "codex",
+                  "and the runtime repair is untouched")
+            after = snapshot(board)
+            check(after["stages"] == before["stages"] and after["transitions"] == before["transitions"]
+                  and after["tickets"] == before["tickets"], "stages, transitions and tickets unchanged")
+            record = {r.role: (tl.role_runtime_binding(r)[0], r.slot)
+                      for r in tl.load_project_config(PROJECT, config_path).roles}
+            check({k: record[k] for k in layout} == {"director": ("codex", 0), "main": ("codex", 1),
+                                                      "ops": ("codex", 2), "audit": ("claude", 3)},
+                  f"the trusted record agrees, runtimes kept: {record}")
+            check({"director", "ops"} <= set(board.app.runtime_targets()),
+                  "and the live panes are still served")
+            config = tl.load_project_config(PROJECT, config_path)
+            # From here the board's current state is the slot repair's.
+            new_revision, rebound = live_state(board)
+            sent = {name: {field: declared[name][field] for field in ("runtime", "target", "slot")}
+                    for name in ("director", "ops")}
 
             code, said, ran = run_command(board, plan, verified, config)
             check(code == 0 and "already match" in said and not ran, f"a rerun has nothing to do: {said}")

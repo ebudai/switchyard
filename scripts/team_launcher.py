@@ -23853,7 +23853,12 @@ class PaneRebind:
 
 
 def plan_pane_rebind(
-    config: ProjectConfig, revision: int, document: dict, *, intended: "Mapping[str, str] | None" = None
+    config: ProjectConfig,
+    revision: int,
+    document: dict,
+    *,
+    intended: "Mapping[str, str] | None" = None,
+    slots: "Mapping[str, int] | None" = None,
 ) -> PaneRebind:
     """Rebind each declared role this tenant runs a pane for, to that pane.
 
@@ -23876,6 +23881,11 @@ def plan_pane_rebind(
             # The operator's reviewed decision, and the only way a runtime
             # differs from the verified configuration here (SYRD-262).
             pane["runtime"] = intended[role.role]
+        if role.role in (slots or {}):
+            # Likewise where a pane is shown: the first migration copied the
+            # example's slots into both the declaration and the configuration,
+            # so neither is evidence of the tenant's layout any more.
+            pane["slot"] = slots[role.role]
         current = declared.get(role.role)
         if current is None:
             notes.append(
@@ -24004,14 +24014,15 @@ def root_verified_tenant(
     return plan, verified, config
 
 
-def recorded_pre_migration_runtimes(config_path: Path) -> dict[str, list[str]]:
-    """What the tenant's own rollback journals say each role ran before a workflow write.
+def recorded_pre_migration_panes(config_path: Path) -> dict[str, list[str]]:
+    """What the tenant's own rollback journals say each pane was before a workflow write.
 
     `workflow_manage apply` keeps the projection it replaced in
-    `workflow-before-<revision>.json` beside the configuration. That is how a
-    Director's Codex choice survived the write that overwrote it (SYRD-262).
-    It is the tenant's file, so this is evidence to show an operator, never
-    authority: read without following links, and nothing is decided from it.
+    `workflow-before-<revision>.json` beside the configuration. That is where
+    MEFP's Codex runtimes and its four-pane slots survived the write that
+    overwrote them (SYRD-262). It is the tenant's file, so this is evidence to
+    show an operator, never authority: read without following links, and
+    nothing is decided from it.
     """
     found: dict[str, list[str]] = {}
     for journal in sorted(config_path.parent.glob("workflow-before-*.json")):
@@ -24024,11 +24035,13 @@ def recorded_pre_migration_runtimes(config_path: Path) -> dict[str, list[str]]:
         except (TypeError, json.JSONDecodeError):
             continue
         for role in roles:
-            cli = role.get("cli") if isinstance(role, dict) else None
-            if isinstance(cli, list) and cli:
-                found.setdefault(str(role.get("role")), []).append(
-                    f"{_command_name(str(cli[0]))} (in {journal.name})"
-                )
+            if not isinstance(role, dict):
+                continue
+            cli = role.get("cli")
+            runtime = _command_name(str(cli[0])) if isinstance(cli, list) and cli else "none"
+            found.setdefault(str(role.get("role")), []).append(
+                f"runtime {runtime}, slot {role.get('slot')} (in {journal.name})"
+            )
     return found
 
 
@@ -24098,6 +24111,7 @@ def switchyard_rebind_workflow_panes_command(
     apply: bool = False,
     expect: str = "",
     runtimes: "Mapping[str, str] | None" = None,
+    slots: "Mapping[str, int] | None" = None,
     registry_dir: Path | None = None,
     config_path: Path | None = None,
     euid_getter: Callable[[], int] = os.geteuid,
@@ -24156,7 +24170,16 @@ def switchyard_rebind_workflow_panes_command(
     from scripts.ticket_board.workflow_config import RUNTIMES
 
     intended = dict(runtimes or {})
+    placed = dict(slots or {})
     pane_roles = {role.role for role in config.roles}
+    for role_name, slot in placed.items():
+        if role_name not in pane_roles:
+            print_func(f"switchyard: {role_name} is not a pane role in {verified}. Nothing was changed.")
+            return 1
+        if type(slot) is not int or not 0 <= slot <= 5:
+            print_func(f"switchyard: slot {slot!r} for {role_name} is not a visible slot (0-5). "
+                       "Nothing was changed.")
+            return 1
     for role_name, runtime in intended.items():
         if role_name not in pane_roles:
             print_func(f"switchyard: {role_name} is not a pane role in {verified}. Nothing was changed.")
@@ -24174,8 +24197,8 @@ def switchyard_rebind_workflow_panes_command(
             + ". Nothing was changed."
         )
         return 1
-    rebind = plan_pane_rebind(config, revision, live, intended=intended)
-    unknown = sorted(set(intended) - {str(r.get("name")) for r in live.get("roles") or []})
+    rebind = plan_pane_rebind(config, revision, live, intended=intended, slots=placed)
+    unknown = sorted((set(intended) | set(placed)) - {str(r.get("name")) for r in live.get("roles") or []})
     if unknown:
         print_func(f"switchyard: {', '.join(unknown)} is not a declared role; a rebind does not add "
                    "roles. Nothing was changed.")
@@ -24188,17 +24211,22 @@ def switchyard_rebind_workflow_panes_command(
 
     print_func(f"switchyard: {slug} declared pane rebind, from {verified}")
     print_func(f"  board            revision {rebind.revision}, digest {rebind.digest}")
-    if intended:
-        recorded = recorded_pre_migration_runtimes(verified)
+    if intended or placed:
+        recorded = recorded_pre_migration_panes(verified)
         by_role = {str(row.get("role")): row for row in registrations}
         for role in config.roles:
-            if role.role not in intended:
+            if role.role not in intended and role.role not in placed:
                 continue
             row = by_role.get(role.role) or {}
-            print_func(f"  operator         {role.role}: runtime {intended[role.role]} (the operator's decision)")
-            print_func(f"    evidence       configuration now: {role_runtime_binding(role)[0]}")
+            decided = ", ".join(
+                ([f"runtime {intended[role.role]}"] if role.role in intended else [])
+                + ([f"slot {placed[role.role]}"] if role.role in placed else [])
+            )
+            print_func(f"  operator         {role.role}: {decided} (the operator's decision)")
+            print_func(f"    evidence       configuration now: runtime {role_runtime_binding(role)[0]}, "
+                       f"slot {role.slot}")
             print_func("    evidence       tenant journal before its last workflow write: "
-                       + (", ".join(recorded.get(role.role) or []) or "none recorded"))
+                       + ("; ".join(recorded.get(role.role) or []) or "none recorded"))
             print_func(f"    evidence       live registration: "
                        + (f"{row.get('runtime')}/{row.get('target')} (pid {row.get('pid')})" if row else "none"))
     for line in rebind.changes or ("(the declaration already names every pane's binding)",):
@@ -24264,6 +24292,7 @@ def switchyard_rebind_workflow_panes_command(
             "switchyard: preview; nothing was written. Apply exactly this with: "
             f"pkexec switchyard rebind-workflow-panes {slug}"
             + "".join(f" --runtime {name}={value}" for name, value in sorted(intended.items()))
+            + "".join(f" --slot {name}={value}" for name, value in sorted(placed.items()))
             + f" --apply --expect {review}"
         )
         return 0
@@ -24278,6 +24307,7 @@ def switchyard_rebind_workflow_panes_command(
         slug,
         ["switchyard", "rebind-workflow-panes", slug,
          *(f"--runtime={name}={value}" for name, value in sorted(intended.items())),
+         *(f"--slot={name}={value}" for name, value in sorted(placed.items())),
          "--apply", "--expect", expect],
         operator=operator.name,
     )
@@ -24290,7 +24320,7 @@ def switchyard_rebind_workflow_panes_command(
     attempt.write("stdout", json.dumps({
         "revision": rebind.revision, "digest": rebind.digest, "document": rebind.document,
         "bindings": rebind.bindings, "rebound_digest": rebind.rebound_digest,
-        "rebound": rebind.rebound, "attribution": attribution, "intended": intended,
+        "rebound": rebind.rebound, "attribution": attribution, "intended": intended, "slots": placed,
         "review": review,
         "files": {str(item.path): {"before": item.document.raw.decode("utf-8", "replace"),
                                    "after": item.body.decode("utf-8", "replace")}
@@ -34804,6 +34834,11 @@ def _build_switchyard_rebind_workflow_panes_parser() -> argparse.ArgumentParser:
         help="the runtime the operator has decided a pane role runs; shown with the evidence "
         "for it, and reconciled into the tenant's configuration before the board",
     )
+    parser.add_argument(
+        "--slot", action="append", default=[], metavar="ROLE=SLOT",
+        help="the visible slot (0-5) the operator has decided a pane role is shown in; "
+        "shown with the evidence for it and reconciled the same way",
+    )
     parser.add_argument("--config-path", type=Path, default=None, help=argparse.SUPPRESS)
     return parser
 
@@ -37575,8 +37610,14 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             if not sep or not name.strip() or not value.strip():
                 raise SystemExit(f"switchyard: --runtime takes ROLE=RUNTIME, not {item!r}")
             runtimes[name.strip()] = value.strip()
+        slots: dict[str, int] = {}
+        for item in args.slot:
+            name, sep, value = item.partition("=")
+            if not sep or not name.strip() or not value.strip().isdigit():
+                raise SystemExit(f"switchyard: --slot takes ROLE=SLOT, not {item!r}")
+            slots[name.strip()] = int(value.strip())
         return switchyard_rebind_workflow_panes_command(
-            args.project, apply=args.apply, expect=args.expect, runtimes=runtimes,
+            args.project, apply=args.apply, expect=args.expect, runtimes=runtimes, slots=slots,
             config_path=args.config_path,
         )
     if argv[0].casefold() == "migrate-workflow":

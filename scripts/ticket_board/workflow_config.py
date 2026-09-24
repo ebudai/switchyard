@@ -143,6 +143,27 @@ BUILTIN_FLAGS = {
 }
 
 
+#: Operations a legacy board admits only from the ticket's assignee (or the
+#: director), whatever the workflow row's own `owner_scoped` says.
+#:
+#: Named here rather than inline because it is AUTHORITY, and it is authority
+#: the legacy transition table does not record: those rows carry
+#: `owner_scoped = false` for every one of these, and this check is what
+#: actually narrows them. `legacy_workflow` reads this same constant when it
+#: declares a legacy tenant's workflow, so the declared document cannot widen
+#: what the legacy board allowed without this line changing too (SYRD-240).
+LEGACY_ASSIGNEE_SCOPED_OPERATIONS = frozenset({
+    "start_work",
+    "submit_to_inspection",
+    "submit_to_audit",
+    "submit_to_audit_without_commit",
+    "implementer_kick_back",
+    "request_commit_exempt",
+    "start_task",
+    "complete_task",
+})
+
+
 def parking_stage_names(cfg: dict[str, Any]) -> set[str]:
     """Stages that hold work nobody is doing.
 

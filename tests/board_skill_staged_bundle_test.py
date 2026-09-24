@@ -237,10 +237,18 @@ def staged_bundle_runs_for_a_fresh_role_home() -> None:
         assert "board_skill_cli" in broken.stderr, broken.stderr
 
 
+#: Everything a staging pass writes outside the tenant's own directory. The
+#: polkit catalogue joined the list when the boundary install did, and a tenant
+#: with no role accounts reaches this render at all only since SYRD-249 -- so
+#: this child began writing a second real path the moment that skip was fixed.
+PRIVATE_ROOTS = ("/usr/local/lib", "/usr/share/polkit-1/actions")
+
+
 def _private_staging_root() -> None:
-    """A writable /usr/local/lib for this namespace, and for nothing else."""
-    Path("/usr/local/lib").mkdir(parents=True, exist_ok=True)
-    subprocess.run(["mount", "-t", "tmpfs", "tmpfs", "/usr/local/lib"], check=True)
+    """Writable copies of what staging touches, for this namespace only."""
+    for target in PRIVATE_ROOTS:
+        Path(target).mkdir(parents=True, exist_ok=True)
+        subprocess.run(["mount", "-t", "tmpfs", "tmpfs", target], check=True)
 
 
 def namespace_command(child: list[str], *, euid: int) -> list[str]:
@@ -271,11 +279,13 @@ def test_the_namespace_is_entered_whoever_runs_this() -> None:
 
 
 def host_staging_listing() -> list[str]:
-    """What this host has under the staging root, as the parent process sees it."""
-    root = Path("/usr/local/lib")
-    if not root.is_dir():
-        return []
-    return sorted(str(path) for path in root.iterdir())
+    """What this host has under everything staging touches, from out here."""
+    listing: list[str] = []
+    for target in PRIVATE_ROOTS:
+        root = Path(target)
+        if root.is_dir():
+            listing.extend(sorted(str(path) for path in root.iterdir()))
+    return listing
 
 
 def main() -> int:

@@ -673,10 +673,20 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
     the worktrees are created by the launcher, so none of this can run at the
     same time as account creation (SYRD-39).
     """
-    if not plan.role_accounts or not plan.roles_group:
-        return ""
+    # The staged bundle first, and for EVERY tenant. It is root-owned, lives at
+    # a shared path no tenant account can write, and is what a pane runs:
+    # switchyard-display-attach, the tenant control client, the board skill
+    # installer, the privileged action boundary. A modern single-owner tenant
+    # has no per-role accounts, so this whole function used to return nothing
+    # for it -- and its six panes opened onto
+    # `sudo: /usr/local/lib/switchyard/<project>/switchyard-display-attach:
+    # command not found` while provisioning reported success (SYRD-249).
+    #
+    # Only the per-account loop below depends on there being role accounts.
     worktrees = dict(plan.role_worktrees)
     lines: list[str] = list(role_tooling_staging_commands(plan.project, SHARED_RELEASE_CURRENT))
+    if not plan.role_accounts or not plan.roles_group:
+        return "\n".join(lines)
     for role, account in plan.role_accounts:
         lines.extend(
             role_runtime_commands(

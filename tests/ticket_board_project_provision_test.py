@@ -894,7 +894,12 @@ def test_role_accounts_rollout_is_idempotent_and_doubles_as_migration() -> None:
     commands = role_accounts_command(plan)
 
     assert commands == ""
-    assert role_runtime_command(plan) == ""
+    # Not empty any more, and that is the SYRD-249 fix: a tenant with no
+    # per-role accounts still needs the root-owned bundle its panes run, so
+    # only the per-account half is conditional.
+    runtime = role_runtime_command(plan)
+    assert "switchyard-display-attach" in runtime, runtime
+    assert f"sudo -u " not in runtime, runtime
 
 
 def test_role_commands_never_reach_into_the_owner_home() -> None:
@@ -908,7 +913,12 @@ def test_role_commands_never_reach_into_the_owner_home() -> None:
     """
     plan = build_plan(project="otto", owner_user="otto-agent")
     combined = role_accounts_command(plan) + "\n" + role_runtime_command(plan)
-    assert combined == "\n"
+    # The invariant is what these commands may NAME, not that there are none of
+    # them: the staged bundle this now renders lives at a shared root-owned
+    # path and is copied from the release, never from the owner's home
+    # (SYRD-249 keeps SYRD-39's property).
+    assert plan.owner_home not in combined, combined
+    assert "/usr/local/lib/switchyard/otto" in combined, combined
 
 
 def test_role_control_interface_covers_every_control_path_narrowly() -> None:
@@ -987,7 +997,13 @@ def test_publication_credential_is_root_owned_and_never_regenerated() -> None:
     # owns, and no sudo rule reaching one (SYRD-123).
     operator = render_operator_commands(plan)
     assert "/etc/switchyard/publish/otto.json" not in operator, operator
-    assert "switchyard-publish-ref" not in operator, operator
+    # Named only to be taken away. The staged bundle a tenant now gets removes
+    # the retired publisher by name, which is how a tenant that once had one
+    # loses it (SYRD-123); what must never appear is an install of it
+    # (SYRD-249 made this rollout stage the bundle at all).
+    publisher = [line for line in operator.splitlines() if "switchyard-publish-ref" in line]
+    assert publisher, operator
+    assert all(line.strip().startswith("sudo rm -f") for line in publisher), publisher
     assert "NOPASSWD: /usr/local/lib/switchyard" not in operator, operator
     # What it does install is the owner's own GitHub identity, which is the
     # whole credential story for a new project now.

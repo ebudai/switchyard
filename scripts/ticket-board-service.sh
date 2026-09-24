@@ -864,6 +864,94 @@ PY
     return 1
 }
 
+# The unit names the commit cache the board must verify against, and the board
+# says which one it is actually using. They used to be able to disagree: the
+# unit put the cache in `Environment=`, an older `ticket-board.env` beside it
+# still set the same variable, and systemd lets the file win -- so an upgrade
+# restarted a healthy-looking board that refused every newly published commit
+# as unknown (SYRD-251). The unit now passes the cache on the command line,
+# where no environment file reaches; this reads the running board back rather
+# than trusting that it did.
+verify_live_commit_repositories() {
+    local scope="$1"
+    local unit_path url="http://$BOARD_HOST:$BOARD_PORT/api/client-config"
+    if [[ "$scope" == "system" ]]; then
+        unit_path="$(system_unit_file_path)" || {
+            log "commit cache verification failed: no installed $SERVICE_NAME unit names the managed cache"
+            return 1
+        }
+    else
+        unit_path="$UNIT_PATH"
+    fi
+    if python3 - "$url" "$SMOKE_TIMEOUT_SECONDS" "$unit_path" "$RUNTIME_HOME/.config/$PROJECT_SLUG/ticket-board.env" <<'PY'
+import json
+import os
+import shlex
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+url, timeout, unit_path, env_file = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
+argv_cache = environment_cache = ""
+try:
+    lines = Path(unit_path).read_text(encoding="utf-8").splitlines()
+except OSError as exc:
+    print(f"ticket-board commit cache check could not read {unit_path}: {exc.strerror}", file=sys.stderr)
+    sys.exit(1)
+for line in lines:
+    line = line.strip()
+    if line.startswith("ExecStart="):
+        try:
+            words = shlex.split(line[len("ExecStart="):])
+        except ValueError:
+            words = []
+        for index, word in enumerate(words):
+            if word == "--commit-git-dir" and index + 1 < len(words):
+                argv_cache = words[index + 1]
+    elif line.startswith("Environment="):
+        name, _, value = line[len("Environment="):].strip().strip('"').partition("=")
+        if name.strip() == "TICKET_BOARD_COMMIT_GIT_DIR":
+            environment_cache = value.strip().strip('"')
+managed = argv_cache or environment_cache
+if not managed:
+    # Nothing declared: the board resolves its own default, and there is no
+    # managed value for anything to have overridden.
+    print(f"ticket-board commit cache: {unit_path} names none; the board resolves its default")
+    sys.exit(0)
+expected = [str(Path(item)) for item in managed.split(os.pathsep) if item.strip()]
+deadline = time.monotonic() + timeout
+last_error = "not attempted"
+while time.monotonic() < deadline:
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as response:
+            payload = json.load(response)
+        actual = payload.get("commit_repositories")
+        if not isinstance(actual, list):
+            last_error = "the board does not report commit_repositories"
+        elif [str(Path(str(item))) for item in actual] == expected:
+            print(f"ticket-board commit cache: the board verifies commits against {os.pathsep.join(expected)}")
+            sys.exit(0)
+        else:
+            # Name the file, never its contents: it holds the report secret.
+            last_error = (
+                f"the board verifies commits against {os.pathsep.join(map(str, actual))}, "
+                f"but {unit_path} manages {os.pathsep.join(expected)}; the service environment "
+                f"overrides the unit -- look for TICKET_BOARD_COMMIT_GIT_DIR in {env_file}"
+            )
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        last_error = str(exc)
+    time.sleep(0.25)
+print(f"ticket-board commit cache check failed for {url}: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
+    then
+        return 0
+    fi
+    return 1
+}
+
 verify_local_socket_available() {
     local socket_dir
     if [[ "${TICKET_BOARD_SKIP_POST_DEPLOY_SOCKET_VERIFY:-}" == "1" ]]; then
@@ -1091,7 +1179,7 @@ WorkingDirectory=$BOARD_CURRENT_LINK
 RuntimeDirectory=$PROJECT_SLUG-ticket-board
 ExecStartPre=/bin/mkdir -p $FRAME_ROOT
 ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
-ExecStart=$PYTHON_BIN $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT
+ExecStart=$PYTHON_BIN $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT --commit-git-dir $COMMIT_GIT_DIR
 Restart=on-failure
 RestartSec=2
 EnvironmentFile=-$RUNTIME_HOME/.config/$PROJECT_SLUG/ticket-board.env
@@ -1305,6 +1393,11 @@ deploy_restart_service() {
         exit 1
     fi
     if ! verify_live_build_id "$deployed_sha"; then
+        rollback_live_service "$scope" "$previous_release"
+        start_listener_after_upgrade
+        exit 1
+    fi
+    if ! verify_live_commit_repositories "$scope"; then
         rollback_live_service "$scope" "$previous_release"
         start_listener_after_upgrade
         exit 1

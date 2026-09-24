@@ -3361,6 +3361,14 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
     process_authority_line = (
         "" if plan.role_accounts else "Environment=TICKET_BOARD_PROCESS_AUTHORITY=1\n"
     )
+    # The commit cache is on the command line as well as in `Environment=`. The
+    # `EnvironmentFile=` below is the owner's, it outlives every upgrade, and
+    # systemd lets a value in it beat the unit's own `Environment=`: a stale
+    # TICKET_BOARD_COMMIT_GIT_DIR there silently moved the board back onto a
+    # cache nothing refreshes, and every new candidate was an unknown commit
+    # (SYRD-251). The board prefers the argument to any environment value. The
+    # `Environment=` line stays because it is where the publisher reads the
+    # cache it refreshes.
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
@@ -3372,7 +3380,7 @@ User={plan.service_user}
 {tenant_group_line}WorkingDirectory={plan.board_current}
 RuntimeDirectory={plan.runtime_directory}
 RuntimeDirectoryMode=0750
-ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir}
+ExecStart={default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir} --commit-git-dir {plan.commit_git_dir}
 Restart=on-failure
 RestartSec=2
 EnvironmentFile=-{plan.owner_home}/.config/{plan.project}/ticket-board.env

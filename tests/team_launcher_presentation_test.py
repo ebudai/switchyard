@@ -590,6 +590,44 @@ def test_full_launch_keeps_starting_workers_and_builds_recovery_slots_after_fail
             assert "pane start failed with exit 7 for director" in errors.getvalue()
 
 
+class AttachingPresentationRunner(PresentationRunner):
+    """The shared fake, plus the one thing a recovery now needs to see.
+
+    Recovery reattaches the display that is SHOWING the role, found from the
+    live display sessions, and succeeds only once that display is proven a
+    client of the worker (SYRD-239 live UAT). This fake adds a live display
+    labelled with the role and makes its respawn produce the nested client a
+    real proxy's `tmux attach` would. Nothing else changes, so the case using
+    it still tests what it always did: readiness first, the prepared
+    environment, one recorded recovery.
+    """
+
+    def __init__(self, project: str = "porter", *, slot: int = 1, role: str = "app") -> None:
+        super().__init__(project)
+        self.display = f"{project}-display-{slot}"
+        self.role_session = f"{project}-{role}"
+        self.display_tty = "/dev/pts/91"
+        self.sessions.add(self.display)
+        self.proxy_roles[self.display] = role
+
+    def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        tmux_args = args[args.index("tmux"):] if "tmux" in args else args
+        command = tmux_args[1] if len(tmux_args) > 1 else ""
+        target = tmux_args[tmux_args.index("-t") + 1] if "-t" in tmux_args else ""
+        if command == "list-sessions":
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="".join(f"{s}\n" for s in sorted(self.sessions)))
+        if command == "display-message" and tmux_args[-1] == "#{pane_tty}" and self._session(target) == self.display:
+            self.calls.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout=f"{self.display_tty}\n")
+        result = super().__call__(args, **kwargs)
+        if command == "respawn-pane" and self._session(target) == self.display and result.returncode == 0:
+            clients = self.session_clients.setdefault(self.role_session, [])
+            if self.display_tty not in clients:
+                clients.append(self.display_tty)
+        return result
+
+
 def test_recover_command_requires_desktop_readiness_and_uses_prepared_role_environment() -> None:
     with tempfile.TemporaryDirectory(prefix="switchyard-presentation-recover-entry.") as tmp:
         root = Path(tmp)
@@ -598,7 +636,7 @@ def test_recover_command_requires_desktop_readiness_and_uses_prepared_role_envir
         raw["desktop_access"] = {"mode": "headless"}
         config_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         config = load_project_config("porter", config_path)
-        runner = PresentationRunner()
+        runner = AttachingPresentationRunner()
         args = team_launcher._build_switchyard_present_parser().parse_args(["porter", "recover", "app"])
         prepare_calls = 0
         start_calls = 0

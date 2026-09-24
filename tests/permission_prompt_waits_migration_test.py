@@ -176,9 +176,34 @@ def main() -> int:
         and "ticket_board_listener" in migration_text,
         "the migration restates the listener grant",
     )
-    # Numbered so the ordered tail reaches it after what it depends on.
-    later = [path.name for path in sorted(MIGRATIONS.glob("pgu*.sql")) if path.name > MIGRATION.name]
-    check(later == [], f"it is the last ordered migration: {later}")
+    # Numbered so the ordered tail reaches it after what it depends on. Stated
+    # as exactly that: every board function it calls already exists when it
+    # runs -- in the floor an upgrade starts from, or in a migration ordered
+    # before it. This used to be "it is the LAST migration", which is true for
+    # one release and then false forever: the next ticket to ship a board fix
+    # (SYRD-256's pgu957) fails it with nothing wrong, as
+    # ticket_board_park_blocked_postgres_test has been failing since pgu955.
+    # The dependencies are read from the function's own code, so a call added
+    # later is held to the same rule without anybody updating a list.
+    import re
+
+    code = "\n".join(
+        line.split("--", 1)[0] for line in MIGRATION.read_text(encoding="utf-8").splitlines()
+    )
+    depends_on = sorted(set(re.findall(r"ticket_board\.([a-z0-9_]+)\s*\(", code)) - {FUNCTION})
+    check(depends_on, f"the dependencies were found at all: {depends_on}")
+    legacy_floor = schema_before(LEGACY_FROM)
+    earlier = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(MIGRATIONS.glob("*.sql"))
+        if path.name < MIGRATION.name
+    )
+    missing = [
+        name for name in depends_on
+        if f"FUNCTION ticket_board.{name}(" not in legacy_floor
+        and f"FUNCTION ticket_board.{name}(" not in earlier
+    ]
+    check(missing == [], f"everything it calls exists before it runs: {missing}")
 
     # And the rule this ticket is an instance of. rbac.sql grants on a board
     # that may have arrived by upgrade, so every function it names has to be

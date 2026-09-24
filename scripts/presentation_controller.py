@@ -151,6 +151,98 @@ def _resolved_runtime_assignments(
     return resolved, missing
 
 
+def runtime_divergence_refusal(
+    config: team_launcher.ProjectConfig,
+    *,
+    opener: Callable[[str], Any] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    proc_root: Path | None = None,
+) -> str:
+    """Why a live worker has no runtime assignment, when that can be verified.
+
+    The board shows a role's assignment only while its registered runtime and
+    target equal the ones the workflow DECLARES, and it refuses to register any
+    other. So a declared workflow that disagrees with the worker actually
+    running makes a live role look unregistered, and "no live runtime assignment
+    for configured role(s): director, ops" is all the operator was told. That is
+    what SYRD-239's live UAT got on mefp: the workflow declared director and ops
+    as claude while both workers were Codex.
+
+    Verified, and bounded, rather than guessed:
+
+    * only roles the board's own reading reports missing;
+    * only their DECLARED target, taken from the board's workflow document --
+      never a conventional tmux name -- and only one inside this project;
+    * the process in that exact pane, read from its own command line.
+
+    It changes nothing and authorizes nothing: it returns the refusal text, or
+    "" when there is no divergence it can prove, in which case the caller's
+    ordinary refusal stands.
+    """
+    try:
+        _resolved, missing = _resolved_runtime_assignments(config, opener=opener)
+    except SystemExit:
+        return ""
+    if not missing:
+        return ""
+    url = f"{config.board_url.rstrip('/')}/api/workflow"
+    open_url = opener or (lambda target: urllib_request.urlopen(target, timeout=3))
+    try:
+        with open_url(url) as response:
+            payload = json.load(response)
+        declared_roles = {
+            str(spec.get("name") or ""): spec
+            for spec in (payload.get("document") or {}).get("roles") or []
+            if isinstance(spec, dict)
+        }
+    except (OSError, ValueError, AttributeError, urllib_error.URLError):
+        return ""
+    procs = proc_root or Path("/proc")
+    divergent: list[str] = []
+    for role in sorted(missing):
+        spec = declared_roles.get(role) or {}
+        declared = str(spec.get("runtime") or "").strip()
+        target = str(spec.get("target") or "").strip()
+        if not declared or not target.split(":", 1)[0].startswith(f"{config.project}-"):
+            continue
+        probe = runner(
+            ["tmux", "display-message", "-p", "-t", _exact_tmux_target(target), "#{pane_pid}"],
+            capture_output=True, text=True, check=False,
+        )
+        pid = str(getattr(probe, "stdout", "") or "").strip()
+        if getattr(probe, "returncode", 1) != 0 or not pid.isdigit():
+            continue
+        try:
+            argv0 = (procs / pid / "cmdline").read_bytes().split(b"\0", 1)[0].decode()
+        except OSError:
+            continue
+        live = team_launcher._command_name(argv0) if argv0 else ""
+        # Only a runtime Switchyard runs counts as evidence. A pane whose
+        # process is a shell, a wrapper or anything else says nothing about
+        # which runtime is there, and "the live worker runs bash" would be a
+        # claim this cannot back.
+        if live not in team_launcher.SUPPORTED_CONFIG_CLI_NAMES:
+            continue
+        if live != declared:
+            divergent.append(
+                f"switchyard:   {role}: declared {declared} at {target}, but the live worker "
+                f"in that pane runs {live} (pid {pid})"
+            )
+    if not divergent:
+        return ""
+    return "\n".join(
+        [
+            f"switchyard: {config.project}'s declared workflow disagrees with its live workers, "
+            "so the board holds no runtime assignment for them:",
+            *divergent,
+            "switchyard: the board registers only the runtime a role is declared to run, so "
+            "these workers cannot hold an assignment, and nothing is reattached to a target it "
+            "cannot verify. Nothing was changed. The Director has to correct the declared "
+            "runtime before this can succeed.",
+        ]
+    )
+
+
 def display_session_name(project: str, slot: int) -> str:
     return f"{project}-display-{slot}"
 
@@ -1954,13 +2046,29 @@ def presentation_action(
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     proc_root: Path | None = None,
+    assignment_opener: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
-    config = runtime_assignment_config(config)
-    _validate_role_namespace(config)
     # Narrow on purpose: the operator path opens for the recovery of the
     # DIRECTOR's slot and nothing else. A disconnected app or ops slot is still
     # the Director's to recover, because the Director is still there to do it.
     operator_recovery = action == "recover" and (role_name or "").strip().lower() == DIRECTOR_ROLE
+    try:
+        config = runtime_assignment_config(config, opener=assignment_opener)
+    except SystemExit as refusal:
+        # Said precisely only to a caller who could have acted: anyone else gets
+        # the refusal unchanged, and no probe runs on their behalf.
+        try:
+            _require_director(config, environ, operator_recovery=operator_recovery)
+        except SystemExit:
+            raise refusal from None
+        precise = runtime_divergence_refusal(
+            config, opener=assignment_opener, runner=_tmux_runner(config, runner),
+            proc_root=proc_root,
+        )
+        if precise:
+            raise SystemExit(precise) from None
+        raise
+    _validate_role_namespace(config)
     actor = _require_director(config, environ, operator_recovery=operator_recovery)
     owner_runner = _tmux_runner(config, runner)
     state_path = state_path or presentation_state_path(config, config_path=config_path)

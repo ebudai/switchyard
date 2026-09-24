@@ -24928,6 +24928,19 @@ def switchyard_new_command(
             f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
             "were not started:\n  " + "\n  ".join(pending_isolation) + "\n" + next_step
         )
+    # Before any window opens: a pane's first act is to run a program out of
+    # the root-owned staged bundle, and a tenant whose staging was skipped
+    # opened its tabs onto a command that was not there while provisioning
+    # reported success (SYRD-249).
+    staging_problems = ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
+    if staging_problems:
+        for problem in staging_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: not opening {resolved_slug}'s windows. Everything else it needs was "
+            "created and nothing was removed; the tenant is startable once its tooling is staged."
+        )
+        return 1
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
     launch_result = 0 if launch_deferred else launch_project(
@@ -26906,6 +26919,56 @@ def refresh_role_pane_hooks(
             continue
         print_func(f"switchyard: refreshed {config.project}'s pane hooks for {account} in {home}")
     return problems
+
+
+def ensure_staged_role_tooling(
+    config: ProjectConfig,
+    *,
+    release_root: Path | None = None,
+    staging_root: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """The bundle a pane runs, present and root-owned, or why it is not.
+
+    Checked before any window opens and repaired in place when it can be. A
+    modern single-owner tenant declares no per-role accounts, and the whole
+    staging step used to sit behind a test for those, so provisioning reported
+    success and then opened six tabs onto
+    `sudo: /usr/local/lib/switchyard/<project>/switchyard-display-attach:
+    command not found` (SYRD-249).
+
+    The repair is the same renderer an upgrade uses, from the same selected
+    release, and it is idempotent: it installs what the release carries and
+    removes what it does not. It touches nothing but that root-owned directory
+    -- no credentials, no worktrees, no database, no session history -- so a
+    resumed tenant can be repaired without being rebuilt.
+    """
+    release = (
+        Path(release_root) if release_root is not None
+        else switchyard_shared_install_root() / "current"
+    )
+    staged = _staged_tooling_dir(config, staging_root)
+    problems = staged_role_tooling_problems(
+        config.project, str(release), staging_root=staged
+    )
+    if not problems:
+        return []
+    print_func(
+        f"switchyard: {config.project}'s staged role tooling in {staged} is incomplete; "
+        f"restaging it from {release}"
+    )
+    repaired = refresh_staged_role_tooling(
+        config, release_root=release, staging_root=staging_root,
+        runner=runner, print_func=print_func,
+    )
+    if not repaired:
+        return []
+    return repaired + [
+        f"{config.project}'s panes would open on tooling that is not there. Stage it with "
+        f"`sudo switchyard upgrade {config.project}`, which restages this bundle from the "
+        "selected release, and then start the project again."
+    ]
 
 
 def _staged_tooling_dir(config: ProjectConfig, staging_root: Path | None) -> Path:
@@ -32534,6 +32597,17 @@ def resume_tenant(
     against a board that did not come up produces panes that cannot register,
     and a report of success over them is worse than the failure.
     """
+    # The staged bundle first, because it is what every pane this resume leads
+    # to will run, and repairing it costs nothing when it is already right. A
+    # tenant provisioned before SYRD-249 has none of it: an ordinary start
+    # restores it in place, without touching credentials, worktrees, the
+    # database or session history.
+    staging_problems = ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
+    if staging_problems:
+        return staging_problems + [
+            f"{config.project} was not resumed: its panes would start against tooling that is "
+            "not staged. Nothing was stopped or removed"
+        ]
     # Idempotent by asking first. `systemctl start` on a live unit is a no-op,
     # but the listener is restored with `restart`, which would bounce a healthy
     # one -- and resuming an already-running tenant must not interrupt it.

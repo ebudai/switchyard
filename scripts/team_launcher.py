@@ -35004,6 +35004,19 @@ def _build_switchyard_stop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_recover_display_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard recover-display",
+        description=(
+            "Reattach a project's Director display after its window slot lost it. Run it from "
+            "the desktop session of the operator the project is registered to; it reaches the "
+            "project owner over the tenant-control bridge and recovers the Director slot only."
+        ),
+    )
+    parser.add_argument("project", nargs="+", help="project name or slug")
+    return parser
+
+
 def _build_switchyard_start_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard start")
     parser.add_argument("project", nargs="+")
@@ -35497,6 +35510,7 @@ Commands:
   present          map persistent role sessions into stable display slots at runtime
   attach           attach this terminal to a role's live worker by project and role name
   replace-window   replace a root-owned presentation window without stopping any worker
+  recover-display  reattach a project's disconnected Director display, as its desktop operator
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes
@@ -36155,6 +36169,62 @@ def ensure_staged_role_bundle_before_crossing(
     return ""
 
 
+def switchyard_recover_display_command(
+    argv: Sequence[str],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> int:
+    """`switchyard recover-display <project>`: the operator's way back to the Director.
+
+    This verb was advertised by the disconnected Director slot, listed in
+    SWITCHYARD_COMMANDS and mapped in the tenant-control bridge -- and never
+    dispatched. `switchyard_main` fell through to bare-project selection, so the
+    live MEFP UAT got `unknown project 'recover-display mefp'` and nothing was
+    recovered (SYRD-239).
+
+    For the desktop operator the work happens on the far side. Loading the
+    configuration crosses to the owner the same way `stop` and `status` do: the
+    bridge maps this verb to `present <slug> recover director` from root-owned
+    data and runs it as the owner, and control does not come back here. So the
+    verb carries no authority of its own; it only chooses the route.
+
+    Reached past that line only when no crossing happened -- the caller is the
+    owner, or root. Neither is the registered operator the bridge authenticates,
+    so the recovery is decided by the presentation controller's own check, and
+    a caller it would refuse is told why in terms of this command rather than
+    being sent back to run it again.
+    """
+    from scripts import presentation_controller
+
+    args = _build_switchyard_recover_display_parser().parse_args(list(argv[1:]))
+    entry = _resolve_switchyard_project(" ".join(args.project))
+    # The slug, not what was typed: the bridge only serves `<verb> <slug>`, so
+    # a display name here would silently fall back to sudo.
+    config = _load_switchyard_project_config_for_command(entry, ["recover-display", entry.slug])
+    env = os.environ if environ is None else environ
+    actor = (env.get("TICKET_BOARD_CALLER_ROLE") or env.get("PGU_TICKET_BOARD_CALLER_ROLE") or "").strip().lower()
+    if actor != presentation_controller.DIRECTOR_ROLE and not presentation_controller.operator_recovery_caller(
+        config, env
+    ):
+        grant = _tenant_control_grant(config.project)
+        registered = grant.get("authorized_user", "")
+        route = (
+            f"it is registered to {registered}; run this from {registered}'s desktop session"
+            if registered
+            else f"{config.project} has no tenant-control grant, so no operator is registered for it"
+        )
+        raise SystemExit(
+            f"switchyard: recover-display reaches {config.project}'s Director through its "
+            f"tenant-control bridge, as the desktop operator the project is registered to. "
+            f"{current_user_name()} did not arrive over that bridge, so nothing authorizes the "
+            f"recovery here: {route}"
+        )
+    present_args = _build_switchyard_present_parser().parse_args(
+        [entry.slug, "recover", presentation_controller.DIRECTOR_ROLE]
+    )
+    return switchyard_present_command(config, config_path=entry.config_path, args=present_args)
+
+
 def _switchyard_exec_through_tenant_control(
     project: str,
     operation: str,
@@ -36210,6 +36280,13 @@ def _switchyard_exec_through_tenant_control(
         # (SYRD-202).
         if operation == "stop":
             code = close_desktop_presentation(project, caller=caller)
+        elif operation == "recover-display":
+            # A recovery reattaches the Director inside the window that is
+            # already open; it has no window half to complete. Asking for one
+            # would find no handoff and -- on a tenant with desktop access --
+            # report the successful recovery as "no presentation window was
+            # handed back ... run it again" (SYRD-239 live UAT).
+            print_func(f"switchyard: {project}'s Director display was recovered")
         else:
             code = complete_desktop_presentation(project, caller=caller, runner=runner)
     raise SystemExit(code)
@@ -36978,6 +37055,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             config_path=entry.config_path,
             role_name=args.role,
         )
+    if argv[0].casefold() == "recover-display":
+        return switchyard_recover_display_command(argv)
     if argv[0].casefold() == "stop":
         args = _build_switchyard_stop_parser().parse_args(argv[1:])
         project = " ".join(args.project)

@@ -703,6 +703,27 @@ def traced_status(**kwargs):
 
 team_launcher.switchyard_status_command = traced_status
 
+
+def traced_present(config, *, config_path, args):
+    # The recovery itself needs a live tmux team; what this suite owns is who
+    # reached it and on whose authority. So the REAL authorization runs, against
+    # the real root-owned grant, with the identity the bridge really set.
+    from scripts import presentation_controller
+
+    record["operation"] = "present"
+    record["project"] = config.project
+    record["run_as_user"] = config.run_as_user
+    record["present"] = [args.project, args.action, args.role]
+    record["actor"] = presentation_controller._require_director(
+        config,
+        os.environ,
+        operator_recovery=(args.action == "recover" and (args.role or "") == "director"),
+    )
+    return 0
+
+
+team_launcher.switchyard_present_command = traced_present
+
 code = 0
 try:
     code = team_launcher.switchyard_main(sys.argv[1:])
@@ -860,6 +881,143 @@ def case_all_three_verbs_run_through_the_real_public_dispatcher(accounts: Accoun
         assert _requires_root_as(accounts.human.pw_name, argv), argv
 
 
+#: What `sudo` would have been asked to run: recorded, and nothing else done.
+#: The human cannot become root, so the harness takes that one hop itself --
+#: with exactly the argv recorded here, which is what makes the chain a chain.
+SUDO_RECORDER = """#!/bin/sh
+printf '%s\\n' "$@" > "@SUDO_LOG@"
+exit 0
+"""
+
+
+def _as_user(user: pwd.struct_passwd, argv: list[str], environ: dict[str, str]):
+    return subprocess.run(
+        ["setpriv", f"--reuid={user.pw_uid}", f"--regid={user.pw_gid}", "--clear-groups", *argv],
+        text=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env=environ, cwd="/",
+    )
+
+
+def _sudo_hop(program: str, caller_uid: int, *args: str):
+    """What sudo does with the recorded request: run it as root, naming the caller."""
+    env = {"PATH": "/usr/bin:/bin", "SUDO_UID": str(caller_uid), "SUDO_USER": "root"}
+    return subprocess.run(
+        [program, *args], text=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, cwd="/",
+    )
+
+
+def case_the_operator_recovers_the_director_through_the_public_entry_point(
+    accounts: Accounts, work: Path
+) -> None:
+    """`switchyard recover-display <project>`, typed by the operator, the whole way.
+
+    SYRD-239's first candidate listed the verb, mapped it in the bridge and
+    printed it on the disconnected Director slot -- and `switchyard_main` had no
+    branch for it. The live MEFP UAT got `unknown project 'recover-display
+    mefp'`. Nothing here caught it because every case in this file entered at
+    the BRIDGE: none ran the operator's own `switchyard`, which is the half
+    that was missing.
+
+    So this enters where the operator does -- the public `scripts/switchyard`,
+    as the human, unprivileged -- and follows it: what it asks sudo to run, the
+    staged bridge running that exact request as root, the owner's real
+    `switchyard_main`, and the real operator authorization at the end.
+    """
+    from scripts import team_launcher
+    from scripts.ticket_board.project_provision import tenant_control_commands
+
+    record = _record_path(work, "recover-record.json", accounts)
+    launcher = _shared_release(work, record, source=DISPATCHER_SOURCE)
+    _register_project(accounts, work)
+    # Staged the production way, as root: grant and sudoers rule, then the
+    # protocol programs and role bundle from this checkout -- the things the
+    # near side checks before it will cross.
+    _apply(tenant_control_commands(PROJECT, accounts.owner.pw_name, accounts.human.pw_name))
+    _apply([team_launcher.tenant_control_repair_command(PROJECT, release_root=str(ROOT))])
+    _write_grant(
+        {
+            "project": PROJECT,
+            "owner": accounts.owner.pw_name,
+            "authorized_user": accounts.human.pw_name,
+            "launcher": str(launcher),
+        }
+    )
+
+    box = work / "sudo"
+    box.mkdir()
+    os.chmod(box, 0o1777)
+    sudo_log = box / "argv"
+    recorder = box / "sudo"
+    recorder.write_text(SUDO_RECORDER.replace("@SUDO_LOG@", str(sudo_log)), encoding="utf-8")
+    recorder.chmod(0o755)
+    public = ROOT / "scripts" / "switchyard"
+    environ = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp",
+        "SWITCHYARD_SUDO_BIN": str(recorder),
+    }
+
+    # 0. The trampoline would not put a password prompt in front of it.
+    assert not _requires_root_as(accounts.human.pw_name, ["recover-display", PROJECT])
+    assert _requires_root_as(accounts.intruder.pw_name, ["recover-display", PROJECT])
+
+    # 1. The operator types the command the slot shows them.
+    near = _as_user(accounts.human, [sys.executable, str(public), "recover-display", PROJECT], environ)
+    assert "unknown project" not in near.stdout, near.stdout
+    assert near.returncode == 0, near.stdout
+    # A recovery has no window to hand back; it must not be reported as one
+    # that failed to arrive.
+    assert "no presentation window was handed back" not in near.stdout, near.stdout
+    assert "Director display was recovered" in near.stdout, near.stdout
+
+    # 2. What it asked sudo for is exactly the bounded request, and only it.
+    assert sudo_log.exists(), f"the operator's command never reached sudo: {near.stdout}"
+    sent = sudo_log.read_text(encoding="utf-8").splitlines()
+    helper = str(GRANT_ROOT / PROJECT / "switchyard-tenant-control")
+    assert sent == ["-n", helper, PROJECT, "recover-display"], sent
+
+    # 3. The hop sudo makes, with that exact request.
+    if record.exists():
+        record.unlink()
+    crossed = _sudo_hop(sent[1], accounts.human.pw_uid, *sent[2:])
+    assert crossed.returncode == 0, crossed.stdout
+    ran = json.loads(record.read_text(encoding="utf-8"))
+    assert "error" not in ran, ran
+    assert ran["code"] == 0, ran
+
+    # 4. The owner's real dispatcher received the fixed recovery -- the
+    #    Director's slot, this project -- as the owner, for this human ...
+    assert ran["argv"] == ["present", PROJECT, "recover", "director"], ran["argv"]
+    assert ran["operation"] == "present" and ran["present"] == [PROJECT, "recover", "director"], ran
+    assert ran["uid"] == accounts.owner.pw_uid, ran
+    assert ran["caller"] == accounts.human.pw_name, ran
+    # ... and the real authorization admitted it as the operator, not as a
+    # Director nobody was.
+    assert ran["actor"] == f"operator:{accounts.human.pw_name}", ran
+
+    # 5. The refusals, at the same public entry point.
+    sudo_log.unlink()
+    intruder = _as_user(accounts.intruder, [sys.executable, str(public), "recover-display", PROJECT], environ)
+    assert intruder.returncode != 0, intruder.stdout
+    assert f"may not control {PROJECT}; it is registered to {accounts.human.pw_name}" in intruder.stdout, (
+        intruder.stdout
+    )
+    assert not sudo_log.exists(), "an unregistered user reached sudo"
+
+    # Another project: its own name is all the operator can give, and it is
+    # not a project this grant covers.
+    elsewhere = _as_user(accounts.human, [sys.executable, str(public), "recover-display", "otherproject"], environ)
+    assert elsewhere.returncode != 0, elsewhere.stdout
+    assert "unknown project 'otherproject'" in elsewhere.stdout, elsewhere.stdout
+    assert not sudo_log.exists(), "a request for another project reached sudo"
+
+    # And the bridge still offers no ordinary presentation change: only the
+    # fixed recovery verb exists, so `present` itself is not a verb it runs.
+    ordinary = _sudo_hop(helper, accounts.human.pw_uid, PROJECT, "present")
+    assert ordinary.returncode != 0, ordinary.stdout
+
+
 def case_repair_reinstalls_the_same_bridge_for_the_same_human(accounts: Accounts, work: Path) -> None:
     """Run the generated repair commands for real, twice, as root.
 
@@ -946,6 +1104,7 @@ def end_to_end() -> None:
             case_a_grant_anyone_could_rewrite_is_not_trusted,
             case_nothing_reusable_is_ever_written_down,
             case_all_three_verbs_run_through_the_real_public_dispatcher,
+            case_the_operator_recovers_the_director_through_the_public_entry_point,
             case_repair_reinstalls_the_same_bridge_for_the_same_human,
             case_the_bridge_returns_one_validated_handoff_to_its_caller,
         ):

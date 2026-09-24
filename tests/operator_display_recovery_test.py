@@ -343,6 +343,160 @@ def test_the_bridge_carries_one_more_fixed_verb_and_no_role() -> None:
         )
 
 
+# -- SYRD-239 live UAT: the command existed everywhere except the dispatcher ---
+
+
+class patched:
+    """Replace module attributes for one block, and always put them back."""
+
+    def __init__(self, module, **replacements) -> None:
+        self.module = module
+        self.replacements = replacements
+
+    def __enter__(self):
+        self.saved = {name: getattr(self.module, name) for name in self.replacements}
+        for name, value in self.replacements.items():
+            setattr(self.module, name, value)
+        return self
+
+    def __exit__(self, *exc):
+        for name, value in self.saved.items():
+            setattr(self.module, name, value)
+        return False
+
+
+def test_the_public_dispatcher_reaches_the_command() -> None:
+    """What the membership checks above never did: run it.
+
+    The verb was in SWITCHYARD_COMMANDS, in TENANT_CONTROL_OPERATIONS and in the
+    bridge, and `switchyard_main` had no branch for it -- so the live UAT got
+    `unknown project 'recover-display mefp'`. The end-to-end proof, from the
+    operator's own `scripts/switchyard` through sudo and the bridge, is in
+    tenant_control_bridge_e2e_test; this is the same seam without a namespace.
+    """
+    reached: list[list[str]] = []
+    with patched(tl, switchyard_recover_display_command=lambda argv: reached.append(list(argv)) or 0):
+        code = tl.switchyard_main(["recover-display", PROJECT])
+    check(code == 0, f"the dispatcher returned the command's result: {code}")
+    check(reached == [["recover-display", PROJECT]], f"and reached the command itself: {reached}")
+
+
+def _bridge_run(operation: str, *, desktop: bool):
+    """`_switchyard_exec_through_tenant_control` with the bridge answering 0."""
+    completions: list[str] = []
+    said: list[str] = []
+
+    def complete(project, *, caller, runner):
+        completions.append(project)
+        return 1  # what it answers on a desktop tenant with no handoff
+
+    with patched(
+        tl,
+        ensure_staged_role_bundle_before_crossing=lambda *a, **k: "",
+        _tenant_has_desktop_access=lambda *a, **k: desktop,
+        complete_desktop_presentation=complete,
+    ):
+        try:
+            tl._switchyard_exec_through_tenant_control(
+                PROJECT, operation,
+                grant={"authorized_user": tl.current_user_name()},
+                runner=lambda argv, **kw: types.SimpleNamespace(returncode=0),
+                ensure_helper=lambda *a, **k: None,
+                print_func=said.append,
+            )
+        except SystemExit as exc:
+            return exc.code, completions, said
+    raise AssertionError("the bridge exec always ends in SystemExit")
+
+
+def test_a_recovery_is_not_reported_as_a_window_that_never_came() -> None:
+    """The second defect behind the first.
+
+    After the bridge answers, every verb but `stop` used to go on to open the
+    window the owner half handed back. A recovery hands nothing back -- it
+    reattaches the Director inside the window that is already open -- and on a
+    tenant with desktop access "nothing handed back" is reported as a failure:
+    "no presentation window was handed back ... run it again". So with the
+    dispatch fixed and nothing else, a SUCCESSFUL recovery would still have
+    exited 1 and told the operator it had not worked.
+    """
+    code, completions, said = _bridge_run("recover-display", desktop=True)
+    check(code == 0, f"a recovery the bridge completed exits 0: {code}")
+    check(completions == [], f"and asks for no window to open: {completions}")
+    check(any("Director display was recovered" in line for line in said), f"and says so: {said}")
+
+    # The control, so the seam above is known to be live: a start on the same
+    # tenant does complete its window, and reports its absence.
+    code, completions, _said = _bridge_run("start", desktop=True)
+    check(completions == [PROJECT], f"a start still completes its window: {completions}")
+    check(code == 1, f"and still reports a window that never came: {code}")
+
+
+def test_without_the_bridge_the_refusal_does_not_send_them_back_to_it() -> None:
+    """Reached only when no crossing happened: the owner, or root.
+
+    Neither is the registered operator the bridge authenticates, so nothing new
+    is authorized here. What changes is the message: the presentation
+    controller's own refusal tells its reader to run `switchyard
+    recover-display`, which is the command this caller just ran.
+    """
+    loaded: list[list[str]] = []
+    presented: list[list[str]] = []
+    entry = tl.SwitchyardProjectEntry(slug=PROJECT, name="MEFP Project", config_path=Path("/nonexistent"))
+
+    with real_config() as cfg:
+        def load(entry_, argv):
+            loaded.append(list(argv))
+            return cfg
+
+        def present(config_, *, config_path, args):
+            presented.append([args.project, args.action, args.role])
+            return 0
+
+        with patched(
+            tl,
+            _resolve_switchyard_project=lambda selection: entry,
+            _load_switchyard_project_config_for_command=load,
+            _tenant_control_grant=lambda project, **k: {"authorized_user": OPERATOR},
+            current_user_name=lambda: "stellaris-agent",
+            switchyard_present_command=present,
+        ):
+            message = refused(
+                lambda: tl.switchyard_recover_display_command(
+                    ["recover-display", "MEFP", "Project"], environ={}
+                ),
+                "did not arrive over that bridge",
+            )
+            check(f"registered to {OPERATOR}" in message, f"it says who can: {message}")
+            check("Run `switchyard recover-display" not in message,
+                  f"and does not send them back to the command they ran: {message}")
+            check(presented == [], "nothing was recovered")
+            # The slug crosses, not what was typed: the bridge serves only
+            # `<verb> <slug>`, so a display name would silently fall to sudo.
+            check(loaded == [["recover-display", PROJECT]], f"the crossing argv: {loaded}")
+
+            # The two identities that ARE authorized still get through, to the
+            # same fixed recovery the bridge would have asked for.
+            code = tl.switchyard_recover_display_command(
+                ["recover-display", PROJECT], environ={"TICKET_BOARD_CALLER_ROLE": "director"}
+            )
+            check(code == 0 and presented[-1] == [PROJECT, "recover", "director"],
+                  f"the Director's own pane: {presented}")
+            code = tl.switchyard_recover_display_command(
+                ["recover-display", PROJECT],
+                environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+            )
+            check(code == 0 and presented[-1] == [PROJECT, "recover", "director"],
+                  f"and the operator the bridge named: {presented}")
+            refused(
+                lambda: tl.switchyard_recover_display_command(
+                    ["recover-display", PROJECT],
+                    environ={tl.TENANT_CONTROL_CALLER_ENV: "intruder"},
+                ),
+                "did not arrive over that bridge",
+            )
+
+
 def main() -> int:
     def watchdog(_signum, _frame):
         raise TimeoutError("operator_display_recovery_test exceeded its time budget")

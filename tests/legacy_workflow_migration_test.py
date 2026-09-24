@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -402,39 +403,54 @@ def test_the_migration_refuses_when_root_vouches_for_no_document() -> None:
         check("--despite-board" in joined, f"including the legacy form of it: {joined}")
 
 
-def test_the_migration_is_a_no_op_when_the_board_already_runs_it() -> None:
-    """Idempotence, at the layer that decides whether to write at all.
+class provision_root:
+    """Point root's provision root at a scratch directory, for one block.
 
-    The database is idempotent underneath this -- `apply_declared_workflow`
-    returns the existing revision when the document is unchanged -- but a
-    rerun should not reach it, and should not report a migration it did not
-    perform.
+    The handoff lives beside it. Through this documented seam, "root's" files
+    are the caller's own (expected_privileged_uid), so both halves run here.
     """
-    with tenant() as t:
-        root_doc = dict(MIGRATED_DOCUMENT)
-        stored = as_the_board_stores_it(root_doc)
-        printed: list[str] = []
-        ran: list = []
-        with root_holds(root_doc):
-            migration = tl.plan_workflow_migration(
-                t.config,
-                config_path=t.config_path,
-                board_reader=lambda _c: (7, dict(stored), ""),
-            )
-            check(migration.already_installed, "it recognises the document is already in force")
-            check(not migration.installable, "so there is nothing to install")
 
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=True,
-                config_path=t.config_path,
-                runner=lambda *a, **k: ran.append(a) or _completed(0),
+    def __enter__(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="syrd253-root.")
+        self.previous = os.environ.get("SWITCHYARD_PRIVILEGED_PROVISION_ROOT")
+        root = Path(self.tmp.name) / "provision"
+        os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = str(root)
+        return root
+
+    def __exit__(self, *exc):
+        if self.previous is None:
+            os.environ.pop("SWITCHYARD_PRIVILEGED_PROVISION_ROOT", None)
+        else:
+            os.environ["SWITCHYARD_PRIVILEGED_PROVISION_ROOT"] = self.previous
+        self.tmp.cleanup()
+        return False
+
+
+def migrate(t, *, apply, board, euid=0):
+    printed: list[str] = []
+    with root_holds(MIGRATED_DOCUMENT):
+        code = tl.switchyard_migrate_workflow_command(
+            "porter", apply=apply, config_path=t.config_path, board_reader=board,
+            euid_getter=lambda: euid, print_func=printed.append,
+        )
+    return code, "\n".join(printed)
+
+
+def test_the_migration_is_a_no_op_when_the_board_already_runs_it() -> None:
+    """Idempotence, at the layer that decides whether to do anything at all."""
+    with tenant() as t, provision_root():
+        stored = as_the_board_stores_it(MIGRATED_DOCUMENT)
+        with root_holds(MIGRATED_DOCUMENT):
+            migration = tl.plan_workflow_migration(
+                t.config, config_path=t.config_path,
                 board_reader=lambda _c: (7, dict(stored), ""),
-                print_func=printed.append,
             )
+        check(migration.already_installed, "it recognises the document is already in force")
+        check(not migration.installable, "so there is nothing to install")
+        code, report = migrate(t, apply=True, board=lambda _c: (7, dict(stored), ""))
         check(code == 0, f"a rerun succeeds without doing anything: {code}")
-        check(not ran, "and writes nothing")
-        check("already running exactly this workflow" in "\n".join(printed), "\n".join(printed))
+        check("already running exactly this workflow" in report, report)
+        check(not tl.workflow_handoff_path("porter").exists(), "and hands nothing over")
 
 
 def test_the_migration_will_not_overwrite_a_different_live_workflow() -> None:
@@ -452,158 +468,258 @@ def test_the_migration_will_not_overwrite_a_different_live_workflow() -> None:
 
 
 def test_a_dry_run_reports_what_would_be_installed_and_writes_nothing() -> None:
-    with tenant() as t:
-        printed: list[str] = []
-        ran: list = []
-        with root_holds(MIGRATED_DOCUMENT):
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=False,
-                config_path=t.config_path,
-                runner=lambda *a, **k: ran.append(a) or _completed(0),
-                board_reader=lambda _c: (0, None, ""),
-                print_func=printed.append,
-            )
-        report = "\n".join(printed)
+    with tenant() as t, provision_root():
+        code, report = migrate(t, apply=False, board=lambda _c: (0, None, ""))
         check(code == 0, f"{code}: {report}")
-        check(not ran, "nothing was run")
+        check(not tl.workflow_handoff_path("porter").exists(), "nothing was handed over")
         check("running NONE" in report, f"the board's state: {report}")
         check("source" in report, f"where the document came from: {report}")
         check("not reversible" in report, f"and the one-way door is stated: {report}")
         check("--apply" in report, f"and how to do it: {report}")
 
 
-def test_applying_installs_the_document_and_confirms_the_board_runs_it() -> None:
-    """The success path, and the confirmation that makes it a claim worth making.
+def test_root_hands_the_reviewed_workflow_over_and_writes_nothing_to_the_board() -> None:
+    """SYRD-253: configuring a workflow is the director's write, never root's.
 
-    The write reporting exit 0 is not the same as the board running the
-    workflow, and this whole ticket is about the difference between a command
-    that returned 0 and a tenant that actually migrated.
+    The live retry died on `caller_role must be non-empty` because root was
+    making a director-only write. Root has no director process to make it
+    with, and must not borrow a role header or a token to fake one.
     """
-    with tenant() as t:
-        stored = as_the_board_stores_it(MIGRATED_DOCUMENT)
-        seen: list[list[str]] = []
-        # A non-zero revision with no document on purpose: it is what a board
-        # that HAD a workflow and lost its configuration row reports, which is
-        # the recovery `workflow_manage`'s rollback-document path exists for.
-        # It also makes "pin to the revision you read" distinguishable from
-        # "assume zero" -- with a zero-revision fixture those are the same
-        # bytes, and the assertion below would prove nothing.
-        boards = [(5, None, ""), (8, dict(stored), "")]
+    with tenant() as t, provision_root():
+        reads: list = []
 
         def board(_config):
-            return boards[min(len(seen), len(boards) - 1)]
+            reads.append(1)
+            return 5, None, ""
 
-        def runner(command, **_kwargs):
-            seen.append(list(command))
-            return _completed(0)
-
-        printed: list[str] = []
-        with root_holds(MIGRATED_DOCUMENT):
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=True,
-                config_path=t.config_path,
-                runner=runner,
-                board_reader=board,
-                euid_getter=lambda: 0,
-                print_func=printed.append,
-            )
-        report = "\n".join(printed)
+        code, report = migrate(t, apply=True, board=board)
         check(code == 0, f"{code}: {report}")
-        check(len(seen) == 1, f"it wrote once: {seen}")
-        command = seen[0]
-        check("workflow_manage.py" in " ".join(command), f"through the reviewed path: {command}")
-        check("apply" in command, f"{command}")
-        check("--expected-revision" in command, "with optimistic concurrency")
+        check(len(reads) == 1, f"root read the board once and never came back to write: {reads}")
+        path = tl.workflow_handoff_path("porter")
+        info = path.lstat()
+        check(stat.S_IMODE(info.st_mode) == 0o644, f"readable, and writable only by root: {oct(info.st_mode)}")
+        check(stat.S_IMODE(path.parent.lstat().st_mode) == 0o755, "in a directory only root writes")
+        handed = json.loads(path.read_text())
+        check(handed["board_revision"] == 5, f"pinned to the revision it read: {handed['board_revision']}")
+        check(handed["project"] == "porter", f"{handed['project']}")
+        check("switchyard finish-upgrade porter" in report, f"and names the director's step: {report}")
+        check("nothing was written to the board" in report, report)
+
+        read, problem = tl.read_workflow_handoff("porter", config_path=t.config_path)
+        check(read is not None, f"which the director can read back: {problem}")
+        check(read.reviewed_digest == handed["reviewed_digest"], "with the digest root showed")
+
+
+def test_the_director_refuses_a_handoff_it_cannot_trust() -> None:
+    """Every way the file could not be root's, or not what root showed."""
+    import copy as _copy
+
+    with tenant() as t, provision_root():
+        migrate(t, apply=True, board=lambda _c: (0, None, ""))
+        path = tl.workflow_handoff_path("porter")
+        original = path.read_text()
+
+        def refused(label, expect):
+            read, problem = tl.read_workflow_handoff("porter", config_path=t.config_path)
+            check(read is None, f"{label}: it was accepted")
+            check(expect in problem, f"{label}, for the right reason: {problem}")
+
+        edited = json.loads(original)
+        edited["document"] = _copy.deepcopy(edited["document"])
+        edited["document"]["roles"][0]["label"] = "Somebody Else"
+        path.write_text(json.dumps(edited))
+        refused("an edited document", "does not match its own digest")
+
+        moved = json.loads(original)
+        moved["effective_digest"] = "0" * 64
+        path.write_text(json.dumps(moved))
+        refused("a document that would no longer be written as shown", "not the")
+
+        path.write_text(original)
+        path.chmod(0o664)
+        refused("a file its group could rewrite", "group or beyond can write")
+        path.chmod(0o644)
+
+        link = path.with_name("second-name.json")
+        os.link(path, link)
+        refused("a file with a second name", "links")
+        link.unlink()
+
+        path.rename(path.with_name("real.json"))
+        path.symlink_to(path.with_name("real.json"))
+        refused("a symlink", "symlink")
+
+
+def test_the_director_install_does_nothing_when_there_is_nothing_to_do() -> None:
+    with tenant() as t, provision_root():
+        stored = as_the_board_stores_it(MIGRATED_DOCUMENT)
+        said: list[str] = []
+        # A handoff is present: a board that already runs a workflow must be
+        # left alone because it runs one, not because nothing was handed over.
+        migrate(t, apply=True, board=lambda _c: (0, None, ""))
         check(
-            command[command.index("--expected-revision") + 1] == "5",
-            f"pinned to the revision it read, not to an assumed zero: {command}",
+            tl.install_handed_off_workflow(
+                t.config, config_path=t.config_path, caller_role="director",
+                board_reader=lambda _c: (4, dict(stored), ""), print_func=said.append,
+            ) is None,
+            "a board already running a workflow is left alone",
         )
-        check("--config" in command, "and it rewrites the tenant projection")
-        check("revision 8" in report, f"and it confirms what the board now runs: {report}")
-        check("restart" in report, f"and says what the director needs: {report}")
+        from scripts import workflow_manage
 
-
-def test_a_write_that_did_not_land_is_not_reported_as_a_migration() -> None:
-    """exit 0 from the writer, and a board still running nothing."""
-    with tenant() as t:
-        printed: list[str] = []
-        with root_holds(MIGRATED_DOCUMENT):
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=True,
-                config_path=t.config_path,
-                runner=lambda *a, **k: _completed(0),
-                board_reader=lambda _c: (0, None, ""),
-                euid_getter=lambda: 0,
-                print_func=printed.append,
+        attempted: list = []
+        previous = workflow_manage.main
+        workflow_manage.main = lambda args: attempted.append(args) or 0
+        said.clear()
+        try:
+            unreadable = tl.install_handed_off_workflow(
+                t.config, config_path=t.config_path, caller_role="director",
+                board_reader=lambda _c: (0, None, "refused"), print_func=said.append,
             )
-        report = "\n".join(printed)
-        check(code == 1, f"it is not a success: {code}")
-        check("still reports no declared workflow" in report, report)
-        check("Nothing can be claimed" in report, f"and says so plainly: {report}")
+        finally:
+            workflow_manage.main = previous
+        check(unreadable is False, "with something to install, a board that cannot be read is not read as empty")
+        check("could not be read: refused" in " ".join(said), f"and says so: {said}")
+        check(attempted == [], f"and writes nothing on an unknown: {attempted}")
+        tl.workflow_handoff_path("porter").unlink()
+        reads: list = []
+        check(
+            tl.install_handed_off_workflow(
+                t.config, config_path=t.config_path, caller_role="director",
+                board_reader=lambda _c: reads.append(1) or (0, None, "refused"),
+                print_func=said.append,
+            ) is None,
+            "and with no handoff there is nothing to install",
+        )
+        check(reads == [], "and the board is not even asked, so an unreachable one changes nothing")
 
-    # And the subtler one: the board runs a workflow, but not this one.
-    with tenant() as t:
-        other = as_the_board_stores_it(UNMIGRATED_DOCUMENT)
-        printed = []
-        with root_holds(MIGRATED_DOCUMENT):
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=True,
-                config_path=t.config_path,
-                runner=lambda *a, **k: _completed(0),
-                board_reader=lambda _c: (0, None, "") if not printed else (9, dict(other), ""),
-                euid_getter=lambda: 0,
-                print_func=printed.append,
+
+def test_a_write_the_board_does_not_show_is_not_reported_as_installed() -> None:
+    """The writer returning is not the board running the workflow."""
+    from scripts import workflow_manage
+
+    other = as_the_board_stores_it(UNMIGRATED_DOCUMENT)
+    for after, expect in (
+        ((0, None, ""), "still reports no declared workflow"),
+        ((9, dict(other), ""), "root handed over"),
+    ):
+        with tenant() as t, provision_root():
+            migrate(t, apply=True, board=lambda _c: (0, None, ""))
+            reads: list = []
+            argv: list = []
+
+            def board(_config):
+                reads.append(1)
+                return (0, None, "") if len(reads) == 1 else after
+
+            said: list[str] = []
+            previous = workflow_manage.main
+            workflow_manage.main = lambda args: argv.append(list(args)) or 0
+            try:
+                result = tl.install_handed_off_workflow(
+                    t.config, config_path=t.config_path, caller_role="director",
+                    board_reader=board, print_func=said.append,
+                )
+            finally:
+                workflow_manage.main = previous
+            check(result is False, f"{after}: {result}")
+            check(expect in " ".join(said), " ".join(said))
+            command = argv[0]
+            check(command[command.index("--socket") + 1] == t.config.board_socket,
+                  f"the write was pinned to the board's socket: {command}")
+            check(command[command.index("--expected-revision") + 1] == "0",
+                  f"and to the revision it read: {command}")
+
+
+def test_root_will_not_hand_over_through_a_directory_others_can_write() -> None:
+    with tenant() as t, provision_root():
+        directory = tl.workflow_handoff_path("porter").parent
+        directory.mkdir(parents=True)
+        directory.chmod(0o775)
+        code, report = migrate(t, apply=True, board=lambda _c: (0, None, ""))
+        check(code == 1, f"{code}: {report}")
+        check("only root may write where the director reads" in report, report)
+        check(not tl.workflow_handoff_path("porter").exists(), "and nothing was handed over")
+
+
+def test_the_director_install_writes_only_over_the_socket() -> None:
+    """A config with no socket gets a refusal, never a TCP write."""
+    import dataclasses
+
+    with tenant() as t, provision_root():
+        migrate(t, apply=True, board=lambda _c: (0, None, ""))
+        said: list[str] = []
+        no_socket = dataclasses.replace(t.config, board_socket="")
+        result = tl.install_handed_off_workflow(
+            no_socket, config_path=t.config_path, caller_role="director",
+            board_reader=lambda _c: (0, None, ""), print_func=said.append,
+        )
+        check(result is False, f"{result}: {said}")
+        check("only made over the socket" in " ".join(said), " ".join(said))
+
+
+class patched:
+    """Replace team_launcher attributes for one block, and put them back."""
+
+    def __init__(self, **replacements):
+        self.replacements = replacements
+
+    def __enter__(self):
+        self.previous = {name: getattr(tl, name) for name in self.replacements}
+        for name, value in self.replacements.items():
+            setattr(tl, name, value)
+        return self
+
+    def __exit__(self, *exc):
+        for name, value in self.previous.items():
+            setattr(tl, name, value)
+        return False
+
+
+def test_finish_upgrade_installs_the_handoff_before_migrating_onboarding() -> None:
+    """The director's command is where the first write happens, and a refusal stops it."""
+    calls: list[str] = []
+    common = dict(
+        resolve_pinned_upgrade_source=lambda config, **_k: (None, None, None, ""),
+        control_role_name=lambda config, **_k: ("director", ""),
+        migrate_declarative_director_onboarding=lambda *a, **k: calls.append("onboarding") or False,
+        director_onboarding_state=lambda *a, **k: ("pending", "stop here"),
+        record_upgrade_phase=lambda *a, **k: None,
+    )
+    for outcome, expected_code, expected_calls in (
+        (False, 1, ["install"]),
+        (None, 1, ["install", "onboarding"]),
+        (True, 1, ["install", "onboarding"]),
+    ):
+        calls.clear()
+        seen: dict = {}
+
+        def install(config, *, config_path, caller_role, print_func, **_k):
+            calls.append("install")
+            seen["caller_role"] = caller_role
+            return outcome
+
+        with tenant() as t, patched(install_handed_off_workflow=install, **common):
+            code = tl.finish_upgrade_command(
+                t.config, config_path=t.config_path, print_func=lambda _line: None
             )
-        check(code == 1, f"{code}")
-        check("not the one that was installed" in "\n".join(printed), "\n".join(printed))
-
-
-def test_a_failed_write_is_reported_rather_than_confirmed() -> None:
-    with tenant() as t:
-        printed: list[str] = []
-        with root_holds(MIGRATED_DOCUMENT):
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=True,
-                config_path=t.config_path,
-                runner=lambda *a, **k: _completed(3),
-                board_reader=lambda _c: (0, None, ""),
-                euid_getter=lambda: 0,
-                print_func=printed.append,
-            )
-        check(code == 1, f"{code}")
-        check("was not installed" in "\n".join(printed), "\n".join(printed))
+        check(code == expected_code, f"{outcome}: {code}")
+        check(calls == expected_calls, f"install {outcome} -> {calls}")
+        check(seen["caller_role"] == "director", f"as the control role: {seen}")
 
 
 def test_an_unprivileged_caller_is_told_how_this_is_run() -> None:
-    with tenant() as t:
-        printed: list[str] = []
-        ran: list = []
-        with root_holds(MIGRATED_DOCUMENT):
-            code = tl.switchyard_migrate_workflow_command(
-                "porter",
-                apply=True,
-                config_path=t.config_path,
-                runner=lambda *a, **k: ran.append(a) or _completed(0),
-                board_reader=lambda _c: (0, None, ""),
-                euid_getter=lambda: 1000,
-                print_func=printed.append,
-            )
+    with tenant() as t, provision_root():
+        code, report = migrate(t, apply=True, board=lambda _c: (0, None, ""), euid=1000)
         check(code == 1, f"{code}")
-        check(not ran, "and nothing was written")
-        check("pkexec switchyard migrate-workflow porter --apply" in "\n".join(printed),
-              "\n".join(printed))
+        check(not tl.workflow_handoff_path("porter").exists(), "and nothing was handed over")
+        check("pkexec switchyard migrate-workflow porter --apply" in report, report)
 
 
 def test_the_command_is_registered_and_parses_what_it_claims() -> None:
     check("migrate-workflow" in tl.SWITCHYARD_COMMANDS, "the command exists")
     check(
         "migrate-workflow" in tl.SWITCHYARD_PRIVILEGED_COMMANDS,
-        "and is privileged: it rewrites the tenant's config and the board's workflow",
+        "and is privileged: it writes the root-owned handoff the director trusts",
     )
     parsed = tl._build_switchyard_migrate_workflow_parser().parse_args(["porter", "--apply"])
     check(parsed.project == "porter" and parsed.apply is True, f"{parsed}")
@@ -611,15 +727,6 @@ def test_the_command_is_registered_and_parses_what_it_claims() -> None:
         tl._build_switchyard_migrate_workflow_parser().parse_args(["porter"]).apply is False,
         "and a bare invocation is a dry run",
     )
-
-
-def _completed(code):
-    class _Result:
-        returncode = code
-        stdout = ""
-        stderr = ""
-
-    return _Result()
 
 
 def main() -> int:

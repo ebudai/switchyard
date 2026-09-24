@@ -8,6 +8,13 @@ import sys
 from pathlib import Path
 import tempfile
 import urllib.request
+
+if __name__ == "__main__":
+    # Run by filename, only scripts/ is on the path and every import below
+    # fails (SYRD-253). The release root is what the `switchyard` entry point
+    # puts there too.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from scripts.ticket_board.workflow_config import validate
 from scripts.ticket_board.write_client import TicketBoardWriteClient
 from scripts.workflow_launcher import (
@@ -267,6 +274,16 @@ def main(argv=None):
         default=os.environ.get("TICKET_BOARD_URL", "http://127.0.0.1:8770"),
     )
     parser.add_argument("--expected-revision", type=int)
+    parser.add_argument(
+        "--socket",
+        help="write only over this board socket, never falling back to TCP. The board "
+        "then decides the caller's role from the connecting process, not from a header",
+    )
+    parser.add_argument(
+        "--caller-role",
+        help="the role this process runs as; required by the client, and on --socket the "
+        "board checks it against the process rather than trusting it",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--journal", type=Path, help="saved apply journal (required for rollback)"
@@ -437,6 +454,14 @@ def main(argv=None):
         else current["revision"]
     )
     client = TicketBoardWriteClient(board_url=args.board_url)
+    if args.socket:
+        # An explicit socket path disables the client's TCP fallback, so this
+        # write is authorized by the process that makes it or not at all.
+        client = TicketBoardWriteClient(
+            board_url=args.board_url,
+            socket_path=args.socket,
+            **({"caller_role": args.caller_role} if args.caller_role else {}),
+        )
     if rollback_baseline is not current:
         client.configure_workflow(
             rollback_baseline["document"], expected_revision=expected, dry_run=True
@@ -520,3 +545,9 @@ def main(argv=None):
         )
     )
     return 0
+
+
+if __name__ == "__main__":
+    # Without this, running the file did nothing and exited 0 -- a migration
+    # that reported success having never written anything (SYRD-253).
+    raise SystemExit(main())

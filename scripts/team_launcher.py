@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import errno
 import grp
 import hashlib
@@ -23099,10 +23100,31 @@ class WorkflowMigration:
     board_has_document: bool = False
     already_installed: bool = False
     problems: tuple[str, ...] = ()
+    # What `workflow_manage apply` will actually write: the reviewed document
+    # after the director-onboarding backfill it runs on every write. That
+    # backfill at least sets its migration marker, so the board ends up
+    # holding this digest, never the reviewed one (SYRD-253).
+    effective_digest: str = ""
 
     @property
     def installable(self) -> bool:
         return self.document is not None and not self.problems and not self.already_installed
+
+    @property
+    def written_digest(self) -> str:
+        return self.effective_digest or self.digest
+
+
+def effective_workflow_document(document: dict, config_path: Path) -> dict:
+    """The document as `workflow_manage apply` will write it.
+
+    The same function the child calls, not a restatement of it, so the digest
+    shown before `--apply` and checked after it is the one the board ends up
+    holding.
+    """
+    from scripts.workflow_manage import _migrate_director_onboarding
+
+    return _migrate_director_onboarding(config_path, copy.deepcopy(document))
 
 
 def read_board_workflow_state(
@@ -23212,7 +23234,13 @@ def plan_workflow_migration(
         )
 
     digest = workflow_document_digest(validated)
-    already = live is not None and workflow_document_digest(live) == digest
+    effective_digest = workflow_document_digest(
+        effective_workflow_document(validated, config_path)
+    )
+    # Either form is this workflow: the reviewed one if something wrote it
+    # verbatim, the effective one if it went through `apply` -- which is what
+    # makes a rerun after a successful migration a no-op.
+    already = live is not None and workflow_document_digest(live) in {digest, effective_digest}
     if live is not None and not already:
         problems.append(
             f"{config.project}'s board is already running a declared workflow with a different "
@@ -23229,6 +23257,7 @@ def plan_workflow_migration(
         board_has_document=live is not None,
         already_installed=already,
         problems=tuple(problems),
+        effective_digest=effective_digest,
     )
 
 
@@ -23238,12 +23267,11 @@ def switchyard_migrate_workflow_command(
     apply: bool = False,
     registry_dir: Path | None = None,
     config_path: Path | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     board_reader: Callable[[ProjectConfig], tuple[int, dict | None, str]] | None = None,
     euid_getter: Callable[[], int] = os.geteuid,
     print_func: Callable[[str], None] = print,
 ) -> int:
-    """Install root's declared workflow onto a tenant whose board is running none.
+    """Hand root's declared workflow to a tenant's director, for a board running none.
 
     This is the bounded migration SYRD-240 asks for. A legacy tenant -- one
     provisioned before declarative workflows -- runs stages, transitions and
@@ -23251,18 +23279,16 @@ def switchyard_migrate_workflow_command(
     `/api/workflow` answers null and its Director keeps receiving the
     provisioning-scaffold onboarding rather than the migrated one.
 
-    It drives `workflow_manage apply`, which already does every hard part and
-    is the same path `role-prompt` takes: schema validation, the
-    director-onboarding backfill that sets the marker the pane hook reads, a
-    writability precheck on the projection, optimistic concurrency on
-    `expected_revision`, a dry run before the real write, and the rollback
-    journal. Reimplementing any of that here would be a second copy of the one
-    path that must not have two.
+    Root verifies what it vouches for and shows both digests: the reviewed one,
+    and the one the board will hold after the director-onboarding backfill
+    every workflow write applies. With --apply it publishes that for the
+    director and writes nothing to the board: configuring a workflow is a
+    director write, authorized by the director's own process on the board
+    socket (SYRD-253). `switchyard finish-upgrade` makes it, through
+    `workflow_manage apply`.
 
-    Idempotent because the database makes it so: `apply_declared_workflow`
-    returns the existing revision unchanged when the document it is given
-    already equals the one in force, so a rerun inserts no rows. This refuses
-    before writing anyway, so a rerun does not even reach it.
+    Idempotent: once the board runs this workflow, in either form, a rerun
+    says so and does nothing.
     """
     slug = _validate_project_slug(slug)
     if config_path is not None:
@@ -23283,6 +23309,11 @@ def switchyard_migrate_workflow_command(
     )
     if migration.document is not None:
         print_func(f"  document         {migration.digest}")
+        if migration.written_digest != migration.digest:
+            print_func(
+                f"  writes           {migration.written_digest} (the same document with the "
+                "director-onboarding backfill every workflow write applies)"
+            )
         print_func(f"  source           {migration.source}")
         print_func(
             f"  roles            {len(migration.document.get('roles') or [])}; "
@@ -23295,7 +23326,7 @@ def switchyard_migrate_workflow_command(
     if migration.already_installed:
         print_func(
             f"switchyard: {slug}'s board is already running exactly this workflow "
-            f"(digest {migration.digest}). Nothing to do."
+            f"(digest {migration.written_digest}). Nothing to do."
         )
         return 0
     if not migration.installable:
@@ -23314,78 +23345,225 @@ def switchyard_migrate_workflow_command(
         return 0
     if euid_getter() != 0:
         print_func(
-            f"switchyard: installing {slug}'s declared workflow rewrites the tenant's generated "
-            f"launcher configuration as well as the board's workflow. Run: "
-            f"pkexec switchyard migrate-workflow {slug} --apply"
+            f"switchyard: handing {slug}'s reviewed workflow to its director writes a "
+            f"root-owned record. Run: pkexec switchyard migrate-workflow {slug} --apply"
         )
         return 1
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory(prefix=f"switchyard-migrate-{slug}.") as raw:
-        document_path = Path(raw) / "document.json"
-        document_path.write_text(
-            json.dumps(migration.document, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        board_root = (
-            str(config.board_url or "")
-            .rstrip("/")
-            .removesuffix("/api/tickets")
-            .removesuffix("/api")
-        )
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve().parent / "workflow_manage.py"),
-            "apply",
-            "--config",
-            str(resolved_config),
-            "--board-url",
-            board_root,
-            "--document",
-            str(document_path),
-            # First activation demands an explicit validated baseline to
-            # return to. There is no "no workflow" to return to, so the
-            # baseline is this same document -- which is exactly what the
-            # irreversibility note above says out loud.
-            "--rollback-document",
-            str(document_path),
-            "--expected-revision",
-            str(migration.board_revision),
-        ]
-        result = runner(command, capture_output=True, text=True)
-    for stream in (getattr(result, "stdout", ""), getattr(result, "stderr", "")):
-        for line in str(stream or "").splitlines():
-            print_func(f"  {line}")
-    if getattr(result, "returncode", 1) != 0:
-        print_func(f"switchyard: {slug}'s workflow was not installed.")
+    # Root makes no board write here. Configuring the workflow is a director
+    # write, and the board decides who is the director from the process that
+    # connects to its socket. Root has no such process, and a role header or a
+    # write token supplied from root would be exactly the impersonation that
+    # boundary exists to refuse (SYRD-253). So root publishes what it reviewed,
+    # where the director can read it and nothing but root can write it, and the
+    # director's own session installs it.
+    try:
+        handoff = publish_workflow_handoff(slug, migration)
+    except OSError as exc:
+        print_func(f"switchyard: could not record the handoff for {slug}'s director: {exc}")
+        print_func("switchyard: nothing was changed on the board.")
         return 1
-
-    revision, live, problem = (board_reader or read_board_workflow_state)(config)
-    if live is None:
-        print_func(
-            f"switchyard: the write reported success but {slug}'s board still reports no "
-            f"declared workflow{(' (' + problem + ')') if problem else ''}. Nothing can be "
-            "claimed for this migration."
-        )
-        return 1
-    from scripts.ticket_board.project_provision import workflow_document_digest
-
-    if workflow_document_digest(live) != migration.digest:
-        print_func(
-            f"switchyard: {slug}'s board now runs a workflow, but not the one that was "
-            f"installed (digest {workflow_document_digest(live)} rather than {migration.digest})."
-        )
-        return 1
+    print_func(f"switchyard: recorded {slug}'s reviewed workflow for its director at {handoff}")
     print_func(
-        f"switchyard: {slug} is running its declared workflow at revision {revision} "
-        f"(digest {migration.digest})."
-    )
-    print_func(
-        f"switchyard: restart {slug}'s roles for the director to receive the migrated "
-        f"onboarding: `switchyard stop {slug}` then `switchyard start {slug}`."
+        f"switchyard: nothing was written to the board. {slug}'s director installs it from "
+        f"its own session: `switchyard finish-upgrade {slug}`. The board will then serve "
+        f"digest {migration.written_digest}; rerun this command afterwards to confirm it."
     )
     return 0
+
+
+def workflow_handoff_path(project: str) -> Path:
+    """Where root leaves a reviewed workflow for the director to install.
+
+    Beside root's provision directory rather than in it: that directory is
+    root's alone (0700), and the director must be able to read this. Nothing
+    but root may write here, like the project registry beside it.
+    """
+    return switchyard_privileged_provision_root().parent / "workflow-handoff" / f"{project}.json"
+
+
+def publish_workflow_handoff(project: str, migration: "WorkflowMigration") -> Path:
+    """Write the reviewed document, and what it will become, for the director."""
+    path = workflow_handoff_path(project)
+    directory = path.parent
+    directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"{directory} is not a plain directory")
+    if info.st_uid != os.geteuid() or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise OSError(
+            f"{directory} is owned by uid {info.st_uid} with mode "
+            f"{stat.S_IMODE(info.st_mode):04o}; only root may write where the director reads"
+        )
+    payload = json.dumps(
+        {
+            "project": project,
+            "reviewed_digest": migration.digest,
+            "effective_digest": migration.written_digest,
+            "board_revision": migration.board_revision,
+            "document": migration.document,
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    fd, temporary = tempfile.mkstemp(prefix=f".{project}.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return path
+
+
+@dataclass(frozen=True)
+class HandedOffWorkflow:
+    """A workflow root reviewed, read back the way the director may trust it."""
+
+    document: dict
+    reviewed_digest: str
+    effective_digest: str
+
+
+def read_workflow_handoff(
+    project: str, *, config_path: Path
+) -> tuple[HandedOffWorkflow | None, str]:
+    """Root's handoff, or why it may not be used.
+
+    Read by fd with no symlink at any component, and only if root wrote it
+    and nobody else can rewrite it. The effective digest is recomputed with
+    the function `workflow_manage apply` runs, so what the director writes is
+    what root showed -- or nothing.
+    """
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    path = workflow_handoff_path(project)
+    holder, problem = read_plan_no_follow(
+        path, require_root_owned=True, require_single_link=True
+    )
+    if holder is None:
+        return None, problem
+    raw = holder.data
+    if str(raw.get("project") or "") != project:
+        return None, f"{path} is for project {raw.get('project')!r}, not {project!r}"
+    document = raw.get("document")
+    if not isinstance(document, dict):
+        return None, f"{path} carries no document"
+    reviewed = workflow_document_digest(document)
+    if reviewed != str(raw.get("reviewed_digest") or ""):
+        return None, (
+            f"{path} does not match its own digest ({raw.get('reviewed_digest')} vs "
+            f"{reviewed}); it was changed by something that did not write it"
+        )
+    effective = workflow_document_digest(effective_workflow_document(document, config_path))
+    if effective != str(raw.get("effective_digest") or ""):
+        return None, (
+            f"the document would now be written as {effective}, not the "
+            f"{raw.get('effective_digest')} root showed; the director's onboarding source "
+            f"changed since. Rerun `pkexec switchyard migrate-workflow {project} --apply`."
+        )
+    return HandedOffWorkflow(document, reviewed, effective), ""
+
+
+def install_handed_off_workflow(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    caller_role: str,
+    board_reader: Callable[[ProjectConfig], tuple[int, dict | None, str]] | None = None,
+    print_func: Callable[[str], None] = print,
+) -> bool | None:
+    """The director's first write of a workflow root reviewed.
+
+    Returns None when there is nothing to do (the board already runs a
+    workflow, or root handed nothing over), True once the board serves exactly
+    the handed-off document, and False on any refusal -- with the reason
+    printed and nothing written.
+
+    The write goes through `workflow_manage apply`, the path every later
+    workflow change takes, and ONLY over the board's socket. There the board
+    takes the caller's role from the connecting process, so this succeeds
+    from the director's registered session and from nothing else; the role
+    named here only satisfies the client.
+    """
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    # The handoff first: it is a file, and a tenant root handed nothing to is
+    # every tenant but one mid-migration, so finish-upgrade must not start
+    # depending on the board being readable for them.
+    if not workflow_handoff_path(config.project).exists():
+        return None
+    reader = board_reader or read_board_workflow_state
+    revision, live, problem = reader(config)
+    if problem:
+        print_func(f"switchyard: {config.project}'s board workflow could not be read: {problem}")
+        return False
+    if live is not None:
+        return None
+    handed, problem = read_workflow_handoff(config.project, config_path=config_path)
+    if handed is None:
+        print_func(f"switchyard: not installing {config.project}'s workflow: {problem}")
+        return False
+    if not config.board_socket:
+        print_func(
+            f"switchyard: {config.project} names no board socket, and this write is only "
+            "made over the socket."
+        )
+        return False
+    import contextlib
+    import io as _io
+
+    from scripts import workflow_manage
+
+    board_root = (
+        str(config.board_url or "").rstrip("/").removesuffix("/api/tickets").removesuffix("/api")
+    )
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-install-{config.project}.") as raw:
+        document_path = Path(raw) / "document.json"
+        document_path.write_text(
+            json.dumps(handed.document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        captured = _io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured):
+                workflow_manage.main([
+                    "apply",
+                    "--config", str(config_path),
+                    "--board-url", board_root,
+                    "--socket", config.board_socket,
+                    "--caller-role", caller_role,
+                    "--document", str(document_path),
+                    # First activation needs a validated baseline to return
+                    # to. There is no "no workflow" to return to, so it is this
+                    # same document: the one-way door the preview names.
+                    "--rollback-document", str(document_path),
+                    "--expected-revision", str(revision),
+                ])
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - reported, never swallowed
+            print_func(f"switchyard: {config.project}'s workflow was not installed: {exc}")
+            return False
+    revision, live, problem = reader(config)
+    if live is None:
+        print_func(
+            f"switchyard: the write reported success but {config.project}'s board still "
+            f"reports no declared workflow{(' (' + problem + ')') if problem else ''}."
+        )
+        return False
+    if workflow_document_digest(live) != handed.effective_digest:
+        print_func(
+            f"switchyard: {config.project}'s board now runs digest "
+            f"{workflow_document_digest(live)}, not the {handed.effective_digest} root handed over."
+        )
+        return False
+    print_func(
+        f"switchyard: {config.project} is running its declared workflow at revision {revision} "
+        f"(digest {handed.effective_digest}; reviewed by root as {handed.reviewed_digest})."
+    )
+    return True
 
 
 def switchyard_adopt_workflow_command(
@@ -31831,6 +32009,17 @@ def finish_upgrade_command(
             f"{current_user_name()}"
         )
         return 0
+    # A legacy board runs no workflow at all, so there is nothing for the
+    # onboarding migration below to migrate. Root may have handed over the one
+    # it reviewed; installing it is this command's job, because only the
+    # director's process can make that write (SYRD-253).
+    installed = install_handed_off_workflow(
+        config, config_path=config_path, caller_role=director, print_func=print_func
+    )
+    if installed is False:
+        return 1
+    if installed:
+        config = load_project_config(config.project, config_path)
     migrate_declarative_director_onboarding(config, config_path=config_path, print_func=print_func)
     config = load_project_config(config.project, config_path)
     # Completion is what the board and the projection carry, not what the

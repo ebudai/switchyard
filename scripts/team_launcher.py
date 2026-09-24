@@ -24928,6 +24928,19 @@ def switchyard_new_command(
             f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
             "were not started:\n  " + "\n  ".join(pending_isolation) + "\n" + next_step
         )
+    # Before any window opens: a pane's first act is to run a program out of
+    # the root-owned staged bundle, and a tenant whose staging was skipped
+    # opened its tabs onto a command that was not there while provisioning
+    # reported success (SYRD-249).
+    staging_problems = ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
+    if staging_problems:
+        for problem in staging_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: not opening {resolved_slug}'s windows. Everything else it needs was "
+            "created and nothing was removed; the tenant is startable once its tooling is staged."
+        )
+        return 1
     launch_started_at = time.time()
     launch_started_ns = time.time_ns()
     launch_result = 0 if launch_deferred else launch_project(
@@ -26906,6 +26919,73 @@ def refresh_role_pane_hooks(
             continue
         print_func(f"switchyard: refreshed {config.project}'s pane hooks for {account} in {home}")
     return problems
+
+
+#: Who owns a staged bundle on a host: root, always. `install -o root -g root`
+#: is what puts it there, and every account that later READS it -- the desktop
+#: operator running `switchyard new`, the project owner the control bridge
+#: crosses to -- is somebody else. The verifier defaults to the reader's own
+#: uid, which is the right default for the sandbox fixtures that stage as
+#: themselves and the wrong one for every production path, so this says root
+#: explicitly and the override exists only for those fixtures (SYRD-249 review).
+STAGED_TOOLING_OWNER_UID = 0
+
+
+def ensure_staged_role_tooling(
+    config: ProjectConfig,
+    *,
+    release_root: Path | None = None,
+    staging_root: Path | None = None,
+    expect_uid: int = STAGED_TOOLING_OWNER_UID,
+    euid_getter: Callable[[], int] = os.geteuid,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> list[str]:
+    """The bundle a pane runs, present and root-owned, or why it is not.
+
+    Checked before any window opens. A modern single-owner tenant declares no
+    per-role accounts, and the whole staging step used to sit behind a test for
+    those, so provisioning reported success and then opened six tabs onto
+    `sudo: /usr/local/lib/switchyard/<project>/switchyard-display-attach:
+    command not found` (SYRD-249).
+
+    Repaired here only by root, and root is the only account that could: the
+    staging commands install as `root:root` at a path no tenant may write. An
+    unprivileged caller -- the operator before the bridge, the owner after it --
+    is told what is wrong and which command repairs it, and runs nothing. The
+    tenant account never becomes a general stager for root, and the repair that
+    does happen is the same idempotent renderer an upgrade uses, touching
+    nothing but that one root-owned directory.
+    """
+    release = (
+        Path(release_root) if release_root is not None
+        else switchyard_shared_install_root() / "current"
+    )
+    staged = _staged_tooling_dir(config, staging_root)
+    problems = staged_role_tooling_problems(
+        config.project, str(release), staging_root=staged, expect_uid=expect_uid
+    )
+    if not problems:
+        return []
+    repair = f"`sudo switchyard upgrade {config.project}` restages it from the selected release"
+    if euid_getter() != 0:
+        return problems + [
+            f"{config.project}'s panes would open on tooling that is not staged, and repairing "
+            f"it is root's: {repair}"
+        ]
+    print_func(
+        f"switchyard: {config.project}'s staged role tooling in {staged} is incomplete; "
+        f"restaging it from {release}"
+    )
+    repaired = refresh_staged_role_tooling(
+        config, release_root=release, staging_root=staging_root,
+        runner=runner, print_func=print_func,
+    )
+    if not repaired:
+        return []
+    return repaired + [
+        f"{config.project}'s panes would open on tooling that is not there: {repair}"
+    ]
 
 
 def _staged_tooling_dir(config: ProjectConfig, staging_root: Path | None) -> Path:
@@ -32534,6 +32614,19 @@ def resume_tenant(
     against a board that did not come up produces panes that cannot register,
     and a report of success over them is worse than the failure.
     """
+    # The staged bundle first, because it is what every pane this resume leads
+    # to will run. This can be reached as root (`sudo switchyard start`) or as
+    # the project owner (the control bridge crossed to it), so it repairs only
+    # in the first case and reports in the second: the owner may not stage
+    # root's files, and the operator's own path repairs these two programs
+    # before it crosses, through the recorded privileged command
+    # `ensure_tenant_control_helper` already uses (SYRD-211, SYRD-249 review).
+    staging_problems = ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
+    if staging_problems:
+        return staging_problems + [
+            f"{config.project} was not resumed: its panes would start against tooling that is "
+            "not staged. Nothing was stopped or removed"
+        ]
     # Idempotent by asking first. `systemctl start` on a live unit is a no-op,
     # but the listener is restored with `restart`, which would bounce a healthy
     # one -- and resuming an already-running tenant must not interrupt it.
@@ -34881,6 +34974,93 @@ def ensure_tenant_control_helper(
     )
 
 
+#: A staged file that is simply not there. Absence is the one shape an
+#: ordinary launch may repair by itself: SYRD-211 deliberately refused to
+#: restage on DRIFT, because "this release would install different bytes" is
+#: true of every tenant the moment the shared release moves and would make
+#: every launch privileged. Nothing being there at all is not drift.
+STAGED_TOOLING_ABSENT_MARKER = "is not staged at"
+
+
+def missing_staged_role_tooling(
+    project: str, *, release_root: str = "", root: Path | None = None
+) -> tuple[list[str], list[str]]:
+    """(what is absent, what is wrong another way) in a tenant's staged bundle.
+
+    Asked of root-controlled inputs only: the project slug the registry named,
+    the selected shared release, and the staging path root owns. Nothing here
+    comes from the tenant's own configuration, because this decides what root
+    is about to be asked to run (SYRD-249 review).
+    """
+    release = release_root or str(switchyard_shared_install_root() / "current")
+    problems = staged_role_tooling_problems(
+        project, release, staging_root=Path(role_tooling_staging_dir(project, root=root)),
+        expect_uid=STAGED_TOOLING_OWNER_UID,
+    )
+    absent = [problem for problem in problems if STAGED_TOOLING_ABSENT_MARKER in problem]
+    return absent, [problem for problem in problems if problem not in absent]
+
+
+def ensure_staged_role_bundle_before_crossing(
+    project: str,
+    *,
+    release_root: str = "",
+    root: Path | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    print_func: Callable[[str], None] = print,
+) -> str:
+    """Stage what a tenant is missing, before root runs anything as its owner.
+
+    The bridge repair before this one covers the two programs whose wire
+    contract the crossing itself depends on. That is the right scope for it and
+    the wrong scope for a tenant that has NONE of its bundle: `test` was
+    provisioned with a staging directory holding only control-grant.json and
+    its board unit, so the bridge crossed cleanly and its panes still had
+    nothing to run (SYRD-249).
+
+    So absence is repaired here, through the same recorded privileged command
+    the helper repair uses -- one journalled step, scoped to this tenant's own
+    directory, rendered from the selected release. The caller is the desktop
+    operator, who has sudo; the tenant account is never asked to stage anything.
+
+    A bundle that is merely OLDER is left alone, because restaging on drift
+    would make every launch privileged (SYRD-211). A bundle that is present and
+    wrong -- another account's, writable by others, not a regular file -- is
+    refused rather than overwritten, for the same reason the helper repair
+    refuses it. Returns "" when the launch may proceed.
+    """
+    absent, other = missing_staged_role_tooling(project, release_root=release_root, root=root)
+    if not absent:
+        # The healthy path costs a few stats and no privileged step.
+        return ""
+    hostile = [
+        problem for problem in other
+        if "owned by uid" in problem or "writable" in problem or "not a regular file" in problem
+    ]
+    if hostile:
+        return (
+            f"{project}'s staged tooling is not root's to replace: " + "; ".join(hostile)
+        )
+    print_func(
+        f"switchyard: {project} is missing {len(absent)} of its staged role tooling; "
+        "restaging the bundle from the current release before continuing"
+    )
+    problem = repair_tenant_control_helper(
+        project, release_root=release_root, root=root, runner=runner, print_func=print_func
+    )
+    if problem:
+        return problem
+    still_absent, _ = missing_staged_role_tooling(
+        project, release_root=release_root, root=root
+    )
+    if still_absent:
+        return (
+            f"{project}'s staged role tooling is still incomplete after restaging: "
+            + "; ".join(still_absent[:4])
+        )
+    return ""
+
+
 def _switchyard_exec_through_tenant_control(
     project: str,
     operation: str,
@@ -34914,6 +35094,16 @@ def _switchyard_exec_through_tenant_control(
     # is repaired from the current release and the launch resumes; any other
     # shape is refused here rather than executed.
     ensure_helper(project, grant=grant, runner=runner, print_func=print_func)
+    # And the rest of the bundle, while this process still belongs to somebody
+    # with sudo. Past this line the work happens as the tenant owner, which may
+    # not stage root's files -- so a tenant missing everything but its grant
+    # would otherwise cross successfully and open panes with nothing to run
+    # (SYRD-249).
+    bundle_problem = ensure_staged_role_bundle_before_crossing(
+        project, runner=runner, print_func=print_func
+    )
+    if bundle_problem:
+        raise SystemExit(f"switchyard: {bundle_problem}")
     # Run, not replace. The bridge answers with one validated handoff when the
     # owner half could not do the desktop half, and this process -- which owns
     # the desktop -- is the one that can. Its terminal is passed through

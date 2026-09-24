@@ -10924,10 +10924,23 @@ def _prompt_role_runtime_plan(
 def _prompt_switchyard_role_plan(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    #: Whose CLI context the model lists come from. A catalog is a property of
+    #: an ACCOUNT, not of a host: `agy models` on the operator's login and on
+    #: the tenant owner's are different lists, and the one that matters is the
+    #: owner's, because that is the account the role will run as. Asking the
+    #: wrong one is how `test2` was configured with a slug its own owner does
+    #: not recognise (SYRD-250).
+    owner_user: str = "",
+    owner_home: Path | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> tuple[RoleSelection, ...]:
     """Every role of a new project, chosen rather than typed."""
+    owner_args = (
+        _owner_command_env_args(owner_user, owner_home, [])
+        if owner_user and owner_home is not None
+        else ()
+    )
     include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
     include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
     fixed: list[str] = []
@@ -10952,13 +10965,14 @@ def _prompt_switchyard_role_plan(
             _prompt_role_runtime_plan(
                 role,
                 default_cli=NEW_PROJECT_ROLE_CLI_DEFAULTS.get(role, "claude"),
-                runner=runner, input_func=input_func, print_func=print_func,
+                runner=runner, owner_args=owner_args,
+                input_func=input_func, print_func=print_func,
             )
         )
     for role in implementers:
         plan.append(
             _prompt_role_runtime_plan(
-                role, default_cli="codex", runner=runner,
+                role, default_cli="codex", runner=runner, owner_args=owner_args,
                 input_func=input_func, print_func=print_func,
             )
         )
@@ -12874,6 +12888,17 @@ class FirstRunAuthReport:
     untrusted_roles: list[tuple[str, str, str]]
     stale_codex_hook_trust: list[CodexHookTrustMismatch] = field(default_factory=list)
     missing_cli_roles: dict[str, list[str]] = field(default_factory=dict)
+    #: Roles whose configured model is absent from their OWNER's own catalog,
+    #: as (role, cli, model, available). Only ever populated from a list the
+    #: owner's CLI actually produced; a recorded table never contradicts a
+    #: configured value (SYRD-250).
+    #:
+    #: Deliberately absent from `has_warnings` and from
+    #: `report_first_run_auth_warnings`: this one does not warn, it stops
+    #: (`stop_before_launch_for_unknown_models`), and that gate says the whole
+    #: thing where it is actionable. Counting it as a warning with no warning
+    #: line to print would be a report claiming more than it shows.
+    unknown_model_roles: list[tuple[str, str, str, tuple[str, ...]]] = field(default_factory=list)
     model_validation_failures: list[ModelValidationFailure] = field(default_factory=list)
     owner_user: str = ""
     owner_shell_issue: OwnerShellIssue | None = None
@@ -18797,6 +18822,41 @@ def run_first_run_auth_phase(
             for role in step.roles or (step.role,):
                 untrusted.append((step.cli, role, str(step.workdir)))
 
+    # Free, and not a probe: one `agy models` in the OWNER's context, compared
+    # against what each role is configured to run. SYRD-246 removed the probe
+    # that asked a model to prove itself, which cost tokens and time and could
+    # reject a working model; this asks the CLI for its own list and checks
+    # membership, which is neither. Without it `test2` started its audit pane on
+    # a slug the owner does not recognise and the provider quietly ran something
+    # else (SYRD-250).
+    #
+    # Asked once per CLI rather than once per role, because the answer is a
+    # property of the account and the account does not change between two
+    # roles. This is the second `agy models` of the phase and deliberately so:
+    # the first is `agy`'s auth probe, which ran before this phase could log
+    # anybody in, so its answer may describe an account that was not signed in
+    # yet.
+    unknown_model_roles: list[tuple[str, str, str, tuple[str, ...]]] = []
+    owner_prefix = _owner_command_env_args(effective_owner, effective_home, [])
+    owner_catalogs: dict[str, runtime_catalog.Catalog | None] = {}
+    for role in config.roles:
+        cli = _role_cli_name(role)
+        if not role.model or cli in unauthenticated or cli in missing_cli_roles:
+            # An account that cannot answer at all has nothing to say about a
+            # model, and those roles are already reported. A role with no model
+            # configured takes the runtime's own default and has nothing to
+            # contradict.
+            continue
+        if cli not in owner_catalogs:
+            owner_catalogs[cli] = runtime_catalog.owner_model_catalog(
+                cli, runner=runner, owner_args=owner_prefix
+            )
+        mismatch = runtime_catalog.model_absent_from(owner_catalogs[cli], role.model)
+        if mismatch is not None:
+            unknown_model_roles.append(
+                (role.role, cli, role.model, tuple(c.value for c in mismatch.choices))
+            )
+
     model_validation_failures: list[ModelValidationFailure] = []
     if validate_models:
         # A provider whose first run is unfinished cannot answer a model probe
@@ -18818,6 +18878,7 @@ def run_first_run_auth_phase(
         untrusted,
         manifest.stale_codex_hook_trust,
         missing_cli_roles,
+        unknown_model_roles,
         model_validation_failures,
         # Named whenever the report will tell somebody to run something as
         # that account. An incomplete provider setup now carries a resumable
@@ -18837,6 +18898,11 @@ def run_first_run_auth_phase(
             # message whose whole job is to say whose account to finish it on
             # (SYRD-221 DAT).
             or unauthenticated
+            # Same reason again. The unknown-model gate's entire claim is that
+            # THIS account does not list the model, and the operator has to
+            # know which account was asked before they can agree or disagree
+            # with it -- their own `agy` may well list the slug (SYRD-250).
+            or unknown_model_roles
         )
         else "",
         owner_shell_issue=manifest.owner_shell_issue,
@@ -18966,6 +19032,38 @@ def report_models_were_not_probed(
         "prove anything. If one is wrong the provider says so in that role's own pane, in "
         f"its own words. To ask on purpose: `switchyard validate-models {config.project}`."
     )
+
+
+def stop_before_launch_for_unknown_models(
+    report: FirstRunAuthReport,
+    *,
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """A role configured for a model its own account does not offer is not started.
+
+    The alternative is what `test2` did: the pane came up, the provider printed
+    `model gemini-3.7-flash-high is not recognized ... Ignoring the flag`, and
+    the role ran on something nobody chose. A warning inside a pane nobody is
+    reading is not a decision anybody made.
+
+    Nothing is substituted. The configured value is left exactly as it is and
+    the operator is told what their own account offers instead, because picking
+    a replacement here would be the silent rewrite this ticket forbids -- and
+    the value may be right while the account is simply not set up yet.
+    """
+    if not report.unknown_model_roles:
+        return False
+    for role, cli, model, available in report.unknown_model_roles:
+        offered = ", ".join(available) if available else "(its catalog is empty)"
+        print_func(
+            f"switchyard: not starting {role}: {cli} on "
+            f"{report.owner_user or 'the project account'} does not offer "
+            f"{model!r}, so the provider would ignore it and run something else. "
+            f"That account offers: {offered}. Choose one with `switchyard set-role-runtime "
+            f"{role}` or leave the model unset to take the runtime's own default; nothing "
+            "has been changed for you."
+        )
+    return True
 
 
 def stop_before_launch_for_unauthenticated_providers(
@@ -24592,7 +24690,11 @@ def switchyard_new_command(
             # identifiers to recall and a comma-separated line to compose
             # (SYRD-115).
             role_plan = _prompt_switchyard_role_plan(
-                runner=runner, input_func=input_func, print_func=print_func
+                runner=runner,
+                owner_user=owner_user,
+                owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
+                input_func=input_func,
+                print_func=print_func,
             )
             chosen_pairs = [(entry.role, entry.cli) for entry in role_plan]
             selected_role_models = {
@@ -24893,6 +24995,8 @@ def switchyard_new_command(
     if stop_before_launch_for_unauthenticated_providers(
         first_run_auth_report, print_func=print_func
     ):
+        return 1
+    if stop_before_launch_for_unknown_models(first_run_auth_report, print_func=print_func):
         return 1
     report_models_were_not_probed(config, print_func=print_func)
     launch_runner = _owner_project_git_runner(
@@ -36034,6 +36138,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report):
         return 1
     if stop_before_launch_for_unauthenticated_providers(first_run_auth_report):
+        return 1
+    if stop_before_launch_for_unknown_models(first_run_auth_report):
         return 1
     launch_result = launch_project(
         config,

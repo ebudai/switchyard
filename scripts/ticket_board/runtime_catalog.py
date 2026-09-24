@@ -63,13 +63,26 @@ class Catalog:
     detail: str = ""
 
     @property
+    def enumerable(self) -> bool:
+        """Whether this list came from the account that will use it.
+
+        Only a live list can be checked against; a recorded one is a starting
+        point that has never been shown to this account. Nothing may be refused
+        on the strength of a table (SYRD-250).
+        """
+        return self.provenance == PROVENANCE_LIVE
+
+    @property
     def note(self) -> str:
         """One line an operator can read before choosing from this list."""
         if self.provenance == PROVENANCE_LIVE:
-            return f"listed by {self.detail}"
+            return f"listed by {self.detail} in this account"
         if self.provenance == PROVENANCE_EMPTY:
             return self.detail
-        return f"recorded {CATALOG_RECORDED} (catalog v{CATALOG_VERSION}); {self.detail}".rstrip("; ")
+        return (
+            f"UNVERIFIED: recorded {CATALOG_RECORDED} (catalog v{CATALOG_VERSION}) and not "
+            f"checked against this account; {self.detail}"
+        ).rstrip("; ")
 
 
 #: The runtimes a role can be given. The set is `SUPPORTED_CONFIG_CLI_NAMES`;
@@ -208,6 +221,48 @@ def model_catalog(
         )
     detail = "run this on a host that can reach the runtime to list its own" if command else ""
     return Catalog(recorded, PROVENANCE_RECORDED, detail=detail)
+
+
+def owner_model_catalog(
+    runtime: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    owner_args: Sequence[str] = (),
+) -> Catalog | None:
+    """The list `runtime` itself produced in the owner's account, or None.
+
+    None means "this account has not told us anything", which covers a runtime
+    that cannot enumerate at all, a runner that was not supplied, and a call
+    that failed or returned nothing parseable. It is deliberately not the same
+    value as an empty list: a recorded table describes a vendor, not an
+    account, and nothing here may be used to contradict a configured model.
+
+    One call answers for every role on that runtime, so callers read it once
+    per CLI. It costs one `agy models`: no prompt, no token, no capability
+    probe -- the difference between this and the probe SYRD-246 removed.
+    """
+    if runtime not in LIVE_MODEL_COMMANDS:
+        return None
+    found = model_catalog(runtime, runner=runner, owner_args=owner_args)
+    return found if found.enumerable else None
+
+
+def model_absent_from(catalog: Catalog | None, model: str) -> Catalog | None:
+    """`catalog`, when it exists and does not contain `model`; else None.
+
+    Returns the catalog rather than a bool so the caller can say what the
+    account does offer without asking twice. Nothing is substituted for the
+    missing value: `test2`'s audit role was configured for a slug its owner
+    does not list, and picking a replacement here would be the silent rewrite
+    SYRD-250 forbids -- the value may well be right and the account simply not
+    set up yet.
+    """
+    wanted = str(model or "").strip()
+    if catalog is None or not wanted:
+        return None
+    if any(choice.value == wanted for choice in catalog.choices):
+        return None
+    return catalog
 
 
 def effort_catalog(runtime: str) -> Catalog:

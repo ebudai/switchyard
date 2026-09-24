@@ -33,7 +33,7 @@ from .app import TicketBoardApp, iso_now, project_slug
 from .frontend import render_html
 from .runtime_paths import directorctl_path
 from .peer_identity import SessionIdentity, session_identity, session_is_live
-from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES
+from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_DIRECTORCTL = directorctl_path(__file__)
@@ -1079,16 +1079,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError(f"unknown ticket operation: {operation}")
         if caller_role not in allowed:
             raise PermissionError(f"{caller_role} cannot call {operation}")
-        if operation in {
-            "start_work",
-            "submit_to_inspection",
-            "submit_to_audit",
-            "submit_to_audit_without_commit",
-            "implementer_kick_back",
-            "request_commit_exempt",
-            "start_task",
-            "complete_task",
-        } and ticket_id is not None:
+        if operation in LEGACY_ASSIGNEE_SCOPED_OPERATIONS and ticket_id is not None:
             ticket = self.app.get_ticket(ticket_id)
             if caller_role != "director" and str(ticket.get("assignee", "")).strip().lower() != caller_role:
                 raise PermissionError(f"{caller_role} cannot call {operation} for ticket assigned to {ticket.get('assignee')}")

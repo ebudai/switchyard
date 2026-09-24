@@ -22534,6 +22534,10 @@ class WorkflowAdoption:
     board_digest: str = ""
     difference: tuple[str, ...] = ()
     problems: tuple[str, ...] = ()
+    #: For a document COMPOSED rather than read: everything in it that is not a
+    #: plain read of the tenant, one line each, so the operator authorizing the
+    #: record sees exactly what installing it changes (SYRD-240).
+    accounting: tuple[str, ...] = ()
 
     @property
     def adoptable(self) -> bool:
@@ -22638,6 +22642,126 @@ def propose_workflow_adoption(
         source=tenant_plan_path,
         board_digest=board_digest,
         difference=tuple(difference),
+    )
+
+
+def read_board_columns(
+    config: ProjectConfig,
+    *,
+    connection_factory: Callable[[str, float], Any] | None = None,
+) -> tuple[list[dict] | None, str]:
+    """The stages the running board presents, in order, over its own socket."""
+    try:
+        from scripts.ticket_board.write_client import UnixHTTPConnection
+
+        factory = connection_factory or (
+            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
+        )
+        connection = factory(config.board_socket, 3)
+        try:
+            connection.request("GET", "/api/board")
+            response = connection.getresponse()
+            body = response.read().decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+        if response.status != 200:
+            return None, f"the board answered HTTP {response.status} for its stages"
+        columns = json.loads(body).get("columns")
+    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
+        return None, f"the board's stages could not be read: {exc}"
+    if not isinstance(columns, list):
+        return None, "the board reported no stages"
+    return columns, ""
+
+
+def propose_legacy_workflow_adoption(
+    slug: str,
+    plan: "ProjectBoardProvision",
+    config: ProjectConfig,
+    *,
+    board_reader: Callable[[ProjectConfig], tuple[dict | None, str]] | None = None,
+    columns_reader: Callable[[ProjectConfig], tuple[list[dict] | None, str]] | None = None,
+) -> WorkflowAdoption:
+    """Compose the declared workflow of a tenant that never had one, and check it.
+
+    For a tenant provisioned with the `default-project` seed, whose plan
+    declares no workflow at all -- so there is nothing for an ordinary adoption
+    to record (SYRD-240). The document is built by `legacy_workflow` from ROOT's
+    plan, never the tenant's, through the same generator that wrote the
+    tenant's rows; what it adds or changes is returned as `accounting`.
+
+    It is then checked against the running board before anything is proposed:
+    the board must be running no declared workflow, and every stage it presents
+    must appear in the composed document, in the same order and under the same
+    label. A tenant whose board has drifted from what its plan would have
+    seeded is refused rather than overwritten -- the document would describe a
+    board that is not there.
+    """
+    from scripts.ticket_board import legacy_workflow
+    from scripts.ticket_board.project_provision import (
+        project_workflow_stages,
+        project_workflow_transitions,
+        workflow_document_digest,
+    )
+
+    source = privileged_baseline_plan_path(slug)
+    if str(getattr(plan, "workflow_seed", "") or "") != legacy_workflow.LEGACY_SEED:
+        return WorkflowAdoption(source=source, problems=(
+            f"{slug} was seeded with {plan.workflow_seed!r}, and only the "
+            f"{legacy_workflow.LEGACY_SEED!r} seed has a composed declarative form",
+        ))
+    try:
+        declared = legacy_workflow.compose_legacy_workflow(
+            plan,
+            canonical=legacy_workflow.load_canonical(Path(__file__).resolve().parents[1]),
+            stage_seeds=project_workflow_stages(plan),
+            transition_seeds=project_workflow_transitions(plan),
+        )
+    except legacy_workflow.LegacyWorkflowRefused as exc:
+        return WorkflowAdoption(source=source, problems=(str(exc),))
+    try:
+        from scripts.ticket_board.workflow_config import validate
+
+        document = validate(declared.document, project=slug)
+    except (ValueError, SystemExit) as exc:
+        return WorkflowAdoption(source=source, problems=(
+            f"the composed workflow for {slug} does not validate: {exc}",
+        ))
+
+    live, board_problem = (board_reader or read_board_declared_workflow)(config)
+    if live is not None:
+        return WorkflowAdoption(source=source, problems=(
+            f"{slug}'s board is already running a declared workflow; composing one from "
+            "its seed would replace it, which is not what this is for",
+        ))
+    if "no declared workflow" not in board_problem:
+        return WorkflowAdoption(source=source, problems=(board_problem,))
+
+    columns, columns_problem = (columns_reader or read_board_columns)(config)
+    if columns is None:
+        return WorkflowAdoption(source=source, problems=(columns_problem,))
+    live_stages = [(str(c.get("key")), str(c.get("label"))) for c in columns]
+    added = {s["name"] for s in document["stages"]} - {key for key, _ in live_stages}
+    composed_stages = [
+        (s["name"], s["label"]) for s in document["stages"] if s["name"] not in added
+    ]
+    if live_stages != composed_stages:
+        return WorkflowAdoption(source=source, problems=(
+            f"{slug}'s board presents stages {live_stages}, but its plan would have seeded "
+            f"{composed_stages}; the board has drifted from its seed, so a document composed "
+            "from that seed would describe a board that is not there",
+        ))
+
+    accounting = (
+        *(f"changes: {line}" for line in declared.differences),
+        *(f"adds: {line}" for line in declared.additions),
+        *(f"omits: {line}" for line in declared.excluded),
+    )
+    return WorkflowAdoption(
+        document=document,
+        digest=workflow_document_digest(document),
+        source=source,
+        accounting=accounting,
     )
 
 
@@ -23274,6 +23398,7 @@ def switchyard_adopt_workflow_command(
     euid_getter: Callable[[], int] = os.geteuid,
     operator_resolver: Callable[[], Any] | None = None,
     board_reader: Callable[[ProjectConfig], tuple[dict | None, str]] | None = None,
+    columns_reader: Callable[[ProjectConfig], tuple[list[dict] | None, str]] | None = None,
     journal: Any | None = None,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -23405,7 +23530,33 @@ def switchyard_adopt_workflow_command(
             owner_uid=uid_for_user(plan.owner_user),
             board_reader=board_reader,
         )
-        say(f"switchyard: {slug} declared workflow proposed from {proposal.source}")
+        composed = False
+        # Only a tenant that is legacy on BOTH counts: its plan declares no
+        # workflow AND its board is running none. A board that is running a
+        # declared workflow belongs to a declarative tenant whose plan file has
+        # lost its key -- a different fault, which the ordinary refusal names
+        # correctly -- and composing a legacy document for it would describe a
+        # workflow that tenant does not run. Narrowing here keeps that refusal
+        # exactly as SYRD-166 defined it.
+        board_runs_none = "no declared workflow" in (board_reader or read_board_declared_workflow)(config)[1]
+        if proposal.document is None and board_runs_none and any(
+            "declares no workflow" in problem for problem in proposal.problems
+        ):
+            # A tenant that predates declared workflows has nothing to adopt,
+            # which is where live UAT on mefp stopped (SYRD-240). Its document
+            # is composed from ROOT's plan instead, checked against the running
+            # board, and put in front of the operator with everything it
+            # changes -- then recorded exactly as an adopted one would be.
+            proposal = propose_legacy_workflow_adoption(
+                slug, plan, config,
+                board_reader=board_reader,
+                columns_reader=columns_reader,
+            )
+            composed = True
+        say(f"switchyard: {slug} declared workflow "
+            f"{'composed from' if composed else 'proposed from'} {proposal.source}")
+        for line in proposal.accounting:
+            say(f"switchyard:   {line}")
         if proposal.document is not None:
             say(f"switchyard: proposed digest {proposal.digest}")
             say(f"switchyard: the board holds {proposal.board_digest or 'no declared workflow'}")

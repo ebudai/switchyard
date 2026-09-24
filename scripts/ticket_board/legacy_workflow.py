@@ -193,9 +193,17 @@ def compose_legacy_workflow(
     canonical: Mapping[str, Any],
     stage_seeds: Sequence[Any],
     transition_seeds: Sequence[Any],
+    panes: Mapping[str, Mapping[str, Any]],
     semantics: Mapping[str, ActionSemantics] = ACTION_SEMANTICS,
 ) -> DeclaredLegacyWorkflow:
     """Build the declared document for a tenant seeded with `default-project`.
+
+    `panes` is, per role this tenant runs as a pane, that pane's `runtime`,
+    `target` and `slot` from the tenant's own configuration. The board serves
+    a role's runtime assignment -- and grants its process any authority --
+    only when the declaration names exactly the runtime and target the pane
+    registers with, and the presentation places panes by slot, so all three
+    are the tenant's, never the shipped example's (SYRD-262).
 
     `stage_seeds` and `transition_seeds` are what `project_workflow_stages` /
     `project_workflow_transitions` produce for this tenant's plan -- passed in
@@ -393,11 +401,55 @@ def compose_legacy_workflow(
     # role this tenant runs. The shipped document marks `designer` inactive --
     # it is one tenant's choice -- and copying that made every default-project
     # tenant WITH a designer unrepresentable, since the seed gives it `draft`
-    # and the validator will not let an inactive role own a stage. mefp has no
-    # designer, which is why the first version passed for it and nothing else.
+    # and the validator will not let an inactive role own a stage.
     for role in roles:
         if role["name"] in referenced:
             role["active"] = True
+    # Which process wields a role, and where it is shown, is this tenant's
+    # configuration. The first version copied the shipped example's runtime,
+    # target and slot, so MEFP's declaration said `claude` for a Director and
+    # Ops that run Codex, and the board hid both -- including the Director's
+    # authority (SYRD-262). A role with no pane here gets none of the three
+    # rather than an invented one.
+    for role in roles:
+        pane = panes.get(role["name"]) or {}
+        for field in ("runtime", "target", "slot"):
+            role[field] = pane.get(field)
+    # A stage that notifies owners with no pane here was never delivered to on
+    # the legacy board either: there was no pane to reach. The validator will
+    # not declare a notice nobody can receive, so such a stage is declared
+    # silent. Where only SOME owners lack a pane, silencing would
+    # also silence the ones that have one, and dropping owners would change
+    # who may act -- so that is refused rather than guessed.
+    paneless = {r["name"] for r in roles if not r.get("target")}
+    for stage in stages:
+        notify = stage.get("notify") or {}
+        if notify.get("kind") in {"assignee", "stage_owner_fallback"}:
+            destinations = set(stage["owners"])
+        elif notify.get("kind") == "fixed_role":
+            destinations = {notify.get("role")}
+        else:
+            continue
+        lacking = destinations & paneless
+        if not lacking:
+            continue
+        if lacking != destinations:
+            raise LegacyWorkflowRefused(
+                f"stage {stage['name']} notifies {sorted(destinations)}, but "
+                f"{sorted(lacking)} run no pane in this tenant's configuration; configure "
+                "those panes, or the stage cannot be declared without silencing the others"
+            )
+        # Not a difference, so not reported as one: the differential test
+        # routes a ticket into MEFP's designer-owned draft stage and the
+        # legacy board queues no notice for the designer either -- its queue
+        # does not even admit that role as a target.
+        stage["notify"] = {"kind": "none", "role": None}
+    for name in sorted(set(panes) - {r["name"] for r in roles}):
+        differences.append(
+            f"pane role {name}: this tenant runs a {name} pane, but its workflow gives "
+            f"{name} no stage or transition, so the declaration omits it and the board "
+            "will not serve that pane an assignment"
+        )
     missing_roles = sorted(referenced - {r["name"] for r in roles})
     if missing_roles:
         raise LegacyWorkflowRefused(

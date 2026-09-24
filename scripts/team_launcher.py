@@ -234,6 +234,10 @@ SWITCHYARD_COMMANDS = (
     # workflow document, so /api/workflow answers null and its Director keeps
     # receiving provisioning-scaffold onboarding (SYRD-240).
     "migrate-workflow",
+    # Rebinds a declared workflow's pane roles to the tenant's own panes, when
+    # the declaration names runtimes or targets its panes do not register with
+    # and so hides them, the Director's authority included (SYRD-262).
+    "rebind-workflow-panes",
     # Finishes a project whose `switchyard new` stopped before it was
     # registered, so the installation that already exists can be completed
     # instead of started again: root's artifacts first (SYRD-147), then the
@@ -3884,6 +3888,22 @@ def _command_name(value: str) -> str:
     return Path(value.strip()).name
 
 
+def role_runtime_binding(role: "RoleConfig") -> tuple[str, str]:
+    """The (runtime, target) a role's pane registers with the board.
+
+    One function for both sides of the match the board makes: the pane
+    registers with this, and a declared workflow composed for a tenant names
+    this, so the two cannot disagree (SYRD-262).
+    """
+    return _command_name(role.cli[0]), role.target
+
+
+def role_pane_declaration(role: "RoleConfig") -> dict[str, Any]:
+    """How a declared workflow describes this tenant's pane for `role`."""
+    runtime, target = role_runtime_binding(role)
+    return {"runtime": runtime, "target": target, "slot": role.slot}
+
+
 def yolo_args_for_role(role: RoleConfig) -> list[str]:
     if not role.yolo:
         return []
@@ -4174,14 +4194,14 @@ def cli_command_for_role(
     env_prefix = ["env", *_env_unset_prefix((*PANE_TARGET_ENV_KEYS, *role.unset_env)), *_env_prefix(env)]
     socket_path = str(role.env.get("TICKET_BOARD_SOCKET") or "").strip()
     if socket_path and str(role.env.get("TICKET_BOARD_PROCESS_AUTHORITY") or "") == "1":
-        runtime = _command_name(role.cli[0])
+        runtime, target = role_runtime_binding(role)
         return [
             *env_prefix,
             runtime_registrar,
             "--socket", socket_path,
             "--role", role.role,
             "--runtime", runtime,
-            "--target", role.target,
+            "--target", target,
             "--worktree", role.workdir,
             "--session-dir", str(session_dir.expanduser()),
             "--",
@@ -22786,6 +22806,9 @@ def propose_legacy_workflow_adoption(
             canonical=legacy_workflow.load_canonical(Path(__file__).resolve().parents[1]),
             stage_seeds=project_workflow_stages(plan),
             transition_seeds=project_workflow_transitions(plan),
+            # What each of this tenant's panes registers as -- the reviewed
+            # configuration, not the example's defaults (SYRD-262).
+            panes={role.role: role_pane_declaration(role) for role in config.roles},
         )
     except legacy_workflow.LegacyWorkflowRefused as exc:
         return WorkflowAdoption(source=source, problems=(str(exc),))
@@ -23645,6 +23668,337 @@ def install_handed_off_workflow(
         f"(digest {handed.effective_digest}; reviewed by root as {handed.reviewed_digest})."
     )
     return True
+
+
+PANE_BINDING_FIELDS = ("runtime", "target", "slot")
+
+
+@dataclass(frozen=True)
+class PaneRebind:
+    """What rebinding a board's declared pane roles to its tenant's panes would do."""
+
+    revision: int
+    document: dict
+    rebound: dict
+    bindings: dict
+    changes: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+    problems: tuple[str, ...] = ()
+
+    @property
+    def digest(self) -> str:
+        from scripts.ticket_board.project_provision import workflow_document_digest
+
+        return workflow_document_digest(self.document)
+
+    @property
+    def rebound_digest(self) -> str:
+        from scripts.ticket_board.project_provision import workflow_document_digest
+
+        return workflow_document_digest(self.rebound)
+
+
+def plan_pane_rebind(config: ProjectConfig, revision: int, document: dict) -> PaneRebind:
+    """Rebind each declared role this tenant runs a pane for, to that pane.
+
+    The values come from the tenant's configuration through the function the
+    pane registers with, never from a caller (SYRD-262). A role the tenant runs
+    no pane for is left exactly as declared, and a pane whose role is not
+    declared is reported rather than added: a rebind changes bindings, not
+    which roles exist.
+    """
+    from scripts.ticket_board.workflow_config import validate
+
+    declared = {str(role.get("name")): role for role in document.get("roles") or []}
+    bindings: dict[str, dict] = {}
+    changes: list[str] = []
+    notes: list[str] = []
+    for role in config.roles:
+        pane = role_pane_declaration(role)
+        current = declared.get(role.role)
+        if current is None:
+            notes.append(
+                f"{role.role}: this tenant runs a {role.role} pane, but the declared workflow has "
+                f"no {role.role} role; a rebind does not add roles"
+            )
+            continue
+        was = {field: current.get(field) for field in PANE_BINDING_FIELDS}
+        if was != pane:
+            bindings[role.role] = pane
+            changes.append(
+                f"{role.role}: " + ", ".join(
+                    f"{field} {was[field]} -> {pane[field]}"
+                    for field in PANE_BINDING_FIELDS if was[field] != pane[field]
+                )
+            )
+    for name, current in declared.items():
+        if name not in {role.role for role in config.roles} and current.get("target"):
+            notes.append(
+                f"{name}: declared on {current.get('runtime')}/{current.get('target')} but this "
+                "tenant runs no such pane; left as declared"
+            )
+    rebound = copy.deepcopy(document)
+    for role in rebound.get("roles") or []:
+        if role.get("name") in bindings:
+            role.update(bindings[role["name"]])
+    problems: list[str] = []
+    try:
+        validate(copy.deepcopy(rebound), project=config.project)
+    except (ValueError, SystemExit) as exc:
+        problems.append(f"the rebound workflow would not validate: {exc}")
+    return PaneRebind(revision, document, rebound, bindings, tuple(changes), tuple(notes), tuple(problems))
+
+
+def read_runtime_registrations(
+    plan: "ProjectBoardProvision",
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> tuple[list[dict], str]:
+    """Every registered pane, including those the declaration currently hides."""
+    result = runner(
+        ["sudo", "-u", "postgres", "psql", "-X", "-tA", "-v", "ON_ERROR_STOP=1",
+         plan.admin_database_url, "-c",
+         "SELECT coalesce(json_agg(json_build_object('role', role, 'runtime', runtime, "
+         "'target', actual_target, 'pid', process_pid, 'start_time', process_start_time) "
+         "ORDER BY role), '[]') FROM ticket_board.role_runtime_assignments"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        return [], _proc_failure_reason(result, f"psql exited {result.returncode}")
+    try:
+        return list(json.loads(result.stdout or "[]")), ""
+    except json.JSONDecodeError as exc:
+        return [], f"unreadable registrations: {exc}"
+
+
+def _registration_visibility(rebind: PaneRebind, registrations: list[dict]) -> list[str]:
+    from scripts.ticket_board.peer_identity import SessionIdentity, session_is_live
+
+    lines = []
+    by_role = {str(row.get("role")): row for row in registrations}
+    for role, binding in sorted(rebind.bindings.items()):
+        row = by_role.get(role)
+        if row is None:
+            lines.append(f"{role}: no pane is registered; it is served once one registers")
+            continue
+        matches = row.get("runtime") == binding["runtime"] and row.get("target") == binding["target"]
+        live = session_is_live(SessionIdentity(int(row.get("pid") or 0), int(row.get("start_time") or 0)))
+        state = "live" if live else "not running"
+        if matches and live:
+            lines.append(f"{role}: registered {row['runtime']}/{row['target']} (pid {row['pid']}, {state}) "
+                         "matches, so it is served as soon as the rebind lands -- no restart")
+        else:
+            lines.append(f"{role}: registered {row.get('runtime')}/{row.get('target')} (pid "
+                         f"{row.get('pid')}, {state}) does not match {binding['runtime']}/"
+                         f"{binding['target']}; it stays unserved until that role is restarted")
+    return lines
+
+
+def root_verified_tenant(
+    slug: str,
+    *,
+    registry_dir: Path | None = None,
+    config_path: Path | None = None,
+    print_func: Callable[[str], None] = print,
+) -> "tuple[ProjectBoardProvision, Path, ProjectConfig] | None":
+    """Root's plan for `slug`, rebuilt from root's own record, and the tenant
+    configuration root has verified against it -- or None, with the reasons
+    printed. The same sequence `adopt-workflow` runs before trusting a tenant's
+    configuration (SYRD-166, SYRD-262).
+    """
+    baseline = privileged_baseline_plan_path(slug)
+    record, problem = read_plan_no_follow(baseline, require_root_owned=True)
+    if record is None:
+        print_func(f"switchyard: {problem}")
+        return None
+    identity = trusted_owner_identity(slug)
+    if not identity.trusted:
+        for objection in identity.problems:
+            print_func(f"switchyard: {objection}")
+        print_func(f"switchyard: root cannot establish whose installation {slug} is.")
+        return None
+    recorded_release = str(record.data.get("source_repo") or "").strip()
+    if recorded_release:
+        selected = Path(recorded_release)
+    else:
+        selected, release_problem = _resume_source_release(None)
+        if release_problem:
+            print_func(f"switchyard: {release_problem}")
+            return None
+    plan, divergence = _resume_plan_from_record(record, identity, source_repo=selected)
+    if divergence:
+        for objection in divergence:
+            print_func(f"switchyard: {objection}")
+        print_func(f"switchyard: root cannot rebuild {slug}'s plan unchanged.")
+        return None
+    verified, config, config_problems = verified_tenant_config(
+        plan, slug, explicit=config_path, owner_uid=uid_for_user(plan.owner_user),
+        registry_dir=registry_dir,
+    )
+    if config is None or verified is None:
+        for objection in config_problems:
+            print_func(f"switchyard: {objection}")
+        print_func(f"switchyard: {slug}'s configuration is not one root has verified.")
+        return None
+    return plan, verified, config
+
+
+def switchyard_rebind_workflow_panes_command(
+    slug: str,
+    *,
+    apply: bool = False,
+    expect: str = "",
+    registry_dir: Path | None = None,
+    config_path: Path | None = None,
+    euid_getter: Callable[[], int] = os.geteuid,
+    operator_resolver: Callable[[], Any] | None = None,
+    board_reader: Callable[[ProjectConfig], tuple[int, dict | None, str]] | None = None,
+    registrations_reader: Callable[["ProjectBoardProvision"], tuple[list[dict], str]] | None = None,
+    tenant_resolver: Callable[..., Any] | None = None,
+    sql_runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    journal: Any | None = None,
+    print_func: Callable[[str], None] = print,
+) -> int:
+    """Rebind a declared workflow's pane roles to the tenant's own panes (SYRD-262).
+
+    For a board whose declaration names the wrong runtime, target or slot for
+    roles its tenant runs: the board then serves those panes no assignment and
+    grants their processes no authority -- the Director's included, so the
+    Director cannot correct it. This is root's bounded repair, and it is not a
+    Director write: nobody acts as the Director.
+
+    The values are derived here from root's verified tenant configuration
+    through the function panes register with; no caller supplies a role,
+    runtime, target or slot. Only those three fields of roles that already
+    exist can change. Without --apply it previews the bindings, the exact
+    document diff and both digests. --apply must name the previewed digest
+    with --expect, and the database refuses unless the live revision AND
+    document are still the reviewed ones. The run is journaled with both
+    documents, and the new revision is attributed to this repair.
+    """
+    import difflib
+
+    from scripts.ticket_board.rollout_journal import Attempt, resolve_operator
+
+    slug = _validate_project_slug(slug)
+    if euid_getter() != 0:
+        print_func(
+            f"switchyard: rebinding {slug}'s declared pane roles reads root's records and writes "
+            f"through the database owner. Run: pkexec switchyard rebind-workflow-panes {slug}"
+        )
+        return 1
+    operator = (operator_resolver or resolve_operator)()
+    if getattr(operator, "source", "") != "pkexec" or not getattr(operator, "known", False):
+        print_func(
+            "switchyard: a rebind is an operator's decision and has to be authorized as one. "
+            f"This run was elevated by {getattr(operator, 'source', None) or 'nothing that names a person'}. "
+            f"Run: pkexec switchyard rebind-workflow-panes {slug}"
+        )
+        return 1
+
+    resolved = (tenant_resolver or root_verified_tenant)(
+        slug, registry_dir=registry_dir, config_path=config_path, print_func=print_func
+    )
+    if resolved is None:
+        print_func(f"switchyard: refusing to rebind {slug}. Nothing was changed.")
+        return 1
+    plan, verified, config = resolved
+    revision, live, board_problem = (board_reader or read_board_workflow_state)(config)
+    if live is None:
+        print_func(
+            f"switchyard: {slug}'s board workflow could not be read"
+            + (f": {board_problem}" if board_problem else ", or it runs none")
+            + ". Nothing was changed."
+        )
+        return 1
+    rebind = plan_pane_rebind(config, revision, live)
+    print_func(f"switchyard: {slug} declared pane rebind, from {verified}")
+    print_func(f"  board            revision {rebind.revision}, digest {rebind.digest}")
+    for line in rebind.changes or ("(every pane role already matches)",):
+        print_func(f"  changes          {line}")
+    for line in rebind.notes:
+        print_func(f"  unchanged        {line}")
+    for line in rebind.problems:
+        print_func(f"  problem          {line}")
+    if rebind.problems:
+        print_func("switchyard: nothing was changed.")
+        return 1
+    if not rebind.bindings:
+        print_func(f"switchyard: {slug}'s declared pane roles already match its panes. Nothing to do.")
+        return 0
+    before = json.dumps(rebind.document, indent=2, sort_keys=True).splitlines()
+    after = json.dumps(rebind.rebound, indent=2, sort_keys=True).splitlines()
+    for line in difflib.unified_diff(before, after, "declared", "rebound", lineterm="", n=2):
+        print_func(f"  | {line}")
+    print_func(f"  rebound          digest {rebind.rebound_digest}")
+    registrations, registration_problem = (registrations_reader or read_runtime_registrations)(plan)
+    if registration_problem:
+        print_func(f"  registrations    could not be read: {registration_problem}")
+    for line in _registration_visibility(rebind, registrations):
+        print_func(f"  registration     {line}")
+    if not apply:
+        print_func(
+            "switchyard: preview; nothing was written. Apply exactly this with: "
+            f"pkexec switchyard rebind-workflow-panes {slug} --apply --expect {rebind.rebound_digest}"
+        )
+        return 0
+    if expect != rebind.rebound_digest:
+        print_func(
+            f"switchyard: --expect {expect or '(none)'} is not the rebind this would write now "
+            f"({rebind.rebound_digest}). Review the preview and apply the digest it shows. "
+            "Nothing was changed."
+        )
+        return 1
+
+    attempt = journal or Attempt(
+        slug, ["switchyard", "rebind-workflow-panes", slug, "--apply", "--expect", expect],
+        operator=operator.name,
+    )
+    attempt.operator = operator
+    attempt.open()
+    attribution = f"SYRD-262 pane rebind by {operator.name} from {verified}"
+    # Rollback evidence, before anything is written: both documents and the
+    # bindings, in root's journal. The previous document also stays in the
+    # board's own workflow_revisions.
+    attempt.write("stdout", json.dumps({
+        "revision": rebind.revision, "digest": rebind.digest, "document": rebind.document,
+        "bindings": rebind.bindings, "rebound_digest": rebind.rebound_digest,
+        "rebound": rebind.rebound, "attribution": attribution,
+    }, sort_keys=True) + "\n")
+    result = sql_runner(
+        ["sudo", "-u", "postgres", "psql", "-X", "-tA", "-v", "ON_ERROR_STOP=1",
+         "-v", f"rev={int(rebind.revision)}",
+         "-v", f"expected={json.dumps(rebind.document, sort_keys=True)}",
+         "-v", f"bindings={json.dumps(rebind.bindings, sort_keys=True)}",
+         "-v", f"why={attribution}",
+         plan.admin_database_url, "-f", "-"],
+        input=("SELECT ticket_board.rebind_declared_pane_roles("
+               ":rev, :'expected'::jsonb, :'bindings'::jsonb, :'why');\n"),
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        reason = _proc_failure_reason(result, f"psql exited {result.returncode}")
+        attempt.close(status="failed", exit_status=1, detail=reason)
+        print_func(f"switchyard: the database refused the rebind: {reason}. Nothing was changed.")
+        return 1
+    new_revision, now, now_problem = (board_reader or read_board_workflow_state)(config)
+    from scripts.ticket_board.project_provision import workflow_document_digest
+
+    if now is None or workflow_document_digest(now) != rebind.rebound_digest:
+        detail = (f"the board now serves {workflow_document_digest(now) if now else 'nothing'}"
+                  f"{(' (' + now_problem + ')') if now_problem else ''}, not {rebind.rebound_digest}")
+        attempt.close(status="failed", exit_status=1, detail=detail)
+        print_func(f"switchyard: {detail}.")
+        return 1
+    registrations, _ = (registrations_reader or read_runtime_registrations)(plan)
+    for line in _registration_visibility(rebind, registrations):
+        print_func(f"  registration     {line}")
+    attempt.close(status="succeeded", exit_status=0, detail=f"revision {new_revision}")
+    print_func(
+        f"switchyard: {slug} now declares its panes at revision {new_revision} "
+        f"(digest {rebind.rebound_digest}), attributed to this rebind."
+    )
+    return 0
 
 
 def switchyard_adopt_workflow_command(
@@ -34075,6 +34429,22 @@ def _build_switchyard_approve_desktop_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_switchyard_rebind_workflow_panes_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="switchyard rebind-workflow-panes",
+        description=(
+            "Correct the runtime, target and slot a declared workflow names for the roles a "
+            "tenant runs as panes, from root's verified tenant configuration. Nothing else in "
+            "the workflow can change. Previews without --apply."
+        ),
+    )
+    parser.add_argument("project", help="project name or slug")
+    parser.add_argument("--apply", action="store_true", help="write the previewed rebind; requires root")
+    parser.add_argument("--expect", default="", help="the rebound digest the preview showed")
+    parser.add_argument("--config-path", type=Path, default=None, help=argparse.SUPPRESS)
+    return parser
+
+
 def _build_switchyard_migrate_workflow_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard migrate-workflow",
@@ -36833,6 +37203,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             reference=args.reference,
             show=args.show,
             revoke=args.revoke,
+        )
+    if argv[0].casefold() == "rebind-workflow-panes":
+        args = _build_switchyard_rebind_workflow_panes_parser().parse_args(argv[1:])
+        return switchyard_rebind_workflow_panes_command(
+            args.project, apply=args.apply, expect=args.expect, config_path=args.config_path
         )
     if argv[0].casefold() == "migrate-workflow":
         args = _build_switchyard_migrate_workflow_parser().parse_args(argv[1:])

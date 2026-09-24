@@ -52,12 +52,23 @@ def check(condition: bool, detail: str) -> None:
 
 
 def mefp_plan():
-    """A plan shaped like the live mefp board: roles director main ops audit user."""
+    """A plan shaped like the live mefp board: a designer-owned draft stage, main
+    and ops implementing, audit reviewing -- as its /api/workflow shows."""
     return pv.build_plan(
         project=PROJECT, project_name="MEFP", owner_user="stellaris-agent",
         owner_home=Path("/home/stellaris-agent"), source_repo=ROOT,
-        implementer_roles=("main", "ops"), include_designer=False, include_audit=True,
+        implementer_roles=("main", "ops"), include_designer=True, include_audit=True,
     )
+
+
+def mefp_panes() -> dict:
+    """MEFP's four panes, as its configuration runs them (SYRD-262)."""
+    return {
+        role: {"runtime": runtime, "target": f"{PROJECT}-{role}:0.0", "slot": slot}
+        for slot, (role, runtime) in enumerate(
+            (("director", "codex"), ("main", "codex"), ("ops", "codex"), ("audit", "claude"))
+        )
+    }
 
 
 class Board:
@@ -101,7 +112,12 @@ class Board:
             self.admin,
             "SELECT jsonb_build_object('state',state,'assignee',assignee,"
             "'commit_hash',commit_hash,'audit_signoff',audit_signoff,"
-            "'user_signoff',user_signoff) FROM ticket_board.tickets "
+            "'user_signoff',user_signoff,"
+            # Who was queued a notice for this ticket: a stage's notify is
+            # behaviour too, and only visible here (SYRD-262).
+            "'notified',(SELECT coalesce(jsonb_agg(q.target_role ORDER BY q.id),'[]'::jsonb) "
+            "FROM ticket_board.ticket_notification_queue q WHERE q.ticket_id=t.id)) "
+            "FROM ticket_board.tickets t "
             f"WHERE id='{ticket_id}';",
         ))
 
@@ -146,6 +162,9 @@ SCENARIOS = [
     Scenario("user reopen from done", {"state": "done", "assignee": "director",
                                        "commit_hash": "d" * 40},
              "user_reopen", "user", {"reason": "regressed"}),
+    # MEFP's draft stage belongs to a designer it runs no pane for (SYRD-262).
+    Scenario("route into draft for the designer", {"state": "analysis", "assignee": "director"},
+             "route", "director", {"state": "draft", "assignee": "designer"}),
     Scenario("cancel from triage", {"state": "analysis", "assignee": "director"},
              "cancel", "director", {"text": "no longer needed"}),
     # The one case the composer declares rather than reproduces: a reviewed
@@ -240,6 +259,7 @@ def main() -> int:
         plan, canonical=lw.load_canonical(ROOT),
         stage_seeds=pv.project_workflow_stages(plan),
         transition_seeds=pv.project_workflow_transitions(plan),
+        panes=mefp_panes(),
     )
     undeclared: list[str] = []
     with temporary_cluster(prefix="syrd240-equiv-", shutdown="immediate") as cluster:

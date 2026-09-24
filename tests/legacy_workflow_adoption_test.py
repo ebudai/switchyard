@@ -15,6 +15,7 @@ import copy
 import json
 import signal
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -42,18 +43,52 @@ def mefp_plan(**overrides):
     kwargs = dict(
         project=PROJECT, project_name="MEFP", owner_user="stellaris-agent",
         owner_home=Path("/home/stellaris-agent"), source_repo=ROOT,
-        implementer_roles=("main", "ops"), include_designer=False, include_audit=True,
+        # As live MEFP's board shows it: a designer-owned draft stage, main and
+        # ops implementing, audit reviewing (read from /api/workflow).
+        implementer_roles=("main", "ops"), include_designer=True, include_audit=True,
     )
     kwargs.update(overrides)
     return pv.build_plan(**kwargs)
 
 
-def compose(plan=None):
+_CONFIG_DIR = tempfile.TemporaryDirectory(prefix="syrd262-config.")
+
+#: MEFP's four panes as the User runs them: the Director and Ops on Codex,
+#: which the shipped example -- and so the first composer -- said were Claude.
+MEFP_PANES = (("director", "codex"), ("main", "codex"), ("ops", "codex"), ("audit", "claude"))
+
+
+def mefp_config(panes=MEFP_PANES):
+    """A real tenant configuration, loaded the way the adopt command loads it."""
+    path = Path(_CONFIG_DIR.name) / f"{PROJECT}-{abs(hash(panes))}.json"
+    path.write_text(json.dumps({
+        "project": PROJECT,
+        "board_url": "http://127.0.0.1:1/",
+        "board_socket": "/nonexistent/mefp-ticket-board.sock",
+        "role_state_isolation": True,
+        "roles": [
+            {"role": role, "cli": [f"/usr/local/bin/{cli}"], "slot": slot,
+             "workdir": f"{_CONFIG_DIR.name}/worktrees/{role}"}
+            for slot, (role, cli) in enumerate(panes)
+        ],
+    }), encoding="utf-8")
+    return tl.load_project_config(PROJECT, path)
+
+
+def registered_binding(role) -> tuple[str, str]:
+    """What this role's pane actually registers with: read from its launch command."""
+    command = tl.cli_command_for_role(role, session_dir=Path(_CONFIG_DIR.name) / "sessions")
+    return command[command.index("--runtime") + 1], command[command.index("--target") + 1]
+
+
+def compose(plan=None, config=None):
     plan = plan or mefp_plan()
+    config = config or mefp_config()
     return lw.compose_legacy_workflow(
         plan, canonical=lw.load_canonical(ROOT),
         stage_seeds=pv.project_workflow_stages(plan),
         transition_seeds=pv.project_workflow_transitions(plan),
+        panes={role.role: tl.role_pane_declaration(role) for role in config.roles},
     )
 
 
@@ -68,14 +103,14 @@ def no_workflow(_config):
 
 
 def config():
-    return types.SimpleNamespace(project=PROJECT, board_socket="/nonexistent.sock")
+    return mefp_config()
 
 
-def propose(plan=None, *, board=no_workflow, columns=None):
+def propose(plan=None, *, board=no_workflow, columns=None, config_override=None):
     plan = plan or mefp_plan()
     cols = live_columns(plan) if columns is None else columns
     return tl.propose_legacy_workflow_adoption(
-        PROJECT, plan, config(),
+        PROJECT, plan, config_override or config(),
         board_reader=board,
         columns_reader=lambda _c: (cols, "") if cols is not None else (None, "unreachable"),
     )
@@ -106,10 +141,71 @@ def test_a_tenant_with_a_designer_is_representable_too() -> None:
     )
     draft = next(s for s in pv.project_workflow_stages(plan) if s.name == "draft")
     check("designer" in draft.owner_roles, f"this plan's draft belongs to designer: {draft}")
-    declared = compose(plan)
+    # A tenant that has a designer runs a designer pane; and this plan's
+    # implementation stage is shared by main and app.
+    panes = MEFP_PANES + (("designer", "claude"), ("app", "codex"))
+    declared = compose(plan, config=mefp_config(panes))
     document = validate(copy.deepcopy(declared.document), project=PROJECT)
     designer = next(r for r in document["roles"] if r["name"] == "designer")
     check(designer["active"] is True, f"so designer is active in its document: {designer}")
+
+
+def test_each_pane_is_declared_as_exactly_what_it_registers() -> None:
+    """SYRD-262: the board hides a role whose declaration and registration differ."""
+    config = mefp_config()
+    declared = {r["name"]: r for r in compose(config=config).document["roles"]}
+    for role in config.roles:
+        registered = registered_binding(role)
+        check(
+            (declared[role.role]["runtime"], declared[role.role]["target"]) == registered,
+            f"{role.role} is declared as {declared[role.role].get('runtime')}/"
+            f"{declared[role.role].get('target')} and registers as {registered}",
+        )
+    check(declared["director"]["runtime"] == "codex" and declared["ops"]["runtime"] == "codex",
+          "MEFP's Director and Ops are Codex, as they run")
+    for role in config.roles:
+        check(declared[role.role]["slot"] == role.slot,
+              f"{role.role} is shown where its tenant puts it: {declared[role.role]['slot']} vs {role.slot}")
+    for name, role in declared.items():
+        if name not in {r.role for r in config.roles}:
+            check(role.get("runtime") is None and role.get("target") is None and role.get("slot") is None,
+                  f"{name} runs no pane here, so it is bound to none: {role}")
+
+
+def test_a_pane_the_workflow_would_not_declare_is_disclosed() -> None:
+    config = mefp_config(MEFP_PANES + (("inspector", "claude"),))
+    declared = compose(config=config)
+    check(any("pane role inspector" in line for line in declared.differences),
+          f"a pane the board would ignore is said out loud: {declared.differences}")
+    proposal = propose(config_override=config)
+    check("changes: pane role inspector" in "\n".join(proposal.accounting),
+          f"and shown before the digest is vouched: {proposal.accounting}")
+
+
+def test_a_stage_whose_only_owners_have_no_pane_is_declared_silent() -> None:
+    """MEFP's `draft` belongs to a designer it runs no pane for."""
+    declared = compose()
+    draft = next(s for s in declared.document["stages"] if s["name"] == "draft")
+    check(draft["owners"] == ["designer"], f"ownership is unchanged: {draft}")
+    check(draft["notify"]["kind"] == "none", f"and it notifies nobody: {draft['notify']}")
+    # Legacy queued no designer notice either (legacy_workflow_equivalence_test,
+    # "route into draft for the designer"), so it is not claimed as a change.
+    check(not any("draft" in line for line in declared.differences),
+          f"and it is not claimed as a change, because it is not one: {declared.differences}")
+    validate(copy.deepcopy(declared.document), project=PROJECT)
+    check(True, "and the document validates")
+
+
+def test_a_stage_shared_with_a_paneless_owner_is_refused_not_silenced() -> None:
+    plan = pv.build_plan(
+        project=PROJECT, project_name="MEFP", owner_user="o",
+        owner_home=Path("/h"), source_repo=ROOT,
+    )
+    try:
+        compose(plan, config=mefp_config(MEFP_PANES + (("designer", "claude"),)))
+        check(False, "a stage shared by main and a paneless app was silenced or guessed")
+    except lw.LegacyWorkflowRefused as exc:
+        check("in_progress" in str(exc) and "app" in str(exc), f"names the stage and role: {exc}")
 
 
 def test_every_authority_field_is_read_from_the_seed() -> None:
@@ -169,6 +265,7 @@ def test_an_action_nobody_named_is_a_refusal_not_a_default() -> None:
             plan, canonical=lw.load_canonical(ROOT),
             stage_seeds=pv.project_workflow_stages(plan),
             transition_seeds=pv.project_workflow_transitions(plan),
+            panes={role.role: tl.role_pane_declaration(role) for role in mefp_config().roles},
             semantics=trimmed,
         )
         check(False, "an unnamed action was given a primitive")

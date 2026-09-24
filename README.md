@@ -112,7 +112,7 @@ Commands:
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
 
-Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, start, teardown, status, validate-models.
+Bare project names start or attach the project. Recognized commands: board-skill, new, register, upgrade, repair-boundary, approve-desktop, adopt-workflow, migrate-workflow, rebind-workflow-panes, resume-provision, finish-upgrade, cutover-roles, publication-status, rollout-log, recover-display, privileged-action, install-shared-release, release-status, add-role, worker-pool, set-owner-identity, present, attach, replace-window, set-vcs-close-role, set-role-runtime, agy-credential, seed-role-credentials, role-prompt, onboarding-readiness, stop, start, teardown, status, validate-models.
 ```
 
 <!-- switchyard-help:end -->

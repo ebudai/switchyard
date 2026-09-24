@@ -12559,6 +12559,151 @@ def switchyard_teardown_command(
     return 0
 
 
+#: Where provisioning installs the board's deploy rule. Its absence is how a
+#: host without polkit shows itself, halfway through the packet (SYRD-261).
+POLKIT_RULES_DIR = Path("/etc/polkit-1/rules.d")
+
+
+#: What a polkit authority answers with: authorized, not authorized, needs
+#: authentication, dismissed. Any of them means the service answered over the
+#: system bus; pkcheck says 127 when it could not ask at all (pkcheck(1)).
+POLKIT_ANSWERED_EXIT_CODES = frozenset({0, 1, 2, 3})
+#: Brings back a stopped or masked authority. `restart` alone refuses a masked
+#: unit, which is one way a host ends up with polkit present and unusable;
+#: `unmask` is a no-op on a unit that is not masked (SYRD-261 review).
+POLKIT_RESTART_COMMAND = "sudo systemctl unmask polkit.service && sudo systemctl restart polkit.service"
+#: Bounded, and long enough for the system bus to activate polkitd on a host
+#: where nothing has asked it anything yet -- which is normal, not broken.
+POLKIT_QUERY_TIMEOUT_SECONDS = 15.0
+
+
+def _apt_archive_has(package: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
+    """The installer's own question, asked the same way (install-switchyard-prereqs)."""
+    try:
+        result = runner(
+            ["apt-cache", "show", "--no-all-versions", package],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def polkit_install_command(
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> str:
+    """One command an operator can paste, or "" when there is none to give.
+
+    Command text only, never prose around it: a remedy the operator has to
+    edit before it runs is not a remedy (SYRD-261 review). On apt the package
+    names depend on the release, so the archive is asked, as the installer asks.
+    """
+    if which("pacman"):
+        return "sudo pacman -S --needed polkit"
+    if which("apt-get"):
+        if _apt_archive_has("pkexec", runner=runner):
+            return "sudo apt-get install -y polkitd pkexec"
+        return "sudo apt-get install -y policykit-1"
+    return ""
+
+
+def polkit_service_problem(
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    timeout_seconds: float = POLKIT_QUERY_TIMEOUT_SECONDS,
+) -> str:
+    """Why the polkit authority cannot answer an authorization question, or "".
+
+    Presence is not readiness: the rules directory and pkexec can both be there
+    while polkitd cannot start or the system bus cannot reach it, and the board
+    unit's deploy rule is then never consulted. So it is asked one real
+    question, about this very process, through polkit's own client. Whatever
+    the answer -- this account may not even be authorized -- an answer is what
+    proves the service works; the system bus starts polkitd on demand, so a
+    service that is simply not running yet is not a failure.
+    """
+    pkcheck = which("pkcheck")
+    if pkcheck is None:
+        return "pkcheck, polkit's own client, is not on PATH"
+    try:
+        result = runner(
+            [pkcheck, "--action-id", "org.freedesktop.policykit.exec", "--process", str(os.getpid())],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return f"the polkit authority did not answer within {timeout_seconds:g}s"
+    except OSError as exc:
+        return f"pkcheck could not be run: {exc}"
+    if result.returncode in POLKIT_ANSWERED_EXIT_CODES:
+        return ""
+    detail = " ".join(str(result.stderr or "").split()) or f"exit {result.returncode}"
+    return f"the polkit authority could not answer an authorization query (pkcheck: {detail})"
+
+
+def polkit_readiness_problems(
+    *,
+    rules_dir: Path | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> list[str]:
+    """Why this host cannot take a tenant's polkit rule or answer for it, if it cannot.
+
+    Asked before anything is created. On a minimal host `switchyard new` used
+    to create the accounts, the project and the board's units, then fail
+    installing the deploy rule into a directory that did not exist -- and a
+    re-run was refused, because by then a unit was installed with no database
+    beside it (SYRD-261).
+    """
+    rules_dir = rules_dir if rules_dir is not None else POLKIT_RULES_DIR
+    missing: list[str] = []
+    if not rules_dir.is_dir():
+        missing.append(f"{rules_dir} does not exist")
+    if which("pkexec") is None:
+        missing.append("pkexec is not on PATH")
+    if missing:
+        install = polkit_install_command(which=which, runner=runner)
+        return [
+            f"polkit is not installed ({'; '.join(missing)}). Provisioning installs a polkit "
+            "rule so the project account can restart its own board, and privileged commands "
+            "run through pkexec. "
+            + (
+                f"Install it, then run this again:\n    {install}"
+                if install
+                else "Install your distribution's polkit package, then run this again."
+            )
+        ]
+    service = polkit_service_problem(which=which, runner=runner)
+    if service:
+        return [
+            f"polkit is installed but not working: {service}. The board's deploy rule is "
+            "enforced by that service. Start it, then run this again:\n"
+            f"    {POLKIT_RESTART_COMMAND}"
+        ]
+    return []
+
+
+def _installed_unit_is_this_plans(plan: ProjectBoardProvision) -> bool:
+    """Whether the installed board unit is exactly the one this plan renders.
+
+    The packet installs the units before it creates the database, so a run that
+    stopped between the two leaves precisely this unit and no database. That is
+    this provisioning, half done, and running it again finishes it. A unit
+    that says anything else is somebody else's state, and stays refused.
+    """
+    try:
+        installed = _installed_unit_path(plan.board_unit).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return installed == render_board_unit(plan)
+
+
 def precheck_new_project(
     plan: ProjectBoardProvision,
     *,
@@ -12571,8 +12716,9 @@ def precheck_new_project(
     registry_dir: Path | None = None,
     require_owner_user: bool = True,
     require_repository: bool = True,
+    polkit_problems: Callable[..., list[str]] = polkit_readiness_problems,
 ) -> None:
-    errors: list[str] = []
+    errors: list[str] = list(polkit_problems(runner=runner))
     if require_owner_user and uid_for_user(plan.owner_user) is None:
         errors.append(f"target user {plan.owner_user!r} does not exist")
     if require_repository and not _path_exists(repository):
@@ -12591,7 +12737,15 @@ def precheck_new_project(
         if port_is_live:
             errors.append(f"port {plan.port} is already in use but {plan.board_unit} is not installed")
     elif not database_exists:
-        errors.append(f"{plan.board_unit} is installed but database {plan.database!r} does not exist")
+        # Exactly this plan's unit and no database is this provisioning, stopped
+        # between installing its units and creating its database; running it
+        # again completes it. Anything else is not ours to build over (SYRD-261).
+        if not _installed_unit_is_this_plans(plan):
+            errors.append(
+                f"{plan.board_unit} is installed but database {plan.database!r} does not exist, "
+                "and the installed unit is not the one this provisioning would install.\n"
+                f"  to inspect recovery: switchyard teardown {plan.project} --dry-run"
+            )
     else:
         table_count = _ticket_board_table_count(plan.database, runner=runner)
         if table_count > 0:

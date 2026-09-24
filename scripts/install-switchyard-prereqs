@@ -140,13 +140,31 @@ ensure_postgres_cluster() {
     fi
 }
 
+# polkit is a runtime dependency, not a desktop nicety: provisioning installs a
+# rule under /etc/polkit-1/rules.d so the project account can restart its own
+# board, and the privileged entry points go through pkexec. A desktop host
+# always has it; a minimal one does not, and `switchyard new` then failed
+# halfway through its packet with the tenant stranded (SYRD-261).
+#
+# Debian 12+ and Ubuntu 22.10+ split it into polkitd and pkexec; older
+# releases ship both in policykit-1 and have no package by the new names, so
+# naming those there would abort the whole install. Ask the archive.
+apt_polkit_packages() {
+    if apt-cache show --no-all-versions pkexec >/dev/null 2>&1; then
+        printf 'polkitd pkexec\n'
+    else
+        printf 'policykit-1\n'
+    fi
+}
+
 manager="$(detect_manager)"
 case "$manager" in
     apt)
         printf 'Refreshing apt package index with apt-get update before installing packages.\n'
         run_root_cmd apt-get update
+        # shellcheck disable=SC2046 # one package name per word, on purpose
         run_root_cmd apt-get install -y \
-            python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl
+            python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl $(apt_polkit_packages)
         printf 'KDE/separate layout users also need Konsole: %s apt-get install -y konsole\n' "$SUDO_BIN"
         ensure_postgres_cluster
         printf 'Installing psycopg into the shared Switchyard Python venv at %s.\n' "$SWITCHYARD_PYTHON_VENV"
@@ -162,7 +180,7 @@ case "$manager" in
     pacman)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
         run_cmd "$SUDO_BIN" pacman -S --needed \
-            python postgresql tmux git curl python-pillow python-psycopg acl
+            python postgresql tmux git curl python-pillow python-psycopg acl polkit
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
         ensure_postgres_cluster
         printf 'Installing psycopg from the distribution package python-psycopg, which satisfies %s.\n' "$PIP_SPEC"

@@ -50,10 +50,24 @@ class RuntimePreflight:
     busy: bool
     workflow_revision: int
     blockers: tuple[str, ...] = ()
+    #: What the role runs today, and what the caller asked for. `None` means
+    #: the caller had nothing to say about the model, which is how every
+    #: pre-SYRD-250 caller behaves.
+    current_model: str = ""
+    requested_model: str | None = None
 
     @property
     def is_noop(self) -> bool:
-        return self.current_runtime == self.requested_runtime
+        """Nothing to do only when NEITHER half of the choice is changing.
+
+        The model used to be invisible here, so `set-role-runtime` on a role
+        already using that runtime returned "no change" and kept a model the
+        account does not recognise -- leaving no supported way to repair
+        test2's audit role at all (SYRD-250 DAT).
+        """
+        if self.current_runtime != self.requested_runtime:
+            return False
+        return self.requested_model is None or self.requested_model == self.current_model
 
     @property
     def ok(self) -> bool:
@@ -257,6 +271,9 @@ def preflight(
     config_path: Path,
     role_name: str,
     runtime: str,
+    #: The model the role should run. `None` leaves whatever is configured and
+    #: keeps this a runtime-only decision.
+    model: str | None = None,
     pane_state_dir: Path | None = None,
     board_url: str = "",
     force: bool = False,
@@ -286,8 +303,14 @@ def preflight(
     )
     busy = busy_check(role, pane_state_dir=state_dir, runner=runner)
 
+    current_model = str(getattr(role, "model", "") or "")
+    # A model-only change restarts the role exactly as a runtime change does,
+    # so it earns the same readiness and busy checks. Asking "is the runtime
+    # changing" skipped both for the one repair this ticket exists to enable.
+    changing = current != runtime or (model is not None and model != current_model)
+
     blockers: list[str] = []
-    if current != runtime:
+    if changing:
         blockers.extend(_readiness_blockers(config, role, runtime, runner=runner))
         if busy and not force:
             blockers.append(
@@ -305,6 +328,8 @@ def preflight(
             busy=busy,
             workflow_revision=revision,
             blockers=tuple(blockers),
+            current_model=current_model,
+            requested_model=model,
         ),
         document,
     )
@@ -575,6 +600,7 @@ def switch_role_runtime(
         config_path=config_path,
         role_name=role_name,
         runtime=runtime,
+        model=model,
         pane_state_dir=pane_state_dir,
         force=force,
         environ=environ,

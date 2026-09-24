@@ -71,6 +71,14 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
         ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
+        # The owner's own model list, read once after the auth probes and
+        # before any role starts. It is the same command as `agy`'s auth probe
+        # above and deliberately a second call: that one ran BEFORE this phase
+        # could log anybody in, so its answer describes an account that may not
+        # have been signed in yet. Free by construction -- no prompt, no token,
+        # no capability probe -- and asked once per CLI however many roles
+        # share it (SYRD-250).
+        ["sudo", "-u", "otto-agent", "agy", "models"],
         [
             "sudo", "-u", "otto-agent", "claude", "--model", "claude-opus-5",
             "--dangerously-skip-permissions", "-p", team_launcher.MODEL_VALIDATION_PROMPT,

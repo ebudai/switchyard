@@ -10752,6 +10752,7 @@ def _model_field(
     configured: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     owner_args: Sequence[str] = (),
+    unverified_because: str = "",
     print_func: Callable[[str], None] = print,
 ) -> Field:
     """The models for whichever runtime was chosen a moment ago.
@@ -10765,7 +10766,8 @@ def _model_field(
     def choices(answers: Mapping[str, Any]) -> tuple[Choice, ...]:
         runtime = str(answers.get("runtime") or "")
         found = runtime_catalog.model_catalog(
-            runtime, configured=configured, runner=runner, owner_args=owner_args
+            runtime, configured=configured, runner=runner, owner_args=owner_args,
+            unverified_because=unverified_because,
         )
         if runtime not in announced:
             # Where the list came from, said once per runtime: a recorded
@@ -10876,6 +10878,7 @@ def _prompt_role_runtime_plan(
     configured: RoleSelection | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
     owner_args: Sequence[str] = (),
+    unverified_because: str = "",
     interactive: bool = True,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
@@ -10894,7 +10897,8 @@ def _prompt_role_runtime_plan(
             _runtime_field(role, default=default_cli, configured=held.cli),
             _model_field(
                 role, configured=held.model, runner=runner,
-                owner_args=owner_args, print_func=print_func,
+                owner_args=owner_args, unverified_because=unverified_because,
+                print_func=print_func,
             ),
             _effort_field(role, configured=held.effort),
         )
@@ -10924,10 +10928,44 @@ def _prompt_role_runtime_plan(
 def _prompt_switchyard_role_plan(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    #: Whose CLI context the model lists come from. A catalog is a property of
+    #: an ACCOUNT, not of a host: `agy models` on the operator's login and on
+    #: the tenant owner's are different lists, and the one that matters is the
+    #: owner's, because that is the account the role will run as. Asking the
+    #: wrong one is how `test2` was configured with a slug its own owner does
+    #: not recognise (SYRD-250).
+    owner_user: str = "",
+    owner_home: Path | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> tuple[RoleSelection, ...]:
     """Every role of a new project, chosen rather than typed."""
+    # The account usually does not exist yet: `switchyard new` chooses its
+    # roles before it creates anybody, and it must keep choosing before it
+    # creates anybody -- nothing may be mutated before the plan review. So the
+    # owner-scoped list is simply not available here, and the honest thing is
+    # to say which account could not be asked and that the choice will be
+    # confirmed once it can be. Pretending otherwise is what shipped the first
+    # time: the recorded fallback offered `gemini-3.7-flash-high`, the very
+    # slug test2 was misconfigured with (SYRD-250 DAT).
+    owner_exists = _owner_account_exists(owner_user)
+    owner_args = (
+        _owner_command_env_args(owner_user, owner_home, [])
+        if owner_user and owner_home is not None
+        else ()
+    )
+    # One guard, and it is this one. When the owner cannot be asked, NOBODY is
+    # asked: leaving the runner in place would enumerate whoever is TYPING and
+    # label their models "listed in this account" -- the original defect, moved
+    # into the code meant to fix it. Withholding the runner is what makes that
+    # impossible; withholding the prefix as well would only look careful.
+    catalog_runner = runner if owner_exists else None
+    unverified_because = (
+        f"the {owner_user} account does not exist yet, so its own list could not be read; "
+        f"this choice is confirmed against it after the account is created"
+        if owner_user and not owner_exists
+        else ""
+    )
     include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
     include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
     fixed: list[str] = []
@@ -10952,13 +10990,16 @@ def _prompt_switchyard_role_plan(
             _prompt_role_runtime_plan(
                 role,
                 default_cli=NEW_PROJECT_ROLE_CLI_DEFAULTS.get(role, "claude"),
-                runner=runner, input_func=input_func, print_func=print_func,
+                runner=catalog_runner, owner_args=owner_args,
+                unverified_because=unverified_because,
+                input_func=input_func, print_func=print_func,
             )
         )
     for role in implementers:
         plan.append(
             _prompt_role_runtime_plan(
-                role, default_cli="codex", runner=runner,
+                role, default_cli="codex", runner=catalog_runner, owner_args=owner_args,
+                unverified_because=unverified_because,
                 input_func=input_func, print_func=print_func,
             )
         )
@@ -12874,6 +12915,17 @@ class FirstRunAuthReport:
     untrusted_roles: list[tuple[str, str, str]]
     stale_codex_hook_trust: list[CodexHookTrustMismatch] = field(default_factory=list)
     missing_cli_roles: dict[str, list[str]] = field(default_factory=dict)
+    #: Roles whose configured model is absent from their OWNER's own catalog,
+    #: as (role, cli, model, available). Only ever populated from a list the
+    #: owner's CLI actually produced; a recorded table never contradicts a
+    #: configured value (SYRD-250).
+    #:
+    #: Deliberately absent from `has_warnings` and from
+    #: `report_first_run_auth_warnings`: this one does not warn, it stops
+    #: (`stop_before_launch_for_unknown_models`), and that gate says the whole
+    #: thing where it is actionable. Counting it as a warning with no warning
+    #: line to print would be a report claiming more than it shows.
+    unknown_model_roles: list[tuple[str, str, str, tuple[str, ...]]] = field(default_factory=list)
     model_validation_failures: list[ModelValidationFailure] = field(default_factory=list)
     owner_user: str = ""
     owner_shell_issue: OwnerShellIssue | None = None
@@ -18797,6 +18849,41 @@ def run_first_run_auth_phase(
             for role in step.roles or (step.role,):
                 untrusted.append((step.cli, role, str(step.workdir)))
 
+    # Free, and not a probe: one `agy models` in the OWNER's context, compared
+    # against what each role is configured to run. SYRD-246 removed the probe
+    # that asked a model to prove itself, which cost tokens and time and could
+    # reject a working model; this asks the CLI for its own list and checks
+    # membership, which is neither. Without it `test2` started its audit pane on
+    # a slug the owner does not recognise and the provider quietly ran something
+    # else (SYRD-250).
+    #
+    # Asked once per CLI rather than once per role, because the answer is a
+    # property of the account and the account does not change between two
+    # roles. This is the second `agy models` of the phase and deliberately so:
+    # the first is `agy`'s auth probe, which ran before this phase could log
+    # anybody in, so its answer may describe an account that was not signed in
+    # yet.
+    unknown_model_roles: list[tuple[str, str, str, tuple[str, ...]]] = []
+    owner_prefix = _owner_command_env_args(effective_owner, effective_home, [])
+    owner_catalogs: dict[str, runtime_catalog.Catalog | None] = {}
+    for role in config.roles:
+        cli = _role_cli_name(role)
+        if not role.model or cli in unauthenticated or cli in missing_cli_roles:
+            # An account that cannot answer at all has nothing to say about a
+            # model, and those roles are already reported. A role with no model
+            # configured takes the runtime's own default and has nothing to
+            # contradict.
+            continue
+        if cli not in owner_catalogs:
+            owner_catalogs[cli] = runtime_catalog.owner_model_catalog(
+                cli, runner=runner, owner_args=owner_prefix
+            )
+        mismatch = runtime_catalog.model_absent_from(owner_catalogs[cli], role.model)
+        if mismatch is not None:
+            unknown_model_roles.append(
+                (role.role, cli, role.model, tuple(c.value for c in mismatch.choices))
+            )
+
     model_validation_failures: list[ModelValidationFailure] = []
     if validate_models:
         # A provider whose first run is unfinished cannot answer a model probe
@@ -18818,6 +18905,7 @@ def run_first_run_auth_phase(
         untrusted,
         manifest.stale_codex_hook_trust,
         missing_cli_roles,
+        unknown_model_roles,
         model_validation_failures,
         # Named whenever the report will tell somebody to run something as
         # that account. An incomplete provider setup now carries a resumable
@@ -18837,6 +18925,11 @@ def run_first_run_auth_phase(
             # message whose whole job is to say whose account to finish it on
             # (SYRD-221 DAT).
             or unauthenticated
+            # Same reason again. The unknown-model gate's entire claim is that
+            # THIS account does not list the model, and the operator has to
+            # know which account was asked before they can agree or disagree
+            # with it -- their own `agy` may well list the slug (SYRD-250).
+            or unknown_model_roles
         )
         else "",
         owner_shell_issue=manifest.owner_shell_issue,
@@ -18966,6 +19059,171 @@ def report_models_were_not_probed(
         "prove anything. If one is wrong the provider says so in that role's own pane, in "
         f"its own words. To ask on purpose: `switchyard validate-models {config.project}`."
     )
+
+
+def record_role_model(
+    config: "ProjectConfig",
+    *,
+    config_path: Path,
+    role_name: str,
+    model: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> "ProjectConfig":
+    """Write one role's model into the project config, and nothing else.
+
+    Ownership is restored afterwards because this runs as root during
+    `switchyard new`, and a tenant config the tenant cannot read is a worse
+    outcome than the model it was repairing.
+    """
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    roles = raw.get("roles")
+    if not isinstance(roles, list):
+        raise SystemExit(f"switchyard: {config_path} must define a roles list")
+    for entry in roles:
+        if isinstance(entry, dict) and entry.get("role") == role_name:
+            entry.pop("model", None)
+            if model:
+                entry["model"] = model
+            break
+    else:
+        raise SystemExit(f"switchyard: {config_path} has no role {role_name!r}")
+    _write_json_atomic(config_path, raw)
+    ensure_owner_file(config, config_path, runner=runner)
+    return load_project_config(config.project, config_path)
+
+
+def confirm_unknown_models_with_owner(
+    config: "ProjectConfig",
+    report: FirstRunAuthReport,
+    *,
+    config_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    interactive: bool | None = None,
+    input_func: Callable[[str], str] = input,
+    print_func: Callable[[str], None] = print,
+) -> tuple["ProjectConfig", FirstRunAuthReport]:
+    """Ask the account that now exists, and record what it answers.
+
+    This is the other half of the ordering problem. `switchyard new` must
+    choose its roles' models before it creates anything -- the plan review is
+    the last point at which nothing has been mutated -- so at that moment there
+    is no owner account to enumerate and the recorded fallback is all there is.
+    By the time this runs the account exists AND has authenticated, which is
+    the first moment its catalog is a real answer.
+
+    Refusing the launch here would be correct and useless: the operator chose
+    from the only list available to them and would be told, after provisioning,
+    that it was the wrong list. So the choice is offered again, against the
+    real one. Nothing is substituted -- the configured value is shown and an
+    answer is required (SYRD-250 DAT).
+
+    Returns the config and report as they now stand. Roles still carrying a
+    model the owner does not offer are left in `unknown_model_roles` for the
+    launch gate, which is what happens when there is nobody to ask.
+    """
+    if not report.unknown_model_roles:
+        return config, report
+    can_ask = (sys.stdin.isatty() if interactive is None else interactive)
+    if not can_ask:
+        return config, report
+
+    _owner_user, owner_args = _owner_catalog_args(config)
+    unresolved: list[tuple[str, str, str, tuple[str, ...]]] = []
+    for role, cli, model, available in report.unknown_model_roles:
+        print_func(
+            f"switchyard: {role} was configured for {model!r} before "
+            f"{report.owner_user or 'the project account'} existed, and that account "
+            f"does not offer it. Choose from what it does offer:"
+        )
+        try:
+            chosen = terminal_select.select_one(
+                # Deliberately NOT `configured=model`. That would put the value
+                # the account has just refused at the top of the list and make
+                # it the default, so pressing Enter would keep the broken
+                # model. It is named in the line above instead, and typing it
+                # again is still possible through the custom path -- as a
+                # deliberate act rather than the path of least resistance.
+                _model_field(
+                    role, runner=runner, owner_args=owner_args,
+                    print_func=print_func,
+                ),
+                {"runtime": cli},
+                input_func=input_func,
+                print_func=print_func,
+            )
+        except terminal_select.Cancelled:
+            # Somebody who cannot answer this is not somebody to crash a
+            # half-provisioned project at. The role keeps its configured value
+            # and the launch gate below says what to run to repair it.
+            print_func(f"switchyard: {role}'s model was left as {model!r}.")
+            unresolved.append((role, cli, model, available))
+            continue
+        config = record_role_model(
+            config, config_path=config_path, role_name=role, model=chosen, runner=runner
+        )
+        still_absent = runtime_catalog.model_absent_from(
+            runtime_catalog.owner_model_catalog(cli, runner=runner, owner_args=owner_args),
+            chosen,
+        )
+        if still_absent is None:
+            print_func(
+                f"switchyard: {role} will run {chosen or cli + "'s own default"}."
+            )
+            continue
+        # They were shown the account's list and typed something else. That is
+        # a decision somebody made rather than a warning nobody read, which is
+        # the whole complaint -- but it is still not a model this account
+        # knows, so the launch gate below says so and stops.
+        unresolved.append(
+            (role, cli, chosen, tuple(c.value for c in still_absent.choices))
+        )
+    return config, replace(report, unknown_model_roles=unresolved)
+
+
+def stop_before_launch_for_unknown_models(
+    report: FirstRunAuthReport,
+    *,
+    project: str = "",
+    print_func: Callable[[str], None] = print,
+) -> bool:
+    """A role configured for a model its own account does not offer is not started.
+
+    The alternative is what `test2` did: the pane came up, the provider printed
+    `model gemini-3.7-flash-high is not recognized ... Ignoring the flag`, and
+    the role ran on something nobody chose. A warning inside a pane nobody is
+    reading is not a decision anybody made.
+
+    Nothing is substituted. The configured value is left exactly as it is and
+    the operator is told what their own account offers instead, because picking
+    a replacement here would be the silent rewrite this ticket forbids -- and
+    the value may be right while the account is simply not set up yet.
+    """
+    if not report.unknown_model_roles:
+        return False
+    for role, cli, model, available in report.unknown_model_roles:
+        offered = ", ".join(available) if available else "(its catalog is empty)"
+        print_func(
+            f"switchyard: not starting {role}: {cli} on "
+            f"{report.owner_user or 'the project account'} does not offer "
+            f"{model!r}, so the provider would ignore it and run something else. "
+            f"That account offers: {offered}. Nothing has been changed for you."
+        )
+        # A remedy has to be a command that runs and fixes this. The first
+        # version of this message named `switchyard set-role-runtime <role>`,
+        # which omits the required project AND, even spelled correctly, could
+        # not change a model while the runtime stayed the same -- it reported
+        # "no change" and kept the bad value (SYRD-250 DAT).
+        print_func(
+            f"switchyard:   repair it with: switchyard set-role-runtime "
+            f"{project or '<project>'} {role} --cli {cli} "
+            f"--model {available[0] if available else '<model>'}"
+        )
+        print_func(
+            f"switchyard:   or take {cli}'s own default with: switchyard set-role-runtime "
+            f"{project or '<project>'} {role} --cli {cli} --model ''"
+        )
+    return True
+
 
 
 def stop_before_launch_for_unauthenticated_providers(
@@ -24478,6 +24736,9 @@ def switchyard_new_command(
     registry_dir: Path | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
+    #: Whether there is somebody to ask. `None` reads the terminal, which is
+    #: right in production and unanswerable in a test with no tty.
+    interactive: bool | None = None,
     agent_cli_policy: str = "",
     agent_cli_sources: Sequence[str] | None = None,
 ) -> int:
@@ -24592,7 +24853,11 @@ def switchyard_new_command(
             # identifiers to recall and a comma-separated line to compose
             # (SYRD-115).
             role_plan = _prompt_switchyard_role_plan(
-                runner=runner, input_func=input_func, print_func=print_func
+                runner=runner,
+                owner_user=owner_user,
+                owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
+                input_func=input_func,
+                print_func=print_func,
             )
             chosen_pairs = [(entry.role, entry.cli) for entry in role_plan]
             selected_role_models = {
@@ -24892,6 +25157,23 @@ def switchyard_new_command(
         return 1
     if stop_before_launch_for_unauthenticated_providers(
         first_run_auth_report, print_func=print_func
+    ):
+        return 1
+    # The account exists and has authenticated now, which is the first moment
+    # its model list is a real answer. The operator chose before either was
+    # true, so they are offered the real list rather than refused for having
+    # used the only one available to them (SYRD-250 DAT).
+    config, first_run_auth_report = confirm_unknown_models_with_owner(
+        config,
+        first_run_auth_report,
+        config_path=config_path,
+        runner=runner,
+        interactive=interactive,
+        input_func=input_func,
+        print_func=print_func,
+    )
+    if stop_before_launch_for_unknown_models(
+        first_run_auth_report, project=config.project, print_func=print_func
     ):
         return 1
     report_models_were_not_probed(config, print_func=print_func)
@@ -34178,6 +34460,15 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "model the role should run, checked against the project owner's own catalog; "
+            "pass an empty value to drop it and take the runtime's default. Omit it to keep "
+            "the configured model, or to be asked when it is one the owner does not offer"
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="switch even though the role is mid-turn; requires --reason",
@@ -34185,6 +34476,31 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reason", default="", help="why a busy role was interrupted; recorded with the change")
     parser.add_argument("--dry-run", action="store_true", help="run every check, change nothing")
     return parser
+
+
+def _owner_account_exists(owner_user: str) -> bool:
+    """Whether there is an account to ask anything of yet.
+
+    A `switchyard new` chooses its roles' models before it creates the owner,
+    so "cannot enumerate" and "does not exist yet" are different answers that
+    used to look identical (SYRD-250 DAT).
+    """
+    if not owner_user:
+        return False
+    try:
+        pwd.getpwnam(owner_user)
+    except KeyError:
+        return False
+    return True
+
+
+def _owner_catalog_args(config: "ProjectConfig") -> tuple[str, tuple[str, ...]]:
+    """The account whose model list decides, and the argv prefix to ask it."""
+    owner_user = str(getattr(config, "run_as_user", "") or "")
+    if not owner_user:
+        return "", ()
+    owner_home = _owner_home_for_auth(owner_user)
+    return owner_user, tuple(_owner_command_env_args(owner_user, owner_home, []))
 
 
 def _role_named(config: ProjectConfig, role_name: str) -> RoleConfig | None:
@@ -34200,6 +34516,9 @@ def set_project_role_runtime_command(
     config_path: Path,
     role_name: str,
     runtime: str = "",
+    #: `None` means "keep whatever is configured, unless the owner does not
+    #: offer it"; `""` drops the model; anything else is an explicit choice.
+    model: str | None = None,
     force: bool = False,
     reason: str = "",
     dry_run: bool = False,
@@ -34214,6 +34533,11 @@ def set_project_role_runtime_command(
     existing = _role_named(config, role_name)
     current_runtime = _role_cli_name(existing) if existing is not None else ""
     can_ask = (sys.stdin.isatty() if interactive is None else interactive)
+    # Whose catalog decides. This used to be nobody's: the model selector below
+    # ran with no owner prefix, so a director repairing a tenant was offered
+    # their OWN models -- the same account mix-up this ticket is about, in the
+    # command meant to repair it (SYRD-250 DAT).
+    owner_user, owner_args = _owner_catalog_args(config)
     if not runtime:
         if not can_ask:
             raise SystemExit(
@@ -34232,9 +34556,27 @@ def set_project_role_runtime_command(
     # runtime actually changes, because a model name belongs to the runtime that
     # advertises it: a role moved from Codex to Claude used to keep `gpt-5.5`,
     # and the new runtime was started with the old one's model (SYRD-115).
+    configured_model = str(getattr(existing, "model", "") or "")
     chosen_model: str | None = None
-    if existing is not None and current_runtime and runtime != current_runtime:
-        configured_model = str(getattr(existing, "model", "") or "")
+    if model is not None:
+        # Explicit, and checked against the owner's own list rather than taken
+        # on faith. Refused rather than replaced: substituting a model nobody
+        # asked for is what this ticket forbids.
+        chosen_model = model.strip()
+        if chosen_model:
+            unavailable = runtime_catalog.model_absent_from(
+                runtime_catalog.owner_model_catalog(
+                    runtime, runner=runner, owner_args=owner_args
+                ),
+                chosen_model,
+            )
+            if unavailable is not None:
+                offered = ", ".join(choice.value for choice in unavailable.choices)
+                raise SystemExit(
+                    f"switchyard: {runtime} on {owner_user or 'the project account'} does not "
+                    f"offer {chosen_model!r}; it offers: {offered}. Nothing was changed."
+                )
+    elif existing is not None and current_runtime and runtime != current_runtime:
         if configured_model:
             print_func(
                 f"switchyard: {role_name}'s model {configured_model} belongs to "
@@ -34242,7 +34584,9 @@ def set_project_role_runtime_command(
             )
         if can_ask:
             chosen_model = terminal_select.select_one(
-                _model_field(role_name, runner=runner, print_func=print_func),
+                _model_field(
+                    role_name, runner=runner, owner_args=owner_args, print_func=print_func
+                ),
                 {"runtime": runtime},
                 input_func=input_func,
                 print_func=print_func,
@@ -34251,6 +34595,47 @@ def set_project_role_runtime_command(
             # Nobody to ask, so the honest move is to leave the role on the new
             # runtime's own default rather than on a model it does not have.
             chosen_model = ""
+    elif configured_model:
+        # Same runtime, and this is the repair path. `set-role-runtime` used to
+        # compute a model only when the runtime CHANGED, so an audit role
+        # already on `agy` could not be moved off a model its account does not
+        # recognise by any supported command at all -- the launch was stopped
+        # and the remedy it named did nothing (SYRD-250 DAT).
+        unavailable = runtime_catalog.model_absent_from(
+            runtime_catalog.owner_model_catalog(
+                runtime, runner=runner, owner_args=owner_args
+            ),
+            configured_model,
+        )
+        if unavailable is not None:
+            offered = ", ".join(choice.value for choice in unavailable.choices)
+            print_func(
+                f"switchyard: {runtime} on {owner_user or 'the project account'} does not "
+                f"offer {role_name}'s configured model {configured_model!r}, so the provider "
+                f"would ignore it and run something else. That account offers: {offered}."
+            )
+            if not can_ask:
+                raise SystemExit(
+                    f"switchyard: nothing was changed. Re-run naming the model, for example "
+                    f"`switchyard set-role-runtime {config.project} {role_name} "
+                    f"--cli {runtime} --model {unavailable.choices[0].value}`, or pass "
+                    f"`--model ''` to take {runtime}'s own default."
+                )
+            # Not seeded with `configured_model`: the account has just refused
+            # it, so offering it first and making it the default would mean
+            # pressing Enter keeps the broken value. It is named in the line
+            # above; typing it again is still possible, as a deliberate act.
+            chosen_model = terminal_select.select_one(
+                _model_field(
+                    role_name,
+                    runner=runner,
+                    owner_args=owner_args,
+                    print_func=print_func,
+                ),
+                {"runtime": runtime},
+                input_func=input_func,
+                print_func=print_func,
+            )
 
     result = role_runtime.switch_role_runtime(
         config,
@@ -35907,6 +36292,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             config_path=entry.config_path,
             role_name=args.role,
             runtime=args.cli,
+            model=args.model,
             force=args.force,
             reason=args.reason,
             dry_run=args.dry_run,
@@ -36034,6 +36420,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
     if stop_before_launch_for_missing_owner_clis(first_run_auth_report):
         return 1
     if stop_before_launch_for_unauthenticated_providers(first_run_auth_report):
+        return 1
+    if stop_before_launch_for_unknown_models(first_run_auth_report, project=config.project):
         return 1
     launch_result = launch_project(
         config,

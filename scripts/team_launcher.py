@@ -4375,7 +4375,11 @@ def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) 
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
     if isinstance(stderr, str) and stderr.strip():
-        return stderr.strip().splitlines()[-1]
+        # All of it, on one line. Git explains a failure across several lines
+        # and the last is often the least of it: a refused fetch ends "and the
+        # repository exists.", which is all an operator was shown of "Could not
+        # read from remote repository" (SYRD-255).
+        return " ".join(line.strip() for line in stderr.strip().splitlines() if line.strip())
     return fallback
 
 
@@ -8973,7 +8977,10 @@ def _resolve_deploy_ref_readonly(
             if remote_sha:
                 return remote_sha, ""
         else:
-            return "", _proc_failure_reason(remote_proc, f"git ls-remote exited {remote_proc.returncode}")
+            return "", (
+                f"`{' '.join(git_deploy_ref_ls_remote_args(source_repo, deploy_ref))}` failed: "
+                + _proc_failure_reason(remote_proc, f"git ls-remote exited {remote_proc.returncode}")
+            )
     rev_parse_proc = run_owner_correct_git(
         git_deploy_ref_rev_parse_args(source_repo, deploy_ref),
         runner=runner,
@@ -8982,7 +8989,10 @@ def _resolve_deploy_ref_readonly(
         text=True,
     )
     if rev_parse_proc.returncode != 0:
-        return "", _proc_failure_reason(rev_parse_proc, f"git rev-parse exited {rev_parse_proc.returncode}")
+        return "", (
+            f"`{' '.join(git_deploy_ref_rev_parse_args(source_repo, deploy_ref))}` failed: "
+            + _proc_failure_reason(rev_parse_proc, f"git rev-parse exited {rev_parse_proc.returncode}")
+        )
     return str(rev_parse_proc.stdout or "").strip(), ""
 
 
@@ -9008,7 +9018,7 @@ def _resolve_deploy_ref_from_bare_repo(
         )
         if proc.returncode == 0:
             return str(proc.stdout or "").strip(), ""
-        errors.append(_proc_failure_reason(proc, f"git rev-parse exited {proc.returncode}"))
+        errors.append(f"{ref}: " + _proc_failure_reason(proc, f"git rev-parse exited {proc.returncode}"))
     return "", "; ".join(errors)
 
 
@@ -28104,6 +28114,18 @@ def read_upgrade_source(config: ProjectConfig) -> dict[str, str]:
     }
 
 
+def upgrade_source_unavailable_reason(config: ProjectConfig) -> str:
+    """Why root's pin record gave this process nothing, said so it can be reported."""
+    path = privileged_upgrade_source_path(config)
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return f"root recorded no pinned release at {path}"
+    except OSError as exc:
+        return f"root's pinned-release record {path} is not readable by {current_user_name()} ({exc.strerror})"
+    return f"root's pinned-release record {path} was refused as not root's own"
+
+
 def resolve_pinned_upgrade_source(
     config: ProjectConfig,
     *,
@@ -31989,11 +32011,31 @@ def finish_upgrade_command(
     # session, with none of the outer command's arguments. It reports the same
     # release the privileged phases were pinned to rather than resolving one of
     # its own (SYRD-61).
+    named = source_repo is not None or deploy_ref is not None
     source_repo, commit_git_dir, deploy_ref, pinned = resolve_pinned_upgrade_source(
         config, source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref
     )
     if pinned:
         print_func(f"switchyard: reporting the release {config.project} was pinned to: {pinned}")
+    elif not named:
+        # Root's record is in a directory only root can read, so from here it
+        # is usually not there at all. Never `origin/main` in its place without
+        # saying so: the operator pinned and deployed a release, and resolving a
+        # branch nobody asked for is what failed live (SYRD-255).
+        unavailable = upgrade_source_unavailable_reason(config)
+        release, commit, staged_problem = director_readable_pinned_release(config.project)
+        if release is not None:
+            source_repo, deploy_ref = release, commit
+            print_func(
+                f"switchyard: {unavailable}; reporting the release root staged for "
+                f"{config.project}'s roles instead: {commit} ({release})"
+            )
+        else:
+            print_func(
+                f"switchyard: no pinned release is readable for {config.project}: {unavailable}, "
+                f"and {staged_problem}. Resolving {deploy_ref} instead; pass --deploy-ref <commit> "
+                "--source-repo <installed release> to report a specific release."
+            )
     # Bound to the configured account, not to anything the caller says about
     # itself. The board decides the same question from the peer uid; this is so
     # the wrong account gets an answer instead of a rejected write (SYRD-49).
@@ -32103,6 +32145,12 @@ def finish_upgrade_command(
             f"switchyard: {config.project}'s release phase did not complete: {blocked}. "
             "Nothing after it is claimed."
         )
+        if installed:
+            # Partial, and said so: the workflow write above landed and stays.
+            print_func(
+                f"switchyard: {config.project}'s handed-off workflow is installed and stays "
+                "installed; only the release phase is outstanding."
+            )
         return 1
     return 0
 
@@ -35833,6 +35881,55 @@ def tenant_pinned_release_root(
         (install_root or switchyard_shared_install_root()) / "releases" / marker.marker_commit
     )
     return candidate if candidate.is_dir() else None
+
+
+def director_readable_pinned_release(
+    project: str, *, root: Path | None = None, install_root: Path | None = None
+) -> tuple[Path | None, str, str]:
+    """The release root pinned for this tenant, as the director is allowed to see it.
+
+    Returns (release root, commit, "") or (None, "", why not). Root's own record
+    of the pin sits in the privileged provision directory, which is 0700 root,
+    so `finish-upgrade` -- unprivileged by design -- could not read it, took
+    `origin/main` in its place without a word, and failed resolving a branch
+    nobody had asked for after the operator had pinned and deployed a release
+    (SYRD-255).
+
+    Root already publishes where every role can read it the tenant's staged
+    bundle, and the bundle's release marker names the release it was staged
+    from. That marker is root's, not the tenant's: every directory to it is
+    proven root-owned and unwritable by anybody else before a byte is
+    believed, and the release it names is then held to the installed-release
+    rules like any operator-named one -- root-controlled, and carrying root's
+    marker for exactly this commit.
+    """
+    staging_override = os.environ.get("SWITCHYARD_TENANT_CONTROL_ROOT", "").strip()
+    staged = Path(role_tooling_staging_dir(project, root=root))
+    marker_path = staged / SWITCHYARD_RELEASE_MARKER_NAME
+    from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+    # The documented seam, as for the installed release: the walk starts at "/"
+    # on a host and moves only with the staging root's test override, because a
+    # fixture cannot own "/".
+    base = str(root) if root is not None else staging_override
+    problems = root_controlled_problems(
+        str(marker_path),
+        expect_uid=os.getuid() if base else 0,
+        base=base or "/",
+    )
+    if problems:
+        return None, "", f"the staged release marker {marker_path} is not root's: " + "; ".join(problems)
+    marker = _read_switchyard_release_marker(staged)
+    if marker is None or not marker.marker_commit:
+        reason = marker.marker_error if marker is not None else "it is absent"
+        return None, "", f"the staged release marker {marker_path} names no release: {reason}"
+    commit = marker.marker_commit.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return None, "", f"the staged release marker {marker_path} names {commit!r}, not a commit"
+    release = (install_root or switchyard_shared_install_root()) / "releases" / commit
+    if not release.is_dir():
+        return None, "", f"{release}, the release {marker_path} names, is not installed"
+    return release, commit, ""
 
 
 def staged_bundle_launch_problems(

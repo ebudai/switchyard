@@ -19,7 +19,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterator, Mapping, Sequence
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
@@ -53,6 +53,7 @@ def runtime_assignment_config(
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
     print_func: Callable[[str], None] | None = None,
+    unstarted: Collection[str] = (),
 ) -> team_launcher.ProjectConfig:
     """Resolve every shared-account worker from the board's current assignment.
 
@@ -77,10 +78,16 @@ def runtime_assignment_config(
         resolved, missing = _resolved_runtime_assignments(config, opener=opener)
         if not missing:
             return team_launcher.replace(config, roles=resolved)
-        if monotonic() >= deadline:
+        # A role whose pane never started cannot register, so waiting for it
+        # only delays the same refusal: every pane of a headless VM failing
+        # to start sat here for the whole 90 seconds (SYRD-248). A role that
+        # did start is still waited for exactly as before.
+        never_started = sorted(role for role in missing if role in unstarted)
+        if monotonic() >= deadline or (missing and len(never_started) == len(missing)):
             raise SystemExit(
                 "switchyard: no live runtime assignment for configured role(s): "
                 + ", ".join(sorted(missing))
+                + (f"; their panes did not start: {', '.join(never_started)}" if never_started else "")
             )
         if not announced:
             announced = True
@@ -1851,10 +1858,11 @@ def launch_presentation(
     process_launcher: Callable[..., Any] | None = None,
     assignment_wait_seconds: float = 0.0,
     print_func: Callable[[str], None] | None = None,
+    unstarted: Collection[str] = (),
 ) -> int:
     """Restore saved slots during ordinary project launch without changing workers."""
     config = runtime_assignment_config(
-        config, wait_seconds=assignment_wait_seconds, print_func=print_func
+        config, wait_seconds=assignment_wait_seconds, print_func=print_func, unstarted=unstarted
     )
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)

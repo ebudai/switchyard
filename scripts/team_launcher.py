@@ -3525,6 +3525,25 @@ def _expects_launch_runtime_hook_probe(role: RoleConfig) -> bool:
     return cli_name == "codex"
 
 
+def _runtime_hook_deferred_until_activity(role: RoleConfig, status: "LaunchSessionRecordStatus") -> bool:
+    """A pane whose launch is reported and whose hook cannot report until it is used.
+
+    Interactive Codex defers SessionStart until the first prompt, so a pane it
+    has just started writes neither a runtime hook nor a session record however
+    long it is watched. The launcher's own outcome for it is the answer there
+    is to have. The report already says nothing about this case; the wait uses
+    the same rule, so it no longer spends its whole timeout on a record that is
+    not coming -- ten seconds of every fresh `switchyard new` (SYRD-248).
+    """
+    return (
+        _expects_launch_runtime_hook_probe(role)
+        and status.pane_state_source.startswith("team_launcher.")
+        and not status.runtime_hook_reported
+        and not status.unverified_resume
+        and not status.resume_fallback
+    )
+
+
 def launch_session_record_statuses(
     config: ProjectConfig,
     roles: Sequence[RoleConfig] | None = None,
@@ -3545,6 +3564,7 @@ def launch_session_record_statuses(
         else time.monotonic()
     )
     statuses: list[LaunchSessionRecordStatus] = []
+    settled_at: float | None = None
     while True:
         statuses = [
             LaunchSessionRecordStatus(
@@ -3588,8 +3608,23 @@ def launch_session_record_statuses(
             for role, status in zip(roles, statuses, strict=True)
         )
         fallback_grace_elapsed = now >= fallback_deadline
+        # Every pane accounted for: a record, or a launch the launcher reported
+        # for a runtime that cannot record anything until it is used. A short
+        # grace still lets a hook that is merely slow arrive and be reported.
+        all_settled = pane_outcomes_required and all_pane_outcomes_reported and all(
+            status.found or _runtime_hook_deferred_until_activity(role, status)
+            for role, status in zip(roles, statuses, strict=True)
+        )
+        if all_settled and settled_at is None:
+            settled_at = now
+        if not all_settled:
+            settled_at = None
+        settled_grace_elapsed = (
+            settled_at is not None and now - settled_at >= max(0.0, fallback_grace_seconds)
+        )
         if (
             now >= deadline
+            or settled_grace_elapsed
             or (resume_fallback_found and all_pane_outcomes_reported and all_runtime_hooks_reported)
             or (all_records_found and all_pane_outcomes_reported and all_runtime_hooks_reported)
             or (
@@ -3603,6 +3638,8 @@ def launch_session_record_statuses(
         next_deadline = deadline
         if all_records_found and fallback_changed_since_ns is not None and not pane_outcomes_required:
             next_deadline = min(deadline, fallback_deadline)
+        if settled_at is not None:
+            next_deadline = min(next_deadline, settled_at + max(0.0, fallback_grace_seconds))
         sleep_seconds = min(max(0.01, poll_seconds), max(0.0, next_deadline - now))
         if sleep_seconds <= 0:
             return statuses
@@ -3661,12 +3698,7 @@ def report_launch_session_records(
     for status in statuses:
         role = roles_by_target.get(status.target)
         codex_runtime_hook_deferred_until_activity = (
-            role is not None
-            and _expects_launch_runtime_hook_probe(role)
-            and status.pane_state_source.startswith("team_launcher.")
-            and not status.runtime_hook_reported
-            and not status.unverified_resume
-            and not status.resume_fallback
+            role is not None and _runtime_hook_deferred_until_activity(role, status)
         )
         if status.attached_to_running:
             continue
@@ -10506,6 +10538,7 @@ def launch_project(
                 # once refused a launch that had in fact succeeded (SYRD-162).
                 assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
                 print_func=print_func,
+                unstarted=tuple(failed_roles),
             )
         elif launchable_viewer_roles:
             launch_result = launch_tmux_viewer_session(
@@ -10591,6 +10624,7 @@ def launch_project(
                 # Same race, same bound: these workers were started above.
                 assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
                 print_func=print_func,
+                unstarted=tuple(failed_roles),
             )
         elif running_through_tenant_control() and hand_presentation_back_to_the_caller(
             config,
@@ -25069,6 +25103,70 @@ def announce_new_project_presentation(
     )
 
 
+class ProvisioningStages:
+    """Say which stage `switchyard new` is in, and how long each one took.
+
+    A fresh project took about a minute on a modest host and the operator could
+    not tell which part was taking the time, or whether a quiet screen was a
+    wait for them or a stall (SYRD-248). One line as each stage starts, marked
+    when it is waiting for the operator, and one line at the end naming what
+    each stage cost.
+    """
+
+    def __init__(
+        self,
+        names: Sequence[str],
+        *,
+        print_func: Callable[[str], None] = print,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.names = tuple(names)
+        self.print_func = print_func
+        self.monotonic = monotonic
+        self.started: float | None = None
+        self.current: tuple[str, float] | None = None
+        self.durations: list[tuple[str, float]] = []
+
+    def begin(self, name: str, *, waits_for_you: bool = False) -> None:
+        now = self.monotonic()
+        if self.started is None:
+            self.started = now
+        self._close(now)
+        self.current = (name, now)
+        index = self.names.index(name) + 1 if name in self.names else len(self.durations) + 1
+        self.print_func(
+            f"switchyard: [{index}/{len(self.names)}] {name}"
+            + (" -- this step waits for you" if waits_for_you else "")
+            + f" ({now - self.started:.1f}s in)"
+        )
+
+    def finish(self) -> None:
+        now = self.monotonic()
+        self._close(now)
+        if self.started is None:
+            return
+        self.print_func(
+            f"switchyard: provisioned in {now - self.started:.1f}s: "
+            + ", ".join(f"{name} {seconds:.1f}s" for name, seconds in self.durations)
+        )
+
+    def _close(self, now: float) -> None:
+        if self.current is not None:
+            name, since = self.current
+            self.durations.append((name, now - since))
+            self.current = None
+
+
+#: The stages `switchyard new` reports, in order.
+NEW_PROJECT_STAGES = (
+    "host and agent CLI checks",
+    "project accounts and files",
+    "database and board",
+    "provider sign-in and folder trust",
+    "role panes",
+)
+
+
 def switchyard_new_command(
     *,
     slug: str | None = None,
@@ -25257,6 +25355,8 @@ def switchyard_new_command(
     artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
     director_onboarding = _switchyard_dir(project_dir) / SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
+    stages = ProvisioningStages(NEW_PROJECT_STAGES, print_func=print_func)
+    stages.begin("host and agent CLI checks")
     _precheck_project_path_before_mutating(owner_user, project_dir)
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
     precheck_artifact = load_project_design_artifact(from_artifact, expected_project=resolved_slug) if from_artifact else None
@@ -25310,6 +25410,7 @@ def switchyard_new_command(
         input_func=input_func,
         print_func=print_func,
     )
+    stages.begin("project accounts and files")
     _ensure_board_service_user(precheck_plan.service_user, runner=runner)
     _ensure_board_service_peer_auth(precheck_plan, source_repo=effective_source_repo, runner=runner)
     owner_result = _ensure_owner_user_and_project_dir(
@@ -25473,6 +25574,7 @@ def switchyard_new_command(
     provision_dir = (output_dir or (_switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
     provision_dir.mkdir(parents=True, exist_ok=True)
     _write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
+    stages.begin("database and board")
     result = new_project_command(
         resolved_slug,
         from_artifact=artifact_path,
@@ -25521,6 +25623,7 @@ def switchyard_new_command(
     # make a pane unusable before it starts. Whether a model can call a tool is
     # the provider's own answer to give, in the pane, in its own words -- and
     # `switchyard validate-models` still asks it on purpose.
+    stages.begin("provider sign-in and folder trust", waits_for_you=True)
     first_run_auth_report = run_first_run_auth_phase(
         config,
         owner_user=owner_user,
@@ -25590,6 +25693,7 @@ def switchyard_new_command(
     # the root-owned staged bundle, and a tenant whose staging was skipped
     # opened its tabs onto a command that was not there while provisioning
     # reported success (SYRD-249).
+    stages.begin("role panes")
     staging_problems = ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
     if staging_problems:
         for problem in staging_problems:
@@ -25645,6 +25749,7 @@ def switchyard_new_command(
             print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
         else:
             print_func("switchyard: design phase skipped; no designer pane configured")
+    stages.finish()
     return 0
 
 

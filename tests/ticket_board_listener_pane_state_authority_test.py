@@ -39,9 +39,11 @@ from scripts.ticket_board.notify_listener import (  # noqa: E402
     PaneActivityGate,
     PaneHookStateStore,
     TicketBoardNotifyListener,
+    live_pane_targets,
     pane_state_authority,
     registered_pane_targets,
 )
+from scripts.ticket_board.peer_identity import read_process  # noqa: E402
 from scripts.ticket_board.project_provision import (  # noqa: E402
     build_plan,
     render_listener_unit,
@@ -174,6 +176,7 @@ verify_current_release_sha() { record verify-sha; }
 restart_live_service() { record restart-board; }
 smoke_check_http() { record smoke; return $SMOKE_RESULT; }
 verify_live_build_id() { record build-id; }
+verify_live_commit_repositories() { record commit-repos; }
 verify_post_deploy_system_runtime() { record post-runtime; }
 rollback_live_service() { record rollback; }
 verify_listener_pane_state_authority() { record verify-pane-state; return $PANE_STATE_RESULT; }
@@ -383,6 +386,167 @@ def test_the_command_line_check_exits_nonzero_on_a_mismatch() -> None:
         passed = check()
         assert passed.returncode == 0, passed.stdout + passed.stderr
         assert "1 of 1 registered roles" in passed.stdout, passed.stdout
+
+
+# --- 3b. stopped panes are not a mismatch (SYRD-252) -----------------------
+#
+# Live MEFP UAT: every role was deliberately stopped before the upgrade, so the
+# board still held four runtime assignments whose processes no longer existed.
+# The check counted them as registered roles, found no hook state for any, and
+# rolled back a release that was otherwise healthy. The listener never delivers
+# to such an assignment -- refresh_workflow drops it with session_is_live -- so
+# no hook state is owed for it. These cases use real processes and the real
+# /proc, because the shipped default is the path the deploy takes.
+
+
+def exited_pid() -> tuple[int, int]:
+    """A pid that existed and is now reaped, with the start time it had."""
+    child = subprocess.Popen(["sleep", "30"])
+    started = read_process(child.pid)
+    assert started is not None, child.pid
+    child.kill()
+    child.wait()
+    assert read_process(child.pid) is None, f"pid {child.pid} was reused before the test could use it"
+    return child.pid, started.start_time
+
+
+class LivePane:
+    """A running process standing in for a pane's worker, with its identity."""
+
+    def __enter__(self) -> "LivePane":
+        self.child = subprocess.Popen(["sleep", "300"])
+        info = read_process(self.child.pid)
+        assert info is not None, self.child.pid
+        self.pid, self.start_time = self.child.pid, info.start_time
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.child.kill()
+        self.child.wait()
+
+
+def assignment(target: str, pid: int, start_time: int) -> dict:
+    return {"actual_target": target, "process_pid": pid, "process_start_time": start_time}
+
+
+def run_cli(payload: dict, state_dir: Path) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory(prefix="syrd252-cli.") as tmp:
+        assignments = Path(tmp) / "assignments.json"
+        assignments.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(LISTENER_CLI), "--verify-pane-state-authority",
+             "--assignments-json", str(assignments), "--pane-state-dir", str(state_dir)],
+            capture_output=True, text=True, check=False,
+        )
+
+
+def test_a_tenant_with_every_pane_stopped_can_deploy() -> None:
+    """The MEFP shape: four assignments, four processes that no longer exist."""
+    roles = ("mefp-director:0.0", "mefp-audit:0.0", "mefp-main:0.0", "mefp-ops:0.0")
+    payload = {"assignments": {
+        target.split("-")[1].split(":")[0]: assignment(target, *exited_pid()) for target in roles
+    }}
+    live, stale = live_pane_targets(payload)
+    assert live == (), live
+    assert [target for target, _ in stale] == list(roles), stale
+    assert all("no longer exists" in reason for _, reason in stale), stale
+    with tempfile.TemporaryDirectory(prefix="syrd252-stopped.") as tmp:
+        report = pane_state_authority(live, PaneHookStateStore(tmp), stale=stale)
+        assert report.ok is True, report
+        assert "no live registered roles" in report.describe(), report.describe()
+        assert "4 stale assignment(s)" in report.describe(), report.describe()
+
+        # And the form the deploy actually runs: exit 0, with nothing written
+        # into the directory to make it pass.
+        state_dir = Path(tmp) / "pane-state"
+        state_dir.mkdir()
+        passed = run_cli(payload, state_dir)
+        assert passed.returncode == 0, passed.stdout + passed.stderr
+        assert "stale assignment" in passed.stdout, passed.stdout
+        assert list(state_dir.iterdir()) == [], list(state_dir.iterdir())
+
+
+def test_a_live_pane_writing_elsewhere_still_rolls_the_deploy_back() -> None:
+    """SYRD-95 unweakened: a running worker with no state here is a mismatch."""
+    with LivePane() as pane, tempfile.TemporaryDirectory(prefix="syrd252-live.") as tmp:
+        payload = {"assignments": {"ops": assignment("mefp-ops:0.0", pane.pid, pane.start_time)}}
+        live, stale = live_pane_targets(payload)
+        assert live == ("mefp-ops:0.0",) and stale == (), (live, stale)
+
+        state_dir = Path(tmp) / "pane-state"
+        state_dir.mkdir()
+        failed = run_cli(payload, state_dir)
+        assert failed.returncode == 1, failed.stdout + failed.stderr
+        assert "none of the 1 registered roles" in failed.stdout, failed.stdout
+
+        # Its hooks writing into this directory is what makes it agree.
+        PaneHookStateStore(state_dir).write("mefp-ops:0.0", "idle", source="codex.Stop")
+        assert run_cli(payload, state_dir).returncode == 0
+
+
+def test_stale_assignments_do_not_hide_a_live_pane_writing_elsewhere() -> None:
+    """Mixed: stopped roles are set aside, the live one is still judged."""
+    with LivePane() as pane, tempfile.TemporaryDirectory(prefix="syrd252-mixed.") as tmp:
+        payload = {"assignments": {
+            "director": assignment("mefp-director:0.0", *exited_pid()),
+            "main": assignment("mefp-main:0.0", pane.pid, pane.start_time),
+        }}
+        failed = run_cli(payload, Path(tmp))
+        assert failed.returncode == 1, failed.stdout + failed.stderr
+        assert "none of the 1 registered roles (mefp-main:0.0)" in failed.stdout, failed.stdout
+
+
+def test_a_reused_pid_is_stale_not_live() -> None:
+    """The pid runs, but it is not the process the board registered."""
+    with LivePane() as pane:
+        live, stale = live_pane_targets(
+            {"assignments": {"ops": assignment("mefp-ops:0.0", pane.pid, pane.start_time + 1)}}
+        )
+        assert live == (), live
+        assert len(stale) == 1 and "reused" in stale[0][1], stale
+
+
+def test_an_assignment_that_cannot_be_proven_gone_is_counted_live() -> None:
+    """Fail closed: no recorded process is not evidence that nothing runs."""
+    payload = {"assignments": {
+        "ops": {"actual_target": "mefp-ops:0.0"},
+        "main": {"actual_target": "mefp-main:0.0", "process_pid": "not-a-pid"},
+    }}
+    live, stale = live_pane_targets(payload)
+    assert live == ("mefp-ops:0.0", "mefp-main:0.0") and stale == (), (live, stale)
+    with tempfile.TemporaryDirectory(prefix="syrd252-unknown.") as tmp:
+        assert run_cli(payload, Path(tmp)).returncode == 1
+
+
+def test_a_process_that_exists_but_cannot_be_read_is_counted_live() -> None:
+    """hidepid, or another account's pane: unreadable is not gone.
+
+    The kernel is asked directly. pid 1 always exists and, for a caller that is
+    not root, answers EPERM -- which must read as "exists".
+    """
+    from scripts.ticket_board.notify_listener import _pid_exists, assignment_process_gone
+
+    assert _pid_exists(1) is True
+    dead, _started = exited_pid()
+    assert _pid_exists(dead) is False
+
+    # A /proc that lists the pid but will not show its stat.
+    with tempfile.TemporaryDirectory(prefix="syrd252-hidden.") as tmp:
+        proc_root = Path(tmp)
+        (proc_root / "4242").mkdir()
+        hidden = {"actual_target": "t:0.0", "process_pid": 4242, "process_start_time": 7}
+        assert assignment_process_gone(hidden, proc_root=proc_root) == ""
+        assert "no longer exists" in assignment_process_gone(
+            {**hidden, "process_pid": 4343}, proc_root=proc_root
+        )
+
+    # On the real /proc: a pid whose stat cannot be read (the pid of a reaped
+    # child reads that way) is judged by the kernel alone. If the kernel says
+    # the pid exists, it is live; only "no such process" makes it stale.
+    unreadable = {"actual_target": "t:0.0", "process_pid": dead, "process_start_time": 7}
+    assert assignment_process_gone(unreadable, pid_exists=lambda _pid: True) == ""
+    assert assignment_process_gone(unreadable, pid_exists=lambda _pid: None) == ""
+    assert "no longer exists" in assignment_process_gone(unreadable, pid_exists=lambda _pid: False)
 
 
 # --- 4 and 5. a real queue, a real gate, a real database -------------------

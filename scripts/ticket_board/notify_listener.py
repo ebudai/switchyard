@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, Sequence
 import psycopg
 from psycopg import sql
 
-from .peer_identity import SessionIdentity, session_is_live
+from .peer_identity import PROC_ROOT, SessionIdentity, read_process, session_is_live
 from .runtime_paths import directorctl_path
 
 CHANNEL = "ticket_board_state_transition"
@@ -798,6 +798,11 @@ class PaneStateAuthority:
     registered: tuple[str, ...]
     with_state: tuple[str, ...]
     without_state: tuple[str, ...]
+    # Assignments whose process is provably gone, with the proof. They are
+    # not registered roles for this purpose: the listener itself drops them
+    # before delivering (refresh_workflow), so no hook state is owed for them
+    # and their absence says nothing about which directory is right (SYRD-252).
+    stale: tuple[tuple[str, str], ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -808,8 +813,22 @@ class PaneStateAuthority:
         return not self.registered or bool(self.with_state)
 
     def describe(self) -> str:
+        stale = ""
+        if self.stale:
+            stale = (
+                f"; {len(self.stale)} stale assignment(s) not counted, their process is gone: "
+                + ", ".join(f"{target} ({reason})" for target, reason in self.stale)
+            )
         if not self.registered:
+            if self.stale:
+                return (
+                    f"pane-state authority: no live registered roles; nothing to serve from "
+                    f"{self.state_dir}{stale}"
+                )
             return f"pane-state authority: no registered roles; nothing to serve from {self.state_dir}"
+        return self._describe_registered() + stale
+
+    def _describe_registered(self) -> str:
         if not self.with_state:
             return (
                 f"pane-state authority: {self.state_dir} holds hook state for none of the "
@@ -829,7 +848,10 @@ class PaneStateAuthority:
 
 
 def pane_state_authority(
-    targets: Iterable[str], store: "PaneHookStateStore"
+    targets: Iterable[str],
+    store: "PaneHookStateStore",
+    *,
+    stale: Iterable[tuple[str, str]] = (),
 ) -> PaneStateAuthority:
     """Compare the configured directory against the roles actually registered."""
 
@@ -841,7 +863,90 @@ def pane_state_authority(
         registered=registered,
         with_state=with_state,
         without_state=without_state,
+        stale=tuple(stale),
     )
+
+
+def _pid_exists(pid: int) -> bool | None:
+    """Whether the kernel knows this pid, even when /proc will not show it.
+
+    kill(pid, 0) is not subject to hidepid, so EPERM still proves existence.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def assignment_process_gone(
+    assignment: Any,
+    *,
+    proc_root: Path = PROC_ROOT,
+    pid_exists: Callable[[int], bool | None] = _pid_exists,
+) -> str:
+    """Why an assignment's process is provably gone, or "" if it may be live.
+
+    Only positive proof counts. An assignment with no recorded process, or a
+    process that exists but cannot be read, is treated as live -- so the check
+    stays fail-closed for anything it cannot see (SYRD-95), and a stopped
+    tenant, whose recorded processes simply no longer exist, can still deploy
+    (SYRD-252).
+    """
+
+    if not isinstance(assignment, dict):
+        return ""
+    try:
+        pid = int(assignment.get("process_pid") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if pid <= 1:
+        return ""
+    try:
+        recorded_start = int(assignment.get("process_start_time") or 0)
+    except (TypeError, ValueError):
+        recorded_start = 0
+    process = read_process(pid, proc_root=proc_root)
+    if process is not None:
+        if recorded_start > 0 and process.start_time != recorded_start:
+            return f"pid {pid} was reused: started at {process.start_time}, not {recorded_start}"
+        return ""
+    if proc_root != PROC_ROOT:
+        # A substituted /proc has no kernel behind it to ask; absence there is
+        # all the evidence there is.
+        return "" if (proc_root / str(pid)).exists() else f"pid {pid} no longer exists"
+    # Unreadable is not gone: hidepid, or a process this caller may not
+    # inspect. Only the kernel saying "no such process" proves it.
+    return f"pid {pid} no longer exists" if pid_exists(pid) is False else ""
+
+
+def live_pane_targets(
+    payload: Any, *, proc_root: Path = PROC_ROOT
+) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Split the board's registered targets into possibly-live and provably-stale."""
+
+    assignments = (payload or {}).get("assignments") if isinstance(payload, dict) else None
+    if not isinstance(assignments, dict):
+        return (), ()
+    live: list[str] = []
+    stale: list[tuple[str, str]] = []
+    for assignment in assignments.values():
+        if not isinstance(assignment, dict):
+            continue
+        target = str(assignment.get("actual_target") or "").strip()
+        if not target:
+            continue
+        reason = assignment_process_gone(assignment, proc_root=proc_root)
+        if reason:
+            stale.append((target, reason))
+        else:
+            live.append(target)
+    live_targets = tuple(dict.fromkeys(live))
+    return live_targets, tuple((t, r) for t, r in dict.fromkeys(stale) if t not in live_targets)
 
 
 def registered_pane_targets(payload: Any) -> tuple[str, ...]:
@@ -3673,9 +3778,8 @@ def verify_pane_state_authority(args: argparse.Namespace) -> int:
     payload = load_runtime_assignments(
         board_url=args.board_url, assignments_json=args.assignments_json
     )
-    report = pane_state_authority(
-        registered_pane_targets(payload), PaneHookStateStore(args.pane_state_dir)
-    )
+    live, stale = live_pane_targets(payload)
+    report = pane_state_authority(live, PaneHookStateStore(args.pane_state_dir), stale=stale)
     print(report.describe())
     if report.ok:
         return 0

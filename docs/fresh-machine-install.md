@@ -60,15 +60,22 @@ hard error rather than something switchyard overwrites.
 
 ```bash
 sudo apt-get update
-sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl
+sudo apt-get install python3 postgresql postgresql-client tmux git curl python3-venv python3-pil acl polkitd pkexec
 ```
+
+On releases older than Debian 12 and Ubuntu 22.10, polkit is the single
+`policykit-1` package; the installer picks whichever the archive has.
 
 ### pacman
 
 ```bash
 sudo pacman -Syu
-sudo pacman -S python postgresql tmux git curl python-pillow python-psycopg acl
+sudo pacman -S python postgresql tmux git curl python-pillow python-psycopg acl polkit
 ```
+
+polkit is required, not optional: provisioning installs a polkit rule so the
+project account can restart its own board, and privileged commands run through
+`pkexec`. Desktop installs already have it; minimal and server installs may not.
 
 The installer runs `apt-get update` before apt installs and prints that refresh.
 It does not run `pacman -Sy`; Arch-family systems should use the full

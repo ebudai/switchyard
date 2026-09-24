@@ -9823,6 +9823,17 @@ def presentation_controller_enabled(config: "ProjectConfig", *, config_path: Pat
     return presentation_controller.presentation_enabled(config, config_path=config_path)
 
 
+def presentation_section_for_roles(roles: "Iterable[Mapping[str, Any]]") -> dict[str, Any]:
+    """`legacy_presentation_section`'s rule, over a configuration's raw role entries."""
+    mapping = {
+        str(role["slot"]): str(role.get("role"))
+        for role in roles
+        if isinstance(role, Mapping) and not role.get("detached") and role.get("slot") is not None
+    }
+    slot_count = max((int(slot) for slot in mapping), default=-1) + 1
+    return {"slot_count": slot_count, "layouts": {"default": mapping}}
+
+
 def legacy_presentation_section(config: "ProjectConfig") -> dict[str, Any]:
     """The section `switchyard new` writes, from this tenant's configured slots.
 
@@ -24076,6 +24087,8 @@ def plan_projection_rewrites(
         projected = projection_files(config_path, rebound)
     except (KeyError, ValueError, OSError, SystemExit) as exc:
         return [], [f"the tenant projection could not be generated from the rebound workflow: {exc!r}"]
+    if config_path in projected:
+        projected[config_path] = _reconciled_presentation_section(projected[config_path])
     for path, text in projected.items():
         holder, problem = read_plan_no_follow(
             path, require_root_owned=False, require_owner_uids=sorted({0, owner_uid}),
@@ -24091,6 +24104,32 @@ def plan_projection_rewrites(
     # reconciled before the board is (SYRD-262).
     rewrites.sort(key=lambda item: item.path != config_path)
     return rewrites, problems
+
+
+def _reconciled_presentation_section(text: str) -> str:
+    """Re-derive a presentation section Switchyard wrote, from the slots now configured.
+
+    The legacy presentation migration (SYRD-233) writes `slot_count` and a
+    `default` layout from the slots in force at the time. On MEFP those were
+    the example's, so the section went on holding its window at six slots
+    after the roles were put back on 0-3 (SYRD-262). A section of exactly that
+    shape -- nothing but a `default` layout -- carries nothing a person chose,
+    so it is derived again by the same rule. One with any other layout is
+    somebody's own and is left as it is. Either way the result is in the
+    preview's diff and under its digest before anything is written.
+    """
+    document = json.loads(text)
+    section = document.get("presentation")
+    if not isinstance(section, dict):
+        return text
+    layouts = section.get("layouts")
+    if set(section) - {"slot_count", "layouts"} or not isinstance(layouts, dict) or set(layouts) - {"default"}:
+        return text
+    derived = presentation_section_for_roles(document.get("roles") or [])
+    if derived["slot_count"] < 1 or section == derived:
+        return text
+    document["presentation"] = derived
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
 def rebind_review_digest(rebind: "PaneRebind", rewrites: list[ProjectionRewrite]) -> str:

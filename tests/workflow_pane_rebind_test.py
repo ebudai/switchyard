@@ -512,6 +512,13 @@ def main_board_cases() -> None:
             # still say 1/2/5/4; the four-pane window shows 0-3. The operator
             # states the layout; the runtimes just repaired must not move.
             layout = {"director": 0, "main": 1, "ops": 2, "audit": 3}
+            # The legacy presentation migration (SYRD-233) wrote its section
+            # from the slots in force when it ran -- here, the example's --
+            # which is what held MEFP's window at six panes afterwards.
+            record = json.loads(config_path.read_text())
+            record["presentation"] = tl.presentation_section_for_roles(record["roles"])
+            check(record["presentation"]["slot_count"] == 6, f"the stale section: {record['presentation']}")
+            config_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
             config = tl.load_project_config(PROJECT, config_path)
             for slots, expected in (({"director": 7}, "is not a visible slot"),
                                     ({"intruder": 0}, "is not a pane role"),
@@ -535,8 +542,14 @@ def main_board_cases() -> None:
                     sections.setdefault(current, []).append(line[4:])
             check(sections.get("declared") and all('"slot"' in l for l in sections["declared"]),
                   f"the document diff touches only slots: {sections.get('declared')}")
-            check(all('"slot"' in l for l in sections.get(str(config_path)) or ['"slot"']),
-                  f"and so does the record's: {sections.get(str(config_path))}")
+            import re as _re
+
+            record_diff = sections.get(str(config_path)) or []
+            check(record_diff and all('"slot' in l or _re.fullmatch(r'[-+]\s*"\d+": "\w+",?', l)
+                                      or l.strip() in {"+}", "-}", "+},", "-},"} for l in record_diff),
+                  f"and the record's: slots, and the presentation section derived from them: {record_diff}")
+            check(any('"slot_count": 6' in l for l in record_diff) and any('"slot_count": 4' in l for l in record_diff),
+                  f"the section's six becomes four in the reviewed diff: {record_diff}")
             slot_review = said.split("--expect ")[-1].strip()
             before = snapshot(board)
             code, said, ran = run_command(board, plan, verified, config, runtimes={}, slots=layout,
@@ -558,6 +571,30 @@ def main_board_cases() -> None:
                   f"the trusted record agrees, runtimes kept: {record}")
             check({"director", "ops"} <= set(board.app.runtime_targets()),
                   "and the live panes are still served")
+            section = json.loads(config_path.read_text())["presentation"]
+            check(section == {"slot_count": 4, "layouts": {"default": {"0": "director", "1": "main",
+                                                                        "2": "ops", "3": "audit"}}},
+                  f"and the presentation section now asks for four panes: {section}")
+            # MEFP as it stands now: bindings and slots already right, only the
+            # stale section left. A bare rebind finds exactly that, shows it,
+            # and writes the record alone -- the board is not touched.
+            record = json.loads(config_path.read_text())
+            record["presentation"] = {"slot_count": 6, "layouts": {"default": {
+                "1": "director", "2": "main", "4": "audit", "5": "ops"}}}
+            config_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+            config = tl.load_project_config(PROJECT, config_path)
+            revision_now = live_state(board)[0]
+            code, said, ran = run_command(board, plan, verified, config, runtimes={})
+            check(code == 0 and not ran and "  | --- declared" not in said
+                  and any('"slot_count": 4' in l for l in said.splitlines()),
+                  f"a bare preview shows only the section, no workflow change: {said}")
+            section_review = said.split("--expect ")[-1].strip()
+            code, said, ran = run_command(board, plan, verified, config, runtimes={}, apply=True,
+                                          expect=section_review)
+            check(code == 0 and not ran, f"its apply writes the record and runs no SQL: {said}")
+            check(live_state(board)[0] == revision_now, "so the board's revision does not move")
+            check(json.loads(config_path.read_text())["presentation"]["slot_count"] == 4,
+                  "and the record asks for four panes")
             config = tl.load_project_config(PROJECT, config_path)
             # From here the board's current state is the slot repair's.
             new_revision, rebound = live_state(board)

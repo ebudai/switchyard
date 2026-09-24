@@ -612,6 +612,31 @@ def _read_state(path: Path, *, config: team_launcher.ProjectConfig, config_path:
             for mapping in state["layouts"].values():
                 mapping[str(slot)] = None
         state["slot_count"] = projected_count
+    elif projected_count < state["slot_count"]:
+        # And back down. A count that only grew kept MEFP's window at the six
+        # slots its example-derived layout once needed after its roles were
+        # put back on 0-3: `switchyard start` opened six panes, two of them
+        # inert (SYRD-262). Shrink to what is still in use -- never below what
+        # the configuration projects, and never past a slot a named layout or
+        # a non-default active mapping still shows somebody in.
+        needed = projected_count
+        occupied = [
+            mapping for name, mapping in state["layouts"].items() if name != "default"
+        ]
+        if state["active_layout"] != "default":
+            occupied.append(state["slots"])
+        for mapping in occupied:
+            for slot, role in mapping.items():
+                if role is not None:
+                    needed = max(needed, int(slot) + 1)
+        if needed < state["slot_count"]:
+            for slot in range(needed, state["slot_count"]):
+                state["slots"].pop(str(slot), None)
+                for mapping in state["layouts"].values():
+                    mapping.pop(str(slot), None)
+            state["slot_count"] = needed
+            if state["focused_slot"] >= needed:
+                state["focused_slot"] = 0
     for name, mapping in current_defaults["layouts"].items():
         state["layouts"][name] = {
             str(slot): mapping.get(str(slot))

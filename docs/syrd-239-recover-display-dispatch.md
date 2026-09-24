@@ -205,15 +205,132 @@ conventional name, so the two could not be told apart.
 
 **Mutation: 15/15 killed** (the 7 above plus 8 on the refusal).
 
+## Third live failure: success reported, the wrong displays rewired
+
+This happened after the declared runtime was repaired (SYRD-262, revision 4).
+`switchyard recover-display mefp` exited 0 and said the Director was recovered.
+On the User's four-pane window, though, the Director was not restored, and Ops
+turned into an inert "mefp: display slot hidden" screen. The command's own
+report called slot 1 Director and slot 5 Ops `client=connected`.
+
+**Cause, reproduced on a real tmux server.**
+
+- **Recovery re-applied the whole stored mapping.** It called `_mutate` with a
+  no-op transform, which runs `_apply_mapping` over every slot and does
+  `respawn-pane -k` on each slot's proxy.
+- **The stored mapping was not what the window showed.** While the layout is
+  "default", `_read_state` re-derives the mapping from the *current* config on
+  every read. After mefp's role set changed, it named Director slot 1 and Ops
+  slot 5 of 6. The window that was open still showed display 0-3 as they were
+  launched. Re-applying the mapping rewired the visible panes: in the
+  reproduction, the pane that showed the Director got `designer`, the Director
+  moved to another pane, and the pane that showed Ops got `audit` (on mefp it
+  got an empty slot, hence "hidden").
+- **"connected" was the `@switchyard_role` label.** That label is set right
+  after a respawn whether or not the nested attach inside it lives.
+
+**The fix.**
+
+- **Recovery finds the display from the live display sessions themselves.**
+  It reads the `<project>-display-<n>` sessions and each one's label, which is
+  what the open window is showing. It reconfigures only the displays showing
+  that role, and never the stored mapping.
+- **Every other display is left alone,** as are the viewer layout and the
+  mapping. Viewer observer flags are reconciled, which respawns nothing.
+- **Success means proven attachment.** Each recovered display's pane must be
+  alive, and its `pane_tty` must be a client of the worker's own session. The
+  proxy is a nested `tmux attach` in that pane, so nothing else puts that tty
+  in the worker's client list. There is a bounded wait of 5 seconds.
+  Otherwise recovery refuses, and nothing is recorded as a recovery.
+- **History records the actor and the displays touched,** without changing any
+  slot.
+- **With no live display showing the role, recovery refuses before the worker
+  step,** naming what each live display does show. Nothing is started or
+  restarted on the way.
+- **The report measures instead of echoing the label.** `client_state` is now:
+  - `connected` only when attachment is proven;
+  - `detached` when the slot is labelled for a role but no live attach exists
+    from it;
+  - `hidden` for a hidden slot;
+  - `disconnected` or `failed`, as before.
+
+  `actual_role` is still the label, and the report now says whether it is true.
+- **Attached is not the same as seen.** The Director's follow-up read-only
+  finding: on mefp the Director slot's *window pane process* had itself exited.
+  A display proxied perfectly to its worker was on no screen. So where the
+  presentation **has** a window, success also requires that window to show the
+  recovered display: either a terminal presentation does not own is a client
+  of the display (a separate-window tab), or a viewer pane is its client and
+  the viewer has such a terminal. Otherwise recovery says the proxy was
+  reattached but the display is not visible, records nothing, and names the
+  exact command that window's pane runs (`display_attach_args_for`). The test
+  runs that printed command as a new pane, and the next recovery then
+  succeeds.
+- **Headless is different.** Where no window is attached to the presentation
+  at all, visibility is not the test: attached is success, and the report
+  says `window_attached: false`. Demanding a window there broke
+  `test_isolated_tmux_exact_targets_preserve_prefix_collision_sessions`, a
+  headless viewer recovering `app`, and would have made `present recover`
+  unusable without a desktop. That neighbour is what narrowed the rule.
+- **Liveness is checked as well as the tty.** A dead pane is never attached,
+  because Linux reuses pty numbers. Another terminal attached to the Director
+  can hold a dead slot's old tty.
+
+**Evidence.**
+
+- `tests/display_recovery_live_tmux_test.py` is new, with 53 checks in 5 cases on a real
+  but **isolated** tmux server: `TMUX` is removed, `TMUX_TMPDIR` is temporary,
+  and the socket path is asserted before anything is created or killed.
+- It builds mefp's shape:
+  - four display sessions launched in the old order, with real nested
+    attaches;
+  - four real outer clients standing in for the Konsole panes;
+  - a config whose derived mapping says Director 1 / Ops 5.
+- It closes the Director's attachment and recovers through the real
+  `presentation_action`. Then:
+  - display 0 is again a client of the Director;
+  - displays 1-3 keep the same proxy pid, the same attachment and the same
+    label;
+  - every outer client is still attached;
+  - history records `[0]`;
+  - the mapping is unchanged;
+  - the report agrees.
+- A recovery whose worker is gone is refused and records nothing. A window
+  with no Director display is refused before the worker step.
+- **On main (`0a0b08d`, and again on `163d3c6`) the same test fails.** The report calls the closed
+  attachment `connected`. Without that check, display 0 is not reattached. A
+  scratch run shows main respawning all four displays and rewiring them:
+  `director -> designer`, `main -> director`, `audit -> main`, `ops -> audit`.
+- `operator_display_recovery_test`: 74 checks. **Mutation: 16/16** on this
+  round (10 on recovery and the report, 6 on visibility), and the earlier 15
+  are still 15/15.
+- **Two test-harness defects of my own, found and fixed:**
+  - `team_launcher` is loaded twice, once as `scripts.team_launcher`, so a patch
+    on the test's `tl` does not reach `presentation_controller`. The
+    divergence cases from the previous round passed by reading **this host's
+    real mefp grant**, which names eric. They now patch both modules, and they
+    authorize a name no grant contains, so a patch that misses fails the test
+    instead of passing it. Disabling the second-module patch makes them fail.
+  - The first draft of the live test let the real worker start run for the
+    same reason.
+- **One neighbour fixture was extended, not rewritten.**
+  `test_recover_command_requires_desktop_readiness_and_uses_prepared_role_environment`
+  had no display sessions at all; on main, "recover" created them by
+  re-applying the mapping. It now uses `AttachingPresentationRunner`, a
+  subclass that adds one live display labelled `app` and the nested client
+  its respawn produces. The shared fake and the case's assertions are
+  unchanged.
+- **Sweep:** rebased onto `163d3c6` (SYRD-262's slot reconciliation; no file
+  overlap). 31 suites give identical pass/fail against it, and all 198 cases
+  give identical results. `workflow_pane_rebind_test` (82 checks) passes on
+  top.
+
 ## Still required, and what this does NOT fix
 
-Successful live recovery on mefp stays blocked by the declared-runtime
-defect, which the Director is filing separately. Until that is repaired,
-`switchyard recover-display mefp` gives the precise refusal above, not a
-recovered Director. **SYRD-239's User UAT has not passed** and must not be
-recorded as passed.
-
-Once the declaration is corrected, repeat the live check:
+The declared-runtime defect was repaired as SYRD-262 (revision 4).
+**SYRD-239's User UAT has still not passed.** The third live failure above is
+what this round fixes, and the Director has held further live retries until an
+audited correction is ready. Then repeat the live check:
 
 1. Close only the Director's display attachment.
 2. Run `switchyard recover-display mefp` from the desktop operator's shell,

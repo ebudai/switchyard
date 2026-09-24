@@ -46,6 +46,12 @@ import team_launcher as tl  # noqa: E402
 CHECKS = 0
 PROJECT = "mefp"
 OPERATOR = "eric"
+#: For cases that patch the grant lookup rather than pass a grant root: a name
+#: no real grant on any host names. If a patch fails to reach the module that
+#: is actually called, the real grant is read instead -- and with this name it
+#: then REFUSES, so the mistake fails the test rather than passing it. With
+#: "eric" it passed: this host's real mefp grant names eric (SYRD-239).
+FAKE_OPERATOR = "syrd239-operator"
 
 
 def check(condition: bool, detail: str) -> None:
@@ -347,21 +353,35 @@ def test_the_bridge_carries_one_more_fixed_verb_and_no_role() -> None:
 
 
 class patched:
-    """Replace module attributes for one block, and always put them back."""
+    """Replace module attributes for one block, and always put them back.
+
+    `team_launcher` is loaded twice in this process: as `team_launcher`, which
+    this file imports, and as `scripts.team_launcher`, which
+    presentation_controller imports. They are different module objects, so a
+    patch on one does not reach code running in the other. Passing `tl`
+    patches both.
+    """
 
     def __init__(self, module, **replacements) -> None:
-        self.module = module
+        self.modules = [module]
+        if module is tl and pc.team_launcher is not tl:
+            self.modules.append(pc.team_launcher)
         self.replacements = replacements
 
     def __enter__(self):
-        self.saved = {name: getattr(self.module, name) for name in self.replacements}
-        for name, value in self.replacements.items():
-            setattr(self.module, name, value)
+        self.saved = [
+            (module, {name: getattr(module, name) for name in self.replacements})
+            for module in self.modules
+        ]
+        for module in self.modules:
+            for name, value in self.replacements.items():
+                setattr(module, name, value)
         return self
 
     def __exit__(self, *exc):
-        for name, value in self.saved.items():
-            setattr(self.module, name, value)
+        for module, saved in self.saved:
+            for name, value in saved.items():
+                setattr(module, name, value)
         return False
 
 
@@ -457,7 +477,7 @@ def test_without_the_bridge_the_refusal_does_not_send_them_back_to_it() -> None:
             tl,
             _resolve_switchyard_project=lambda selection: entry,
             _load_switchyard_project_config_for_command=load,
-            _tenant_control_grant=lambda project, **k: {"authorized_user": OPERATOR},
+            _tenant_control_grant=lambda project, **k: {"authorized_user": FAKE_OPERATOR},
             current_user_name=lambda: "stellaris-agent",
             switchyard_present_command=present,
         ):
@@ -467,7 +487,7 @@ def test_without_the_bridge_the_refusal_does_not_send_them_back_to_it() -> None:
                 ),
                 "did not arrive over that bridge",
             )
-            check(f"registered to {OPERATOR}" in message, f"it says who can: {message}")
+            check(f"registered to {FAKE_OPERATOR}" in message, f"it says who can: {message}")
             check("Run `switchyard recover-display" not in message,
                   f"and does not send them back to the command they ran: {message}")
             check(presented == [], "nothing was recovered")
@@ -484,7 +504,7 @@ def test_without_the_bridge_the_refusal_does_not_send_them_back_to_it() -> None:
                   f"the Director's own pane: {presented}")
             code = tl.switchyard_recover_display_command(
                 ["recover-display", PROJECT],
-                environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+                environ={tl.TENANT_CONTROL_CALLER_ENV: FAKE_OPERATOR},
             )
             check(code == 0 and presented[-1] == [PROJECT, "recover", "director"],
                   f"and the operator the bridge named: {presented}")
@@ -548,7 +568,7 @@ def _diverged_recovery(*, environ, declared, panes, processes):
             (Path(proc) / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
         isolated = tl.replace(cfg, role_state_isolation=True, run_as_user=tl.current_user_name())
         tmux = LivePanes(panes)
-        with patched(tl, _tenant_control_grant=lambda project, **k: {"authorized_user": OPERATOR}):
+        with patched(tl, _tenant_control_grant=lambda project, **k: {"authorized_user": FAKE_OPERATOR}):
             message = refused(lambda: pc.presentation_action(
                 isolated, config_path=Path("/nonexistent/mefp.json"), action="recover",
                 role_name="director", environ=environ, runner=tmux,
@@ -563,7 +583,7 @@ MEFP_DECLARED = {"director": ("claude", f"{PROJECT}-director:0.0"), "app": ("cla
 def test_a_live_worker_the_declaration_disowns_is_named_not_reattached() -> None:
     """What the operator is told instead of the bare "no live runtime assignment"."""
     message, calls = _diverged_recovery(
-        environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+        environ={tl.TENANT_CONTROL_CALLER_ENV: FAKE_OPERATOR},
         declared=MEFP_DECLARED,
         panes={f"{PROJECT}-director:0.0": 294308},
         processes={294308: ["codex", "resume", "019f9418"]},
@@ -600,7 +620,7 @@ def test_no_provable_divergence_leaves_the_ordinary_refusal() -> None:
     # The pane runs what is declared: the reason is something else, and this
     # does not pretend to know it.
     message, _calls = _diverged_recovery(
-        environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+        environ={tl.TENANT_CONTROL_CALLER_ENV: FAKE_OPERATOR},
         declared=MEFP_DECLARED,
         panes={f"{PROJECT}-director:0.0": 7},
         processes={7: ["claude"]},
@@ -610,7 +630,7 @@ def test_no_provable_divergence_leaves_the_ordinary_refusal() -> None:
 
     # A pane whose process is not a runtime proves nothing about the runtime.
     message, _calls = _diverged_recovery(
-        environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+        environ={tl.TENANT_CONTROL_CALLER_ENV: FAKE_OPERATOR},
         declared=MEFP_DECLARED,
         panes={f"{PROJECT}-director:0.0": 11},
         processes={11: ["/bin/bash", "-c", "codex"]},
@@ -620,7 +640,7 @@ def test_no_provable_divergence_leaves_the_ordinary_refusal() -> None:
 
     # A declared target outside this project is never probed.
     message, calls = _diverged_recovery(
-        environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+        environ={tl.TENANT_CONTROL_CALLER_ENV: FAKE_OPERATOR},
         declared={"director": ("claude", "otherproject-director:0.0"), "app": ("claude", f"{PROJECT}-app:0.0")},
         panes={"otherproject-director:0.0": 294308},
         processes={294308: ["codex"]},
@@ -636,7 +656,7 @@ def test_the_declared_target_is_probed_never_the_conventional_name() -> None:
     conventional name: only the declared one may be read."""
     recovery = f"{PROJECT}-director-r2:0.0"
     message, calls = _diverged_recovery(
-        environ={tl.TENANT_CONTROL_CALLER_ENV: OPERATOR},
+        environ={tl.TENANT_CONTROL_CALLER_ENV: FAKE_OPERATOR},
         declared={"director": ("claude", recovery), "app": ("claude", f"{PROJECT}-app:0.0")},
         panes={recovery: 294308, f"{PROJECT}-director:0.0": 999},
         processes={294308: ["codex", "resume"], 999: ["codex"]},
@@ -646,6 +666,34 @@ def test_the_declared_target_is_probed_never_the_conventional_name() -> None:
     check("pid 999" not in message, f"the decoy at the conventional name is not: {message}")
     check(f"={PROJECT}-director:0.0" not in [c[-2] for c in calls],
           f"and the conventional name was never probed: {calls}")
+
+
+def test_a_dead_slot_is_not_attached_even_if_its_old_tty_is_reused() -> None:
+    """Why `_proxy_attached` checks the pane is alive, not only its terminal.
+
+    A dead pane still reports the terminal it had, and Linux hands a freed pty
+    number to the next terminal that asks. If that terminal is attached to the
+    Director -- someone's own `switchyard attach` -- the dead slot's old tty is
+    in the Director's client list, and the tty test alone would call it
+    connected.
+    """
+    def tmux_state(dead: str):
+        def run(args, **kwargs):
+            if args[:2] == ["tmux", "display-message"] and args[-1] == "#{pane_dead}":
+                return types.SimpleNamespace(returncode=0, stdout=f"{dead}\n")
+            if args[:2] == ["tmux", "display-message"] and args[-1] == "#{pane_tty}":
+                return types.SimpleNamespace(returncode=0, stdout="/dev/pts/5\n")
+            if args[:2] == ["tmux", "list-clients"]:
+                return types.SimpleNamespace(returncode=0, stdout="/dev/pts/5\n")
+            raise AssertionError(f"unexpected tmux call: {args}")
+        return run
+
+    with real_config() as cfg:
+        director = pc._role_by_name(cfg, "director")
+        check(pc._proxy_attached(cfg, 0, director, runner=tmux_state("0")) is True,
+              "a live pane whose tty is a Director client is attached")
+        check(pc._proxy_attached(cfg, 0, director, runner=tmux_state("1")) is False,
+              "a dead pane is not, whoever now holds its old tty")
 
 
 def main() -> int:

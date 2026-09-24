@@ -13,6 +13,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -1435,6 +1436,206 @@ def _mutate(
         return state
 
 
+#: How long a respawned proxy has to become a client of its worker. Its attach
+#: is one local tmux client starting; seconds, not minutes.
+RECOVERY_ATTACH_TIMEOUT_SECONDS = 5.0
+RECOVERY_ATTACH_POLL_SECONDS = 0.1
+
+
+def _live_display_labels(
+    config: team_launcher.ProjectConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> dict[int, str | None]:
+    """Every live display session of this project, and the role it is showing.
+
+    Read from the sessions themselves -- `<project>-display-<n>` on the owner's
+    server and the `@switchyard_role` each one was last configured with -- so
+    it answers for the window that is actually open, whatever the stored
+    mapping currently derives.
+    """
+    listing = runner(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    if listing.returncode != 0:
+        return {}
+    pattern = re.compile(rf"^{re.escape(config.project)}-display-(\d+)$")
+    labels: dict[int, str | None] = {}
+    for name in str(getattr(listing, "stdout", "") or "").splitlines():
+        match = pattern.match(name.strip())
+        if not match:
+            continue
+        slot = int(match.group(1))
+        label = runner(
+            [
+                "tmux", "display-message", "-p", "-t",
+                _exact_tmux_target(f"{name.strip()}:0.0"), "#{@switchyard_role}",
+            ],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        value = str(getattr(label, "stdout", "") or "").strip() if label.returncode == 0 else ""
+        labels[slot] = None if value in {"", "hidden"} else value
+    return labels
+
+
+def _live_role_display_slots(
+    config: team_launcher.ProjectConfig,
+    role: team_launcher.RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> tuple[dict[int, str | None], list[int]]:
+    """The live displays, and which of them show ``role`` -- or a refusal."""
+    live = _live_display_labels(config, runner=runner)
+    slots = sorted(slot for slot, label in live.items() if label == role.role)
+    if not slots:
+        showing = ", ".join(
+            f"slot {slot}: {label or 'nothing'}" for slot, label in sorted(live.items())
+        ) or "none"
+        raise SystemExit(
+            f"switchyard: no live display of {config.project} is showing {role.role} "
+            f"(its display sessions show: {showing}), so there is no {role.role} display to "
+            "recover; nothing was changed"
+        )
+    return live, slots
+
+
+def _slot_visible(
+    config: team_launcher.ProjectConfig,
+    slot: int,
+    own_ttys: set[str],
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """Is a window a person can see showing this display slot?
+
+    Either a terminal presentation does not own is a client of the slot itself
+    (a separate window's tab), or a viewer pane is its client and the viewer
+    session has such a terminal (the viewer window). Presentation's own panes
+    are clients everywhere and prove nothing on their own (SYRD-65).
+    """
+    clients = _session_client_ttys(display_session_name(config.project, slot), runner=runner)
+    if clients - own_ttys:
+        return True
+    viewer = team_launcher.viewer_session_for_project(config.project)
+    viewer_panes = _session_pane_ttys(viewer, runner=runner)
+    return bool(clients & viewer_panes) and bool(
+        _session_client_ttys(viewer, runner=runner) - own_ttys
+    )
+
+
+def _recover_role_display(
+    config: team_launcher.ProjectConfig,
+    role: team_launcher.RoleConfig,
+    *,
+    config_path: Path,
+    state_path: Path,
+    actor: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    file_runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    timeout: float = RECOVERY_ATTACH_TIMEOUT_SECONDS,
+    poll: float = RECOVERY_ATTACH_POLL_SECONDS,
+) -> dict[str, Any]:
+    """Reattach the slots showing ``role`` -- and nothing else -- then prove it.
+
+    This used to be `_mutate` with a no-op transform, which re-applies the
+    WHOLE mapping: every slot's proxy was killed and respawned to recover one.
+    On mefp that left Ops -- which had been fine -- on an inert "display slot
+    hidden" screen, while the command reported every slot connected from their
+    labels (SYRD-239 live UAT).
+
+    Now only the live display sessions SHOWING this role are reconfigured --
+    found from the sessions themselves, not from the stored mapping, which can
+    name different slots than the open window shows. Every other slot, the
+    viewer's layout and the mapping itself are left exactly as they are.
+    Success is reported only once each of those slots is proven to be a live
+    client of the worker. Otherwise it refuses, and nothing is recorded as a
+    recovery that did not happen.
+    """
+    with _locked_state(state_path, config=config, runner=file_runner or runner):
+        state = _read_state(state_path, config=config, config_path=config_path)
+        # Which display the operator is looking at is a fact about the LIVE
+        # display sessions, not about the stored mapping. While the layout is
+        # "default", `_read_state` re-derives the mapping from the current
+        # config on every read, so after a role set changes it can name a
+        # different slot than the one the open window is showing: on mefp it
+        # put the Director in slot 1 and Ops in slot 5 of 6, while the
+        # four-pane window still showed display 0-3 as they were opened. The
+        # label on each live display session is what it is showing.
+        live, slots = _live_role_display_slots(config, role, runner=runner)
+        presentation_ttys = _presentation_client_ttys(
+            config, max(max(live) + 1, state["slot_count"]), runner=runner
+        )
+        for slot in slots:
+            _configure_display_session(
+                config, slot, role.role, runner=runner, presentation_ttys=presentation_ttys
+            )
+        # Flags only: a viewer client's ignore-size. It respawns nothing.
+        _reconcile_viewer_observers(config, runner=runner)
+        deadline = monotonic() + max(0.0, timeout)
+        pending = list(slots)
+        while True:
+            pending = [
+                slot for slot in pending if not _proxy_attached(config, slot, role, runner=runner)
+            ]
+            if not pending or monotonic() >= deadline:
+                break
+            sleep(poll)
+        if pending:
+            raise SystemExit(
+                f"switchyard: {role.role}'s display was respawned but slot(s) "
+                f"{', '.join(str(slot) for slot in pending)} did not attach to its worker "
+                f"{role.tmux_session} within {timeout:g}s. It was not recovered; no other slot "
+                "was touched and nothing was recorded"
+            )
+        # Attached is not the same as seen. On mefp the Director's WINDOW pane
+        # -- the Konsole tab that was a client of its display slot -- had itself
+        # exited, so a display proxied perfectly to the worker was on no screen
+        # at all. Success means a window is showing it (SYRD-239 live UAT).
+        #
+        # Only when there IS a window. A presentation no window is attached to
+        # at all -- headless, or before anyone opens one -- has nothing to be
+        # visible on, and refusing there would only make `present recover`
+        # unusable on it; its report already says `window_attached: false`.
+        # What made mefp wrong was a window showing three panes while the
+        # Director's display was on none of them.
+        count = max(max(live) + 1, state["slot_count"])
+        own = _presentation_client_ttys(config, count, runner=runner)
+        windowed = bool(external_presentation_clients(config, count, runner=runner))
+        unseen = [
+            slot for slot in slots
+            if windowed and not _slot_visible(config, slot, own, runner=runner)
+        ]
+        if unseen:
+            gui_user = team_launcher.presentation_gui_user(config)
+            reopen = "; ".join(
+                shlex.join(display_attach_args_for(
+                    config.project, slot, owner=config.run_as_user or "", gui_user=gui_user,
+                ))
+                for slot in unseen
+            )
+            raise SystemExit(
+                f"switchyard: {role.role} is attached to its worker again in display slot(s) "
+                f"{', '.join(str(slot) for slot in unseen)}, but no window is showing "
+                f"{'it' if len(unseen) == 1 else 'them'} -- the window pane for that slot has "
+                f"closed. It is not visible, so this is not reported as a recovery, and no other "
+                f"slot was touched. To show it, run this in a terminal on the desktop: {reopen}"
+            )
+        state["revision"] += 1
+        history = [*state["history"], {
+            "revision": state["revision"],
+            "actor": actor,
+            "action": "recover",
+            "detail": {"role": role.role, "slots": slots},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }]
+        state["history"] = history[-PRESENTATION_HISTORY_LIMIT:]
+        _write_state(config, state_path, state, runner=file_runner or runner)
+        return state
+
+
 def _actual_proxy_role(
     config: team_launcher.ProjectConfig,
     slot: int,
@@ -1456,7 +1657,55 @@ def _actual_proxy_role(
     if proc.returncode != 0:
         return None, "failed"
     actual = str(getattr(proc, "stdout", "") or "").strip() or None
+    # The label is what the slot was last TOLD to show, set right after the
+    # respawn whether or not the attach inside it lived. Reporting it as
+    # "connected" is how a recovery claimed a Director and an Ops slot were
+    # connected while one showed nothing and the other an inert "display slot
+    # hidden" screen (SYRD-239 live UAT). So the state is measured.
+    if actual is None or actual == "hidden":
+        return actual, "hidden"
+    role = _role_by_name(config, actual)
+    if role is None or not _proxy_attached(config, slot, role, runner=runner):
+        return actual, "detached"
     return actual, "connected"
+
+
+def _proxy_attached(
+    config: team_launcher.ProjectConfig,
+    slot: int,
+    role: team_launcher.RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """Is this display slot's proxy a live client of ``role``'s worker session?
+
+    Proven from both ends rather than from a label: the slot's pane is alive,
+    and its terminal is one of the terminals the worker's own session lists as
+    a client. The proxy is a nested `tmux attach` running in that pane, so its
+    client terminal IS the pane's terminal; nothing else puts that terminal in
+    the worker's client list.
+    """
+    pane = _exact_tmux_target(f"{display_session_name(config.project, slot)}:0.0")
+    dead = runner(
+        ["tmux", "display-message", "-p", "-t", pane, "#{pane_dead}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    if dead.returncode != 0 or str(getattr(dead, "stdout", "") or "").strip() != "0":
+        return False
+    tty = runner(
+        ["tmux", "display-message", "-p", "-t", pane, "#{pane_tty}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    pane_tty = str(getattr(tty, "stdout", "") or "").strip()
+    if tty.returncode != 0 or not pane_tty:
+        return False
+    clients = runner(
+        ["tmux", "list-clients", "-t", _exact_tmux_target(role.tmux_session), "-F", "#{client_tty}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    if clients.returncode != 0:
+        return False
+    return pane_tty in {line.strip() for line in str(getattr(clients, "stdout", "") or "").splitlines()}
 
 
 def slots_showing_role(
@@ -2203,6 +2452,9 @@ def presentation_action(
         if role is None:
             raise SystemExit(f"switchyard: unknown role {role_name!r}")
         prepared_owner_runner = _tmux_runner(prepared_config, runner)
+        # Before the worker is touched: a recovery with no display to recover
+        # must not start or restart anything on its way to refusing.
+        _live_role_display_slots(prepared_config, role, runner=prepared_owner_runner)
         recovery_runner = _exact_tmux_runner(prepared_owner_runner)
         result = team_launcher.ensure_visible_role_session_for_viewer(
             role,
@@ -2216,10 +2468,9 @@ def presentation_action(
         )
         if result != 0:
             raise SystemExit(f"switchyard: recovery failed for {role.role} (exit {result})")
-        return _mutate(
-            prepared_config, config_path=config_path, state_path=state_path, actor=actor, action=action,
-            detail={"role": role.role}, transform=lambda _state: None, runner=prepared_owner_runner,
-            file_runner=runner,
+        return _recover_role_display(
+            prepared_config, role, config_path=config_path, state_path=state_path, actor=actor,
+            runner=prepared_owner_runner, file_runner=runner, monotonic=monotonic, sleep=sleep,
         )
     raise SystemExit(f"switchyard: unknown presentation action {action!r}")
 

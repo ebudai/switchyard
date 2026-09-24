@@ -84,6 +84,7 @@ def tenant_config(scratch: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "project": PROJECT,
+        "layout": "layout.json",
         "board_url": "http://127.0.0.1:1/",
         "board_socket": str(scratch / "run" / "board.sock"),
         "role_state_isolation": True,
@@ -213,12 +214,18 @@ class Journal:
 OPERATOR = types.SimpleNamespace(name="eric", source="pkexec", known=True)
 
 
+INTENDED = {"director": "codex", "ops": "codex"}
+
+
 def run_command(board, plan, verified, config, *, apply=False, expect="", journal=None,
-                euid=0, operator=OPERATOR, resolver=True):
+                euid=0, operator=OPERATOR, resolver=True, runtimes=INTENDED):
     said: list[str] = []
     ran: list[list[str]] = []
+    record_at_sql: list[str] = []
 
     def sql_runner(args, **kwargs):
+        # What the trusted record says at the moment the board is written.
+        record_at_sql.append(Path(verified).read_text())
         # The command's own argv and stdin, executed by real psql. Only the
         # privilege hop and the host's admin URL are swapped for the test's.
         ran.append(list(args))
@@ -227,7 +234,7 @@ def run_command(board, plan, verified, config, *, apply=False, expect="", journa
         return subprocess.run(real, **kwargs)
 
     code = tl.switchyard_rebind_workflow_panes_command(
-        PROJECT, apply=apply, expect=expect,
+        PROJECT, apply=apply, expect=expect, runtimes=runtimes,
         euid_getter=lambda: euid, operator_resolver=lambda: operator,
         tenant_resolver=(lambda *a, **k: (plan, verified, config)) if resolver else (lambda *a, **k: None),
         board_reader=lambda _c: live_state(board) + ("",),
@@ -237,6 +244,7 @@ def run_command(board, plan, verified, config, *, apply=False, expect="", journa
             "ORDER BY role), '[]') FROM ticket_board.role_runtime_assignments;")), ""),
         sql_runner=sql_runner, journal=journal or Journal(), print_func=said.append,
     )
+    run_command.record_at_sql = record_at_sql
     return code, "\n".join(said), ran
 
 
@@ -258,7 +266,10 @@ def main_board_cases() -> None:
         scratch = Path(raw)
         config_path, config = tenant_config(scratch)
         plan = equivalence.mefp_plan()
-        plan = types.SimpleNamespace(**{**plan.__dict__, "admin_database_url": "postgresql:///host-admin"})
+        # The tenant here is this test's own account: it owns the files root
+        # will verify and replace.
+        plan = types.SimpleNamespace(**{**plan.__dict__, "admin_database_url": "postgresql:///host-admin",
+                                        "owner_user": account})
         board = equivalence.Board(cluster, "rebind")
         socket_path = Path(config.board_socket)
         unix = TicketBoardUnixServer(socket_path, board.app, events=board.server.events,
@@ -304,6 +315,32 @@ def main_board_cases() -> None:
                 conn.execute("SELECT ticket_board.apply_declared_workflow(%s::jsonb)",
                              (json.dumps(revision_three(config)),))
             revision, document = live_state(board)
+
+            # ...and what `workflow_manage apply` then did to the tenant: kept the
+            # projection it replaced in its rollback journal, and rewrote the
+            # configuration FROM the declaration -- so the trusted record says
+            # Claude too, and a restart would launch Claude (SYRD-262).
+            from scripts.workflow_launcher import projection_files
+
+            projected = projection_files(config_path, document)
+            (config_path.parent / "workflow-before-0.json").write_text(json.dumps({
+                "previous": {"revision": 0, "document": None},
+                "desired": document,
+                "previous_files": {str(path): (path.read_text() if path.exists() else None)
+                                   for path in projected},
+            }), encoding="utf-8")
+            for path, text in projected.items():
+                path.write_text(text, encoding="utf-8")
+            config = tl.load_project_config(PROJECT, config_path)
+            check({r.role: tl.role_runtime_binding(r)[0] for r in config.roles}["director"] == "claude",
+                  "the defect reached the trusted record: the configuration now says claude")
+
+            # The live preview's failure: nothing differs between the record
+            # and the declaration, while the live panes are hidden. That must
+            # be a refusal, not "nothing to do".
+            code, said, ran = run_command(board, plan, config_path, config, runtimes={})
+            check(code == 1 and not ran and "refusing" in said and "divergent        director" in said,
+                  f"a no-op over divergent live panes is refused: {said}")
 
             served = set(board.app.runtime_targets())
             check("director" not in served and "ops" not in served,
@@ -358,12 +395,29 @@ def main_board_cases() -> None:
             code, said, ran = run_command(board, plan, verified, config)
             check(code == 0 and not ran, f"a preview writes nothing: {said}")
             check("director: runtime claude -> codex" in said and "ops: runtime claude -> codex" in said, said)
-            check("designer: declared on claude/mefp-designer:0.0 but this tenant runs no such pane; "
-                  "left as declared" in said, f"a role with no pane is left alone: {said}")
-            diff = [l[4:] for l in said.splitlines() if l.startswith("  | ") and l[4:5] in "+-"
-                    and not l[4:].startswith(("+++", "---"))]
-            check(diff and all('"runtime"' in l for l in diff),
-                  f"the exact document diff touches only bindings: {diff}")
+            # Revision 3's projection also put a designer pane into the tenant's
+            # configuration. It is not the operator's to change here, and a
+            # rebind never adds or removes roles: it is left exactly as it is.
+            check("designer" not in "".join(l for l in said.splitlines() if l.startswith("  changes")),
+                  f"a role the operator did not name is not rebound: {said}")
+            check("operator         director: runtime codex (the operator's decision)" in said, said)
+            check("evidence       configuration now: claude" in said, f"the record's value is shown: {said}")
+            check("tenant journal before its last workflow write: codex (in workflow-before-0.json)" in said,
+                  f"the tenant's pre-migration choice is shown as evidence: {said}")
+            check("evidence       live registration: codex/mefp-director:0.0" in said, said)
+            sections: dict[str, list[str]] = {}
+            current = ""
+            for line in said.splitlines():
+                if line.startswith("  | --- "):
+                    current = line[len("  | --- "):]
+                elif line.startswith("  | ") and current and line[4:5] in "+-" and not line[4:].startswith("+++"):
+                    sections.setdefault(current, []).append(line[4:])
+            check(sections.get("declared") and all('"runtime"' in l for l in sections["declared"]),
+                  f"the document diff touches only runtime: {sections.get('declared')}")
+            config_diff = sections.get(str(config_path)) or []
+            check(config_diff and all(any(k in l for k in ('"runtime"', '"cli"', '"live_commands"', '"codex"', '"claude"'))
+                                      for l in config_diff),
+                  f"and the configuration's diff only what follows the runtime: {config_diff}")
             check("matches, so it is served as soon as the rebind lands -- no restart" in said,
                   f"and says the live panes will be served without a restart: {said}")
             digest = said.split("--expect ")[-1].strip()
@@ -381,11 +435,28 @@ def main_board_cases() -> None:
                                           resolver=False)
             check(code == 1 and not ran, f"so is an unverified configuration: {said}")
 
+            for runtimes, expected in (({"intruder": "codex"}, "is not a pane role"),
+                                       ({"director": "bash"}, "is not a runtime")):
+                code, said, ran = run_command(board, plan, verified, config, runtimes=runtimes)
+                check(code == 1 and not ran and expected in said, f"{runtimes} is refused: {said}")
+            # The digest covers the files: one edited after the preview is not
+            # the one that was reviewed.
+            original = config_path.read_text()
+            config_path.write_text(original.replace('"project"', ' "project"', 1))
+            code, said, ran = run_command(board, plan, verified, config, apply=True, expect=digest)
+            check(code == 1 and not ran and "is not what this would write now" in said,
+                  f"a record edited since the preview is refused: {said}")
+            config_path.write_text(original)
+
             journal = Journal()
             before = snapshot(board)
+            record_before = config_path.stat()
             code, said, ran = run_command(board, plan, verified, config, apply=True, expect=digest,
                                           journal=journal)
             check(code == 0 and len(ran) == 1, f"the reviewed rebind is applied: {said}")
+            at_sql = json.loads(run_command.record_at_sql[0])
+            check({r["role"]: r["cli"][0] for r in at_sql["roles"]}["director"] == "codex",
+                  "the trusted record was reconciled BEFORE the board was written")
             sent = json.loads(next(a for a in ran[0] if a.startswith("bindings="))[len("bindings="):])
             check(set(sent) == {"director", "ops"}
                   and all(set(b) == {"runtime", "target", "slot"} for b in sent.values()),
@@ -411,6 +482,18 @@ def main_board_cases() -> None:
             evidence = json.loads(journal.written[0])
             check(evidence["document"] == document and evidence["rebound"] == rebound
                   and journal.closed.get("status") == "succeeded", "and in root's journal too")
+            check(str(config_path) in evidence["files"]
+                  and '"claude"' in evidence["files"][str(config_path)]["before"],
+                  "with the configuration's previous content, to put back if needed")
+            reconciled = {r.role: tl.role_runtime_binding(r)[0]
+                          for r in tl.load_project_config(PROJECT, config_path).roles}
+            check(reconciled["director"] == "codex" and reconciled["ops"] == "codex"
+                  and reconciled["main"] == "codex" and reconciled["audit"] == "claude",
+                  f"the trusted record now says what runs, so a restart launches Codex: {reconciled}")
+            record_after = config_path.stat()
+            check((record_after.st_uid, record_after.st_gid, record_after.st_mode)
+                  == (record_before.st_uid, record_before.st_gid, record_before.st_mode),
+                  "and the tenant's file keeps its owner and mode")
 
             served = set(board.app.runtime_targets())
             check({"director", "ops"} <= served, f"the Codex panes are served now: {served}")
@@ -426,36 +509,51 @@ def main_board_cases() -> None:
                   f"the same bindings again return the same revision: {again.stdout} {again.stderr}")
             check(live_state(board)[0] == new_revision, "and the function itself writes nothing new")
 
-            # A database that says yes while the board shows otherwise is not a rebind.
-            said_fake: list[str] = []
-            journal = Journal()
+            # A database that says yes while the board shows otherwise is not a
+            # rebind; a database that refuses is journaled as failed. Both are
+            # driven from a board reader frozen at revision 3, previewed first
+            # so the digest is the one that state produces.
             stale_state = (revision, document)
-            code = tl.switchyard_rebind_workflow_panes_command(
-                PROJECT, apply=True, expect=digest, euid_getter=lambda: 0,
-                operator_resolver=lambda: OPERATOR,
-                tenant_resolver=lambda *a, **k: (plan, verified, config),
-                board_reader=lambda _c: stale_state + ("",),
-                registrations_reader=lambda _p: ([], ""),
-                sql_runner=lambda args, **k: subprocess.CompletedProcess(args, 0, "", ""),
-                journal=journal, print_func=said_fake.append,
-            )
-            check(code == 1 and "not " + digest in "\n".join(said_fake),
+
+            def faked(sql_result, *, apply, expect=""):
+                said_fake: list[str] = []
+                journal = Journal()
+                code = tl.switchyard_rebind_workflow_panes_command(
+                    PROJECT, apply=apply, expect=expect, runtimes=INTENDED, euid_getter=lambda: 0,
+                    operator_resolver=lambda: OPERATOR,
+                    tenant_resolver=lambda *a, **k: (plan, verified, tl.load_project_config(PROJECT, config_path)),
+                    board_reader=lambda _c: stale_state + ("",),
+                    registrations_reader=lambda _p: ([], ""),
+                    sql_runner=lambda args, **k: sql_result(args),
+                    journal=journal, print_func=said_fake.append,
+                )
+                return code, said_fake, journal
+
+            _, preview, _ = faked(lambda args: None, apply=False)
+            stale_review = next(l for l in preview if "--expect " in l).split("--expect ")[-1].strip()
+            code, said_fake, journal = faked(lambda args: subprocess.CompletedProcess(args, 0, "", ""),
+                                             apply=True, expect=stale_review)
+            check(code == 1 and any("the board now serves" in l for l in said_fake),
                   f"a write the board does not show is reported, not claimed: {said_fake}")
             check(journal.closed.get("status") == "failed", f"and journaled as failed: {journal.closed}")
 
-            journal = Journal()
-            code = tl.switchyard_rebind_workflow_panes_command(
-                PROJECT, apply=True, expect=digest, euid_getter=lambda: 0,
-                operator_resolver=lambda: OPERATOR,
-                tenant_resolver=lambda *a, **k: (plan, verified, config),
-                board_reader=lambda _c: stale_state + ("",),
-                registrations_reader=lambda _p: ([], ""),
-                sql_runner=lambda args, **k: subprocess.CompletedProcess(
-                    args, 3, "", "ERROR: workflow changed since it was reviewed"),
-                journal=journal, print_func=said_fake.append,
-            )
+            code, said_fake, journal = faked(
+                lambda args: subprocess.CompletedProcess(args, 3, "", "ERROR: workflow changed since it was reviewed"),
+                apply=True, expect=stale_review)
             check(code == 1 and "refused the rebind" in "\n".join(said_fake), said_fake[-1])
             check(journal.closed.get("status") == "failed", f"a refusal is journaled as failed: {journal.closed}")
+
+            # Root never follows a link the tenant put where its record was.
+            elsewhere = config_path.with_name("elsewhere.json")
+            config_path.rename(elsewhere)
+            config_path.symlink_to(elsewhere)
+            try:
+                code, said, ran = run_command(board, plan, verified, config, apply=True, expect=digest)
+                check(code == 1 and not ran and "symlink" in said,
+                      f"a configuration that became a link is refused, nothing written: {said}")
+            finally:
+                config_path.unlink()
+                elsewhere.rename(config_path)
         finally:
             if tmux is not None:
                 tmux.kill()

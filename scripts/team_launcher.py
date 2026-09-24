@@ -23852,7 +23852,9 @@ class PaneRebind:
         return workflow_document_digest(self.rebound)
 
 
-def plan_pane_rebind(config: ProjectConfig, revision: int, document: dict) -> PaneRebind:
+def plan_pane_rebind(
+    config: ProjectConfig, revision: int, document: dict, *, intended: "Mapping[str, str] | None" = None
+) -> PaneRebind:
     """Rebind each declared role this tenant runs a pane for, to that pane.
 
     The values come from the tenant's configuration through the function the
@@ -23867,8 +23869,13 @@ def plan_pane_rebind(config: ProjectConfig, revision: int, document: dict) -> Pa
     bindings: dict[str, dict] = {}
     changes: list[str] = []
     notes: list[str] = []
+    intended = dict(intended or {})
     for role in config.roles:
         pane = role_pane_declaration(role)
+        if role.role in intended:
+            # The operator's reviewed decision, and the only way a runtime
+            # differs from the verified configuration here (SYRD-262).
+            pane["runtime"] = intended[role.role]
         current = declared.get(role.role)
         if current is None:
             notes.append(
@@ -23997,11 +24004,100 @@ def root_verified_tenant(
     return plan, verified, config
 
 
+def recorded_pre_migration_runtimes(config_path: Path) -> dict[str, list[str]]:
+    """What the tenant's own rollback journals say each role ran before a workflow write.
+
+    `workflow_manage apply` keeps the projection it replaced in
+    `workflow-before-<revision>.json` beside the configuration. That is how a
+    Director's Codex choice survived the write that overwrote it (SYRD-262).
+    It is the tenant's file, so this is evidence to show an operator, never
+    authority: read without following links, and nothing is decided from it.
+    """
+    found: dict[str, list[str]] = {}
+    for journal in sorted(config_path.parent.glob("workflow-before-*.json")):
+        holder, _problem = read_plan_no_follow(journal, require_root_owned=False)
+        if holder is None:
+            continue
+        previous = (holder.data.get("previous_files") or {}).get(str(config_path))
+        try:
+            roles = json.loads(previous or "{}").get("roles") or []
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for role in roles:
+            cli = role.get("cli") if isinstance(role, dict) else None
+            if isinstance(cli, list) and cli:
+                found.setdefault(str(role.get("role")), []).append(
+                    f"{_command_name(str(cli[0]))} (in {journal.name})"
+                )
+    return found
+
+
+@dataclass(frozen=True)
+class ProjectionRewrite:
+    """One tenant projection file root will replace, read without following links."""
+
+    path: Path
+    document: "PlanDocument"
+    body: bytes
+
+    @property
+    def changed(self) -> bool:
+        return self.document.raw != self.body
+
+
+def plan_projection_rewrites(
+    config_path: Path, rebound: dict, *, owner_uid: int
+) -> tuple[list[ProjectionRewrite], list[str]]:
+    """The tenant's projection as the rebound document would generate it.
+
+    The same `projection_files` every workflow write uses, so the launcher
+    configuration, its copies of the document and the board agree afterwards.
+    Only files that already exist are replaced, each read and later written by
+    descriptor inside its own directory, keeping its owner and mode.
+    """
+    from scripts.workflow_launcher import projection_files
+
+    rewrites: list[ProjectionRewrite] = []
+    problems: list[str] = []
+    try:
+        projected = projection_files(config_path, rebound)
+    except (KeyError, ValueError, OSError, SystemExit) as exc:
+        return [], [f"the tenant projection could not be generated from the rebound workflow: {exc!r}"]
+    for path, text in projected.items():
+        holder, problem = read_plan_no_follow(
+            path, require_root_owned=False, require_owner_uids=sorted({0, owner_uid}),
+            require_single_link=True, require_not_shared_writable=True,
+        )
+        if holder is None:
+            if "does not exist" in problem:
+                continue
+            problems.append(problem)
+            continue
+        rewrites.append(ProjectionRewrite(path, holder, text.encode("utf-8")))
+    # The configuration first: it is the record a restart reads, so it is
+    # reconciled before the board is (SYRD-262).
+    rewrites.sort(key=lambda item: item.path != config_path)
+    return rewrites, problems
+
+
+def rebind_review_digest(rebind: "PaneRebind", rewrites: list[ProjectionRewrite]) -> str:
+    """One digest over everything an apply would change, old and new."""
+    return hashlib.sha256(json.dumps({
+        "document": [rebind.digest, rebind.rebound_digest],
+        "files": {
+            str(item.path): [hashlib.sha256(item.document.raw).hexdigest(),
+                             hashlib.sha256(item.body).hexdigest()]
+            for item in rewrites if item.changed
+        },
+    }, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def switchyard_rebind_workflow_panes_command(
     slug: str,
     *,
     apply: bool = False,
     expect: str = "",
+    runtimes: "Mapping[str, str] | None" = None,
     registry_dir: Path | None = None,
     config_path: Path | None = None,
     euid_getter: Callable[[], int] = os.geteuid,
@@ -24057,6 +24153,19 @@ def switchyard_rebind_workflow_panes_command(
         print_func(f"switchyard: refusing to rebind {slug}. Nothing was changed.")
         return 1
     plan, verified, config = resolved
+    from scripts.ticket_board.workflow_config import RUNTIMES
+
+    intended = dict(runtimes or {})
+    pane_roles = {role.role for role in config.roles}
+    for role_name, runtime in intended.items():
+        if role_name not in pane_roles:
+            print_func(f"switchyard: {role_name} is not a pane role in {verified}. Nothing was changed.")
+            return 1
+        if runtime not in RUNTIMES:
+            print_func(f"switchyard: {runtime!r} is not a runtime ({', '.join(sorted(RUNTIMES))}). "
+                       "Nothing was changed.")
+            return 1
+
     revision, live, board_problem = (board_reader or read_board_workflow_state)(config)
     if live is None:
         print_func(
@@ -24065,75 +24174,170 @@ def switchyard_rebind_workflow_panes_command(
             + ". Nothing was changed."
         )
         return 1
-    rebind = plan_pane_rebind(config, revision, live)
+    rebind = plan_pane_rebind(config, revision, live, intended=intended)
+    unknown = sorted(set(intended) - {str(r.get("name")) for r in live.get("roles") or []})
+    if unknown:
+        print_func(f"switchyard: {', '.join(unknown)} is not a declared role; a rebind does not add "
+                   "roles. Nothing was changed.")
+        return 1
+    rewrites, file_problems = plan_projection_rewrites(
+        verified, rebind.rebound, owner_uid=uid_for_user(plan.owner_user)
+    )
+    registrations, registration_problem = (registrations_reader or read_runtime_registrations)(plan)
+    review = rebind_review_digest(rebind, rewrites)
+
     print_func(f"switchyard: {slug} declared pane rebind, from {verified}")
     print_func(f"  board            revision {rebind.revision}, digest {rebind.digest}")
-    for line in rebind.changes or ("(every pane role already matches)",):
+    if intended:
+        recorded = recorded_pre_migration_runtimes(verified)
+        by_role = {str(row.get("role")): row for row in registrations}
+        for role in config.roles:
+            if role.role not in intended:
+                continue
+            row = by_role.get(role.role) or {}
+            print_func(f"  operator         {role.role}: runtime {intended[role.role]} (the operator's decision)")
+            print_func(f"    evidence       configuration now: {role_runtime_binding(role)[0]}")
+            print_func("    evidence       tenant journal before its last workflow write: "
+                       + (", ".join(recorded.get(role.role) or []) or "none recorded"))
+            print_func(f"    evidence       live registration: "
+                       + (f"{row.get('runtime')}/{row.get('target')} (pid {row.get('pid')})" if row else "none"))
+    for line in rebind.changes or ("(the declaration already names every pane's binding)",):
         print_func(f"  changes          {line}")
     for line in rebind.notes:
         print_func(f"  unchanged        {line}")
-    for line in rebind.problems:
+    problems = [*rebind.problems, *file_problems]
+    if registration_problem:
+        problems.append(f"the live registrations could not be read: {registration_problem}")
+    for line in problems:
         print_func(f"  problem          {line}")
-    if rebind.problems:
+    if problems:
         print_func("switchyard: nothing was changed.")
         return 1
-    if not rebind.bindings:
+
+    changed_files = [item for item in rewrites if item.changed]
+    if not rebind.bindings and not changed_files:
+        # Nothing to write is only a success when the board already serves what
+        # runs. A live pane the declaration does not match is the very failure
+        # this exists to repair, and reporting "nothing to do" over it is what
+        # left MEFP's Director without authority after the first preview.
+        declared = {str(r.get("name")): r for r in live.get("roles") or []}
+        divergent = [
+            f"{row.get('role')}: live pane registered {row.get('runtime')}/{row.get('target')}, "
+            f"declared {declared[row['role']].get('runtime')}/{declared[row['role']].get('target')}"
+            for row in registrations
+            if row.get("role") in declared and row.get("role") in pane_roles
+            and (row.get("runtime"), row.get("target"))
+            != (declared[row["role"]].get("runtime"), declared[row["role"]].get("target"))
+        ]
+        if divergent:
+            for line in divergent:
+                print_func(f"  divergent        {line}")
+            print_func(
+                f"switchyard: refusing: {slug}'s declaration already equals its configuration, "
+                "but live panes registered something else, so there is nothing this could write "
+                "that would serve them. If those panes run what was intended, name it: "
+                f"pkexec switchyard rebind-workflow-panes {slug} --runtime ROLE=RUNTIME. "
+                "Nothing was changed."
+            )
+            return 1
         print_func(f"switchyard: {slug}'s declared pane roles already match its panes. Nothing to do.")
         return 0
-    before = json.dumps(rebind.document, indent=2, sort_keys=True).splitlines()
-    after = json.dumps(rebind.rebound, indent=2, sort_keys=True).splitlines()
-    for line in difflib.unified_diff(before, after, "declared", "rebound", lineterm="", n=2):
-        print_func(f"  | {line}")
+
+    if rebind.bindings:
+        before = json.dumps(rebind.document, indent=2, sort_keys=True).splitlines()
+        after = json.dumps(rebind.rebound, indent=2, sort_keys=True).splitlines()
+        for line in difflib.unified_diff(before, after, "declared", "rebound", lineterm="", n=2):
+            print_func(f"  | {line}")
+    for item in changed_files:
+        for line in difflib.unified_diff(
+            item.document.raw.decode("utf-8", "replace").splitlines(),
+            item.body.decode("utf-8", "replace").splitlines(),
+            str(item.path), f"{item.path} (reconciled)", lineterm="", n=1,
+        ):
+            print_func(f"  | {line}")
     print_func(f"  rebound          digest {rebind.rebound_digest}")
-    registrations, registration_problem = (registrations_reader or read_runtime_registrations)(plan)
-    if registration_problem:
-        print_func(f"  registrations    could not be read: {registration_problem}")
     for line in _registration_visibility(rebind, registrations):
         print_func(f"  registration     {line}")
+    print_func(f"  review           digest {review}")
     if not apply:
         print_func(
             "switchyard: preview; nothing was written. Apply exactly this with: "
-            f"pkexec switchyard rebind-workflow-panes {slug} --apply --expect {rebind.rebound_digest}"
+            f"pkexec switchyard rebind-workflow-panes {slug}"
+            + "".join(f" --runtime {name}={value}" for name, value in sorted(intended.items()))
+            + f" --apply --expect {review}"
         )
         return 0
-    if expect != rebind.rebound_digest:
+    if expect != review:
         print_func(
-            f"switchyard: --expect {expect or '(none)'} is not the rebind this would write now "
-            f"({rebind.rebound_digest}). Review the preview and apply the digest it shows. "
-            "Nothing was changed."
+            f"switchyard: --expect {expect or '(none)'} is not what this would write now "
+            f"({review}). Review the preview and apply the digest it shows. Nothing was changed."
         )
         return 1
 
     attempt = journal or Attempt(
-        slug, ["switchyard", "rebind-workflow-panes", slug, "--apply", "--expect", expect],
+        slug,
+        ["switchyard", "rebind-workflow-panes", slug,
+         *(f"--runtime={name}={value}" for name, value in sorted(intended.items())),
+         "--apply", "--expect", expect],
         operator=operator.name,
     )
     attempt.operator = operator
     attempt.open()
     attribution = f"SYRD-262 pane rebind by {operator.name} from {verified}"
-    # Rollback evidence, before anything is written: both documents and the
-    # bindings, in root's journal. The previous document also stays in the
-    # board's own workflow_revisions.
+    # Rollback evidence, before anything is written: both documents, every
+    # file's old and new content, and what the operator decided. The previous
+    # document also stays in the board's own workflow_revisions.
     attempt.write("stdout", json.dumps({
         "revision": rebind.revision, "digest": rebind.digest, "document": rebind.document,
         "bindings": rebind.bindings, "rebound_digest": rebind.rebound_digest,
-        "rebound": rebind.rebound, "attribution": attribution,
+        "rebound": rebind.rebound, "attribution": attribution, "intended": intended,
+        "review": review,
+        "files": {str(item.path): {"before": item.document.raw.decode("utf-8", "replace"),
+                                   "after": item.body.decode("utf-8", "replace")}
+                  for item in changed_files},
     }, sort_keys=True) + "\n")
-    result = sql_runner(
-        ["sudo", "-u", "postgres", "psql", "-X", "-tA", "-v", "ON_ERROR_STOP=1",
-         "-v", f"rev={int(rebind.revision)}",
-         "-v", f"expected={json.dumps(rebind.document, sort_keys=True)}",
-         "-v", f"bindings={json.dumps(rebind.bindings, sort_keys=True)}",
-         "-v", f"why={attribution}",
-         plan.admin_database_url, "-f", "-"],
-        input=("SELECT ticket_board.rebind_declared_pane_roles("
-               ":rev, :'expected'::jsonb, :'bindings'::jsonb, :'why');\n"),
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        reason = _proc_failure_reason(result, f"psql exited {result.returncode}")
-        attempt.close(status="failed", exit_status=1, detail=reason)
-        print_func(f"switchyard: the database refused the rebind: {reason}. Nothing was changed.")
+
+    def write_files(items: "list[ProjectionRewrite]") -> str:
+        for item in items:
+            problem = write_plan_no_follow(item.document, item.body)
+            if problem:
+                return problem
+        return ""
+
+    # 1. The trusted tenant record first: it is what a restart reads.
+    first = [item for item in changed_files if item.path == Path(verified)]
+    problem = write_files(first)
+    if problem:
+        attempt.close(status="failed", exit_status=1, detail=problem)
+        print_func(f"switchyard: {problem}. Nothing else was changed.")
+        return 1
+    # 2. The board, compare-and-swap on the reviewed revision and document.
+    if rebind.bindings:
+        result = sql_runner(
+            ["sudo", "-u", "postgres", "psql", "-X", "-tA", "-v", "ON_ERROR_STOP=1",
+             "-v", f"rev={int(rebind.revision)}",
+             "-v", f"expected={json.dumps(rebind.document, sort_keys=True)}",
+             "-v", f"bindings={json.dumps(rebind.bindings, sort_keys=True)}",
+             "-v", f"why={attribution}",
+             plan.admin_database_url, "-f", "-"],
+            input=("SELECT ticket_board.rebind_declared_pane_roles("
+                   ":rev, :'expected'::jsonb, :'bindings'::jsonb, :'why');\n"),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            reason = _proc_failure_reason(result, f"psql exited {result.returncode}")
+            attempt.close(status="failed", exit_status=1, detail=reason)
+            print_func(
+                f"switchyard: the database refused the rebind: {reason}. The board was not changed"
+                + (f"; {verified} was already reconciled and the journal holds its previous content."
+                   if first else ".")
+            )
+            return 1
+    # 3. The rest of the projection, generated from the rebound document.
+    problem = write_files([item for item in changed_files if item.path != Path(verified)])
+    if problem:
+        attempt.close(status="failed", exit_status=1, detail=problem)
+        print_func(f"switchyard: the board was rebound but {problem}; rerun to finish.")
         return 1
     new_revision, now, now_problem = (board_reader or read_board_workflow_state)(config)
     from scripts.ticket_board.project_provision import workflow_document_digest
@@ -24150,7 +24354,7 @@ def switchyard_rebind_workflow_panes_command(
     attempt.close(status="succeeded", exit_status=0, detail=f"revision {new_revision}")
     print_func(
         f"switchyard: {slug} now declares its panes at revision {new_revision} "
-        f"(digest {rebind.rebound_digest}), attributed to this rebind."
+        f"(digest {rebind.rebound_digest}), attributed to this rebind, and {verified} agrees."
     )
     return 0
 
@@ -34594,7 +34798,12 @@ def _build_switchyard_rebind_workflow_panes_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("project", help="project name or slug")
     parser.add_argument("--apply", action="store_true", help="write the previewed rebind; requires root")
-    parser.add_argument("--expect", default="", help="the rebound digest the preview showed")
+    parser.add_argument("--expect", default="", help="the review digest the preview showed")
+    parser.add_argument(
+        "--runtime", action="append", default=[], metavar="ROLE=RUNTIME",
+        help="the runtime the operator has decided a pane role runs; shown with the evidence "
+        "for it, and reconciled into the tenant's configuration before the board",
+    )
     parser.add_argument("--config-path", type=Path, default=None, help=argparse.SUPPRESS)
     return parser
 
@@ -37360,8 +37569,15 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         )
     if argv[0].casefold() == "rebind-workflow-panes":
         args = _build_switchyard_rebind_workflow_panes_parser().parse_args(argv[1:])
+        runtimes: dict[str, str] = {}
+        for item in args.runtime:
+            name, sep, value = item.partition("=")
+            if not sep or not name.strip() or not value.strip():
+                raise SystemExit(f"switchyard: --runtime takes ROLE=RUNTIME, not {item!r}")
+            runtimes[name.strip()] = value.strip()
         return switchyard_rebind_workflow_panes_command(
-            args.project, apply=args.apply, expect=args.expect, config_path=args.config_path
+            args.project, apply=args.apply, expect=args.expect, runtimes=runtimes,
+            config_path=args.config_path,
         )
     if argv[0].casefold() == "migrate-workflow":
         args = _build_switchyard_migrate_workflow_parser().parse_args(argv[1:])

@@ -203,6 +203,37 @@ DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-6';
               f"and once dead-lettered it says failed, through both reads: {listed} / {single}")
         check(listed["reason"] == "tmux_target_missing", f"{listed}")
 
+        # SYRD-268: sent, and the recipient's hooks recorded no turn. That is
+        # not delivery, and it is reported as exactly what it is.
+        t.seed_postgres_ticket(admin, "PGU-7", title="final sign-off", state="director_review",
+                               assignee="director")
+        t.psql(admin, """
+DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = 'PGU-7';
+INSERT INTO ticket_board.notification_trace
+    (ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event,
+     pane_busy_determination, busy_reason)
+VALUES (clock_timestamp(), 'PGU-7', 'director', 'transition', 'send_unconfirmed', 'director_review',
+        'director', 'idle', 'no_submission_witnessed');
+""")
+        unconfirmed = app.get_ticket("PGU-7")
+        check(unconfirmed["active_work_notified_at"] == "",
+              f"an unconfirmed send is not a notification time: {unconfirmed['active_work_notified_at']}")
+        state = unconfirmed["active_work_delivery"]
+        check(state["state"] == "unconfirmed" and state["reason"] == "no_submission_witnessed",
+              f"it is reported unconfirmed, not delivered: {state}")
+        listed = {ticket["id"]: ticket for ticket in app.list_tickets()[0]}["PGU-7"]["active_work_delivery"]
+        check(listed == state, f"through both reads: {listed}")
+        # A later witnessed send is delivery.
+        t.psql(admin, """
+INSERT INTO ticket_board.notification_trace
+    (ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event,
+     pane_busy_determination, busy_reason)
+VALUES (clock_timestamp(), 'PGU-7', 'director', 'transition', 'send', 'director_review', 'director',
+        'idle', 'idle');
+""")
+        check(app.get_ticket("PGU-7")["active_work_delivery"]["state"] == "delivered",
+              "and a witnessed send afterwards is delivered")
+
         # The single-ticket read carries it too.
         single = app.get_ticket("PGU-1")
         check(single["active_work_delivery"]["state"] == "failed", f"get_ticket agrees: {single['active_work_delivery']}")

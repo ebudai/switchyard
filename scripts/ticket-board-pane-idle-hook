@@ -43,6 +43,8 @@ UUID_RE = re.compile(
 )
 SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
+#: Must match notify_listener.TURN_START_EVENTS (SYRD-268).
+TURN_START_EVENTS = frozenset({"UserPromptSubmit", "PreInvocation", "pre_llm_call"})
 SESSION_START_FRESH_SOURCE = "startup"
 DIRECTOR_ROLE = "director"
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
@@ -148,13 +150,27 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
         raise ValueError("pane hook state must be idle, busy, or blocked")
     target_dir = Path(state_dir).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
+    written_at = time.time()
+    path = _target_path(target_dir, target)
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous = None
     payload = {
         "target": target,
         "state": normalized_state,
-        "updated_at": time.time(),
+        "updated_at": written_at,
         "source": source,
     }
-    path = _target_path(target_dir, target)
+    # When the latest turn STARTED, carried across the writes after it, so
+    # the notification listener can tell that a notice it sent started a turn
+    # even if the turn has already ended when it looks. Same rule as
+    # notify_listener.hook_turn_started_at; a test holds the two together
+    # (SYRD-268).
+    if normalized_state == "busy" and source.rsplit(".", 1)[-1] in TURN_START_EVENTS:
+        payload["turn_started_at"] = written_at
+    elif isinstance(previous, dict) and previous.get("turn_started_at") is not None:
+        payload["turn_started_at"] = previous["turn_started_at"]
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)

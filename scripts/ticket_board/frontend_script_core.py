@@ -1665,6 +1665,8 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       line.className = `card-delivery card-delivery-${delivery.state}`;
       if (delivery.state === 'failed') {
         line.textContent = `Not delivered to ${owner}: ${delivery.reason || 'failed'}`;
+      } else if (delivery.state === 'unconfirmed') {
+        line.textContent = `Sent to ${owner}, not confirmed received`;
       } else if (delivery.state === 'pending') {
         const tries = delivery.attempts ? ` (attempt ${delivery.attempts})` : '';
         line.textContent = `Not yet delivered to ${owner}${tries}`;

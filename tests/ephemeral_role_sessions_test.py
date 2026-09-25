@@ -223,9 +223,23 @@ def drive(
         def sender(target: str, message: str) -> None:
             sent.append((target, message))
 
+    delivered_to = sender
+
+    def pane_that_takes_what_it_is_sent(target: str, message: str) -> Any:
+        # A real pane that receives a prompt runs a turn, and its runtime's own
+        # hooks record it: UserPromptSubmit, then Stop. The listener now
+        # requires that witness before calling a notice delivered (SYRD-268),
+        # so a pane that shows nothing would be -- correctly -- a notice that
+        # was never received. The turn is modelled as finished, so the pane is
+        # idle again for the next notice, as a quick real one would be.
+        result = delivered_to(target, message)
+        store.write(target, "busy", source="codex.UserPromptSubmit")
+        store.write(target, "idle", source="codex.Stop")
+        return result
+
     listener = TicketBoardNotifyListener(
         conninfo="dbname=test",
-        sender=sender,
+        sender=pane_that_takes_what_it_is_sent,
         activity_gate=gate.is_working,
         connector=lambda *args, **kwargs: conn,
         poll_seconds=0,

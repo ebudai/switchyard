@@ -440,6 +440,7 @@ STYLE = """    :root {
       color: #fca5a5;
     }
     .card-delivery-pending,
+    .card-delivery-unconfirmed,
     .card-delivery-none {
       color: #fcd34d;
     }

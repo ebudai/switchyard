@@ -404,6 +404,8 @@ class PaneHookState:
     state: str
     updated_at: float
     source: str = ""
+    #: None when the file predates SYRD-268 and never recorded it.
+    turn_started_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -739,6 +741,46 @@ def parse_directorctl_diagnostic(output: str | None) -> dict[str, Any]:
 #: mefp it was, the whole time -- and the assignment comes back when the
 #: declaration and the worker agree again, so this is retried, never
 #: dead-lettered as a missing pane (SYRD-264).
+#: Hook events that mean a turn STARTED in the pane: a prompt was taken and the
+#: runtime began working on it. Only a start can witness a notice. A turn that
+#: ENDS after a send may be a turn that was already running when the notice
+#: was typed into it -- which is the case this exists to catch -- and session
+#: starts, launcher writes and Claude's periodic idle notification are not
+#: turns at all (SYRD-268).
+TURN_START_EVENTS = frozenset({
+    "UserPromptSubmit",   # claude, codex
+    "PreInvocation",      # gemini / agy
+    "pre_llm_call",       # hermes
+})
+
+
+def hook_turn_started_at(
+    previous: dict[str, Any] | None, state: str, source: str, now: float
+) -> float | None:
+    """When the pane's latest turn started, carried across later writes.
+
+    The state file holds only the latest state, and a turn's end overwrites its
+    start; without this, a listener that looks a moment late sees only "idle"
+    and cannot tell a turn happened. So a turn start sets it, and every other
+    write keeps what was there. The hook script writes the same field the
+    same way, and a test holds the two to it.
+    """
+    if state == "busy" and (source or "").rsplit(".", 1)[-1] in TURN_START_EVENTS:
+        return now
+    if isinstance(previous, dict):
+        try:
+            carried = previous.get("turn_started_at")
+            return float(carried) if carried is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
+#: How long a sent notice has to show up as a turn in the recipient's own
+#: hook state before it is recorded as unconfirmed rather than delivered.
+DEFAULT_SUBMISSION_CONFIRM_SECONDS = 15.0
+DEFAULT_SUBMISSION_POLL_SECONDS = 0.25
+SEND_UNCONFIRMED_EVENT = "send_unconfirmed"
+
+
 RUNTIME_ASSIGNMENT_UNRESOLVED = "runtime_assignment_unresolved"
 RUNTIME_ASSIGNMENT_MARKERS = (
     "cannot resolve runtime assignment",
@@ -1019,11 +1061,18 @@ class PaneHookStateStore:
             updated_at = float(parsed.get("updated_at"))
         except (TypeError, ValueError):
             return None
+        turn_started_at: float | None
+        try:
+            raw_turn = parsed.get("turn_started_at")
+            turn_started_at = float(raw_turn) if raw_turn is not None else None
+        except (TypeError, ValueError):
+            turn_started_at = None
         return PaneHookState(
             target=str(parsed.get("target") or target),
             state=state,
             updated_at=updated_at,
             source=str(parsed.get("source") or ""),
+            turn_started_at=turn_started_at,
         )
 
     def write(self, target: str, state: str, *, source: str = "", now: float | None = None) -> Path:
@@ -1031,13 +1080,21 @@ class PaneHookStateStore:
         if normalized_state not in {"idle", "busy", "blocked"}:
             raise ValueError("pane hook state must be idle, busy, or blocked")
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        written_at = time.time() if now is None else now
+        path = self._target_path(target)
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = None
         payload = {
             "target": target,
             "state": normalized_state,
-            "updated_at": time.time() if now is None else now,
+            "updated_at": written_at,
             "source": source,
         }
-        path = self._target_path(target)
+        turn_started_at = hook_turn_started_at(previous, normalized_state, source, written_at)
+        if turn_started_at is not None:
+            payload["turn_started_at"] = turn_started_at
         tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(path)
@@ -1123,6 +1180,31 @@ class PaneActivityGate:
 
     def last_trace(self, target: str) -> ActivityTrace | None:
         return self._last_trace_by_target.get(target)
+
+    def submission_witnessed(self, target: str, since: float) -> bool | None:
+        """Did the recipient's OWN runtime record a turn after ``since``?
+
+        directorctl's check is what the pane looks like, and a busy agent's
+        pane looks submitted whatever happened: its output moves and its
+        status line says "Working". The runtime's hooks are a separate witness,
+        written by the CLI itself when a prompt starts a turn: UserPromptSubmit
+        (claude, codex), PreInvocation (gemini), pre_llm_call (hermes). The gate
+        only sends to an idle pane, so a turn START after the send is the notice
+        being taken (SYRD-268). A turn END is not: it may close a turn that was
+        already running when the notice was typed into its composer.
+
+        None when there is no hook state to ask: that is "cannot tell", and it
+        must never read as either answer.
+        """
+        state = self.state_store.read(target)
+        if state is None:
+            return None
+        if state.turn_started_at is not None:
+            return state.turn_started_at >= since
+        # A state file written before turn starts were recorded: only a start
+        # that is still the latest write can be read from it.
+        event = (state.source or "").rsplit(".", 1)[-1]
+        return state.updated_at >= since and event in TURN_START_EVENTS
 
     def missing_hook_targets(self, targets: list[str] | None = None) -> list[str]:
         checked_targets = targets or sorted(set(self.role_targets.values()))
@@ -1769,6 +1851,11 @@ class TicketBoardNotifyListener:
         stop_event: threading.Event | None = None,
         logger: logging.Logger = LOGGER,
         target_exists: Callable[[str], bool | None] | None = None,
+        #: Hook timestamps are epoch seconds written by the pane's CLI, so the
+        #: moment a send started is taken from the same clock (SYRD-268).
+        wall_clock: Callable[[], float] = time.time,
+        submission_confirm_seconds: float = DEFAULT_SUBMISSION_CONFIRM_SECONDS,
+        submission_poll_seconds: float = DEFAULT_SUBMISSION_POLL_SECONDS,
     ) -> None:
         self.role_targets = dict(ROLE_TO_TARGET)
         self.workflow = None
@@ -1802,6 +1889,9 @@ class TicketBoardNotifyListener:
         self.pre_send_recheck_delay_seconds = max(0.0, pre_send_recheck_delay_seconds)
         self.session_clear_settle_seconds = max(0.0, session_clear_settle_seconds)
         self.sleeper = sleeper
+        self.wall_clock = wall_clock
+        self.submission_confirm_seconds = max(0.0, submission_confirm_seconds)
+        self.submission_poll_seconds = max(0.01, submission_poll_seconds)
         self.stop_event = stop_event or threading.Event()
         self.logger = logger
         self.target_exists = target_exists or tmux_target_exists
@@ -3600,6 +3690,7 @@ WHERE (r.definition->>'active')::boolean
                 ):
                     continue
             directorctl_diagnostic: dict[str, Any] = {}
+            send_started_at = self.wall_clock()
             try:
                 sender_result = self.sender(target, display_message(message))
                 if isinstance(sender_result, dict):
@@ -3661,6 +3752,52 @@ WHERE (r.definition->>'active')::boolean
                     self._requeue_notification(conn, notification_id, attempts, failure_reason)
                 continue
             composer_after = self._composer_snapshot(target)
+            # directorctl returning 0 is not delivery: its check is what the
+            # pane looks like, and a pane already busy on another turn looks
+            # submitted whatever happened -- so MEFP-1's Final Sign-Off notice
+            # was recorded delivered and never seen (SYRD-268). Delivered now
+            # needs the recipient's own hooks to have recorded a turn.
+            submission = self._await_submission(target, send_started_at)
+            if submission is False:
+                self.logger.warning(
+                    "Notification %s for %s was sent to %s but no turn was recorded there within %gs; "
+                    "recording it unconfirmed, not delivered",
+                    notification_id, ticket_id, target, self.submission_confirm_seconds,
+                )
+                unconfirmed_detail = self._delivery_diagnostic_detail(
+                    target=target,
+                    message=message,
+                    attempts=attempts,
+                    activity_trace=activity_trace,
+                    before=composer_before,
+                    after=composer_after,
+                    decision=SEND_UNCONFIRMED_EVENT,
+                    reason="no_submission_witnessed",
+                    directorctl_diagnostic=directorctl_diagnostic,
+                )
+                unconfirmed_detail["submission"] = {
+                    "witnessed": False,
+                    "waited_seconds": self.submission_confirm_seconds,
+                    "since": send_started_at,
+                }
+                self._trace_notification(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event=SEND_UNCONFIRMED_EVENT,
+                    pane_busy=pane_busy,
+                    busy_reason="no_submission_witnessed",
+                    region_digest=activity_trace.region_digest,
+                    detail=unconfirmed_detail,
+                )
+                # Not re-sent automatically: the text may be sitting in the
+                # composer, and typing it again would put it there twice. The
+                # board reports it unconfirmed; the owner of the stage decides.
+                self._ack_notification(conn, notification_id)
+                self._traced_gate_defer_notifications.discard(notification_id)
+                continue
             self._trace_notification(
                 conn,
                 notification_id=notification_id,
@@ -3681,7 +3818,7 @@ WHERE (r.definition->>'active')::boolean
                     decision="send",
                     reason=activity_trace.reason,
                     directorctl_diagnostic=directorctl_diagnostic,
-                ),
+                ) | {"submission": {"witnessed": submission, "since": send_started_at}},
             )
             self._trace_notification(
                 conn,
@@ -3701,6 +3838,26 @@ WHERE (r.definition->>'active')::boolean
             delivered += 1
             self.logger.info("Delivered queued notification %s for %s to %s: %s", notification_id, ticket_id, target, payload)
         return delivered
+
+    def _await_submission(self, target: str, since: float) -> bool | None:
+        """Wait, bounded, for the recipient's own hooks to record a turn.
+
+        True: a turn event was written after the send. False: none within the
+        bound. None: this gate has no hook state to ask -- "cannot tell" is
+        reported as that, never as either answer.
+        """
+        gate_owner = getattr(self.activity_gate, "__self__", None)
+        witnessed = getattr(gate_owner, "submission_witnessed", None)
+        if not callable(witnessed):
+            return None
+        deadline = self.monotonic() + self.submission_confirm_seconds
+        while True:
+            answer = witnessed(target, since)
+            if answer is None or answer:
+                return answer
+            if self.monotonic() >= deadline:
+                return False
+            self.sleeper(self.submission_poll_seconds)
 
     def _wait_for_notification(self, conn: Any) -> bool:
         notifications = conn.notifies(timeout=self._wait_timeout_seconds(conn), stop_after=1)

@@ -3264,9 +3264,17 @@ def test_long_idle_live_pane_still_delivers() -> None:
         store, gate = hook_gate(tmp_path)
         store.write("pgu-research:0.0", "idle", source="claude.Stop", now=100.0)
         conn = FakeConnection([queue_row(51, "PGU-778", attempts=12, assignee="research", target_role="research")])
+
+        def live_pane_takes_it(target: str, message: str) -> None:
+            # A live pane's own hooks record the turn the notice starts; that
+            # is what "delivered" now requires (SYRD-268).
+            sent.append((target, message))
+            store.write(target, "busy", source="claude.UserPromptSubmit")
+            store.write(target, "idle", source="claude.Stop")
+
         listener = TicketBoardNotifyListener(
             conninfo="dbname=test",
-            sender=lambda target, message: sent.append((target, message)),
+            sender=live_pane_takes_it,
             activity_gate=gate.is_working,
             connector=lambda *args, **kwargs: conn,
             poll_seconds=0,

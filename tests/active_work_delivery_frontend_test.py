@@ -74,6 +74,12 @@ def main() -> int:
     check(".card-delivery-failed" in HTML, "and it is styled")
 
     base = {"active_work_highlight": True, "active_work_owner_role": "ops", "assignee": "ops"}
+    (unconfirmed,) = render([{**base, "active_work_delivery": {
+        "state": "unconfirmed", "at": "2026-09-24T21:51:49-04:00", "reason": "no_submission_witnessed"}}])
+    check(unconfirmed and unconfirmed["text"] == "Sent to Ops, not confirmed received",
+          f"an unconfirmed send says it was sent and not seen to arrive: {unconfirmed}")
+    check(unconfirmed["className"] == "card-delivery card-delivery-unconfirmed", f"{unconfirmed}")
+    check(".card-delivery-unconfirmed" in HTML, "and is styled")
     failed, pending, none, delivered, unhighlighted, legacy = render([
         {**base, "active_work_delivery": {
             "state": "failed", "reason": "tmux_target_missing", "at": "2026-09-24T19:25:13-04:00", "attempts": 1}},

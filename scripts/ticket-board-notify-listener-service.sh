@@ -20,6 +20,22 @@ readonly UNIT_DIR="${UNIT_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
 readonly UNIT_PATH="$UNIT_DIR/$SERVICE_NAME"
 readonly DEPLOY_REF="${DEPLOY_REF:-origin/main}"
 readonly SWITCHYARD_RELEASE_MARKER_NAME=".switchyard-release.json"
+# The board the listener -- and the directorctl it runs -- asks which pane a
+# role is in. Without it directorctl assumed 8770, so a tenant on any other
+# port could never resolve a runtime assignment (SYRD-265). An explicit URL or
+# port wins; otherwise the port provisioning allocates for this project, asked
+# of provisioning itself rather than re-derived here.
+allocated_board_port() {
+    PYTHONPATH="$SOURCE_REPO${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+        'import sys; from scripts.ticket_board.project_provision import allocated_port; print(allocated_port(sys.argv[1]))' \
+        "$PROJECT_SLUG"
+}
+if [[ -n "${TICKET_BOARD_URL:-}" ]]; then
+    BOARD_URL="$TICKET_BOARD_URL"
+else
+    BOARD_URL="http://${BOARD_HOST:-127.0.0.1}:${BOARD_PORT:-$(allocated_board_port)}"
+fi
+readonly BOARD_URL
 readonly LISTENER_DATABASE_URL="${TICKET_BOARD_NOTIFY_DATABASE_URL:-${TICKET_BOARD_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=ticket_board_listener}}"
 readonly BOARD_ADMIN_DATABASE_URL="${TICKET_BOARD_ADMIN_DATABASE_URL:-postgresql:///$DEFAULT_DATABASE_NAME?host=/var/run/postgresql&user=postgres}"
 readonly RBAC_SQL="${RBAC_SQL:-$BOARD_CURRENT_LINK/scripts/ticket_board/rbac.sql}"
@@ -235,6 +251,7 @@ Environment=PGUSER=ticket_board_listener
 Environment=TICKET_BOARD_DATABASE_URL=$LISTENER_DATABASE_URL
 Environment=TICKET_BOARD_NOTIFY_DATABASE_URL=$LISTENER_DATABASE_URL
 Environment=TICKET_BOARD_PROJECT=$PROJECT_SLUG
+Environment=TICKET_BOARD_URL=$BOARD_URL
 Environment=TICKET_BOARD_DIRECTORCTL=$BOARD_CURRENT_LINK/scripts/directorctl
 Environment=TICKET_BOARD_PANE_STATE_DIR=%t/$PROJECT_SLUG-ticket-board/pane-state
 EnvironmentFile=-%h/.config/$PROJECT_SLUG/ticket-board-notify-listener.env

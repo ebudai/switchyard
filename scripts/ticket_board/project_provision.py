@@ -3491,6 +3491,18 @@ def tenant_primary_group(owner_user: str) -> str:
         return ""
 
 
+def listener_board_url(plan: ProjectBoardProvision) -> str:
+    """The board this tenant's listener and its directorctl ask for runtime assignments.
+
+    The address the board unit itself binds (`--host 127.0.0.1 --port`). Left
+    unset, directorctl fell back to 8770 -- another tenant's board, or none --
+    so every notice on a non-default-port tenant failed to resolve its role's
+    runtime and was retried forever while the listener claimed it from the
+    right database (SYRD-265).
+    """
+    return f"http://127.0.0.1:{plan.port}"
+
+
 def render_listener_unit(plan: ProjectBoardProvision) -> str:
     """The listener's unit, including where it reads pane hook state.
 
@@ -3540,6 +3552,7 @@ Restart=always
 RestartSec=2
 Environment=PYTHONUNBUFFERED=1
 Environment=TICKET_BOARD_PROJECT={plan.project}
+Environment=TICKET_BOARD_URL={listener_board_url(plan)}
 {process_authority_line.rstrip()}
 {role_accounts_line.rstrip()}
 Environment=PGHOST=/var/run/postgresql

@@ -1225,7 +1225,13 @@ notification_candidates AS (
                   AND NOT blocker.resolved
             )
             AS is_actionable_current,
-        sent.last_sent_at AS active_work_notified_at
+        sent.last_sent_at AS active_work_notified_at,
+        queued.attempts AS active_work_delivery_attempts,
+        queued.last_error AS active_work_delivery_last_error,
+        queued.dead_lettered_at AS active_work_delivery_dead_lettered_at,
+        queued.terminal_reason AS active_work_delivery_terminal_reason,
+        queued.next_attempt_at AS active_work_delivery_next_attempt_at,
+        queued.id IS NOT NULL AS active_work_delivery_queued
     FROM notification_scope
     LEFT JOIN LATERAL (
         SELECT max(trace.ts) AS last_sent_at
@@ -1235,13 +1241,44 @@ notification_candidates AS (
           AND trace.kind = 'transition'
           AND trace.event = 'send'
           AND trace.ticket_state_at_event = notification_scope.state
+          -- This VISIT to the stage, not any earlier one: a ticket sent to Ops,
+          -- routed back to analysis and returned to Ops must not report the
+          -- first visit's send while the second notice is pending or dead
+          -- (SYRD-264 Final Sign-Off). A legacy row with no recorded entry is
+          -- not bounded rather than hidden.
+          AND (notification_scope.entered_current_state_at IS NULL
+               OR trace.ts >= notification_scope.entered_current_state_at)
     ) sent ON true
+    -- The notice that has NOT been delivered, if there is one: acknowledged
+    -- notices are deleted, so a remaining row for this owner and this stage is
+    -- either still pending or dead-lettered. Without this the board showed a
+    -- ticket as the owner's current work -- which MEFP-1 was -- and nothing at
+    -- all about its notice having been dead-lettered (SYRD-264).
+    LEFT JOIN LATERAL (
+        SELECT q.id, q.attempts, q.last_error, q.dead_lettered_at, q.terminal_reason,
+               q.next_attempt_at
+        FROM ticket_board.ticket_notification_queue q
+        WHERE q.ticket_id = notification_scope.id
+          AND q.target_role = notification_scope.owner_role
+          AND q.kind = 'transition'
+          AND COALESCE(q.payload->>'new_state', q.payload->>'state') = notification_scope.state
+          AND (notification_scope.entered_current_state_at IS NULL
+               OR q.created_at >= notification_scope.entered_current_state_at)
+        ORDER BY q.id DESC
+        LIMIT 1
+    ) queued ON true
 ),
 active_work AS (
     SELECT
         notification_candidates.id,
         notification_candidates.owner_role,
         notification_candidates.active_work_notified_at,
+        notification_candidates.active_work_delivery_attempts,
+        notification_candidates.active_work_delivery_last_error,
+        notification_candidates.active_work_delivery_dead_lettered_at,
+        notification_candidates.active_work_delivery_terminal_reason,
+        notification_candidates.active_work_delivery_next_attempt_at,
+        notification_candidates.active_work_delivery_queued,
         -- There is exactly one visible current ticket per logical owner. The
         -- send timestamp remains separate evidence and does not rank work.
         notification_candidates.is_actionable_current
@@ -1282,6 +1319,12 @@ SELECT
     t.updated_text,
     active_work.owner_role AS active_work_owner_role,
     active_work.active_work_notified_at,
+    active_work.active_work_delivery_attempts,
+    active_work.active_work_delivery_last_error,
+    active_work.active_work_delivery_dead_lettered_at,
+    active_work.active_work_delivery_terminal_reason,
+    active_work.active_work_delivery_next_attempt_at,
+    COALESCE(active_work.active_work_delivery_queued, false) AS active_work_delivery_queued,
     COALESCE(active_work.active_work_highlight, false) AS active_work_highlight,
     COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
     COALESCE(
@@ -1406,6 +1449,7 @@ ORDER BY rank;
             "active_work_highlight": bool(row["active_work_highlight"]),
             "active_work_owner_role": str(row["active_work_owner_role"] or ""),
             "active_work_notified_at": self._format_optional_datetime(row["active_work_notified_at"]),
+            "active_work_delivery": self._active_work_delivery(row),
             # awaiting_role has TWO consumers and they are easy to mistake for
             # one. read_client.needs_director() reads it from here to put a
             # ticket in the director's attention queue, and the nudge queries in
@@ -1423,6 +1467,49 @@ ORDER BY rank;
         }
         self._set_screenshot_fields(ticket, self._build_screenshot_entries(list(screenshots)))
         return ticket
+
+    def _active_work_delivery(self, row: Any) -> dict[str, Any]:
+        """Whether the current owner's notice for this stage reached them.
+
+        `active_work_highlight` says whose current work a ticket is; it has
+        never said the owner was told, and on mefp a ticket was highlighted as
+        Ops's work while its one notice sat dead-lettered (SYRD-264). This says
+        which of the three it is, from the durable records:
+
+        * ``delivered`` -- a send is traced for this owner at this stage;
+        * ``failed`` -- the notice was dead-lettered, with its reason;
+        * ``pending`` -- the notice is queued and has not been delivered yet,
+          with the last error, if a send has been tried and failed;
+        * ``none`` -- the ticket has an owner and no notice is recorded at all.
+
+        Empty ``state`` when the ticket has no current owner to notify.
+        """
+        get = row.get if hasattr(row, "get") else (lambda key, default=None: row[key])
+        owner = str(get("active_work_owner_role", "") or "")
+        if not owner:
+            return {"state": ""}
+        notified_at = self._format_optional_datetime(get("active_work_notified_at"))
+        if notified_at:
+            return {"state": "delivered", "at": notified_at}
+        if get("active_work_delivery_queued", False):
+            attempts = int(get("active_work_delivery_attempts", 0) or 0)
+            dead_at = self._format_optional_datetime(get("active_work_delivery_dead_lettered_at"))
+            if dead_at:
+                return {
+                    "state": "failed",
+                    "at": dead_at,
+                    "reason": str(get("active_work_delivery_terminal_reason", "") or ""),
+                    "attempts": attempts,
+                }
+            return {
+                "state": "pending",
+                "attempts": attempts,
+                "reason": str(get("active_work_delivery_last_error", "") or ""),
+                "next_attempt_at": self._format_optional_datetime(
+                    get("active_work_delivery_next_attempt_at")
+                ),
+            }
+        return {"state": "none"}
 
     def _format_optional_datetime(self, value: Any) -> str:
         if value is None:

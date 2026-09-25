@@ -695,15 +695,19 @@ SET last_transition_notified_at = clock_timestamp() + interval '3 hours',
     last_nudged_at = NULL
 WHERE ticket_id = 'PGU-406';
 
+-- Sends are dated now, AFTER the seeding above: a send is only evidence for
+-- the stage visit it happened in, so one dated before the ticket entered its
+-- stage is not counted (SYRD-264). These rows used a fixed July date that
+-- predates every seeded stage entry -- a send that could not have happened.
 INSERT INTO ticket_board.notification_trace (
     ts, ticket_id, target_role, kind, event, ticket_state_at_event, ticket_assignee_at_event, pane_busy_determination, busy_reason
 ) VALUES
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-402', 'director', 'transition', 'send', 'analysis', 'ops', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-404', 'audit', 'transition', 'send', 'audit', 'audit', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-408', 'main', 'transition', 'send', 'in_progress', 'main', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-410', 'research', 'transition', 'send', 'in_progress', 'research', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle'),
-    ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle'),
+    (clock_timestamp(), 'PGU-402', 'director', 'transition', 'send', 'analysis', 'ops', 'idle', 'idle'),
+    (clock_timestamp(), 'PGU-404', 'audit', 'transition', 'send', 'audit', 'audit', 'idle', 'idle'),
+    (clock_timestamp(), 'PGU-408', 'main', 'transition', 'send', 'in_progress', 'main', 'idle', 'idle'),
+    (clock_timestamp(), 'PGU-410', 'research', 'transition', 'send', 'in_progress', 'research', 'idle', 'idle'),
+    (clock_timestamp(), 'PGU-406', 'director', 'transition', 'send', 'director_review', 'director', 'idle', 'idle'),
+    (clock_timestamp(), 'PGU-414', 'inspector', 'transition', 'send', 'inspection', 'ops', 'idle', 'idle'),
     ('2026-07-10T13:00:00+00:00'::timestamptz, 'PGU-409', 'app', 'transition', 'gate_defer', 'in_progress', 'app', 'busy', 'active_work');
 """,
         )

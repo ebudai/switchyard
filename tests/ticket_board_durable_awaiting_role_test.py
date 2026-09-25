@@ -40,7 +40,10 @@ def checks(svc: str, admin: str) -> None:
 
     def listener(sender):
         return TicketBoardNotifyListener(conninfo=admin.replace('user=ticket_board_service', ''),
-            sender=sender, activity_gate=lambda target: False, target_exists=lambda target: True)
+            sender=sender, activity_gate=lambda target: False, target_exists=lambda target: True,
+            # Delivered needs the recipient to have taken it (SYRD-268): the
+            # fixture's pane takes what it is sent.
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent))
 
     def process(worker) -> int:
         # Separate connections and objects exercise persisted delivery/retry after restart.

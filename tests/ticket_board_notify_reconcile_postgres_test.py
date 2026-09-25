@@ -177,6 +177,7 @@ FOR UPDATE
             listener = TicketBoardNotifyListener(
                 conninfo=listener_conninfo,
                 sender=lambda target, message: sent.append((target, message)),
+                submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
                 activity_gate=lambda _target: False,
                 poll_seconds=0,
                 target_exists=lambda _target: True,
@@ -248,6 +249,7 @@ WHERE ticket_id = 'PGU-229';
         final_review_listener = TicketBoardNotifyListener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
             activity_gate=lambda _target: busy[0],
             poll_seconds=0,
             target_exists=lambda _target: True,
@@ -327,6 +329,7 @@ SELECT ticket_board.enqueue_notification(
         stale_state_delivery = TicketBoardNotifyListener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             poll_seconds=0,
             target_exists=lambda _target: True,
@@ -373,6 +376,7 @@ SELECT ticket_board.enqueue_notification(
         stale_recipient_delivery = TicketBoardNotifyListener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             poll_seconds=0,
             target_exists=lambda _target: True,
@@ -432,6 +436,7 @@ WHERE ticket_id = 'PGU-226' AND kind = 'transition';
         cancelled_drop = TicketBoardNotifyListener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             poll_seconds=0,
             target_exists=lambda _target: True,
@@ -479,6 +484,7 @@ WHERE ticket_id = 'PGU-227' AND kind = 'transition';
         picked_up_drop = TicketBoardNotifyListener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             poll_seconds=0,
             target_exists=lambda _target: True,
@@ -549,6 +555,7 @@ WHERE ticket_id = 'PGU-228'
         escalation_delivered = TicketBoardNotifyListener(
             conninfo=listener_conninfo,
             sender=lambda target, message: sent.append((target, message)),
+            submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             poll_seconds=0,
             target_exists=lambda _target: True,

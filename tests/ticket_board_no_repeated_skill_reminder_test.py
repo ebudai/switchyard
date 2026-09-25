@@ -128,6 +128,7 @@ def test_a_transition_is_delivered_verbatim_for_every_role() -> None:
         listener = notify_listener.TicketBoardNotifyListener(
             conninfo="dbname=test",
             sender=sender,
+            submission_witness=lambda target, _since: any(t == target for t, _m in sender.sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             target_exists=lambda _target: True,
             connector=lambda *args, **kwargs: conn,
@@ -151,6 +152,7 @@ def test_the_notify_driven_delivery_path_is_verbatim_too() -> None:
         listener = notify_listener.TicketBoardNotifyListener(
             conninfo="dbname=test",
             sender=sender,
+            submission_witness=lambda target, _since: any(t == target for t, _m in sender.sent),  # the pane takes what it is sent
             activity_gate=lambda _target: False,
             target_exists=lambda _target: True,
             poll_seconds=0,

@@ -288,12 +288,16 @@ def main():
                 sock, port, "held_test", "ticket_board_listener"
             )
 
-            def worker(sender, busy=False):
+            def worker(sender, busy=False, witness=None):
+                # Delivered needs the recipient to have taken it (SYRD-268):
+                # by default, the fixture's pane takes what it is sent.
                 return TicketBoardNotifyListener(
                     conninfo=listener_url,
                     sender=sender,
                     activity_gate=lambda target: busy,
                     target_exists=lambda target: True,
+                    submission_witness=witness
+                    or (lambda target, _since: any(t == target for t, _m in sent)),
                 )
 
             def process(listener):
@@ -374,7 +378,12 @@ def main():
                         check=True,
                         capture_output=True,
                     )
-                    assert process(worker(DirectorctlSender(str(installed)))) == 1
+                    # The receiving pane writes a line only once Enter submits
+                    # it: that is its witness, not anything the sender says.
+                    assert process(worker(
+                        DirectorctlSender(str(installed)),
+                        witness=lambda _target, _since: received.exists() and "PGU-1" in received.read_text(),
+                    )) == 1
                 for attempt in range(50):
                     if received.exists() and "PGU-1" in received.read_text():
                         break

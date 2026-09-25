@@ -421,6 +421,13 @@ def main():
                 )
                 # No GUI/agent is impersonated: idle gate and target existence are explicit fixtures.
                 listener.activity_gate = lambda target: False
+                # And the recipient is the private `cat` pane: what it shows is
+                # what it was given -- delivered needs that witness (SYRD-268).
+                listener.submission_witness = lambda target, _since: any(
+                    t == target and message in subprocess.check_output(
+                        ["tmux", "-S", str(pane_socket), "capture-pane", "-p", "-t", target], text=True)
+                    for t, message in sent
+                ) if target == "cerulean-verifier:0.0" else any(t == target for t, _m in sent)
                 assert listener.process_due_notifications(conn) > 0
                 assert any(
                     target == "cerulean-verifier:0.0" and "Verification" in message

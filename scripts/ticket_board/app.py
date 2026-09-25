@@ -1231,7 +1231,9 @@ notification_candidates AS (
         queued.dead_lettered_at AS active_work_delivery_dead_lettered_at,
         queued.terminal_reason AS active_work_delivery_terminal_reason,
         queued.next_attempt_at AS active_work_delivery_next_attempt_at,
-        queued.id IS NOT NULL AS active_work_delivery_queued
+        queued.id IS NOT NULL AS active_work_delivery_queued,
+        unconfirmed.last_unconfirmed_at AS active_work_delivery_unconfirmed_at,
+        unconfirmed.unconfirmed_reason AS active_work_delivery_unconfirmed_reason
     FROM notification_scope
     LEFT JOIN LATERAL (
         SELECT max(trace.ts) AS last_sent_at
@@ -1267,6 +1269,23 @@ notification_candidates AS (
         ORDER BY q.id DESC
         LIMIT 1
     ) queued ON true
+    -- Sent, and never seen to arrive: the recipient's own hooks recorded no
+    -- turn afterwards, or there was no hook record to read. Not a send, so it
+    -- cannot read as delivered -- which is how MEFP-1's Final Sign-Off notice
+    -- was reported (SYRD-268). The latest one, with the listener's reason.
+    LEFT JOIN LATERAL (
+        SELECT trace.ts AS last_unconfirmed_at, trace.busy_reason AS unconfirmed_reason
+        FROM ticket_board.notification_trace trace
+        WHERE trace.ticket_id = notification_scope.id
+          AND trace.target_role = notification_scope.owner_role
+          AND trace.kind = 'transition'
+          AND trace.event = 'send_unconfirmed'
+          AND trace.ticket_state_at_event = notification_scope.state
+          AND (notification_scope.entered_current_state_at IS NULL
+               OR trace.ts >= notification_scope.entered_current_state_at)
+        ORDER BY trace.ts DESC
+        LIMIT 1
+    ) unconfirmed ON true
 ),
 active_work AS (
     SELECT
@@ -1279,6 +1298,8 @@ active_work AS (
         notification_candidates.active_work_delivery_terminal_reason,
         notification_candidates.active_work_delivery_next_attempt_at,
         notification_candidates.active_work_delivery_queued,
+        notification_candidates.active_work_delivery_unconfirmed_at,
+        notification_candidates.active_work_delivery_unconfirmed_reason,
         -- There is exactly one visible current ticket per logical owner. The
         -- send timestamp remains separate evidence and does not rank work.
         notification_candidates.is_actionable_current
@@ -1325,6 +1346,8 @@ SELECT
     active_work.active_work_delivery_terminal_reason,
     active_work.active_work_delivery_next_attempt_at,
     COALESCE(active_work.active_work_delivery_queued, false) AS active_work_delivery_queued,
+    active_work.active_work_delivery_unconfirmed_at,
+    active_work.active_work_delivery_unconfirmed_reason,
     COALESCE(active_work.active_work_highlight, false) AS active_work_highlight,
     COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
     COALESCE(
@@ -1480,6 +1503,9 @@ ORDER BY rank;
         * ``failed`` -- the notice was dead-lettered, with its reason;
         * ``pending`` -- the notice is queued and has not been delivered yet,
           with the last error, if a send has been tried and failed;
+        * ``unconfirmed`` -- a notice was sent and nothing says it arrived:
+          the recipient's own hooks recorded no turn afterwards, or there was
+          no hook record to read -- with the listener's reason (SYRD-268);
         * ``none`` -- the ticket has an owner and no notice is recorded at all.
 
         Empty ``state`` when the ticket has no current owner to notify.
@@ -1508,6 +1534,15 @@ ORDER BY rank;
                 "next_attempt_at": self._format_optional_datetime(
                     get("active_work_delivery_next_attempt_at")
                 ),
+            }
+        unconfirmed_at = self._format_optional_datetime(get("active_work_delivery_unconfirmed_at"))
+        if unconfirmed_at:
+            # Sent, and no turn followed in the recipient's pane. Reported as
+            # exactly that, and never as delivered (SYRD-268).
+            return {
+                "state": "unconfirmed",
+                "at": unconfirmed_at,
+                "reason": get("active_work_delivery_unconfirmed_reason") or "no_submission_witnessed",
             }
         return {"state": "none"}
 

@@ -60,8 +60,20 @@ const out = tickets.map((ticket) => {
   const line = activeWorkDeliveryLine(ticket);
   return line ? { className: line.className, text: line.textContent, title: line.title } : null;
 });
-process.stdout.write(JSON.stringify(out));
+process.stdout.write(JSON.stringify({ out }));
 """ % (function_source("activeWorkDeliveryLine"), json.dumps(tickets))
+    proc = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)["out"]
+
+
+def hints(tickets: list[dict]) -> list[str]:
+    """What the same tickets' cards carry on hover (renderCard's card.title)."""
+    program = """
+const roleLabel = (role) => ({ ops: 'Ops', main: 'Main', director: 'Director' }[role] || role);
+%s
+process.stdout.write(JSON.stringify(%s.map((ticket) => activeWorkDeliveryHint(ticket))));
+""" % (function_source("activeWorkDeliveryHint"), json.dumps(tickets))
     proc = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)
@@ -74,6 +86,26 @@ def main() -> int:
     check(".card-delivery-failed" in HTML, "and it is styled")
 
     base = {"active_work_highlight": True, "active_work_owner_role": "ops", "assignee": "ops"}
+    # SYRD-268 + SYRD-266: an unconfirmed notice adds no persistent card line
+    # -- the highlight is the cue -- and its diagnosis is on hover. It is
+    # never shown as delivered.
+    unconfirmed_tickets = [
+        {**base, "active_work_owner_role": "director", "assignee": "director", "active_work_delivery": {
+            "state": "unconfirmed", "at": "2026-09-24T21:51:49-04:00", "reason": "no_submission_witnessed"}},
+        {**base, "active_work_delivery": {
+            "state": "unconfirmed", "at": "2026-09-24T21:52:00-04:00", "reason": "no_hook_state"}},
+        {**base, "active_work_highlight": False, "active_work_delivery": {"state": "unconfirmed", "reason": "x"}},
+    ]
+    check(render(unconfirmed_tickets) == [None, None, None], "an unconfirmed notice adds no card line")
+    witnessed_not, no_state, unhighlighted_hint = hints(unconfirmed_tickets)
+    check(witnessed_not == "Sent to Director, not confirmed received · no_submission_witnessed · 2026-09-24T21:51:49-04:00",
+          f"MEFP-1's card says on hover that the notice was sent and not seen to arrive: {witnessed_not!r}")
+    check(no_state == "Sent to Ops, not confirmed received · no_hook_state · 2026-09-24T21:52:00-04:00",
+          f"with the listener's reason when there was nothing to read: {no_state!r}")
+    check(unhighlighted_hint == "", "a ticket that is not current work carries no hint")
+    check("const hint = activeWorkDeliveryHint(ticket);" in HTML and "card.title = hint;" in HTML,
+          "renderCard puts it on the highlighted card's hover")
+    check(".card-delivery-unconfirmed" not in HTML, "and there is no unconfirmed card-line style")
     failed, pending, none, delivered, unhighlighted, legacy = render([
         {**base, "active_work_delivery": {
             "state": "failed", "reason": "tmux_target_missing", "at": "2026-09-24T19:25:13-04:00", "attempts": 1}},

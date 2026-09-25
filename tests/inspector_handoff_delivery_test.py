@@ -166,6 +166,7 @@ def deliver(listener_conninfo: str, *, busy: bool = False) -> list[tuple[str, st
         # host those two agree because the tenant owns both.
         project=PROJECT,
         sender=lambda target, message: sent.append((target, message)),
+        submission_witness=lambda target, _since: any(t == target for t, _m in sent),  # the pane takes what it is sent
         activity_gate=lambda _target: busy,
         poll_seconds=0,
         target_exists=lambda _target: True,

@@ -1657,7 +1657,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
     // highlighted ticket whose notice has not arrived says so, with why.
     function activeWorkDeliveryLine(ticket) {
       const delivery = ticket.active_work_delivery || {};
-      if (!ticket.active_work_highlight || !delivery.state || delivery.state === 'delivered') {
+      if (!ticket.active_work_highlight || !delivery.state || delivery.state === 'delivered'
+          || delivery.state === 'unconfirmed') {
+        // An unconfirmed notice adds no card line: the highlight is the cue
+        // (SYRD-266). Its diagnosis is on hover -- activeWorkDeliveryHint.
         return null;
       }
       const owner = roleLabel(ticket.active_work_owner_role || ticket.assignee);
@@ -1678,6 +1681,17 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       return line;
     }
 
+    // Hover text for a highlighted card whose notice was sent but never seen
+    // to arrive (SYRD-268). Never "delivered": nothing witnessed receipt.
+    function activeWorkDeliveryHint(ticket) {
+      const delivery = ticket.active_work_delivery || {};
+      if (!ticket.active_work_highlight || delivery.state !== 'unconfirmed') {
+        return '';
+      }
+      const owner = roleLabel(ticket.active_work_owner_role || ticket.assignee);
+      return [`Sent to ${owner}, not confirmed received`, delivery.reason, delivery.at].filter(Boolean).join(' · ');
+    }
+
     function renderCard(ticket) {
       const card = document.createElement('article');
       card.className = 'card';
@@ -1689,6 +1703,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       }
       if (ticket.active_work_highlight) {
         card.classList.add('card-active-work');
+        const hint = activeWorkDeliveryHint(ticket);
+        if (hint) {
+          card.title = hint;
+        }
       }
       if (ticket.id === state.selectedId) {
         card.classList.add('selected');

@@ -232,6 +232,7 @@ FROM ticket_board.notification_trace;
                 conninfo=self.listener,
                 project=PROJECT,
                 sender=lambda target, message: self.sent.append((target, message)),
+                submission_witness=lambda target, _since: any(t == target for t, _m in self.sent),  # the pane takes what it is sent
                 activity_gate=lambda _target: False,
                 poll_seconds=0,
                 target_exists=lambda _target: True,

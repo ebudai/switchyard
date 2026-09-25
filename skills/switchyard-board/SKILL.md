@@ -154,10 +154,17 @@ comment you would have written AND sets the durable wait, in one action, so the
 half that matters cannot be the half you forget. It does not reassign anything,
 because the work is still yours; it is waiting.
 
-`blocked_by` accepts ticket IDs only, and is for a dependency you can point at a
-ticket. `await-role` is the bare wait without a reason - prefer
-`request-dependency`, which is that plus the sentence the awaited role needs.
-Either way the wait clears when the awaited role *acts*, not when they reply.
+`blocked_by` is for a dependency you can point at a ticket: one on this board
+(`PREFIX-N`), or work on another board (`project:PREFIX-N`). Only the director
+sets blockers. An external blocker never
+clears by itself - the director releases it explicitly once the thing you need
+is really there - and while it stands it silences your reminders and refuses
+your submission, so you are not asked to act on work that cannot move. If you
+are waiting on another board's work, ask the director once to record that
+blocker rather than re-opening the same dependency. `await-role` is the bare
+wait without a reason - prefer `request-dependency`, which is that plus the
+sentence the awaited role needs. Either way the wait clears when the awaited
+role *acts*, not when they reply.
 
 **If you finish, transition.** A comment saying the work is done leaves the
 ticket exactly where it was. When the work produced no commit, the no-code

@@ -886,6 +886,14 @@ class TicketBoardWriteClient:
             ticket_id, "request_dependency", {"role": role, "reason": reason}, caller_role=caller_role
         )
 
+    def release_external_blocker(
+        self, ticket_id: str, *, ref: str, reason: str, commit: str = "", caller_role: str | None = None
+    ) -> dict[str, Any]:
+        payload = {"ref": ref, "reason": reason}
+        if commit:
+            payload["commit"] = commit
+        return self._ticket_action(ticket_id, "release_external_blocker", payload, caller_role=caller_role)
+
     def await_role(self, ticket_id: str, *, role: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "await_role", {"role": role}, caller_role=caller_role)
 
@@ -1317,6 +1325,18 @@ def _build_parser() -> argparse.ArgumentParser:
     request_dependency.add_argument("ticket_id")
     request_dependency.add_argument("--role", required=True, help="the role this work waits on")
     add_free_text_argument(request_dependency, "--reason", required=True, help="what they have to do, in their words")
+    release_external = subparsers.add_parser(
+        "release-external-blocker",
+        help="end a wait on another board's work, explicitly and with why (SYRD-270)",
+    )
+    release_external.add_argument("ticket_id")
+    release_external.add_argument("--ref", required=True, help="the external blocker, as project:PREFIX-N")
+    add_free_text_argument(release_external, "--reason", required=True, help="what happened that ends the wait")
+    release_external.add_argument(
+        "--commit",
+        default="",
+        help="a commit this board must itself recognise before the wait may end",
+    )
     await_role = subparsers.add_parser("await-role")
     await_role.add_argument("ticket_id")
     await_role.add_argument("--role", required=True)
@@ -1358,7 +1378,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     blockers = subparsers.add_parser("set-blockers")
     blockers.add_argument("ticket_id")
-    blockers.add_argument("--blocked-by", action="append", required=True)
+    blockers.add_argument(
+        "--blocked-by",
+        action="append",
+        required=True,
+        help=(
+            "a ticket on this board (PREFIX-N), or work on another board as project:PREFIX-N; "
+            "an external blocker never resolves by itself -- see release-external-blocker"
+        ),
+    )
     add_free_text_argument(blockers, "--blocked-reason", required=True)
 
     comment = subparsers.add_parser("add-comment")
@@ -1510,6 +1538,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.complete_task(args.ticket_id, text=args.text)
         elif command == "recover_stalled_ticket":
             response = client.recover_stalled_ticket(args.ticket_id, reason=args.reason)
+        elif command == "release_external_blocker":
+            response = client.release_external_blocker(
+                args.ticket_id, ref=args.ref, reason=args.reason, commit=args.commit
+            )
         elif command == "request_dependency":
             response = client.request_dependency(
                 args.ticket_id, role=args.role, reason=args.reason

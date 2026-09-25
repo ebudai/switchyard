@@ -106,6 +106,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "cancel": {"director"},
     "set_manually_controlled": {"director"},
     "set_blockers": {"director"},
+    # SYRD-270: the other half of an external blocker, so the same authority.
+    "release_external_blocker": {"director"},
     "add_comment": CALLER_ROLES,
     "edit_fields": CALLER_ROLES,
     "crop_attachment": {"director", "user"},
@@ -139,6 +141,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # below, which the legacy table honours and the declarative path did not.
     # `add_comment` is named too because the sentence is half of what it does.
     "request_dependency": frozenset({"add_comment", "await_role"}),
+    # Releasing a blocker is setting the ticket's blockers (SYRD-270); the
+    # database checks set_blockers itself.
+    "release_external_blocker": frozenset({"set_blockers"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.
@@ -1444,6 +1449,17 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             updated = self.app.recover_stalled_ticket(
                 ticket_id,
                 reason=str(payload.get("reason", payload.get("text", ""))),
+                caller_role=caller,
+            )
+            self.events.notify_change(self.app.store_signature())
+            self.send_json({"ticket": updated})
+            return
+        elif operation == "release_external_blocker":
+            updated = self.app.release_external_blocker(
+                ticket_id,
+                ref=str(payload.get("ref", payload.get("blocker", ""))),
+                reason=str(payload.get("reason", payload.get("text", ""))),
+                commit=str(payload.get("commit", "") or ""),
                 caller_role=caller,
             )
             self.events.notify_change(self.app.store_signature())

@@ -77,6 +77,9 @@ TERMINAL_STATES = {"done", "cancelled"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 TICKET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 TICKET_NUMBER_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-([0-9]+)$")
+# SYRD-270: a blocker on another board, `<project>:<PREFIX>-<n>`. It never
+# resolves by itself; only release_external_blocker removes it.
+EXTERNAL_BLOCKER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*:[A-Z][A-Z0-9]*-[0-9]+$")
 
 
 def project_slug(environ: dict[str, str] | os._Environ[str] = os.environ) -> str:
@@ -111,6 +114,19 @@ def normalize_ticket_prefix(raw: str) -> str:
 
 def valid_ticket_id(ticket_id: str) -> bool:
     return bool(TICKET_ID_PATTERN.fullmatch(str(ticket_id).strip().upper()))
+
+
+def normalize_blocker_ref(raw: str) -> str:
+    """A local id upper case; a qualified reference as `project:PREFIX-N` (as ticket_board.normalize_blocker_ref)."""
+    value = str(raw).strip()
+    if ":" in value:
+        project, _, ticket = value.partition(":")
+        return f"{project.strip().lower()}:{ticket.strip().upper()}"
+    return value.upper()
+
+
+def is_external_blocker(ref: str) -> bool:
+    return bool(EXTERNAL_BLOCKER_PATTERN.fullmatch(str(ref)))
 
 
 def ticket_id_sentinel(prefix: str) -> str:
@@ -1900,6 +1916,34 @@ ORDER BY rank;
                 )
                 return self._pg_get_ticket(ticket_id, conn)
 
+    def release_external_blocker(
+        self, ticket_id: str, *, ref: str, reason: str, commit: str = "", caller_role: str
+    ) -> dict[str, Any]:
+        """End a wait on another board's work, explicitly, with why (SYRD-270).
+
+        Nothing that happens on the other board releases it: the foreign
+        ticket moving is not the thing this ticket was waiting for. When the
+        wait was for a commit this board could not see, `commit` is checked
+        against THIS board's own repository first -- the same check a
+        submission makes -- and the release is refused until it resolves.
+        The release moves nothing; the owner still takes the work through
+        every gate.
+        """
+        ticket_id = str(ticket_id).strip().upper()
+        evidence = ""
+        if str(commit or "").strip():
+            resolved = self._validate_commit_hash(str(commit))
+            evidence = f"This board resolves commit {resolved}."
+        with self._pg_connect() as conn:
+            with conn.transaction():
+                self._pg_set_caller_role(conn, caller_role)
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.release_external_blocker(%s, %s, %s, %s);",
+                    (ticket_id, normalize_blocker_ref(ref), str(reason), evidence),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
+
     def set_awaiting_role(self, ticket_id: str, awaiting_role: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         awaiting_role = self._require_text(awaiting_role, "awaiting_role").strip().lower()
@@ -2056,11 +2100,16 @@ SELECT EXISTS (
         for item in raw:
             if not isinstance(item, str):
                 raise ValueError("blocked_by entries must be strings")
-            blocker_id = item.strip().upper()
+            blocker_id = normalize_blocker_ref(item)
             if not blocker_id:
                 raise ValueError("blocked_by entries must not be empty")
-            if not valid_ticket_id(blocker_id):
+            if not (valid_ticket_id(blocker_id) or is_external_blocker(blocker_id)):
                 raise ValueError(f"invalid blocked_by ticket id: {item}")
+            if is_external_blocker(blocker_id) and blocker_id.split(":", 1)[1].rsplit("-", 1)[0] == self.ticket_prefix:
+                local_id = blocker_id.split(":", 1)[1]
+                raise ValueError(
+                    f"external blocker {blocker_id} names a ticket on this board; block on {local_id} instead"
+                )
             if blocker_id == ticket_id:
                 raise ValueError("ticket cannot be blocked_by itself")
             if blocker_id not in blocked_by:
@@ -2088,12 +2137,14 @@ SELECT EXISTS (
     def _validate_blocker_ticket_states(self, conn: Any, blocked_by: list[str]) -> None:
         if not blocked_by:
             return
+        # A blocker on another board has no ticket here to check (SYRD-270).
+        local = [blocker_id for blocker_id in blocked_by if not is_external_blocker(blocker_id)]
         rows = conn.execute(
             "SELECT id, state FROM ticket_board.tickets WHERE id = ANY(%s);",
-            (blocked_by,),
+            (local,),
         ).fetchall()
         state_by_id = {str(row["id"]): str(row["state"]) for row in rows}
-        for blocker_id in blocked_by:
+        for blocker_id in local:
             blocker_state = state_by_id.get(blocker_id)
             if blocker_state is None:
                 raise ValueError(f"blocker ticket not found: {blocker_id}")

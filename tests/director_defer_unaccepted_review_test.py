@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -73,8 +74,11 @@ def board(cluster, db: str, *, legacy: bool, document: dict):
         if "already exists" not in str(exc):
             raise
     if legacy:
-        # What the runner applies to a board that predates this release.
-        t.psql(admin, MIGRATION.read_text())
+        # What the runner applies to a board that predates this release: this
+        # migration and every one after it, in one pass -- rbac.sql, applied
+        # next, may grant what a later one creates (SYRD-270).
+        for later in [MIGRATION, *(p for p in sorted(MIGRATIONS.glob("pgu*.sql")) if p.name > MIGRATION.name)]:
+            t.psql(admin, later.read_text())
     t.psql(admin, t.RBAC_PATH.read_text())
     app = t.TicketBoardApp(
         cluster.root / f"frames-{db}",
@@ -200,8 +204,17 @@ def test_the_migration_is_the_copy_an_upgraded_board_runs() -> None:
     assert_no_drift("enforce_declared_ticket_update")
     check(owning_migration("enforce_declared_ticket_update") == MIGRATION,
           owning_migration("enforce_declared_ticket_update").name)
-    later = [p.name for p in sorted(MIGRATIONS.glob("pgu*.sql")) if p.name > MIGRATION.name]
-    check(later == [], later)
+    # What an upgraded board runs is decided per function, so a later
+    # migration matters only if it redefines one of this one's functions.
+    # (Any migration numbered after it used to fail this check -- SYRD-270's
+    # does not touch enforce_declared_ticket_update at all.)
+    mine = set(re.findall(r"CREATE OR REPLACE FUNCTION ticket_board\.(\w+)\(", MIGRATION.read_text()))
+    check(mine, f"{MIGRATION.name} defines functions")
+    overriding = {
+        p.name: sorted(mine & set(re.findall(r"CREATE OR REPLACE FUNCTION ticket_board\.(\w+)\(", p.read_text())))
+        for p in sorted(MIGRATIONS.glob("pgu*.sql")) if p.name > MIGRATION.name
+    }
+    check(not any(overriding.values()), f"a later migration redefines this one's functions: {overriding}")
 
 
 def main() -> int:

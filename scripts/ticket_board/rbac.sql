@@ -118,6 +118,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.defer(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.cancel(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_manually_controlled(text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_blockers(text, text[], text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.release_external_blocker(text, text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.add_comment(text, text, boolean) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.edit_fields(text, jsonb) TO ticket_board_service;

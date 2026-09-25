@@ -139,7 +139,7 @@ system working, not a bug to route around.
 - `cancel` — → cancelled
 - `mark-done` — director_review → done (with `--commit-hash`)
 - `director-dat-sign-off` / `director-dat-kick-back`
-- `set-blockers`, `set-manually-controlled`, `edit-fields`
+- `set-blockers`, `release-external-blocker`, `set-manually-controlled`, `edit-fields`
 - `release-draft` — draft → analysis
 - `force-move` / `override-move` — last resort; **always narrate in a comment**
 
@@ -152,9 +152,17 @@ system working, not a bug to route around.
   with nobody holding it until the idle-owner escalation reached the director over an
   hour later (SYRD-133). Prefer it over bare `await-role`: same wait, plus the sentence
   the awaited role needs in order to act. It does not reassign; the work is still yours.
+- External blockers (director) — `set-blockers <id> --blocked-by syrd:SYRD-269 --blocked-reason "..."`
+  records a wait on another board's work (SYRD-270). It never resolves by itself, whatever
+  the other board does; while it stands the ticket keeps its stage and owner, its
+  reminders and handoffs are silent, and submission is refused. End it with
+  `release-external-blocker <id> --ref syrd:SYRD-269 --reason "..."`, adding `--commit <sha>`
+  when the wait was for a commit this board could not see: the release is then refused
+  until this board's own repository resolves it. The release moves nothing.
 - `await-role` / `clear-awaiting-role` — mark or clear an active ticket as waiting on a
   role. Use it when the next action is genuinely someone else's and there is no ticket to
-  point `blocked_by` at (that field only accepts ticket IDs). It does **two** things:
+  point `blocked_by` at (that field takes this board's ticket IDs, or another board's as
+  `project:PREFIX-N` — see external blockers below). It does **two** things:
   the ticket's nudges are suppressed for four hours, and — for `director` only — the
   ticket appears in `ticket-board-read director`. Both matter: before PGU-906 only the
   suppression worked, so escalating made a ticket silent *and* invisible. Note the

@@ -521,6 +521,15 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       const metaLine2 = document.createElement('div');
       metaLine2.textContent = `Created: ${formatWhen(ticket.created)} | Updated: ${formatWhen(ticket.updated)}`;
       meta.append(metaLine1, metaLine2);
+      // Why the owner's notice has not arrived, where hover cannot reach
+      // (SYRD-266): the card itself carries only the highlight.
+      const deliveryHint = activeWorkDeliveryHint(ticket);
+      if (deliveryHint) {
+        const deliveryLine = document.createElement('div');
+        deliveryLine.className = 'detail-delivery';
+        deliveryLine.textContent = `Notice: ${deliveryHint}`;
+        meta.appendChild(deliveryLine);
+      }
       if (ticket.origin_project || ticket.external_source_ref) {
         const originLine = document.createElement('div');
         const originParts = [];

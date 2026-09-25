@@ -431,18 +431,6 @@ STYLE = """    :root {
       background: linear-gradient(90deg, rgba(252, 211, 77, 0.12), var(--panel-2) 30%);
       box-shadow: 0 0 0 1px rgba(252, 211, 77, 0.22) inset;
     }
-    .card-delivery {
-      margin-top: 4px;
-      font-size: 0.78rem;
-      font-weight: 600;
-    }
-    .card-delivery-failed {
-      color: #fca5a5;
-    }
-    .card-delivery-pending,
-    .card-delivery-none {
-      color: #fcd34d;
-    }
     .card.selected {
       border-color: rgba(125, 211, 252, 0.55);
       box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.3) inset;

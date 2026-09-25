@@ -733,15 +733,42 @@ def parse_directorctl_diagnostic(output: str | None) -> dict[str, Any]:
     return {}
 
 
-def delivery_failure_reason(exc: BaseException, target: str) -> str:
-    output_parts: list[str] = [str(exc)]
-    if isinstance(exc, subprocess.CalledProcessError):
-        for value in (exc.stderr, exc.stdout):
+#: Why a send failed when the fault is the BOARD'S routing, not the pane:
+#: directorctl resolves a role's live target through the board's runtime
+#: assignment and refuses when it cannot. The pane may be perfectly alive -- on
+#: mefp it was, the whole time -- and the assignment comes back when the
+#: declaration and the worker agree again, so this is retried, never
+#: dead-lettered as a missing pane (SYRD-264).
+RUNTIME_ASSIGNMENT_UNRESOLVED = "runtime_assignment_unresolved"
+RUNTIME_ASSIGNMENT_MARKERS = (
+    "cannot resolve runtime assignment",
+    "runtime assignment for",
+)
+
+
+def delivery_error_output(exc: BaseException) -> str:
+    """What the failed process SAID -- never the command line that ran it.
+
+    A CalledProcessError's own text is "Command '[..., 'send', 'mefp-ops:0.0',
+    ...]' returned non-zero exit status 1": it contains the target by
+    construction. Reading that as evidence is how any failure whose output
+    merely contained "not found" was classified as a missing tmux pane.
+    """
+    if isinstance(exc, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+        parts: list[str] = []
+        for value in (exc.stderr, getattr(exc, "stdout", None) or getattr(exc, "output", None)):
             if isinstance(value, bytes):
-                output_parts.append(value.decode("utf-8", errors="replace"))
+                parts.append(value.decode("utf-8", errors="replace"))
             elif isinstance(value, str):
-                output_parts.append(value)
-    output = "\n".join(part for part in output_parts if part).lower()
+                parts.append(value)
+        return "\n".join(part for part in parts if part)
+    return str(exc)
+
+
+def delivery_failure_reason(exc: BaseException, target: str) -> str:
+    output = delivery_error_output(exc).lower()
+    if any(marker in output for marker in RUNTIME_ASSIGNMENT_MARKERS):
+        return RUNTIME_ASSIGNMENT_UNRESOLVED
     target_session = target.split(":", 1)[0].lower()
     missing_target_markers = (
         "can't find pane",
@@ -2006,6 +2033,7 @@ FROM ticket_board.claim_notification()
         reason: str,
         after: ComposerSnapshot | None = None,
         directorctl_diagnostic: dict[str, Any] | None = None,
+        error_output: str = "",
     ) -> dict[str, Any]:
         after_detail = after.as_trace_detail() if after is not None else None
         composer_changed = (
@@ -2019,6 +2047,11 @@ FROM ticket_board.claim_notification()
             "target": target,
             "message": message,
             "attempts": attempts,
+            # What the failed send actually printed. The reason above is a
+            # classification of this, and mefp's dead letter kept only the
+            # classification -- so "tmux_target_missing" could not be checked
+            # against the text it was derived from (SYRD-264).
+            **({"error_output": error_output[-1000:]} if error_output else {}),
             "anti_clobber": {
                 "busy": activity_trace.busy,
                 "reason": activity_trace.reason,
@@ -2361,6 +2394,7 @@ WHERE trace.ticket_id = %s
         message: str,
         attempts: int,
         payload: str,
+        error_output: str = "",
     ) -> None:
         conn.execute(
             "SELECT ticket_board.dead_letter_notification(%s::bigint, %s::text, %s::jsonb)",
@@ -2373,6 +2407,7 @@ WHERE trace.ticket_id = %s
                         "message": message,
                         "attempts": attempts,
                         "payload": self._safe_json_payload(payload),
+                        **({"error_output": error_output[-1000:]} if error_output else {}),
                     },
                     sort_keys=True,
                 ),
@@ -3574,6 +3609,7 @@ WHERE (r.definition->>'active')::boolean
                     stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
                     directorctl_diagnostic = parse_directorctl_diagnostic(stdout if isinstance(stdout, str) else None)
                 failure_reason = delivery_failure_reason(exc, target)
+                error_output = delivery_error_output(exc)
                 if failure_reason == "tmux_target_missing":
                     self.logger.error(
                         "Dead-lettering ticket notification %s because target %s does not exist; role %s is undeliverable until its tmux session is restored",
@@ -3604,6 +3640,7 @@ WHERE (r.definition->>'active')::boolean
                         decision="send_failed",
                         reason=failure_reason,
                         directorctl_diagnostic=directorctl_diagnostic,
+                        error_output=error_output,
                     ),
                 )
                 if failure_reason == "tmux_target_missing":
@@ -3615,8 +3652,12 @@ WHERE (r.definition->>'active')::boolean
                         message=message,
                         attempts=attempts,
                         payload=payload,
+                        error_output=error_output,
                     )
                 else:
+                    # Including runtime_assignment_unresolved: the board's
+                    # routing for this role will return, and the notice is
+                    # delivered then rather than lost now (SYRD-264).
                     self._requeue_notification(conn, notification_id, attempts, failure_reason)
                 continue
             composer_after = self._composer_snapshot(target)

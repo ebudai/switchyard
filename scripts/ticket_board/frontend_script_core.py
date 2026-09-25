@@ -1651,6 +1651,33 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       });
     }
 
+    // The highlight says whose current work a ticket is; it never said the
+    // owner was told. MEFP-1 was highlighted as Ops's work while its only
+    // notice was dead-lettered, and the board showed nothing (SYRD-264). So a
+    // highlighted ticket whose notice has not arrived says so, with why.
+    function activeWorkDeliveryLine(ticket) {
+      const delivery = ticket.active_work_delivery || {};
+      if (!ticket.active_work_highlight || !delivery.state || delivery.state === 'delivered') {
+        return null;
+      }
+      const owner = roleLabel(ticket.active_work_owner_role || ticket.assignee);
+      const line = document.createElement('div');
+      line.className = `card-delivery card-delivery-${delivery.state}`;
+      if (delivery.state === 'failed') {
+        line.textContent = `Not delivered to ${owner}: ${delivery.reason || 'failed'}`;
+      } else if (delivery.state === 'pending') {
+        const tries = delivery.attempts ? ` (attempt ${delivery.attempts})` : '';
+        line.textContent = `Not yet delivered to ${owner}${tries}`;
+      } else {
+        line.textContent = `No notice recorded for ${owner}`;
+      }
+      const details = [delivery.reason, delivery.at, delivery.next_attempt_at].filter(Boolean);
+      if (details.length) {
+        line.title = details.join(' · ');
+      }
+      return line;
+    }
+
     function renderCard(ticket) {
       const card = document.createElement('article');
       card.className = 'card';
@@ -1687,6 +1714,10 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
         assigneeValue.textContent = roleLabel(ticket.assignee);
         assigneeLine.appendChild(assigneeValue);
         titleWrap.appendChild(assigneeLine);
+      }
+      const deliveryLine = activeWorkDeliveryLine(ticket);
+      if (deliveryLine) {
+        titleWrap.appendChild(deliveryLine);
       }
       if (ticket.needs_user_signoff && ticket.state === 'user_review') {
         const signoffState = document.createElement('div');

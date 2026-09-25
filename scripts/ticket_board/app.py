@@ -79,7 +79,8 @@ TICKET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 TICKET_NUMBER_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-([0-9]+)$")
 # SYRD-270: a blocker on another board, `<project>:<PREFIX>-<n>`. It never
 # resolves by itself; only release_external_blocker removes it.
-EXTERNAL_BLOCKER_PATTERN = re.compile(r"^[a-z][a-z0-9_]*:[A-Z][A-Z0-9]*-[0-9]+$")
+# SYRD-273: or a person, `operator:<name>`; `operator` is never a project.
+EXTERNAL_BLOCKER_PATTERN = re.compile(r"^((?!operator:)[a-z][a-z0-9_]*:[A-Z][A-Z0-9]*-[0-9]+|operator:[a-z][a-z0-9_]*)$")
 
 
 def project_slug(environ: dict[str, str] | os._Environ[str] = os.environ) -> str:
@@ -119,6 +120,8 @@ def valid_ticket_id(ticket_id: str) -> bool:
 def normalize_blocker_ref(raw: str) -> str:
     """A local id upper case; a qualified reference as `project:PREFIX-N` (as ticket_board.normalize_blocker_ref)."""
     value = str(raw).strip()
+    if ":" in value and value.split(":", 1)[0].strip().lower() == "operator":
+        return value.lower()
     if ":" in value:
         project, _, ticket = value.partition(":")
         return f"{project.strip().lower()}:{ticket.strip().upper()}"

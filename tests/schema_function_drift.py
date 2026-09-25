@@ -45,3 +45,21 @@ def assert_no_drift(*names: str) -> None:
             f"{owner.name}, so a fresh board and an upgraded board would not "
             f"run the same function"
         )
+
+
+def schema_before(migration: Path) -> str:
+    """schema.sql as it stood before `migration` joined the tree.
+
+    Not the merge-base with origin/main: that stops being "before" the moment
+    the change it describes is merged, and a reproduction built on it would
+    then run against the fix (SYRD-273 found SYRD-270's and SYRD-271's doing
+    exactly that). Clone-based: the migration must be committed.
+    """
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(ROOT), *args], check=True, capture_output=True, text=True).stdout
+
+    adding = git("log", "--format=%H", "--diff-filter=A", "--", str(migration.relative_to(ROOT))).split()
+    assert adding, f"{migration.name} is not committed; clone-based checks see only commits"
+    return git("show", f"{adding[-1]}^:scripts/ticket_board/schema.sql")

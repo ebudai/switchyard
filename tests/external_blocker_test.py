@@ -47,6 +47,7 @@ import ticket_board_director_defer_backlog_test as defer_suite  # noqa: E402
 import ticket_board_write_api_test as t  # noqa: E402
 from scripts.ticket_board import write_client  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
+from schema_function_drift import schema_before  # noqa: E402
 
 CHECKS = 0
 REF = "syrd:SYRD-269"
@@ -298,13 +299,7 @@ MIGRATION = ROOT / "scripts/ticket_board/migrations/pgu960_syrd270_external_bloc
 
 def run_upgrade(cluster) -> None:
     """A board provisioned before this change takes the migration, twice, and then works."""
-    base = subprocess.run(
-        ["git", "-C", str(ROOT), "merge-base", "HEAD", "origin/main"], check=True, capture_output=True, text=True,
-    ).stdout.strip()
-    before = subprocess.run(
-        ["git", "-C", str(ROOT), "show", f"{base}:scripts/ticket_board/schema.sql"],
-        check=True, capture_output=True, text=True,
-    ).stdout
+    before = schema_before(MIGRATION)
     check("ticket_board.external_blocker_pattern" not in before, "the upgrade starts from a schema without it")
     db = "upgraded"
     admin = t.conninfo(cluster.socket_dir, cluster.port, db)

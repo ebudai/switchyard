@@ -153,7 +153,8 @@ system working, not a bug to route around.
   hour later (SYRD-133). Prefer it over bare `await-role`: same wait, plus the sentence
   the awaited role needs in order to act. It does not reassign; the work is still yours.
 - External blockers (director) — `set-blockers <id> --blocked-by syrd:SYRD-269 --blocked-reason "..."`
-  records a wait on another board's work (SYRD-270). It never resolves by itself, whatever
+  records a wait on another board's work (SYRD-270); `--blocked-by operator:<name>` records a
+  wait on a person whose step has no ticket (SYRD-273). It never resolves by itself, whatever
   the other board does; while it stands the ticket keeps its stage and owner, its
   reminders and handoffs are silent, and submission is refused. End it with
   `release-external-blocker <id> --ref syrd:SYRD-269 --reason "..."`, adding `--commit <sha>`

@@ -37,6 +37,7 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 from workflow_document_eras import before_relaying  # noqa: E402
+from schema_function_drift import schema_before  # noqa: E402
 
 CHECKS = 0
 AUDITED = "6d4ee1aa99147e8118f59e637be02b660d62d064"
@@ -122,10 +123,7 @@ def replay(board: Board) -> dict:
 
 def run_before(cluster) -> None:
     """The defect, on the board as it shipped before this change."""
-    base = subprocess.run(["git", "-C", str(ROOT), "merge-base", "HEAD", "origin/main"],
-                          check=True, capture_output=True, text=True).stdout.strip()
-    schema = subprocess.run(["git", "-C", str(ROOT), "show", f"{base}:scripts/ticket_board/schema.sql"],
-                            check=True, capture_output=True, text=True).stdout
+    schema = schema_before(ROOT / "scripts/ticket_board/migrations/pgu961_syrd271_signoff_follows_commit.sql")
     resubmitted = replay(Board(cluster, "before", schema))
     check((resubmitted["state"], resubmitted["audit_signoff"], resubmitted["commit_hash"])
           == ("director_review", True, CHANGED),

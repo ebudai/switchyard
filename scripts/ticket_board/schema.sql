@@ -196,7 +196,7 @@ CREATE INDEX IF NOT EXISTS tickets_source_json_gin
 CREATE TABLE IF NOT EXISTS ticket_board.ticket_blockers (
     ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
     blocker_ticket_id text NOT NULL
-        CHECK (blocker_ticket_id ~ '^([a-z][a-z0-9_]*:)?[A-Z][A-Z0-9]*-[0-9]+$'),
+        CHECK (blocker_ticket_id ~ '^([a-z][a-z0-9_]*:)?[A-Z][A-Z0-9]*-[0-9]+$|^operator:[a-z][a-z0-9_]*$'),
     position integer NOT NULL CHECK (position >= 0),
     resolved boolean NOT NULL DEFAULT false,
     PRIMARY KEY (ticket_id, blocker_ticket_id),
@@ -4875,7 +4875,10 @@ RETURNS text
 LANGUAGE sql
 IMMUTABLE
 AS $$
-    SELECT '^[a-z][a-z0-9_]*:[A-Z][A-Z0-9]*-[0-9]+$';
+    -- Work on another board, `project:PREFIX-N` (SYRD-270), or a person,
+    -- `operator:name` (SYRD-273). `operator` is reserved: it is never a
+    -- project, and a name is never shaped like a ticket id.
+    SELECT '^((?!operator:)[a-z][a-z0-9_]*:[A-Z][A-Z0-9]*-[0-9]+|operator:[a-z][a-z0-9_]*)$';
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.is_external_blocker(p_ref text)
@@ -4892,8 +4895,12 @@ LANGUAGE sql
 IMMUTABLE
 AS $$
     -- A local id is upper case. A qualified reference keeps its project in
-    -- lower case, as project names are written, and its ticket id in upper.
+    -- lower case, as project names are written, and its ticket id in upper;
+    -- a person (`operator:name`) is lower case throughout.
     SELECT CASE
+        WHEN lower(split_part(btrim(coalesce(p_raw, '')), ':', 1)) = 'operator'
+             AND position(':' IN btrim(coalesce(p_raw, ''))) > 0 THEN
+            lower(btrim(coalesce(p_raw, '')))
         WHEN position(':' IN btrim(coalesce(p_raw, ''))) > 0 THEN
             lower(btrim(split_part(btrim(p_raw), ':', 1))) || ':'
             || upper(btrim(substr(btrim(p_raw), position(':' IN btrim(p_raw)) + 1)))

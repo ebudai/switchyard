@@ -151,13 +151,17 @@ gate to get a ticket moving.
 
 ## Blocked, deferred, held: three different things
 
-- **Blocked** - waiting on another ticket. Set the blocker with `set-blockers`
-  and leave the ticket in its owning stage. `blocked_by` takes this board's
-  ticket IDs, or work on another board as `project:PREFIX-N` (an operator step
-  owned by a Switchyard ticket, say). An external blocker never resolves by
-  itself, whatever happens on the other board: end it with
-  `release-external-blocker <id> --ref project:PREFIX-N --reason "..."`, adding
-  `--commit <sha>` when the wait was for a commit this board could not see - the
+- **Blocked** - waiting on something that is not this role's to do. Set the
+  blocker with `set-blockers` and leave the ticket in its owning stage.
+  `blocked_by` takes this board's ticket IDs; work on another board as
+  `project:PREFIX-N` (an operator step owned by a Switchyard ticket, say); or a
+  person whose step has no ticket as `operator:<name>` - never invent a ticket
+  reference for one. Recording it closes the dependency handoff that asked for
+  it, and nothing repeats. An external or operator blocker never resolves by
+  itself, whatever happens elsewhere: end it with
+  `release-external-blocker <id> --ref <ref> --reason "..."`. For a person, the
+  reason is where their result is recorded, and the owner is told once. Add
+  `--commit <sha>` when the wait was for a commit this board could not see: the
   release is refused until this board resolves it. The release moves nothing;
   the owner still submits through every gate.
 - **Deferred** - nobody is working it. Backlog, unassigned.

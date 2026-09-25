@@ -155,13 +155,14 @@ half that matters cannot be the half you forget. It does not reassign anything,
 because the work is still yours; it is waiting.
 
 `blocked_by` is for a dependency you can point at a ticket: one on this board
-(`PREFIX-N`), or work on another board (`project:PREFIX-N`). Only the director
-sets blockers. An external blocker never
+(`PREFIX-N`), work on another board (`project:PREFIX-N`), or a person whose
+step has no ticket (`operator:<name>`). Only the director sets blockers. An external blocker never
 clears by itself - the director releases it explicitly once the thing you need
 is really there - and while it stands it silences your reminders and refuses
 your submission, so you are not asked to act on work that cannot move. If you
-are waiting on another board's work, ask the director once to record that
-blocker rather than re-opening the same dependency. `await-role` is the bare
+are waiting on another board's work or on a person, ask the director once
+(`request-dependency`) to record that blocker rather than re-opening the same
+dependency; you are told once when it is released, with the result. `await-role` is the bare
 wait without a reason - prefer `request-dependency`, which is that plus the
 sentence the awaited role needs. Either way the wait clears when the awaited
 role *acts*, not when they reply.

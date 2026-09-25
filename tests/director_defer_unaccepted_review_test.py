@@ -35,7 +35,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
-from schema_function_drift import assert_no_drift, owning_migration  # noqa: E402
+from schema_function_drift import assert_no_drift, definition, owning_migration  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 WORKFLOW = json.loads((ROOT / "examples" / "workflows" / "inspection.json").read_text())
@@ -200,22 +200,22 @@ def with_forward_move(document: dict) -> dict:
     return document
 
 
+SYRD263_EXEMPTION = """    ELSIF source_stage->>'signoff' IS NOT NULL AND tr->>'primitive' NOT IN ('return','reopen')
+       AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       AND NOT ticket_board.workflow_flag(doc,source_stage->>'signoff',cfg) THEN RAISE EXCEPTION 'stage signoff required'; END IF;"""
+
+
 def test_the_migration_is_the_copy_an_upgraded_board_runs() -> None:
     assert_no_drift("enforce_declared_ticket_update")
-    check(owning_migration("enforce_declared_ticket_update") == MIGRATION,
-          owning_migration("enforce_declared_ticket_update").name)
-    # What an upgraded board runs is decided per function, so a later
-    # migration matters only if it redefines one of this one's functions.
-    # (Any migration numbered after it used to fail this check -- SYRD-270's
-    # does not touch enforce_declared_ticket_update at all.)
-    mine = set(re.findall(r"CREATE OR REPLACE FUNCTION ticket_board\.(\w+)\(", MIGRATION.read_text()))
-    check(mine, f"{MIGRATION.name} defines functions")
-    overriding = {
-        p.name: sorted(mine & set(re.findall(r"CREATE OR REPLACE FUNCTION ticket_board\.(\w+)\(", p.read_text())))
-        for p in sorted(MIGRATIONS.glob("pgu*.sql")) if p.name > MIGRATION.name
-    }
-    check(not any(overriding.values()), f"a later migration redefines this one's functions: {overriding}")
-
+    check(SYRD263_EXEMPTION in MIGRATION.read_text(), f"{MIGRATION.name} ships the exemption")
+    # What an upgraded board runs is the LAST migration defining the function,
+    # which a later ticket may legitimately be (SYRD-271 is). What matters is
+    # that the copy it runs -- and schema.sql's -- still carries this fix.
+    owner = owning_migration("enforce_declared_ticket_update")
+    check(SYRD263_EXEMPTION in owner.read_text(),
+          f"the copy an upgraded board runs ({owner.name}) still exempts parking from the sign-off")
+    check(SYRD263_EXEMPTION in definition("enforce_declared_ticket_update"),
+          "and so does the copy a fresh board installs")
 
 def main() -> int:
     test_the_migration_is_the_copy_an_upgraded_board_runs()

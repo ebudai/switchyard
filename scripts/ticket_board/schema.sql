@@ -1011,6 +1011,9 @@ DECLARE
     shadow_actor text;
     transition_check_state text;
 BEGIN
+    IF ticket_board.declared_workflow() IS NOT NULL THEN
+        RETURN ticket_board.enforce_declared_ticket_update(OLD,NEW);
+    END IF;
     IF NEW.state = 'draft' THEN
         IF OLD.state IS DISTINCT FROM NEW.state THEN
             NEW.assignee := 'unassigned';
@@ -1075,6 +1078,19 @@ BEGIN
     END IF;
     IF NOT NEW.needs_audit THEN
         NEW.audit_signoff := false;
+    END IF;
+    -- A sign-off is a review of one commit (SYRD-271), on this undeclared path
+    -- as on the declared one: entering audit already signed skips it below.
+    -- Different work leaving implementation is reviewed afresh. submit_to_audit
+    -- here already clears Audit's and the Inspector's sign-offs, but never
+    -- the User's, which skips user_review below just the same.
+    IF OLD.state = 'in_progress' AND NEW.state IS DISTINCT FROM OLD.state
+       AND (NEW.commit_hash IS DISTINCT FROM OLD.commit_hash OR NEW.commit_exempt IS DISTINCT FROM OLD.commit_exempt)
+       AND (btrim(NEW.commit_hash) <> '' OR NEW.commit_exempt) THEN
+        -- Carried from the old commit, not granted by this write.
+        NEW.audit_signoff := NEW.audit_signoff AND NOT OLD.audit_signoff;
+        NEW.inspector_signoff := NEW.inspector_signoff AND NOT OLD.inspector_signoff;
+        NEW.user_signoff := NEW.user_signoff AND NOT OLD.user_signoff;
     END IF;
     IF OLD.state = 'in_progress' AND NEW.state = 'audit' AND NEW.needs_inspection AND NOT NEW.inspector_signoff THEN
         NEW.state := 'inspection';
@@ -7893,6 +7909,26 @@ BEGIN
     END LOOP;
     IF tr->>'primitive' IN ('return','reopen') THEN doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',false); END IF;
     IF (tr->>'allow_no_code')::boolean THEN doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',true); END IF;
+    -- A sign-off is a review of one commit (SYRD-271). MEFP-4 was approved for
+    -- one commit, routed back by a plain `move` that clears nothing, and
+    -- resubmitted with another -- and the audit stage, already signed, was
+    -- skipped: the old verdict stood in for a review nobody had done. So when
+    -- work leaves implementation carrying a different commit, every review
+    -- sign-off is cleared here, before the gates are walked, and it enters
+    -- review for exactly the commit it carries.
+    -- The same commit resubmitted keeps its review: that exact work was seen.
+    -- A no-code submission has no commit to show it is the same work, so it
+    -- is always reviewed as new.
+    IF source_stage->>'kind' = 'implementation'
+       AND ((tr->>'allow_no_code')::boolean
+            OR (btrim(coalesce(doc->>'commit_hash','')) <> ''
+                AND (doc->>'commit_hash') IS DISTINCT FROM previous.commit_hash)) THEN
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF flag.value->>'kind' = 'signoff' THEN
+                doc:=ticket_board.set_workflow_flag(doc,flag.key,false);
+            END IF;
+        END LOOP;
+    END IF;
     target:=proposed.state;
     LOOP
         SELECT x INTO dest FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=target;
@@ -8306,6 +8342,19 @@ BEGIN
     END IF;
     IF NOT NEW.needs_audit THEN
         NEW.audit_signoff := false;
+    END IF;
+    -- A sign-off is a review of one commit (SYRD-271), on this undeclared path
+    -- as on the declared one: entering audit already signed skips it below.
+    -- Different work leaving implementation is reviewed afresh. submit_to_audit
+    -- here already clears Audit's and the Inspector's sign-offs, but never
+    -- the User's, which skips user_review below just the same.
+    IF OLD.state = 'in_progress' AND NEW.state IS DISTINCT FROM OLD.state
+       AND (NEW.commit_hash IS DISTINCT FROM OLD.commit_hash OR NEW.commit_exempt IS DISTINCT FROM OLD.commit_exempt)
+       AND (btrim(NEW.commit_hash) <> '' OR NEW.commit_exempt) THEN
+        -- Carried from the old commit, not granted by this write.
+        NEW.audit_signoff := NEW.audit_signoff AND NOT OLD.audit_signoff;
+        NEW.inspector_signoff := NEW.inspector_signoff AND NOT OLD.inspector_signoff;
+        NEW.user_signoff := NEW.user_signoff AND NOT OLD.user_signoff;
     END IF;
     IF OLD.state = 'in_progress' AND NEW.state = 'audit' AND NEW.needs_inspection AND NOT NEW.inspector_signoff THEN
         NEW.state := 'inspection';

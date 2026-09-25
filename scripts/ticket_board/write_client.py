@@ -949,7 +949,14 @@ class TicketBoardWriteClient:
         return self._ticket_action(ticket_id, "user_reopen", {"reason": reason}, caller_role=caller_role)
 
     def mark_done(self, ticket_id: str, *, commit_hash: str = "", caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "mark_done", {"commit_hash": commit_hash}, caller_role=caller_role)
+        # No hash is no field. The board validates any hash it is GIVEN, so an
+        # empty one was refused as "invalid commit hash" before the ticket's
+        # commit exemption was ever consulted -- an audited no-code ticket
+        # could not be closed without inventing provenance (SYRD-267). An
+        # ordinary ticket with no hash is still refused, by the commit
+        # requirement itself.
+        payload = {"commit_hash": commit_hash} if commit_hash.strip() else {}
+        return self._ticket_action(ticket_id, "mark_done", payload, caller_role=caller_role)
 
     def defer(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "defer", caller_role=caller_role)

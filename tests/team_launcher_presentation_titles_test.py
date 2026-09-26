@@ -384,11 +384,13 @@ def test_every_session_that_names_the_terminal_names_the_project() -> None:
     window title, and no `set-titles-string` anywhere is built from a role or a
     slot.
     """
+    # The viewer's argv moved to scripts/tmux_viewer.py (SYRD-309). The launcher
+    # is still read, so a title line added back there is still counted.
     sources = {
         name: (ROOT / "scripts" / name).read_text(encoding="utf-8")
-        for name in ("team_launcher.py", "presentation_controller.py")
+        for name in ("team_launcher.py", "tmux_viewer.py", "presentation_controller.py")
     }
-    assert "def tmux_viewer_set_titles_args" in sources["team_launcher.py"]
+    assert "def tmux_viewer_set_titles_args" in sources["tmux_viewer.py"]
     assert "def display_slot_terminal_title_commands" in sources["presentation_controller.py"]
 
     enabling = [
@@ -415,8 +417,8 @@ def test_every_session_that_names_the_terminal_names_the_project() -> None:
     for name, line in strings:
         assert "slot" not in line and "label" not in line and "role" not in line, (name, line)
     # And the value each of them sends is the project's, by name.
-    for name, source in sources.items():
-        block = source.split('"set-titles-string"', 1)[1][:200]
+    for name in ("tmux_viewer.py", "presentation_controller.py"):
+        block = sources[name].split('"set-titles-string"', 1)[1][:200]
         assert "title" in block, (name, block)
 
 

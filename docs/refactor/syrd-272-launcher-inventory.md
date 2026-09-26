@@ -2,8 +2,8 @@
 
 This document serves the SYRD-272 parent. Each extraction child updates it:
 the before/after table, the slice log, and the plan's next entry. SYRD-286 was
-the first slice, SYRD-287 the second, SYRD-288 the third and SYRD-289
-the fourth.
+the first slice, SYRD-287 the second, SYRD-288 the third, SYRD-289
+the fourth and SYRD-290 the fifth.
 
 - Baseline: public main `d5ffdd00a2b162ac9bee545f52ba0840f70fc7ed`. The
   exclusive refactor window opened at this commit.
@@ -13,6 +13,8 @@ the fourth.
   is SYRD-288's baseline.
 - SYRD-288 was integrated as `fd85a84a91636b3230fbf238d47c1ae7e24fe957`, which
   is SYRD-289's baseline.
+- SYRD-289 was integrated as `3e7337bef48d93363dd8e3ae018cc03cb5b79fe1`, which
+  is SYRD-290's baseline.
 - Soft limit: 1,250 lines, advisory. The pre-commit warning is unchanged.
 
 ## 1. Tracked source inventory
@@ -20,28 +22,30 @@ the fourth.
 These are the tracked non-test files over the soft limit at the baseline,
 followed by the parent's list. Each "after" column is that child's candidate.
 
-| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | Notes |
-|---|---:|---:|---:|---:|---:|---|
-| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | Plan in §3. |
-| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | New in SYRD-286. |
-| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | New in SYRD-287. |
-| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | New in SYRD-287. |
-| `scripts/upstream_report.py` | — | — | — | 351 | 351 | New in SYRD-288. |
-| `scripts/host_accounts.py` | — | — | — | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
-| `scripts/project_onboarding.py` | — | — | — | — | 753 | New in SYRD-289. |
-| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
-| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
-| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
-| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
-| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
-| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
-| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
-| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
-| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
-| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
-| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
-| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
-| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
+| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | Notes |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | Plan in §3. |
+| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
+| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | New in SYRD-287. |
+| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | New in SYRD-287. |
+| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | New in SYRD-288. |
+| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
+| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | New in SYRD-289. |
+| `scripts/role_command.py` | — | — | — | — | — | 212 | New in SYRD-290. |
+| `scripts/model_validation.py` | — | — | — | — | — | 694 | New in SYRD-290. |
+| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
+| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
+| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
+| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
+| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
+| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
+| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
+| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
+| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
+| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
+| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
+| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
+| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
 
 For comparison only: 16 test files are over 1,250 lines, the largest being
 `tests/ticket_board_postgres_triggers_test.py` at 4,034. They are not in this
@@ -103,7 +107,7 @@ re-derives its own closure before moving anything.
 | tmux panes and sessions | 2,076 | 94 |
 | provider state, runtime registration and role identities | 1,761 | 46 |
 | workflow declaration and rebind | 1,567 | 36 |
-| model/effort/CLI runtime selection | 1,456 | 70 |
+| model/effort/CLI runtime selection — **command construction and model validation moved by SYRD-290** | 1,456 | 70 |
 | credentials (agy, role seeding, upstream report) — **agy and role seeding moved by SYRD-287; upstream report by SYRD-288** | 1,436 | 65 |
 | repository hooks, git and worktrees | 1,196 | 68 |
 | CLI parsers and dispatch | 1,157 | 15 |
@@ -161,7 +165,28 @@ re-derives its own closure before moving anything.
    unless it is only a default value (see rule 6). The extractor treats such
    names as launcher facilities since SYRD-289. The first cut of SYRD-289 left
    one unrewritten, and the unbound-name check (rule 7) caught it.
-9. **Keep contractual patch seams.** Suites patch launcher names and expect the
+9. **Source-scanning guards pin text to a file.** Some suites read
+   `team_launcher.py` as text. `launch_without_model_probes_test` requires
+   exactly one `validate_models=True` call site there, and the git ownership
+   lint scans only that file. Before moving a definition, check whether such a
+   guard names it. Either leave the guarded site in the launcher (SYRD-290 left
+   `switchyard_validate_models_command`), or widen the guard in the same commit
+   with the reason stated.
+10. **No agent CLI runs in these suites.** Claude, Codex and agy are installed
+    on this host, and Claude is logged in, so a suite that finds a real
+    authenticated CLI would make a paid request
+    (`team_launcher_model_tool_call_probe_test` has such a case). Slices that
+    touch model or CLI code run their suites with stubs for `claude`, `codex`,
+    `agy`, `hermes` and `gemini` ahead of `/usr/bin` on PATH; each stub refuses
+    and exits 1. The one exception is `codex_effort_config_key_test`, whose
+    Codex runs only inside `unshare --net`.
+11. **A second launcher module object.** `desktop_access_test`'s exported-release
+    case loads `team_launcher.py` again, under another module name. Moved code
+    resolves `scripts.team_launcher`, not that copy. That case has failed at the
+    same assertion since before SYRD-286 (checked on `d5ffdd0`), before it
+    reaches any moved code, so it gives no evidence either way. A slice that
+    wants it as evidence must first make it pass on the baseline.
+12. **Keep contractual patch seams.** Suites patch launcher names and expect the
    patch to reach code that is now elsewhere. A moved caller reads such a name
    from `team_launcher` when it runs, even if the definition itself moved.
    SYRD-287 does this for the owner-traversal checks.
@@ -177,8 +202,8 @@ starts. The sizes are closure sizes at the baseline. Every child re-measures.
 | 2 | **Agent credentials**: agy credential source and role credential seeding (`agy-credential`, `seed-role-credentials`) (SYRD-287) | 1,180 moved | 17 inbound (mostly `switchyard_new_command`); 2 patched names found on re-measure |
 | 3 | **Upstream report link and credential** (SYRD-288) | 296 moved | 2 inbound (`upgrade_project_command`); 2 patched names |
 | 4 | **Onboarding docs, director onboarding and generated board skill** (SYRD-289) | 636 moved | 9 inbound; 3 patched names, all at call sites that stay in the launcher |
-| 5 | Model, effort and CLI command construction — **suggested next** | 630 | 11 inbound; re-measure |
-| 6 | Repository hooks, git and worktrees; widens the git ownership lint | 1,200 | re-measure |
+| 5 | **Role CLI command construction and model validation** (SYRD-290) | 212 + 694 in two modules | 5 + 11 inbound; 0 patched names; `validate-models` verb kept in the launcher (rule 9) |
+| 6 | Repository hooks, git and worktrees; widens the git ownership lint — **suggested next** | 1,200 | re-measure |
 | 7 | Agent CLI discovery, promotion and first-run auth | 2,600 | several children; re-measure |
 | 8 | Board service, listener and status (`status`, `release-status` reads) | 1,100 | 19+ inbound |
 | 9 | Workflow declaration, adopt/migrate/rebind verbs | 1,600 | re-measure |
@@ -457,3 +482,95 @@ Model and runtime selection is the next slice.
 | `grep -ci onboarding` in the file a reader opens | 154 in 36,379 lines | 94 in 753 lines |
 | `grep -ci onboarding` left in `team_launcher.py` | 154 | 83: callers in `new`/`upgrade`/`finish-upgrade`/launch, the inline `role-prompt` dispatch, prompt limits and the import list |
 | onboarding/board-skill `def`/`class` names in `team_launcher.py` | 16 | 0 |
+
+### SYRD-290: role CLI command construction and model validation
+
+Re-measured on `3e7337b` before editing. The ~630 estimate covered two
+responsibilities, so they became two modules with a one-way import:
+
+- **`scripts/role_command.py`** (212 lines, 13 definitions) builds a role's CLI
+  command:
+  - the per-CLI adapter tables: `YOLO_ARGS_BY_CLI`, `STARTUP_ARGS_BY_CLI`,
+    `EFFORT_STYLE_BY_CLI`, `DEFAULT_MODEL_ARG_BY_CLI` and
+    `DEFAULT_RESUME_{MODE,FLAG,SUBCOMMAND}_BY_CLI`;
+  - `yolo_args_for_role`, `startup_args_for_role` and `effort_args_for_role`
+    (Codex's `-c model_reasoning_effort="<level>"`);
+  - `_resume_args_for_role`, `hermes_env_for_role` and `cli_command_for_role`.
+
+  Inbound: `tmux_new_session_args` and `_role_from_json`.
+- **`scripts/model_validation.py`** (694 lines, 24 definitions) checks a
+  role's model:
+  - the probe constants and prompt;
+  - `ModelValidationFailure`, `ModelProbeAttempt` and `_ModelProbeWorkspace`;
+  - the probe command, evidence and suggestion helpers, `_probe_role_model` and
+    `validate_role_models`;
+  - the unknown-model report, confirm and record steps and the stop gate;
+  - the interactive model and effort fields.
+
+  Inbound: first-run auth, `new`, `switchyard_main` and the role-runtime
+  prompts. It imports `YOLO_ARGS_BY_CLI` from `role_command`.
+
+**Not moved.**
+- `switchyard_validate_models_command` stays in the launcher. It is the one
+  call site allowed to pass `validate_models=True`, and
+  `launch_without_model_probes_test` checks that in `team_launcher.py`'s text
+  (rule 9). The first cut moved it, and that suite went red only on the
+  candidate. The cut was redone rather than the guard edited.
+- `_command_name`, which has callers across the launcher, stays as a shared
+  facility.
+- CLI discovery, promotion, auth and running the probes stay in the launcher.
+
+**Boundaries.**
+- **Into the modules.** `team_launcher` imports 32 names explicitly: 12 from
+  `role_command` and 20 from `model_validation`. No moved name is patched by
+  any suite. Five private helpers nobody outside reads are no longer launcher
+  attributes.
+- **Out to the launcher, at call time.**
+  - `role_command`'s reads include `_command_name`, `role_runtime_binding`,
+    `session_id_for_role`, `hermes_home_for_role`, `_uses_hermes`,
+    `_uses_fresh_session_per_ticket`, `default_user_bin_dirs`,
+    `_prepend_paths` and `_env_unset_prefix`.
+  - `model_validation`'s reads include `_role_cli_name`, `_run_owner_cli_probe`,
+    `_owner_catalog_args`, `_proc_failure_reason`,
+    `OWNER_CLI_PROBE_TIMEOUT_SECONDS`, `load_project_config`,
+    `_write_json_atomic` and `ensure_owner_file`.
+- **Library imports.** `runtime_catalog`, `terminal_select` and the
+  prompt-schema names are imported directly. They are shared module objects,
+  and none is patched on the launcher.
+
+**Evidence.**
+- The AST proof holds for 37 definitions, including the bound-name check.
+- A **192-case argv matrix** of `cli_command_for_role`, `yolo_args_for_role`,
+  `startup_args_for_role`, `effort_args_for_role` and `hermes_env_for_role` is
+  **byte-identical** to the baseline. It covers:
+  - 4 runtimes;
+  - 3 effort levels;
+  - yolo on and off;
+  - fresh and resumed sessions;
+  - with and without extra arguments and a model.
+- The new `tests/role_command_boundary_test.py` has 9 checks, and 6 of 6
+  mutations are killed.
+- `codex_effort_config_key_test` gives 15 checks on both sides, including
+  Codex's own header, offline.
+- The model-probe, first-run, catalog, selector, pane, tmux, clone-hook,
+  adoption, Hermes, process-authority and role-runtime suites, and the four
+  earlier boundary tests, are green and identical to the baseline.
+- Pre-existing reds are identical per case: `team_launcher_pane_paths` 9/2,
+  `team_launcher_project_artifacts` 10/6, `team_launcher_env_config` 24/2. The
+  two env-config failures are both command-construction cases. The command
+  each builds and the assertion each fails at are byte-identical on both
+  sides; they assume a real home and a real owner's PATH.
+- CLI help output is byte-identical to the baseline for 7 invocations.
+  `validate-models --help` treating `--help` as a project is existing
+  behaviour, the same on both sides.
+- A staged release contains and loads both modules.
+
+**Navigation measurement** (counts only; no timing or token claim):
+
+| | Baseline (`3e7337b`) | After |
+|---|---|---|
+| Files holding the responsibility | 1 (`team_launcher.py`, 35,730 lines) | 2 (`role_command.py` 212, `model_validation.py` 694) |
+| Where it sits | regions from line 439 to 18786 | each module contiguous |
+| model/effort/yolo/startup/cli-command `def`/`class` names in `team_launcher.py` | 27 | 5 (live-model inspection and the `validate-models` verb) |
+| `grep -ci effort` in the launcher / the new modules | 59 / — | 44 / 15 + 6 |
+| `grep -ciE 'model.?probe\|model.?validation'` in the launcher / the new modules | 50 / — | 27 / 38 |

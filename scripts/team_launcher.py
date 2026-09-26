@@ -3928,7 +3928,14 @@ def effort_args_for_role(role: RoleConfig) -> list[str]:
     if style == "flag":
         return ["--effort", role.effort]
     if style == "config":
-        return ["-c", f"reasoning_effort={role.effort}"]
+        # Codex's setting is `model_reasoning_effort`; its `-c` value is TOML,
+        # so the level is a quoted string. The bare `reasoning_effort` this
+        # used to emit is not a setting: Codex 0.156.1 answers
+        # "session-flags: `reasoning_effort` is ignored." and runs at its
+        # default, measured from its own session header (SYRD-277). A role's
+        # extra_args come after this and Codex applies the last `-c` of a key,
+        # so an explicit override there still wins.
+        return ["-c", f'model_reasoning_effort="{role.effort}"']
     if style == "reasoning":
         return ["--reasoning", role.effort]
     if style is None and cli_name in EFFORT_STYLE_BY_CLI:

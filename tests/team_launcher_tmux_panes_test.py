@@ -89,7 +89,7 @@ def test_start_creates_missing_session_once_then_attaches() -> None:
     assert "TICKET_BOARD_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "PGU_PANE_TARGET=pgu-ops:0.0" in runner.calls[1][-1]
     assert "--model gpt-5.5" in runner.calls[1][-1]
-    assert "-c reasoning_effort=high" in runner.calls[1][-1]
+    assert "-c 'model_reasoning_effort=\"high\"'" in runner.calls[1][-1]
     assert "--dangerously-bypass-approvals-and-sandbox" in runner.calls[1][-1]
     assert "--dangerously-bypass-hook-trust" in runner.calls[1][-1]
     assert "--reasoning-effort" not in runner.calls[1][-1]

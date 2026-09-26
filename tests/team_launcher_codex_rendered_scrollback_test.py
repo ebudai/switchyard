@@ -164,7 +164,7 @@ def test_the_rest_of_the_codex_command_is_untouched() -> None:
             "--model",
             "gpt-5.5",
             "-c",
-            "reasoning_effort=high",
+            'model_reasoning_effort="high"',
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
             "--search",

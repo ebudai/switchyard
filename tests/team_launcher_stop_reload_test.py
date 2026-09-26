@@ -408,7 +408,7 @@ def test_resume_commands_use_cli_specific_shapes_and_front_position() -> None:
 
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(ops_command))
         assert _command_tail(ops_command)[:3] == ["codex", "resume", session_id]
-        assert _command_tail(ops_command)[3:7] == ["--model", "gpt-5.5", "-c", "reasoning_effort=high"]
+        assert _command_tail(ops_command)[3:7] == ["--model", "gpt-5.5", "-c", 'model_reasoning_effort="high"']
 
         assert any(entry.startswith(f"PATH={default_user_bin()}:") for entry in _env_entries(inspector_command))
         assert _command_tail(inspector_command)[:3] == ["agy", "--conversation", session_id]

@@ -90,7 +90,7 @@ class Catalog:
 #: operator choosing a runtime is told what choosing it means.
 RUNTIMES: tuple[Choice, ...] = (
     Choice("claude", "Claude Code", "takes an --effort flag"),
-    Choice("codex", "Codex", "takes reasoning_effort as config"),
+    Choice("codex", "Codex", "takes model_reasoning_effort as config"),
     Choice("agy", "Antigravity", "can list its own models; takes no effort level"),
     Choice("hermes", "Hermes", "chooses its model in its own picker"),
 )
@@ -140,7 +140,7 @@ RECORDED_EFFORT: dict[str, tuple[Choice, ...]] = {
         Choice("low", "low"),
     ),
     "codex": (
-        Choice("high", "high", "rendered as -c reasoning_effort=high"),
+        Choice("high", "high", 'rendered as -c model_reasoning_effort="high"'),
         Choice("medium", "medium"),
         Choice("low", "low"),
     ),

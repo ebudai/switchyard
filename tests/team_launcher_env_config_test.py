@@ -899,18 +899,18 @@ def test_effort_config_translates_to_cli_specific_args() -> None:
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
         assert "--effort" in command, (role_name, command)
         assert command[command.index("--effort") + 1] == "high"
-        assert "reasoning_effort=high" not in command
+        assert 'model_reasoning_effort="high"' not in command
 
     for role_name in ("main", "app", "ops"):
         command = cli_command_for_role(roles[role_name], session_dir=config.session_dir)
         assert "-c" in command, (role_name, command)
-        assert command[command.index("-c") + 1] == "reasoning_effort=high"
+        assert command[command.index("-c") + 1] == 'model_reasoning_effort="high"'
         assert "--effort" not in command
 
     inspector_command = cli_command_for_role(roles["inspector"], session_dir=config.session_dir)
     assert "--effort" not in inspector_command
     assert "-c" not in inspector_command
-    assert "reasoning_effort=high" not in inspector_command
+    assert 'model_reasoning_effort="high"' not in inspector_command
 
 def test_inspector_agy_cli_stays_in_first_run_trust_phase() -> None:
     config = team_launcher.replace(load_project_config("pgu", ROOT / "config" / "team-launcher" / "pgu.json"), desktop_access={"mode": "headless"})
@@ -933,7 +933,7 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "--model",
             "gpt-5.6-sol",
             "-c",
-            "reasoning_effort=high",
+            'model_reasoning_effort="high"',
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
@@ -942,7 +942,7 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "--model",
             "gpt-5.5",
             "-c",
-            "reasoning_effort=high",
+            'model_reasoning_effort="high"',
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],
@@ -952,7 +952,7 @@ def test_pgu_launch_commands_include_model_and_bypass_flags() -> None:
             "--model",
             "gpt-5.5",
             "-c",
-            "reasoning_effort=high",
+            'model_reasoning_effort="high"',
             "--dangerously-bypass-approvals-and-sandbox",
             "--dangerously-bypass-hook-trust",
         ],

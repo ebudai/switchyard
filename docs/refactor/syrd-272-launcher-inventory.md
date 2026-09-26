@@ -4,7 +4,7 @@ This document serves the SYRD-272 parent. Each extraction child updates it:
 the before/after table, the slice log, and the plan's next entry. SYRD-286 was
 the first slice, SYRD-287 the second, SYRD-288 the third, SYRD-289
 the fourth, SYRD-290 the fifth, SYRD-291 the sixth, SYRD-292
-slice 6a and SYRD-293 slice 6b.
+slice 6a, SYRD-293 slice 6b and SYRD-294 slice 6c.
 
 - Baseline: public main `d5ffdd00a2b162ac9bee545f52ba0840f70fc7ed`. The
   exclusive refactor window opened at this commit.
@@ -22,6 +22,8 @@ slice 6a and SYRD-293 slice 6b.
   is SYRD-292's baseline.
 - SYRD-292 was integrated as `6f0ccb733c0b6df1a8627c77d021238056cad973`, which
   is SYRD-293's baseline.
+- SYRD-293 was integrated as `37bbb53ce823f222e20fa6beb20a0bffa57827af`, which
+  is SYRD-294's baseline.
 - Soft limit: 1,250 lines, advisory. The pre-commit warning is unchanged.
 
 ## 1. Tracked source inventory
@@ -29,33 +31,34 @@ slice 6a and SYRD-293 slice 6b.
 These are the tracked non-test files over the soft limit at the baseline,
 followed by the parent's list. Each "after" column is that child's candidate.
 
-| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | After SYRD-291 | After SYRD-292 | After SYRD-293 | Notes |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | 34,365 | 33,826 | 33,573 | Plan in §3. |
-| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
-| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | 832 | 832 | 832 | New in SYRD-287. |
-| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | 484 | 484 | 484 | New in SYRD-287. |
-| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | 351 | 351 | 351 | New in SYRD-288. |
-| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
-| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | 753 | 753 | 753 | New in SYRD-289. |
-| `scripts/role_command.py` | — | — | — | — | — | 212 | 212 | 212 | 212 | New in SYRD-290. |
-| `scripts/model_validation.py` | — | — | — | — | — | 694 | 694 | 694 | 694 | New in SYRD-290. |
-| `scripts/project_worktrees.py` | — | — | — | — | — | — | 742 | 742 | 742 | New in SYRD-291. |
-| `scripts/launcher_checkout.py` | — | — | — | — | — | — | — | 632 | 632 | New in SYRD-292. |
-| `scripts/owner_git.py` | — | — | — | — | — | — | — | — | 323 | New in SYRD-293. |
-| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
-| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
-| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
-| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
-| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
-| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
-| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
-| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
-| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
-| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
-| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
-| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
-| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
+| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | After SYRD-291 | After SYRD-292 | After SYRD-293 | After SYRD-294 | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | 34,365 | 33,826 | 33,573 | 33,377 | Plan in §3. |
+| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
+| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | New in SYRD-287. |
+| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | New in SYRD-287. |
+| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | 351 | 351 | 351 | 351 | New in SYRD-288. |
+| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | 23 | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
+| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | 753 | 753 | 753 | 753 | New in SYRD-289. |
+| `scripts/role_command.py` | — | — | — | — | — | 212 | 212 | 212 | 212 | 212 | New in SYRD-290. |
+| `scripts/model_validation.py` | — | — | — | — | — | 694 | 694 | 694 | 694 | 694 | New in SYRD-290. |
+| `scripts/project_worktrees.py` | — | — | — | — | — | — | 742 | 742 | 742 | 742 | New in SYRD-291. |
+| `scripts/launcher_checkout.py` | — | — | — | — | — | — | — | 632 | 632 | 632 | New in SYRD-292. |
+| `scripts/owner_git.py` | — | — | — | — | — | — | — | — | 323 | 323 | New in SYRD-293. |
+| `scripts/pane_hooks.py` | — | — | — | — | — | — | — | — | — | 262 | New in SYRD-294. |
+| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
+| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
+| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
+| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
+| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
+| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
+| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
+| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
+| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
+| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
+| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
+| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
+| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
 
 For comparison only: 16 test files are over 1,250 lines, the largest being
 `tests/ticket_board_postgres_triggers_test.py` at 4,034. They are not in this
@@ -229,8 +232,10 @@ starts. The sizes are closure sizes at the baseline. Every child re-measures.
 | 6 | **Project worktrees and control repository** (SYRD-291); widened the git ownership lint | 742 | 6 inbound; `_control_repository_owner_home` patched (routed through the launcher) |
 | 6a | **Launcher checkout self-update** (SYRD-292) | 632 | 7 inbound edges; `ensure_launcher_checkout_current` patched at launcher call sites; 12 builders linted |
 | 6b | **Owner-correct git execution and project git helpers** (SYRD-293) | 323 | 10 inbound edges from the launcher, plus the three git modules through `launcher.run_owner_correct_git`; that name is patched on the launcher and kept there as the seam, including for owner_git's own helpers |
-| 6c | Board pane hooks and Codex hook trust (`install_generated_project_pane_hooks_args`, `ensure_generated_project_pane_hooks`, `tenant_hook_accounts`, `refresh_role_pane_hooks`, the `_codex_hook_trust_*` report) — **suggested next** | ~190 | Measured on SYRD-293's candidate: repository (pre-commit) hooks already live in `scripts/repository_hooks.py`, so there is little repository-hook glue left in the launcher. The tmux viewer-relayout hooks belong to presentation (§3 row 12). |
-| 7 | Agent CLI discovery, promotion and first-run auth | 2,600 | several children; re-measure |
+| 6c | **Board pane hooks and Codex hook trust** (SYRD-294) | 262 | Measured on SYRD-293's candidate: repository (pre-commit) hooks already live in `scripts/repository_hooks.py`, so there is little repository-hook glue left in the launcher. The tmux viewer-relayout hooks belong to presentation (§3 row 12). |
+| 7 | Agent CLI discovery, promotion and first-run auth | 2,600 | several children |
+| 7a | Agent CLI discovery and host-wide promotion (`promote_agent_cli_*`, `classify_agent_cli`, `resolve_agent_cli_source`, `agent_cli_*`, install instructions) — **suggested next** | ~1,203 (43 defs, 8 inbound, 23 launcher deps; measured on SYRD-294's candidate) | at the soft limit: split discovery from promotion if the closure does not stay under 1,250 once its header is added |
+| 7b | First-run provider auth and setup manifest (`FirstRun*`, `run_first_run_auth_phase`, `_run_provider_first_run`, `stop_before_launch_for_unauthenticated_providers`, …) | ~2,172 (93 defs, 14 inbound) | two or more children |
 | 8 | Board service, listener and status (`status`, `release-status` reads) | 1,100 | 19+ inbound |
 | 9 | Workflow declaration, adopt/migrate/rebind verbs | 1,600 | re-measure |
 | 10 | Provider state, runtime registration and role identities | 1,800 | re-measure |
@@ -838,3 +843,78 @@ lines) received 13 definitions:
 | Files holding the responsibility | 1 (`team_launcher.py`, 33,826 lines) | 1 (`owner_git.py`, 323 lines) |
 | owner-git `def`/`class` names in `team_launcher.py` | 13 | 0 |
 | Where it sits | three regions: lines ~3979–4054, ~10049 and ~14243–14421 | the whole file |
+
+### SYRD-294 (slice 6c): pane hooks and Codex hook trust
+
+Re-measured on `37bbb53` before editing: 9 definitions, about 190 lines, in four
+regions of `team_launcher.py`. They moved into one module,
+**`scripts/pane_hooks.py`** (262 lines), because both parts concern the hooks
+that run in a role's pane:
+- **Board pane hooks:** `install_generated_project_pane_hooks_args`,
+  `ensure_generated_project_pane_hooks`, `tenant_hook_accounts` and
+  `refresh_role_pane_hooks`.
+- **Codex hook trust:** `CodexHookTrustMismatch`,
+  `stale_codex_hook_trust_for_roles`, `_codex_hook_trust_reason`,
+  `_codex_hook_trust_affected_roles` and `_format_codex_hook_trust_report`.
+
+**Stayed.**
+- The viewer-relayout tmux hooks, which are presentation.
+- Repository hooks, which are `scripts/repository_hooks.py`.
+- `scripts/ticket_board/codex_hook_trust.py` itself, which does the board-side
+  hashing and trust reading.
+
+**Boundaries.**
+- **Into the module.** `team_launcher` imports the 7 names its callers and the
+  suites read, explicitly; its callers are launch, upgrade and first-run setup.
+  `workflow_launcher.py` reaches `launcher.ensure_generated_project_pane_hooks`.
+- **Patched names.** `ensure_generated_project_pane_hooks` (2 suites) and
+  `refresh_role_pane_hooks` (1 suite) are patched only around launcher call
+  sites that stayed, and no moved function calls a patched moved name.
+- **Out to the launcher, at call time.** `uid_for_user`, `runtime_dir_for_uid`,
+  `current_user_name`, `home_dir_for_user`, `role_run_as_user`,
+  `_staged_tooling_dir`, `_is_generated_project_layout_template`,
+  `_proc_failure_reason`, `_role_cli_name` and `_role_names`.
+- **Library imports.** `codex_command_hook_trust_entries` and
+  `codex_trusted_hashes` are imported directly from `codex_hook_trust` under
+  the launcher's own `_`-aliases, so the moved text is unchanged. Neither is
+  patched.
+
+**Evidence.**
+- The AST proof holds for 9 definitions, including the bound-name check. No
+  name involved is defined twice.
+- The new `tests/pane_hooks_boundary_test.py` has 7 checks. It builds the
+  hook-installer argv from the launcher's patched home, uid, runtime dir and
+  user, both with `sudo` for another user and without it for the owner, and
+  drives the trust check through the launcher's patched CLI lookup. 5 of 5
+  mutations are killed. The one that first survived, the installer deciding
+  who is running by itself, showed the test lacked the owner case; that case
+  was added.
+- Green and identical to the baseline:
+  - pane hook install, generated-layout upgrade, first-run auth, missing-CLI
+    install hint and first-run setup (492);
+  - Codex folder trust (53), process authority, project provision and
+    cutover;
+  - the eight earlier boundary tests.
+- Red on the baseline, compared case by case:
+  - `team_launcher_layout_upgrade_commands` 12/8 (its own cases write pane
+    state, which trips the runner's live-state guard);
+  - `team_launcher_env_config` 24/2, `team_launcher_new_project` 18/1 and
+    `claude_permission_hook` 22/1.
+- **Not counted as coverage:**
+  - `team_launcher_declarative_workflow` is identical by whole log, but it
+    stops at `unshare --map-auto` on both sides, before it reaches its patched
+    `ensure_generated_project_pane_hooks`.
+  - `claude_permission_hook`'s red case needs a real Claude, which the suite
+    stubs refuse.
+  - `ticket_board_hermes_hook_events` skips on both sides, because Hermes is
+    not installed.
+- CLI help output is byte-identical to the baseline for 5 invocations.
+- A staged release contains and loads the module.
+
+**Navigation measurement** (counts only; no timing or token claim):
+
+| | Baseline (`37bbb53`) | After |
+|---|---|---|
+| Files holding the responsibility | 1 (`team_launcher.py`, 33,573 lines) | 1 (`pane_hooks.py`, 262 lines) |
+| pane-hook/hook-trust `def`/`class` names in `team_launcher.py` | 9 | 0 |
+| Where it sits | four regions, lines ~5857 to ~24260 | the whole file |

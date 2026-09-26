@@ -650,6 +650,25 @@ from scripts.session_records import (
     _session_record_for_role,
     superseded_session_id_for_role,
 )
+# Session and pane-state paths and the initial pane idle state (SYRD-311),
+# moved out whole. Named here because launching, config loading and the role
+# session code below resolve them -- the suites patch `account_session_dir`,
+# `role_session_dir` and `seed_initial_pane_idle_state` here -- because
+# several modules read them through the launcher, and because
+# `team_launcher.<name>` is how tests reach them. `DEFAULT_SESSION_DIR` and
+# `DEFAULT_PANE_STATE_DIR` stay defined in this file: the suites rebind them
+# here, and the moved code reads them here.
+from scripts.session_paths import (
+    account_session_dir,
+    clear_pane_idle_state_for_role,
+    default_pane_state_dir_for_user,
+    default_session_dir_for_user,
+    role_pane_state_dir,
+    role_session_dir,
+    seed_initial_pane_idle_state,
+    session_dir_uses_user_runtime,
+    shared_pane_state_dir,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -1253,67 +1272,6 @@ def runtime_dir_for_uid(uid: int) -> Path:
     return Path(f"/run/user/{uid}")
 
 
-def _explicit_session_dir_from_env() -> Path | None:
-    value = _env_first("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
-    return Path(value).expanduser() if value else None
-
-
-def _explicit_pane_state_dir_from_env() -> Path | None:
-    value = _env_first("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")
-    return Path(value).expanduser() if value else None
-
-
-def default_session_dir_for_user(user_name: str) -> Path:
-    explicit = _explicit_session_dir_from_env()
-    if explicit is not None:
-        return explicit
-    owner_home = home_dir_for_user(user_name)
-    if owner_home is None:
-        return DEFAULT_SESSION_DIR
-    return owner_home / ".local" / "state" / LIVE_PGU_STATE_DIR_NAME / "pane-sessions"
-
-
-def default_pane_state_dir_for_user(user_name: str, *, project: str) -> Path:
-    explicit = _explicit_pane_state_dir_from_env()
-    if explicit is not None:
-        return explicit
-    user = user_name.strip()
-    if not user:
-        return DEFAULT_PANE_STATE_DIR
-    uid = uid_for_user(user)
-    if uid is None:
-        return DEFAULT_PANE_STATE_DIR
-    return runtime_dir_for_uid(uid) / f"{project}-ticket-board" / "pane-state"
-
-
-def account_session_dir(account: str, *, project: str) -> Path:
-    """Session records for one account of one project.
-
-    Deliberately ignores the ambient TICKET_BOARD_PANE_SESSION_DIR: that names
-    the CURRENT pane's project and user, so honouring it when computing another
-    role's or another project's path hands a role a directory belonging to
-    something else. It is also project-scoped, which the owner-facing helper is
-    not -- that one still hardcodes the legacy pgu state directory (SYRD-39).
-    """
-    home = home_dir_for_user(account)
-    if home is None:
-        return DEFAULT_SESSION_DIR
-    return home / ".local" / "state" / f"{project}-ticket-board" / "pane-sessions"
-
-
-def shared_pane_state_dir(project: str) -> Path:
-    """Where every role of a project records pane activity.
-
-    Role accounts cannot write the owner's XDG runtime directory, and the notify
-    listener cannot read theirs, so per-role state under each role's own
-    /run/user is written where nobody reads it. This is the deliberate
-    aggregation path: the board's runtime directory, group-owned by the
-    project's roles group so every role writes it and the listener reads it
-    (SYRD-39).
-    """
-    return Path("/run") / f"{project}-ticket-board" / "pane-state"
-
-
 def loginctl_enable_linger_args(user_name: str) -> list[str]:
     return ["loginctl", "enable-linger", user_name]
 
@@ -1356,15 +1314,6 @@ def ensure_user_linger_runtime(
         f"team-launcher: linger is enabled for {user!r}, but {runtime_dir} is still missing; "
         "start or restart that user's systemd user manager and retry"
     )
-
-
-def session_dir_uses_user_runtime(session_dir: Path, user_name: str) -> bool:
-    uid = uid_for_user(user_name)
-    if uid is None:
-        return False
-    runtime_dir = runtime_dir_for_uid(uid).resolve(strict=False)
-    session_path = session_dir.resolve(strict=False)
-    return session_path == runtime_dir or runtime_dir in session_path.parents
 
 
 def ensure_configured_runtime_user(
@@ -2742,30 +2691,6 @@ def role_process_runner_for(
     return runner
 
 
-def role_session_dir(config: ProjectConfig, role: RoleConfig) -> Path:
-    """The role-private resumable store under the project account."""
-    # Each logical role retains an independent resumable store even though all
-    # role processes now share the project account.
-    if config.role_state_isolation:
-        return config.session_dir / "roles" / role.role
-    account = role_run_as_user(config, role)
-    if account and account != config.run_as_user:
-        return account_session_dir(account, project=config.project)
-    return config.session_dir
-
-
-def role_pane_state_dir(
-    config: ProjectConfig, role: RoleConfig, default: Path | None = None
-) -> Path:
-    """Where pane hooks aggregate state across the active identity model."""
-    account = role_run_as_user(config, role)
-    if not config.role_state_isolation and account and account != config.run_as_user:
-        return shared_pane_state_dir(config.project)
-    if default is not None:
-        return default
-    return default_pane_state_dir_for_user(config.run_as_user, project=config.project)
-
-
 def _role_board_env(config: ProjectConfig, role: RoleConfig, session_role_map: dict[str, str]) -> dict[str, str]:
     env = {
         "TICKET_BOARD_PROJECT": config.project,
@@ -3106,34 +3031,6 @@ def _prepend_paths(path_value: str, directories: Sequence[str]) -> str:
         parts = [part for part in parts if part != directory]
         parts.insert(0, directory)
     return ":".join(parts)
-
-
-def seed_initial_pane_idle_state(
-    role: RoleConfig,
-    *,
-    pane_state_dir: Path,
-    source: str,
-    now: float | None = None,
-) -> Path:
-    path = pane_state_dir / pane_state_file_name(role.target)
-    payload = {
-        "target": role.target,
-        "state": "idle",
-        "updated_at": time.time() if now is None else now,
-        "source": source,
-    }
-    _write_json_atomic(path, payload)
-    return path
-
-
-def clear_pane_idle_state_for_role(role: RoleConfig, *, pane_state_dir: Path) -> None:
-    path = pane_state_dir / pane_state_file_name(role.target)
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        print(f"team-launcher: failed to clear pane state for {role.role}: {exc}", file=sys.stderr)
 
 
 def _ambient_pane_session_ids(environ: Mapping[str, str] | None = None) -> dict[str, str]:

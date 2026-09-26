@@ -582,6 +582,10 @@ class WorkerReadiness:
     runtime: str = "unknown"
     account: bool = False
     worktree: bool = False
+    #: Whether the worker's runtime has recorded trust for its worktree. A
+    #: session started without it is a live process parked at the provider's
+    #: "Trust this folder?" and not a worker that can take a ticket (SYRD-279).
+    trusted: bool = True
     session: bool = False
     holding: tuple[str, ...] = ()
 
@@ -602,6 +606,8 @@ class WorkerReadiness:
             found.append("the Unix account its pane runs as does not exist")
         if not self.worktree:
             found.append(WORKTREE_MISSING)
+        elif not self.trusted:
+            found.append(WORKTREE_UNTRUSTED)
         return tuple(found)
 
     @property
@@ -695,6 +701,9 @@ def worker_readiness(
                 runtime=runtime_state,
                 account=bool(pane_user) and launcher.local_account_exists(pane_user),
                 worktree=workdir is not None and Path(workdir).is_dir(),
+                trusted=workdir is None or not Path(workdir).is_dir() or launcher._workdir_is_trusted(
+                    pool.runtime, owner_home=home, workdir=Path(workdir)
+                ),
                 session=session_alive,
                 holding=tuple(str(ticket.get("id") or "") for ticket in queues.get(name, [])),
             )
@@ -724,8 +733,10 @@ BLOCKER_CLEARED_BY = {
     # only if the operator put it there, which is why the plan names it on that
     # step rather than promising it.
     "queue": "workflow apply",
-    # Declared workers with nothing on disk yet: exactly what preparation does.
+    # Declared workers with nothing on disk yet, or a worktree their runtime
+    # has not trusted: exactly what preparation does.
     "worktrees": "worker preparation",
+    "trust": "worker preparation",
 }
 
 
@@ -960,6 +971,14 @@ class WorkerAction:
 WORKER_ACTION_SUCCESSES = frozenset({"started", "already running", "stopped", "already stopped"})
 #: The blocker a missing worktree reports, and the one `prepare-role` clears.
 WORKTREE_MISSING = "its worktree is missing"
+#: And the one an untrusted worktree reports, which the same preparation clears
+#: through the provider's own trust prompt, answered once by the owner.
+WORKTREE_UNTRUSTED = (
+    "its runtime has not trusted its worktree, so a session opens at the provider's "
+    "folder-trust prompt instead of taking work"
+)
+#: The blockers `prepare-role` exists to clear.
+PREPARATION_BLOCKERS = (WORKTREE_MISSING, WORKTREE_UNTRUSTED)
 
 
 def prepare_role_command(config_path: Path | str, member: str) -> str:
@@ -1008,7 +1027,7 @@ def start_worker(
         raise ValueError(f"{member} is not a live member of the {pool.name} pool")
     if state.blockers and not force:
         detail = "; ".join(state.blockers)
-        if WORKTREE_MISSING in state.blockers:
+        if any(blocker in state.blockers for blocker in PREPARATION_BLOCKERS):
             # Preparation is its own supported step; start does not do it.
             detail += f". Prepare it first, then start it again: {prepare_role_command(config_path, member)}"
         return WorkerAction(member, "not started", detail)

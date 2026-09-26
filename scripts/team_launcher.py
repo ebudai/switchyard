@@ -880,6 +880,32 @@ def worker_pool_preflight(
             )
         )
 
+    # A worktree its runtime has never been asked to trust starts a session
+    # that looks alive and sits at "Trust this folder?", unable to take work --
+    # both MEFP workers did, and read as ready and running (SYRD-279). Read
+    # from the provider's own record, under the account the panes run as.
+    untrusted = [
+        member for member in already
+        if member not in unprepared
+        and not _workdir_is_trusted(
+            pool.runtime, owner_home=home, workdir=Path(worker_pool_member_role(config, member).workdir)
+        )
+    ]
+    if untrusted:
+        from scripts.worker_pool import prepare_role_command
+
+        config_arg = config_path if config_path is not None else f"<{config.project} launcher config>"
+        findings.append(
+            WorkerPoolFinding(
+                True,
+                "trust",
+                f"{pool.runtime} has not trusted the worktree of {', '.join(untrusted)}, so "
+                f"{'its session' if len(untrusted) == 1 else 'their sessions'} would open at its "
+                "folder-trust prompt instead of taking work. Preparation asks once, as the owner: "
+                + "; ".join(prepare_role_command(config_arg, member) for member in untrusted),
+            )
+        )
+
     findings.append(
         WorkerPoolFinding(
             False,
@@ -14233,7 +14259,7 @@ AGENT_CLI_INSTALL_COMMANDS: dict[str, str] = {
     "codex": "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
     "hermes": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
 }
-FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude"})
+FIRST_RUN_TRUST_CLIS = frozenset({"agy", "claude", "codex"})
 #: The file the probe leaves for the model to read, named so that a stale one
 #: found in a temp directory says what made it.
 MODEL_PROBE_FILENAME = "switchyard-model-probe.txt"
@@ -18634,11 +18660,61 @@ def _trust_path_candidates(workdir: Path) -> list[str]:
     return list(dict.fromkeys(candidates))
 
 
+def _codex_trust_path_candidates(workdir: Path) -> list[str]:
+    """Every path Codex honours this directory's trust under -- which is not Claude's list.
+
+    Measured against Codex 0.156.1, one startup per case, past sign-in, in a
+    throwaway CODEX_HOME (SYRD-279):
+
+    - a linked worktree of an ordinary checkout is trusted by an entry for the
+      worktree itself or for the checkout's root, and NOT by one for its `.git`
+      directory -- the prompt says trusting "will apply to" the root;
+    - a linked worktree of a bare repository -- every Switchyard role worktree,
+      hung off `control.git` -- is trusted only by an entry for the worktree
+      itself; neither the bare repository nor its parent counts.
+
+    Reusing Claude's candidates, which include the git directory, would call a
+    worktree trusted that Codex then stops at "Trust this folder?" for.
+    """
+    expanded = workdir.expanduser()
+    candidates = [str(expanded), str(expanded.resolve(strict=False))]
+    common = _git_common_dir_for(expanded)
+    if common is not None and common.name == ".git":
+        root = common.parent
+        candidates.extend([str(root), str(root.resolve(strict=False))])
+    return list(dict.fromkeys(candidates))
+
+
+def _codex_workdir_is_trusted(owner_home: Path, workdir: Path) -> bool:
+    """Whether Codex will open `workdir` at a prompt rather than "Trust this folder?".
+
+    Codex records the answer in its own config as
+    `[projects."<path>"] trust_level = "trusted"`; "untrusted" is also an answer,
+    and not this one.
+    """
+    import tomllib
+
+    try:
+        config = tomllib.loads((owner_home / ".codex" / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    projects = config.get("projects")
+    if not isinstance(projects, dict):
+        return False
+    for path in _codex_trust_path_candidates(workdir):
+        entry = projects.get(path)
+        if isinstance(entry, dict) and entry.get("trust_level") == "trusted":
+            return True
+    return False
+
+
 def _workdir_is_trusted(cli: str, *, owner_home: Path, workdir: Path) -> bool:
     if cli == "claude":
         return _claude_workdir_is_trusted(owner_home, workdir)
     if cli == "agy":
         return _agy_workdir_is_trusted(owner_home, workdir)
+    if cli == "codex":
+        return _codex_workdir_is_trusted(owner_home, workdir)
     return True
 
 

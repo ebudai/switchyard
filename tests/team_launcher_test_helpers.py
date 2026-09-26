@@ -969,8 +969,10 @@ def _mark_first_run_setup_complete(
     that means "there is nothing left to ask" has to carry both, or the manifest
     correctly offers the steps it is asserting are absent (SYRD-191).
     """
-    wanted = clis or {"claude", "agy"}
+    wanted = clis or {"claude", "agy", "codex"}
     owner_home.mkdir(parents=True, exist_ok=True)
+    if "codex" in wanted and trust:
+        _record_codex_trust(owner_home, config)
     claude_roles = [role for role in config.roles if role.cli[:1] == ["claude"]]
     if "claude" in wanted:
         owner_home.joinpath(".claude.json").write_text(
@@ -1003,6 +1005,35 @@ def _mark_first_run_setup_complete(
             + "\n",
             encoding="utf-8",
         )
+
+
+def _record_codex_trust(owner_home: Path, config) -> None:
+    """Trust every codex role's worktree the way Codex records it after "Trust and continue".
+
+    Codex has its own folder-trust prompt and keeps the answer in
+    `~/.codex/config.toml` as `[projects."<path>"] trust_level = "trusted"`; a
+    fixture that means "trust already passes" for a codex role has to carry it,
+    as it carries Claude's and Antigravity's (SYRD-279).
+    """
+    paths = [
+        str(Path(role.workdir).resolve(strict=False))
+        for role in config.roles
+        if role.cli[:1] == ["codex"]
+    ]
+    if not paths:
+        return
+    import tomllib
+
+    config_toml = owner_home / ".codex" / "config.toml"
+    config_toml.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        recorded = tomllib.loads(config_toml.read_text(encoding="utf-8")).get("projects", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        recorded = {}
+    with config_toml.open("a", encoding="utf-8") as handle:
+        for path in dict.fromkeys(paths):
+            if path not in recorded:  # a repeated table is not TOML, and not trust
+                handle.write(f'[projects."{path}"]\ntrust_level = "trusted"\n\n')
 
 
 def _mark_first_run_roles_detached(config_path: Path, *role_names: str) -> None:

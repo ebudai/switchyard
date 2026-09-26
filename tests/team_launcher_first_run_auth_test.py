@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from team_launcher_test_helpers import _record_codex_trust
 
 def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
@@ -61,6 +62,8 @@ def test_first_run_auth_phase_is_silent_when_auth_and_trust_already_pass() -> No
         runner.login_seen.update({"agy", "claude", "codex"})
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -109,6 +112,9 @@ def test_first_run_auth_phase_reports_stale_codex_hook_trust_without_writing_con
         _mark_first_run_setup_complete(owner_home, config)
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
+        original_config = config_path.read_text(encoding="utf-8")
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -186,6 +192,9 @@ def test_first_run_auth_phase_distinguishes_changed_codex_hook_trust_from_never_
         runner.login_seen.add("codex")
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
+        original_config = config_path.read_text(encoding="utf-8")
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -219,6 +228,9 @@ def test_first_run_auth_phase_accepts_matching_codex_hook_trust_without_writing_
         runner.login_seen.add("codex")
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
+        original_config = (owner_home / ".codex" / "config.toml").read_text(encoding="utf-8")
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -297,6 +309,9 @@ def test_first_run_auth_phase_ignores_codex_role_with_no_installed_hooks() -> No
         runner.login_seen.add("codex")
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
+        codex_before = (owner_home / ".codex" / "config.toml").read_text(encoding="utf-8")
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -304,11 +319,11 @@ def test_first_run_auth_phase_ignores_codex_role_with_no_installed_hooks() -> No
             runner=runner,
             print_func=messages.append,
         )
-        config_written = (owner_home / ".codex" / "config.toml").exists()
+        config_unchanged = (owner_home / ".codex" / "config.toml").read_text(encoding="utf-8") == codex_before
 
     assert report == team_launcher.FirstRunAuthReport({}, [])
     assert messages == []
-    assert not config_written
+    assert config_unchanged  # the fixture now records Codex's trust there; the product still writes nothing (SYRD-279)
 
 def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-auth.") as tmp:
@@ -366,6 +381,8 @@ def test_first_run_auth_phase_does_not_sudo_wrap_same_owner() -> None:
         original_current_user_name = team_launcher.current_user_name
         try:
             team_launcher.current_user_name = lambda: "otto-agent"
+            # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+            _record_codex_trust(owner_home, config)
             report = team_launcher.run_first_run_auth_phase(
                 config,
                 owner_user="otto-agent",
@@ -399,6 +416,8 @@ def test_first_run_auth_phase_reports_missing_cli_separately_from_login() -> Non
             runner.login_seen.add("codex")
             messages: list[str] = []
 
+            # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+            _record_codex_trust(owner_home, config)
             report = team_launcher.run_first_run_auth_phase(
                 config,
                 owner_user="otto-agent",
@@ -501,6 +520,8 @@ def test_first_run_auth_invokes_owner_home_cli_with_same_path_as_presence_check(
         runner = HomeOnlyCliRunner(owner_local_bin)
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -643,6 +664,8 @@ def test_first_run_auth_phase_reports_broken_existing_owner_shell_without_mutati
 
         try:
             team_launcher.pwd.getpwnam = lambda user_name: FakeUserInfo() if user_name == "otto-agent" else original_getpwnam(user_name)
+            # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+            _record_codex_trust(owner_home, config)
             report = team_launcher.run_first_run_auth_phase(
                 config,
                 owner_user="otto-agent",
@@ -695,6 +718,8 @@ def test_first_run_auth_phase_silent_for_executable_owner_shell() -> None:
 
         try:
             team_launcher.pwd.getpwnam = lambda user_name: FakeUserInfo() if user_name == "otto-agent" else original_getpwnam(user_name)
+            # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+            _record_codex_trust(owner_home, config)
             report = team_launcher.run_first_run_auth_phase(
                 config,
                 owner_user="otto-agent",

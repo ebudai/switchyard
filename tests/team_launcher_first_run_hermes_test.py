@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from team_launcher_test_helpers import _record_codex_trust
 
 def test_hermes_config_check_requires_resolved_api_key() -> None:
     unauthenticated = subprocess.CompletedProcess(
@@ -206,16 +207,18 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
     assert report.untrusted_roles == [
         ("claude", "director", str(tmp_path / "worktrees" / "director")),
         ("claude", "research", str(tmp_path / "worktrees" / "research")),
+        # Codex asks "Trust this folder?" too (measured on 0.156.1, SYRD-279).
+        ("codex", "ops", str(tmp_path / "worktrees" / "ops")),
         ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
     ]
     printed = [value for kind, value in events if kind == "print"]
     # The manifest is printed in full first; each foreground step then says what
     # it is about to do with the terminal, immediately before taking it.
     instructions = [line for line in printed if "will now run in" in line]
-    # The provider's first run and three worktrees' trust, plus one for each
+    # The provider's first run and four worktrees' trust, plus one for each
     # sign-in that actually ran.
     steps = [line for line in instructions if "to sign in. " not in line]
-    assert len(steps) == 4, steps
+    assert len(steps) == 5, steps
     # This fake records nothing, so every login still runs after its re-read:
     # Claude, Codex and agy, each announced (SYRD-221 UAT, test9).
     sign_ins = [line for line in instructions if "to sign in. " in line]
@@ -228,7 +231,7 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
     printed = [line for line in printed if "will now run in" not in line]
     assert printed == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "3 login step(s), 1 provider setup step(s), 3 folder trust step(s), "
+        "3 login step(s), 1 provider setup step(s), 4 folder trust step(s), "
         "2 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login claude: roles director, research; "
         "interactive account setup running claude auth login as otto-agent",
@@ -243,6 +246,9 @@ def test_first_run_setup_manifest_prints_every_step_before_first_interactive_com
         "recurs per project/workdir even when the owner user is reused; "
         "interactive repository trust today, not account login",
         f"switchyard: folder trust claude: role research at {tmp_path / 'worktrees' / 'research'}; "
+        "recurs per project/workdir even when the owner user is reused; "
+        "interactive repository trust today, not account login",
+        f"switchyard: folder trust codex: role ops at {tmp_path / 'worktrees' / 'ops'}; "
         "recurs per project/workdir even when the owner user is reused; "
         "interactive repository trust today, not account login",
         f"switchyard: folder trust agy: role inspector at {tmp_path / 'worktrees' / 'inspector'}; "
@@ -352,6 +358,9 @@ def test_first_run_auth_phase_declined_login_reports_affected_roles_without_abor
         messages: list[str] = []
         runner = FirstRunAuthRunner(authenticated_after_login=False)
 
+        # Its worktrees' folder trust is already answered: this case is about the
+        # declined login, and Codex has its own trust step (SYRD-279).
+        _record_codex_trust(owner_home, config)
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",

@@ -46,6 +46,7 @@ if str(ROOT / "tests") not in sys.path:
 from team_launcher_test_helpers import (  # noqa: E402
     FirstRunAuthRunner,
     _mark_first_run_setup_complete,
+    _record_codex_trust,
     _write_first_run_auth_config,
     load_project_config,
     team_launcher,
@@ -334,6 +335,9 @@ def test_the_setup_step_says_it_will_ask_for_a_sign_in() -> None:
         owner_home = tmp_path / "home" / "otto-agent"
         owner_home.mkdir(parents=True)
         runner = FirstRunAuthRunner()
+        # Its Codex roles' folder trust is already answered: this case is about
+        # Claude's flow, and Codex has its own trust step (SYRD-279).
+        _record_codex_trust(owner_home, config)
         runner.login_seen.update({"claude", "codex"})
         messages: list[str] = []
         team_launcher.run_first_run_auth_phase(
@@ -438,6 +442,9 @@ def test_the_measured_vendor_flow_is_reported_rather_than_promised_away() -> Non
             encoding="utf-8",
         )
         runner = MeasuredClaudeRunner(owner_home, completes_setup=True)
+        # Its Codex roles' folder trust is already answered: this case is about
+        # Claude's flow, and Codex has its own trust step (SYRD-279).
+        _record_codex_trust(owner_home, config)
         messages: list[str] = []
         first = team_launcher.run_first_run_auth_phase(
             config, owner_user="otto-agent", owner_home=owner_home,
@@ -829,6 +836,9 @@ def test_a_tenant_with_a_desktop_policy_still_gets_bounded_steps() -> None:
         tmp_path = Path(tmp)
         config, _config_path, owner_home = launchable_tenant(tmp_path)
         check(config.desktop_access is not None, "the fixture declares desktop access")
+        # Its Codex roles' folder trust is already answered: this case is about
+        # Claude's flow, and Codex has its own trust step (SYRD-279).
+        _record_codex_trust(owner_home, config)
         (owner_home / ".claude").mkdir(parents=True, exist_ok=True)
         (owner_home / ".claude" / ".credentials.json").write_text("{}\n", encoding="utf-8")
         started: list[list[str]] = []

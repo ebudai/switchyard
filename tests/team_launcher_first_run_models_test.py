@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from team_launcher_test_helpers import *
+from team_launcher_test_helpers import _record_codex_trust
 
 def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-first-run-models.") as tmp:
@@ -230,6 +231,8 @@ def test_first_run_auth_phase_does_not_validate_models_unless_requested() -> Non
         )
         runner.login_seen.add("codex")
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -267,6 +270,8 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
         runner.login_seen.add("hermes")
         messages: list[str] = []
 
+        # Codex asks folder trust too, and a tenant past first run has answered it (SYRD-279).
+        _record_codex_trust(owner_home, config)
         report = team_launcher.run_first_run_auth_phase(
             config,
             owner_user="otto-agent",
@@ -366,12 +371,15 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         ("agy", "inspector", str(tmp_path / "worktrees" / "inspector")),
         ("claude", "designer", str(tmp_path / "worktrees" / "designer")),
         ("claude", "director", str(tmp_path / "worktrees" / "director")),
+        ("codex", "main", str(tmp_path / "worktrees" / "main")),
+        ("codex", "ops", str(tmp_path / "worktrees" / "ops")),
     ]
     # The manifest probes, then Claude's own first run once for both of its
     # roles, then -- for each provider still unauthenticated -- one login,
     # each preceded by the re-read that would have skipped it, then one trust
-    # action per distinct worktree: three, for two Claude roles and one agy
-    # role, and none for Codex, which takes no directory trust.
+    # action per distinct worktree, in role order: five, for two Claude roles,
+    # two Codex roles and one agy role. Codex asks "Trust this folder?" too --
+    # measured on 0.156.1; this said it took no directory trust (SYRD-279).
     #
     # `claude auth login` survives here only because this fake records nothing:
     # its welcome flow does not mark the account authenticated, so the re-read
@@ -399,14 +407,18 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         ["sudo", "-u", "otto-agent", "agy", "models"],
         ["sudo", "-u", "otto-agent", "claude"],
         ["sudo", "-u", "otto-agent", "claude"],
+        ["sudo", "-u", "otto-agent", "codex"],
         ["sudo", "-u", "otto-agent", "agy"],
+        ["sudo", "-u", "otto-agent", "codex"],
     ]
     # Each trust action runs in the worktree it is about; everything before it
     # runs in the owner's home.
-    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs][-3:] == [
+    assert [kwargs.get("cwd") for kwargs in runner.call_kwargs][-5:] == [
         str(tmp_path / "worktrees" / "designer"),
         str(tmp_path / "worktrees" / "director"),
+        str(tmp_path / "worktrees" / "ops"),
         str(tmp_path / "worktrees" / "inspector"),
+        str(tmp_path / "worktrees" / "main"),
     ]
     # Nothing was written on the account's behalf: Switchyard asks the CLI to
     # run its own setup and looks again, and never manufactures the answer.
@@ -414,7 +426,7 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
     assert not (owner_home / ".gemini" / "antigravity-cli" / "settings.json").exists()
     assert messages == [
         "switchyard: first-run setup manifest for owner user otto-agent: "
-        "3 login step(s), 1 provider setup step(s), 3 folder trust step(s), "
+        "3 login step(s), 1 provider setup step(s), 5 folder trust step(s), "
         "0 codex hook approval(s), 0 missing CLI(s)",
         "switchyard: login claude: roles designer, director; "
         "interactive account setup running claude auth login as otto-agent",
@@ -432,8 +444,14 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         "switchyard: folder trust claude: role director at "
         f"{tmp_path / 'worktrees' / 'director'}; recurs per project/workdir even when the owner "
         "user is reused; interactive repository trust today, not account login",
+        "switchyard: folder trust codex: role ops at "
+        f"{tmp_path / 'worktrees' / 'ops'}; recurs per project/workdir even when the owner "
+        "user is reused; interactive repository trust today, not account login",
         "switchyard: folder trust agy: role inspector at "
         f"{tmp_path / 'worktrees' / 'inspector'}; recurs per project/workdir even when the owner "
+        "user is reused; interactive repository trust today, not account login",
+        "switchyard: folder trust codex: role main at "
+        f"{tmp_path / 'worktrees' / 'main'}; recurs per project/workdir even when the owner "
         "user is reused; interactive repository trust today, not account login",
         # Each foreground step says what it is about to do with the terminal,
         # and how to hand it back, before it takes it (SYRD-191).
@@ -457,8 +475,14 @@ def test_first_run_auth_phase_sequences_setup_then_logins_then_trust_for_every_r
         f"switchyard: claude will now run in {tmp_path / 'worktrees' / 'director'} as this "
         "project's owner so it can be trusted once for director. Answer the trust "
         "prompt; the terminal comes back on its own once the answer is recorded.",
+        f"switchyard: codex will now run in {tmp_path / 'worktrees' / 'ops'} as this "
+        "project's owner so it can be trusted once for ops. Answer the trust "
+        "prompt; the terminal comes back on its own once the answer is recorded.",
         f"switchyard: agy will now run in {tmp_path / 'worktrees' / 'inspector'} as this "
         "project's owner so it can be trusted once for inspector. Answer the trust "
+        "prompt; the terminal comes back on its own once the answer is recorded.",
+        f"switchyard: codex will now run in {tmp_path / 'worktrees' / 'main'} as this "
+        "project's owner so it can be trusted once for main. Answer the trust "
         "prompt; the terminal comes back on its own once the answer is recorded.",
     ]
 
@@ -548,17 +572,20 @@ def test_first_run_trust_skips_detached_non_folder_trust_clis() -> None:
         tmp_path = Path(tmp)
         owner_home = tmp_path / "home" / "otto-agent"
         owner_home.mkdir(parents=True)
+        # Hermes has no folder-trust prompt. Codex used to stand here as the
+        # second such CLI; it has one (measured on 0.156.1), so it now gets a
+        # trust step like Claude and agy, covered in codex_folder_trust_test
+        # (SYRD-279).
         config_path = _write_first_run_auth_config(
             tmp_path,
             roles=[
-                ("ops", "codex"),
                 ("bulk", "hermes"),
             ],
         )
-        _mark_first_run_roles_detached(config_path, "ops", "bulk")
+        _mark_first_run_roles_detached(config_path, "bulk")
         config = load_project_config("otto", config_path)
         runner = FirstRunAuthRunner()
-        runner.login_seen.update({"codex", "hermes"})
+        runner.login_seen.update({"hermes"})
         messages: list[str] = []
         trust_probes: list[str] = []
 
@@ -584,7 +611,6 @@ def test_first_run_trust_skips_detached_non_folder_trust_clis() -> None:
     assert messages == []
     assert trust_probes == []
     assert runner.calls == [
-        ["sudo", "-u", "otto-agent", "codex", "login", "status"],
         ["sudo", "-u", "otto-agent", "hermes", "config", "check"],
     ]
 

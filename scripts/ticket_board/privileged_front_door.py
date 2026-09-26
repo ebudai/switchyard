@@ -161,10 +161,13 @@ def plan_action(
         if installed and f'id="{action.action_id}"' not in installed:
             problems.append(
                 f"this host's installed privileged boundary predates {action.name}: its policy "
-                "declares no such action. The boundary is installed from the host's shared "
-                "release by the privileged phase of a tenant upgrade, so once an operator has "
-                "installed a release that has it (`install-shared-release`), run "
-                f"`switchyard privileged-action {project} upgrade-tenant` and then this again"
+                "declares no such action. The boundary follows the shared release this host "
+                "runs, never a tenant's pin: once an operator has installed a release that has "
+                f"it (`install-shared-release`), `switchyard privileged-action {project} "
+                "upgrade-tenant` installs the boundary from that release -- and, if the tenant "
+                "is still pinned to an older one, changes nothing else and names the pinned "
+                "preview and upgrade -- then run this again. Never reinstall an older release "
+                "to reach it (SYRD-284)"
             )
 
     # What root would actually run. This is where a commit that no trusted

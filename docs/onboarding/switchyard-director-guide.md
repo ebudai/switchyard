@@ -251,9 +251,16 @@ cannot make, such as the tenant-control sudoers rule, happen there -- then
 `upgrade-tenant-release` applies it pinned to the same commit, and
 `deploy-release` deploys an approved release. The root-owned helper runs these
 only for your registered pane. What remains an operator's is host-wide:
-installing or selecting the shared release everyone runs, and installing the
-privileged boundary itself. A host whose installed boundary predates an action
-refuses it and names that repair.
+installing or selecting the shared release everyone runs. The privileged
+boundary follows that shared release, never a tenant's pin: installing a shared
+release installs its boundary. On a host whose boundary predates an action (a
+release installed before that rule), the action is refused and names the repair:
+run `switchyard privileged-action <project> upgrade-tenant`. When your tenant is
+still pinned to an older release than the host runs, that installs the boundary
+from the host's release, changes nothing of the tenant's, and stops, naming
+`preview-upgrade commit=<host release>` and then `upgrade-tenant-release` with
+the same commit. That is the whole sequence; never reinstall the older release
+the tenant was pinned to.
 
 The change itself is applied atomically against the board's current workflow
 revision: if the configuration moved since you read it, your write is rejected

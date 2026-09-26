@@ -704,9 +704,17 @@ def main() -> int:
     report["argumentless_step"] = stale_step
     report["argumentless_exit"] = stale.returncode
     report["argumentless_text"] = f"{stale.stdout}\n{stale.stderr}"
+    # What it recovers is the pin: the deploy ref it keeps is the old release.
+    # It does name the release this host now runs -- as the pinned preview and
+    # upgrade to move to it -- rather than advising a reinstall of the old one,
+    # which is the loop SYRD-284 removed.
     report["argumentless_recovers_old_release"] = (
-        old_commit in f"{stale.stdout}{stale.stderr}"
-        and new_commit not in f"{stale.stdout}{stale.stderr}"
+        f"deploy ref {old_commit}" in report["argumentless_text"]
+        and f"deploy ref {new_commit}" not in report["argumentless_text"]
+    )
+    report["argumentless_names_the_pinned_way_forward"] = (
+        f"preview-upgrade commit={new_commit}" in report["argumentless_text"]
+        and "install that release first" not in report["argumentless_text"]
     )
 
     # A tenant that still carries the publication grant, which is what every

@@ -463,6 +463,7 @@ def test_a_stale_installed_launcher_is_bootstrapped_with_root_owned_code_only() 
     # release durably, and it is executed in the case below.
     assert report["pin_started_stale"] is True, report
     assert report["argumentless_recovers_old_release"] is True, report["argumentless_text"]
+    assert report["argumentless_names_the_pinned_way_forward"] is True, report["argumentless_text"]
     assert report["sequence_repins"] is True, report["bootstrap_sequence"]
 
     # ROUND 4: the operator's two commands run in a repository every role can

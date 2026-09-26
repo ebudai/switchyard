@@ -257,10 +257,14 @@ Then close with the workflow's completion action, which requires the commit hash
   applies it, and `deploy-release` deploys an approved release. The helper runs
   them for your registered pane and no other process, and journals each run.
 - Host-wide changes stay with the root operator: building or installing the
-  shared release (`install-shared-release`, `select-shared-release`) and
-  installing the privileged helper and policy themselves. If an action is
-  refused because this host's boundary predates it, route the repair it names;
-  never work around the boundary.
+  shared release (`install-shared-release`, `select-shared-release`), which
+  also installs that release's privileged helper and policy. If an action is
+  refused because this host's boundary predates it, run
+  `switchyard privileged-action <project> upgrade-tenant` once: with the tenant
+  pinned to an older release than the host runs, it installs the boundary from
+  the host's release, changes nothing of the tenant's, and names the pinned
+  `preview-upgrade` then `upgrade-tenant-release` for the host's commit. Follow
+  those; never reinstall the older release, and never work around the boundary.
 - `switchyard board-skill verify` / `install` repairs the skills a pane loads.
 - Rollback is a decision with a record: say on the ticket what was deployed,
   what regressed, what you reverted to, and how you confirmed the revert took.

@@ -1544,6 +1544,19 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 "blocked_by": payload.get("blocked_by", payload.get("ids", [])),
                 "blocked_reason": str(payload.get("blocked_reason", payload.get("reason", ""))),
             }
+            # A reason with nothing to wait on records no wait: the ticket is
+            # not blocked, its owner is reminded as before, and the reason is
+            # only a note. MEFP-14's Director set exactly that for a
+            # cross-board dependency and was told it succeeded (SYRD-285).
+            # Clearing -- no blockers, no reason -- is still allowed; so is
+            # editing the note on the ticket itself.
+            listed = patch["blocked_by"] if isinstance(patch["blocked_by"], list) else [patch["blocked_by"]]
+            if not any(str(item or "").strip() for item in listed) and patch["blocked_reason"].strip():
+                raise ValueError(
+                    "set_blockers needs something to wait on: a blocked_reason alone is a note, not a "
+                    "wait. Name it in blocked_by -- a ticket here (PREFIX-N), work on another board "
+                    "(project:PREFIX-N), or a person (operator:<name>)"
+                )
         elif operation == "add_comment":
             patch = {"comment": {"who": caller, "text": str(payload.get("text", "")), "urgent": bool(payload.get("urgent", False))}}
         elif operation == "edit_fields":

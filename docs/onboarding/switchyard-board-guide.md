@@ -159,7 +159,9 @@ system working, not a bug to route around.
   reminders and handoffs are silent, and submission is refused. End it with
   `release-external-blocker <id> --ref syrd:SYRD-269 --reason "..."`, adding `--commit <sha>`
   when the wait was for a commit this board could not see: the release is then refused
-  until this board's own repository resolves it. The release moves nothing.
+  until this board's own repository resolves it. The release moves nothing. A
+  `blocked_reason` with an empty `blocked_by` is a note, not a wait: it suppresses no
+  reminder, and `set-blockers` refuses it (SYRD-285).
 - `await-role` / `clear-awaiting-role` — mark or clear an active ticket as waiting on a
   role. Use it when the next action is genuinely someone else's and there is no ticket to
   point `blocked_by` at (that field takes this board's ticket IDs, or another board's as

@@ -163,7 +163,9 @@ gate to get a ticket moving.
   reason is where their result is recorded, and the owner is told once. Add
   `--commit <sha>` when the wait was for a commit this board could not see: the
   release is refused until this board resolves it. The release moves nothing;
-  the owner still submits through every gate.
+  the owner still submits through every gate. A `blocked_reason` with nothing
+  in `blocked_by` is only a note: it blocks nothing and silences nothing, so
+  `set-blockers` refuses it - name what the ticket waits on.
 - **Deferred** - nobody is working it. Backlog, unassigned.
 - **Held** - a deliberate hold by you. `set-manually-controlled` mutes nudges
   *and* bypasses transition gates entirely, so it is an escape hatch, not a

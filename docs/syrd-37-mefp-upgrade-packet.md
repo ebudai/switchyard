@@ -202,13 +202,19 @@ together.
 
 ```
 switchyard worker-pool mefp list
+<release>/scripts/ticket-board-workflow prepare-role --config <mefp launcher config> --role impl-1
 switchyard worker-pool mefp start impl-1
 switchyard worker-pool mefp attach impl-1
 ```
 
 `list` reports every worker, what it still needs, and what it is holding.
-`start` refuses a worker that is not ready and names the subsystem that is
-missing. `attach` is how somebody watches one; it never escalates.
+A worker declared by `worker-pool apply` has no worktree yet, and `start` does
+not create one: prepare it once with `prepare-role`, which sets up its
+worktree, hooks and folder trust and refuses a runtime that is not signed in.
+Preflight and `start` both print that command, filled in, for a worker that
+still needs it. `start` refuses a worker that is not ready, names the subsystem
+that is missing, and exits non-zero (SYRD-278). `attach` is how somebody watches
+one; it never escalates.
 
 **Undo:** `switchyard worker-pool mefp stop impl-1` ends the session and leaves
 the identity and the work where they are.

@@ -704,6 +704,7 @@ def worker_pool_preflight(
     *,
     owner_home: Path | None = None,
     board_workflow: Mapping[str, Any] | None = None,
+    config_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> list[WorkerPoolFinding]:
     """What bringing this project's declared pool up would change, and what stops it.
@@ -851,6 +852,31 @@ def worker_pool_preflight(
                 f"workers run without a permanent pane; the {len(visible)} visible role(s) "
                 "already configured are unchanged, and a worker is attached when somebody "
                 "asks to watch it",
+            )
+        )
+
+    # A declared worker is an identity and a route, not a place to work: `apply`
+    # writes the document and nothing on disk, and `start` moves a tmux session
+    # and nothing else. A worker with no worktree is refused at start, so it is
+    # a blocker here, before anybody tries -- with the supported preparation to
+    # run, rather than a report of zero blockers followed by a refusal (SYRD-278).
+    unprepared = [
+        member for member in already
+        if not (worker_pool_member_role(config, member).workdir
+                and Path(worker_pool_member_role(config, member).workdir).is_dir())
+    ]
+    if unprepared:
+        from scripts.worker_pool import prepare_role_command
+
+        config_arg = config_path if config_path is not None else f"<{config.project} launcher config>"
+        findings.append(
+            WorkerPoolFinding(
+                True,
+                "worktrees",
+                f"{', '.join(unprepared)} {'is' if len(unprepared) == 1 else 'are'} declared but "
+                f"{'has' if len(unprepared) == 1 else 'have'} no worktree yet, so `start` would "
+                "refuse; `start` does not prepare a worker. Prepare each one first: "
+                + "; ".join(prepare_role_command(config_arg, member) for member in unprepared),
             )
         )
 
@@ -35445,7 +35471,9 @@ def switchyard_worker_pool_command(
     document = _worker_pool_document(config, board_workflow)
 
     if action == "preflight":
-        findings = worker_pool_preflight(config, board_workflow=board_workflow, runner=runner)
+        findings = worker_pool_preflight(
+            config, board_workflow=board_workflow, config_path=entry.config_path, runner=runner
+        )
         for line in format_worker_pool_preflight(config, findings):
             print_func(line)
         if pool is not None and document:
@@ -35475,7 +35503,8 @@ def switchyard_worker_pool_command(
             blockers=[
                 (finding.subject, finding.detail)
                 for finding in worker_pool_preflight(
-                    config, board_workflow=board_workflow, runner=runner
+                    config, board_workflow=board_workflow, config_path=entry.config_path,
+                    runner=runner,
                 )
                 if finding.blocking
             ],
@@ -35586,16 +35615,20 @@ def switchyard_worker_pool_command(
             config, pool, document=document, board_snapshot_reader=board_snapshot_reader, runner=runner
         )
         if action == "stop":
-            print_func(pool_module.stop_worker(config, member, runner=runner).describe())
-            return 0
-        started = pool_module.start_worker if action == "start" else pool_module.restart_worker
-        results = started(
-            config, pool, member,
-            readiness=readiness, config_path=entry.config_path, force=force, runner=runner,
-        )
-        for result in results if isinstance(results, list) else [results]:
+            results = [pool_module.stop_worker(config, member, runner=runner)]
+        else:
+            started = pool_module.start_worker if action == "start" else pool_module.restart_worker
+            outcome = started(
+                config, pool, member,
+                readiness=readiness, config_path=entry.config_path, force=force, runner=runner,
+            )
+            results = outcome if isinstance(outcome, list) else [outcome]
+        for result in results:
             print_func(result.describe())
-        return 0
+        # A worker that was asked for and did not come up is a failure, and so
+        # is a restart whose stop worked and whose start did not: "not started"
+        # exiting 0 read as done to every caller that checks (SYRD-278).
+        return 0 if all(result.succeeded for result in results) else 1
 
     if action == "attach":
         from scripts import presentation_controller

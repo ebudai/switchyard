@@ -296,6 +296,26 @@ from scripts.launcher_checkout import (
     probe_launcher_checkout,
     warn_if_artifact_source_checkout_is_stale,
 )
+# Owner-correct git execution and project git helpers (SYRD-293), moved out
+# whole. `run_owner_correct_git` stays reachable -- and patchable -- here: the
+# other git modules and owner_git's own helpers call it through the launcher.
+# Named here too because `new`, launch, add-role, deploy and config loading call
+# them, and because `team_launcher.<name>` is how callers and tests reach them.
+from scripts.owner_git import (
+    GitOwnerRule,
+    _commit_project_git_changes,
+    _ensure_project_git_repository,
+    _git_owner_failure,
+    _git_owner_for_target,
+    _git_status_porcelain,
+    _git_target_path_from_args,
+    _owner_project_git_runner,
+    _path_is_under,
+    _path_owner_user,
+    _require_existing_project_git_repository,
+    run_owner_correct_git,
+    _run_owner_git,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -3976,82 +3996,8 @@ def _proc_failure_reason(proc: subprocess.CompletedProcess[Any], fallback: str) 
     return fallback
 
 
-def _path_owner_user(path: Path) -> tuple[str, str]:
-    try:
-        info = path.stat()
-    except OSError as exc:
-        return "", str(exc)
-    try:
-        return pwd.getpwuid(info.st_uid).pw_name, ""
-    except KeyError:
-        return "", f"uid {info.st_uid} has no passwd entry"
-
-
-@dataclass(frozen=True)
-class GitOwnerRule:
-    root: Path
-    owner_user: str
-
-
 def _normalized_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
-
-
-def _path_is_under(path: Path, root: Path) -> bool:
-    normalized = _normalized_path(path)
-    normalized_root = _normalized_path(root)
-    return normalized == normalized_root or normalized.is_relative_to(normalized_root)
-
-
-def _git_target_path_from_args(args: Sequence[str]) -> Path | None:
-    if not args or args[0] != "git":
-        return None
-    for index, arg in enumerate(args):
-        if arg == "-C" and index + 1 < len(args):
-            return Path(args[index + 1])
-        if arg == "--git-dir" and index + 1 < len(args):
-            return Path(args[index + 1])
-        if arg.startswith("--git-dir="):
-            return Path(arg.split("=", 1)[1])
-    if len(args) >= 5 and args[1:3] == ["clone", "--bare"]:
-        return Path(args[4])
-    return None
-
-
-def _git_owner_for_target(target: Path, owner_rules: Sequence[GitOwnerRule]) -> tuple[str, str]:
-    # A configured target must not be redirected after validation.  In
-    # particular, do not follow a role-owned worktree symlink into another
-    # tenant and then choose that destination's owner (SYRD-66).
-    if target.is_symlink():
-        return "", f"refusing symlink git target {target}"
-    for rule in owner_rules:
-        if rule.owner_user and _path_is_under(target, rule.root):
-            return rule.owner_user, ""
-    if target.exists():
-        return _path_owner_user(target)
-    return "", f"{target} does not exist and no owner rule matched"
-
-
-def _git_owner_failure(args: Sequence[str], detail: str) -> subprocess.CompletedProcess[Any]:
-    return subprocess.CompletedProcess(list(args), 125, stderr=f"owner-correct git skipped: {detail}")
-
-
-def run_owner_correct_git(
-    args: list[str],
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-    owner_rules: Sequence[GitOwnerRule] = (),
-    **kwargs: Any,
-) -> subprocess.CompletedProcess[Any]:
-    target = _git_target_path_from_args(args)
-    if target is None:
-        return _git_owner_failure(args, "git command does not declare a target path")
-    owner_user, error = _git_owner_for_target(target, owner_rules)
-    if not owner_user:
-        return _git_owner_failure(args, error or f"cannot determine owner for {target}")
-    if owner_user == current_user_name():
-        return runner(args, **kwargs)
-    return runner(["sudo", "-u", owner_user, *args], **kwargs)
 
 
 def _parse_ls_remote_head(output: str) -> str | None:
@@ -10046,24 +9992,6 @@ def _tcp_port_in_use(port: int) -> bool:
         return False
 
 
-def _git_status_porcelain(repo: Path, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
-    try:
-        result = run_owner_correct_git(
-            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
-            runner=runner,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except OSError as exc:
-        raise SystemExit(f"team-launcher: cannot inspect deploy checkout {repo}: {exc}") from exc
-    if result.returncode != 0:
-        stderr = str(getattr(result, "stderr", "") or "").strip()
-        detail = f": {stderr}" if stderr else ""
-        raise SystemExit(f"team-launcher: cannot inspect deploy checkout {repo}{detail}")
-    return str(getattr(result, "stdout", "") or "").rstrip("\n")
-
-
 def _looks_like_switchyard_release_tree(path: Path) -> bool:
     return (
         (path / "switchyard").is_file()
@@ -14238,187 +14166,6 @@ def _chown_project_file(
 
 def _owner_git_args(owner_user: str, project_dir: Path, *git_args: str) -> list[str]:
     return ["sudo", "-u", owner_user, "git", "-C", str(project_dir), *git_args]
-
-
-def _run_owner_git(
-    owner_user: str,
-    project_dir: Path,
-    *git_args: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> subprocess.CompletedProcess[Any]:
-    return run_owner_correct_git(
-        ["git", "-C", str(project_dir), *git_args],
-        runner=runner,
-        owner_rules=[GitOwnerRule(project_dir, owner_user)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-
-def _ensure_project_git_repository(
-    *,
-    owner_user: str,
-    project_dir: Path,
-    branch: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> bool:
-    if not (project_dir / ".git").exists():
-        init = _run_owner_git(owner_user, project_dir, "init", "-b", branch, runner=runner)
-        if init.returncode != 0:
-            raise SystemExit(
-                f"switchyard: failed to initialize git repository in {project_dir}: "
-                f"{_proc_failure_reason(init, f'exit {init.returncode}')}"
-            )
-        remote = _run_owner_git(owner_user, project_dir, "remote", "get-url", "origin", runner=runner)
-        if remote.returncode != 0:
-            add_remote = _run_owner_git(owner_user, project_dir, "remote", "add", "origin", str(project_dir), runner=runner)
-            if add_remote.returncode != 0:
-                raise SystemExit(
-                    f"switchyard: failed to add local origin remote for {project_dir}: "
-                    f"{_proc_failure_reason(add_remote, f'exit {add_remote.returncode}')}"
-                )
-        created_repository = True
-    else:
-        check = _run_owner_git(
-            owner_user,
-            project_dir,
-            "rev-parse",
-            "--is-inside-work-tree",
-            runner=runner,
-        )
-        if check.returncode != 0:
-            raise SystemExit(
-                f"switchyard: project path {project_dir} has unusable git metadata: "
-                f"{_proc_failure_reason(check, f'exit {check.returncode}')}"
-            )
-        created_repository = False
-
-    head = _run_owner_git(owner_user, project_dir, "rev-parse", "--verify", "HEAD", runner=runner)
-    if head.returncode == 0:
-        return created_repository
-    if not created_repository:
-        raise SystemExit(
-            f"switchyard: project path {project_dir} is already a git repository but has no initial commit; "
-            "create one yourself, or remove its .git directory and let switchyard initialize it"
-        )
-
-    add = _run_owner_git(owner_user, project_dir, "add", ".", runner=runner)
-    if add.returncode != 0:
-        raise SystemExit(
-            f"switchyard: failed to stage initial project files in {project_dir}: "
-            f"{_proc_failure_reason(add, f'exit {add.returncode}')}"
-        )
-    commit = _run_owner_git(
-        owner_user,
-        project_dir,
-        "-c",
-        "user.name=Switchyard",
-        "-c",
-        "user.email=switchyard@localhost",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "Initial Switchyard project",
-        runner=runner,
-    )
-    if commit.returncode != 0:
-        raise SystemExit(
-            f"switchyard: failed to create initial git commit in {project_dir}: "
-            f"{_proc_failure_reason(commit, f'exit {commit.returncode}')}"
-        )
-    return True
-
-
-def _require_existing_project_git_repository(
-    *,
-    owner_user: str,
-    project_dir: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    check = _run_owner_git(
-        owner_user,
-        project_dir,
-        "rev-parse",
-        "--is-inside-work-tree",
-        runner=runner,
-    )
-    if check.returncode != 0:
-        raise SystemExit(
-            f"switchyard: --no-git-init was set, but project path {project_dir} is not a git repository; "
-            "initialize it yourself before running switchyard new"
-        )
-    head = _run_owner_git(owner_user, project_dir, "rev-parse", "--verify", "HEAD", runner=runner)
-    if head.returncode != 0:
-        raise SystemExit(
-            f"switchyard: --no-git-init was set, but project path {project_dir} has no initial commit; "
-            "create one yourself before running switchyard new"
-        )
-
-
-def _commit_project_git_changes(
-    *,
-    owner_user: str,
-    project_dir: Path,
-    message: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    status = _run_owner_git(owner_user, project_dir, "status", "--porcelain", runner=runner)
-    if status.returncode != 0:
-        raise SystemExit(
-            f"switchyard: failed to inspect git status in {project_dir}: "
-            f"{_proc_failure_reason(status, f'exit {status.returncode}')}"
-        )
-    if not str(getattr(status, "stdout", "") or "").strip():
-        return
-    add = _run_owner_git(owner_user, project_dir, "add", ".", runner=runner)
-    if add.returncode != 0:
-        raise SystemExit(
-            f"switchyard: failed to stage project files in {project_dir}: "
-            f"{_proc_failure_reason(add, f'exit {add.returncode}')}"
-        )
-    commit = _run_owner_git(
-        owner_user,
-        project_dir,
-        "-c",
-        "user.name=Switchyard",
-        "-c",
-        "user.email=switchyard@localhost",
-        "commit",
-        "-m",
-        message,
-        runner=runner,
-    )
-    if commit.returncode != 0:
-        raise SystemExit(
-            f"switchyard: failed to commit project files in {project_dir}: "
-            f"{_proc_failure_reason(commit, f'exit {commit.returncode}')}"
-        )
-
-
-def _owner_project_git_runner(
-    *,
-    owner_user: str,
-    project_dir: Path,
-    owned_roots: Sequence[Path] = (),
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    normalized_roots = [_normalized_path(project_dir), *(_normalized_path(path) for path in owned_roots)]
-    owner_rules = [GitOwnerRule(root, owner_user) for root in normalized_roots]
-
-    def is_owned_path(path: Path) -> bool:
-        return any(_path_is_under(path, root) for root in normalized_roots)
-
-    def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        if len(args) >= 3 and args[:2] == ["mkdir", "-p"] and is_owned_path(Path(args[2])):
-            return runner(["sudo", "-u", owner_user, *args], **kwargs)
-        if len(args) >= 3 and args[:2] == ["test", "-x"] and is_owned_path(Path(args[2])):
-            return runner(["sudo", "-u", owner_user, *args], **kwargs)
-        if args[:1] == ["git"]:
-            return run_owner_correct_git(args, runner=runner, owner_rules=owner_rules, **kwargs)
-        return runner(args, **kwargs)
-
-    return wrapped
 
 
 def _owner_process_runner(

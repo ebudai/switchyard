@@ -26,6 +26,8 @@ GIT_LINTED_MODULES = (
     TEAM_LAUNCHER,
     ROOT / "scripts" / "project_worktrees.py",
     ROOT / "scripts" / "launcher_checkout.py",
+    # The chokepoint itself and its project helpers' call sites (SYRD-293).
+    ROOT / "scripts" / "owner_git.py",
 )
 GIT_CHOKEPOINT = "run_owner_correct_git"
 

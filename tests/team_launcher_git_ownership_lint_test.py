@@ -17,6 +17,11 @@ if str(ROOT / "tests") not in sys.path:
 from standalone_test_runner import run_module_tests
 
 TEAM_LAUNCHER = ROOT / "scripts" / "team_launcher.py"
+#: Every production module that defines or runs `git_*_args` builders. The
+#: worktree and control-repository builders moved out of the launcher into
+#: `project_worktrees.py` (SYRD-291), with their call sites, and are held to the
+#: same chokepoint there.
+GIT_LINTED_MODULES = (TEAM_LAUNCHER, ROOT / "scripts" / "project_worktrees.py")
 GIT_CHOKEPOINT = "run_owner_correct_git"
 
 
@@ -71,9 +76,8 @@ def git_owner_chokepoint_violations(source: str, path: Path) -> list[GitOwnershi
 
 
 def lint_team_launcher_git_calls(path: Path = TEAM_LAUNCHER) -> list[GitOwnershipLintViolation]:
-    # Deliberately limited to team_launcher.py: it contains every production
-    # git_*_args builder and call site today; tests use the builders as expected
-    # argv fixtures.
+    # Production modules only (GIT_LINTED_MODULES): tests use the builders as
+    # expected argv fixtures.
     return git_owner_chokepoint_violations(path.read_text(encoding="utf-8"), path)
 
 
@@ -129,8 +133,22 @@ def test_literal_git_command_is_outside_builder_lint_scope() -> None:
 
 
 def test_team_launcher_git_calls_use_owner_chokepoint() -> None:
-    violations = lint_team_launcher_git_calls()
+    violations = [violation for path in GIT_LINTED_MODULES for violation in lint_team_launcher_git_calls(path)]
     assert violations == [], _format_violations(violations)
+
+
+def test_every_module_that_defines_a_git_builder_is_linted() -> None:
+    """A builder moved to a new module must not leave the lint behind (SYRD-291)."""
+    defining = sorted(
+        path for path in (ROOT / "scripts").rglob("*.py")
+        if any(
+            isinstance(node, ast.FunctionDef) and node.name.startswith("git_") and node.name.endswith("_args")
+            for node in ast.parse(path.read_text(encoding="utf-8")).body
+        )
+    )
+    assert defining, "no git_*_args builder found at all; the scan itself is broken"
+    unlinted = [path for path in defining if path not in GIT_LINTED_MODULES]
+    assert unlinted == [], f"git_*_args builders outside the lint's scope: {unlinted}"
 
 
 def main() -> int:

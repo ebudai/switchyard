@@ -152,6 +152,7 @@ switchyard worker-pool <project> plan                # the ordered upgrade, with
 switchyard worker-pool <project> apply [--apply]     # declare the pool in the workflow document
 switchyard worker-pool <project> list                # every worker, what it needs, what it holds
 switchyard worker-pool <project> admission           # the review lanes, and whether they are ordered
+ticket-board-workflow prepare-role --config <cfg> --role <worker>  # its worktree, hooks and trust
 switchyard worker-pool <project> start   <worker>    # bring one up
 switchyard worker-pool <project> stop    <worker>    # end its session, keep its identity and its work
 switchyard worker-pool <project> restart <worker>    # recover a stuck runtime
@@ -183,6 +184,24 @@ installing them later does not get that turn back (SYRD-35, SYRD-36).
 
 `--force` starts anyway, and the report says it was forced and what it was
 forced past.
+
+`start` does not prepare a worker. `apply` gives a worker its identity, its
+route and its board registration, and puts nothing on disk; the worktree, the
+pane hooks and folder trust come from the per-role preparation, which refuses a
+worker whose runtime is not signed in. So a worker declared by `apply` is
+prepared once, explicitly, before its first start:
+
+```
+<release>/scripts/ticket-board-workflow prepare-role --config <launcher config> --role <worker>
+```
+
+Preflight names every declared worker that has no worktree yet, with that
+command filled in for it, and `start` refuses one with the same command. A
+worker added through `add-role` on a built-in-workflow tenant is prepared by
+`add-role` itself. `start`, `stop` and `restart` exit non-zero whenever the
+worker did not end up where the verb asked -- refused, failed, or a restart whose
+start did not follow its stop -- and zero for "already running" and "already
+stopped", which are what was asked for (SYRD-278).
 
 ### Retirement and replacement
 

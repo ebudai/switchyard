@@ -601,7 +601,7 @@ class WorkerReadiness:
         if not self.account:
             found.append("the Unix account its pane runs as does not exist")
         if not self.worktree:
-            found.append("its worktree is missing")
+            found.append(WORKTREE_MISSING)
         return tuple(found)
 
     @property
@@ -724,6 +724,8 @@ BLOCKER_CLEARED_BY = {
     # only if the operator put it there, which is why the plan names it on that
     # step rather than promising it.
     "queue": "workflow apply",
+    # Declared workers with nothing on disk yet: exactly what preparation does.
+    "worktrees": "worker preparation",
 }
 
 
@@ -942,6 +944,39 @@ class WorkerAction:
     def describe(self) -> str:
         return f"switchyard: {self.role} {self.action}: {self.detail}"
 
+    @property
+    def succeeded(self) -> bool:
+        """Whether the worker is now in the state the verb asked for.
+
+        "already running" answers `start` and "already stopped" answers `stop`:
+        the operator asked for a state and has it. Anything else -- refused,
+        failed -- did not happen, and a command that reports success over it is
+        the report disagreeing with the machine (SYRD-278).
+        """
+        return self.action in WORKER_ACTION_SUCCESSES
+
+
+#: The outcomes that leave a worker where the verb meant it to be.
+WORKER_ACTION_SUCCESSES = frozenset({"started", "already running", "stopped", "already stopped"})
+#: The blocker a missing worktree reports, and the one `prepare-role` clears.
+WORKTREE_MISSING = "its worktree is missing"
+
+
+def prepare_role_command(config_path: Path | str, member: str) -> str:
+    """The supported preparation of one worker, as a command that runs as printed.
+
+    Declaring a worker -- `worker-pool apply` -- gives it an identity, a route
+    and a board registration, and nothing on disk; `start` moves a tmux session
+    and nothing else. The worktree, pane hooks and folder trust come from the
+    per-role preparation, which refuses rather than preparing a worker whose
+    runtime is not signed in. Named by this release's own path, because the
+    bare name is on a role pane's PATH and not on an operator's (SYRD-278).
+    """
+    import shlex
+
+    program = Path(__file__).resolve().with_name("ticket-board-workflow")
+    return shlex.join([str(program), "prepare-role", "--config", str(config_path), "--role", member])
+
 
 def start_worker(
     config,
@@ -972,7 +1007,11 @@ def start_worker(
     if state is None:
         raise ValueError(f"{member} is not a live member of the {pool.name} pool")
     if state.blockers and not force:
-        return WorkerAction(member, "not started", "; ".join(state.blockers))
+        detail = "; ".join(state.blockers)
+        if WORKTREE_MISSING in state.blockers:
+            # Preparation is its own supported step; start does not do it.
+            detail += f". Prepare it first, then start it again: {prepare_role_command(config_path, member)}"
+        return WorkerAction(member, "not started", detail)
     if state.session:
         return WorkerAction(member, "already running", f"its session is live at {state.target}")
     role = launcher._role_by_name(config, member)

@@ -6,7 +6,8 @@ the first slice, SYRD-287 the second, SYRD-288 the third, SYRD-289
 the fourth, SYRD-290 the fifth, SYRD-291 the sixth, SYRD-292
 slice 6a, SYRD-293 slice 6b, SYRD-294 slice 6c,
 SYRD-295 slice 7a, SYRD-296 slice 7b, SYRD-297 slice 7c-1, SYRD-298
-slice 7c-2a, SYRD-299 slice 7c-2b and SYRD-300 slice 7c-3.
+slice 7c-2a, SYRD-299 slice 7c-2b, SYRD-300 slice 7c-3 and SYRD-301
+slice 8a.
 
 - Baseline: public main `d5ffdd00a2b162ac9bee545f52ba0840f70fc7ed`. The
   exclusive refactor window opened at this commit.
@@ -38,6 +39,8 @@ slice 7c-2a, SYRD-299 slice 7c-2b and SYRD-300 slice 7c-3.
   is SYRD-299's baseline.
 - SYRD-299 was integrated as `57cac704c13ca3372b5b8f35352bb08a1cdd8e84`, which
   is SYRD-300's baseline.
+- SYRD-300 was integrated as `f29f5a0eb158946c789ce227ba44f964a94deb4f`, which
+  is SYRD-301's baseline.
 - Soft limit: 1,250 lines, advisory. The pre-commit warning is unchanged.
 
 ## 1. Tracked source inventory
@@ -45,41 +48,42 @@ slice 7c-2a, SYRD-299 slice 7c-2b and SYRD-300 slice 7c-3.
 These are the tracked non-test files over the soft limit at the baseline,
 followed by the parent's list. Each "after" column is that child's candidate.
 
-| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | After SYRD-291 | After SYRD-292 | After SYRD-293 | After SYRD-294 | After SYRD-295 | After SYRD-296 | After SYRD-297 | After SYRD-298 | After SYRD-299 | After SYRD-300 | Notes |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | 34,365 | 33,826 | 33,573 | 33,377 | 32,030 | 31,654 | 31,495 | 31,209 | 30,284 | 29,664 | Plan in §3. |
-| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
-| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | New in SYRD-287. |
-| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | New in SYRD-287. |
-| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | New in SYRD-288. |
-| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
-| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | New in SYRD-289. |
-| `scripts/role_command.py` | — | — | — | — | — | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | New in SYRD-290. |
-| `scripts/model_validation.py` | — | — | — | — | — | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | New in SYRD-290. |
-| `scripts/project_worktrees.py` | — | — | — | — | — | — | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | New in SYRD-291. |
-| `scripts/launcher_checkout.py` | — | — | — | — | — | — | — | 632 | 632 | 632 | 632 | 632 | 632 | 632 | 632 | 632 | New in SYRD-292. |
-| `scripts/owner_git.py` | — | — | — | — | — | — | — | — | 323 | 323 | 323 | 323 | 323 | 323 | 323 | 323 | New in SYRD-293. |
-| `scripts/pane_hooks.py` | — | — | — | — | — | — | — | — | — | 262 | 262 | 262 | 262 | 262 | 262 | 262 | New in SYRD-294. |
-| `scripts/agent_cli_discovery.py` | — | — | — | — | — | — | — | — | — | — | 435 | 435 | 435 | 435 | 435 | 435 | New in SYRD-295. |
-| `scripts/agent_cli_promotion.py` | — | — | — | — | — | — | — | — | — | — | 1,099 | 1,099 | 1,099 | 1,099 | 1,099 | 1,099 | New in SYRD-295. |
-| `scripts/first_run_setup.py` | — | — | — | — | — | — | — | — | — | — | — | 443 | 443 | 443 | 443 | 443 | New in SYRD-296. |
-| `scripts/provider_auth_status.py` | — | — | — | — | — | — | — | — | — | — | — | — | 223 | 223 | 223 | 223 | New in SYRD-297. |
-| `scripts/provider_screen.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | 344 | 344 | 344 | New in SYRD-298: a leaf. |
-| `scripts/provider_session.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | — | 1,022 | 1,022 | New in SYRD-299: imports only `provider_screen` at its top. |
-| `scripts/first_run_auth.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | 703 | New in SYRD-300: imports `provider_session` and `runtime_catalog` at its top, never the launcher. |
-| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
-| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
-| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
-| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
-| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
-| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
-| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
-| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
-| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
-| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
-| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
-| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
-| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
+| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | After SYRD-291 | After SYRD-292 | After SYRD-293 | After SYRD-294 | After SYRD-295 | After SYRD-296 | After SYRD-297 | After SYRD-298 | After SYRD-299 | After SYRD-300 | After SYRD-301 | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | 34,365 | 33,826 | 33,573 | 33,377 | 32,030 | 31,654 | 31,495 | 31,209 | 30,284 | 29,664 | 28,942 | Plan in §3. |
+| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
+| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | 832 | New in SYRD-287. |
+| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | 484 | New in SYRD-287. |
+| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | 351 | New in SYRD-288. |
+| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
+| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | 753 | New in SYRD-289. |
+| `scripts/role_command.py` | — | — | — | — | — | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | 212 | New in SYRD-290. |
+| `scripts/model_validation.py` | — | — | — | — | — | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | 694 | New in SYRD-290. |
+| `scripts/project_worktrees.py` | — | — | — | — | — | — | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | 742 | New in SYRD-291. |
+| `scripts/launcher_checkout.py` | — | — | — | — | — | — | — | 632 | 632 | 632 | 632 | 632 | 632 | 632 | 632 | 632 | 632 | New in SYRD-292. |
+| `scripts/owner_git.py` | — | — | — | — | — | — | — | — | 323 | 323 | 323 | 323 | 323 | 323 | 323 | 323 | 323 | New in SYRD-293. |
+| `scripts/pane_hooks.py` | — | — | — | — | — | — | — | — | — | 262 | 262 | 262 | 262 | 262 | 262 | 262 | 262 | New in SYRD-294. |
+| `scripts/agent_cli_discovery.py` | — | — | — | — | — | — | — | — | — | — | 435 | 435 | 435 | 435 | 435 | 435 | 435 | New in SYRD-295. |
+| `scripts/agent_cli_promotion.py` | — | — | — | — | — | — | — | — | — | — | 1,099 | 1,099 | 1,099 | 1,099 | 1,099 | 1,099 | 1,099 | New in SYRD-295. |
+| `scripts/first_run_setup.py` | — | — | — | — | — | — | — | — | — | — | — | 443 | 443 | 443 | 443 | 443 | 443 | New in SYRD-296. |
+| `scripts/provider_auth_status.py` | — | — | — | — | — | — | — | — | — | — | — | — | 223 | 223 | 223 | 223 | 223 | New in SYRD-297. |
+| `scripts/provider_screen.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | 344 | 344 | 344 | 344 | New in SYRD-298: a leaf. |
+| `scripts/provider_session.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | — | 1,022 | 1,022 | 1,022 | New in SYRD-299: imports only `provider_screen` at its top. |
+| `scripts/first_run_auth.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | 703 | 703 | New in SYRD-300: imports `provider_session` and `runtime_catalog` at its top, never the launcher. |
+| `scripts/project_status.py` | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | — | 800 | New in SYRD-301: imports nothing of Switchyard's at its top. |
+| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
+| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
+| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
+| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
+| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
+| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
+| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
+| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
+| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
+| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
+| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
+| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
+| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
 
 For comparison only: 16 test files are over 1,250 lines, the largest being
 `tests/ticket_board_postgres_triggers_test.py` at 4,034. They are not in this
@@ -278,7 +282,9 @@ starts. The sizes are closure sizes at the baseline. Every child re-measures.
 | 7c-2a | **Pure provider screen classifiers** (SYRD-298) | 344 | a leaf: no Switchyard imports |
 | 7c-2b | **Foreground first-run session runner and terminal ownership** (SYRD-299) | 1,022 (30 defs) | imports `provider_screen` directly; `_owner_command_env_args` and `_pane_identity_scrubbed_env` are read from the launcher at call time; the three shared constants moved with it (see the slice log) |
 | 7c-3 | **First-run authentication phase and report** (SYRD-300) | 703 (13 defs) | 3 patched names moved and called through the launcher; the runner sentinel moved with them (rule 15); two source guards widened to read the new module; the install-table formatters and `_pane_identity_scrubbed_env` kept in the launcher |
-| 8 | Board service, listener and status. **Suggested next: the `status` and `release-status` verbs** (`switchyard_status_command`, `switchyard_release_status_command`, their parsers, `SwitchyardProjectStatus`, `SwitchyardRuntimeCopyStatus` and their private helpers) | ~692 (21 defs; measured on SYRD-300's candidate) | 1 patched name (`switchyard_status_command`, in `tenant_control_bridge_e2e_test`); the listener and board-unit control is a separate later child |
+| 8 | Board service, listener and status | 1,100 | split as below |
+| 8a | **`status` and `release-status` verbs** (SYRD-301) | 800 (21 defs) | 1 patched name (`switchyard_status_command`), dispatched by `switchyard_main` through the launcher's name; no source guard named the moved code |
+| 8b | Board and listener service control (`start_owner_listener`, `stop_owner_listener`, `capture_listener_state`, `_board_system_unit_action`, `board_system_unit_is_active`, `activate_board_authority`, `authority_unit_installs`, `restore_installed_units`, `repair_owner_user_manager`, `_ensure_board_service_user`/`_peer_auth`, unit names) — **suggested next** | ~384 (22 defs; measured on SYRD-301's candidate) | 5 patched names (`capture_listener_state`, `board_system_unit_is_active`, `_ensure_board_service_peer_auth`, `_uid_for_user`, `OWNER_USER_MANAGER_RESTART_TIMEOUT_SECONDS`); every caller is tenant lifecycle (`suspend_tenant`, `resume_tenant`, `cutover_role_identities_command`, `upgrade_project_command`, `switchyard_new_command`), so all stay callers through the launcher. The listener-only seed set is 7 defs / 109 lines, too small to stand alone |
 | 9 | Workflow declaration, adopt/migrate/rebind verbs | 1,600 | re-measure |
 | 10 | Provider state, runtime registration and role identities | 1,800 | re-measure |
 | 11 | tmux panes and sessions | 2,100 | heavily patched; later |
@@ -1501,3 +1507,90 @@ same commit:
 | Where it sits | two regions, lines 11538–11598 and 12931–13568 | the whole file |
 | phase/report `def`/`class` in `team_launcher.py` | 12 | 0 |
 | `warning: switchyard` lines in `team_launcher.py` | 25 | 17 |
+
+### SYRD-301 (slice 8a): `status` and `release-status` verbs
+
+Re-measured on `f29f5a0` before editing, and the design was posted on the
+ticket first. The closure is 21 definitions (692 lines), taken from five
+regions: lines 11472–11545, 17365–17877, 21716–21823, 27147–27194 and
+27297–27303. All of it moved into **`scripts/project_status.py`** (800 lines):
+- **The result types:** `SwitchyardProjectStatus` and
+  `SwitchyardRuntimeCopyStatus`.
+- **Project status:** `switchyard_project_statuses`,
+  `STATUS_PROBE_TIMEOUT_SECONDS`, the root-record fallback
+  `root_recorded_tenant_facts`, and the JSON payload helpers.
+- **Runtime-copy reporting:** `switchyard_runtime_copy_statuses` with the
+  checkout, release and shared-release probes, and the installed wrapper and
+  its target parsers.
+- **The verbs:** `switchyard_status_command` and
+  `switchyard_release_status_command`, their parsers, `format_release_alignment`
+  and `close_release_phase` (the `--close` journal path; `rollout_journal`
+  stays a function-local import).
+
+**Boundaries.**
+- The module imports nothing of Switchyard's at its top. Its 22 launcher
+  facilities are read at call time, including `load_project_config`,
+  `_switchyard_entries`, `tenant_release_status`, `release_alignment`,
+  `record_upgrade_phase` and `pane_liveness`.
+- No default argument or decorator names a launcher name.
+- `ProjectConfig`, `ReleaseAlignment` and `LauncherCheckoutProbe` are
+  annotation-only.
+- The launcher imports 11 names explicitly: the 2 verbs and 2 parsers that
+  `switchyard_main` dispatches to, and 7 more the suites read.
+- The one patched name, `switchyard_status_command`
+  (`tenant_control_bridge_e2e_test`), is still dispatched through the
+  launcher's global, so the patch still decides what `switchyard status` runs.
+- No source guard named the moved code, so none needed widening.
+
+**Evidence.**
+- **AST proof:** it holds for 21 definitions: identical ASTs, the launcher
+  equal to the baseline minus the moved nodes plus one import, comments
+  conserved and no unbound names. There are no non-move edits.
+- **New boundary test:** `tests/project_status_boundary_test.py` has 6
+  checks. It pins:
+  - no Switchyard import at the top;
+  - one set of objects in both import orders;
+  - `switchyard status --json` reaching the launcher's patched verb;
+  - a status reading the launcher's listing and config loader when it runs.
+
+  6 of 6 mutations are killed, each at its own assertion.
+
+  The first run of the "dispatch bypasses the patch" mutant fell through to
+  the real verb and read this host's tenants. It was read-only, with `sudo`
+  stubbed. The test now replaces the verb's first step with a function that
+  fails the test, so a fallthrough stops before any host read.
+- **Green and identical to the baseline:**
+  - read-only status without root (11), status liveness (20), release-phase
+    journal (77) and rollout journal (10);
+  - legacy workflow migration (105) and trampoline classification;
+  - every boundary test except `ticket_board_board_authority`, which is red
+    identically on the baseline and is unrelated.
+- **Red on both trees, identical per case** (rule 14 runner, refusing
+  provider and `sudo` stubs):
+
+  | Suite | Pass | Fail | Note |
+  |---|---:|---:|---|
+  | design | 17 | 1 | |
+  | freshness | 15 | 1 | |
+  | tenant suspension | 15 | 2 | |
+  | unprivileged presentation | 7 | 4 | |
+  | tenant-control bridge | 20 | 1 | |
+  | switchyard commands | 10 | 2 | |
+  | switchyard resolution | 4 | 7 | |
+  | tenant-control bridge e2e | 8 | — | case lines identical |
+  | git lint | 9 | 1 | line numbers differ |
+  | tmux invocation lint | — | — | identical log; stops at a test-file finding on both trees; the new module has no tmux argv |
+
+- **CLI:** `--help` output and exit codes are identical for all 36
+  invocations, including `status` and `release-status`.
+- **Staged release:** it contains the module and loads it from the release
+  root. The verbs are the launcher's own objects, and
+  `release-status --help` exits 0.
+
+**Navigation measurement** (counts only; no timing or token claim):
+
+| | Baseline (`f29f5a0`) | After |
+|---|---|---|
+| Files holding the responsibility | 1 (`team_launcher.py`, 29,664 lines) | 1 (`project_status.py`, 800 lines) |
+| Where it sits | five regions, lines 11472–27303 | the whole file |
+| status `def`/`class` in `team_launcher.py` | 20 | 0 |

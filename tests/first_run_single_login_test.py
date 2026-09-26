@@ -193,7 +193,8 @@ def test_an_account_the_welcome_flow_does_not_settle_still_gets_its_login() -> N
 
 def test_setup_runs_before_the_logins_it_can_make_unnecessary() -> None:
     """Order is the fix; re-reading is what makes the order pay."""
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+    # The phase lives in its own module since SYRD-300.
+    source = (ROOT / "scripts" / "first_run_auth.py").read_text(encoding="utf-8")
     phase = source[source.index("def run_first_run_auth_phase("):]
     phase = phase[: phase.index("\ndef ", 1)]
     setup_at = phase.index("for step in manifest.provider_setup_steps:")

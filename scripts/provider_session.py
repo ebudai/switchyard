@@ -20,7 +20,7 @@ module imports; it never imports this one. The launcher helpers that build the
 owner's environment (`_owner_command_env_args`, `_pane_identity_scrubbed_env`)
 are read from `scripts.team_launcher` at call time, so patches on the launcher
 still reach them. Deciding which providers need a first run, and reporting the
-result, stays in the launcher.
+result, is the auth phase, `scripts/first_run_auth.py` (SYRD-300).
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-299). `team_launcher`
 imports this module at its top and still exports every name callers read there.

@@ -12,8 +12,8 @@ signed-in state that counts, not the operator's. This module covers:
 - **Provider first run.** Whether a provider's account-wide first run is
   complete (`_provider_account_setup_complete`).
 
-Running logins and the interactive first run is the auth phase, and stays in
-`scripts/team_launcher.py`.
+Running logins and the interactive first run is the auth phase,
+`scripts/first_run_auth.py` (SYRD-300).
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-297). `team_launcher`
 imports this module at its top and still exports every name. Its facilities

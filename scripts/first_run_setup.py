@@ -10,10 +10,11 @@ module covers:
 - **Reading each provider's own trust record**, to tell whether a workdir is
   already trusted (`_workdir_is_trusted` and the per-provider probes).
 
-Running the steps, and reading a provider's authentication state, is the auth
-phase. That phase stays in `scripts/team_launcher.py` (`run_first_run_auth_phase`,
-`_cli_auth_status`, `FIRST_RUN_AUTH_*`, ...), and this module reads what it needs
-of it from `scripts.team_launcher` when a function runs.
+Running the steps is the auth phase, `scripts/first_run_auth.py` (SYRD-300);
+reading a provider's authentication state is `scripts/provider_auth_status.py`
+(`_cli_auth_status`, ...); `FIRST_RUN_AUTH_LOGIN_COMMANDS` stays in
+`scripts/team_launcher.py`. This module reads what it needs of them from
+`scripts.team_launcher` when a function runs.
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-296). `team_launcher`
 imports this module at its top and still exports every name callers read there.

@@ -262,8 +262,11 @@ def test_no_normal_launch_path_asks_for_model_validation() -> None:
     diagnostic command.
     """
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+    # The phase itself moved out (SYRD-300); an opt-in added there would be a
+    # caller too, so its module is read with the launcher.
+    phase = (ROOT / "scripts" / "first_run_auth.py").read_text(encoding="utf-8")
     enabling = [
-        line.strip() for line in source.splitlines() if "validate_models=True" in line
+        line.strip() for line in (source + phase).splitlines() if "validate_models=True" in line
     ]
     check(len(enabling) == 1,
           f"exactly one caller asks for model validation: {enabling}")

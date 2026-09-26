@@ -2,12 +2,14 @@
 
 This document serves the SYRD-272 parent. Each extraction child updates it:
 the before/after table, the slice log, and the plan's next entry. SYRD-286 was
-the first slice and SYRD-287 the second.
+the first slice, SYRD-287 the second and SYRD-288 the third.
 
 - Baseline: public main `d5ffdd00a2b162ac9bee545f52ba0840f70fc7ed`. The
   exclusive refactor window opened at this commit.
 - SYRD-286 was integrated as `4af050e436123fc1ad7d2aed0034ed771cc5bba9`, which
   is SYRD-287's baseline.
+- SYRD-287 was integrated as `95c11f0ae3f8e6b873aa1e42c99a7064558fa2af`, which
+  is SYRD-288's baseline.
 - Soft limit: 1,250 lines, advisory. The pre-commit warning is unchanged.
 
 ## 1. Tracked source inventory
@@ -15,25 +17,27 @@ the first slice and SYRD-287 the second.
 These are the tracked non-test files over the soft limit at the baseline,
 followed by the parent's list. Each "after" column is that child's candidate.
 
-| File | Baseline | After SYRD-286 | After SYRD-287 | Notes |
-|---|---:|---:|---:|---|
-| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | Plan in §3. |
-| `scripts/worker_pool_command.py` | — | 777 | 777 | New in SYRD-286. |
-| `scripts/role_credentials.py` | — | — | 832 | New in SYRD-287. |
-| `scripts/agy_credential.py` | — | — | 484 | New in SYRD-287. |
-| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
-| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
-| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
-| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
-| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
-| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
-| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
-| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
-| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
-| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
-| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
-| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
-| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
+| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | Notes |
+|---|---:|---:|---:|---:|---|
+| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | Plan in §3. |
+| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | New in SYRD-286. |
+| `scripts/role_credentials.py` | — | — | 832 | 832 | New in SYRD-287. |
+| `scripts/agy_credential.py` | — | — | 484 | 484 | New in SYRD-287. |
+| `scripts/upstream_report.py` | — | — | — | 351 | New in SYRD-288. |
+| `scripts/host_accounts.py` | — | — | — | 23 | New in SYRD-288: a dependency-free leaf. |
+| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
+| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
+| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
+| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
+| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
+| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
+| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
+| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
+| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
+| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
+| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
+| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
+| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
 
 For comparison only: 16 test files are over 1,250 lines, the largest being
 `tests/ticket_board_postgres_triggers_test.py` at 4,034. They are not in this
@@ -96,7 +100,7 @@ re-derives its own closure before moving anything.
 | provider state, runtime registration and role identities | 1,761 | 46 |
 | workflow declaration and rebind | 1,567 | 36 |
 | model/effort/CLI runtime selection | 1,456 | 70 |
-| credentials (agy, role seeding, upstream report) — **agy and role seeding moved by SYRD-287** | 1,436 | 65 |
+| credentials (agy, role seeding, upstream report) — **agy and role seeding moved by SYRD-287; upstream report by SYRD-288** | 1,436 | 65 |
 | repository hooks, git and worktrees | 1,196 | 68 |
 | CLI parsers and dispatch | 1,157 | 15 |
 | board service, listener and status | 1,095 | 54 |
@@ -138,7 +142,15 @@ re-derives its own closure before moving anything.
    still passed that diff. The independent proof caught it, and it was shown to
    fail on that fault, on a changed body and on a lost comment. Run
    retroactively on SYRD-286 (`4af050e` against `d5ffdd0`), it also holds.
-6. **Keep contractual patch seams.** Suites patch launcher names and expect the
+6. **Default arguments are bound at import.** A moved function whose
+   parameter defaults to a launcher name cannot defer that name to call time.
+   Such a dependency moves to a leaf module that both the launcher and the
+   moved code import, so it stays one object. The extractor refuses a launcher
+   name in a default or decorator (SYRD-288).
+7. **No name may be left unbound.** The proof also fails on any name used but
+   bound nowhere, in the launcher or a new module. A module header built by hand
+   can miss an import: SYRD-288 caught `dataclasses.replace` this way.
+8. **Keep contractual patch seams.** Suites patch launcher names and expect the
    patch to reach code that is now elsewhere. A moved caller reads such a name
    from `team_launcher` when it runs, even if the definition itself moved.
    SYRD-287 does this for the owner-traversal checks.
@@ -152,8 +164,8 @@ starts. The sizes are closure sizes at the baseline. Every child re-measures.
 |---|---|---:|---|
 | 1 | **Worker pool** declaration, preflight and `worker-pool` verb (SYRD-286) | 680 | 3 inbound edges, 0 patched names |
 | 2 | **Agent credentials**: agy credential source and role credential seeding (`agy-credential`, `seed-role-credentials`) (SYRD-287) | 1,180 moved | 17 inbound (mostly `switchyard_new_command`); 2 patched names found on re-measure |
-| 3 | Upstream report link and credential — **suggested next** | 280 | 2 inbound; re-measure |
-| 4 | Onboarding docs, role prompts and board skill (`role-prompt`, `board-skill`, onboarding refresh) | 550 | 9 inbound, 3 patched |
+| 3 | **Upstream report link and credential** (SYRD-288) | 296 moved | 2 inbound (`upgrade_project_command`); 2 patched names |
+| 4 | Onboarding docs, role prompts and board skill (`role-prompt`, `board-skill`, onboarding refresh) — **suggested next** | 550 | 9 inbound, 3 patched; re-measure |
 | 5 | Model, effort and CLI command construction | 630 | 11 inbound |
 | 6 | Repository hooks, git and worktrees; widens the git ownership lint | 1,200 | re-measure |
 | 7 | Agent CLI discovery, promotion and first-run auth | 2,600 | several children; re-measure |
@@ -294,3 +306,69 @@ No git builder moved, so the ownership lint's scope is unchanged.
 | `grep -ci credential` in the file(s) a reader opens | 262 in 37,808 lines | 72 in 484 (agy), 67 in 832 (role) |
 | `grep -ci credential` left in `team_launcher.py` | 262 | 162 (upstream report, first-run auth, import list, `new`) |
 | credential/agy/hermes `def`/`class` names in `team_launcher.py` | 37 | 13 |
+
+### SYRD-288: upstream report link and credential
+
+Re-measured on `95c11f0` before editing: 9 definitions in one contiguous region
+of `team_launcher.py`, lines 26806–27101, about 296 lines. There are 2 inbound
+edges, both from `upgrade_project_command`.
+
+- **`scripts/upstream_report.py`** (351 lines) holds:
+  - `UPSTREAM_REPORT_CREDENTIAL_NAME` and `UPSTREAM_REPORT_TOKEN_KEY`;
+  - `upstream_report_credential_path`, the tenant's owner-private copy of the
+    report token;
+  - `_board_env_report_token`;
+  - `upstream_report_board`, which resolves the upstream board from the host
+    registry;
+  - `record_upstream_report_link`, which persists the link in the tenant
+    config;
+  - `refresh_upstream_report_credential`;
+  - `_credential_is_private` and `_write_owner_private_file`, the owner-only
+    write through an owned directory chain.
+- **`scripts/host_accounts.py`** (23 lines) holds `home_dir_for_user`, unchanged.
+
+**Boundaries.**
+- **Into the modules.** `team_launcher` imports 9 names explicitly: the 8 moved
+  names callers or suites read, and `home_dir_for_user`.
+  `upstream_report_credential_test` patches
+  `team_launcher.record_upstream_report_link` and
+  `refresh_upstream_report_credential` and then drives the launcher's
+  `upgrade_project_command`. That call site stayed in the launcher, so the
+  patches still reach it. `_credential_is_private` is no longer a launcher
+  attribute; nothing outside read it.
+- **Out to the launcher, at call time.** `uid_for_user`, `_load_json`,
+  `_write_json_atomic`, `_registry_project_entries` and
+  `_open_owned_directory_chain`.
+- **The one boundary change.** Five moved functions take
+  `home_for_user=home_dir_for_user` as a default argument. A default is
+  evaluated when the `def` runs, and the suite asserts it `is
+  team_launcher.home_dir_for_user`. So `home_dir_for_user`, an 8-line pure
+  `pwd` lookup, moved into the leaf `host_accounts`. The launcher and
+  `upstream_report` both import it from there, so it is one object, and
+  patches on `team_launcher.home_dir_for_user` still reach every launcher
+  caller. The defaults bind exactly as before: once, to the real function.
+
+**Evidence.**
+- The AST proof holds for both modules, including the stay-behind bound-name
+  check. It fails on a planted lost comment, a changed default, and the missing
+  `replace` import.
+- The new `tests/upstream_report_boundary_test.py` has 8 checks, and 6 of 6
+  mutations are killed.
+- `upstream_report_credential_test` (54 checks), the home-patching suites and
+  the previous slices' boundary tests are green and identical to the baseline.
+- The pre-existing reds are identical per case.
+- CLI help output is byte-identical to the baseline.
+- A staged release contains and loads both modules, with the default identity
+  intact.
+
+No git builder moved.
+
+**Navigation measurement** (counts only; no timing or token claim):
+
+| | Baseline (`95c11f0`) | After |
+|---|---|---|
+| Files holding the responsibility | 1 (`team_launcher.py`, 36,670 lines) | 1 (`upstream_report.py`, 351 lines) |
+| Where it sits | lines 26806–27101 | the whole file |
+| `grep -ciE 'upstream.?report'` in the file a reader opens | 78 in 36,670 lines | 39 in 351 lines |
+| `grep -ciE 'upstream.?report'` left in `team_launcher.py` | 78 | 54: the `upstream_report_url` config field, CLI flags, provisioning plumbing and the import list |
+| `def` names with `upstream_report` in `team_launcher.py` | 4 | 0 |

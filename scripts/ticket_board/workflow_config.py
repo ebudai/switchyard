@@ -306,9 +306,15 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "project",
             "remove_stages",
             "migrations",
+            "reservation",
         },
         "unknown workflow configuration field",
     )
+    # SYRD-276: how long an implementer stays reserved by work it has touched.
+    # Absent is "review" -- what every tenant has always had -- and is left
+    # absent, so no stored document changes by being revalidated.
+    if "reservation" in cfg:
+        need(cfg["reservation"] in ("review", "lifecycle"), "invalid reservation policy")
     if project is not None:
         need(
             cfg.get("project", project) == project,

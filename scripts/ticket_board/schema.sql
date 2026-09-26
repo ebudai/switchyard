@@ -7476,6 +7476,11 @@ BEGIN
         AND x->>'kind' IN ('draft','system') AND x->>'gate' IS NULL AND NOT (x->>'terminal')::boolean
         AND (jsonb_array_length(x->'owners')=0 OR x->'owners' ? (cfg->'queue'->>'assignee'))
         AND (cfg->'queue'->>'assignee'='unassigned' OR cfg->'queue'->>'assignee'=ANY(active_roles))) THEN RAISE EXCEPTION 'invalid configured holding destination'; END IF;
+    -- SYRD-276: how long an implementer stays reserved by work it has touched.
+    -- Absent is 'review', the behaviour every tenant has always had.
+    IF cfg ? 'reservation' AND (jsonb_typeof(cfg->'reservation') IS DISTINCT FROM 'string'
+        OR cfg->>'reservation' NOT IN ('review','lifecycle')) THEN
+        RAISE EXCEPTION 'invalid reservation policy'; END IF;
     IF (SELECT count(*) FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'kind'='implementation') <> 1 THEN
         RAISE EXCEPTION 'exactly one implementation stage required'; END IF;
     FOR s IN SELECT value FROM jsonb_array_elements(cfg->'stages') LOOP
@@ -9823,11 +9828,27 @@ $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.ticket_current_reserved_ticket(p_implementer text,p_excluding_ticket_id text DEFAULT NULL)
 RETURNS text LANGUAGE sql STABLE AS $$
+ -- Which ticket holds an implementer's one serial slot. Under the default
+ -- 'review' policy: its own implementation ticket, or one of its tickets in a
+ -- review stage. Under a tenant's 'lifecycle' policy (SYRD-276) a ticket also
+ -- keeps holding its implementer wherever else it goes before it is finished --
+ -- analysis after a User reopen, most importantly -- so a kickback can never
+ -- leave that implementer free to take a second ticket and then hand the first
+ -- one back to them. Terminal stages, parked tickets, draft stages and manual
+ -- control never hold.
  SELECT CASE WHEN ticket_board.declared_workflow() IS NULL THEN ticket_board.legacy_current_reserved_ticket(p_implementer,p_excluding_ticket_id)
  ELSE (SELECT t.id FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=t.id
  WHERE (p_excluding_ticket_id IS NULL OR t.id<>p_excluding_ticket_id) AND NOT t.manually_controlled
- AND ticket_board.declared_stage_kind(t.state) IN ('implementation','review')
- AND (CASE WHEN ticket_board.declared_stage_kind(t.state)='implementation' THEN t.assignee ELSE ns.last_implementer_assignee END)=p_implementer
+ AND (
+   (ticket_board.declared_stage_kind(t.state) IN ('implementation','review')
+    AND (CASE WHEN ticket_board.declared_stage_kind(t.state)='implementation' THEN t.assignee ELSE ns.last_implementer_assignee END)=p_implementer)
+   OR (coalesce(ticket_board.declared_workflow()->>'reservation','review')='lifecycle'
+    AND ticket_board.declared_stage_kind(t.state)='system'
+    AND NOT coalesce((SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
+                      WHERE x->>'name'=t.state), false)
+    AND NOT t.parked
+    AND ns.last_implementer_assignee=p_implementer)
+ )
  ORDER BY t.ticket_number LIMIT 1) END;
 $$;
 

@@ -396,6 +396,22 @@ from scripts.first_run_setup import (
     _role_names,
     _workdir_is_trusted,
 )
+# Provider auth-status probing (SYRD-297), moved out whole. Every name is kept
+# here: the suites patch several of them on the launcher, and the launcher's
+# own first-run and launch code, and the modules already moved out, reach
+# them as `team_launcher.<name>`.
+from scripts.provider_auth_status import (
+    FIRST_RUN_AUTH_STATUS_COMMANDS,
+    OWNER_CLI_PROBE_TIMEOUT_SECONDS,
+    PROBE_TIMED_OUT_STATUS,
+    _claude_account_setup_complete,
+    _cli_auth_probe_passed,
+    _cli_auth_status,
+    _owner_cli_is_installed,
+    _owner_home_for_auth,
+    _provider_account_setup_complete,
+    _run_owner_cli_probe,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -12434,12 +12450,6 @@ def github_identity_remedy(status: GithubIdentityStatus, *, project: str = "") -
     return "\n".join(lines)
 
 
-FIRST_RUN_AUTH_STATUS_COMMANDS: dict[str, list[str]] = {
-    "agy": ["agy", "models"],
-    "claude": ["claude", "auth", "status", "--json"],
-    "codex": ["codex", "login", "status"],
-    "hermes": ["hermes", "config", "check"],
-}
 FIRST_RUN_AUTH_LOGIN_COMMANDS: dict[str, list[str]] = {
     "agy": ["agy"],
     "claude": ["claude", "auth", "login"],
@@ -12797,13 +12807,6 @@ def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
     return owned_roots
 
 
-def _owner_home_for_auth(owner_user: str, fallback: Path | None = None) -> Path:
-    try:
-        return Path(pwd.getpwnam(owner_user).pw_dir)
-    except KeyError:
-        return fallback or (Path("/home") / owner_user)
-
-
 def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
     if owner_user == current_user_name():
         return list(command)
@@ -12887,74 +12890,6 @@ def _pane_identity_scrubbed_env(source: Mapping[str, str] | None = None) -> dict
 
 def _role_cli_name(role: RoleConfig) -> str:
     return _command_name(role.cli[0]) if role.cli else ""
-
-
-#: How long a non-interactive probe of a provider may take before it is treated
-#: as a failure rather than waited on.
-#:
-#: These probes are the one part of the first-run phase nobody can see: stdin is
-#: /dev/null, stdout and stderr are captured, and nothing is drawn. Unbounded,
-#: that is a launcher that stops dead with no process to look at, no output, and
-#: a window whose title has already been handed back -- which is what a fresh
-#: test15 and then test16 both showed after the trust steps completed
-#: (SYRD-245). A single `-p` prompt that has not answered in three minutes is
-#: not going to; an interactive step that legitimately waits on a person is
-#: bounded separately and much longer.
-OWNER_CLI_PROBE_TIMEOUT_SECONDS = 180.0
-#: The exit status recorded for a probe that had to be given up on. 124 is what
-#: `timeout(1)` uses, so a reader who has seen one recognises the other.
-PROBE_TIMED_OUT_STATUS = 124
-
-
-def _run_owner_cli_probe(
-    *,
-    owner_user: str,
-    owner_home: Path,
-    command: Sequence[str],
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-    cwd: Path | None = None,
-    timeout_seconds: float = OWNER_CLI_PROBE_TIMEOUT_SECONDS,
-) -> subprocess.CompletedProcess[Any]:
-    args = _owner_command_env_args(owner_user, owner_home, command)
-    try:
-        return runner(
-            args,
-            cwd=str(cwd if cwd is not None else owner_home),
-            env=_pane_identity_scrubbed_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired:
-        # Reported as a failed probe rather than raised: the phase below turns
-        # every other probe failure into a named, resumable line, and a
-        # traceback here would lose which role and which model it was.
-        return subprocess.CompletedProcess(
-            args,
-            PROBE_TIMED_OUT_STATUS,
-            stdout="",
-            stderr=(
-                f"no answer after {timeout_seconds:g}s; gave up. Run this yourself to see "
-                f"what it is waiting for: {shlex.join(str(part) for part in args)}"
-            ),
-        )
-    except TypeError:
-        # A caller's runner that predates the bound. Kept working rather than
-        # made to accept a keyword it never had, because these probes are
-        # driven by several suites' fakes.
-        return runner(
-            args,
-            cwd=str(cwd if cwd is not None else owner_home),
-            env=_pane_identity_scrubbed_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except OSError as exc:
-        return subprocess.CompletedProcess(args, 127, stdout="", stderr=str(exc))
 
 
 #: How often a bounded foreground step looks to see whether the thing it was
@@ -14294,71 +14229,6 @@ def _run_owner_cli_until(
         print_func=print_func,
     )
 
-def _cli_auth_probe_passed(cli: str, proc: subprocess.CompletedProcess[Any]) -> bool:
-    if proc.returncode != 0:
-        return False
-    stdout = str(getattr(proc, "stdout", "") or "")
-    stderr = str(getattr(proc, "stderr", "") or "")
-    combined = f"{stdout}\n{stderr}".casefold()
-    if cli == "claude":
-        try:
-            parsed = json.loads(stdout)
-        except json.JSONDecodeError:
-            return False
-        return parsed.get("loggedIn") is True
-    if cli == "hermes":
-        # PGU-773 measured `hermes auth list` as a false positive: a pooled
-        # manual OpenRouter credential appears there while Hermes still reports
-        # no resolved API keys and opens `hermes setup`. `config check` reports
-        # only environment/config-resolved keys, which is the runnable shape.
-        return any(line.strip().startswith("\N{CHECK MARK} ") and "_API_KEY" in line for line in stdout.splitlines())
-    if cli in {"agy", "codex"}:
-        return "not logged" not in combined and "not authenticated" not in combined
-    return True
-
-
-def _owner_cli_is_installed(
-    cli: str,
-    *,
-    owner_user: str,
-    owner_home: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> bool:
-    command = FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli)
-    if command is None or not command:
-        return True
-    binary = command[0]
-    proc = _run_owner_cli_probe(
-        owner_user=owner_user,
-        owner_home=owner_home,
-        command=["sh", "-c", f"command -v {shlex.quote(binary)}"],
-        runner=runner,
-    )
-    return proc.returncode == 0
-
-
-def _cli_auth_status(
-    cli: str,
-    *,
-    owner_user: str,
-    owner_home: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> str:
-    command = FIRST_RUN_AUTH_STATUS_COMMANDS.get(cli)
-    if command is None:
-        return "authenticated"
-    proc = _run_owner_cli_probe(owner_user=owner_user, owner_home=owner_home, command=command, runner=runner)
-    if _cli_auth_probe_passed(cli, proc):
-        return "authenticated"
-    if not _owner_cli_is_installed(
-        cli,
-        owner_user=owner_user,
-        owner_home=owner_home,
-        runner=runner,
-    ):
-        return "not_installed"
-    return "unauthenticated"
-
 
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
@@ -14380,35 +14250,6 @@ def _read_toml_object(path: Path) -> dict[str, Any]:
 #: rather than written: Switchyard asks the CLI to run its own setup and then
 #: looks again, and never manufactures the answer (SYRD-191).
 FIRST_RUN_SETUP_CLIS = frozenset({"claude"})
-
-
-def _claude_account_setup_complete(owner_home: Path) -> bool:
-    """Whether Claude's own first run has been completed for this account.
-
-    Credentials and setup are separate: the live testing tenant held a valid
-    `.claude/.credentials.json` beside a `.claude.json` carrying an
-    `oauthAccount` and neither `hasCompletedOnboarding` nor a `theme`, and every
-    pane opened the theme flow instead of a prompt (SYRD-191).
-
-    Completion is now `hasCompletedOnboarding` alone; a `theme` is
-    deliberately no longer accepted as a second signal. Measured on Claude Code v2.1.270: answering
-    the theme prompt writes neither key, during the session or after it, and a
-    genuinely onboarded account carries no top-level `theme` at all. So the
-    fallback could never be the thing that reported success -- and had some
-    path written a theme mid-flow it would have reported success early, which
-    is the same class of defect as reading an unanswered menu as a finished
-    prompt. It cost nothing to keep and could only ever be wrong (SYRD-221).
-    """
-    config = _read_json_object(owner_home / ".claude.json")
-    if not config:
-        return False
-    return config.get("hasCompletedOnboarding") is True
-
-
-def _provider_account_setup_complete(cli: str, *, owner_home: Path) -> bool:
-    if cli == "claude":
-        return _claude_account_setup_complete(owner_home)
-    return True
 
 
 #: What an operator is told before a foreground step takes their terminal. Said

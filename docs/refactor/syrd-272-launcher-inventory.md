@@ -3,7 +3,8 @@
 This document serves the SYRD-272 parent. Each extraction child updates it:
 the before/after table, the slice log, and the plan's next entry. SYRD-286 was
 the first slice, SYRD-287 the second, SYRD-288 the third, SYRD-289
-the fourth, SYRD-290 the fifth and SYRD-291 the sixth.
+the fourth, SYRD-290 the fifth, SYRD-291 the sixth and SYRD-292
+slice 6a.
 
 - Baseline: public main `d5ffdd00a2b162ac9bee545f52ba0840f70fc7ed`. The
   exclusive refactor window opened at this commit.
@@ -17,6 +18,8 @@ the fourth, SYRD-290 the fifth and SYRD-291 the sixth.
   is SYRD-290's baseline.
 - SYRD-290 was integrated as `9c804c7d26731af80a347a5612424c899f79e352`, which
   is SYRD-291's baseline.
+- SYRD-291 was integrated as `9ceed50d1b1f9c4c95565865240164cd9cf8574c`, which
+  is SYRD-292's baseline.
 - Soft limit: 1,250 lines, advisory. The pre-commit warning is unchanged.
 
 ## 1. Tracked source inventory
@@ -24,31 +27,32 @@ the fourth, SYRD-290 the fifth and SYRD-291 the sixth.
 These are the tracked non-test files over the soft limit at the baseline,
 followed by the parent's list. Each "after" column is that child's candidate.
 
-| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | After SYRD-291 | Notes |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | 34,365 | Plan in §3. |
-| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
-| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | 832 | New in SYRD-287. |
-| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | 484 | New in SYRD-287. |
-| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | 351 | New in SYRD-288. |
-| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
-| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | 753 | New in SYRD-289. |
-| `scripts/role_command.py` | — | — | — | — | — | 212 | 212 | New in SYRD-290. |
-| `scripts/model_validation.py` | — | — | — | — | — | 694 | 694 | New in SYRD-290. |
-| `scripts/project_worktrees.py` | — | — | — | — | — | — | 742 | New in SYRD-291. |
-| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
-| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
-| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
-| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
-| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
-| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
-| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
-| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
-| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
-| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
-| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
-| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
-| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
+| File | Baseline | After SYRD-286 | After SYRD-287 | After SYRD-288 | After SYRD-289 | After SYRD-290 | After SYRD-291 | After SYRD-292 | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `scripts/team_launcher.py` | 38,527 | 37,808 | 36,670 | 36,379 | 35,730 | 34,987 | 34,365 | 33,826 | Plan in §3. |
+| `scripts/worker_pool_command.py` | — | 777 | 777 | 777 | 777 | 777 | 777 | 777 | New in SYRD-286. |
+| `scripts/role_credentials.py` | — | — | 832 | 832 | 832 | 832 | 832 | 832 | New in SYRD-287. |
+| `scripts/agy_credential.py` | — | — | 484 | 484 | 484 | 484 | 484 | 484 | New in SYRD-287. |
+| `scripts/upstream_report.py` | — | — | — | 351 | 351 | 351 | 351 | 351 | New in SYRD-288. |
+| `scripts/host_accounts.py` | — | — | — | 23 | 23 | 23 | 23 | 23 | New in SYRD-288: a dependency-free leaf. |
+| `scripts/project_onboarding.py` | — | — | — | — | 753 | 753 | 753 | 753 | New in SYRD-289. |
+| `scripts/role_command.py` | — | — | — | — | — | 212 | 212 | 212 | New in SYRD-290. |
+| `scripts/model_validation.py` | — | — | — | — | — | 694 | 694 | 694 | New in SYRD-290. |
+| `scripts/project_worktrees.py` | — | — | — | — | — | — | 742 | 742 | New in SYRD-291. |
+| `scripts/launcher_checkout.py` | — | — | — | — | — | — | — | 632 | New in SYRD-292. |
+| `scripts/ticket_board/schema.sql` | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | 12,019 | Proposed exception: one DDL document applied whole. It is still reviewed as its own child. |
+| `scripts/ticket_board/project_provision.py` | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | 4,741 | Parent list; needs a child. |
+| `scripts/ticket_board/notify_listener.py` | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | 4,057 | Parent list; needs a child. |
+| `scripts/presentation_controller.py` | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | 2,632 | Parent list; needs a child. |
+| `scripts/ticket_board/app.py` | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | 2,417 | Parent list; needs a child. |
+| `scripts/ticket_board/server.py` | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | 1,900 | Parent list; needs a child. |
+| `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | 1,773 | Proposed exception: a migration is immutable history. |
+| `scripts/ticket_board/frontend_script_core.py` | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | 1,761 | Parent list; generated front-end asset. Its boundary is the asset, not Python modules. |
+| `scripts/ticket_board/write_client.py` | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | 1,608 | Parent list; needs a child. |
+| `scripts/ticket-board-service.sh` | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | 1,517 | Parent list; a shell entry point. Split along its own subcommands. |
+| `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | 1,442 | Proposed exception: migration. |
+| `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | 1,299 | Proposed exception: migration. |
+| `deploy/SYRD-87-recover-syrd-runtime.sh` | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | 1,292 | Proposed exception: a one-off recovery packet kept as a record. |
 
 For comparison only: 16 test files are over 1,250 lines, the largest being
 `tests/ticket_board_postgres_triggers_test.py` at 4,034. They are not in this
@@ -88,8 +92,8 @@ git ls-files | grep -v '^tests/' | grep -Ev '\.(md|json|txt|png|svg|lock)$' \
   Moved code that calls such a facility must look it up on `team_launcher` at
   call time. Otherwise the patches silently stop reaching it.
 - **Git ownership lint.** `tests/team_launcher_git_ownership_lint_test.py`
-  scans every module in its `GIT_LINTED_MODULES`. Since SYRD-291 that is
-  `team_launcher.py` and `project_worktrees.py`. The test
+  scans every module in its `GIT_LINTED_MODULES`. Since SYRD-292 that is
+  `team_launcher.py`, `project_worktrees.py` and `launcher_checkout.py`. The test
   `test_every_module_that_defines_a_git_builder_is_linted` fails if any
   `scripts/` module defines a `git_*_args` builder outside that set, so a slice
   that moves builders must add its module in the same commit.
@@ -120,7 +124,7 @@ re-derives its own closure before moving anything.
 | board service, listener and status | 1,095 | 54 |
 | onboarding docs, prompts and skills — **docs, director onboarding and board skill moved by SYRD-289** | 796 | 32 |
 | worker pool — **moved by SYRD-286** | 737 | 19 |
-| launcher checkout self-update | 462 | 15 |
+| launcher checkout self-update — **moved by SYRD-292** | 462 | 15 |
 
 ### How a slice is chosen and cut
 
@@ -210,8 +214,8 @@ starts. The sizes are closure sizes at the baseline. Every child re-measures.
 | 4 | **Onboarding docs, director onboarding and generated board skill** (SYRD-289) | 636 moved | 9 inbound; 3 patched names, all at call sites that stay in the launcher |
 | 5 | **Role CLI command construction and model validation** (SYRD-290) | 212 + 694 in two modules | 5 + 11 inbound; 0 patched names; `validate-models` verb kept in the launcher (rule 9) |
 | 6 | **Project worktrees and control repository** (SYRD-291); widened the git ownership lint | 742 | 6 inbound; `_control_repository_owner_home` patched (routed through the launcher) |
-| 6a | Launcher checkout self-update (`git_launcher_*` builders, `probe_launcher_checkout`, `ensure_launcher_checkout_current`, `deploy_launcher_checkout`) — **suggested next** | ~511 | re-measure; its builders go under the lint guard |
-| 6b | Owner-correct git chokepoint and project git helpers (`run_owner_correct_git`, `GitOwnerRule`, `_owner_project_git_runner`, `_commit_project_git_changes`) | ~160 | used across the launcher; a leaf for the other git modules |
+| 6a | **Launcher checkout self-update** (SYRD-292) | 632 | 7 inbound edges; `ensure_launcher_checkout_current` patched at launcher call sites; 12 builders linted |
+| 6b | Owner-correct git chokepoint and project git helpers (`run_owner_correct_git`, `GitOwnerRule`, `_git_owner_*`, `_path_owner_user`, `_owner_project_git_runner`, `_commit_project_git_changes`, `_require_existing_project_git_repository`, `_git_status_porcelain`) — **suggested next** | ~171 | re-measure. Suites patch `run_owner_correct_git` on the launcher (the onboarding boundary test and the lint), so the three git modules must keep reading it through the launcher at call time, not import it from the new leaf. |
 | 6c | Repository hook glue left in the launcher | re-measure | the "hook" names also match tmux relayout hooks, which belong to presentation |
 | 7 | Agent CLI discovery, promotion and first-run auth | 2,600 | several children; re-measure |
 | 8 | Board service, listener and status (`status`, `release-status` reads) | 1,100 | 19+ inbound |
@@ -669,3 +673,78 @@ from line 672 and lines 3914–5212.
 | control-repository/worktree `def`/`class` names in `team_launcher.py` | 31 | 8 (callers in launch and first-run, and `worktree_ref`) |
 | `git_*_args` builders in `team_launcher.py` | 30 | 14 (launcher checkout and deploy ref) |
 | `grep -c control_repository` in the launcher / the new module | 104 / — | 46 / 68 |
+
+### SYRD-292 (slice 6a): launcher checkout self-update
+
+Re-measured on `9ceed50` before editing: 27 definitions, about 516 lines, in
+four regions (lines 619–620, 777, 3948–4561 and 22144). They moved into
+**`scripts/launcher_checkout.py`** (632 lines):
+- `ALLOW_STALE_LAUNCHER_ENV`, `LEGACY_ALLOW_STALE_LAUNCHER_ENV` and
+  `LauncherCheckoutProbe`;
+- the **12 launcher-checkout `git_*_args` builders**, with
+  `_parse_ahead_behind`, `_format_behind_count` and `_short_head`;
+- `probe_launcher_checkout`, `probe_checkout_against_worktree_ref` and
+  `launcher_checkout_status`;
+- `_auto_fast_forward_launcher_checkout`, `ensure_launcher_checkout_current`
+  and `deploy_launcher_checkout`;
+- `warn_if_artifact_source_checkout_is_stale`;
+- `_launcher_checkout_runner`, and `_owner_correct_git_runner`, the runner
+  adapter over the chokepoint whose only caller is `_launcher_checkout_runner`.
+
+**Boundaries.**
+- **Into the module.** `team_launcher` imports 22 names explicitly for its
+  callers: `launch_project`, `main`, `upgrade_project_command`,
+  `_runtime_checkout_copy_status` and `_format_checkout_probe_status`.
+  `ensure_launcher_checkout_current` is patched in
+  `team_launcher_presentation_test` around launcher call sites that stayed.
+  Five private helpers nothing outside reads are no longer launcher
+  attributes.
+- **Out to the launcher, at call time.** The chokepoint
+  (`run_owner_correct_git`, `GitOwnerRule`, `_path_owner_user`), `_repo_root`
+  (patched in 3 suites), `worktree_ref`, `_env_truthy_any`,
+  `_parse_ls_remote_head` (shared with deploy-ref resolution),
+  `_proc_failure_reason` and `shared_switchyard_release_for_path`.
+- **Unchanged and still in the launcher.** Host shared-release install and
+  upgrade.
+
+**Git ownership lint.**
+- `launcher_checkout.py` joined `GIT_LINTED_MODULES`, and the module has no
+  findings.
+- Mutation-checked:
+  - a launcher-checkout builder run through `runner(...)` is reported at
+    `launcher_checkout.py:172`, as a third finding beside the launcher's two;
+  - dropping the module from the set fails the all-builder-module guard.
+- The launcher's two documented baseline findings (the deploy-ref builders)
+  are still reported, not masked.
+
+**Evidence.**
+- The AST proof holds for 27 definitions, including the bound-name check.
+- The new `tests/launcher_checkout_boundary_test.py` has 6 checks. It drives
+  `probe_launcher_checkout` through a patched chokepoint and `_repo_root` with
+  canned git answers, and 4 of 4 mutations are killed.
+- Green and identical to the baseline: cutover, release phase journal,
+  read-only status, privileged artifacts, tenant deploy identity, authority
+  before deploy, the SYRD-87 deploy probe target, and the six boundary tests.
+- Red on the baseline, compared case by case with a fresh `HOME` per run:
+  - `team_launcher_freshness` 15/1. For the red case
+    (`…uses_owner_runner_when_launcher_user_differs`), the 9 git commands
+    through the chokepoint and the failing line are byte-identical to the
+    baseline.
+  - `team_launcher_resume_detached` 8/1, `team_launcher_presentation` 11/5,
+    `team_launcher_pinned_release_resume` 14/1,
+    `team_launcher_trusted_migration_artifact` 6/7 and
+    `team_launcher_viewer` 21/5. The viewer suite differs only in the hashes
+    of its temporary fixture commits.
+- CLI help output is byte-identical to the baseline for 5 invocations. The
+  `team-launcher` help, including the deploy and stale-launcher options, is
+  among them.
+- A staged release contains and loads the module, and the lint is clean on the
+  release's own copy of it.
+
+**Navigation measurement** (counts only; no timing or token claim):
+
+| | Baseline (`9ceed50`) | After |
+|---|---|---|
+| Files holding the responsibility | 1 (`team_launcher.py`, 34,365 lines) | 1 (`launcher_checkout.py`, 632 lines) |
+| launcher-checkout `def`/`class` names in `team_launcher.py` | 20 | 0 |
+| `git_*_args` builders in `team_launcher.py` | 14 | 2 (the deploy-ref pair) |

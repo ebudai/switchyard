@@ -19,9 +19,14 @@ from standalone_test_runner import run_module_tests
 TEAM_LAUNCHER = ROOT / "scripts" / "team_launcher.py"
 #: Every production module that defines or runs `git_*_args` builders. The
 #: worktree and control-repository builders moved out of the launcher into
-#: `project_worktrees.py` (SYRD-291), with their call sites, and are held to the
+#: `project_worktrees.py` (SYRD-291), and the launcher-checkout builders into
+#: `launcher_checkout.py` (SYRD-292), with their call sites, and are held to the
 #: same chokepoint there.
-GIT_LINTED_MODULES = (TEAM_LAUNCHER, ROOT / "scripts" / "project_worktrees.py")
+GIT_LINTED_MODULES = (
+    TEAM_LAUNCHER,
+    ROOT / "scripts" / "project_worktrees.py",
+    ROOT / "scripts" / "launcher_checkout.py",
+)
 GIT_CHOKEPOINT = "run_owner_correct_git"
 
 

@@ -115,6 +115,7 @@ def plan_action(
     identity: Callable[[], privileged_helper.CallerIdentity] = privileged_helper.caller_identity,
     verify: Callable[..., list[str]] = privileged_install.verify_installation,
     build_command: Callable[..., list[str]] = privileged_operations.command_for,
+    read_policy: Callable[[Path], str] | None = None,
 ) -> ActionPlan:
     """Decide everything that can be decided without privilege.
 
@@ -144,6 +145,27 @@ def plan_action(
     if installation:
         problems.extend(installation)
         problems.append(f"Run `sudo switchyard upgrade {project}` to reinstall the boundary")
+    else:
+        # Present and root's is not the same as knowing this action. A host
+        # whose boundary was installed from an older release has no policy
+        # entry for an action added since, so polkit cannot authorize it and
+        # the installed helper would refuse it as uncatalogued -- safely, but
+        # without saying what to do (SYRD-283). The policy is world-readable.
+        try:
+            installed = (read_policy or (lambda path: path.read_text(encoding="utf-8")))(
+                privileged_install.policy_path(policy.parent)
+            )
+        except OSError as exc:
+            installed = ""
+            problems.append(f"the installed policy could not be read ({exc})")
+        if installed and f'id="{action.action_id}"' not in installed:
+            problems.append(
+                f"this host's installed privileged boundary predates {action.name}: its policy "
+                "declares no such action. The boundary is installed from the host's shared "
+                "release by the privileged phase of a tenant upgrade, so once an operator has "
+                "installed a release that has it (`install-shared-release`), run "
+                f"`switchyard privileged-action {project} upgrade-tenant` and then this again"
+            )
 
     # What root would actually run. This is where a commit that no trusted
     # source holds is refused -- before privilege, before mutation, with the

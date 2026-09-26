@@ -247,10 +247,21 @@ Then close with the workflow's completion action, which requires the commit hash
 ## Release, upgrade and rollback
 
 - `switchyard upgrade <project>` refreshes generated project artifacts and
-  reports release drift; `--dry-run` first, always.
+  reports release drift; `--dry-run` first, always. Run as you, it cannot make
+  the checks only root can (the tenant-control sudoers rule is one) and says
+  so instead of declaring the tenant ready.
+- Your tenant's upgrade and board deploy are yours, through the approved
+  privileged boundary and pinned to an exact release commit:
+  `switchyard privileged-action <project> preview-upgrade commit=<sha>` is
+  root's read-only dry run, `upgrade-tenant-release` with the same commit
+  applies it, and `deploy-release` deploys an approved release. The helper runs
+  them for your registered pane and no other process, and journals each run.
+- Host-wide changes stay with the root operator: building or installing the
+  shared release (`install-shared-release`, `select-shared-release`) and
+  installing the privileged helper and policy themselves. If an action is
+  refused because this host's boundary predates it, route the repair it names;
+  never work around the boundary.
 - `switchyard board-skill verify` / `install` repairs the skills a pane loads.
-- Deploying the board service itself is an operator action, not a board action.
-  Route it; do not run it because you can reach it.
 - Rollback is a decision with a record: say on the ticket what was deployed,
   what regressed, what you reverted to, and how you confirmed the revert took.
 

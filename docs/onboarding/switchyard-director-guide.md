@@ -242,8 +242,18 @@ there is no second deploy for an operator to run. `switchyard upgrade` says the
 release is deployed and names `switchyard finish-upgrade <project>` as the only
 remaining step. That step is yours: it is a board write authorized from your uid,
 and root refuses to counterfeit it. If the output prints a deployment sequence
-instead, the deployed release genuinely differs from the pinned one and an
-operator runs that first.
+instead, the deployed release genuinely differs from the pinned one.
+
+Tenant-scoped privileged work is yours too, through the approved boundary rather
+than an operator: `switchyard privileged-action <project> preview-upgrade
+commit=<sha>` runs the upgrade's dry run as root -- the checks your own dry run
+cannot make, such as the tenant-control sudoers rule, happen there -- then
+`upgrade-tenant-release` applies it pinned to the same commit, and
+`deploy-release` deploys an approved release. The root-owned helper runs these
+only for your registered pane. What remains an operator's is host-wide:
+installing or selecting the shared release everyone runs, and installing the
+privileged boundary itself. A host whose installed boundary predates an action
+refuses it and names that repair.
 
 The change itself is applied atomically against the board's current workflow
 revision: if the configuration moved since you read it, your write is rejected

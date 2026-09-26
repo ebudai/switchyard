@@ -60,6 +60,15 @@ def _upgrade_tenant(values: Mapping[str, str]) -> list[str]:
     return [LAUNCHER, "upgrade", values["project"]]
 
 
+def _preview_upgrade(values: Mapping[str, str]) -> list[str]:
+    # Always --dry-run: this action cannot be turned into the upgrade itself.
+    return [LAUNCHER, "upgrade", values["project"], "--deploy-ref", values["commit"], "--dry-run"]
+
+
+def _upgrade_tenant_release(values: Mapping[str, str]) -> list[str]:
+    return [LAUNCHER, "upgrade", values["project"], "--deploy-ref", values["commit"]]
+
+
 #: The file a built release carries, naming the commit it was built from.
 #: The same name `team_launcher.SWITCHYARD_RELEASE_MARKER_NAME` writes;
 #: `test_the_marker_name_matches_what_the_build_writes` keeps the two honest.
@@ -217,6 +226,8 @@ def _repair_boundary(values: Mapping[str, str]) -> list[str]:
 OPERATIONS: dict[str, Callable[[Mapping[str, str]], list[str]]] = {
     "deploy-release": _deploy_release,
     "upgrade-tenant": _upgrade_tenant,
+    "preview-upgrade": _preview_upgrade,
+    "upgrade-tenant-release": _upgrade_tenant_release,
     "install-shared-release": _install_shared_release,
     "select-shared-release": _select_shared_release,
     "repair-boundary": _repair_boundary,

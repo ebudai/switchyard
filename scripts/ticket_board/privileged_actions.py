@@ -129,6 +129,28 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         arguments=(("project", _slug),),
     ),
     PrivilegedAction(
+        name="preview-upgrade",
+        summary="Check a tenant upgrade to an exact release, as root, changing nothing",
+        message="Authentication is required to check a Switchyard tenant upgrade",
+        # The dry run of `upgrade-tenant-release`. Some of what an upgrade must
+        # verify is readable only by root -- the tenant-control sudoers rule
+        # is 0440 root -- so a director's own unprivileged dry run cannot
+        # conclude, and must not guess (SYRD-283). Read-only by construction:
+        # the helper only ever adds --dry-run.
+        authentication=ALLOW_ACTIVE,
+        arguments=(("project", _slug), ("commit", _commit)),
+    ),
+    PrivilegedAction(
+        name="upgrade-tenant-release",
+        summary="Run the privileged phases of a tenant upgrade, pinned to an exact release",
+        message="Authentication is required to upgrade a Switchyard tenant",
+        # `upgrade-tenant` pinned: the release the director previewed is the
+        # release the upgrade resolves, not whatever a ref names by the time
+        # root reads it (SYRD-283). Same authority as `upgrade-tenant`.
+        authentication=ALLOW_ACTIVE,
+        arguments=(("project", _slug), ("commit", _commit)),
+    ),
+    PrivilegedAction(
         name="install-shared-release",
         summary="Make an already-built shared release this host's current one",
         message="Authentication is required to install a shared Switchyard release",

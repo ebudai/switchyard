@@ -9998,7 +9998,8 @@ class DisplayBridgeState:
     (SYRD-233, live on mefp).
     """
 
-    #: "not needed", "present", "install" or "refuse".
+    #: "not needed", "present", "install", "refuse", or "unverified" -- the rule
+    #: exists but only root can read it, and this process is not root.
     action: str
     detail: str = ""
     commands: tuple[str, ...] = ()
@@ -10039,6 +10040,14 @@ def sudoers_rule_state(
             return "refuse", (
                 f"{rule} is a symlink; sudo will not load it and replacing it would write "
                 "wherever it points"
+            )
+        if exc.errno == errno.EACCES and os.geteuid() != 0:
+            # Not a finding about the rule: it is root's 0440 file, exactly as
+            # it should be, and this process is not root. Calling that a refusal
+            # stopped MEFP's Director's unprivileged upgrade dry run with "every
+            # tab refused" (SYRD-283). Nor is it a pass: nothing here read it.
+            return "unverified", (
+                f"{rule} can only be read by root, and this process is uid {os.geteuid()}"
             )
         return "refuse", f"{rule} cannot be read ({exc.strerror})"
     try:
@@ -10148,6 +10157,8 @@ def display_bridge_state(
     )
     if verdict == "refuse":
         return DisplayBridgeState("refuse", detail)
+    if verdict == "unverified":
+        return DisplayBridgeState("unverified", detail)
     if verdict == "install":
         return replace(install, detail=f"{install.detail} ({detail})") if detail else install
     return DisplayBridgeState("present", f"{user} already holds the display bridge")
@@ -10185,6 +10196,12 @@ def display_bridge_launch_problem(
     return ""
 
 
+def _privileged_upgrade_check_command(project: str, deploy_ref: str | None) -> str:
+    """The boundary command that runs this upgrade's checks as root, read-only."""
+    commit = deploy_ref if deploy_ref and re.fullmatch(r"[0-9a-f]{40}", deploy_ref) else "<release commit>"
+    return f"switchyard privileged-action {project} preview-upgrade commit={commit}"
+
+
 def ensure_display_bridge(
     config: "ProjectConfig",
     *,
@@ -10192,6 +10209,7 @@ def ensure_display_bridge(
     dry_run: bool = False,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
+    root_check: str = "",
     **locations: Any,
 ) -> bool:
     """Install the display bridge a crossing window needs, the way provisioning does.
@@ -10209,6 +10227,19 @@ def ensure_display_bridge(
             f"switchyard: {config.project}'s presentation window would open with every tab "
             f"refused: {state.detail}. This upgrade stops before declaring it ready. Nothing "
             "was changed."
+        )
+        return False
+    if state.action == "unverified":
+        # The grant -- the half this process CAN read -- has already been judged
+        # and is right. The rule is root's to read, so the check that remains
+        # is root's, through the approved boundary rather than any widening of
+        # that file (SYRD-283). Not ready, and not refused either.
+        print_func(
+            f"switchyard: {config.project}'s display bridge could not be verified from here: "
+            f"{state.detail}. Its grant is correct; the sudoers rule beside it can only be "
+            "checked by root. Run the same upgrade check as root through the approved "
+            f"boundary: {root_check or 'switchyard privileged-action ' + config.project + ' preview-upgrade commit=<release commit>'}. "
+            "This run does not declare the tenant ready. Nothing was changed."
         )
         return False
     if dry_run:
@@ -31243,7 +31274,8 @@ def upgrade_project_command(
             or legacy_presentation_migration(planned, config_path=config_path).needed
         ):
             if not ensure_display_bridge(
-                planned, gui_user=pinned, dry_run=dry_run, runner=runner, print_func=print_func
+                planned, gui_user=pinned, dry_run=dry_run, runner=runner, print_func=print_func,
+                root_check=_privileged_upgrade_check_command(config.project, deploy_ref),
             ):
                 return 1
         if not dry_run:

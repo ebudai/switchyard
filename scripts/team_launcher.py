@@ -684,6 +684,45 @@ from scripts.role_sessions import (
     tmux_kill_session_by_name_args,
     _uses_fresh_session_per_ticket,
 )
+# Environment lookups (SYRD-313), a leaf: the pane entry points below and in
+# scripts/role_pane_entry.py take `DEFAULT_PANE_STATE_DIR` as a default
+# argument, so it is one object; the suites rebind both names here, and
+# `session_paths` reads them here.
+from scripts.launcher_env import (
+    DEFAULT_PANE_STATE_DIR,
+    _env_first,
+)
+# Provider resume stores, Hermes homes and resume verification (SYRD-313),
+# moved out whole. Named here because `role_sessions`, `role_command` and
+# `role_identity_cutover` read them through the launcher, and because
+# `team_launcher.<name>` is how tests reach them.
+from scripts.provider_resume import (
+    _claude_project_dir_for_workdir,
+    clear_unverified_resume_for_role,
+    CODEX_SESSIONS_DIR_NAME,
+    hermes_home_for_role,
+    HERMES_PRIVATE_HOME_ENTRIES,
+    HERMES_SHARED_HOME_ENTRIES,
+    _home_from_session_dir,
+    prepare_hermes_home_for_role,
+    _resume_launch_status,
+    RESUME_LAUNCH_TIMEOUT,
+    RESUME_LAUNCH_VERIFIED,
+    _resume_preflight_allows_attempt,
+    _uses_hermes,
+)
+# Role pane entry (SYRD-313), moved out whole. Named here because `main` and
+# `launch_project` below run it -- the suites patch `run_role_pane`,
+# `run_detached_role` and `ensure_visible_role_session_for_viewer` here -- and
+# because `presentation_controller`, `role_runtime` and `role_sessions` read
+# it through the launcher.
+from scripts.role_pane_entry import (
+    attach_role_to_slot,
+    ensure_visible_role_session_for_viewer,
+    run_detached_role,
+    run_role_pane,
+    tmux_new_session_args,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -752,25 +791,12 @@ RELEASE_ROLLBACK_SCHEMA = "switchyard.release-rollback.v1"
 NON_DECLARATIVE_WORKFLOW_SEED = "pgu-full"
 
 
-def _env_first(*names: str) -> str:
-    for name in names:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value
-    return ""
-
-
 DEFAULT_SESSION_DIR = (
     Path(_env_first("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")).expanduser()
     if _env_first("TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
     else Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     / LIVE_PGU_STATE_DIR_NAME
     / "pane-sessions"
-)
-DEFAULT_PANE_STATE_DIR = (
-    Path(_env_first("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")).expanduser()
-    if _env_first("TICKET_BOARD_PANE_STATE_DIR", "PGU_TICKET_BOARD_PANE_STATE_DIR")
-    else Path(f"/run/user/{os.getuid()}/pgu-ticket-board/pane-state")
 )
 USER_BIN_ENV = "TEAM_LAUNCHER_BIN_DIR"
 LEGACY_USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
@@ -977,45 +1003,6 @@ DESKTOP_FROM_HEADLESS_OPTION = "headless_option"
 DESKTOP_FROM_HOST_APPROVAL = "host_approval"
 DESKTOP_FROM_NEW_APPROVAL = "new_approval"
 DESKTOP_FROM_CHOSEN_HEADLESS = "chosen_headless"
-CLAUDE_PROJECTS_DIR_NAME = ".claude/projects"
-CODEX_SESSIONS_DIR_NAME = ".codex/sessions"
-HERMES_HOME_DIR_NAME = ".hermes"
-HERMES_SHARED_HOME_ENTRIES = (
-    ".env",
-    "SOUL.md",
-    "auth.json",
-    "auth.lock",
-    "bin",
-    "config.yaml",
-    "hooks",
-    "models_dev_cache.json",
-    "shell-hooks-allowlist.json",
-    "shell-hooks-allowlist.json.lock",
-    "skills",
-)
-HERMES_PRIVATE_HOME_ENTRIES = frozenset(
-    {
-        ".hermes_history",
-        ".skills_prompt_snapshot.json",
-        ".update_check",
-        "audio_cache",
-        "cache",
-        "cron",
-        "image_cache",
-        "logs",
-        "memories",
-        "pairing",
-        "sandboxes",
-        "sessions",
-        "state.db",
-        "state.db-shm",
-        "state.db-wal",
-    }
-)
-HERMES_SHARED_LOCK_GUARDS = {
-    "auth.lock": "auth.json",
-    "shell-hooks-allowlist.json.lock": "shell-hooks-allowlist.json",
-}
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 DETACHED_SESSION_STABILITY_SECONDS = 2.0
@@ -3048,49 +3035,6 @@ def _prepend_paths(path_value: str, directories: Sequence[str]) -> str:
     return ":".join(parts)
 
 
-def _ambient_pane_session_ids(environ: Mapping[str, str] | None = None) -> dict[str, str]:
-    source = os.environ if environ is None else environ
-    result: dict[str, str] = {}
-    for key in ("TICKET_BOARD_PANE_SESSION_ID", "PGU_PANE_SESSION_ID"):
-        value = str(source.get(key) or "").strip()
-        if value:
-            result[key] = value
-    return result
-
-
-def _ambient_session_conflict_for_role(
-    role: RoleConfig,
-    *,
-    session_dir: Path,
-    environ: Mapping[str, str] | None = None,
-) -> str:
-    recorded_session_id = session_id_for_role(role, session_dir)
-    if not recorded_session_id:
-        return ""
-    conflicts = [
-        f"{key}={value}"
-        for key, value in _ambient_pane_session_ids(environ).items()
-        if value != recorded_session_id
-    ]
-    if not conflicts:
-        return ""
-    return (
-        f"team-launcher: refusing to launch {role.role}; ambient pane session id "
-        f"{', '.join(conflicts)} does not match recorded session {recorded_session_id} "
-        f"for target {role.target}. Strip pane identity env or run from outside a pane."
-    )
-
-
-def clear_unverified_resume_for_role(role: RoleConfig, session_dir: Path) -> None:
-    path = session_dir / f"{session_file_name(role.target)}.resume_timeout"
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        print(f"team-launcher: failed to clear unverified resume marker for {role.role}: {exc}", file=sys.stderr)
-
-
 def _command_name(value: str) -> str:
     return Path(value.strip()).name
 
@@ -3109,206 +3053,6 @@ def role_pane_declaration(role: "RoleConfig") -> dict[str, Any]:
     """How a declared workflow describes this tenant's pane for `role`."""
     runtime, target = role_runtime_binding(role)
     return {"runtime": runtime, "target": target, "slot": role.slot}
-
-
-def _uses_agy_conversation_resume(role: RoleConfig) -> bool:
-    cli_name = _command_name(role.cli[0]) if role.cli else ""
-    return cli_name == "agy" and role.resume_mode == "flag" and role.resume_flag == "--conversation"
-
-
-def _uses_claude_resume(role: RoleConfig) -> bool:
-    cli_name = _command_name(role.cli[0]) if role.cli else ""
-    return cli_name == "claude" and role.resume_mode == "flag" and role.resume_flag == "--resume"
-
-
-def _uses_codex_resume(role: RoleConfig) -> bool:
-    cli_name = _command_name(role.cli[0]) if role.cli else ""
-    return cli_name == "codex" and role.resume_mode == "subcommand" and role.resume_subcommand == "resume"
-
-
-def _uses_hermes(role: RoleConfig) -> bool:
-    cli_name = _command_name(role.cli[0]) if role.cli else ""
-    return cli_name == "hermes"
-
-
-def agy_conversation_store_exists(session_id: str, *, root: Path | None = None) -> bool:
-    if not session_id:
-        return False
-    root = root or AGY_CONVERSATION_ROOT
-    return (root / "conversations" / f"{session_id}.db").is_file() or (root / "brain" / session_id).is_dir()
-
-
-def _home_from_session_dir(session_dir: Path) -> Path:
-    expanded = session_dir.expanduser()
-    parts = expanded.parts
-    for index in range(len(parts) - 1):
-        if parts[index] == ".local" and parts[index + 1] == "state":
-            return Path(*parts[:index])
-    return Path.home()
-
-
-def hermes_shared_home_for_session_dir(session_dir: Path) -> Path:
-    return _home_from_session_dir(session_dir) / HERMES_HOME_DIR_NAME
-
-
-def hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path:
-    role_home_name = session_file_name(role.target).removesuffix(".json")
-    return session_dir.expanduser().parent / "hermes-homes" / role_home_name
-
-
-def _same_path(left: Path, right: Path) -> bool:
-    return left.expanduser().resolve(strict=False) == right.expanduser().resolve(strict=False)
-
-
-def _symlink_shared_hermes_entry(source: Path, destination: Path) -> None:
-    if destination.is_symlink():
-        try:
-            if _same_path(destination.resolve(strict=False), source):
-                return
-        except OSError:
-            pass
-        destination.unlink()
-    elif destination.exists():
-        return
-    destination.symlink_to(source)
-
-
-def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path | None:
-    if not _uses_hermes(role):
-        return None
-    hermes_home = hermes_home_for_role(role, session_dir=session_dir)
-    _ensure_private_dir(hermes_home)
-    shared_home = hermes_shared_home_for_session_dir(session_dir)
-    for entry in HERMES_SHARED_HOME_ENTRIES:
-        if entry in HERMES_PRIVATE_HOME_ENTRIES:
-            continue
-        source = shared_home / entry
-        # Locks must live with the resource they guard. Hermes derives both
-        # of these lock paths from shared JSON files, so role-local locks would
-        # leave several panes writing the same JSON without mutual exclusion.
-        if not source.exists() and entry in HERMES_SHARED_LOCK_GUARDS:
-            guarded = shared_home / HERMES_SHARED_LOCK_GUARDS[entry]
-            if guarded.exists():
-                shared_home.mkdir(parents=True, exist_ok=True)
-                source.touch(mode=0o600, exist_ok=True)
-        if not source.exists():
-            continue
-        _symlink_shared_hermes_entry(source, hermes_home / entry)
-    return hermes_home
-
-
-def _session_record_transcript_path(record: dict[str, Any] | None) -> Path | None:
-    if record is None:
-        return None
-    payload = record.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    raw_path = str(payload.get("transcript_path") or "").strip()
-    return Path(raw_path).expanduser() if raw_path else None
-
-
-def _claude_project_dir_for_workdir(workdir: str, *, home: Path) -> Path:
-    absolute = str(Path(workdir).expanduser().resolve(strict=False))
-    project_key = "-" + absolute.strip("/").replace("/", "-")
-    return home / CLAUDE_PROJECTS_DIR_NAME / project_key
-
-
-def claude_session_store_exists(
-    role: RoleConfig,
-    session_id: str,
-    *,
-    session_dir: Path,
-    record: dict[str, Any] | None = None,
-) -> tuple[bool, str]:
-    transcript_path = _session_record_transcript_path(record)
-    if transcript_path is not None:
-        return transcript_path.is_file(), str(transcript_path)
-    store_path = _claude_project_dir_for_workdir(role.workdir, home=_home_from_session_dir(session_dir)) / f"{session_id}.jsonl"
-    return store_path.is_file(), str(store_path)
-
-
-def codex_session_store_exists(
-    session_id: str,
-    *,
-    session_dir: Path,
-    record: dict[str, Any] | None = None,
-) -> tuple[bool, str]:
-    transcript_path = _session_record_transcript_path(record)
-    if transcript_path is not None:
-        return transcript_path.is_file(), str(transcript_path)
-    sessions_root = _home_from_session_dir(session_dir) / CODEX_SESSIONS_DIR_NAME
-    if not session_id:
-        return False, str(sessions_root)
-    try:
-        for path in sessions_root.rglob(f"*-{session_id}.jsonl"):
-            if path.is_file():
-                return True, str(path)
-    except OSError:
-        pass
-    return False, f"{sessions_root}/**/*-{session_id}.jsonl"
-
-
-def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, session_dir: Path) -> tuple[bool, str]:
-    record = _session_record_for_role(role, session_dir)
-    if _uses_claude_resume(role):
-        found, location = claude_session_store_exists(role, session_id, session_dir=session_dir, record=record)
-        if found:
-            return True, ""
-        return (
-            False,
-            (
-                f"team-launcher: recorded claude session {session_id} for {role.role} "
-                f"is not present at {location}; starting fresh instead of passing claude --resume, "
-                "which exits when the conversation is missing"
-            ),
-        )
-    if _uses_codex_resume(role):
-        found, location = codex_session_store_exists(session_id, session_dir=session_dir, record=record)
-        if found:
-            return True, ""
-        return (
-            False,
-            (
-                f"team-launcher: recorded codex session {session_id} for {role.role} "
-                f"is not present at {location}; starting fresh instead of passing codex resume"
-            ),
-        )
-    if not _uses_agy_conversation_resume(role):
-        return True, ""
-    session_home = _home_from_session_dir(session_dir)
-    agy_root = (
-        session_home / AGY_CREDENTIAL_DIR_NAME
-        if session_home != Path.home()
-        else AGY_CONVERSATION_ROOT
-    )
-    if agy_conversation_store_exists(session_id, root=agy_root):
-        return True, ""
-    return (
-        False,
-        (
-            f"team-launcher: recorded agy conversation {session_id} for {role.role} "
-            "is not present in the local Antigravity store; starting fresh instead of relying "
-            "on agy --conversation, which silently falls back when the id is missing"
-        ),
-    )
-
-
-def tmux_new_session_args(
-    role: RoleConfig,
-    *,
-    session_dir: Path,
-    pane_state_dir: Path | None = None,
-    resume: bool = False,
-    bin_user: str = "",
-) -> list[str]:
-    shell_command = _quote_command(
-        cli_command_for_role(role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=resume, bin_user=bin_user)
-    )
-    return ["tmux", "new-session", "-d", "-s", role.tmux_session, "-c", role.workdir, "-n", role.role, shell_command]
-
-
-def tmux_attach_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "attach", "-t", role.tmux_session]
 
 
 def tmux_has_session_args(role: RoleConfig) -> list[str]:
@@ -3545,253 +3289,6 @@ def live_command_matches_role(
         return False
     actual = _command_name(str(proc.stdout).strip())
     return actual in expected
-
-
-RESUME_LAUNCH_VERIFIED = "verified"
-RESUME_LAUNCH_MISSING = "missing"
-RESUME_LAUNCH_TIMEOUT = "timeout"
-
-
-def _resume_launch_status(
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> str:
-    deadline = time.monotonic() + RESUME_STARTUP_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if live_command_matches_role(role, runner=runner):
-            return RESUME_LAUNCH_VERIFIED
-        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-            return RESUME_LAUNCH_MISSING
-        time.sleep(RESUME_STARTUP_POLL_SECONDS)
-    if live_command_matches_role(role, runner=runner):
-        return RESUME_LAUNCH_VERIFIED
-    if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        return RESUME_LAUNCH_MISSING
-    return RESUME_LAUNCH_TIMEOUT
-
-
-def _resume_launch_verified(
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> bool:
-    return _resume_launch_status(role, runner=runner) == RESUME_LAUNCH_VERIFIED
-
-
-def _detached_launch_verified(
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> bool:
-    if not _resume_launch_verified(role, runner=runner):
-        return False
-    deadline = time.monotonic() + DETACHED_SESSION_STABILITY_SECONDS
-    while time.monotonic() < deadline:
-        if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-            return False
-        if not live_command_matches_role(role, runner=runner):
-            return False
-        time.sleep(RESUME_STARTUP_POLL_SECONDS)
-    return (
-        runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-        and live_command_matches_role(role, runner=runner)
-    )
-
-
-def desktop_reload_is_safe(role: RoleConfig, pane_state_dir: Path) -> bool:
-    if not role.unset_env:
-        return True
-    from scripts.ticket_board.notify_listener import PaneActivityGate, PaneHookStateStore
-    gate = PaneActivityGate(state_store=PaneHookStateStore(pane_state_dir))
-    if gate.is_busy(role.target):
-        print(f"switchyard: {role.target} is busy; wait for an idle checkpoint before reloading desktop environment", file=sys.stderr)
-        return False
-    return True
-
-
-def run_role_pane(
-    role: RoleConfig,
-    *,
-    mode: str,
-    session_dir: Path,
-    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
-    force_reload: bool = False,
-    bin_user: str = "",
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> int:
-    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-    if mode == "attach":
-        if not exists:
-            print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
-            return 1
-        return runner(tmux_attach_args(role)).returncode
-    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
-    if conflict:
-        print(conflict, file=sys.stderr)
-        return 1
-    if mode == "reload":
-        if exists and not desktop_reload_is_safe(role, pane_state_dir):
-            return 1
-        if exists:
-            if not force_reload and not live_command_matches_role(role, runner=runner):
-                print(
-                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
-                    "rerun with --force to override",
-                    file=sys.stderr,
-                )
-                return 1
-            kill_proc = runner(tmux_kill_session_args(role))
-            if kill_proc.returncode != 0:
-                return int(kill_proc.returncode)
-        start_result = _start_role_session(
-            role,
-            session_dir=session_dir,
-            pane_state_dir=pane_state_dir,
-            prefer_resume=True,
-            seed_source="team_launcher.reload",
-            bin_user=bin_user,
-            runner=runner,
-        )
-        if start_result != 0:
-            return start_result
-        return runner(tmux_attach_args(role)).returncode
-    if mode in {"start", "attach-or-start"}:
-        if not exists:
-            start_result = _start_role_session(
-                role,
-                session_dir=session_dir,
-                pane_state_dir=pane_state_dir,
-                prefer_resume=True,
-                seed_source="team_launcher.start",
-                post_start_verifier=lambda: _resume_launch_verified(role, runner=runner),
-                bin_user=bin_user,
-                runner=runner,
-            )
-            if start_result != 0:
-                return start_result
-        return runner(tmux_attach_args(role)).returncode
-    raise SystemExit(f"unknown pane mode: {mode}")
-
-
-def run_detached_role(
-    role: RoleConfig,
-    *,
-    mode: str,
-    session_dir: Path,
-    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
-    force_reload: bool = False,
-    bin_user: str = "",
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> int:
-    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-    if mode == "attach":
-        if not exists:
-            print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
-            return 1
-        return 0
-    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
-    if conflict:
-        print(conflict, file=sys.stderr)
-        return 1
-    if mode == "reload":
-        if exists and not desktop_reload_is_safe(role, pane_state_dir):
-            return 1
-        if exists:
-            if not force_reload and not live_command_matches_role(role, runner=runner):
-                print(
-                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
-                    "rerun with --force to override",
-                    file=sys.stderr,
-                )
-                return 1
-            kill_proc = runner(tmux_kill_session_args(role))
-            if kill_proc.returncode != 0:
-                return int(kill_proc.returncode)
-        return _start_role_session(
-            role,
-            session_dir=session_dir,
-            pane_state_dir=pane_state_dir,
-            prefer_resume=True,
-            seed_source="team_launcher.reload",
-            post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
-            bin_user=bin_user,
-            runner=runner,
-        )
-    if mode in {"start", "attach-or-start"}:
-        if not exists:
-            return _start_role_session(
-                role,
-                session_dir=session_dir,
-                pane_state_dir=pane_state_dir,
-                prefer_resume=True,
-                seed_source="team_launcher.start",
-                post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
-                bin_user=bin_user,
-                runner=runner,
-            )
-        return 0
-    raise SystemExit(f"unknown detached role mode: {mode}")
-
-
-def ensure_visible_role_session_for_viewer(
-    role: RoleConfig,
-    *,
-    mode: str,
-    session_dir: Path,
-    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
-    force_reload: bool = False,
-    bin_user: str = "",
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> int:
-    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-    if mode == "attach":
-        if not exists:
-            print(f"tmux session {role.tmux_session} does not exist", file=sys.stderr)
-            return 1
-        return 0
-    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
-    if conflict:
-        print(conflict, file=sys.stderr)
-        return 1
-    if mode == "reload":
-        if exists and not desktop_reload_is_safe(role, pane_state_dir):
-            return 1
-        if exists:
-            if not force_reload and not live_command_matches_role(role, runner=runner):
-                print(
-                    f"refusing to reload {role.tmux_session}: live pane command does not match configured CLI; "
-                    "rerun with --force to override",
-                    file=sys.stderr,
-                )
-                return 1
-            kill_proc = runner(tmux_kill_session_args(role))
-            if kill_proc.returncode != 0:
-                return int(kill_proc.returncode)
-        return _start_role_session(
-            role,
-            session_dir=session_dir,
-            pane_state_dir=pane_state_dir,
-            prefer_resume=True,
-            seed_source="team_launcher.reload",
-            bin_user=bin_user,
-            runner=runner,
-        )
-    if mode in {"start", "attach-or-start"}:
-        if not exists:
-            return _start_role_session(
-                role,
-                session_dir=session_dir,
-                pane_state_dir=pane_state_dir,
-                prefer_resume=True,
-                seed_source="team_launcher.start",
-                post_start_verifier=lambda: _resume_launch_verified(role, runner=runner),
-                bin_user=bin_user,
-                runner=runner,
-            )
-        seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source="team_launcher.start")
-        return 0
-    raise SystemExit(f"unknown viewer role mode: {mode}")
 
 
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
@@ -20508,109 +20005,6 @@ def _write_role_visibility(
         raise SystemExit(f"team-launcher: cannot update launcher config {config_path}: {exc}") from exc
     ensure_owner_file(config, config_path, runner=runner)
     return load_project_config(config.project, config_path)
-
-
-def attach_role_to_slot(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    role_name: str,
-    slot: int,
-    session_dir: Path,
-    pane_state_dir: Path = DEFAULT_PANE_STATE_DIR,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    if slot < 0:
-        raise SystemExit("team-launcher: attach-role slot must be non-negative")
-    slot_count = _layout_slot_count(config)
-    if slot >= slot_count:
-        raise SystemExit(
-            f"team-launcher: cannot attach {role_name} to slot {slot}; layout {config.layout} has {slot_count} slot(s)"
-        )
-    role = _role_by_name(config, role_name)
-    occupant = next(
-        (
-            candidate
-            for candidate in config.roles
-            if candidate.role != role.role and not candidate.detached and candidate.slot == slot
-        ),
-        None,
-    )
-    if occupant is not None:
-        raise SystemExit(
-            f"team-launcher: cannot attach {role.role} to slot {slot}; slot {slot} is occupied by {occupant.role}"
-        )
-    if not role.detached:
-        if role.slot == slot:
-            print_func(f"team-launcher: role {role.role} is already attached to slot {slot}")
-            return 0
-        raise SystemExit(f"team-launcher: role {role.role} is already attached to slot {role.slot}")
-    visible_count = sum(1 for candidate in config.roles if not candidate.detached)
-    if visible_count >= MAX_VISIBLE_PANES_PER_WINDOW:
-        raise SystemExit(
-            f"team-launcher: cannot attach {role.role}; at most {MAX_VISIBLE_PANES_PER_WINDOW} panes "
-            "can be visible in one window; detach another role first"
-        )
-    conflict = _ambient_session_conflict_for_role(role, session_dir=session_dir)
-    if conflict:
-        print(conflict, file=sys.stderr)
-        return 1
-    exists = runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-    session_id = session_id_for_role(role, session_dir)
-    if not exists:
-        if not session_id:
-            print(f"team-launcher: cannot attach {role.role}; no live session or recorded resume id", file=sys.stderr)
-            return 1
-        preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
-        if not preflight_ok:
-            print(preflight_message, file=sys.stderr)
-            return 1
-    updated_config = _write_role_visibility(
-        config,
-        config_path=config_path,
-        role=role,
-        detached=False,
-        slot=slot,
-        runner=runner,
-    )
-    updated_role = _role_by_name(updated_config, role.role)
-    if not exists:
-        prepare_hermes_home_for_role(updated_role, session_dir=session_dir)
-        start_proc = runner(
-            tmux_new_session_args(updated_role, session_dir=session_dir, pane_state_dir=pane_state_dir, resume=True)
-        )
-        if start_proc.returncode != 0:
-            _write_role_visibility(
-                updated_config,
-                config_path=config_path,
-                role=updated_role,
-                detached=True,
-                slot=None,
-                runner=runner,
-            )
-            return int(start_proc.returncode)
-        resume_status = _resume_launch_status(updated_role, runner=runner)
-        if resume_status == RESUME_LAUNCH_VERIFIED:
-            clear_unverified_resume_for_role(updated_role, session_dir)
-            seed_initial_pane_idle_state(updated_role, pane_state_dir=pane_state_dir, source="team_launcher.attach_role")
-        else:
-            _write_role_visibility(
-                updated_config,
-                config_path=config_path,
-                role=updated_role,
-                detached=True,
-                slot=None,
-                runner=runner,
-            )
-            print(
-                f"team-launcher: resume for {updated_role.role} using session {session_id} was not verified; "
-                "leaving tmux session and session record intact",
-                file=sys.stderr,
-            )
-            return 1
-    print_func(f"team-launcher: attached role {role.role} to slot {slot}; refusing to relayout other panes")
-    return runner(tmux_attach_args(updated_role)).returncode
 
 
 def detach_role_from_slot(

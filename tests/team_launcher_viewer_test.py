@@ -8,8 +8,10 @@ from team_launcher_test_helpers import *
 def test_viewer_session_argument_is_required_and_has_no_global_default() -> None:
     signature = inspect.signature(team_launcher.launch_tmux_viewer_session)
     assert signature.parameters["viewer_session"].default is inspect.Parameter.empty
-    # The viewer launch moved to scripts/tmux_viewer.py (SYRD-309); both files are read.
-    for name in ("team_launcher.py", "tmux_viewer.py"):
+    # The viewer launch moved to scripts/tmux_viewer.py (SYRD-309) and making a
+    # role's session visible to it to scripts/role_pane_entry.py (SYRD-313);
+    # all three files are read.
+    for name in ("team_launcher.py", "tmux_viewer.py", "role_pane_entry.py"):
         assert "DEFAULT_VIEWER_SESSION" not in (ROOT / "scripts" / name).read_text(encoding="utf-8"), name
 
 

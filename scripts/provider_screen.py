@@ -21,8 +21,8 @@ reading, with no I/O:
 - `_replaced_frame_starts_at` finds where a redrawn frame begins.
 
 Driving the provider's session, owning the terminal and the tmux window is the
-session runner, which stays in `scripts/team_launcher.py` and reaches these
-through it.
+session runner, `scripts/provider_session.py` (SYRD-299), which imports these
+directly.
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-298). `team_launcher`
 imports this module at its top and still exports every name callers read there.

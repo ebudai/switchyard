@@ -41,7 +41,10 @@ os.environ.setdefault(
     "SWITCHYARD_PRIVILEGED_PROVISION_ROOT", "/nonexistent/switchyard-syrd240"
 )
 
-import team_launcher as tl  # noqa: E402
+# The canonical module, not a bare `team_launcher` copy: the migration code
+# lives in scripts/workflow_adoption.py since SYRD-303 and reads the launcher's
+# facilities from `scripts.team_launcher`, so that is where a patch must land.
+import scripts.team_launcher as tl  # noqa: E402
 
 CHECKS = 0
 

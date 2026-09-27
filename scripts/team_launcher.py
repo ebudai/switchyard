@@ -910,8 +910,10 @@ from scripts.pane_launcher_preflight import (
     _verify_pane_launcher_path,
 )
 from scripts.launch_phases import (
+    LaunchPreparation,
     LaunchSetup,
     _launch_runners_and_paths,
+    _prepare_launch,
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
@@ -4876,85 +4878,27 @@ def launch_project(
         config = prepare_project_desktop(config, runner=runner)
     if not dry_run:
         pane_script_path = _verify_pane_launcher_path(config, script_path=script_path, runner=worktree_runner)
-    failed_roles: dict[str, str] = {}
-    running_roles: list[RoleConfig] = []
-    reconcile_home: Path | None = None
-    #: Roles still carrying an older provider state than the account has,
-    #: because their session could not be ended. Their record is deliberately
-    #: not updated, so the next ordinary launch tries again (SYRD-191).
-    unreconciled_roles: set[str] = set()
-    if not dry_run:
-        ensure_launcher_checkout_current(
-            config,
-            runner=worktree_runner,
-            auto_deploy=not (
-                no_launcher_self_deploy
-                or _env_truthy_any(NO_LAUNCHER_SELF_DEPLOY_ENV, LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV)
-            ),
-            allow_stale=allow_stale_launcher,
-        )
-        if mode == "attach-or-start":
-            running_roles = _running_project_roles(config, runner=runner)
-            reconcile_home = owner_home or _owner_home_for_auth(
-                config.run_as_user or current_user_name()
-            )
-            running_roles, unreconciled_roles = _drop_roles_with_stale_provider_runtime(
-                config,
-                running_roles,
-                owner_home=reconcile_home,
-                runner=runner,
-                print_func=print_func,
-            )
-        ensure_configured_runtime_user(config, runner=runner)
-        ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
-        ensure_generated_project_pane_hooks(
-            config,
-            config_path=config_path,
-            script_path=pane_script_path,
-            pane_state_dir=effective_pane_state_dir,
-            runner=runner,
-        )
-        ensure_generated_project_board_skill(
-            config,
-            config_path=config_path,
-            script_path=pane_script_path,
-            runner=runner,
-            print_func=print_func,
-        )
-        seed_default_session_dir_from_legacy_sources(config.session_dir)
-        if mode == "attach-or-start":
-            worktree_roles = (
-                [role for role in config.roles if role.role not in {running.role for running in running_roles}]
-                if running_roles and config.control_repository is not None
-                else config.roles
-            )
-            failed_roles = _prepare_project_worktrees_for_launch(
-                config,
-                running_roles=running_roles,
-                runner=worktree_runner,
-            ).failed_roles
-            if worktree_roles and config.control_repository is not None and set(failed_roles) == {role.role for role in worktree_roles}:
-                reason = next(iter(failed_roles.values()), "unknown error")
-                print(f"team-launcher: failed to prepare control repository for {config.project}: {reason}", file=sys.stderr)
-                return 1
-        elif mode == "reload":
-            fetch_project_worktree_ref(config, runner=worktree_runner)
-            config = sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
-            config = prepare_project_desktop(config, runner=runner)
-        # Worktrees are created here, after the operator artifact has already
-        # run, so a fresh project reaches this point with trees still owned by
-        # the project owner. Say so every launch until the handoff is done,
-        # rather than starting roles that cannot write their own trees.
-        isolation_gaps = role_isolation_gaps(config)
-        if isolation_gaps:
-            print_func(
-                "team-launcher: refusing to launch " + config.project
-                + "; its resumable state is not ready for project-account runtime:\n  "
-                + "\n  ".join(isolation_gaps)
-                + f"\nRun `sudo switchyard upgrade {config.project}` after every live role is at a "
-                "resumable checkpoint. The migration leaves dedicated accounts intact."
-            )
-            return 1
+    launch_preparation = _prepare_launch(
+        config,
+        allow_stale_launcher=allow_stale_launcher,
+        config_path=config_path,
+        dry_run=dry_run,
+        effective_pane_state_dir=effective_pane_state_dir,
+        mode=mode,
+        no_launcher_self_deploy=no_launcher_self_deploy,
+        owner_home=owner_home,
+        pane_script_path=pane_script_path,
+        print_func=print_func,
+        runner=runner,
+        worktree_runner=worktree_runner,
+    )
+    if launch_preparation.exit_code is not None:
+        return launch_preparation.exit_code
+    config = launch_preparation.config
+    failed_roles = launch_preparation.failed_roles
+    running_roles = launch_preparation.running_roles
+    reconcile_home = launch_preparation.reconcile_home
+    unreconciled_roles = launch_preparation.unreconciled_roles
     materialize_layout(
         config,
         config_path=config_path,

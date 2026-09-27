@@ -151,8 +151,15 @@ def test_a_launch_preparation_reaches_its_seams_through_the_launcher() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     calls = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_prepare_project_worktrees_for_launch"]
-    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
-          "launch_project calls it at its one baseline site, by the launcher's own name")
+    # SYRD-340 moved that site, in launch_project's P5, to launch_phases, which
+    # calls it through the launcher.
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    phase_calls = [n for n in ast.walk(phases) if isinstance(n, ast.Call)
+                   and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_prepare_project_worktrees_for_launch"]
+    check(len(calls) + len(phase_calls) == 1 and all(isinstance(n.func, ast.Name) for n in calls)
+          and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                  and n.func.value.id == "launcher" for n in phase_calls),
+          "the launch calls it at its one baseline site: through the launcher from launch_phases")
     module = ast.parse((ROOT / "scripts" / "project_worktrees.py").read_text(encoding="utf-8"))
     function = next(n for n in module.body
                     if isinstance(n, ast.FunctionDef) and n.name == "_prepare_project_worktrees_for_launch")

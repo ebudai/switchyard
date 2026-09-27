@@ -19,6 +19,12 @@ rest of the launch reads. This pins what makes that safe:
 - **The launch is wired as before:** the board preflight still refuses before
   the phase runs, and the phase's runner is the one the next phase uses.
 
+SYRD-340 added P5, pre-launch preparation (`_prepare_launch`, returning a frozen
+`LaunchPreparation` whose `exit_code` is None to go on or the code the launch
+returns at once). Its cases below pin every branch, the order of every step, the
+runner each is given, the objects handed back, both refusals with their exact
+output, and the launch returning the phase's code before the layout is written.
+
 Every lookup is this test's own fake, patched on the launcher and recorded; no
 account, path, git, provider, GUI, board, socket or tmux is touched.
 """
@@ -37,7 +43,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 CHECKS = 0
-EXPORTED = ("LaunchSetup", "_launch_runners_and_paths")
+EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch")
 #: The phase's launcher lookups, each called once at most, through the launcher.
 SEAMS = ("current_user_name", "_owner_process_runner", "_owner_project_git_runner", "_control_repository_owned_roots",
          "default_pane_state_dir_for_user", "default_layout_output_path", "project_window_title")
@@ -347,7 +353,14 @@ def test_a_dry_run_carries_the_phases_paths_title_and_layout_owner_into_the_layo
     cfg = SimpleNamespace(project="p339", role_state_isolation=False, run_as_user="syrd339-owner", repository=None,
                           roles=[])
     printed = io.StringIO()
-    with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: sentinel,
+    from scripts.launch_phases import LaunchPreparation
+
+    def inert_p5(c: object, **k: object) -> LaunchPreparation:
+        # P5 is inert in a dry run; standing it in keeps any real preparation code out of this case.
+        return LaunchPreparation(exit_code=None, config=c, failed_roles={}, running_roles=[], reconcile_home=None,
+                                 unreconciled_roles=set())
+
+    with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: sentinel, _prepare_launch=inert_p5,
                  materialize_layout=lambda c, **k: laid_out.append(k),
                  ensure_layout_output_owner=lambda c, path, *, runner: owned.append((path, runner))):
         with contextlib.redirect_stdout(printed):
@@ -363,11 +376,303 @@ def test_a_dry_run_carries_the_phases_paths_title_and_layout_owner_into_the_layo
           f"and the plan carries the phase's title and layout path: {plan}")
 
 
+#: P5's launcher lookups, each read once, through the launcher (measured).
+P5_SEAMS = ("LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV", "NO_LAUNCHER_SELF_DEPLOY_ENV",
+            "_drop_roles_with_stale_provider_runtime", "_env_truthy_any", "_owner_home_for_auth",
+            "_prepare_project_worktrees_for_launch", "_running_project_roles",
+            "current_user_name", "ensure_configured_runtime_user", "ensure_generated_project_board_skill",
+            "ensure_generated_project_pane_hooks", "ensure_launcher_checkout_current", "ensure_owner_state_dirs",
+            "fetch_project_worktree_ref", "prepare_project_desktop", "role_isolation_gaps",
+            "seed_default_session_dir_from_legacy_sources", "sync_reload_config_to_live_sessions")
+P5_OUTPUTS = ("exit_code", "config", "failed_roles", "running_roles", "reconcile_home", "unreconciled_roles")
+PANES = Path("/nonexistent/syrd340/pane-state")
+PANE_SCRIPT = Path("/nonexistent/syrd340/pane")
+OWNER_HOME = Path("/nonexistent/syrd340/owner-home")
+
+
+def worktree_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    raise AssertionError(f"the preparation must not run anything itself: {argv}")
+
+
+class Preparation:
+    """P5's launcher lookups, answering from objects this test owns, into one ordered log."""
+
+    def __init__(self, *, env_flag: bool = False, running: tuple[str, ...] = (), failed: dict | None = None,
+                 gaps: list[str] | None = None, current: str = "syrd340-launcher", step_error: Exception | None = None):
+        self.env_flag, self.running, self.failed, self.gaps = env_flag, running, failed or {}, gaps or []
+        self.current, self.step_error = current, step_error
+        self.log: list[tuple] = []
+        self.kept: list = []
+        self.unreconciled = {"syrd340-unreconciled"}
+        self.worktree_result = SimpleNamespace(failed_roles=dict(self.failed))
+        self.synced = SimpleNamespace(project="p340-synced")
+        self.desktop = SimpleNamespace(project="p340-desktop")
+        self.auth_home = Path("/nonexistent/syrd340/auth-home")
+
+    def names(self, config: SimpleNamespace) -> dict[str, object]:
+        L = self.log
+
+        def running_roles(cfg, *, runner):
+            L.append(("running", runner))
+            return [r for r in cfg.roles if r.role in self.running]
+
+        def drop(cfg, running, *, owner_home, runner, print_func):
+            L.append(("drop", [r.role for r in running], owner_home, runner, print_func))
+            self.kept = list(running)
+            return self.kept, self.unreconciled
+
+        def runtime_user(cfg, *, runner):
+            L.append(("runtime-user", runner))
+            if self.step_error:
+                raise self.step_error
+
+        return dict(
+            NO_LAUNCHER_SELF_DEPLOY_ENV="SYRD340_NO_DEPLOY",
+            LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV="SYRD340_LEGACY_NO_DEPLOY",
+            _env_truthy_any=lambda *names: L.append(("env", names)) or self.env_flag,
+            ensure_launcher_checkout_current=lambda cfg, *, runner, auto_deploy, allow_stale: L.append(
+                ("checkout", runner, auto_deploy, allow_stale)),
+            _running_project_roles=running_roles,
+            current_user_name=lambda: L.append(("current",)) or self.current,
+            _owner_home_for_auth=lambda user: L.append(("auth-home", user)) or self.auth_home,
+            _drop_roles_with_stale_provider_runtime=drop,
+            ensure_configured_runtime_user=runtime_user,
+            ensure_owner_state_dirs=lambda cfg, *, pane_state_dir, runner: L.append(
+                ("owner-dirs", pane_state_dir, runner)),
+            ensure_generated_project_pane_hooks=lambda cfg, *, config_path, script_path, pane_state_dir, runner:
+            L.append(("hooks", config_path, script_path, pane_state_dir, runner)),
+            ensure_generated_project_board_skill=lambda cfg, *, config_path, script_path, runner, print_func: L.append(
+                ("board-skill", config_path, script_path, runner, print_func)),
+            seed_default_session_dir_from_legacy_sources=lambda session_dir: L.append(("seed", session_dir)),
+            _prepare_project_worktrees_for_launch=lambda cfg, *, running_roles, runner: L.append(
+                ("worktrees", [r.role for r in running_roles], runner)) or self.worktree_result,
+            fetch_project_worktree_ref=lambda cfg, *, runner: L.append(("fetch", runner)),
+            sync_reload_config_to_live_sessions=lambda cfg, *, config_path, runner: L.append(("sync", cfg, runner))
+            or self.synced,
+            prepare_project_desktop=lambda cfg, *, runner: L.append(("desktop", cfg, runner)) or self.desktop,
+            role_isolation_gaps=lambda cfg: L.append(("gaps", cfg)) or list(self.gaps),
+        )
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def p5_config(*, control: bool = True, owner: str | None = "syrd340-owner") -> SimpleNamespace:
+    return SimpleNamespace(project="p340", run_as_user=owner,
+                           roles=[SimpleNamespace(role=n) for n in ("alpha", "beta")],
+                           control_repository=Path("/nonexistent/syrd340/control") if control else None,
+                           session_dir=Path("/nonexistent/syrd340/sessions"))
+
+
+def prepare(prep: Preparation, cfg: SimpleNamespace, *, mode: str = "attach-or-start", dry_run: bool = False,
+            owner_home: object = OWNER_HOME, no_deploy: bool = False, printed: list | None = None):
+    import contextlib
+    import io
+
+    from scripts import launch_phases, team_launcher
+
+    printed = printed if printed is not None else []
+    stderr = io.StringIO()
+    with patched(team_launcher, **prep.names(cfg)), contextlib.redirect_stderr(stderr):
+        result = launch_phases._prepare_launch(
+            cfg, allow_stale_launcher="syrd340-allow-stale", config_path=CONFIG_PATH, dry_run=dry_run,
+            effective_pane_state_dir=PANES, mode=mode, no_launcher_self_deploy=no_deploy, owner_home=owner_home,
+            pane_script_path=PANE_SCRIPT, print_func=printed.append, runner=caller_runner,
+            worktree_runner=worktree_runner)
+    return result, stderr.getvalue(), printed
+
+
+def test_the_preparation_reads_every_launcher_lookup_through_the_launcher() -> None:
+    module = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_prepare_launch")
+    for name in P5_SEAMS:
+        uses = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(uses) == 1 and isinstance(uses[0].value, ast.Name) and uses[0].value.id == "launcher" and not bare,
+              f"P5 reads {name} at its one site, through the launcher")
+    bound = {a.arg for a in function.args.args + function.args.kwonlyargs}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute)
+                      and isinstance(n.value, ast.Name) and n.value.id == "launcher" and n.attr in bound})
+    check("launcher" not in bound and through == [], f"nothing P5 binds is read as the launcher's: {through}")
+    import sys as _sys
+
+    from scripts import launch_phases
+    check(launch_phases.sys is _sys, "sys is the module's own import, the one module object")
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_prepare_launch"]
+    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
+          "launch_project calls P5 at one site, by the launcher's own (patchable) name")
+    from scripts.launch_phases import LaunchPreparation
+    check(tuple(f.name for f in dataclasses.fields(LaunchPreparation)) == P5_OUTPUTS
+          and LaunchPreparation.__dataclass_params__.frozen,
+          "LaunchPreparation is frozen, exit_code first, then the five outputs in the order P5 assigns them")
+
+
+def test_p5_a_dry_run_prepares_nothing() -> None:
+    prep = Preparation(); cfg = p5_config()
+    result, err, printed = prepare(prep, cfg, dry_run=True)
+    check(prep.log == [] and err == "" and printed == [], f"a dry run asks nothing and says nothing: {prep.log}")
+    check(result.exit_code is None and result.config is cfg and result.failed_roles == {} and result.running_roles == []
+          and result.reconcile_home is None and result.unreconciled_roles == set(),
+          f"it goes on, with the caller's config and empty preparation: {result}")
+
+
+def test_p5_attach_or_start_prepares_in_order() -> None:
+    prep = Preparation(running=("alpha",), failed={"beta": "busy"}); cfg = p5_config(control=False)
+    result, err, printed = prepare(prep, cfg)
+    check(prep.kinds() == ["env", "checkout", "running", "drop", "runtime-user", "owner-dirs", "hooks", "board-skill",
+                           "seed", "worktrees", "gaps"],
+          f"the checkout, the running roles and their stale runtimes, then the account, state, hooks, skill, seed, "
+          f"worktrees and the isolation check: {prep.kinds()}")
+    entries = dict((e[0], e) for e in prep.log)
+    check(entries["checkout"] == ("checkout", worktree_runner, True, "syrd340-allow-stale")
+          and entries["env"] == ("env", ("SYRD340_NO_DEPLOY", "SYRD340_LEGACY_NO_DEPLOY")),
+          f"the checkout runs through the worktree runner, self-deploying unless the launcher's flags say not: "
+          f"{prep.log[:2]}")
+    check(entries["running"] == ("running", caller_runner)
+          and entries["drop"][1:4] == (["alpha"], OWNER_HOME, caller_runner) and "auth-home" not in prep.kinds(),
+          f"running roles through the caller's runner, reconciled against the given owner home: {entries['drop']}")
+    check(entries["owner-dirs"] == ("owner-dirs", PANES, caller_runner)
+          and entries["hooks"] == ("hooks", CONFIG_PATH, PANE_SCRIPT, PANES, caller_runner)
+          and entries["board-skill"][1:4] == (CONFIG_PATH, PANE_SCRIPT, caller_runner)
+          and entries["seed"] == ("seed", cfg.session_dir)
+          and entries["worktrees"] == ("worktrees", ["alpha"], worktree_runner),
+          f"state, hooks and skill from the phase's paths; worktrees through the worktree runner: {prep.log}")
+    check(result.exit_code is None and result.config is cfg and result.failed_roles is prep.worktree_result.failed_roles
+          and result.running_roles is prep.kept and result.reconcile_home is OWNER_HOME
+          and result.unreconciled_roles is prep.unreconciled and err == "" and printed == [],
+          f"it goes on, handing back the very objects the steps made: {result}")
+
+
+def test_p5_the_reconcile_home_is_looked_up_when_not_given() -> None:
+    prep = Preparation(); prepare(prep, p5_config(), owner_home=None)
+    check(("auth-home", "syrd340-owner") in prep.log and "current" not in prep.kinds(),
+          f"the owner's own auth home, without asking who is running: {prep.log}")
+    prep = Preparation(current="syrd340-me"); result, _, _ = prepare(prep, p5_config(owner=None), owner_home=None)
+    check(prep.kinds()[:4] == ["env", "checkout", "running", "current"] and ("auth-home", "syrd340-me") in prep.log
+          and result.reconcile_home is prep.auth_home, f"with no owner, the current user's: {prep.log}")
+
+
+def test_p5_the_self_deploy_switches() -> None:
+    prep = Preparation(); prepare(prep, p5_config(), no_deploy=True)
+    check(prep.log[0][:3] == ("checkout", worktree_runner, False) and "env" not in prep.kinds(),
+          f"an explicit no-self-deploy wins without reading the environment: {prep.log[:2]}")
+    prep = Preparation(env_flag=True); prepare(prep, p5_config())
+    check(prep.log[1][:3] == ("checkout", worktree_runner, False), f"so does the environment's: {prep.log[:2]}")
+
+
+def test_p5_reload_and_attach() -> None:
+    prep = Preparation(); cfg = p5_config()
+    result, _, _ = prepare(prep, cfg, mode="reload")
+    check(prep.kinds() == ["env", "checkout", "runtime-user", "owner-dirs", "hooks", "board-skill", "seed", "fetch",
+                           "sync", "desktop", "gaps"],
+          f"a reload fetches, syncs and prepares the desktop, and looks at no running role: {prep.kinds()}")
+    check(prep.log[7] == ("fetch", worktree_runner) and prep.log[8] == ("sync", cfg, caller_runner)
+          and prep.log[9] == ("desktop", prep.synced, caller_runner) and prep.log[10] == ("gaps", prep.desktop)
+          and result.config is prep.desktop and result.exit_code is None,
+          f"the synced config is the one prepared, and the prepared one is handed on: {prep.log[7:]}")
+    prep = Preparation(); result, _, _ = prepare(prep, cfg, mode="attach")
+    check(prep.kinds() == ["env", "checkout", "runtime-user", "owner-dirs", "hooks", "board-skill", "seed", "gaps"]
+          and result.config is cfg, f"a plain attach prepares no worktree and no reload: {prep.kinds()}")
+
+
+def test_p5_a_control_repository_that_cannot_be_prepared_stops_the_launch() -> None:
+    prep = Preparation(running=("alpha",), failed={"beta": "clone refused"})
+    result, err, printed = prepare(prep, p5_config(control=True))
+    check(result.exit_code == 1 and "gaps" not in prep.kinds() and printed == []
+          and err == "team-launcher: failed to prepare control repository for p340: clone refused\n",
+          f"every stopped role failed, so the launch stops, saying why on stderr: {result.exit_code} {err!r}")
+    prep = Preparation(failed={"alpha": "busy"})
+    result, err, _ = prepare(prep, p5_config(control=True))
+    check(result.exit_code is None and err == "" and "gaps" in prep.kinds()
+          and result.failed_roles == {"alpha": "busy"}, f"a partial failure goes on: {result}")
+    prep = Preparation(failed={"alpha": "a", "beta": "b"})
+    result, err, _ = prepare(prep, p5_config(control=False))
+    check(result.exit_code is None and err == "", "without a control repository, even a complete failure goes on")
+
+
+def test_p5_isolation_gaps_stop_the_launch() -> None:
+    prep = Preparation(gaps=["alpha is still dedicated", "beta too"])
+    result, err, printed = prepare(prep, p5_config())
+    check(result.exit_code == 1 and err == "" and printed == [
+        "team-launcher: refusing to launch p340; its resumable state is not ready for project-account runtime:\n  "
+        "alpha is still dedicated\n  beta too\nRun `sudo switchyard upgrade p340` after every live role is at a "
+        "resumable checkpoint. The migration leaves dedicated accounts intact."],
+          f"the launch stops, saying why through print_func: {printed}")
+
+
+def test_p5_a_failing_step_stops_the_phase() -> None:
+    refusal = PermissionError("syrd340: runtime user")
+    prep = Preparation(step_error=refusal)
+    try:
+        prepare(prep, p5_config()); raised = None
+    except PermissionError as exc:
+        raised = exc
+    check(raised is refusal and prep.kinds()[-1] == "runtime-user",
+          f"the step's failure reaches the caller, and nothing after it runs: {prep.kinds()}")
+
+
+def test_the_launch_returns_p5s_code_before_the_layout_and_hands_its_values_on() -> None:
+    import contextlib
+    import io
+
+    from scripts import team_launcher
+    from scripts.launch_phases import LaunchPreparation
+
+    order: list[str] = []
+    asked: list[dict] = []
+    stopped = LaunchPreparation(exit_code=7, config=None, failed_roles={}, running_roles=[], reconcile_home=None,
+                                unreconciled_roles=set())
+
+    def phase(cfg: object, **kwargs: object) -> LaunchPreparation:
+        order.append("prepare"); asked.append(kwargs)
+        return stopped
+
+    def never(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the layout was written after P5 stopped the launch")
+
+    from scripts.launch_phases import LaunchSetup
+    setup = LaunchSetup(worktree_runner=worktree_runner, role_process_runner=caller_runner,
+                        delegate_role_sessions_to_owner=False, effective_pane_state_dir=PANES,
+                        output_path=Path("/nonexistent/syrd340/layout.json"), window_title="P340",
+                        should_assign_layout_owner=False, pane_script_path=SCRIPT)
+    cfg = SimpleNamespace(project="p340", role_state_isolation=False, pane_launcher=None, run_as_user="syrd340-owner",
+                          repository=None, roles=[])
+    with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: setup, _prepare_launch=phase,
+                 materialize_layout=never,
+                 upgrade_generated_project_layout=lambda c, **k: order.append("upgrade")
+                 or SimpleNamespace(changed=False),
+                 _verify_pane_launcher_path=lambda c, **k: order.append("verify") or PANE_SCRIPT):
+        result = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
+                                              runner=caller_runner)
+    check(result == 7 and order == ["upgrade", "verify", "prepare"],
+          f"P4's checks run first, then P5, whose code the launch returns before the layout: {result} {order}")
+    check(asked[0]["pane_script_path"] is PANE_SCRIPT and asked[0]["dry_run"] is False and asked[0]["mode"] == "attach",
+          f"P5 is handed the pane script P4 verified, and the launch's own arguments: {asked[0]}")
+    prepared = SimpleNamespace(project="p340-prepared", run_as_user="syrd340-owner", repository=None, roles=[])
+    going_on = LaunchPreparation(exit_code=None, config=prepared, failed_roles={"x": "y"}, running_roles=[],
+                                 reconcile_home=None, unreconciled_roles=set())
+    laid_out: list[tuple] = []
+    printed = io.StringIO()
+    with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: setup,
+                 _prepare_launch=lambda c, **k: going_on,
+                 materialize_layout=lambda c, **k: laid_out.append((c, k["failed_roles"]))), \
+            contextlib.redirect_stdout(printed):
+        result = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
+                                              runner=caller_runner, dry_run=True, assign_layout_owner=False)
+    check(result == 0 and laid_out == [(prepared, going_on.failed_roles)]
+          and laid_out[0][1] is going_on.failed_roles,
+          f"going on, the layout is written from the prepared config and failures, the same objects: {laid_out}")
+
+
 #: Run first: a seam taken past the launcher must be caught before any
 #: behaviour check runs the real code it reached.
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
-             "test_the_call_site_the_seams_and_the_phases_own_names")
+             "test_the_call_site_the_seams_and_the_phases_own_names",
+             "test_the_preparation_reads_every_launcher_lookup_through_the_launcher")
 
 
 def main() -> int:

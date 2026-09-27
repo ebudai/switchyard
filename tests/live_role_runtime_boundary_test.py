@@ -143,10 +143,13 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 def test_the_calls_the_seams_and_the_functions_own_names() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     moved = ast.parse((ROOT / "scripts" / "live_role_runtime.py").read_text(encoding="utf-8"))
+    # SYRD-340 moved launch_project's P5, with its calls of the drop and the
+    # reload sync, into launch_phases; it calls them through the launcher.
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        moved_calls = [n for n in ast.walk(moved)
+        moved_calls = [n for tree in (moved, phases) for n in ast.walk(tree)
                        if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
         check(len(calls) + len(moved_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
               and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)

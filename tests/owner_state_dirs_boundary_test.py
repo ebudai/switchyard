@@ -41,6 +41,8 @@ CHECKS = 0
 
 EXPORTED = ("install_owner_state_dir_args", "_owner_state_roots", "_is_owner_state_path", "ensure_owner_state_dirs")
 #: Measured on the baseline: the launcher's own call sites (all in launch_project).
+#: SYRD-340 moved one of them, in launch_project's P5, to launch_phases, which
+#: calls it through the launcher; the total is unchanged.
 LAUNCHER_CALLS = {"ensure_owner_state_dirs": 3}
 #: Measured on the baseline: the moved code's calls, each through the launcher.
 MOVED_CALLS = {"current_user_name": 1, "runtime_dir_for_uid": 1, "_proc_failure_reason": 1,
@@ -151,8 +153,14 @@ def test_the_calls_the_seams_and_the_functions_own_names() -> None:
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline sites, by its own name")
+        phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+        phase_calls = [n for n in ast.walk(phases)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(phase_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in phase_calls),
+              f"{name} is called at its {count} baseline sites: by the launcher's own name there, "
+              "through the launcher from launch_phases")
     moved = ast.parse((ROOT / "scripts" / "owner_state_dirs.py").read_text(encoding="utf-8"))
     top = [n for n in moved.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     check(not any("team_launcher" in ast.dump(n) for n in top),

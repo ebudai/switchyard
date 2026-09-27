@@ -53,7 +53,9 @@ READ_ELSEWHERE = {
     "workflow_launcher": ("prepare_project_desktop",),
     "desktop_policy": ("configure_project_desktop",),
 }
-#: Measured on the baseline: the launcher's own call sites.
+#: Measured on the baseline: the launcher's own call sites. SYRD-340 moved one
+#: prepare_project_desktop site, in launch_project's P5 reload branch, to
+#: launch_phases, which calls it through the launcher; the totals are unchanged.
 LAUNCHER_CALLS = {"prepare_project_desktop": 6, "configure_project_desktop": 2}
 LAUNCHER_READS = ("prepare_project_desktop", "configure_project_desktop", "_load_json", "_owner_command_args",
                   "_write_json_atomic", "current_user_name")
@@ -175,11 +177,17 @@ def test_every_reader_reaches_its_names_through_the_launcher() -> None:
 
 def test_the_seams_and_the_functions_own_imports() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline sites, by its own patchable name")
+        phase_calls = [n for n in ast.walk(phases)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(phase_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in phase_calls),
+              f"{name} is called at its {count} baseline sites: by the launcher's own patchable name there, "
+              "through the launcher from launch_phases")
     moved = ast.parse((ROOT / "scripts" / "project_desktop.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in LAUNCHER_READS})

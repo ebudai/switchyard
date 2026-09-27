@@ -9,6 +9,12 @@ old position, by the launcher's own name.
   when the launch runs as another account -- and the pane-state directory,
   layout output, window title, layout-owner flag and pane script the rest of
   the launch uses, returned as a frozen `LaunchSetup`.
+- **P5, pre-launch preparation** (`_prepare_launch`, SYRD-340): the launcher
+  checkout, the running roles and their stale runtimes, the runtime user,
+  owner state, hooks, board skill and session seeding, the worktrees, the
+  reload's sync and the isolation check, returned as a frozen
+  `LaunchPreparation` whose `exit_code` is `None` to go on, or the code the
+  launch returns at once.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -18,12 +24,13 @@ imports `team_launcher` at its top.
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
-    from scripts.team_launcher import ProjectConfig
+    from scripts.team_launcher import ProjectConfig, RoleConfig
 
 
 @dataclass(frozen=True)
@@ -84,4 +91,139 @@ def _launch_runners_and_paths(
         window_title=window_title,
         should_assign_layout_owner=should_assign_layout_owner,
         pane_script_path=pane_script_path,
+    )
+
+
+@dataclass(frozen=True)
+class LaunchPreparation:
+    """What P5 hands the rest of `launch_project`: `exit_code` is None to go on,
+    else the code the launch returns at once; then the prepared values, in the
+    order P5 assigns them."""
+
+    exit_code: int | None
+    config: ProjectConfig
+    failed_roles: dict[str, str]
+    running_roles: list[RoleConfig]
+    reconcile_home: Path | None
+    unreconciled_roles: set[str]
+
+
+def _prepare_launch(
+    config: ProjectConfig,
+    *,
+    allow_stale_launcher: bool,
+    config_path: Path,
+    dry_run: bool,
+    effective_pane_state_dir: Path,
+    mode: str,
+    no_launcher_self_deploy: bool,
+    owner_home: Path | None,
+    pane_script_path: Path,
+    print_func: Callable[[str], None],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    worktree_runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> LaunchPreparation:
+    """P5 of `launch_project`, unchanged: the preparation before the layout is written."""
+    from scripts import team_launcher as launcher
+
+    failed_roles: dict[str, str] = {}
+    running_roles: list[RoleConfig] = []
+    reconcile_home: Path | None = None
+    #: Roles still carrying an older provider state than the account has,
+    #: because their session could not be ended. Their record is deliberately
+    #: not updated, so the next ordinary launch tries again (SYRD-191).
+    unreconciled_roles: set[str] = set()
+    if not dry_run:
+        launcher.ensure_launcher_checkout_current(
+            config,
+            runner=worktree_runner,
+            auto_deploy=not (
+                no_launcher_self_deploy
+                or launcher._env_truthy_any(launcher.NO_LAUNCHER_SELF_DEPLOY_ENV, launcher.LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV)
+            ),
+            allow_stale=allow_stale_launcher,
+        )
+        if mode == "attach-or-start":
+            running_roles = launcher._running_project_roles(config, runner=runner)
+            reconcile_home = owner_home or launcher._owner_home_for_auth(
+                config.run_as_user or launcher.current_user_name()
+            )
+            running_roles, unreconciled_roles = launcher._drop_roles_with_stale_provider_runtime(
+                config,
+                running_roles,
+                owner_home=reconcile_home,
+                runner=runner,
+                print_func=print_func,
+            )
+        launcher.ensure_configured_runtime_user(config, runner=runner)
+        launcher.ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
+        launcher.ensure_generated_project_pane_hooks(
+            config,
+            config_path=config_path,
+            script_path=pane_script_path,
+            pane_state_dir=effective_pane_state_dir,
+            runner=runner,
+        )
+        launcher.ensure_generated_project_board_skill(
+            config,
+            config_path=config_path,
+            script_path=pane_script_path,
+            runner=runner,
+            print_func=print_func,
+        )
+        launcher.seed_default_session_dir_from_legacy_sources(config.session_dir)
+        if mode == "attach-or-start":
+            worktree_roles = (
+                [role for role in config.roles if role.role not in {running.role for running in running_roles}]
+                if running_roles and config.control_repository is not None
+                else config.roles
+            )
+            failed_roles = launcher._prepare_project_worktrees_for_launch(
+                config,
+                running_roles=running_roles,
+                runner=worktree_runner,
+            ).failed_roles
+            if worktree_roles and config.control_repository is not None and set(failed_roles) == {role.role for role in worktree_roles}:
+                reason = next(iter(failed_roles.values()), "unknown error")
+                print(f"team-launcher: failed to prepare control repository for {config.project}: {reason}", file=sys.stderr)
+                return LaunchPreparation(
+                    exit_code=1,
+                    config=config,
+                    failed_roles=failed_roles,
+                    running_roles=running_roles,
+                    reconcile_home=reconcile_home,
+                    unreconciled_roles=unreconciled_roles,
+                )
+        elif mode == "reload":
+            launcher.fetch_project_worktree_ref(config, runner=worktree_runner)
+            config = launcher.sync_reload_config_to_live_sessions(config, config_path=config_path, runner=runner)
+            config = launcher.prepare_project_desktop(config, runner=runner)
+        # Worktrees are created here, after the operator artifact has already
+        # run, so a fresh project reaches this point with trees still owned by
+        # the project owner. Say so every launch until the handoff is done,
+        # rather than starting roles that cannot write their own trees.
+        isolation_gaps = launcher.role_isolation_gaps(config)
+        if isolation_gaps:
+            print_func(
+                "team-launcher: refusing to launch " + config.project
+                + "; its resumable state is not ready for project-account runtime:\n  "
+                + "\n  ".join(isolation_gaps)
+                + f"\nRun `sudo switchyard upgrade {config.project}` after every live role is at a "
+                "resumable checkpoint. The migration leaves dedicated accounts intact."
+            )
+            return LaunchPreparation(
+                exit_code=1,
+                config=config,
+                failed_roles=failed_roles,
+                running_roles=running_roles,
+                reconcile_home=reconcile_home,
+                unreconciled_roles=unreconciled_roles,
+            )
+    return LaunchPreparation(
+        exit_code=None,
+        config=config,
+        failed_roles=failed_roles,
+        running_roles=running_roles,
+        reconcile_home=reconcile_home,
+        unreconciled_roles=unreconciled_roles,
     )

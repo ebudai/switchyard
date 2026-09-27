@@ -10873,3 +10873,103 @@ helpers rather than with this closure:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 11,678 lines.
+
+### SYRD-380 (slice 18e): tenant release root preparation
+
+Measured on `20cc0e6`. The design was posted **before** any edit. A correction
+of two line numbers in it came **after** the WIP move: the `#:` block is
+7593-7598, not 7587-7592, because I had read my own plan's lead offset twice.
+No code depended on those numbers.
+
+**Moved:** the Director's six definitions, contiguous and in order, from
+`scripts/team_launcher.py` into the new `scripts/tenant_release_root.py`
+(261 lines). The launcher re-exports them in one explicit, unaliased
+import. They are `RELEASE_ROOT_WRITABLE_DIRS` (with its 6-line `#:` block),
+`RELEASE_ROOT_WRITABLE_FILES`, `release_root_repair_record_path`,
+`_open_release_root_entries` (with its nested `refuse` closure),
+`prepare_tenant_release_root` and `owner_release_root_problems`.
+- **Not moved:** `TrustedOwnerIdentity` and `trusted_owner_identity` stay
+  unchanged in the launcher, and are read through it at call time.
+- **Definition-time bindings:** only `dry_run=False` and the builtin `print`;
+  the constants are the same tuple literals. The module imports nothing of
+  Switchyard's at its top.
+- **Seams:** 18 call-time reads of 15 names in 4 functions,
+  exactly the Director's proposed facilities plus 4 moved siblings.
+- **Comments:** 14 comment lines moved, 6 of them the `#:` block.
+- **`_finish_upgrade_preview`** still reads `owner_release_root_problems` bare,
+  as a launcher global.
+- **The launcher** goes from 11,678 to 11,468 lines.
+- **Mover fix:** the mover's safety assertion stopped its first run before it
+  wrote anything, because it had counted the nested `refuse` as a launcher
+  global. Nested definitions were added to its locals, and it was rerun.
+
+**Guards: none widened.** The two name→count tables naming these count their
+own modules' functions (director_upgrade and upgrade_phases), and the two
+launcher-source readers inspect unchanged functions.
+
+**Proof.** The independent proof (`equiv380.py`) holds:
+- each of the six equals its baseline node, whole;
+- the seams are exactly the symtable body globals;
+- the nested closure, the locals and the except names are never seams;
+- scope: every global the module reads is bound in it or is a builtin;
+- the defaults and constants are as above;
+- the remaining launcher reads the six exactly where the baseline did;
+- comments are conserved;
+- every other `scripts/` file is unchanged.
+
+I planted 17 faults, and 17 are caught. One fault was first written
+malformed and was rewritten.
+
+**Evidence.**
+- **New boundary test:** `tests/tenant_release_root_boundary_test.py`,
+  80 checks. `os.fchown` and `os.fchmod` are recorders and never real.
+  The effective uid, the trusted identity, the account and home lookups, root's
+  baseline, the no-follow walk and the record writer are stand-ins.
+  - The entries are real files in owned temp. An `fstat` stand-in reports
+    fixture-chosen owners (root's legacy entries, another account's), so no
+    real ownership is needed.
+  - Every opened descriptor is checked closed on every path.
+  - It shows a launcher stand-in reaching all 15 seams.
+- **Mutations:** 42 of 42 are killed by assertions under the guard, with a
+  clean restore. The behaviour tests alone kill 39 of 42; the 3
+  left are import-structure mutants: the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Every run was under the in-process execution guard.**
+  - **Whole suites:** 3 per tree. 2 pass on both;
+    the new test is absent at baseline.
+  - **Not run:** `legacy_release_root_repair_test`, the one suite that drives
+    these for real. It is namespace-root: `unshare` with real `chown`. That is
+    excluded by the ticket.
+- **Containment:** live snapshots before and after; **no live change.** No real
+  ownership or permission operation ran.
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module from the release, with one set of objects, and the trusted owner
+  identity is still the launcher's.
+
+**Observation, pre-existing and not changed:** `_open_release_root_entries`
+reports a `releases` that is a regular file as "a symbolic link". It opens with
+`O_DIRECTORY`, the kernel answers `ENOTDIR`, and the code maps `ENOTDIR` to "a
+symbolic link", so its later "is not a directory" branch is unreachable for
+`releases/`. The refusal itself is correct; only its wording is wrong. My test
+pins today's wording.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the trusted owner identity -- 2 definitions, 65 lines (lines 5159-5225, not contiguous):
+  -   5159   12  TrustedOwnerIdentity  launcher callers outside: -; production readers outside the launcher: -
+  -   5173   53  trusted_owner_identity  launcher callers outside: -; production readers outside the launcher: ['scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/tenant_release_root.py', 'scripts/workflow_adoption.py']
+  - launcher names it reads (through the launcher once moved): 2: ['privileged_baseline_plan_path', 'root_controlled_problems_for']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 6: ['scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/tenant_release_root.py', 'scripts/workflow_adoption.py']
+  - test files naming any of them: 5 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the Director named this the start of the privilege-boundary extraction; the domain totals below are re-measured)
+  - it also reads 2 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['home_dir_for_user (scripts.host_accounts)', 'uid_for_user (scripts.host_accounts)']
+- Largest remaining launcher domains (`domains.py`):
+  -  2298 lines  206 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1437 lines   52 defs  privileged boundary, tenant control and repair
+  -  1389 lines   40 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 11,468 lines.

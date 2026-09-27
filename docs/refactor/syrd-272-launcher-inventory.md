@@ -10444,3 +10444,117 @@ implemented**:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 13,069 lines.
+
+### SYRD-376 (slice 18a): the upgrade journal, phases and pinned-source records
+
+Measured on `1683abf`. The design was posted **before** any edit, with one
+count correction also posted before any edit. That correction replaced a typed
+file count with the measured 12.
+
+**Moved:** 24 top-level definitions, in the launcher's order, from
+`scripts/team_launcher.py` into the new `scripts/upgrade_records.py`
+(626 lines). The launcher re-exports them in one explicit, unaliased
+import. They are the phase table and owners, `RoleAccountCutover`, root's
+journal and the tenant's projection, the unprivileged observation, root's
+pinned-source record, and the phase reports.
+- **The source was non-contiguous:** interleaved launcher code stays, including
+  the pending identities, `process_uid`, `privileged_upgrade_journal_path` and
+  `resolved_source_selection`.
+- **Leading comments move with their nodes,** as does the `@dataclass(frozen=True)`
+  decorator: 49 comment lines, 19 of them leading blocks.
+- **Nothing runs at load but what did:** `RoleAccountCutover`'s `dataclass`
+  (the module's own import, the same object), and `UPGRADE_PHASE_OWNERS`, built
+  from `UPGRADE_PHASES` just above it. The module imports nothing of Switchyard's
+  at its top.
+- **Seams:** 49 call-time reads of 27 names in 16 functions,
+  through `from scripts import team_launcher as launcher`. 16 of those names
+  are moved siblings, the constants included, so a launcher patch still reaches
+  each one. Two are launcher imports: `privileged_provision_dir` and
+  `DEFAULT_TENANT_RELEASE_DEPLOY_REF`.
+- **The rest of the launcher** reads four of them bare as launcher globals, in
+  `release_alignment`.
+- **Both root writers are unchanged:**
+  - staging name;
+  - `O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW` at 0600;
+  - write, then fchmod, then a best-effort fchown/chown;
+  - close in `finally`, then replace;
+  - the projection still follows a failed phase write.
+- **The launcher** goes from 13,069 to 12,546 lines.
+
+**Guards: none widened.** I measured every name→count table (12 files, each
+counting its own module's functions), every launcher-source reader (all of
+which inspect `upgrade_project_command`/`switchyard_main`), `__module__`
+users, and every launcher rebinding of a seam. The rebindings are:
+`record_upgrade_phase`, `record_release_phase_from_status`,
+`_write_privileged_json`, `privileged_provision_dir`,
+`switchyard_privileged_provision_root`, `privileged_artifact_mode` and
+`current_user_name`. All of them still reach the moved code.
+
+**Proof.** The independent proof (`equiv376.py`, symtable-based) holds:
+- each of the 24 equals its baseline node, whole;
+- the seams are exactly the body globals, none at definition time;
+- both writers' order is structural;
+- the bindings are as above;
+- the rest of the launcher is unchanged;
+- comments are conserved;
+- every other `scripts/` file is unchanged.
+
+I planted 20 faults, and 20 are caught. A first version of the writer
+clause crashed rather than failed on three faults; that was fixed before the
+recorded run.
+
+**Evidence.**
+- **New boundary test:** `tests/upgrade_records_boundary_test.py`, 209
+  checks, with owned temp files and stand-ins for euid, fchown/chown, the
+  privileged directory, the publisher, the account and the workflow lookups.
+  It shows a launcher stand-in reaching all 27 seams.
+- **Mutations:** 67 of 67 are killed by assertions under the guard, with a
+  clean restore. The behaviour tests alone kill 64 of 67; the 3
+  left are import-structure mutants: the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Every run was under the in-process execution guard.**
+  - **Whole suites:** 6 per tree, all owned-fake boundary suites. 4 pass on
+    both; 1 stops at the guard identically on both (a passwd lookup), and
+    I also ran it per case. The new test is absent at baseline.
+  - **Per case:** 73 cases per tree across 12 suites. 18 pass on
+    both; 55 stop at the guard identically on both, as limited pre-effect
+    parity only; 0 fail otherwise.
+  - **Excluded:** 105 cases, by a per-case closure screen. These are the
+    cases that drive `upgrade_project_command`/`finish_upgrade_command` or a
+    phase, the cases that fake root without redirecting the privileged root to
+    owned temp, and the cases that reference tmux, Konsole, systemctl, pkexec,
+    unshare or `/run/`.
+  - Refusal signatures compared: 73; differing: 0, after
+    normalizing the worktree root in truncated spawn text.
+- **Containment:** live snapshots before and after both runs; **no live
+  change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module from the release, with one set of objects and the same bindings.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: release alignment and the director's divergence report -- 6 definitions, 253 lines (lines 3313-9416, not contiguous):
+  -   3313    5  _read_deploy_sha_marker  launcher callers outside: -; production readers outside the launcher: -
+  -   3320   11  _current_tenant_release  launcher callers outside: -; production readers outside the launcher: ['scripts/tenant_release_target.py']
+  -   8347  103  ReleaseAlignment  launcher callers outside: -; production readers outside the launcher: ['scripts/project_status.py']
+  -   8452   17  _live_board_build_id  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   8471   77  release_alignment  launcher callers outside: -; production readers outside the launcher: ['scripts/project_status.py']
+  -   9377   40  director_release_divergence_report  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py']
+  - launcher names it reads (through the launcher once moved): 7: ['ProjectConfig', 'switchyard_shared_install_root', '_read_switchyard_release_marker', '_tenant_board_root_from_config_or_plan', 'privileged_upgrade_journal_path', 'declared_workflow_presence', '_open_board_url']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/director_upgrade.py', 'scripts/project_status.py', 'scripts/tenant_release_target.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - the other measured release/install/upgrade closures, for the order after it:
+  -   - tenant release status and deploy report: 13 definitions, 391 lines; launcher callers outside: ['_finish_upgrade_preview']; production readers: 5
+  -   - release root preparation: 8 definitions, 267 lines; launcher callers outside: ['_finish_upgrade_preview']; production readers: 7
+  -   - rollback and publication-remote records: 7 definitions, 183 lines; launcher callers outside: ['switchyard_main']; production readers: 1
+  - it also reads 4 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['read_upgrade_journal (scripts.upgrade_records)', 'read_upgrade_source (scripts.upgrade_records)', 'upgrade_phase_observation (scripts.upgrade_records)', 'upgrade_phase_state (scripts.upgrade_records)']
+- Largest remaining launcher domains (`domains.py`):
+  -  2406 lines   67 defs  release selection, install and upgrade
+  -  2258 lines  202 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1481 lines   55 defs  privileged boundary, tenant control and repair
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 12,546 lines.

@@ -51,13 +51,14 @@ READ_ELSEWHERE = {
     "agy_credential": ("default_gui_user",),
 }
 PATCHED_SEAMS = ("detected_invoking_desktop", "presentation_gui_user", "default_gui_user")
-#: Call sites in the launcher functions that stayed: replace_presentation_window_command
-#: (default_gui_user, twice), legacy_presentation_refusal (presentation_gui_user),
-#: launch_project (resolve_layout_mode, twice) and switchyard_new_command (once).
+#: The baseline call sites: replace_presentation_window_command (default_gui_user,
+#: twice), legacy_presentation_refusal (presentation_gui_user), launch_project
+#: (resolve_layout_mode, twice) and switchyard_new_command (once).
 LAUNCHER_CALLS = {"default_gui_user": 2, "presentation_gui_user": 1, "resolve_layout_mode": 3}
-#: Modules those launcher callers moved to (SYRD-328 moved legacy_presentation_refusal),
+#: Modules those launcher callers moved to (SYRD-328 moved legacy_presentation_refusal,
+#: SYRD-329 replace_presentation_window_command),
 #: whose calls must still go through the launcher; the totals are the baseline's.
-MOVED_CALLERS = ("legacy_presentation.py",)
+MOVED_CALLERS = ("legacy_presentation.py", "presentation_window_replacement.py")
 ACCOUNT_VARIABLES = ("TEAM_LAUNCHER_GUI_USER", "PGU_TEAM_LAUNCHER_GUI_USER", "SUDO_USER",
                      "SWITCHYARD_TENANT_CONTROL_CALLER")
 

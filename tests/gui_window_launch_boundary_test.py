@@ -132,10 +132,20 @@ def test_every_reader_reaches_its_names_through_the_launcher() -> None:
 
 def test_the_patched_seams_are_reached_through_the_launcher() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    calls = [n for n in ast.walk(launcher_tree)
-             if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "launch_konsole_window"]
-    check(len(calls) == 2 and all(isinstance(n.func, ast.Name) for n in calls),
-          "launch_project and replace_presentation_window_command call it by the launcher's patchable name")
+    # Two baseline sites: launch_project's, and replace_presentation_window_command's,
+    # which SYRD-329 moved to presentation_window_replacement, where it still calls
+    # through the launcher.
+    moved_trees = [ast.parse((ROOT / "scripts" / "presentation_window_replacement.py").read_text(encoding="utf-8"))]
+    for name, count in {"launch_konsole_window": 2}.items():
+        calls = [n for n in ast.walk(launcher_tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        moved_calls = [n for tree in moved_trees for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(moved_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id in ("launcher", "team_launcher") for n in moved_calls),
+              f"{name} is called at its {count} baseline sites, by the launcher's own name there and through "
+              "the launcher where a caller moved")
     moved = ast.parse((ROOT / "scripts" / "gui_window_launch.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in PATCHED_SEAMS + ("_env_first",)})

@@ -879,6 +879,9 @@ from scripts.legacy_presentation import (
     presentation_controller_enabled,
     presentation_section_for_roles,
 )
+from scripts.presentation_window_replacement import (
+    replace_presentation_window_command,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -18392,111 +18395,6 @@ def switchyard_present_command(
     )
     report = presentation_controller.presentation_report(config, config_path=config_path, runner=runner)
     presentation_controller.print_presentation_report(report, json_output=False, print_func=print_func)
-    return 0
-
-
-def replace_presentation_window_command(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    script_path: Path | None = None,
-    pane_state_dir: Path | None = None,
-    layout_mode: str = LAYOUT_MODE_AUTO,
-    layout_environ: dict[str, str] | None = None,
-    proc_root: Path | None = None,
-    euid_getter: Callable[[], int] = os.geteuid,
-    signaller: Callable[[int, int], None] = os.kill,
-    settle_seconds: float = 2.0,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    konsole_process_launcher: Callable[..., Any] | None = None,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    """Replace an unsafe root-owned presentation window, leaving workers running.
-
-    The tenant cannot signal a root process, so this is the operator's path off
-    a window that predates the repair. It touches exactly two things: the GUI
-    processes it found, and a freshly rendered layout. Worker sessions are
-    listed before and after and are never a target -- losing a role's session
-    would lose that role's work, which is a worse outcome than the window
-    (SYRD-43).
-    """
-    windows = unsafe_root_presentation_windows(config, config_path=config_path, proc_root=proc_root)
-    workers_before = [role.role for role in _running_project_roles(config, runner=runner)]
-    if not windows:
-        print_func(
-            f"switchyard: {config.project} has no root-owned presentation window; nothing to replace."
-        )
-        return 0
-    if euid_getter() != 0:
-        print_func(
-            unsafe_presentation_report(config, windows)
-            + "\nThis command must run as root: a tenant cannot signal a root process."
-        )
-        return 1
-    print_func(unsafe_presentation_report(config, windows))
-    for window in windows:
-        try:
-            signaller(window.pid, signal.SIGTERM)
-        except (OSError, ProcessLookupError) as exc:
-            print_func(f"switchyard: could not stop presentation pid {window.pid}: {exc}")
-    deadline = time.monotonic() + max(0.0, settle_seconds)
-    while time.monotonic() < deadline:
-        if not unsafe_root_presentation_windows(config, config_path=config_path, proc_root=proc_root):
-            break
-        time.sleep(0.1)
-    remaining = unsafe_root_presentation_windows(config, config_path=config_path, proc_root=proc_root)
-    for window in remaining:
-        try:
-            signaller(window.pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError) as exc:
-            print_func(f"switchyard: could not stop presentation pid {window.pid}: {exc}")
-    workers_after = [role.role for role in _running_project_roles(config, runner=runner)]
-    lost = [role for role in workers_before if role not in workers_after]
-    if lost:
-        print_func(
-            "switchyard: worker sessions that were running are no longer running: "
-            + ", ".join(lost)
-            + ". They were not a target of this command; start the project to recover them."
-        )
-    from scripts import presentation_controller
-
-    resolved_script = script_path or switchyard_pane_launcher_for(config)
-    output_path = default_layout_output_path(config, config_path=config_path)
-    if presentation_controller.presentation_enabled(config, config_path=config_path):
-        result = presentation_controller.launch_presentation(
-            config,
-            config_path=config_path,
-            layout=LAYOUT_MODE_SEPARATE,
-            runner=runner,
-            process_launcher=konsole_process_launcher,
-        )
-    else:
-        materialize_layout(
-            config,
-            config_path=config_path,
-            mode="attach-or-start",
-            script_path=resolved_script,
-            output_path=output_path,
-            pane_state_dir=pane_state_dir,
-        )
-        result = launch_konsole_window(
-            output_path,
-            project=config.project,
-            window_title=project_window_title(config),
-            gui_user=default_gui_user() or None,
-            runner=runner,
-            process_launcher=konsole_process_launcher,
-        )
-    if result != 0:
-        print_func(
-            f"switchyard: replaced the root-owned window but could not open a new one (exit {result}). "
-            f"Worker sessions are untouched; run `switchyard {config.project}` from the desktop account."
-        )
-        return result
-    print_func(
-        f"switchyard: replaced {config.project}'s presentation window as {default_gui_user()}; "
-        f"worker sessions still running: {', '.join(workers_after) or 'none'}"
-    )
     return 0
 
 

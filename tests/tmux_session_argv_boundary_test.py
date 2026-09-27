@@ -38,8 +38,8 @@ CHECKS = 0
 EXPORTED = ('live_command_matches_role', 'pane_command', 'pane_command_args', 'tmux_has_session_args',
             'tmux_kill_session_args')
 READ_ELSEWHERE = {
-    "tmux_has_session_args": ("provider_resume", "role_identity_cutover", "role_pane_entry", "role_runtime",
-                              "role_sessions", "worker_pool"),
+    "tmux_has_session_args": ("live_role_runtime", "provider_resume", "role_identity_cutover", "role_pane_entry",
+                              "role_runtime", "role_sessions", "worker_pool"),
     "tmux_kill_session_args": ("live_role_runtime", "role_pane_entry", "role_runtime", "role_sessions",
                                "worker_pool"),
     "live_command_matches_role": ("provider_resume", "role_identity_cutover", "role_pane_entry"),

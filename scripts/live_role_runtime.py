@@ -23,6 +23,7 @@ This module never imports `team_launcher` at its top.
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
@@ -206,3 +207,56 @@ def _drop_roles_with_stale_provider_runtime(
             + ": their runtimes started against older provider state than this account now has"
         )
     return keep, unreconciled
+
+def sync_reload_config_to_live_sessions(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+) -> ProjectConfig:
+    from scripts import team_launcher as launcher
+
+    raw_config = launcher._load_json(config_path)
+    raw_roles = raw_config.get("roles")
+    if not isinstance(raw_roles, list):
+        return config
+    role_by_name = {role.role: role for role in config.roles}
+    updated_roles: list[RoleConfig] = []
+    changed = False
+    for raw_role in raw_roles:
+        if not isinstance(raw_role, dict):
+            continue
+        role_name = str(raw_role.get("role") or "").strip()
+        role = role_by_name.get(role_name)
+        if role is None:
+            continue
+        # A role's live session is in that role's own tmux server, so reload has
+        # to inspect it there or it sees nothing and rewrites the config from a
+        # blank reading (SYRD-39).
+        role_runner = launcher.role_process_runner_for(config, role, runner=runner)
+        if role_runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            updated_roles.append(role)
+            continue
+        live_model = launcher.live_model_for_role(role, session_dir=launcher.role_session_dir(config, role), runner=role_runner)
+        if not live_model:
+            updated_roles.append(role)
+            continue
+        live_cli = launcher.live_cli_for_role(role, runner=role_runner)
+        next_role = role
+        if live_cli and live_cli != role.cli:
+            raw_role["cli"] = live_cli
+            if not set(live_cli) <= set(role.live_commands):
+                raw_role["live_commands"] = live_cli
+                next_role = replace(next_role, cli=live_cli, live_commands=live_cli)
+            else:
+                next_role = replace(next_role, cli=live_cli)
+            changed = True
+        if live_model != role.model:
+            raw_role["model"] = live_model
+            next_role = replace(next_role, model=live_model)
+            changed = True
+        updated_roles.append(next_role)
+    if not changed:
+        return config
+    launcher._write_json_atomic(config_path, raw_config)
+    return replace(config, roles=updated_roles)

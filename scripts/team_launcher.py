@@ -889,6 +889,7 @@ from scripts.live_role_runtime import (
     live_model_for_role,
     process_tree_argvs,
     roles_with_stale_provider_runtime,
+    sync_reload_config_to_live_sessions,
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
@@ -4965,58 +4966,6 @@ def report_tenant_release_upgrade(
             "hook binary, or pane launcher changes; this command does not restart panes"
         )
     return status
-
-
-def sync_reload_config_to_live_sessions(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> ProjectConfig:
-    raw_config = _load_json(config_path)
-    raw_roles = raw_config.get("roles")
-    if not isinstance(raw_roles, list):
-        return config
-    role_by_name = {role.role: role for role in config.roles}
-    updated_roles: list[RoleConfig] = []
-    changed = False
-    for raw_role in raw_roles:
-        if not isinstance(raw_role, dict):
-            continue
-        role_name = str(raw_role.get("role") or "").strip()
-        role = role_by_name.get(role_name)
-        if role is None:
-            continue
-        # A role's live session is in that role's own tmux server, so reload has
-        # to inspect it there or it sees nothing and rewrites the config from a
-        # blank reading (SYRD-39).
-        role_runner = role_process_runner_for(config, role, runner=runner)
-        if role_runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-            updated_roles.append(role)
-            continue
-        live_model = live_model_for_role(role, session_dir=role_session_dir(config, role), runner=role_runner)
-        if not live_model:
-            updated_roles.append(role)
-            continue
-        live_cli = live_cli_for_role(role, runner=role_runner)
-        next_role = role
-        if live_cli and live_cli != role.cli:
-            raw_role["cli"] = live_cli
-            if not set(live_cli) <= set(role.live_commands):
-                raw_role["live_commands"] = live_cli
-                next_role = replace(next_role, cli=live_cli, live_commands=live_cli)
-            else:
-                next_role = replace(next_role, cli=live_cli)
-            changed = True
-        if live_model != role.model:
-            raw_role["model"] = live_model
-            next_role = replace(next_role, model=live_model)
-            changed = True
-        updated_roles.append(next_role)
-    if not changed:
-        return config
-    _write_json_atomic(config_path, raw_config)
-    return replace(config, roles=updated_roles)
 
 
 def _privileged_upgrade_check_command(project: str, deploy_ref: str | None) -> str:

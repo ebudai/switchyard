@@ -20,15 +20,25 @@ and other modules read. This pins what makes that safe:
   record, which running roles are stale, and the drop's notices, order, account
   runner and unreconciled roles.
 
-The snapshot, pane pids, generations, runners and kill argv are this test's own
-fakes; no `ps` runs, no tmux is asked and no process or session is touched.
+SYRD-331 appended the reload's config sync, `sync_reload_config_to_live_sessions`,
+unchanged: the one consumer of the two detectors. It reads them, the config
+reader and writer, the role runner, the has-session argv and the session
+directory through the launcher, and `dataclasses.replace` as its own import --
+the very object the launcher holds. Its tenant-config write is pinned: the
+caller's path, the launcher's atomic writer, once, and only when a role changed.
+
+The snapshot, pane pids, generations, runners, kill argv, detections and the
+config loader and writer are this test's own fakes; no `ps` runs, no tmux is
+asked, no config is written and no process or session is touched.
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,17 +49,23 @@ if str(ROOT) not in sys.path:
 CHECKS = 0
 
 EXPORTED = ("process_tree_argvs", "_model_from_argv", "live_cli_for_role", "live_model_for_role",
-            "roles_with_stale_provider_runtime", "_drop_roles_with_stale_provider_runtime")
+            "roles_with_stale_provider_runtime", "_drop_roles_with_stale_provider_runtime",
+            "sync_reload_config_to_live_sessions")
 STAYED = ("KNOWN_LIVE_CLI_NAMES", "pane_pid_for_role", "_process_snapshot", "process_tree_command_names",
           "tmux_pane_pid_args", "role_process_runner_for")
-#: Measured on the baseline: the launcher's own call sites.
-LAUNCHER_CALLS = {"live_cli_for_role": 1, "live_model_for_role": 1, "_drop_roles_with_stale_provider_runtime": 1}
+#: Measured on the SYRD-330 baseline: the launcher's own call sites. The
+#: detectors' one caller each, the reload sync, moved here in SYRD-331 and calls
+#: them through the launcher; the totals are unchanged.
+LAUNCHER_CALLS = {"live_cli_for_role": 1, "live_model_for_role": 1, "_drop_roles_with_stale_provider_runtime": 1,
+                  "sync_reload_config_to_live_sessions": 1}
 #: Measured on the baseline: the moved code's calls, each through the launcher.
 MOVED_CALLS = {"_process_snapshot": 1, "pane_pid_for_role": 2, "process_tree_command_names": 1, "_command_name": 1,
                "process_tree_argvs": 1, "_model_from_argv": 1, "_session_payload_model_for_role": 1,
                "_role_cli_name": 2, "provider_state_store_problem": 1, "recorded_provider_state_generation": 1,
                "provider_state_generation": 1, "unreadable_provider_state_roles": 1,
-               "roles_with_stale_provider_runtime": 1, "role_process_runner_for": 1, "tmux_kill_session_args": 1}
+               "roles_with_stale_provider_runtime": 1, "role_process_runner_for": 2, "tmux_kill_session_args": 1,
+               "live_cli_for_role": 1, "live_model_for_role": 1, "_load_json": 1, "_write_json_atomic": 1,
+               "role_session_dir": 1, "tmux_has_session_args": 1}
 READS = ("KNOWN_LIVE_CLI_NAMES",)
 HOME = Path("/nonexistent/syrd330/owner-home")
 SESSIONS = Path("/nonexistent/syrd330/sessions")
@@ -116,21 +132,27 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
             "import scripts.team_launcher as t, scripts.live_role_runtime as r; "
             f"print(all(getattr(t, n) is getattr(r, n) for n in {EXPORTED!r}), "
             f"any(hasattr(r, n) for n in {STAYED!r}), "
-            "t.KNOWN_LIVE_CLI_NAMES == set(t.SUPPORTED_CONFIG_CLI_NAMES))"
+            "t.KNOWN_LIVE_CLI_NAMES == set(t.SUPPORTED_CONFIG_CLI_NAMES), "
+            "__import__('dataclasses').replace is r.replace is t.replace)"
         )
-        check(result.stdout.strip() == "True False True",
+        check(result.stdout.strip() == "True False True True",
               f"{' then '.join(order)}: every moved name is the launcher's too, and the shared ones stayed: "
               f"{result.stdout}{result.stderr[-600:]}")
 
 
 def test_the_calls_the_seams_and_the_functions_own_names() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    moved = ast.parse((ROOT / "scripts" / "live_role_runtime.py").read_text(encoding="utf-8"))
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline site, by its own name")
-    moved = ast.parse((ROOT / "scripts" / "live_role_runtime.py").read_text(encoding="utf-8"))
+        moved_calls = [n for n in ast.walk(moved)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(moved_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in moved_calls),
+              f"{name} is called at its {count} baseline site, by the launcher's own name there and through "
+              "the launcher where its caller moved")
     top = [n for n in moved.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     check(not any("team_launcher" in ast.dump(n) for n in top),
           "the launcher is never imported at the module's top, only when a function runs")
@@ -344,6 +366,162 @@ def test_stale_roles_are_ended_through_their_own_runner() -> None:
               "team-launcher: restarting alpha, zeta: their runtimes started against older provider state than "
               "this account now has"] and len(printed) == 4,
           f"the notice first, then each failure, then one restart line, sorted: {printed}")
+
+
+@dataclass(frozen=True)
+class SyncRole:
+    role: str
+    cli: list[str]
+    live_commands: list[str]
+    model: str
+
+
+@dataclass(frozen=True)
+class SyncConfig:
+    project: str
+    roles: list[SyncRole]
+
+
+CONFIG_PATH = Path("/nonexistent/syrd331/p331.json")
+
+
+class Reload:
+    """The launcher's names the sync calls, answering from what this test owns, into one event log.
+
+    A role the test did not expect to be read still gets an answer -- a model
+    and CLI no role has -- so reading it shows up as a change, not a crash.
+    """
+
+    def __init__(self, raw: object, running: dict[str, bool], models: dict[str, str],
+                 clis: dict[str, list[str]], *, write_error: Exception | None = None) -> None:
+        self.raw, self.running, self.models, self.clis = raw, running, models, clis
+        self.write_error = write_error
+        self.events: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        def runner_for(config: object, r: SyncRole, *, runner: object):
+            self.events.append(("runner", r.role, runner))
+
+            def role_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                self.events.append(("run", r.role, argv, kwargs))
+                return subprocess.CompletedProcess(argv, 0 if self.running[r.role] else 1, "", "")
+            role_runner.role = r.role
+            return role_runner
+
+        def write(path: Path, payload: dict) -> None:
+            self.events.append(("write", path, json.loads(json.dumps(payload))))
+            if self.write_error:
+                raise self.write_error
+
+        return dict(
+            _load_json=lambda path: self.events.append(("load", path)) or self.raw,
+            _write_json_atomic=write,
+            role_process_runner_for=runner_for,
+            tmux_has_session_args=lambda r: ["syrd331-has", r.role],
+            role_session_dir=lambda config, r: Path(f"/nonexistent/syrd331/sessions/{r.role}"),
+            live_model_for_role=lambda r, *, session_dir, runner: self.events.append(
+                ("model", r.role, session_dir, runner.role)) or self.models.get(r.role, "m-unasked"),
+            live_cli_for_role=lambda r, *, runner: self.events.append(("cli", r.role, runner.role))
+            or self.clis.get(r.role, ["syrd331-unasked"]),
+        )
+
+    def named(self, kind: str) -> list[tuple]:
+        return [e for e in self.events if e[0] == kind]
+
+
+def sync(reload: Reload, config: SyncConfig):
+    from scripts import live_role_runtime, team_launcher
+
+    with patched(team_launcher, **reload.names()):
+        return live_role_runtime.sync_reload_config_to_live_sessions(config, config_path=CONFIG_PATH, runner=RUNNER)
+
+
+def sync_role(name: str, cli: str = "syrd331-a", *, allowed: tuple[str, ...] = ("syrd331-a",),
+              model: str = "m-old") -> SyncRole:
+    return SyncRole(name, [cli], list(allowed), model)
+
+
+def test_a_config_with_no_role_list_is_left_alone() -> None:
+    config = SyncConfig("p331", [sync_role("r")])
+    for raw in ({}, {"roles": "not-a-list"}):
+        reload = Reload(raw, {}, {}, {})
+        check(sync(reload, config) is config and reload.events == [("load", CONFIG_PATH)],
+              f"no role list: the config comes back as it was, read once and never written: {reload.events}")
+
+
+def test_nothing_changed_writes_nothing() -> None:
+    roles = [sync_role("down"), sync_role("nomodel"), sync_role("same", model="m-same")]
+    config = SyncConfig("p331", roles)
+    raw = {"roles": ["junk", {"role": "ghost"}, {"role": " down "}, {"role": "nomodel"}, {"role": "same"}]}
+    reload = Reload(raw, {"down": False, "nomodel": True, "same": True}, {"nomodel": "", "same": "m-same"},
+                    {"same": ["syrd331-a"]})
+    result = sync(reload, config)
+    check(result is config and reload.named("write") == [],
+          f"a junk entry, an unknown role, a stopped role, no live model and a match change nothing, and "
+          f"nothing is written: {reload.named('write')}")
+    check([e[1] for e in reload.named("runner")] == ["down", "nomodel", "same"]
+          and all(e[2] is RUNNER for e in reload.named("runner")),
+          f"each known role gets its own account's runner, built from the caller's: {reload.named('runner')}")
+    check(reload.named("run") == [("run", n, ["syrd331-has", n], {"stdout": subprocess.DEVNULL,
+                                                                    "stderr": subprocess.DEVNULL})
+                                  for n in ("down", "nomodel", "same")],
+          f"its session is asked for through that runner: {reload.named('run')}")
+    check([e[1:] for e in reload.named("model")] == [("nomodel", Path("/nonexistent/syrd331/sessions/nomodel"),
+                                                      "nomodel"),
+                                                     ("same", Path("/nonexistent/syrd331/sessions/same"), "same")]
+          and [e[1:] for e in reload.named("cli")] == [("same", "same")],
+          f"a stopped role is not read; the model comes first, from the role's session directory, and with no "
+          f"live model the CLI is never asked: {reload.named('model')} {reload.named('cli')}")
+
+
+def test_live_changes_are_written_once_after_every_role_is_read() -> None:
+    roles = [sync_role("stopped"), sync_role("cli", cli="syrd331-a"),
+             sync_role("allowed", cli="syrd331-b", allowed=("syrd331-a", "syrd331-b")),
+             sync_role("model"), sync_role("both"), sync_role("unlisted")]
+    config = SyncConfig("p331", roles)
+    raw = {"project": "p331", "roles": [
+        {"role": "both", "cli": ["syrd331-a"], "model": "m-old"},
+        {"role": "stopped", "cli": ["syrd331-a"], "model": "m-old"},
+        {"role": "cli", "cli": ["syrd331-a"], "live_commands": ["syrd331-a"], "model": "m-old"},
+        {"role": "allowed", "cli": ["syrd331-b"], "live_commands": ["syrd331-a", "syrd331-b"], "model": "m-old"},
+        {"role": "model", "cli": ["syrd331-a"], "model": "m-old"}]}
+    reload = Reload(raw, {"stopped": False, "cli": True, "allowed": True, "model": True, "both": True},
+                    {"cli": "m-old", "allowed": "m-old", "model": "m-new", "both": "m-both"},
+                    {"cli": ["syrd331-c"], "allowed": ["syrd331-a"], "model": ["syrd331-a"], "both": ["syrd331-d"]})
+    result = sync(reload, config)
+    writes = reload.named("write")
+    check(len(writes) == 1 and writes[0][1] == CONFIG_PATH and reload.events[-1][0] == "write"
+          and reload.events[0] == ("load", CONFIG_PATH),
+          f"one write, to the caller's config path, after the config is read and every role is: {writes}")
+    check(writes[0][2] == {"project": "p331", "roles": [
+        {"role": "both", "cli": ["syrd331-d"], "live_commands": ["syrd331-d"], "model": "m-both"},
+        {"role": "stopped", "cli": ["syrd331-a"], "model": "m-old"},
+        {"role": "cli", "cli": ["syrd331-c"], "live_commands": ["syrd331-c"], "model": "m-old"},
+        {"role": "allowed", "cli": ["syrd331-a"], "live_commands": ["syrd331-a", "syrd331-b"], "model": "m-old"},
+        {"role": "model", "cli": ["syrd331-a"], "model": "m-new"}]},
+          f"the written config: a new CLI also becomes the live commands unless they already allow it, and a "
+          f"new model is recorded: {writes[0][2]}")
+    by = {r.role: r for r in result.roles}
+    check([r.role for r in result.roles] == ["both", "stopped", "cli", "allowed", "model"] and result.project == "p331",
+          f"the returned config holds the listed roles, in the file's order: {[r.role for r in result.roles]}")
+    check(by["stopped"] is roles[0] and by["cli"] == SyncRole("cli", ["syrd331-c"], ["syrd331-c"], "m-old")
+          and by["allowed"] == SyncRole("allowed", ["syrd331-a"], ["syrd331-a", "syrd331-b"], "m-old")
+          and by["model"] == SyncRole("model", ["syrd331-a"], ["syrd331-a"], "m-new")
+          and by["both"] == SyncRole("both", ["syrd331-d"], ["syrd331-d"], "m-both"),
+          f"and each role as it is now running: {result.roles}")
+
+
+def test_a_failed_write_is_not_swallowed() -> None:
+    config = SyncConfig("p331", [sync_role("r")])
+    reload = Reload({"roles": [{"role": "r", "model": "m-old"}]}, {"r": True}, {"r": "m-new"}, {"r": ["syrd331-a"]},
+                    write_error=PermissionError("syrd331: not the owner"))
+    try:
+        sync(reload, config)
+        raised = None
+    except PermissionError as exc:
+        raised = exc
+    check(raised is reload.write_error and len(reload.named("write")) == 1,
+          f"the writer's refusal reaches the caller: {raised!r}")
 
 
 #: Run first: a seam taken past the launcher must be caught before any

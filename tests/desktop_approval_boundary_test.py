@@ -50,9 +50,12 @@ EXPORTED = (
     'read_host_desktop_approval', 'switchyard_approve_desktop_command', 'write_desktop_approval_record',
     'write_host_desktop_approval',
 )
-#: The launcher's own call sites, measured on the baseline and unchanged.
+#: The call sites, measured on the baseline and unchanged in number: the
+#: launcher's own, and those of its callers SYRD-326 moved to desktop_policy,
+#: where they still call through the launcher.
 LAUNCHER_CALLS = {"read_host_desktop_approval": 3, "write_host_desktop_approval": 1,
                   "switchyard_approve_desktop_command": 1}
+MOVED_CALLERS = ("desktop_policy.py",)
 LAUNCHER_READS = ("_is_valid_owner_user_name", "_write_json_atomic", "expected_privileged_uid", "read_plan_no_follow")
 ME = pwd.getpwuid(os.getuid()).pw_name
 OPERATOR = SimpleNamespace(name="syrd325-operator", uid=1325, source="pkexec", known=True)
@@ -142,11 +145,17 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 
 def test_the_seams_and_the_functions_own_imports() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    moved_trees = [ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8")) for name in MOVED_CALLERS]
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline sites, by its own patchable name")
+        moved_calls = [n for tree in moved_trees for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(moved_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id in ("launcher", "team_launcher") for n in moved_calls),
+              f"{name} is called at its {count} baseline sites, by the launcher's own name there and through "
+              "the launcher where a caller moved")
     moved = ast.parse((ROOT / "scripts" / "desktop_approval.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in LAUNCHER_READS})

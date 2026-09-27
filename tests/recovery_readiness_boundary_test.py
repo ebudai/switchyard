@@ -159,8 +159,14 @@ def test_the_seams_the_local_import_and_the_defaults() -> None:
           "every default is the object it was: the shared timeout, print, subprocess.run, None")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     defined = {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)}
-    check(not defined & set(MOVED) and {"_finish_provision_after_packet", "read_board_declared_workflow"} <= defined,
-          f"the launcher defines none of them, and keeps the two interleaved definitions: {defined & set(MOVED)}")
+    # The two interleaved definitions did not come here. SYRD-366 moved the finish
+    # step on to scripts/resume_provision_command.py, which the launcher re-exports.
+    finish_exports = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.resume_provision_command"
+                      for a in n.names}
+    check(not defined & set(MOVED) and "read_board_declared_workflow" in defined
+          and "_finish_provision_after_packet" in defined | finish_exports
+          and not {"_finish_provision_after_packet", "read_board_declared_workflow"} & {f.name for f in functions},
+          f"the launcher defines none of them, and still has the two interleaved definitions: {defined & set(MOVED)}")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.recovery_readiness"]
     check(exported == [sorted(MOVED)], f"one explicit re-export of all three: {exported}")
     repair = ast.parse((ROOT / "scripts" / "repository_boundary_repair.py").read_text(encoding="utf-8"))

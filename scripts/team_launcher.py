@@ -921,9 +921,11 @@ from scripts.launch_phases import (
 )
 from scripts.upgrade_phases import (
     UpgradeIdentitiesDone,
+    UpgradeSourcePinned,
     UpgradeStateReady,
     UpgradeToolingStaged,
     _finish_upgrade,
+    _pin_upgrade_source,
     _recover_upgrade_state,
     _refresh_upgrade_artifacts,
     _stage_upgrade_tooling,
@@ -13531,111 +13533,25 @@ def upgrade_project_command(
     own -- creating the accounts, and the director's own board write -- are
     reported rather than attempted (SYRD-45).
     """
-    # First, before anything is recorded or repaired and before any phase.
-    # Every role launch needs a desktop policy, and a legacy tenant can predate
-    # them: live on mefp the upgrade ran to completion, reported nothing left to
-    # do, and the pane restart it was followed by suspended a working tenant and
-    # then refused to start it. Some phases restart roles themselves, so finding
-    # out later would strand them down mid-upgrade. Asked here, the answer costs
-    # nothing and changes nothing (SYRD-232).
-    desktop_choice, desktop_problems = upgrade_desktop_policy_decision(config, desktop_policy)
-    if desktop_problems:
-        for problem in desktop_problems:
-            print_func(f"switchyard: {problem}")
-        print_func(
-            f"switchyard: {'this dry run shows the upgrade would ' if dry_run else ''}"
-            f"{'stop' if dry_run else 'stopping'} before any phase, so {config.project} is not "
-            "declared ready and no pane restart should follow. Nothing was changed: no "
-            "artifact, account, release, access grant, board, listener or role session."
-        )
-        return 1
-    # Before the source is used for anything, because everything the later
-    # phases deploy is decided by it. An operator who pinned a release on the
-    # outer command gets the same release in every phase that follows, whether
-    # the next one is reached by this process or by the rerun the accounts phase
-    # asks for; an operator who pinned nothing here is filled in from what was
-    # pinned last time (SYRD-61).
-    pinned_explicitly = (
-        source_repo is not None or commit_git_dir is not None or deploy_ref is not None
+    source_pinned = _pin_upgrade_source(
+        config,
+        commit_git_dir=commit_git_dir,
+        deploy_ref=deploy_ref,
+        desktop_policy=desktop_policy,
+        dry_run=dry_run,
+        print_func=print_func,
+        publish_remote=publish_remote,
+        runner=runner,
+        source_repo=source_repo,
+        tooling_root=tooling_root,
     )
-    # Whether the deploy ref is somebody's choice or a default the resolver
-    # supplies. Only a choice may contradict an installed release's marker.
-    deploy_ref_chosen = deploy_ref is not None
-    # Read back first, then record what this invocation actually ends up using.
-    # Doing it the other way round would let an operator who pins one of the
-    # three erase the other two, and the phase after theirs would then be the
-    # one guessing.
-    source_repo, commit_git_dir, deploy_ref, recovered = resolve_pinned_upgrade_source(
-        config, source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref
-    )
-    deploy_ref_chosen = deploy_ref_chosen or bool(recovered)
-    if recovered:
-        print_func(
-            f"switchyard: {config.project} keeps the release this upgrade was pinned to: {recovered}"
-        )
-    if recovered and not pinned_explicitly:
-        refused = _recovered_pin_behind_host(
-            config,
-            source_repo=source_repo,
-            deploy_ref=deploy_ref,
-            dry_run=dry_run,
-            tooling_root=tooling_root,
-            runner=runner,
-            print_func=print_func,
-        )
-        if refused is not None:
-            return refused
-    if pinned_explicitly and not dry_run and os.geteuid() != 0:
-        print_func(
-            f"switchyard: this upgrade is not root, so {config.project}'s pinned release is not "
-            "recorded. The generated continuation will say so, and the privileged rerun has to "
-            "carry --source-repo, --commit-git-dir and --deploy-ref itself."
-        )
-    # Where this tenant publishes, recorded before anything else is written:
-    # everything after it decides by this remote, and a pin that cannot be kept
-    # has to stop the upgrade while nothing has changed yet. A warning printed
-    # after the phases, with the run carrying on and exiting 0, is what the
-    # first version of this did (SYRD-229 review).
-    pin_changed, pin_previous = False, ""
-    if publish_remote.strip():
-        pin_changed, pin_previous, pin_problems = record_publication_remote(
-            config.project, publish_remote, dry_run=dry_run, print_func=print_func
-        )
-        if pin_problems:
-            for problem in pin_problems:
-                print_func(f"switchyard: {problem}")
-            print_func(
-                f"switchyard: refusing to upgrade {config.project}: its publication remote could "
-                "not be recorded, and everything after this decides by it. Nothing was changed."
-            )
-            return 1
-    if pinned_explicitly:
-        durability = record_upgrade_source(
-            config,
-            source_repo=source_repo,
-            commit_git_dir=commit_git_dir,
-            deploy_ref=deploy_ref,
-            dry_run=dry_run,
-        )
-        if durability:
-            # Before any phase, so nothing is regenerated, no phase is recorded
-            # as safely resumable, and above all no continuation is advertised:
-            # a handoff that cannot carry the pin is the incident this ticket is
-            # about, and accepting the pin anyway would schedule it (SYRD-61).
-            for problem in durability:
-                print_func(f"switchyard: {problem}")
-            if pin_changed:
-                # So that "Nothing was changed" below stays true.
-                restored = restore_publication_remote(config.project, pin_previous)
-                if restored:
-                    print_func(f"switchyard: {restored}")
-            print_func(
-                f"switchyard: refusing to upgrade {config.project} with a release it cannot keep. "
-                "Its accounts phase hands the upgrade back through sudo, which carries neither "
-                "arguments nor environment, so a pin that is not durable is one the next phase "
-                "would have to guess at. Nothing was changed."
-            )
-            return 1
+    if not isinstance(source_pinned, UpgradeSourcePinned):
+        return source_pinned
+    desktop_choice = source_pinned.desktop_choice
+    deploy_ref_chosen = source_pinned.deploy_ref_chosen
+    source_repo = source_pinned.source_repo
+    commit_git_dir = source_pinned.commit_git_dir
+    deploy_ref = source_pinned.deploy_ref
     state_ready = _recover_upgrade_state(
         config,
         config_path=config_path,

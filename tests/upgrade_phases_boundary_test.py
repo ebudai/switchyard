@@ -59,6 +59,15 @@ dry-run planning, the presentation and display bridge, restore before
 repatriation, the reloads only for real work, and the partial cutover's report
 and revert; the desktop policy validator is patched where it lives, and config
 is a real frozen dataclass, so `replace` really runs.
+
+SYRD-351 added U1, desktop decision and source pinning (`_pin_upgrade_source`, a
+frozen `UpgradeSourcePinned`, 1 from three refusals and a stale recovered pin's
+own code -- 0 included). Its cases pin the desktop refusal before anything else,
+each pinned argument alone as explicit, the recovered pin said and checked only
+when nothing was given, the non-root warning, the remote recorded only when
+given and before the pin is made durable, the remote put back only when this run
+changed it, and the upgrade returning a refusal before any value is read or U2
+runs. The effective uid is a patched answer; no remote, pin or release is written.
 """
 
 from __future__ import annotations
@@ -77,7 +86,8 @@ if str(ROOT) not in sys.path:
 
 CHECKS = 0
 EXPORTED = ("UpgradeToolingStaged", "_stage_upgrade_tooling", "UpgradeIdentitiesDone", "_upgrade_identities_and_accounts",
-            "_finish_upgrade", "_refresh_upgrade_artifacts", "UpgradeStateReady", "_recover_upgrade_state")
+            "_finish_upgrade", "_refresh_upgrade_artifacts", "UpgradeStateReady", "_recover_upgrade_state",
+            "UpgradeSourcePinned", "_pin_upgrade_source")
 #: U4's launcher lookups and how many times each is read (measured on the SYRD-346 baseline: 16 reads of 9 names).
 SEAMS = {"_staged_tooling_dir": 1, "refresh_role_pane_hooks": 2, "resolve_trusted_upgrade_release": 2,
          "remove_tenant_publication_boundary": 2, "remove_untrusted_role_account_migration": 1,
@@ -258,9 +268,9 @@ def test_the_seams_the_phases_own_names_and_the_call_site() -> None:
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
           "the upgrade calls U4 by the launcher's own (patchable) name")
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 4]]
-    # U4 was statement [43]; SYRD-349 folded U3's fourteen statements into one ([30]), and SYRD-350 U2's
-    # thirteen into six, so it is [23] now.
-    check(at == 23 and wiring == ["if not isinstance(tooling_staged, UpgradeToolingStaged):\n    return tooling_staged",
+    # U4 was statement [43]; SYRD-349 folded U3's fourteen statements into one ([30]), SYRD-350 U2's
+    # thirteen into six ([23]), and SYRD-351 U1's twelve into seven, so it is [18] now.
+    check(at == 18 and wiring == ["if not isinstance(tooling_staged, UpgradeToolingStaged):\n    return tooling_staged",
                                   "trusted_release_root = tooling_staged.trusted_release_root",
                                   "publication_detail = tooling_staged.publication_detail"],
           f"the upgrade calls U4 at its old position, returns a refusal before reading either value, then takes both: "
@@ -278,7 +288,7 @@ def run_wiring(answer: object):
     """The upgrade's own call, dispatch and unpacking, compiled from the launcher and run against a stand-in U4."""
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
-    statements = upgrade.body[23:27]
+    statements = upgrade.body[18:22]
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in (
             "config", "config_path", "deploy_ref", "deploy_ref_chosen", "dry_run", "effective_source_repo",
@@ -573,8 +583,8 @@ def test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local()
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
           "the upgrade calls U5 by the launcher's own (patchable) name")
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 4]]
-    # U5 was statement [47]; [34] after SYRD-349, [27] after SYRD-350.
-    check(at == 27 and wiring == ["if not isinstance(identities_done, UpgradeIdentitiesDone):\n    return identities_done",
+    # U5 was statement [47]; [34] after SYRD-349, [27] after SYRD-350, [22] after SYRD-351.
+    check(at == 22 and wiring == ["if not isinstance(identities_done, UpgradeIdentitiesDone):\n    return identities_done",
                                   "config = identities_done.config",
                                   "release_report_config = identities_done.release_report_config"],
           f"at U5's old position, a refusal is returned before either value is read: {at} {wiring}")
@@ -793,7 +803,7 @@ def run_u5_wiring(answer: object):
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=[*upgrade.body[27:31], ast.parse("return ('went on', config, release_report_config)").body[0]],
+        body=[*upgrade.body[22:26], ast.parse("return ('went on', config, release_report_config)").body[0]],
         decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeIdentitiesDone
     asked: list[tuple] = []
@@ -904,7 +914,7 @@ def test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade() -> Non
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
     tail = upgrade.body[-1]
-    check(len(upgrade.body) == 32 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
+    check(len(upgrade.body) == 27 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
           and isinstance(tail.value.func, ast.Name) and tail.value.func.id == "_finish_upgrade"
           and {k.arg: ast.unparse(k.value) for k in tail.value.keywords}.get("release_report_config") == "release_report_config",
           f"the upgrade ends by returning U6's answer, called by the launcher's own name at U6's old position: "
@@ -1023,7 +1033,7 @@ def test_the_upgrade_returns_u6s_answer_after_u5() -> None:
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=upgrade.body[27:32], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+        body=upgrade.body[22:27], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeIdentitiesDone
     for u5_answer in (Code(4), "continue"):
         asked: list[tuple] = []
@@ -1138,9 +1148,9 @@ def test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config() -> N
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_refresh_upgrade_artifacts")), None)
-    check(at == 22 and isinstance(upgrade.body[at].value.func, ast.Name)
+    check(at == 17 and isinstance(upgrade.body[at].value.func, ast.Name)
           and ast.unparse(upgrade.body[at].targets[0]) == "config"
-          and [ast.unparse(n) for n in upgrade.body[19:22]] == ["release_report_config = config",
+          and [ast.unparse(n) for n in upgrade.body[14:17]] == ["release_report_config = config",
                                                                  "trusted_release_root: Path | None = None",
                                                                  "publication_detail = ''"],
           "the upgrade assigns U3's config at U3's old position, by the launcher's own name, after the report config "
@@ -1250,7 +1260,7 @@ def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=[*upgrade.body[19:23],
+        body=[*upgrade.body[14:18],
               ast.parse("return config, release_report_config, trusted_release_root, publication_detail").body[0]],
         decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     new = SimpleNamespace(name="u3 config")
@@ -1392,7 +1402,7 @@ def test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> 
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_recover_upgrade_state")), None)
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 6]] if at is not None else []
-    check(at == 13 and isinstance(upgrade.body[at].value.func, ast.Name) and wiring == [
+    check(at == 8 and isinstance(upgrade.body[at].value.func, ast.Name) and wiring == [
         "if not isinstance(state_ready, UpgradeStateReady):\n    return state_ready",
         "source_repo = state_ready.source_repo", "effective_source_repo = state_ready.effective_source_repo",
         "config = state_ready.config", "cutover = state_ready.cutover"]
@@ -1555,7 +1565,7 @@ def test_the_upgrade_returns_u2s_refusal_and_unpacks_its_state() -> None:
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=[*upgrade.body[13:20],
+        body=[*upgrade.body[8:15],
               ast.parse("return source_repo, effective_source_repo, config, cutover, release_report_config").body[0]],
         decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeStateReady
@@ -1574,10 +1584,296 @@ def test_the_upgrade_returns_u2s_refusal_and_unpacks_its_state() -> None:
             check(result is answer, f"a refusal is returned as the very object, before anything after U2: {result!r}")
 
 
+# --- U1: desktop decision and source pinning (SYRD-351) ----------------------------------------------------------------
+
+#: U1's launcher lookups and how many times each is read (measured on the SYRD-351 baseline: 6 reads of 6 names).
+U1_SEAMS = {"upgrade_desktop_policy_decision": 1, "resolve_pinned_upgrade_source": 1, "_recovered_pin_behind_host": 1,
+            "record_publication_remote": 1, "record_upgrade_source": 1, "restore_publication_remote": 1}
+U1_TOOLING = Path("/nonexistent/syrd351/tooling")
+U1_REMOTE = "git@example.invalid:syrd351.git"
+#: What the caller hands U1 when it pins nothing.
+UNPINNED = dict(source_repo=None, commit_git_dir=None, deploy_ref=None)
+
+
+class Pinning:
+    """U1's launcher facilities and the effective uid, answering from objects this test owns, into one ordered log."""
+
+    def __init__(self, *, desktop_problems: list | None = None, recovered: str = "", refused: object = None,
+                 euid: int = 0, pin_changed: bool = False, pin_problems: list | None = None,
+                 durability: list | None = None, restored: str = "", error: Exception | None = None) -> None:
+        self.choice = {"mode": "syrd351-choice"}
+        self.desktop_problems = desktop_problems or []
+        self.recovered, self.refused, self.euid = recovered, refused, euid
+        self.pin_changed, self.pin_problems = pin_changed, pin_problems or []
+        self.durability, self.restored, self.error = durability or [], restored, error
+        #: What the resolver answers: objects of this test's own, so identity shows they are what goes on.
+        self.repo, self.cache, self.ref = Path("/nonexistent/syrd351/resolved"), "syrd351-cache", "syrd351-ref"
+        self.log: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+
+        def resolve(config, *, source_repo, commit_git_dir, deploy_ref):
+            L.append(("resolve", config, dict(source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref)))
+            if self.error:
+                raise self.error
+            return self.repo, self.cache, self.ref, self.recovered
+
+        return dict(
+            upgrade_desktop_policy_decision=lambda config, desktop_policy:
+                L.append(("desktop", config, desktop_policy)) or (self.choice, list(self.desktop_problems)),
+            resolve_pinned_upgrade_source=resolve,
+            _recovered_pin_behind_host=lambda config, **kw: L.append(("stale?", config, kw)) or self.refused,
+            record_publication_remote=lambda project, remote, **kw: L.append(("remote", project, remote, kw))
+                or (self.pin_changed, "syrd351-previous", list(self.pin_problems)),
+            record_upgrade_source=lambda config, **kw: L.append(("durable", config, kw)) or list(self.durability),
+            restore_publication_remote=lambda project, previous: L.append(("restore", project, previous)) or self.restored,
+        )
+
+    def geteuid(self) -> int:
+        self.log.append(("euid?",))
+        return self.euid
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def u1(pin: Pinning, *, dry_run: bool = False, publish_remote: str = "", desktop_policy: object = None,
+       source_repo: object = None, commit_git_dir: object = None, deploy_ref: object = None):
+    from scripts import team_launcher, upgrade_phases
+
+    said: list[str] = []
+    config = SimpleNamespace(project=PROJECT, name="syrd351-config")
+    with patched(team_launcher, **pin.names()), patched(os, geteuid=pin.geteuid):
+        result = upgrade_phases._pin_upgrade_source(
+            config, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref, desktop_policy=desktop_policy,
+            dry_run=dry_run, print_func=said.append, publish_remote=publish_remote, runner=refusing_runner,
+            source_repo=source_repo, tooling_root=U1_TOOLING)
+    return result, said, config
+
+
+def test_u1_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> None:
+    text = (ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8")
+    module = ast.parse(text)
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_pin_upgrade_source")
+    for name, count in U1_SEAMS.items():
+        through = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name
+                   and isinstance(n.value, ast.Name) and n.value.id == "launcher"]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(through) == count and not bare, f"U1 reads {name} at its {count} site(s), through the launcher")
+    geteuid = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == "geteuid"]
+    check(len(geteuid) == 1 and isinstance(geteuid[0].value, ast.Name) and geteuid[0].value.id == "os",
+          "the effective uid is asked of the module's own os, once")
+    bools = [n for n in ast.walk(function) if isinstance(n, ast.Call) and ast.unparse(n.func) in ("bool", "launcher.bool")]
+    check(len(bools) == 1 and isinstance(bools[0].func, ast.Name), "bool is the builtin, called bare, once")
+    bound = {a.arg for a in ast.walk(function) if isinstance(a, ast.arg)}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                      and n.value.id == "launcher" and n.attr in bound | {"os", "bool", "Path", "print"}})
+    check(through == [], f"nothing U1 binds, nor os or a builtin, is read as the launcher's: {through}")
+    source = ast.get_source_segment(text, function) or ""
+    check("(SYRD-232)" in source and "(SYRD-229 review)" in source,
+          "the leading desktop comment and the publication remote's comment moved with the phase")
+    from scripts import upgrade_phases
+    fields = dataclasses.fields(upgrade_phases.UpgradeSourcePinned)
+    check([f.name for f in fields] == ["desktop_choice", "deploy_ref_chosen", "source_repo", "commit_git_dir", "deploy_ref"]
+          and upgrade_phases.UpgradeSourcePinned.__dataclass_params__.frozen, f"a frozen five-field continuation: {fields}")
+    launcher_text = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+    launcher = ast.parse(launcher_text)
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    check(ast.get_docstring(upgrade, clean=False).startswith("Run the privileged phases of a tenant upgrade, in order")
+          and "(SYRD-232)" not in (ast.get_source_segment(launcher_text, upgrade) or ""),
+          "the docstring stays the upgrade's, and the comments left with U1")
+    call = upgrade.body[1]
+    check(isinstance(call, ast.Assign) and isinstance(call.value, ast.Call) and isinstance(call.value.func, ast.Name)
+          and call.value.func.id == "_pin_upgrade_source" and ast.unparse(call.targets[0]) == "source_pinned"
+          and [ast.unparse(a) for a in call.value.args] == ["config"]
+          and {k.arg: ast.unparse(k.value) for k in call.value.keywords} == {n: n for n in (
+              "commit_git_dir", "deploy_ref", "desktop_policy", "dry_run", "print_func", "publish_remote", "runner",
+              "source_repo", "tooling_root")},
+          f"U1 is the upgrade's first statement, by the launcher's name, with its inputs same-named: {ast.unparse(call)[:90]}")
+    wiring = [ast.unparse(n) for n in upgrade.body[2:9]]
+    check(wiring[:6] == [
+        "if not isinstance(source_pinned, UpgradeSourcePinned):\n    return source_pinned",
+        "desktop_choice = source_pinned.desktop_choice", "deploy_ref_chosen = source_pinned.deploy_ref_chosen",
+        "source_repo = source_pinned.source_repo", "commit_git_dir = source_pinned.commit_git_dir",
+        "deploy_ref = source_pinned.deploy_ref"] and wiring[6].startswith("state_ready = _recover_upgrade_state("),
+          f"a refusal returned before any value is read, all five taken in order, then U2: {wiring}")
+
+
+def test_u1_a_desktop_refusal_changes_nothing() -> None:
+    for dry_run, tail in ((False, "stopping before any phase"), (True, "this dry run shows the upgrade would stop before any phase")):
+        pin = Pinning(desktop_problems=["syrd351: no desktop policy", "syrd351: and no approval"])
+        result, said, config = u1(pin, dry_run=dry_run, desktop_policy=Path("syrd351-policy"), publish_remote=U1_REMOTE,
+                                  deploy_ref="v351")
+        check(result == 1 and type(result) is int and pin.log == [("desktop", config, Path("syrd351-policy"))],
+              f"dry {dry_run}: 1, and nothing after the decision is asked: {pin.kinds()}")
+        check(said == ["switchyard: syrd351: no desktop policy", "switchyard: syrd351: and no approval",
+                       f"switchyard: {tail}, so {PROJECT} is not declared ready and no pane restart should follow. "
+                       "Nothing was changed: no artifact, account, release, access grant, board, listener or role session."],
+              f"dry {dry_run}: each problem, then the stop: {said}")
+
+
+def test_u1_a_bare_upgrade_goes_on_with_what_the_resolver_chose() -> None:
+    pin = Pinning()
+    result, said, config = u1(pin)
+    check(pin.kinds() == ["desktop", "resolve"] and pin.log[1] == ("resolve", config, UNPINNED) and said == [],
+          f"nothing pinned, nothing recovered: decide, resolve, and go on: {pin.log}")
+    check(result.desktop_choice is pin.choice and result.deploy_ref_chosen is False and result.source_repo is pin.repo
+          and result.commit_git_dir is pin.cache and result.deploy_ref is pin.ref,
+          f"the choice and the resolver's own objects go on, and the default ref is nobody's choice: {result}")
+
+
+def test_u1_each_pinned_argument_alone_is_an_explicit_pin() -> None:
+    given = dict(source_repo=Path("/nonexistent/syrd351/given"), commit_git_dir="syrd351-given-cache", deploy_ref="v351")
+    for name, value in given.items():
+        pin = Pinning(recovered="syrd351-recovered")
+        result, said, config = u1(pin, **{name: value})
+        check(pin.log[1] == ("resolve", config, {**UNPINNED, name: value}), f"{name}: resolved as given: {pin.log[1]}")
+        check("stale?" not in pin.kinds() and "durable" in pin.kinds() and "euid?" in pin.kinds(),
+              f"{name} alone is explicit: never checked as stale, made durable, warned about: {pin.kinds()}")
+        check(result.deploy_ref_chosen is True, f"{name}: a recovered release makes the ref a choice: {result}")
+    pin = Pinning()
+    result, _, _ = u1(pin, deploy_ref="")
+    check("durable" in pin.kinds() and result.deploy_ref_chosen is True,
+          "an empty ref is still given: explicit, and chosen, because it is not None")
+    pin = Pinning()
+    result, _, _ = u1(pin, source_repo=Path("/nonexistent/syrd351/given"))
+    check(result.deploy_ref_chosen is False, "a pinned source with no ref and nothing recovered chooses no ref")
+
+
+def test_u1_a_recovered_pin_is_reported_then_checked_for_staleness() -> None:
+    pin = Pinning(recovered="syrd351-recovered")
+    result, said, config = u1(pin, dry_run=True)
+    check(said == [f"switchyard: {PROJECT} keeps the release this upgrade was pinned to: syrd351-recovered"]
+          and pin.kinds() == ["desktop", "resolve", "stale?"],
+          f"said, then checked, and nothing made durable or warned about when nothing was given: {pin.kinds()} {said}")
+    check(pin.log[2][1] is config and pin.log[2][2] == dict(source_repo=pin.repo, deploy_ref=pin.ref, dry_run=True,
+                                                          tooling_root=U1_TOOLING, runner=refusing_runner,
+                                                          print_func=said.append),
+          f"checked against the RESOLVED pin, with the caller's tooling root and runner: {pin.log[2]}")
+    check(result.deploy_ref_chosen is True and result.deploy_ref is pin.ref, f"a recovered ref is a choice: {result}")
+
+
+def test_u1_a_stale_recovered_pin_answers_its_own_code() -> None:
+    for code in (Code(0), Code(1), Code(3)):
+        pin = Pinning(recovered="syrd351-recovered", refused=code)
+        result, said, _ = u1(pin, publish_remote=U1_REMOTE)
+        check(result is code and pin.kinds()[-1] == "stale?",
+              f"refused {int(code)}: that very object, nothing recorded after it: {result!r} {pin.kinds()}")
+    pin = Pinning(recovered="syrd351-recovered", refused=None)
+    result, _, _ = u1(pin, publish_remote=U1_REMOTE)
+    check(not isinstance(result, int) and pin.kinds()[-1] == "remote", "None is the only answer that goes on")
+
+
+def test_u1_only_an_explicit_real_non_root_pin_is_warned_about() -> None:
+    warning = (f"switchyard: this upgrade is not root, so {PROJECT}'s pinned release is not recorded. The generated "
+               "continuation will say so, and the privileged rerun has to carry --source-repo, --commit-git-dir and "
+               "--deploy-ref itself.")
+    for dry_run, euid, explicit, warned, asked in ((False, 1000, True, True, True), (False, 0, True, False, True),
+                                                   (True, 1000, True, False, False), (False, 1000, False, False, False)):
+        pin = Pinning(euid=euid)
+        _, said, _ = u1(pin, dry_run=dry_run, deploy_ref="v351" if explicit else None)
+        check((warning in said) == warned and ("euid?" in pin.kinds()) == asked,
+              f"dry {dry_run}, euid {euid}, explicit {explicit}: warned {warned}, uid asked {asked}: {said} {pin.kinds()}")
+    pin = Pinning(euid=1000)
+    u1(pin, deploy_ref="v351", publish_remote=U1_REMOTE)
+    check(pin.kinds() == ["desktop", "resolve", "euid?", "remote", "durable"],
+          f"the warning comes before the remote and the durable pin: {pin.kinds()}")
+
+
+def test_u1_the_publication_remote_is_recorded_only_when_given() -> None:
+    for remote in ("", "   \t", "\n"):
+        pin = Pinning()
+        u1(pin, publish_remote=remote, deploy_ref="v351")
+        check("remote" not in pin.kinds(), f"{remote!r}: nothing given, nothing recorded")
+    for dry_run in (False, True):
+        pin = Pinning()
+        _, said, _ = u1(pin, publish_remote=f" {U1_REMOTE} ", dry_run=dry_run)
+        check(pin.log[-1] == ("remote", PROJECT, f" {U1_REMOTE} ", dict(dry_run=dry_run, print_func=said.append)),
+              f"given: recorded for the project, as given, dry {dry_run}: {pin.log[-1]}")
+    pin = Pinning(pin_problems=["syrd351: remote a", "syrd351: remote b"])
+    result, said, _ = u1(pin, publish_remote=U1_REMOTE, deploy_ref="v351")
+    check(result == 1 and type(result) is int and pin.kinds()[-1] == "remote" and said[-3:] == [
+        "switchyard: syrd351: remote a", "switchyard: syrd351: remote b",
+        f"switchyard: refusing to upgrade {PROJECT}: its publication remote could not be recorded, and everything after "
+        "this decides by it. Nothing was changed."],
+          f"a remote that cannot be kept stops before the pin is made durable: {pin.kinds()} {said}")
+
+
+def test_u1_the_explicit_pin_is_made_durable_or_refused() -> None:
+    pin = Pinning()
+    result, said, config = u1(pin, deploy_ref="v351", commit_git_dir="syrd351-given-cache", dry_run=True)
+    check(pin.log[-1] == ("durable", config, dict(source_repo=pin.repo, commit_git_dir=pin.cache, deploy_ref=pin.ref,
+                                                  dry_run=True))
+          and type(result).__name__ == "UpgradeSourcePinned" and said == [],
+          f"the resolved pin is what is made durable: {pin.log[-1]}")
+    refusal = (f"switchyard: refusing to upgrade {PROJECT} with a release it cannot keep. Its accounts phase hands the "
+               "upgrade back through sudo, which carries neither arguments nor environment, so a pin that is not "
+               "durable is one the next phase would have to guess at. Nothing was changed.")
+    for changed, restored, expected in ((True, "syrd351: remote restored", ["restore"]), (True, "", ["restore"]),
+                                        (False, "syrd351: never", [])):
+        pin = Pinning(pin_changed=changed, durability=["syrd351: not durable"], restored=restored)
+        result, said, _ = u1(pin, deploy_ref="v351", publish_remote=U1_REMOTE)
+        check(result == 1 and type(result) is int and pin.kinds()[3:] == ["remote", "durable", *expected]
+              and (not expected or pin.log[-1] == ("restore", PROJECT, "syrd351-previous")),
+              f"changed {changed}: the remote put back only if this run changed it: {pin.kinds()}")
+        check(said == ["switchyard: syrd351: not durable", *([f"switchyard: {restored}"] if changed and restored else []),
+                       refusal], f"changed {changed}, restored {restored!r}: {said}")
+    pin = Pinning(durability=["syrd351: not durable"])
+    result, _, _ = u1(pin, deploy_ref="v351")
+    check(result == 1 and "restore" not in pin.kinds() and "remote" not in pin.kinds(),
+          "no remote given: nothing recorded, nothing put back")
+
+
+def test_u1_an_error_reaches_the_caller() -> None:
+    boom = OSError("syrd351: resolving raised")
+    pin = Pinning(error=boom)
+    try:
+        u1(pin, publish_remote=U1_REMOTE, deploy_ref="v351"); raised = None
+    except OSError as exc:
+        raised = exc
+    check(raised is boom and pin.kinds()[-1] == "resolve", f"not caught, nothing after it: {pin.kinds()}")
+
+
+def test_the_upgrade_returns_u1s_refusal_before_reading_anything_or_u2() -> None:
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    names = ["config", "config_path", "commit_git_dir", "deploy_ref", "desktop_policy", "dry_run", "print_func",
+             "publish_remote", "runner", "source_repo", "tooling_root"]
+    code = ast.Module(body=[ast.FunctionDef(
+        name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
+                                          kw_defaults=[], defaults=[]),
+        body=[*upgrade.body[1:9],
+              ast.parse("return desktop_choice, deploy_ref_chosen, source_repo, commit_git_dir, deploy_ref, "
+                        "state_ready").body[0]],
+        decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+    from scripts.upgrade_phases import UpgradeSourcePinned
+    for answer in (Code(0), Code(1), "continue"):
+        pinned = UpgradeSourcePinned(desktop_choice={"mode": "c"}, deploy_ref_chosen=True, source_repo=Path("/s"),
+                                     commit_git_dir="cache", deploy_ref="ref")
+        got = pinned if answer == "continue" else answer
+        u2_calls: list[dict] = []
+        namespace = {"UpgradeSourcePinned": UpgradeSourcePinned, "_pin_upgrade_source": lambda config, **k: got,
+                     "_recover_upgrade_state": lambda config, **k: u2_calls.append(k) or "u2 state"}
+        exec(compile(ast.fix_missing_locations(code), "upgrade_project_command", "exec"), namespace)
+        result = namespace["wiring"](SimpleNamespace(name="incoming"), CONFIG_PATH, None, None, None, False, print, "",
+                                     refusing_runner, None, None)
+        if answer == "continue":
+            check(result == ({"mode": "c"}, True, Path("/s"), "cache", "ref", "u2 state")
+                  and result[0] is pinned.desktop_choice and len(u2_calls) == 1
+                  and u2_calls[0]["source_repo"] == Path("/s") and u2_calls[0]["deploy_ref"] == "ref",
+                  f"going on, all five are taken, and U2 gets U1's source and ref: {result} {u2_calls}")
+        else:
+            check(result is answer and u2_calls == [],
+                  f"refusal {int(answer)} is returned as the very object, before U2 or any read: {result!r}")
+
+
 #: Run first: a seam taken past the launcher must be caught before any
 #: behaviour check runs the real code it reached.
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
+             "test_u1_reads_its_lookups_through_the_launcher_and_keeps_its_own_names",
              "test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names",
              "test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config",
              "test_the_seams_the_phases_own_names_and_the_call_site",

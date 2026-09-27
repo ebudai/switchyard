@@ -146,11 +146,17 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 
 def test_the_launchers_names_and_the_functions_own_imports() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    # SYRD-351 moved the upgrade's call into upgrade_phases, which reads it through the launcher.
+    phases_tree = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline site, by its own name")
+        moved = [n for n in ast.walk(phases_tree)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(moved) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in moved),
+              f"the launcher calls {name} at its {count} baseline site, by its own name or through the launcher")
     moved = ast.parse((ROOT / "scripts" / "desktop_policy.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in LAUNCHER_READS})

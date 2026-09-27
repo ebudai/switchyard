@@ -4,6 +4,12 @@
 it keeps its name, signature and defaults, and calls each phase here, at the
 phase's old position, by the launcher's own name.
 
+- **U1, desktop decision and source pinning** (`_pin_upgrade_source`, SYRD-351):
+  the desktop policy decided or refused, the source pin resolved -- explicit,
+  or recovered and refused when stale -- the non-root pin warning, the
+  publication remote recorded, then the explicit pin made durable, the remote
+  put back when it cannot be. Three refusals answer 1 and a stale recovered pin
+  its own code; going on returns a frozen `UpgradeSourcePinned`.
 - **U2, manager, desktop and repatriation** (`_recover_upgrade_state`, SYRD-350):
   the source resolved, the owner's user manager recovered, the desktop
   configured with its presentation and display bridge, interrupted role state
@@ -939,4 +945,150 @@ def _recover_upgrade_state(
         effective_source_repo=effective_source_repo,
         config=config,
         cutover=cutover,
+    )
+
+
+@dataclass(frozen=True)
+class UpgradeSourcePinned:
+    """What U1 hands the rest of `upgrade_project_command` when the upgrade goes
+    on, in the order U1 assigns them. A refusal gets its code instead."""
+
+    desktop_choice: dict[str, Any] | None
+    deploy_ref_chosen: bool
+    source_repo: Path | None
+    commit_git_dir: str | None
+    deploy_ref: str
+
+
+def _pin_upgrade_source(
+    config: ProjectConfig,
+    *,
+    commit_git_dir: str | None,
+    deploy_ref: str | None,
+    desktop_policy: Path | None,
+    dry_run: bool,
+    print_func: Callable[[str], None],
+    publish_remote: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    source_repo: Path | None,
+    tooling_root: Path | None,
+) -> UpgradeSourcePinned | int:
+    """U1 of `upgrade_project_command`, unchanged: the desktop policy decided or
+    refused, the source pin resolved -- explicit or recovered, a stale recovered
+    pin refused -- the non-root warning, then the publication remote and the
+    durable source recorded, the remote put back when the source cannot be kept.
+    The pin, cache and ref go back out as this phase resolved them."""
+    from scripts import team_launcher as launcher
+
+    # First, before anything is recorded or repaired and before any phase.
+    # Every role launch needs a desktop policy, and a legacy tenant can predate
+    # them: live on mefp the upgrade ran to completion, reported nothing left to
+    # do, and the pane restart it was followed by suspended a working tenant and
+    # then refused to start it. Some phases restart roles themselves, so finding
+    # out later would strand them down mid-upgrade. Asked here, the answer costs
+    # nothing and changes nothing (SYRD-232).
+    desktop_choice, desktop_problems = launcher.upgrade_desktop_policy_decision(config, desktop_policy)
+    if desktop_problems:
+        for problem in desktop_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: {'this dry run shows the upgrade would ' if dry_run else ''}"
+            f"{'stop' if dry_run else 'stopping'} before any phase, so {config.project} is not "
+            "declared ready and no pane restart should follow. Nothing was changed: no "
+            "artifact, account, release, access grant, board, listener or role session."
+        )
+        return 1
+    # Before the source is used for anything, because everything the later
+    # phases deploy is decided by it. An operator who pinned a release on the
+    # outer command gets the same release in every phase that follows, whether
+    # the next one is reached by this process or by the rerun the accounts phase
+    # asks for; an operator who pinned nothing here is filled in from what was
+    # pinned last time (SYRD-61).
+    pinned_explicitly = (
+        source_repo is not None or commit_git_dir is not None or deploy_ref is not None
+    )
+    # Whether the deploy ref is somebody's choice or a default the resolver
+    # supplies. Only a choice may contradict an installed release's marker.
+    deploy_ref_chosen = deploy_ref is not None
+    # Read back first, then record what this invocation actually ends up using.
+    # Doing it the other way round would let an operator who pins one of the
+    # three erase the other two, and the phase after theirs would then be the
+    # one guessing.
+    source_repo, commit_git_dir, deploy_ref, recovered = launcher.resolve_pinned_upgrade_source(
+        config, source_repo=source_repo, commit_git_dir=commit_git_dir, deploy_ref=deploy_ref
+    )
+    deploy_ref_chosen = deploy_ref_chosen or bool(recovered)
+    if recovered:
+        print_func(
+            f"switchyard: {config.project} keeps the release this upgrade was pinned to: {recovered}"
+        )
+    if recovered and not pinned_explicitly:
+        refused = launcher._recovered_pin_behind_host(
+            config,
+            source_repo=source_repo,
+            deploy_ref=deploy_ref,
+            dry_run=dry_run,
+            tooling_root=tooling_root,
+            runner=runner,
+            print_func=print_func,
+        )
+        if refused is not None:
+            return refused
+    if pinned_explicitly and not dry_run and os.geteuid() != 0:
+        print_func(
+            f"switchyard: this upgrade is not root, so {config.project}'s pinned release is not "
+            "recorded. The generated continuation will say so, and the privileged rerun has to "
+            "carry --source-repo, --commit-git-dir and --deploy-ref itself."
+        )
+    # Where this tenant publishes, recorded before anything else is written:
+    # everything after it decides by this remote, and a pin that cannot be kept
+    # has to stop the upgrade while nothing has changed yet. A warning printed
+    # after the phases, with the run carrying on and exiting 0, is what the
+    # first version of this did (SYRD-229 review).
+    pin_changed, pin_previous = False, ""
+    if publish_remote.strip():
+        pin_changed, pin_previous, pin_problems = launcher.record_publication_remote(
+            config.project, publish_remote, dry_run=dry_run, print_func=print_func
+        )
+        if pin_problems:
+            for problem in pin_problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: refusing to upgrade {config.project}: its publication remote could "
+                "not be recorded, and everything after this decides by it. Nothing was changed."
+            )
+            return 1
+    if pinned_explicitly:
+        durability = launcher.record_upgrade_source(
+            config,
+            source_repo=source_repo,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            dry_run=dry_run,
+        )
+        if durability:
+            # Before any phase, so nothing is regenerated, no phase is recorded
+            # as safely resumable, and above all no continuation is advertised:
+            # a handoff that cannot carry the pin is the incident this ticket is
+            # about, and accepting the pin anyway would schedule it (SYRD-61).
+            for problem in durability:
+                print_func(f"switchyard: {problem}")
+            if pin_changed:
+                # So that "Nothing was changed" below stays true.
+                restored = launcher.restore_publication_remote(config.project, pin_previous)
+                if restored:
+                    print_func(f"switchyard: {restored}")
+            print_func(
+                f"switchyard: refusing to upgrade {config.project} with a release it cannot keep. "
+                "Its accounts phase hands the upgrade back through sudo, which carries neither "
+                "arguments nor environment, so a pin that is not durable is one the next phase "
+                "would have to guess at. Nothing was changed."
+            )
+            return 1
+    return UpgradeSourcePinned(
+        desktop_choice=desktop_choice,
+        deploy_ref_chosen=deploy_ref_chosen,
+        source_repo=source_repo,
+        commit_git_dir=commit_git_dir,
+        deploy_ref=deploy_ref,
     )

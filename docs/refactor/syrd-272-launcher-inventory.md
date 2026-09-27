@@ -11502,3 +11502,65 @@ implemented**:
   -  1067 lines   37 defs  privileged boundary, tenant control and repair
 
 **SYRD-272 is not complete.** The launcher is still 10,947 lines.
+
+### SYRD-386: repair the release-default guard SYRD-379 left red (a correction to the SYRD-379 record)
+
+**Correction to SYRD-379 above.** SYRD-379 moved `report_tenant_release_upgrade`
+into `scripts/tenant_release_report.py`. `tests/role_identity_cutover_boundary_test.py`
+counts the launcher's exports with a string `deploy_ref` default, and filtered
+them by `__module__` to the launcher and `scripts.tenant_release_target`. From
+`20cc0e6` on it counted 1 of 2 and failed.
+- **Why 379's record missed it:** the suite never names the moved function, so
+  it was not in SYRD-379's comparison set.
+- **How it was found:** SYRD-385 found it, and bisected it to `20cc0e6`
+  (passing at `8d83333`).
+
+**The repair (tests only; `scripts/` byte-identical to `9f1fed8`):** the filter
+now also accepts `scripts.tenant_release_report`, the module the moved function
+lives in, named in the comment.
+- **Unchanged:** the exact count of 2, identity with
+  `DEFAULT_TENANT_RELEASE_DEPLOY_REF` (not equality), the string-default
+  filter, `vars(team_launcher)` as the source, and the separate cutover identity
+  check.
+- **Wording:** the comment, the diagnostic and the module docstring describe
+  the launcher's exports rather than functions that "stayed in the launcher".
+- **Size:** the test goes from 200 to 205 lines. The launcher is unchanged at
+  10,947.
+
+**The inventory the predicate counts (measured under the guard):**
+- `cutover_role_identities_command scripts.role_identity_cutover role_identity_cutover.py:665 'origin/main' is-ref str`
+- `finish_upgrade_command scripts.director_upgrade director_upgrade.py:34 None NOT-ref NoneType`
+- `report_tenant_release_upgrade scripts.tenant_release_report tenant_release_report.py:258 'origin/main' is-ref str`
+- `tenant_release_status scripts.tenant_release_target tenant_release_target.py:177 'origin/main' is-ref str`
+- `upgrade_project_command scripts.team_launcher team_launcher.py:7450 None NOT-ref NoneType`
+
+**Evidence.**
+- **Screened before running:** the whole suite and its one case were screened
+  before any run.
+- **The repaired suite:** passes whole under the guard (16 checks); the
+  baseline fails with a count of 1.
+- **The repaired case alone:** it is structural, with no accumulators; it
+  passes, and fails on the baseline.
+- **Negative mutants:** 9 of 9 are killed on the default-ref assertion,
+  with a clean restore. They cover the report module omitted, each release
+  function dropped from the launcher's exports, a different default value, an
+  equal-but-distinct default object for each function, an extra qualifying
+  function (in the launcher, and in the report module re-exported), and a
+  distinct cutover default.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the tenant-side artifact publisher -- 1 definitions, 40 lines (lines 3109-3148, not contiguous):
+  -   3109   40  publish_tenant_artifact  launcher callers outside: -; production readers outside the launcher: ['scripts/runtime_artifact_refresh.py', 'scripts/upgrade_records.py']
+  - launcher names it reads (through the launcher once moved): 1: ['ProjectConfig']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 2: ['scripts/runtime_artifact_refresh.py', 'scripts/upgrade_records.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive privilege-boundary responsibility after root's own records: how a tenant publishes one generated artifact into its own tree without following a link)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_walk_no_follow (scripts.no_follow_records)']
+  - alternatives measured the same way:
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+  -   - the tenant board-root resolvers (alternative): 2 definitions, 17 lines; launcher callers outside: ['_plan_data_from_config', 'upgrade_generated_project_config']; production readers: 6
+
+**SYRD-272 is not complete.** The launcher is still 10,947 lines.

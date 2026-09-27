@@ -10,8 +10,8 @@ what makes that safe:
 - Every name the launcher's upgrade, finish-upgrade and recovery code and the
   suites reach as `team_launcher.<name>` is still there and is the very same
   object, whichever module is imported first.
-- **The default ref is one object** for the cutover command and the release
-  functions that stayed in the launcher.
+- **The default ref is one object** for the cutover command and the two
+  release functions the launcher exports.
 - **The patched names are still reached.** The suites patch
   `cutover_role_identities_command` and `_interrupted_provider_state_roles`
   on the launcher; the launcher still calls each at exactly its one baseline
@@ -104,19 +104,24 @@ def test_the_default_ref_is_one_object() -> None:
 
     ref = release_refs.DEFAULT_TENANT_RELEASE_DEPLOY_REF
     cutover = inspect.signature(role_identity_cutover.cutover_role_identities_command).parameters["deploy_ref"].default
-    # `tenant_release_status` moved to scripts/tenant_release_target.py with its
-    # default (SYRD-361); the launcher re-exports it, so it is still counted here.
+    # The two release functions the launcher exports with this default have both
+    # moved, each with its default: `tenant_release_status` to
+    # scripts/tenant_release_target.py (SYRD-361) and `report_tenant_release_upgrade`
+    # to scripts/tenant_release_report.py (SYRD-379). The launcher re-exports both,
+    # so both are still counted here, as is anything the launcher itself defines.
     stayed = [
         inspect.signature(fn).parameters["deploy_ref"].default
         for fn in vars(team_launcher).values()
-        if inspect.isfunction(fn) and fn.__module__ in ("scripts.team_launcher", "scripts.tenant_release_target")
+        if inspect.isfunction(fn)
+        and fn.__module__ in ("scripts.team_launcher", "scripts.tenant_release_target", "scripts.tenant_release_report")
         and "deploy_ref" in inspect.signature(fn).parameters
         and inspect.signature(fn).parameters["deploy_ref"].default is not inspect.Parameter.empty
         and isinstance(inspect.signature(fn).parameters["deploy_ref"].default, str)
     ]
     check(cutover is ref, "the cutover command defaults to the leaf's ref")
     check(len(stayed) == 2 and all(default is ref for default in stayed),
-          f"and so do the two release functions that stayed in the launcher: {len(stayed)}")
+          f"and so do the two release functions the launcher exports (tenant_release_status, "
+          f"report_tenant_release_upgrade): {len(stayed)}")
 
 
 def test_the_patched_and_generic_seams_are_reached() -> None:

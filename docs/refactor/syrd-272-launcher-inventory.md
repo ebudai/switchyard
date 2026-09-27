@@ -11841,3 +11841,93 @@ and **not implemented**:
   -  1013 lines   10 defs  CLI parsers and dispatch
 
 **SYRD-272 is not complete.** The launcher is still 10,384 lines.
+
+### SYRD-392 (slice 19i): role-state ownership inspection and repair
+
+Measured on `fa4b7b6`. The design was posted **before** any edit, and the
+baseline defect below was posted before the test edit it concerns.
+
+**Moved:** the nine ordered definitions of the ticket into the new
+`scripts/role_state_ownership.py` (354 lines):
+- `STATE_TREE_MAX_DEPTH`;
+- the no-follow root opener, its root-placed-link rule and the quiet close;
+- the tree walk;
+- the store roots, the read-only findings and the owner-name lookup;
+- the repair.
+
+They are contiguous, and their caller `restore_interrupted_role_state`
+stays.
+- **Re-export:** one explicit, unaliased import of all nine, above the caller.
+- **Seams:** 16 call-time reads of 10 names across 5 functions.
+  The current user and each role's session directory are launcher facilities
+  and are read through the launcher, as are 8 moved siblings and the depth
+  limit.
+- **Unchanged:** the `print_func` default is bound at definition time.
+  `ProjectConfig` is imported only under TYPE_CHECKING.
+- **The launcher** goes from 10,384 to 10,091 lines. No guard needed
+  widening.
+
+**Proof.** The independent proof (`equiv392.py`) holds. 24 of 24
+planted faults are caught, among them: a component or child followed; a
+tenant link, a tenant holder or a writable holder accepted; the walk unsorted
+or unbounded; chown following links; the root descriptor leaked.
+
+**Baseline defect (found here, preserved, reported, not fixed):**
+`_open_tenant_state_root` leaves the current directory descriptor open on each
+early-return refusal inside its component loop (missing component, unopenable
+component, refused link). Measured on the baseline, under the guard:
+- missing component: returned (-1, ''); descriptors left open: 1
+- tenant link: returned (-1, 'link is a symlink that root did not plac'); descriptors left open: 1
+- not a directory: returned (-1, 'file is not a directory'); descriptors left open: 1
+- a real directory (fd returned, closed here): returned (7, ''); descriptors left open: 0
+
+The new test pins this: exactly one descriptor is left open on those paths
+(the test closes it), and a mutant that fixes the leak is caught, as a
+behaviour change.
+
+**Evidence.**
+- **New boundary test:** `tests/role_state_ownership_boundary_test.py`,
+  78 checks. `os.chown`/`os.fchown` are recorders, `pwd`/`os.geteuid`
+  are stand-ins, root-owned links and holders are simulated by an
+  `os.lstat`/`os.fstat` stand-in, descriptors are tracked live, and the
+  defining module's facilities are refused so a bypass fails the test.
+- **Mutations:** 61 of 61 are killed by assertions with zero guard
+  refusals, including the link-uid and holder-uid checks separately, a race
+  where a directory is swapped for a link, a leaked root descriptor, and the
+  refusal applying to non-root callers. The behaviour tests alone kill 57;
+  the 4 left are print default late, the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first:
+  - 3 suites whole;
+  - 42 cases, identical: 32 pass, 0 pass with a
+    tolerated refusal, 10 stop at the guard (pre-effect only), and
+    0 fail otherwise;
+  - 65 flagged cases excluded (namespace root and
+    setpriv, konsole, tmux, upgrade drivers).
+- **What the comparison exercised (call profiler):** 0 of 32 passing runs execute a moved function. The cases that would (namespace root, setpriv, upgrade drivers) are excluded, so the comparison is import and structure parity, and the behaviour rests on the new test, its mutants and the proof.
+- **Containment:** no live change. The CLI help is identical (36
+  invocations plus `team-launcher --help`).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: installing and removing the tenant publication boundary -- 2 definitions, 133 lines (lines 6028-6162, not contiguous):
+  -   6028   52  remove_tenant_publication_boundary  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   6082   81  install_tenant_publication_boundary  launcher callers outside: -; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 3: ['ProjectConfig', 'current_user_name', '_plan_data_from_config']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/upgrade_phases.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded next piece of the privileged-boundary domain: the root-owned boundary that decides where a tenant may publish)
+  - it also reads 2 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['home_dir_for_user (scripts.host_accounts)', 'switchyard_privileged_provision_root (scripts.privileged_provision_records)']
+  - alternatives measured the same way:
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+  -   - the tenant board-root resolvers (alternative): 2 definitions, 17 lines; launcher callers outside: ['_plan_data_from_config', 'upgrade_generated_project_config']; production readers: 6
+- Largest remaining launcher domains (`domains.py`):
+  -  2260 lines  207 defs  general helpers (unclassified)
+  -  1813 lines   74 defs  provisioning (new/register/teardown/owner accounts)
+  -  1277 lines   37 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+
+**SYRD-272 is not complete.** The launcher is still 10,091 lines.

@@ -55,10 +55,14 @@ READ_ELSEWHERE = {
     "presentation_reconnect": ("pane_split_title",),
 }
 PATCHED_SEAMS = ("materialize_layout", "default_layout_output_path", "desktop_state_dir", "pane_split_title")
-#: The call sites of the seams that stayed in the launcher (launch_project,
-#: replace_presentation_window_command, presentation_window_processes,
-#: _desktop_state_root_problem and desktop_presentation_windows).
+#: The call sites of the seams outside this module: launch_project,
+#: replace_presentation_window_command and _desktop_state_root_problem in the
+#: launcher, and presentation_window_processes and desktop_presentation_windows,
+#: which SYRD-321 moved to presentation_windows, where they still call through
+#: the launcher.
 LAUNCHER_CALLS = {"materialize_layout": 2, "default_layout_output_path": 3, "desktop_state_dir": 2}
+#: Modules the launcher's callers moved to, whose calls must go through it.
+MOVED_CALLERS = ("presentation_windows.py",)
 
 
 def check(condition: bool, detail: str) -> None:
@@ -132,11 +136,17 @@ def test_every_reader_reaches_its_names_through_the_launcher() -> None:
 
 def test_the_patched_seams_are_reached_through_the_launcher() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    moved_trees = [ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8")) for name in MOVED_CALLERS]
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline sites, by its own patchable name")
+        moved_calls = [n for tree in moved_trees for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(moved_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id in ("launcher", "team_launcher") for n in moved_calls),
+              f"{name} is called at its {count} baseline sites, by the launcher's own name there and through "
+              "the launcher where a caller moved")
     moved = ast.parse((ROOT / "scripts" / "presentation_layout_files.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in PATCHED_SEAMS})

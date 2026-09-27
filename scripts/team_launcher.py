@@ -797,12 +797,17 @@ from scripts.gui_window_launch import (
     write_konsole_config_defaults,
 )
 from scripts.presentation_layout_files import (
+    _KONSOLE_SAFE_CHARACTER,
+    _KONSOLE_SAFE_WORD,
+    _konsole_command,
+    _konsole_quote,
     chown_layout_output_args,
     default_layout_output_path,
     desktop_layout_destination_problem,
     desktop_presentation_layout_path,
     desktop_state_dir,
     ensure_layout_output_owner,
+    failed_role_command,
     inert_pane_command,
     materialize_layout,
     pane_split_title,
@@ -2362,45 +2367,6 @@ def _quote_command(args: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
-_KONSOLE_SAFE_CHARACTER = re.compile(r"[A-Za-z0-9_@%+=:,./-]")
-_KONSOLE_SAFE_WORD = re.compile(r"^[A-Za-z0-9_@%+=:,./-]+$")
-
-
-def _konsole_quote(value: str) -> str:
-    """Quote one argument for a Konsole layout's `Command`.
-
-    NOT `shlex.quote`. A layout command is split by Konsole, which is not a
-    shell, and the two disagree on exactly one construction: the `'\\''` idiom
-    POSIX quoting uses for an embedded apostrophe. Konsole leaves a stray `'`
-    behind and hands it to the LAST argument on the line, so mefp -- whose
-    project title is `Morfane's Epic Fix Patch` -- opened four panes that each
-    ran `switchyard-display-attach mefp 0'` and exited `slot must be a number
-    or viewer` (SYRD-233 live UAT).
-
-    So an apostrophe is escaped with a backslash instead of closed and
-    reopened, which both parsers read the same way. Measured against the
-    installed Konsole rather than reasoned about; the case that measures it
-    runs the real one.
-
-    Control characters cannot be carried by ANY quoting here: Konsole drops a
-    tab even inside quotes, and a newline truncates the rest of the command
-    line. They are collapsed to a space so the argument that arrives is the one
-    this returned, minus that substitution.
-    """
-    value = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in str(value))
-    if _KONSOLE_SAFE_WORD.match(value):
-        return value
-    if "'" not in value:
-        return f"'{value}'"
-    return "".join(
-        ch if _KONSOLE_SAFE_CHARACTER.match(ch) else f"\\{ch}" for ch in value
-    )
-
-
-def _konsole_command(args: Sequence[str]) -> str:
-    return " ".join(_konsole_quote(str(arg)) for arg in args)
-
-
 def _env_prefix(env: dict[str, str]) -> list[str]:
     return [
         f"{key}={value}"
@@ -2667,25 +2633,6 @@ def switchyard_pane_launcher_for(config: ProjectConfig) -> Path:
 def pane_window_program(script_path: Path) -> Path:
     """The inert pane program that ships beside the launcher this pane runs."""
     return Path(script_path).expanduser().resolve(strict=False).with_name(PANE_WINDOW_NAME)
-
-
-def failed_role_command(role: RoleConfig, reason: str, *, window_title: str = "") -> str:
-    message = f"PGU launcher did not start {role.role}: checkout refresh failed: {reason}"
-    # This pane does not go through the wrapper, so it reports the window's name
-    # itself. Without it the caption would fall back to this split's title the
-    # moment somebody clicked the one pane that failed, which is the window
-    # title following focus again -- in the case where a person is most likely
-    # to be clicking around (SYRD-139).
-    naming = (
-        f"printf '\\033]2;%s\\007' {shlex.quote(window_title)}; " if window_title.strip() else ""
-    )
-    # `sleep 30` used to hand the tab back to the shell that opened the window.
-    # A failed role is exactly when someone reaches for that prompt (SYRD-43).
-    # The inner script is a shell's, so its own quoting stays POSIX; the line
-    # around it is Konsole's to split.
-    return _konsole_command(
-        ["sh", "-c", f"{naming}printf '%s\\n' {shlex.quote(message)}; exec sleep infinity"]
-    )
 
 
 def _verify_pane_launcher_path(

@@ -1076,6 +1076,7 @@ from scripts.owner_preparation import (
     _resolve_owner_shell_path,
     _verify_project_path_writable_by_owner,
 )
+from scripts.new_project_phases import NewProjectChoices, _resolve_new_project_choices
 from scripts.github_identity import (
     GITHUB_IDENTITY_TIMEOUT_SECONDS,
     _plan_with_selection,
@@ -6899,146 +6900,51 @@ def switchyard_new_command(
     agent_cli_policy: str = "",
     agent_cli_sources: Sequence[str] | None = None,
 ) -> int:
-    # One statement, deliberately. Whether anything was injected is what
-    # decides if the setup windows are watched, and a capture-then-resolve
-    # pair is one editing accident away from capturing the RESOLVED value and
-    # silently unwatching every window again -- which is the defect this
-    # ticket spent three candidates not fixing (SYRD-221). Everything below
-    # wants the plain runner it always had; only the first-run phase wants to
-    # know what the caller actually passed.
-    first_run_runner, runner = runner, (
-        subprocess.run if isinstance(runner, _NoRunnerInjected) else runner
-    )
-    if from_artifact is not None:
-        artifact = load_project_design_artifact(from_artifact)
-        resolved_slug = artifact.project
-        resolved_project_name = artifact.project_name
-        owner_user = artifact.owner_user
-        owner_shell = str(artifact.capability_grants.get("shell") or PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
-        project_dir = _resolve_project_path(project_path or artifact.repository)
-        selected_role_clis = artifact.role_clis
-        selected_implementer_roles = artifact.implementer_roles
-        include_designer = artifact.include_designer
-        include_audit = artifact.include_audit
-        selected_audit_roles = artifact.audit_roles
-    else:
-        resolved_project_name = (project_name or _prompt_text("Project name", input_func=input_func)).strip()
-        if not resolved_project_name:
-            raise SystemExit("switchyard: project name cannot be empty")
-        default_slug = _slug_from_project_name(resolved_project_name)
-        resolved_slug = _validate_project_slug(slug or _prompt_text("Slug", default=default_slug, input_func=input_func))
-        raw_agent = agent_name if agent_name is not None else _prompt_text(
-            "Agent user",
-            default=_agent_owner_user(resolved_slug),
-            input_func=input_func,
-        )
-        owner_user = _owner_user_verbatim(raw_agent)
-        owner_shell = str(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"])
-        default_project_dir = _project_dir(home_base, owner_user, resolved_project_name)
-        project_dir = _resolve_project_path(
-            project_path
-            or _prompt_text("Project path", default=str(default_project_dir), input_func=input_func)
-        )
-        selected_role_clis = ()
-        selected_implementer_roles = ()
-        include_designer = True
-        include_audit = True
-        selected_audit_roles = ("audit",)
-    artifact_agy_source = ""
-    if from_artifact is not None:
-        artifact_agy_source = str(
-            artifact.capability_grants.get("agy_credential_source") or ""
-        ).strip()
-    resolved_agy_credential_source, agy_source_origin = _resolve_agy_credential_source(
-        override=agy_credential_source,
-        opt_out=no_agy_credential,
-        artifact_value=artifact_agy_source,
-        home_base=home_base,
-        settings_path=agy_credential_settings_path,
+    new_project_choices = _resolve_new_project_choices(
+        slug=slug,
+        agent_name=agent_name,
+        project_name=project_name,
+        project_path=project_path,
+        from_artifact=from_artifact,
+        role_clis=role_clis,
         yes=yes,
-        input_func=input_func,
-        print_func=print_func,
-    )
-    selected_desktop_policy, desktop_policy_origin = _resolve_desktop_policy(
         desktop_policy=desktop_policy,
         headless=headless,
-        gui_user=desktop_gui_user or "",
-        project=resolved_slug,
-        tenant=owner_user,
-        yes=yes,
-        input_func=input_func,
-        print_func=print_func,
-        settings_path=desktop_approval_settings_path,
-    )
-    from scripts.desktop_access import validate_policy
-    # Validated whichever way it arrived. A generated policy is checked by the
-    # same rules as one an operator wrote, so there is one description of what
-    # a valid grant is rather than a second, kinder one for our own output.
-    selected_desktop_policy = validate_policy(selected_desktop_policy, project=resolved_slug, tenant=owner_user)
-    _check_switchyard_registration_available(
-        slug=resolved_slug,
-        name=resolved_project_name,
+        desktop_gui_user=desktop_gui_user,
+        desktop_approval_settings_path=desktop_approval_settings_path,
+        allow_existing_owner_user=allow_existing_owner_user,
+        agy_credential_source=agy_credential_source,
+        no_agy_credential=no_agy_credential,
+        agy_credential_settings_path=agy_credential_settings_path,
+        home_base=home_base,
+        euid_getter=euid_getter,
+        runner=runner,
         config_dir=config_dir,
         registry_dir=registry_dir,
-    )
-    _confirm_existing_owner_user(
-        owner_user,
-        allow_existing_owner_user=allow_existing_owner_user,
-        input_func=input_func,
-        print_func=print_func,
-        agy_credential_source=resolved_agy_credential_source,
-    )
-    _confirm_switchyard_new(
-        slug=resolved_slug,
-        owner_user=owner_user,
-        project_name=resolved_project_name,
-        project_dir=project_dir,
-        yes=yes,
         input_func=input_func,
         print_func=print_func,
     )
-    if euid_getter() != 0:
-        raise SystemExit("switchyard: new requires sudo; re-run as `sudo ./switchyard new`")
-    selected_role_models: dict[str, str] = {}
-    selected_role_efforts: dict[str, str] = {}
-    if from_artifact is None:
-        if role_clis is not None:
-            chosen_pairs: Sequence[tuple[str, str]] = role_clis
-        else:
-            # One guided path per role -- runtime, then that runtime's models,
-            # then the effort levels it actually renders -- instead of four
-            # identifiers to recall and a comma-separated line to compose
-            # (SYRD-115).
-            role_plan = _prompt_switchyard_role_plan(
-                runner=runner,
-                owner_user=owner_user,
-                owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
-                input_func=input_func,
-                print_func=print_func,
-            )
-            chosen_pairs = [(entry.role, entry.cli) for entry in role_plan]
-            selected_role_models = {
-                entry.role: entry.model for entry in role_plan if entry.model
-            }
-            selected_role_efforts = {
-                entry.role: entry.effort for entry in role_plan if entry.effort
-            }
-            print_role_plan_review(role_plan, print_func=print_func)
-        selected_role_clis = _dedupe_role_cli_pairs(chosen_pairs)
-        _require_new_project_roles(selected_role_clis)
-        selected_implementer_roles = tuple(
-            role for role, _cli in selected_role_clis if role not in NEW_PROJECT_RESERVED_ROLE_NAMES
-        )
-        if not selected_implementer_roles:
-            raise SystemExit("switchyard: at least one implementer role is required")
-        include_designer = any(role == "designer" for role, _cli in selected_role_clis)
-        include_audit = any(role == "audit" for role, _cli in selected_role_clis)
-        selected_audit_roles = ("audit",) if include_audit else ()
-
-    artifact_path = (from_artifact or (_switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
-    design_document = project_dir / SWITCHYARD_DESIGN_FILE_NAME
-    director_onboarding = _switchyard_dir(project_dir) / SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
-    stages = ProvisioningStages(NEW_PROJECT_STAGES, print_func=print_func)
+    agy_source_origin = new_project_choices.agy_source_origin
+    artifact_path = new_project_choices.artifact_path
+    design_document = new_project_choices.design_document
+    director_onboarding = new_project_choices.director_onboarding
+    first_run_runner = new_project_choices.first_run_runner
+    include_audit = new_project_choices.include_audit
+    include_designer = new_project_choices.include_designer
+    owner_shell = new_project_choices.owner_shell
+    owner_user = new_project_choices.owner_user
+    project_dir = new_project_choices.project_dir
+    resolved_agy_credential_source = new_project_choices.resolved_agy_credential_source
+    resolved_project_name = new_project_choices.resolved_project_name
+    resolved_slug = new_project_choices.resolved_slug
+    runner = new_project_choices.runner
+    selected_audit_roles = new_project_choices.selected_audit_roles
+    selected_desktop_policy = new_project_choices.selected_desktop_policy
+    selected_implementer_roles = new_project_choices.selected_implementer_roles
+    selected_role_clis = new_project_choices.selected_role_clis
+    selected_role_efforts = new_project_choices.selected_role_efforts
+    selected_role_models = new_project_choices.selected_role_models
+    stages = new_project_choices.stages
     stages.begin("host and agent CLI checks")
     _precheck_project_path_before_mutating(owner_user, project_dir)
     effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)

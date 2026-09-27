@@ -146,11 +146,13 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 
 def test_the_launchers_names_and_the_functions_own_imports() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    # SYRD-351 moved the upgrade's call into upgrade_phases, and SYRD-366 moved the
-    # resume-provision finish step's call into resume_provision_command; both
-    # read it through the launcher.
+    # SYRD-351 moved the upgrade's call into upgrade_phases, SYRD-366 moved the
+    # resume-provision finish step's call into resume_provision_command, and
+    # SYRD-369 moved `switchyard new`'s choice phase into new_project_phases;
+    # each reads it through the launcher.
     moved_trees = [ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8"))
-                   for name in ("upgrade_phases.py", "resume_provision_command.py") if (ROOT / "scripts" / name).exists()]
+                   for name in ("upgrade_phases.py", "resume_provision_command.py", "new_project_phases.py")
+                   if (ROOT / "scripts" / name).exists()]
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]

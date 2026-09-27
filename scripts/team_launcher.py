@@ -909,6 +909,10 @@ from scripts.board_authority_preflight import (
 from scripts.pane_launcher_preflight import (
     _verify_pane_launcher_path,
 )
+from scripts.launch_phases import (
+    LaunchSetup,
+    _launch_runners_and_paths,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -4846,28 +4850,23 @@ def launch_project(
             # viewer -- reads role env off this object, and would otherwise restart roles
             # without the prompt that was just projected.
             config = load_project_config(config.project, config_path)
-    worktree_runner = runner
-    # Owner-scoped work (worktrees, the viewer session, layout) uses this.
-    # Anything that starts, probes or stops a ROLE selects that role's own
-    # account instead, because bin_user only sets PATH and the uid the board
-    # sees comes from the runner (SYRD-39).
-    role_process_runner = runner
-    owner_runner_anchor = config.repository or config.pane_launcher
-    delegate_role_sessions_to_owner = bool(config.run_as_user and current_user_name() != config.run_as_user)
-    if delegate_role_sessions_to_owner:
-        role_process_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
-        if owner_runner_anchor is not None:
-            worktree_runner = _owner_project_git_runner(
-                owner_user=config.run_as_user,
-                project_dir=owner_runner_anchor,
-                owned_roots=_control_repository_owned_roots(config),
-                runner=runner,
-            )
-    effective_pane_state_dir = pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project)
-    output_path = layout_output or default_layout_output_path(config, config_path=config_path)
-    window_title = project_window_title(config)
-    should_assign_layout_owner = layout_output is None if assign_layout_owner is None else assign_layout_owner
-    pane_script_path = config.pane_launcher or script_path
+    launch_setup = _launch_runners_and_paths(
+        config,
+        config_path=config_path,
+        runner=runner,
+        pane_state_dir=pane_state_dir,
+        layout_output=layout_output,
+        assign_layout_owner=assign_layout_owner,
+        script_path=script_path,
+    )
+    worktree_runner = launch_setup.worktree_runner
+    role_process_runner = launch_setup.role_process_runner
+    delegate_role_sessions_to_owner = launch_setup.delegate_role_sessions_to_owner
+    effective_pane_state_dir = launch_setup.effective_pane_state_dir
+    output_path = launch_setup.output_path
+    window_title = launch_setup.window_title
+    should_assign_layout_owner = launch_setup.should_assign_layout_owner
+    pane_script_path = launch_setup.pane_script_path
     if not dry_run:
         upgrade_result = upgrade_generated_project_layout(config, config_path=config_path, runner=runner)
         if upgrade_result.changed:

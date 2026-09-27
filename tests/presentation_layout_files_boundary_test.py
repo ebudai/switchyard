@@ -206,11 +206,13 @@ KONSOLE_GOLDEN = json.loads(r"""
 #: presentation_window_replacement;
 #: presentation_window_processes and desktop_presentation_windows, which
 #: SYRD-321 moved to presentation_windows; and _desktop_state_root_problem,
-#: which SYRD-328 moved to legacy_presentation. The moved ones still call
-#: through the launcher.
+#: which SYRD-328 moved to legacy_presentation; and launch_project's P3 phase,
+#: which SYRD-339 moved to launch_phases. The moved ones still call through the
+#: launcher.
 LAUNCHER_CALLS = {"materialize_layout": 2, "default_layout_output_path": 3, "desktop_state_dir": 2}
 #: Modules the launcher's callers moved to, whose calls must go through it.
-MOVED_CALLERS = ("presentation_windows.py", "legacy_presentation.py", "presentation_window_replacement.py")
+MOVED_CALLERS = ("presentation_windows.py", "legacy_presentation.py", "presentation_window_replacement.py",
+                 "launch_phases.py")
 
 
 def check(condition: bool, detail: str) -> None:

@@ -28,6 +28,9 @@ GIT_LINTED_MODULES = (
     ROOT / "scripts" / "launcher_checkout.py",
     # The chokepoint itself and its project helpers' call sites (SYRD-293).
     ROOT / "scripts" / "owner_git.py",
+    # The deploy-ref builders and the readonly resolution that runs them
+    # (SYRD-361).
+    ROOT / "scripts" / "tenant_release_target.py",
 )
 GIT_CHOKEPOINT = "run_owner_correct_git"
 

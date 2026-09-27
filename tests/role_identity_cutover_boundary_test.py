@@ -104,10 +104,12 @@ def test_the_default_ref_is_one_object() -> None:
 
     ref = release_refs.DEFAULT_TENANT_RELEASE_DEPLOY_REF
     cutover = inspect.signature(role_identity_cutover.cutover_role_identities_command).parameters["deploy_ref"].default
+    # `tenant_release_status` moved to scripts/tenant_release_target.py with its
+    # default (SYRD-361); the launcher re-exports it, so it is still counted here.
     stayed = [
         inspect.signature(fn).parameters["deploy_ref"].default
         for fn in vars(team_launcher).values()
-        if inspect.isfunction(fn) and fn.__module__ == "scripts.team_launcher"
+        if inspect.isfunction(fn) and fn.__module__ in ("scripts.team_launcher", "scripts.tenant_release_target")
         and "deploy_ref" in inspect.signature(fn).parameters
         and inspect.signature(fn).parameters["deploy_ref"].default is not inspect.Parameter.empty
         and isinstance(inspect.signature(fn).parameters["deploy_ref"].default, str)

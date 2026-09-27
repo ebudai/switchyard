@@ -10309,3 +10309,138 @@ By domain (`domains.py`):
 - project config and registry: 1,240 lines, 46 definitions;
 - CLI parsers and dispatch: 1,039 lines, 11 definitions;
 - and 10 smaller domains.
+
+### SYRD-375 (slice 17h): new-project support helpers and stage reporting
+
+Measured on `8864698`. The design was posted **before** any edit.
+- **Corrected before any edit:** siblings are read through the launcher, as
+  every module since SYRD-368 does.
+- **Corrected after the move, no code changed:** two seam totals I had typed
+  instead of computed. The independent proof's totals clause caught them.
+
+**Moved:** 18 top-level definitions, in the launcher's order, from
+`scripts/team_launcher.py` into the new `scripts/new_project_support.py`
+(386 lines). The launcher re-exports them in one explicit, unaliased import.
+- 12 functions, `ProvisioningStages`, and 5 constants (the two `#:` blocks moved
+  with theirs).
+- Nothing in the rest of the launcher reads any of them. `new_project_phases.py`
+  still reads 14 of them as `launcher.X`, unchanged. The P0-P5 module is
+  byte-identical.
+- **Defaults are bound when each definition runs,** each the same object as
+  before:
+  - `announce_new_project_presentation`'s `report` is the writer defined just
+    above it;
+  - `ProvisioningStages`' clock is `time.monotonic`;
+  - the initial artifact's `implementer_roles` is
+    `DEFAULT_PROJECT_IMPLEMENTER_ROLES` from its leaf,
+    `scripts.ticket_board.project_provision`.
+- **No cycle:** imported alone, the module loads only that leaf's
+  `scripts.ticket_board` package.
+- **Seams:** 28 call-time reads of 26 names, in 9 functions,
+  through `from scripts import team_launcher as launcher`. That covers every
+  launcher global the bodies read and every sibling read at call time, so a
+  patch on the launcher still reaches each one. The standard-library names are
+  the module's own.
+- **The privileged result-file writer is unchanged** apart from three
+  qualified names:
+  - the caller's ids are parsed, and the slug checked before any open;
+  - the write is handed to `launcher._run_as_account`;
+  - the file is opened `O_WRONLY|O_TRUNC|O_NOFOLLOW|O_CLOEXEC` (no `O_CREAT`);
+  - it must be a regular file of that uid before `os.write`;
+  - `os.close` runs in `finally`.
+- **The launcher** goes from 13,369 to 13,069 lines.
+
+**Guards: none widened.** I measured every name-to-count table, source-text
+guard, `getsource` reader, introspective filter and exported-copy fixture that
+names a moved definition or its callees. Each is scoped to another file or
+function, or reads the unchanged phases. The guarded comparison agrees.
+
+**Proof.** The independent proof (`equiv375.py`, symtable-based) holds:
+- each of the 18 equals its baseline node, with the call-time import dropped and
+  `launcher.X` read as `X`;
+- the nested `write()` is identical;
+- the defaults are as above;
+- the rest of the launcher is unchanged;
+- comments are conserved;
+- the phase module is byte-identical.
+
+I planted 15 faults, and 15 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/new_project_support_boundary_test.py`, 143
+  checks, with owned fakes only. No account is switched and no child is
+  started. It shows a launcher stand-in reaching all 26 seams, and covers:
+  - both import orders;
+  - default identity;
+  - dedupe and required roles;
+  - the artifact fields and design document;
+  - chown;
+  - the worktree runner choice;
+  - consent;
+  - the stages;
+  - the announcement;
+  - the writer against owned files: a link, a missing file, a directory, a
+    FIFO, a foreign uid, and the close on refusal.
+- **Mutations:** 55 of 55 are killed by assertions under the guard, with a
+  clean restore. The behaviour tests alone kill 49 of 55. The 6
+  left are identity and import-structure mutants that only the structure tests
+  can see: the default report replaced, another clock by default, the default roles a copy, the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Every run was under the in-process execution guard,** applied before any
+  import.
+  - **Whole suites:** 19 per tree. 14 pass on both;
+    4 stop at the guard identically on both (a passwd lookup), as limited
+    parity only. The new test is absent at baseline.
+  - **Per case:** 263 cases per tree across 22 suites. 109 pass on
+    both; 154 stop at the guard identically on both, as limited pre-effect
+    parity only; 0 fail otherwise. 29 are excluded, the standing
+    SYRD-322/336/338/343 exclusions plus 4 cases in
+    `switchyard_new_opens_its_window_test` that fork a real `_run_as_account`
+    child.
+  - Refusal signatures compared: 292; differing: 0.
+- **Containment:** live snapshots before and after both runs; **no live
+  change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module, the launcher and the phases from the release, with one set of
+  objects and the same defaults.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the upgrade journal, phase and source records -- 24 definitions, 485 lines (lines 7863-9070, not contiguous):
+  -   7863    1  UPGRADE_JOURNAL_SCHEMA  launcher callers outside: -; production readers outside the launcher: -
+  -   7878    7  UPGRADE_PHASES  launcher callers outside: -; production readers outside the launcher: -
+  -   7885    1  UPGRADE_PHASE_OWNERS  launcher callers outside: -; production readers outside the launcher: -
+  -   7971   28  RoleAccountCutover  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  -   8008    3  upgrade_journal_path  launcher callers outside: -; production readers outside the launcher: -
+  -   8030    1  UPGRADE_JOURNAL_OBSERVATIONS  launcher callers outside: -; production readers outside the launcher: -
+  -   8033   10  _read_journal_file  launcher callers outside: -; production readers outside the launcher: -
+  -   8045    7  read_upgrade_journal  launcher callers outside: ['release_alignment']; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   8054    1  UPGRADE_SOURCE_SCHEMA  launcher callers outside: -; production readers outside the launcher: -
+  -   8057   11  privileged_upgrade_source_path  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   8070   21  _write_privileged_json  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   8108   45  record_upgrade_source  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   8155   27  read_upgrade_source  launcher callers outside: ['release_alignment']; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   8184   10  upgrade_source_unavailable_reason  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py']
+  -   8196   39  resolve_pinned_upgrade_source  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/upgrade_phases.py']
+  -   8237   60  record_upgrade_phase  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/project_status.py', 'scripts/role_identity_cutover.py', 'scripts/upgrade_phases.py']
+  -   8299   41  publish_tenant_journal_projection  launcher callers outside: -; production readers outside the launcher: -
+  -   8342   22  _record_upgrade_observation  launcher callers outside: -; production readers outside the launcher: -
+  -   8366    4  upgrade_phase_observation  launcher callers outside: ['release_alignment']; production readers outside the launcher: -
+  -   8372    3  upgrade_phase_state  launcher callers outside: ['release_alignment']; production readers outside the launcher: -
+  -   8489   28  director_phase_required  launcher callers outside: -; production readers outside the launcher: ['scripts/project_onboarding.py']
+  -   8743   32  record_release_phase_from_status  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/upgrade_phases.py']
+  -   8986   53  upgrade_phase_report  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   9041   30  outstanding_release_phase_report  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  - launcher names it reads and keeps reading through the launcher: 11: ['ProjectConfig', 'current_user_name', 'publish_tenant_artifact', 'switchyard_privileged_provision_root', 'privileged_artifact_mode', 'ensure_privileged_provision_dir', '_format_release_sha', 'privileged_upgrade_journal_path', 'resolved_source_selection', 'DeclaredWorkflowPresence', 'declared_workflow_presence']
+  - launcher callers outside the closure (unchanged consumers through the re-export): 1: ['release_alignment']
+  - production modules reading it through the launcher: 5: ['scripts/director_upgrade.py', 'scripts/project_onboarding.py', 'scripts/project_status.py', 'scripts/role_identity_cutover.py', 'scripts/upgrade_phases.py']
+  - test files naming any of them: 16 (a rooted reader/patch/guard scan comes first, as for every slice)
+- Largest remaining launcher domains (`domains.py`), for the order after that:
+  -  2919 lines   89 defs  release selection, install and upgrade
+  -  2232 lines  201 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1517 lines   57 defs  privileged boundary, tenant control and repair
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 13,069 lines.

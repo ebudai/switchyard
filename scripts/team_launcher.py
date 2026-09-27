@@ -1076,6 +1076,26 @@ from scripts.owner_preparation import (
     _resolve_owner_shell_path,
     _verify_project_path_writable_by_owner,
 )
+from scripts.new_project_support import (
+    NEW_PROJECT_FIXED_ROLE_NAMES,
+    NEW_PROJECT_REQUIRED_ROLES,
+    NEW_PROJECT_STAGES,
+    NEW_RESULT_FILE_ENV,
+    ProvisioningStages,
+    SWITCHYARD_DESIGN_FILE_NAME,
+    _agent_owner_user,
+    _chown_switchyard_project_files,
+    _confirm_switchyard_new,
+    _dedupe_role_cli_pairs,
+    _prepare_first_run_auth_worktrees,
+    _project_dir,
+    _report_new_project_to_caller,
+    _require_new_project_roles,
+    _resolve_project_path,
+    _write_initial_switchyard_project_artifact,
+    announce_new_project_presentation,
+    print_role_plan_review,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1153,7 +1173,6 @@ PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
 )
 WORKTREE_POLICIES = frozenset({"shared", "isolated"})
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
-SWITCHYARD_DESIGN_FILE_NAME = "PROJECT_DESIGN.md"
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
@@ -1181,11 +1200,6 @@ LEGACY_USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
 #: which is what made a bridged launch open its window against the owner's own
 #: runtime directory, where no compositor is listening (SYRD-65).
 TENANT_CONTROL_CALLER_ENV = "SWITCHYARD_TENANT_CONTROL_CALLER"
-#: Where `switchyard new`, run as root by the installed wrapper, reports the
-#: project whose window the wrapper should open next as the person who asked.
-#: The wrapper creates and owns the file; root only ever writes it as that
-#: person (SYRD-221 UAT, test10).
-NEW_RESULT_FILE_ENV = "SWITCHYARD_NEW_RESULT_FILE"
 MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
 SWITCHYARD_COMMANDS = (
@@ -1352,10 +1366,6 @@ NEW_PROJECT_ROLE_CLI_DEFAULTS = {
     "audit": "claude",
 }
 SWITCHYARD_PROMPT_MAX_ATTEMPTS = 5
-NEW_PROJECT_REQUIRED_ROLES = (
-    "director",
-)
-NEW_PROJECT_FIXED_ROLE_NAMES = frozenset({"designer", "director", "audit"})
 NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
 NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "user", "unassigned"})
 NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES = ("main", "ops")
@@ -1839,33 +1849,8 @@ def _default_role_cli_pairs(
     return tuple(pairs)
 
 
-def _dedupe_role_cli_pairs(role_clis: Sequence[tuple[str, str]]) -> tuple[tuple[str, str], ...]:
-    result: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for role, cli in role_clis:
-        normalized_role = role.strip().lower()
-        if normalized_role in NEW_PROJECT_RESERVED_ROLE_NAMES:
-            if normalized_role not in NEW_PROJECT_FIXED_ROLE_NAMES:
-                raise SystemExit(f"role {normalized_role!r} is reserved")
-        else:
-            _validate_new_project_implementer_role(normalized_role)
-        normalized_cli = _validate_new_project_cli(cli, context=f"CLI for {normalized_role}")
-        if normalized_role in seen:
-            continue
-        seen.add(normalized_role)
-        result.append((normalized_role, normalized_cli))
-    return tuple(result)
-
-
 def _role_cli_map(role_clis: Sequence[tuple[str, str]]) -> dict[str, str]:
     return {role: cli for role, cli in role_clis}
-
-
-def _require_new_project_roles(role_clis: Sequence[tuple[str, str]]) -> None:
-    roles = {role for role, _cli in role_clis}
-    missing = [role for role in NEW_PROJECT_REQUIRED_ROLES if role not in roles]
-    if missing:
-        raise SystemExit(f"switchyard: required roles missing: {', '.join(missing)}")
 
 
 def _artifact_role_value_pairs(
@@ -4075,25 +4060,6 @@ def _prompt_switchyard_role_plan(
     return tuple(plan)
 
 
-def print_role_plan_review(
-    plan: Sequence[RoleSelection], *, print_func: Callable[[str], None] = print
-) -> None:
-    """The summary shown before anything is created.
-
-    Every role, its runtime, its model and its effort, in one place and before
-    the first account exists. A provisioning run that only reveals what it chose
-    by creating it is one an operator cannot check (SYRD-115).
-    """
-    print_func("switchyard: roles to create:")
-    for selection in plan:
-        parts = [selection.cli]
-        if selection.model:
-            parts.append(selection.model)
-        if selection.effort:
-            parts.append(f"effort {selection.effort}")
-        print_func(f"  {selection.role}: {' -> '.join(parts)}")
-
-
 def _prompt_switchyard_role_choices(
     *,
     input_func: Callable[[str], str] = input,
@@ -5885,23 +5851,8 @@ def _validate_project_slug(value: str) -> str:
     return slug
 
 
-def _agent_owner_user(agent_name: str) -> str:
-    agent = agent_name.strip()
-    if not agent:
-        raise SystemExit("switchyard: agent name cannot be empty")
-    return agent if agent.endswith("-agent") else f"{agent}-agent"
-
-
 def _is_valid_owner_user_name(value: str) -> bool:
     return bool(OWNER_USER_NAME_RE.fullmatch(value))
-
-
-def _project_dir(home_base: Path, owner_user: str, project_name: str) -> Path:
-    return home_base / owner_user / "Projects" / _slug_from_project_name(project_name)
-
-
-def _resolve_project_path(raw_path: Path | str) -> Path:
-    return Path(os.path.expandvars(str(raw_path))).expanduser().resolve(strict=False)
 
 
 def _switchyard_dir(project_dir: Path) -> Path:
@@ -5919,81 +5870,6 @@ def _project_dir_from_generated_config_path(config_path: Path) -> Path | None:
     if resolved.parent.name != "provision" or resolved.parent.parent.name != SWITCHYARD_PROJECT_DIR_NAME:
         return None
     return resolved.parent.parent.parent
-
-
-def _write_initial_switchyard_project_artifact(
-    *,
-    project_name: str,
-    slug: str,
-    owner_user: str,
-    project_dir: Path,
-    artifact_path: Path,
-    design_document: Path,
-    owner_shell: str,
-    implementer_roles: Sequence[str] = DEFAULT_PROJECT_IMPLEMENTER_ROLES,
-    role_clis: Sequence[tuple[str, str]] | None = None,
-    role_models: Mapping[str, str] | None = None,
-    role_efforts: Mapping[str, str] | None = None,
-    include_designer: bool = True,
-    include_audit: bool = True,
-    audit_roles: Sequence[str] | None = None,
-    agy_credential_source: str = "",
-    agy_credential_source_origin: str = "unset",
-) -> None:
-    resolved_audit_roles = tuple(audit_roles) if audit_roles is not None else (("audit",) if include_audit else ())
-    role_overlap = set(implementer_roles) & set(resolved_audit_roles)
-    if role_overlap:
-        raise SystemExit(f"roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}")
-    artifact = ProjectDesignArtifact(
-        project=slug,
-        project_name=project_name,
-        ticket_prefix=validate_ticket_prefix(slug),
-        owner_user=owner_user,
-        repository=project_dir,
-        remote="origin",
-        default_branch="main",
-        worktree_policy="shared",
-        design_document=design_document,
-        implementer_roles=tuple(implementer_roles),
-        audit_roles=resolved_audit_roles,
-        role_clis=_dedupe_role_cli_pairs(
-            role_clis
-            or _default_role_cli_pairs(
-                implementer_roles,
-                include_designer=include_designer,
-                include_audit=include_audit,
-                audit_roles=resolved_audit_roles,
-            )
-        ),
-        role_models=tuple(sorted((role_models or {}).items())),
-        role_efforts=tuple(sorted((role_efforts or {}).items())),
-        catalog_version=runtime_catalog.CATALOG_VERSION if (role_models or role_efforts) else 0,
-        include_designer=include_designer,
-        include_audit=bool(resolved_audit_roles),
-        push_policy="director-main-only",
-        gates=dict(PROJECT_DESIGN_DEFAULT_GATES),
-        capability_grants={
-            **PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS,
-            "shell": owner_shell,
-            "agy_credential_source": agy_credential_source,
-            "agy_credential_source_origin": agy_credential_source_origin,
-        },
-    )
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    if include_designer and not design_document.exists():
-        design_document.write_text(_project_design_markdown(slug, title=project_name, body="Design in progress."), encoding="utf-8")
-    _write_json_atomic(artifact_path, project_design_artifact_payload(artifact))
-
-
-def _chown_switchyard_project_files(
-    *,
-    owner_user: str,
-    project_dir: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    result = runner(["chown", "-R", f"{owner_user}:{owner_user}", str(_switchyard_dir(project_dir))])
-    if result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to assign {_switchyard_dir(project_dir)} to {owner_user}")
 
 
 def _chown_project_file(
@@ -6138,27 +6014,6 @@ def _read_toml_object(path: Path) -> dict[str, Any]:
 #: rather than written: Switchyard asks the CLI to run its own setup and then
 #: looks again, and never manufactures the answer (SYRD-191).
 FIRST_RUN_SETUP_CLIS = frozenset({"claude"})
-
-
-def _prepare_first_run_auth_worktrees(
-    config: ProjectConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    if config.repository is None:
-        return
-    worktree_runner = runner
-    owner_runner_anchor = config.repository or config.pane_launcher
-    if config.run_as_user and owner_runner_anchor is not None and (
-        config.control_repository is not None or config.pane_launcher is not None
-    ):
-        worktree_runner = _owner_project_git_runner(
-            owner_user=config.run_as_user,
-            project_dir=owner_runner_anchor,
-            owned_roots=_control_repository_owned_roots(config),
-            runner=runner,
-        )
-    ensure_project_worktrees(config, refresh=True, runner=worktree_runner)
 
 
 def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
@@ -6706,161 +6561,6 @@ def _resolve_switchyard_project(
     if hint:
         raise SystemExit(hint)
     raise SystemExit(f"switchyard: unknown project {selection!r}")
-
-
-def _confirm_switchyard_new(
-    *,
-    slug: str,
-    owner_user: str,
-    project_name: str,
-    project_dir: Path,
-    yes: bool,
-    input_func: Callable[[str], str],
-    print_func: Callable[[str], None],
-) -> None:
-    print_func(f"switchyard: project name: {project_name}")
-    print_func(f"switchyard: slug: {slug}")
-    print_func(f"switchyard: owner user: {owner_user}")
-    print_func(f"switchyard: project path: {project_dir}")
-    if yes:
-        return
-    answer = _read_prompt("Proceed? [y/N]: ", input_func=input_func).strip().lower()
-    if answer not in {"y", "yes"}:
-        raise SystemExit("switchyard: cancelled")
-
-
-def _report_new_project_to_caller(
-    path: str,
-    project: str,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> bool:
-    """Write `project` into the wrapper's result file, as the wrapper's user.
-
-    Root writing to a path somebody else chose is the classic way to be made to
-    overwrite a file of root's choosing through a symlink. So root does not
-    write it at all: a child drops to the sudo caller's uid and gid first, then
-    opens the path without following a link and without creating anything, and
-    writes only to a regular file that caller already owns. Whatever the path
-    turns out to be, nothing is written that the caller could not have written
-    themselves.
-    """
-    env = os.environ if environ is None else environ
-    uid = _int_env(env.get("SUDO_UID"))
-    gid = _int_env(env.get("SUDO_GID"))
-    if not path or uid is None or gid is None or not PROJECT_SLUG_RE.fullmatch(project):
-        return False
-
-    def write() -> None:
-        fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
-                raise PermissionError(f"{path} is not a regular file of uid {uid}")
-            os.write(fd, project.encode("ascii"))
-        finally:
-            os.close(fd)
-
-    return _run_as_account(uid, gid, write)
-
-
-def announce_new_project_presentation(
-    project: str,
-    *,
-    resolved_layout_mode: str,
-    environ: Mapping[str, str] | None = None,
-    report: Callable[..., bool] = _report_new_project_to_caller,
-    print_func: Callable[[str], None] = print,
-) -> None:
-    """Say where the new project's window is, and arrange for it to open.
-
-    Only a layout that opens its own window from here may say one was opened.
-    The viewer does not: it is one detached tmux session, and root has no screen
-    to show it on. That used to be reported as "full pane window started", and
-    on test10 the command then returned with no window and no hint (SYRD-221
-    UAT). When the installed wrapper is waiting, it is told which project to
-    open and opens it as the person who asked; when it is not, this says how.
-    """
-    env = os.environ if environ is None else environ
-    if resolved_layout_mode != LAYOUT_MODE_VIEWER:
-        print_func(f"switchyard: full pane window started for {project}")
-        return
-    result_file = str(env.get(NEW_RESULT_FILE_ENV) or "")
-    if result_file and report(result_file, project, environ=env):
-        print_func(
-            f"switchyard: every pane of {project} is up; its window opens next, in your "
-            "own session"
-        )
-        return
-    print_func(
-        f"switchyard: every pane of {project} is up, but this command runs as root, "
-        f"which has no screen, so it cannot open the window. Open it from your desktop "
-        f"session with: switchyard {project}"
-    )
-
-
-class ProvisioningStages:
-    """Say which stage `switchyard new` is in, and how long each one took.
-
-    A fresh project took about a minute on a modest host and the operator could
-    not tell which part was taking the time, or whether a quiet screen was a
-    wait for them or a stall (SYRD-248). One line as each stage starts, marked
-    when it is waiting for the operator, and one line at the end naming what
-    each stage cost.
-    """
-
-    def __init__(
-        self,
-        names: Sequence[str],
-        *,
-        print_func: Callable[[str], None] = print,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.names = tuple(names)
-        self.print_func = print_func
-        self.monotonic = monotonic
-        self.started: float | None = None
-        self.current: tuple[str, float] | None = None
-        self.durations: list[tuple[str, float]] = []
-
-    def begin(self, name: str, *, waits_for_you: bool = False) -> None:
-        now = self.monotonic()
-        if self.started is None:
-            self.started = now
-        self._close(now)
-        self.current = (name, now)
-        index = self.names.index(name) + 1 if name in self.names else len(self.durations) + 1
-        self.print_func(
-            f"switchyard: [{index}/{len(self.names)}] {name}"
-            + (" -- this step waits for you" if waits_for_you else "")
-            + f" ({now - self.started:.1f}s in)"
-        )
-
-    def finish(self) -> None:
-        now = self.monotonic()
-        self._close(now)
-        if self.started is None:
-            return
-        self.print_func(
-            f"switchyard: provisioned in {now - self.started:.1f}s: "
-            + ", ".join(f"{name} {seconds:.1f}s" for name, seconds in self.durations)
-        )
-
-    def _close(self, now: float) -> None:
-        if self.current is not None:
-            name, since = self.current
-            self.durations.append((name, now - since))
-            self.current = None
-
-
-#: The stages `switchyard new` reports, in order.
-NEW_PROJECT_STAGES = (
-    "host and agent CLI checks",
-    "project accounts and files",
-    "database and board",
-    "provider sign-in and folder trust",
-    "role panes",
-)
 
 
 def switchyard_new_command(

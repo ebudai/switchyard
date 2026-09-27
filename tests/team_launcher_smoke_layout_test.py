@@ -7,11 +7,13 @@ from team_launcher_test_helpers import *
 
 def test_konsole_process_launcher_is_explicit_only() -> None:
     # The presentation terminal's launch moved to scripts/desktop_presentation.py
-    # (SYRD-317); the launcher is still read.
-    for name in ("team_launcher.py", "desktop_presentation.py"):
+    # (SYRD-317) and the Konsole window's to scripts/gui_window_launch.py
+    # (SYRD-318); the launcher is still read.
+    for name in ("team_launcher.py", "desktop_presentation.py", "gui_window_launch.py"):
         source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
         assert 'getattr(runner, "process_launcher"' not in source, name
-    assert "process_launcher" in (ROOT / "scripts" / "desktop_presentation.py").read_text(encoding="utf-8")
+    for name in ("desktop_presentation.py", "gui_window_launch.py"):
+        assert "process_launcher" in (ROOT / "scripts" / name).read_text(encoding="utf-8"), name
     assert not hasattr(FakeRunner(), "process_launcher")
 
 def test_pgu_layout_matches_reference_six_pane_geometry() -> None:

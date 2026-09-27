@@ -891,6 +891,12 @@ from scripts.live_role_runtime import (
     roles_with_stale_provider_runtime,
     sync_reload_config_to_live_sessions,
 )
+from scripts.owner_state_dirs import (
+    _is_owner_state_path,
+    _owner_state_roots,
+    ensure_owner_state_dirs,
+    install_owner_state_dir_args,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -2787,57 +2793,6 @@ def ensure_owner_file(
     if result.returncode != 0:
         reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
         raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
-
-
-def install_owner_state_dir_args(config: ProjectConfig, path: Path) -> list[str]:
-    if not config.run_as_user:
-        raise ValueError("state directory ownership setup requires run_as_user")
-    return [
-        "install",
-        "-d",
-        "-m",
-        "700",
-        "-o",
-        config.run_as_user,
-        "-g",
-        config.run_as_user,
-        str(path),
-    ]
-
-
-def _owner_state_roots(config: ProjectConfig) -> tuple[Path, ...]:
-    if not config.run_as_user:
-        return ()
-    try:
-        owner = pwd.getpwnam(config.run_as_user)
-    except KeyError:
-        return ()
-    return (
-        Path(owner.pw_dir).expanduser().resolve(strict=False),
-        runtime_dir_for_uid(owner.pw_uid).expanduser().resolve(strict=False),
-    )
-
-
-def _is_owner_state_path(config: ProjectConfig, path: Path) -> bool:
-    resolved = path.expanduser().resolve(strict=False)
-    return any(resolved == root or resolved.is_relative_to(root) for root in _owner_state_roots(config))
-
-
-def ensure_owner_state_dirs(
-    config: ProjectConfig,
-    *,
-    pane_state_dir: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    if not config.run_as_user or current_user_name() == config.run_as_user:
-        return
-    for path in (config.session_dir, pane_state_dir):
-        if not _is_owner_state_path(config, path):
-            continue
-        result = runner(install_owner_state_dir_args(config, path))
-        if result.returncode != 0:
-            reason = _proc_failure_reason(result, f"install failed with exit {result.returncode}")
-            raise SystemExit(f"team-launcher: failed to assign state directory {path} to {config.run_as_user}: {reason}")
 
 
 def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:

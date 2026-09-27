@@ -15,14 +15,21 @@ unchanged. This pins what makes that safe:
   directory and migration name as they are when it is asked, and the trust
   walk stops at the launcher's redirected root -- so a suite that redirects
   the root on the launcher redirects this too.
+- **The staging commands are the function's own import (SYRD-324).** The
+  migration takes its role-tooling staging commands from its own
+  function-level import of `project_provision`, as it did before SYRD-305 --
+  never from the launcher's name, even when that is rebound -- while the
+  shared install root is still read from the launcher when it runs.
 
 Nothing here reads or writes a real account, ACL or privileged path.
 """
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,6 +105,63 @@ def test_roots_copy_is_placed_and_bounded_by_the_launcher_when_asked() -> None:
     check(path == redirected / "dir-p305" / "syrd-305-p305.sh",
           f"the trusted copy is where the launcher's root, directory and name put it: {path}")
     check(boundary == redirected, f"and the trust walk stops at the launcher's redirected root: {boundary}")
+
+
+def _tenant(tmp: Path):
+    """A tenant rendered into a temporary directory, as the script-order suite builds one."""
+    from scripts import team_launcher
+    from scripts.ticket_board.project_provision import build_plan, write_artifacts
+
+    provision, repository = tmp / "provision", tmp / "repository"
+    provision.mkdir()
+    repository.mkdir()
+    plan = build_plan(project="p324", project_name="P324", owner_user="p324-agent", owner_home=tmp / "home",
+                      source_repo=ROOT)
+    write_artifacts(plan, provision, enable_owner_linger=False)
+    config_path = team_launcher.write_new_project_launcher_artifacts(
+        plan, provision, repository=repository, print_func=lambda _text: None)
+    return team_launcher.load_project_config("p324", config_path), config_path
+
+
+def test_the_staging_commands_are_the_functions_own_import() -> None:
+    from scripts import role_account_migration, team_launcher
+    from scripts.ticket_board import project_provision
+
+    fn = [n for n in ast.parse((ROOT / "scripts" / "role_account_migration.py").read_text(encoding="utf-8")).body
+          if isinstance(n, ast.FunctionDef) and n.name == "render_role_account_migration"][0]
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "role_tooling_staging_commands"]
+    imported = [n for n in ast.walk(fn) if isinstance(n, ast.ImportFrom)
+                and n.module == "scripts.ticket_board.project_provision"
+                and any(a.name == "role_tooling_staging_commands" for a in n.names)]
+    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name) and len(imported) == 1,
+          "the migration calls the name it imports from project_provision, not the launcher's")
+
+    asked: list[tuple[str, str]] = []
+
+    def provisioned(project: str, release: str, **kwargs: object) -> list[str]:
+        asked.append((project, release))
+        return ["# syrd324 staging from project_provision"]
+
+    def trap(*args: object, **kwargs: object) -> list[str]:
+        raise AssertionError("the migration reached team_launcher.role_tooling_staging_commands")
+
+    with tempfile.TemporaryDirectory(prefix="syrd324.") as raw:
+        config, config_path = _tenant(Path(raw))
+        saved = (project_provision.role_tooling_staging_commands, team_launcher.role_tooling_staging_commands,
+                 team_launcher.switchyard_shared_install_root)
+        project_provision.role_tooling_staging_commands = provisioned
+        team_launcher.role_tooling_staging_commands = trap
+        team_launcher.switchyard_shared_install_root = lambda: Path("/nonexistent/syrd324/shared")
+        try:
+            script = role_account_migration.render_role_account_migration(config, config_path=config_path)
+        finally:
+            (project_provision.role_tooling_staging_commands, team_launcher.role_tooling_staging_commands,
+             team_launcher.switchyard_shared_install_root) = saved
+    check("# syrd324 staging from project_provision" in script.splitlines(),
+          "the staging commands in the script are project_provision's, as the function imports them")
+    check(asked == [("p324", "/nonexistent/syrd324/shared/current")],
+          f"from the launcher's install root, read when the function runs: {asked}")
 
 
 def main() -> int:

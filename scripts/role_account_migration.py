@@ -348,7 +348,7 @@ def render_role_account_migration(
     # From the pinned shared release, not the tenant's deployed board: the
     # deployed one is the release being replaced (SYRD-45).
     lines.extend(
-        launcher.role_tooling_staging_commands(
+        role_tooling_staging_commands(
             config.project, str(launcher.switchyard_shared_install_root() / "current")
         )
     )

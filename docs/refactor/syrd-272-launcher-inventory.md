@@ -420,6 +420,13 @@ re-derives its own closure before moving anything.
     step 1, which reads `launcher.X` back as `X`. The extractor now leaves
     every name a function binds untouched, and proof step 7 independently
     flags any `launcher.X` whose `X` the function binds itself.
+    SYRD-324 corrected the one earlier site this found
+    (`role_account_migration.render_role_account_migration`, from SYRD-305).
+    It also made the scan scope-aware: parameters of every kind; assignment,
+    for, with, except, walrus and comprehension targets; match captures;
+    imports; nested definitions; and a `global` declaration un-binding a
+    name. Nested functions and lambdas are scanned as their own scopes. It
+    reports zero across every module this refactor created.
 
 ## 3. Sequenced plan
 
@@ -4013,3 +4020,59 @@ Also measured on this candidate:
   in `switchyard_pane_launcher_for`, also read by four modules.
 
 Both need their shared helper settled first (rule 25).
+
+### SYRD-324 (preservation follow-up): the role migration's own import restored
+
+No lines moved, so the size table is unchanged: the launcher is untouched and
+`scripts/role_account_migration.py` keeps its line count.
+
+**The site.** SYRD-323's proof step 7 found one earlier extraction that read
+a function's own import through the launcher.
+`render_role_account_migration` imports `role_tooling_staging_commands` from
+`project_provision` at function level. Before SYRD-305 it called that local
+name; since SYRD-305 it had called `launcher.role_tooling_staging_commands`.
+The launcher binds the very same function object and nothing rebinds it, so
+no ordinary run behaved differently. A launcher patch was visible there,
+though, and it should not have been.
+
+**The correction.** One token: the call is the bare local name again.
+`launcher.switchyard_shared_install_root()` beside it stays, because the
+baseline read the launcher's global there too, so it is a seam.
+
+**Evidence.**
+- **Against the parent of `96953de` (the pre-SYRD-305 launcher):**
+  - the restored function, normalized as proof step 1 normalizes, equals the
+    original exactly, and so do its defaults and comments;
+  - the call is a bare name bound by the function's own `project_provision`
+    import;
+  - proof step 7 is clean for the module;
+  - the unfixed function normalizes equal too -- which is exactly why step 1
+    alone never saw it.
+- **Scope-aware rule 27 scan:** the stricter scan's self-test finds every
+  binding form it names and does not flag a `global`. On all 43 refactor
+  modules it found exactly this site before the correction, and zero after.
+- **Regression:** `tests/role_account_migration_boundary_test.py` now has
+  9 checks. The new case renders the migration for an owned temporary
+  tenant -- rendered as text only, never run -- with `project_provision`'s
+  staging builder recording, the launcher's name a trap, and the launcher's
+  install root patched. It asserts:
+  - the recorded lines are in the script;
+  - the trap was never reached;
+  - the builder was given the launcher's patched install root.
+
+  An AST check pins the bare call.
+- **Mutations**, serially and on the clean tree, both killed:
+  - re-creating the bug is caught by the AST check, and, run alone, by the
+    trap;
+  - reading the install root past the launcher is caught by the recorded
+    argument.
+- **Suites:** the suites that render this migration ran on both this tree
+  and the pristine baseline `3d7d180`.
+  - Green on both: `team_launcher_role_account_script_order`,
+    `board_skill_staged_bundle`, `ticket_board_tenant_source_confinement`
+    and `team_launcher_upgrade_cutover`; so is the boundary test (9 checks
+    here, 6 on the baseline, which lacks the new case).
+  - `role_control_sudoers_install` is red on both trees, identically: 7 pass
+    and 1 fail, case by case, as in SYRD-323.
+- **Release and CLI:** the staged release carries the bare local call, and
+  CLI `--help` output and exit codes are identical for all 36 invocations.

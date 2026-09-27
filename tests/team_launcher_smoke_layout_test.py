@@ -6,9 +6,12 @@ from __future__ import annotations
 from team_launcher_test_helpers import *
 
 def test_konsole_process_launcher_is_explicit_only() -> None:
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-
-    assert 'getattr(runner, "process_launcher"' not in source
+    # The presentation terminal's launch moved to scripts/desktop_presentation.py
+    # (SYRD-317); the launcher is still read.
+    for name in ("team_launcher.py", "desktop_presentation.py"):
+        source = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert 'getattr(runner, "process_launcher"' not in source, name
+    assert "process_launcher" in (ROOT / "scripts" / "desktop_presentation.py").read_text(encoding="utf-8")
     assert not hasattr(FakeRunner(), "process_launcher")
 
 def test_pgu_layout_matches_reference_six_pane_geometry() -> None:

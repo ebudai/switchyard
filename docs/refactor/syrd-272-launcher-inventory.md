@@ -11073,3 +11073,120 @@ implemented**:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 11,402 lines.
+
+### SYRD-382 (slice 19b): the no-follow record readers
+
+Measured on `4bb665b`. The design was posted **before** any edit.
+
+**Moved:** `expected_privileged_uid`, `root_controlled_problems_for`,
+`read_plan_no_follow`, `_directory_owner_no_follow`,
+`read_tenant_document_no_follow` and `_walk_no_follow`, whole and in the
+launcher's order, from `scripts/team_launcher.py` into the new
+`scripts/no_follow_records.py` (268 lines). The launcher re-exports all
+six in one explicit, unaliased import, placed after the trusted-owner-identity
+import.
+- **`PlanDocument` and `PRIVILEGED_PROVISION_ROOT_ENV` stay in the launcher**
+  and are read through it. `PlanDocument` is imported only under
+  `TYPE_CHECKING`, for the annotations.
+- **The publication boundary's `root_controlled_problems`** is still imported
+  locally inside `root_controlled_problems_for`, verbatim and unqualified.
+- **Seams:** 8 call-time reads of 6 names across 5 functions;
+  4 of the names are moved siblings, read through the launcher as the
+  established contract requires.
+- **Unchanged:** every gate and its order, the 65536-byte reads, every
+  descriptor close and the non-leaking decode messages.
+- **Callers keep reading `launcher.X`, unchanged:** the six launcher callers
+  that read these names as launcher globals, and the fourteen production
+  modules that read them through the launcher.
+- **The launcher** goes from 11,402 to 11,192 lines.
+- **No guard needed widening:** no stay check names any of the six.
+
+**Proof.** The independent proof (`equiv382.py`) holds:
+- all six nodes are equal to the baseline, whole, modulo the call-time import
+  and `launcher.X`;
+- the symtable seams are as above;
+- scope: nothing free;
+- the local import is kept verbatim;
+- TYPE_CHECKING holds only `PlanDocument`;
+- the rest of the launcher is unchanged, and the remaining launcher reads of
+  the six are exactly the baseline's;
+- comments are conserved;
+- every other `scripts/` file is unchanged.
+
+I planted 18 faults, and 18 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/no_follow_records_boundary_test.py`, 86
+  checks. Every file is an owned temp entry. Other owners come from an
+  `os.fstat` stand-in, and `Descriptors` records every descriptor opened and
+  closed. The publication boundary's check is a stand-in, so nothing is walked
+  outside owned temp. It covers:
+  - the override, blank or stripped, through the launcher's variable, and the
+    base it gives root control;
+  - the walk: a symlinked base; a missing or unusable base; a symlinked, file,
+    missing or unopenable ancestor;
+  - the plan reader's gates in order: leaf symlink, missing, not a regular
+    file, unopenable, shared-writable, links, owner uids and mode, root owner
+    and mode (both overridden and not);
+  - 65536-byte chunking;
+  - invalid UTF-8 and JSON messages that never quote the bytes;
+  - a non-mapping document, and the exact `PlanDocument` fields (uid told from
+    gid);
+  - the directory reader;
+  - the tenant reader: a writable directory, root-owned versus owner-owned
+    entitlement, attribution of every refusal, and a copied dict;
+  - descriptors closed on every path, and all 6 seams reached through
+    launcher stand-ins.
+- **Mutations:** 55 of 55 are killed by assertions under the guard, with a
+  clean restore. The behaviour tests alone kill 53 of 55; the 2
+  left are import-structure mutants: the launcher imported at load, a name not re-exported.
+- **Every run was under the in-process execution guard.**
+  - **Whole suites:** 8 per tree (no_follow_records_boundary_test.py, privileged_runtime_plan_boundary_test.py, resume_provision_command_boundary_test.py, root_plan_reconstruction_boundary_test.py, runtime_artifact_refresh_boundary_test.py, tenant_release_root_boundary_test.py, trusted_owner_identity_boundary_test.py, workflow_adoption_boundary_test.py).
+    7 pass on both with no refusal; the new test is
+    absent at baseline.
+  - **Per case:** 6 suites and 54 screened cases, with
+    identical results on both trees: 31 pass and 23 stop at
+    the guard. The guard-stopped cases are real passwd lookups the guard
+    refuses, so they count as pre-effect parity only, not behaviour passes.
+  - **Excluded:** 19 cases the call-closure screen flagged
+    (upgrade-driving, fake root, pkexec, setfacl, `/run/`, namespace root).
+- **Containment:** live snapshots before and after; **no live change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module and all fourteen production readers from the release.
+
+**Baseline observations, not changed:**
+- **A symlinked base** is reported by the walk as `cannot open <base> (Not a
+  directory)` rather than as a symlink: Linux answers ENOTDIR for
+  `O_DIRECTORY|O_NOFOLLOW`, and only ancestors are lstat-checked.
+- **`_directory_owner_no_follow`'s "is not a directory" branch** is
+  unreachable through the walk, which opens the directory itself with
+  `O_DIRECTORY`.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the privileged provision directory and its records -- 9 definitions, 109 lines (lines 3132-3280, not contiguous):
+  -   3132    8  switchyard_privileged_provision_root  launcher callers outside: ['install_board_authority_files', 'install_privileged_artifacts', 'install_tenant_publication_boundary', 'pending_identities_path', 'privileged_upgrade_journal_path', 'publication_status_command']; production readers outside the launcher: ['scripts/github_identity.py', 'scripts/privileged_runtime_plan.py', 'scripts/release_rollback.py', 'scripts/role_account_migration.py', 'scripts/runtime_artifact_refresh.py', 'scripts/tenant_release_report.py', 'scripts/tenant_release_root.py', 'scripts/tenant_release_target.py', 'scripts/upgrade_phases.py', 'scripts/upgrade_records.py', 'scripts/workflow_adoption.py']
+  -   3142    3  privileged_baseline_plan_path  launcher callers outside: ['partial_provision_record']; production readers outside the launcher: ['scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/privileged_runtime_plan.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/runtime_artifact_refresh.py', 'scripts/tenant_config_records.py', 'scripts/tenant_release_root.py', 'scripts/trusted_owner_identity.py', 'scripts/workflow_adoption.py']
+  -   3147    4  workflow_record_path  launcher callers outside: -; production readers outside the launcher: ['scripts/workflow_adoption.py']
+  -   3153   25  recorded_declared_workflow  launcher callers outside: ['declared_workflow_presence']; production readers outside the launcher: ['scripts/root_plan_reconstruction.py', 'scripts/workflow_adoption.py']
+  -   3208    1  PRIVILEGED_PROVISION_DIR_MODE  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3209    1  PRIVILEGED_ARTIFACT_MODE  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3210    1  PRIVILEGED_EXECUTABLE_ARTIFACT_MODE  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3213    7  privileged_artifact_mode  launcher callers outside: ['install_privileged_artifacts', 'write_pending_identities']; production readers outside the launcher: ['scripts/privileged_runtime_plan.py', 'scripts/release_rollback.py', 'scripts/role_account_migration.py', 'scripts/tenant_config_records.py', 'scripts/upgrade_records.py', 'scripts/workflow_adoption.py']
+  -   3222   59  ensure_privileged_provision_dir  launcher callers outside: ['install_privileged_artifacts', 'write_pending_identities']; production readers outside the launcher: ['scripts/release_rollback.py', 'scripts/resume_provision_command.py', 'scripts/role_account_migration.py', 'scripts/runtime_artifact_refresh.py', 'scripts/tenant_config_records.py', 'scripts/tenant_release_root.py', 'scripts/upgrade_records.py', 'scripts/workflow_adoption.py']
+  - launcher names it reads (through the launcher once moved): 1: ['PRIVILEGED_PROVISION_ROOT_ENV']
+  - launcher callers outside the closure: 9: ['declared_workflow_presence', 'install_board_authority_files', 'install_privileged_artifacts', 'install_tenant_publication_boundary', 'partial_provision_record', 'pending_identities_path', 'privileged_upgrade_journal_path', 'publication_status_command', 'write_pending_identities']
+  - production modules reading it through the launcher: 17: ['scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/privileged_runtime_plan.py', 'scripts/release_rollback.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/role_account_migration.py', 'scripts/root_plan_reconstruction.py', 'scripts/runtime_artifact_refresh.py', 'scripts/tenant_config_records.py', 'scripts/tenant_release_report.py', 'scripts/tenant_release_root.py', 'scripts/tenant_release_target.py', 'scripts/trusted_owner_identity.py', 'scripts/upgrade_phases.py', 'scripts/upgrade_records.py', 'scripts/workflow_adoption.py']
+  - test files naming any of them: 29 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive privilege-boundary responsibility after the no-follow readers: where root keeps its provision records, and the directory that holds them)
+  - it also reads 4 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['DEFAULT_PRIVILEGED_PROVISION_ROOT (scripts.ticket_board.project_provision)', 'expected_privileged_uid (scripts.no_follow_records)', 'privileged_provision_dir (scripts.ticket_board.project_provision)', 'read_plan_no_follow (scripts.no_follow_records)']
+- Largest remaining launcher domains (`domains.py`):
+  -  2310 lines  208 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1319 lines   38 defs  release selection, install and upgrade
+  -  1219 lines   46 defs  privileged boundary, tenant control and repair
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 11,192 lines.

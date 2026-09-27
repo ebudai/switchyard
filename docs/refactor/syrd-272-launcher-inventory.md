@@ -11727,3 +11727,117 @@ implemented** (larger than the recent slices; the Director may split it):
   -  1039 lines   11 defs  CLI parsers and dispatch
 
 **SYRD-272 is not complete.** The launcher is still 10,788 lines.
+
+### SYRD-391 (slice 19h): the tenant-control helper's state and repair
+
+Measured on `69ae5f5`. The design was posted **before** any edit, and a
+correction was posted before the test was extended (see below).
+
+**Moved:** the fifteen ordered definitions of the ticket into the new
+`scripts/tenant_control_helper.py` (480 lines):
+- the bridge's lifecycle classification and grant (`_tenant_control_can_serve`,
+  `_tenant_control_grant`, `_tenant_control_operation`, and
+  `TENANT_CONTROL_OPERATIONS`/`ROOT`);
+- the frozen `TenantControlHelperState` and `tenant_control_helper_state`,
+  with root as the default entitled uid (`TENANT_CONTROL_OWNER_UID`);
+- the repair command and repair (`TENANT_CONTROL_REPAIR_LABEL`);
+- the protocol-program checks and `ensure_tenant_control_helper`.
+
+The interleaved `_switchyard_user_can_prompt_for_sudo` stays in the launcher.
+- **Re-export:** one explicit, unaliased import of all fifteen, above every
+  caller. That includes `_switchyard_exec_through_tenant_control`, whose eager
+  `ensure_helper` default is the same object.
+- **Seams:** 27 call-time reads of 18 names across 9 functions.
+  The four launcher facilities, the two provisioning helpers and 12 moved
+  siblings, constants and the class are all read through the launcher, so
+  every launcher patch or rebind in the suites still intercepts.
+- **Definition-time bindings are unchanged:** the `runner`/`print_func`
+  defaults and the `@dataclass(frozen=True)` decorator.
+- **The launcher** goes from 10,788 to 10,384 lines. No guard needed
+  widening.
+
+**Proof.** The independent proof (`equiv391.py`) holds. 22 of 22
+planted faults are caught, among them:
+- the entitled uid made the caller's;
+- the disk touched before the slug is refused;
+- the dataclass unfrozen;
+- the bytes compared by size;
+- the repair label dropped.
+
+**Evidence.**
+- **The existing behaviour suite cannot serve under the containment guard.**
+  `tenant_control_helper_repair_test` makes real passwd lookups and spawns
+  `getfacl`, so under the guard it is pre-effect parity only. The
+  correction posted before the edit moved the behaviour evidence into the
+  new test.
+- **New boundary test:** `tests/tenant_control_helper_boundary_test.py`,
+  124 checks. The launcher's ownership check and staging commands are
+  recorders; the same names on `project_provision` are refusing stand-ins, so
+  a path past the launcher fails the test and never reaches the host.
+  Everything else runs over owned temp. It covers:
+  - the narrow classification: the exact shape, casefolded verb, the slug
+    pattern alone (including a trailing newline), the grant's user, and an
+    error meaning "no";
+  - the grant file's refusals and string coercion;
+  - the verb an invocation is;
+  - the repair command with and without the recorder;
+  - the repair's announcement, argv and exit handling (a missing code is a
+    failure);
+  - the state: slug refusal before any filesystem call; the grant
+    disagreement; absent, inspect-error and present; the executable bit;
+    root entitled by default;
+  - staleness as a byte comparison of the named files, with a symlink,
+    missing or unreadable file stale;
+  - ensure: refuse, repair or carry on per program; the post-repair shape and
+    content checks, with their exact messages;
+  - reach of all 18 seams.
+- **Mutations:** 58 of 58 are killed by assertions, each with zero guard
+  refusals (required). The behaviour tests alone kill 53; the 5
+  left are definition-time or import-structure mutants that the structure
+  tests pin: state not frozen, runner default late, the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first and every string-data hit reviewed:
+  - 5 suites whole;
+  - 92 cases, with identical per-case status and refusal counts:
+    48 pass, 1 pass with a tolerated refusal, 42 stop at the
+    guard (pre-effect only), and 1 fail otherwise;
+  - 37 flagged cases excluded.
+- **The two guard-stopped whole suites, run per case** (each case screened first) give identical results on both trees:
+  - tenant_control_helper_repair_test: 3 pass and 19 stop at the guard;
+  - tenant_resume_cli_promotion_test: 2 pass and 12 stop at the guard.
+- **Baseline defects, reported and not fixed** (each is identical on the baseline, with zero refusals):
+  - `tenant_control_helper_repair_test::test_the_repair_touches_no_other_tenant` fails, because shared `/usr/local/lib/switchyard/...` paths appear in the repair command it inspects;
+  - `tenant_control_bridge_test::test_the_authorized_human_reaches_the_owner_through_the_bridge_alone` raises ValueError, because the staged-role-bundle check it does not stand in refuses, and the test parses that message as an exit code.
+- **Containment:** no live change. The CLI help is identical (36
+  invocations plus `team-launcher --help`).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: role-state ownership repair -- 9 definitions, 286 lines (lines 6969-7270, not contiguous):
+  -   6969    1  STATE_TREE_MAX_DEPTH  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6972   51  _open_tenant_state_root  launcher callers outside: -; production readers outside the launcher: -
+  -   7025   16  _root_placed_link  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7043    7  _close_quietly  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7052   74  _walk_tenant_state_tree  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  -   7128    8  role_state_roots  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7138   37  role_state_ownership_problems  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7177    5  _uid_owner_name  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7184   87  repair_role_state_ownership  launcher callers outside: ['restore_interrupted_role_state']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 2: ['ProjectConfig', 'current_user_name']
+  - launcher callers outside the closure: 1: ['restore_interrupted_role_state']
+  - production modules reading it through the launcher: 1: ['scripts/role_identity_cutover.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded next piece of the privileged-boundary domain: walking a tenant's role state without following links and repairing its ownership)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['role_session_dir (scripts.session_paths)']
+  - alternatives measured the same way:
+  -   - the tenant publication boundary install/remove (alternative): 2 definitions, 133 lines; launcher callers outside: -; production readers: 1
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2279 lines  209 defs  general helpers (unclassified)
+  -  1820 lines   75 defs  provisioning (new/register/teardown/owner accounts)
+  -  1277 lines   37 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+
+**SYRD-272 is not complete.** The launcher is still 10,384 lines.

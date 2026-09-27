@@ -1185,6 +1185,10 @@ from scripts.privileged_provision_records import (
     switchyard_privileged_provision_root,
     workflow_record_path,
 )
+from scripts.privileged_artifacts import (
+    install_privileged_artifacts,
+    render_privileged_artifacts,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3138,60 +3142,6 @@ def publish_tenant_artifact(
 
 
 PRIVILEGED_PROVISION_ROOT_ENV = "SWITCHYARD_PRIVILEGED_PROVISION_ROOT"
-
-
-def render_privileged_artifacts(
-    plan: ProjectBoardProvision, *, enable_owner_linger: bool = False
-) -> dict[str, bytes]:
-    """Render everything root installs, in a directory only root can reach.
-
-    Rendering into root's own temporary directory rather than reading the
-    tenant's copies back means the bytes root publishes are the bytes root
-    generated, with no window in which they could be replaced (SYRD-39).
-    """
-    with tempfile.TemporaryDirectory(prefix=f"switchyard-{plan.project}-privileged.") as tmp:
-        staged = Path(tmp)
-        os.chmod(staged, 0o700)
-        write_artifacts(plan, staged, enable_owner_linger=enable_owner_linger)
-        return {
-            name: (staged / name).read_bytes()
-            for name in (*privileged_artifact_names(plan), "plan.json")
-            if (staged / name).is_file()
-        }
-
-
-def install_privileged_artifacts(
-    plan: ProjectBoardProvision,
-    rendered: dict[str, bytes],
-    *,
-    privileged_root: Path | None = None,
-) -> Path:
-    """Publish rendered bytes into a directory only root can reach.
-
-    The provision directory belongs to the tenant, and a directory's owner can
-    replace what is inside it, so root neither writes there nor reads back from
-    there: these bytes come straight from the render above. Each file is written
-    beside its target and renamed, so an operator never reads a half-written
-    unit (SYRD-39).
-
-    "Only root can reach" is enforced here rather than described: the directory
-    is closed to root alone and each artifact is written at the least its
-    consumer needs, which for all of them is root and nobody else (SYRD-176).
-    """
-    base = privileged_root or switchyard_privileged_provision_root()
-    target = privileged_provision_dir(plan.project, root=base)
-    ensure_privileged_provision_dir(target, root=base)
-    for name, body in rendered.items():
-        staged = target / f".{name}.new"
-        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        try:
-            os.write(descriptor, body)
-            os.fchown(descriptor, 0, 0)
-            os.fchmod(descriptor, privileged_artifact_mode(name))
-        finally:
-            os.close(descriptor)
-        staged.replace(target / name)
-    return target
 
 
 def _tenant_board_root_from_config(config: ProjectConfig) -> Path | None:

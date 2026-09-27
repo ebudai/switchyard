@@ -218,8 +218,15 @@ def test_the_launcher_reexports_the_nine_and_keeps_its_facilities() -> None:
     check(len(imports) == 1 and sorted(a.name for a in imports[0].names) == sorted(MOVED)
           and all(a.asname is None for a in imports[0].names), "one explicit import of exactly the nine, unaliased")
     defined = {getattr(n, "name", None) for n in tree.body} | {x.id for n in tree.body if isinstance(n, ast.Assign) for x in n.targets if isinstance(x, ast.Name)}
-    check(not defined & set(MOVED) and "PRIVILEGED_PROVISION_ROOT_ENV" in defined and "render_privileged_artifacts" in defined,
-          "the launcher defines none of the nine, and still defines the override's variable and the renderer between them")
+    # SYRD-384 moved the renderer between the two runs to scripts/privileged_artifacts.py: the launcher keeps it as
+    # its own name -- defined there, or re-exported by exactly that name -- and it never moved into this module.
+    keeps_renderer = "render_privileged_artifacts" in defined or any(
+        isinstance(n, ast.ImportFrom) and n.module == "scripts.privileged_artifacts"
+        and any(a.name == "render_privileged_artifacts" and a.asname is None for a in n.names) for n in tree.body)
+    here = ast.parse((ROOT / "scripts" / "privileged_provision_records.py").read_text(encoding="utf-8"))
+    check(not defined & set(MOVED) and "PRIVILEGED_PROVISION_ROOT_ENV" in defined and keeps_renderer
+          and "render_privileged_artifacts" not in {getattr(n, "name", None) for n in here.body},
+          "the launcher defines none of the nine, and still keeps the override's variable and the renderer between them")
 
 
 # --- behaviour ------------------------------------------------------------------------------------------------------

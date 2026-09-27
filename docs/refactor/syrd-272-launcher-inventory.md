@@ -11310,3 +11310,116 @@ implemented**:
   -  1121 lines   39 defs  privileged boundary, tenant control and repair
 
 **SYRD-272 is not complete.** The launcher is still 11,072 lines.
+
+### SYRD-384 (slice 19d): privileged artifact rendering and installation
+
+Measured on `d64b0c8`. The design was posted **before** any edit, with its one
+guard widening announced.
+
+**Moved:** `render_privileged_artifacts` and `install_privileged_artifacts`,
+whole and in the launcher's order, into the new
+`scripts/privileged_artifacts.py` (89 lines).
+- **The launcher re-exports both** in one explicit, unaliased import, placed
+  after the provision-records import.
+- **Seams:** 6 call-time reads of 6 names across 2 functions:
+  the artifact writer and names, the provision root and directory, the
+  directory repair and the mode selector, all read through the launcher. There
+  are no sibling reads.
+- **`ProjectBoardProvision`** is imported only under TYPE_CHECKING.
+- **Unchanged:** the temporary directory's prefix, the 0700 chmod before the
+  write, the name filter, the explicit-or-derived root, the repair before any
+  write, and per artifact the no-follow `.name.new` opened 0600, then write,
+  fchown(0, 0), the helper's mode, close in `finally`, and rename.
+- **The launcher** goes from 11,072 to 11,022 lines.
+
+**One guard widened (my own SYRD-383 stay check).**
+`privileged_provision_records_boundary_test` required
+`render_privileged_artifacts` to be defined in the launcher.
+- **The widened check** accepts it defined there, or re-exported unaliased from
+  `scripts.privileged_artifacts`, and newly asserts that the records module
+  does not define it.
+- **It passes on the candidate and on a `git archive` copy of the baseline.**
+- **Its 3 mutants are killed** in the full run. Run against that one
+  case alone (a structural check, not an accumulator), the widened predicate
+  catches each of them.
+
+**Proof.** The independent proof (`equiv384.py`) holds:
+- membership and order;
+- symtable seams equal to the generated table's totals;
+- scope;
+- whole-node equality modulo the call-time import and `launcher.X`;
+- the literal defaults;
+- the staging, open-flag, chown and base text;
+- TYPE_CHECKING holding exactly the annotation type;
+- the rest of the launcher unchanged, and the remaining reads the baseline's;
+- the module's comments exactly the moved ones;
+- every other `scripts/` file unchanged.
+
+I planted 20 faults, and 20 are caught. The first run missed an
+added comment; the comment clause is now an exact equality.
+
+**Evidence.**
+- **New boundary test:** `tests/privileged_artifacts_boundary_test.py`,
+  40 checks. `os.fchown` is always a recorder, and every other file
+  operation is recorded and confined to owned temp. It covers:
+  - **Rendering:** the prefix and staging directory; chmod 0700 before the
+    write; the linger flag, by default and when passed; only file names from
+    the privileged list, then the plan, as bytes; cleanup even when the writer
+    raises.
+  - **Installation:** a derived versus explicit root; the target and its repair
+    before any write; per artifact the exact open flags and mode, then write,
+    fchown(0, 0), the helper's mode, close and rename, in rendered order;
+    nothing written outside the target.
+  - **Failures:** a link planted at `.name.new` refused; a failing
+    write/fchown/fchmod closes the descriptor, renames nothing and propagates.
+  - **Reachability:** all 6 seams reached through their own calls.
+- **Mutations:** 48 of 48 are killed by assertions under the guard,
+  including 3 guard mutants, with a clean restore. The behaviour tests
+  alone kill 45 of 48; the 3 left are import-structure mutants:
+  the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Every run was under the in-process execution guard,** and every selected
+  case was screened BEFORE it ran, from a Python-built list.
+  - **Whole suites:** 4 per tree. 4 pass on the
+    candidate with the baseline's status: the new test, the widened guard
+    suite, and both consumer boundary suites.
+  - **Per case:** 20 cases, with identical results on both
+    trees:
+    - 16 pass;
+    - 1 passes with a guard-refused chown the code tolerates
+      (pre-effect only);
+    - 3 stop at the guard (pre-effect parity only);
+    - 0 fail otherwise.
+  - **No accumulator check was run alone:** none was selected per case.
+  - **Excluded:** 10 cases or mains (namespace-root mains,
+    tmux, systemctl/psql/setfacl, pkexec, getfacl, and cases that execute a
+    generated packet phase).
+- **Containment:** live snapshots before and after; **no live change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: root's pending-identity records -- 5 definitions, 72 lines (lines 6921-7000, not contiguous):
+  -   6921    1  PENDING_IDENTITIES_SCHEMA  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6924   12  pending_identities_path  launcher callers outside: -; production readers outside the launcher: -
+  -   6938   29  write_pending_identities  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   6969   20  read_pending_identities  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  -   6991   10  pending_identity_for  launcher callers outside: -; production readers outside the launcher: ['scripts/role_credentials.py']
+  - launcher names it reads (through the launcher once moved): 3: ['RoleConfig', 'ProjectConfig', 'current_user_name']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/role_credentials.py', 'scripts/role_identity_cutover.py', 'scripts/upgrade_phases.py']
+  - test files naming any of them: 1 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive privilege-boundary responsibility after artifact installation: the identities root records for accounts it has yet to create, in the same root-only directory)
+  - it also reads 6 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['canonical_role_identities (scripts.role_identity_cutover)', 'ensure_privileged_provision_dir (scripts.privileged_provision_records)', 'home_dir_for_user (scripts.host_accounts)', 'privileged_artifact_mode (scripts.privileged_provision_records)', 'privileged_provision_dir (scripts.ticket_board.project_provision)', 'switchyard_privileged_provision_root (scripts.privileged_provision_records)']
+  - alternatives measured the same way:
+  -   - with the privileged upgrade journal path (alternative): 6 definitions, 82 lines; launcher callers outside: -; production readers: 5
+  -   - the tenant-side artifact publisher alone (alternative): 1 definitions, 40 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2325 lines  210 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1319 lines   38 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1067 lines   37 defs  privileged boundary, tenant control and repair
+
+**SYRD-272 is not complete.** The launcher is still 11,022 lines.

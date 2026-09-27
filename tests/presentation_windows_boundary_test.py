@@ -59,9 +59,11 @@ READ_ELSEWHERE = {
 #: Measured on the baseline outside the moved code, and unchanged in number: the
 #: launcher's own, and those of replace_presentation_window_command, which SYRD-329
 #: moved to presentation_window_replacement, where it still calls through the launcher.
+#: SYRD-344 moved launch_project's P9, holding one scan and one report, to
+#: launch_phases, which calls them through the launcher too.
 LAUNCHER_CALLS = {"unsafe_root_presentation_windows": 5, "unsafe_presentation_report": 4,
                   "close_presentation_window": 1, "close_desktop_presentation": 1}
-MOVED_CALLERS = ("presentation_window_replacement.py",)
+MOVED_CALLERS = ("presentation_window_replacement.py", "launch_phases.py")
 PATCHED_SEAMS = ("presentation_window_processes", "desktop_presentation_windows", "close_desktop_presentation",
                  "unsafe_root_presentation_windows")
 

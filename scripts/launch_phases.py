@@ -26,6 +26,10 @@ old position, by the launcher's own name.
   failing exit and records each failure into the caller's own `failed_roles`,
   which the rest of the launch reads. A code the launch stops on is returned
   as it was; going on returns a frozen `WorkerStartup`.
+- **P9, the launch's report and records** (`_report_launch`, SYRD-344): the
+  unsafe-window report, the announcement of panes a new window attached to, the
+  provider-state record of every role that came up, and the session report,
+  then the launch's own exit code, which `launch_project` returns.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -595,3 +599,67 @@ def _start_workers_and_present(
         launch_started_ns=launch_started_ns,
         resolved_layout_mode=resolved_layout_mode,
     )
+
+
+def _report_launch(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    effective_pane_state_dir: Path,
+    failed_roles: dict[str, str],
+    launch_started_at: float,
+    launch_started_ns: int,
+    mode: str,
+    print_func: Callable[[str], None],
+    reconcile_home: Path | None,
+    report_session_records: bool,
+    resolved_layout_mode: str,
+    running_roles: list[RoleConfig],
+    session_record_poll: float,
+    session_record_timeout: float,
+    unreconciled_roles: set[str],
+    worker_start_exit_code: int,
+) -> int:
+    """P9 of `launch_project`, unchanged: the unsafe-window report, the attach
+    announcement, the provider-state records and the session report; it answers
+    the launch's own exit code."""
+    from scripts import team_launcher as launcher
+
+    unsafe_windows = launcher.unsafe_root_presentation_windows(config, config_path=config_path)
+    if unsafe_windows:
+        print_func(launcher.unsafe_presentation_report(config, unsafe_windows))
+    if mode == "attach-or-start" and resolved_layout_mode != launcher.LAYOUT_MODE_VIEWER and not unsafe_windows:
+        attached_visible_roles = [role for role in running_roles if not role.detached and role.role not in failed_roles]
+        if attached_visible_roles:
+            attached_names = ", ".join(role.role for role in attached_visible_roles)
+            plural = "pane" if len(attached_visible_roles) == 1 else "panes"
+            print_func(
+                f"switchyard: opened a new window attached to running {plural}: {attached_names}; "
+                "the previous window may be closed if no longer needed"
+            )
+    # What each role's runtime has now been started against. Written after the
+    # launch, for every role that actually came up: a role whose start failed,
+    # or whose stale session could not be ended, keeps its old record so the
+    # next ordinary launch reconciles it instead of forgetting (SYRD-191).
+    if mode == "attach-or-start" and reconcile_home is not None:
+        for role in config.roles:
+            if role.role in failed_roles or role.role in unreconciled_roles:
+                continue
+            cli = launcher._role_cli_name(role)
+            if not cli:
+                continue
+            launcher.record_provider_state_generation(
+                config, role, launcher.provider_state_generation(cli, owner_home=reconcile_home)
+            )
+    if report_session_records:
+        launcher.report_launch_session_records(
+            config,
+            timeout_seconds=session_record_timeout,
+            poll_seconds=session_record_poll,
+            fallback_changed_since_ns=launch_started_ns,
+            pane_state_dir=effective_pane_state_dir,
+            pane_state_updated_since=launch_started_at,
+            attached_roles=running_roles if mode == "attach-or-start" else (),
+            print_func=print_func,
+        )
+    return worker_start_exit_code

@@ -43,6 +43,12 @@ windows; the skips, the stderr text and the first failure kept -- and the
 launch: stopping before the layout mode exists, P9 fenced from a stop, and P9
 seeing the four values and the same failures dict.
 
+SYRD-344 added P9, the launch's report and records (`_report_launch`, the last
+six statements, ending in the launch's own return). Its cases pin the unsafe
+window report, the attach announcement's filter, order and wording, which roles
+get provider-state records, the session report's arguments, the code coming
+back as the very object, and `launch_project` returning P9's answer.
+
 Every lookup is this test's own fake, patched on the launcher and recorded; no
 account, path, git, provider, GUI, board, socket or tmux is touched.
 """
@@ -62,7 +68,7 @@ if str(ROOT) not in sys.path:
 
 CHECKS = 0
 EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch",
-            "_write_layout_and_plan", "WorkerStartup", "_start_workers_and_present")
+            "_write_layout_and_plan", "WorkerStartup", "_start_workers_and_present", "_report_launch")
 #: The phase's launcher lookups, each called once at most, through the launcher.
 SEAMS = ("current_user_name", "_owner_process_runner", "_owner_project_git_runner", "_control_repository_owned_roots",
          "default_pane_state_dir_for_user", "default_layout_output_path", "project_window_title")
@@ -1419,6 +1425,196 @@ def test_the_launch_hands_p78s_four_values_and_its_failures_to_p9() -> None:
           f"a failure P7+P8 recorded is in the very dict P9 reads: {said} {failures}")
 
 
+#: P9's launcher lookups, each read once, through the launcher (measured on the SYRD-344 baseline).
+P9_SEAMS = ("unsafe_root_presentation_windows", "unsafe_presentation_report", "LAYOUT_MODE_VIEWER", "_role_cli_name",
+            "record_provider_state_generation", "provider_state_generation", "report_launch_session_records")
+P9_HOME = Path("/nonexistent/syrd344/owner-home")
+P9_PANES = Path("/nonexistent/syrd344/effective-pane-state")
+
+
+class Reports:
+    """P9's launcher lookups, answering from objects this test owns, into one ordered log."""
+
+    def __init__(self, *, unsafe: list | None = None, error: Exception | None = None):
+        self.unsafe, self.error = unsafe or [], error
+        self.log: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+
+        def session_records(cfg, **kw):
+            L.append(("records", kw))
+            if self.error:
+                raise self.error
+
+        return dict(
+            unsafe_root_presentation_windows=lambda cfg, *, config_path: L.append(("unsafe?", config_path))
+            or self.unsafe,
+            unsafe_presentation_report=lambda cfg, windows: L.append(("unsafe-report", windows)) or "SYRD344 UNSAFE",
+            LAYOUT_MODE_VIEWER="SYRD344_VIEWER",
+            _role_cli_name=lambda role: L.append(("cli", role.role)) or role.cli,
+            provider_state_generation=lambda cli, *, owner_home: L.append(("generation", cli, owner_home))
+            or f"gen-{cli}",
+            record_provider_state_generation=lambda cfg, role, generation: L.append(("record", role.role, generation)),
+            report_launch_session_records=session_records,
+        )
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def p9_role(name: str, *, detached: bool = False, cli: str = "codex") -> SimpleNamespace:
+    return SimpleNamespace(role=name, detached=detached, cli=cli)
+
+
+def report(r: Reports, *, mode: str = "attach-or-start", layout: str = "SYRD344_SEPARATE", running: list | None = None,
+           roles: list | None = None, failed: dict | None = None, unreconciled: set | None = None,
+           home: object = P9_HOME, records: bool = False, code: object = None):
+    from scripts import launch_phases, team_launcher
+
+    said: list[str] = []
+    cfg = SimpleNamespace(project="p344", roles=roles if roles is not None else [])
+    kwargs = dict(config_path=CONFIG_PATH, effective_pane_state_dir=P9_PANES,
+                  failed_roles=failed if failed is not None else {}, launch_started_at=344.25,
+                  launch_started_ns=344_250_000_000, mode=mode, print_func=said.append, reconcile_home=home,
+                  report_session_records=records, resolved_layout_mode=layout,
+                  running_roles=running if running is not None else [], session_record_poll=0.344,
+                  session_record_timeout=34.4, unreconciled_roles=unreconciled if unreconciled is not None else set(),
+                  worker_start_exit_code=code if code is not None else Code(0))
+    with patched(team_launcher, **r.names()):
+        result = launch_phases._report_launch(cfg, **kwargs)
+    return result, said, kwargs, cfg
+
+
+def test_the_report_phase_reads_its_lookups_through_the_launcher() -> None:
+    module = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_report_launch")
+    for name in P9_SEAMS:
+        uses = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(uses) == 1 and isinstance(uses[0].value, ast.Name) and uses[0].value.id == "launcher" and not bare,
+              f"P9 reads {name} at its one site, through the launcher")
+    lens = [n for n in ast.walk(function) if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "len"]
+    check(len(lens) == 1 and isinstance(lens[0].func, ast.Name), "len stays the builtin")
+    bound = {a.arg for a in function.args.args + function.args.kwonlyargs}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute)
+                      and isinstance(n.value, ast.Name) and n.value.id == "launcher" and n.attr in bound})
+    check("launcher" not in bound - {"launcher"} and through == [], f"nothing P9 binds is read as the launcher's: {through}")
+    check(isinstance(function.body[-1], ast.Return) and ast.unparse(function.body[-1]) == "return worker_start_exit_code",
+          "the phase ends in the launch's own return, unchanged")
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launch = next(n for n in launcher_tree.body if isinstance(n, ast.FunctionDef) and n.name == "launch_project")
+    sites = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_report_launch"]
+    check(len(sites) == 1 and isinstance(sites[0].func, ast.Name) and isinstance(launch.body[-1], ast.Return)
+          and launch.body[-1].value is sites[0],
+          "launch_project's last statement returns P9's answer, called by the launcher's own name")
+
+
+def test_p9_an_unsafe_window_is_reported_and_nothing_is_announced() -> None:
+    r = Reports(unsafe=["syrd344-window"])
+    code = Code(3)
+    result, said, _, _ = report(r, running=[p9_role("zeta")], code=code)
+    check(r.log[:2] == [("unsafe?", CONFIG_PATH), ("unsafe-report", ["syrd344-window"])]
+          and said == ["SYRD344 UNSAFE"],
+          f"the unsafe windows are looked for first and their report said, and no attachment announced: {said}")
+    check(result is code, f"the launch's own code comes back, the very object: {result!r}")
+
+
+def test_p9_the_announcement_names_the_attached_visible_panes_in_order() -> None:
+    running = [p9_role("zeta"), p9_role("bg", detached=True), p9_role("alpha"), p9_role("old")]
+    r = Reports()
+    _, said, _, _ = report(r, running=running, failed={"old": "busy"})
+    check(said == ["switchyard: opened a new window attached to running panes: zeta, alpha; "
+                   "the previous window may be closed if no longer needed"],
+          f"visible, started roles in running order, plural, detached and failed ones left out: {said}")
+    _, said, _, _ = report(Reports(), running=[p9_role("zeta"), p9_role("bg", detached=True)])
+    check(said == ["switchyard: opened a new window attached to running pane: zeta; "
+                   "the previous window may be closed if no longer needed"], f"one pane, singular: {said}")
+    for label, kwargs in (("no running role", dict(running=[])),
+                          ("only detached or failed ones", dict(running=[p9_role("bg", detached=True), p9_role("old")],
+                                                                failed={"old": "busy"})),
+                          ("a viewer", dict(running=[p9_role("zeta")], layout="SYRD344_VIEWER")),
+                          ("a plain attach", dict(running=[p9_role("zeta")], mode="attach"))):
+        _, said, _, _ = report(Reports(), **kwargs)
+        check(said == [], f"{label}: nothing is announced: {said}")
+
+
+def test_p9_provider_state_is_recorded_for_each_role_that_came_up() -> None:
+    roles = [p9_role("zeta"), p9_role("old"), p9_role("stale"), p9_role("bare", cli=""), p9_role("alpha", cli="claude")]
+    r = Reports()
+    report(r, roles=roles, failed={"old": "busy"}, unreconciled={"stale"})
+    check([e for e in r.log if e[0] in ("cli", "generation", "record")] == [
+        ("cli", "zeta"), ("generation", "codex", P9_HOME), ("record", "zeta", "gen-codex"),
+        ("cli", "bare"),
+        ("cli", "alpha"), ("generation", "claude", P9_HOME), ("record", "alpha", "gen-claude")],
+          f"in config order, against the reconcile home; failed, unreconciled and CLI-less roles keep their records: "
+          f"{r.log}")
+    for label, kwargs in (("no reconcile home", dict(home=None)), ("a plain attach", dict(mode="attach"))):
+        r = Reports()
+        report(r, roles=roles, **kwargs)
+        check(not {"cli", "generation", "record"} & set(r.kinds()), f"{label}: nothing is recorded: {r.kinds()}")
+
+
+def test_p9_the_session_report_gets_the_launchs_clock_and_directory() -> None:
+    running = [p9_role("zeta")]
+    for mode, attached in (("attach-or-start", running), ("attach", ())):
+        r = Reports(); code = Code(4)
+        result, said, kwargs, _ = report(r, mode=mode, running=running, records=True, code=code)
+        got = next(e[1] for e in r.log if e[0] == "records")
+        check(got == dict(timeout_seconds=34.4, poll_seconds=0.344, fallback_changed_since_ns=344_250_000_000,
+                          pane_state_dir=P9_PANES, pane_state_updated_since=344.25, attached_roles=attached,
+                          print_func=kwargs["print_func"])
+              and (got["attached_roles"] is running if mode == "attach-or-start" else True),
+              f"{mode}: the caller's timeout and poll, the launch's clock, the effective directory, and the attached "
+              f"roles: {got}")
+        check(r.kinds()[-1] == "records" and result is code, f"reported last, and the code still comes back: {result!r}")
+    r = Reports(); code = Code(5)
+    result, _, _, _ = report(r, running=running, records=False, code=code)
+    check("records" not in r.kinds() and result is code, f"not asked for, no report, and the same code: {r.kinds()}")
+
+
+def test_p9_an_error_reaches_the_caller() -> None:
+    boom = OSError("syrd344: records")
+    r = Reports(error=boom)
+    try:
+        report(r, records=True); raised = None
+    except OSError as exc:
+        raised = exc
+    check("records" in r.kinds(), f"asked for, the session report is made: {r.kinds()}")
+    check(raised is boom and r.kinds()[-1] == "records", f"a failing report is not swallowed: {r.kinds()}")
+
+
+def test_the_launch_returns_p9s_answer_with_the_state_before_it() -> None:
+    from scripts import team_launcher
+    from scripts.launch_phases import WorkerStartup
+    going = WorkerStartup(worker_start_exit_code=Code(6), launch_started_at=344.25,
+                          launch_started_ns=344_250_000_000, resolved_layout_mode="SYRD344_SEPARATE")
+    answer = Code(8)
+    asked: list[tuple] = []
+    with patched(team_launcher, _report_launch=lambda c, **k: asked.append((c, k)) or answer):
+        got, p78, _, _, setup, prepared, failures = launch_through_p78(going, mode="attach-or-start", report=True)
+    check(got is answer and len(asked) == 1 and asked[0][0] is prepared,
+          f"launch_project returns P9's answer itself, P9 given P5's config: {got!r}")
+    k = asked[0][1]
+    check(k == dict(config_path=CONFIG_PATH, effective_pane_state_dir=EFFECTIVE, failed_roles=failures,
+                    launch_started_at=344.25, launch_started_ns=344_250_000_000, mode="attach-or-start",
+                    print_func=k["print_func"], reconcile_home=None, report_session_records=True,
+                    resolved_layout_mode="SYRD344_SEPARATE", running_roles=[],
+                    session_record_poll=team_launcher.LAUNCH_SESSION_RECORD_POLL_SECONDS,
+                    session_record_timeout=team_launcher.LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS,
+                    unreconciled_roles=set(), worker_start_exit_code=going.worker_start_exit_code)
+          and k["failed_roles"] is failures and k["worker_start_exit_code"] is going.worker_start_exit_code
+          and k["failed_roles"] is p78[0][1]["failed_roles"],
+          f"P9 gets P7+P8's four values and the very failures dict they wrote into: {k}")
+    asked.clear()
+    stop = Code(7)
+    with patched(team_launcher, _report_launch=lambda c, **k: asked.append((c, k)) or answer):
+        got, _, _, _, _, _, _ = launch_through_p78(stop)
+    check(got is stop and asked == [], f"a stop in P7+P8 never reaches P9: {got!r} {asked}")
+
+
 #: Run first: a seam taken past the launcher must be caught before any
 #: behaviour check runs the real code it reached.
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
@@ -1426,7 +1622,8 @@ STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_the_call_site_the_seams_and_the_phases_own_names",
              "test_the_preparation_reads_every_launcher_lookup_through_the_launcher",
              "test_the_layout_phase_reads_its_lookups_through_the_launcher",
-             "test_the_worker_phase_reads_its_lookups_through_the_launcher")
+             "test_the_worker_phase_reads_its_lookups_through_the_launcher",
+             "test_the_report_phase_reads_its_lookups_through_the_launcher")
 
 
 def main() -> int:

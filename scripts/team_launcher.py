@@ -915,6 +915,7 @@ from scripts.launch_phases import (
     WorkerStartup,
     _launch_runners_and_paths,
     _prepare_launch,
+    _report_launch,
     _start_workers_and_present,
     _write_layout_and_plan,
 )
@@ -4949,44 +4950,24 @@ def launch_project(
     # A window opened by an earlier release can still be running as root, and
     # the tenant cannot signal it. Saying the project is attached while that is
     # true would be the wrong report to act on (SYRD-43).
-    unsafe_windows = unsafe_root_presentation_windows(config, config_path=config_path)
-    if unsafe_windows:
-        print_func(unsafe_presentation_report(config, unsafe_windows))
-    if mode == "attach-or-start" and resolved_layout_mode != LAYOUT_MODE_VIEWER and not unsafe_windows:
-        attached_visible_roles = [role for role in running_roles if not role.detached and role.role not in failed_roles]
-        if attached_visible_roles:
-            attached_names = ", ".join(role.role for role in attached_visible_roles)
-            plural = "pane" if len(attached_visible_roles) == 1 else "panes"
-            print_func(
-                f"switchyard: opened a new window attached to running {plural}: {attached_names}; "
-                "the previous window may be closed if no longer needed"
-            )
-    # What each role's runtime has now been started against. Written after the
-    # launch, for every role that actually came up: a role whose start failed,
-    # or whose stale session could not be ended, keeps its old record so the
-    # next ordinary launch reconciles it instead of forgetting (SYRD-191).
-    if mode == "attach-or-start" and reconcile_home is not None:
-        for role in config.roles:
-            if role.role in failed_roles or role.role in unreconciled_roles:
-                continue
-            cli = _role_cli_name(role)
-            if not cli:
-                continue
-            record_provider_state_generation(
-                config, role, provider_state_generation(cli, owner_home=reconcile_home)
-            )
-    if report_session_records:
-        report_launch_session_records(
-            config,
-            timeout_seconds=session_record_timeout,
-            poll_seconds=session_record_poll,
-            fallback_changed_since_ns=launch_started_ns,
-            pane_state_dir=effective_pane_state_dir,
-            pane_state_updated_since=launch_started_at,
-            attached_roles=running_roles if mode == "attach-or-start" else (),
-            print_func=print_func,
-        )
-    return worker_start_exit_code
+    return _report_launch(
+        config,
+        config_path=config_path,
+        effective_pane_state_dir=effective_pane_state_dir,
+        failed_roles=failed_roles,
+        launch_started_at=launch_started_at,
+        launch_started_ns=launch_started_ns,
+        mode=mode,
+        print_func=print_func,
+        reconcile_home=reconcile_home,
+        report_session_records=report_session_records,
+        resolved_layout_mode=resolved_layout_mode,
+        running_roles=running_roles,
+        session_record_poll=session_record_poll,
+        session_record_timeout=session_record_timeout,
+        unreconciled_roles=unreconciled_roles,
+        worker_start_exit_code=worker_start_exit_code,
+    )
 
 
 def _default_new_project_owner(project: str) -> str:

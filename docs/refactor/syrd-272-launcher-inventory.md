@@ -11646,3 +11646,84 @@ implemented**:
   -  1067 lines   37 defs  privileged boundary, tenant control and repair
 
 **SYRD-272 is not complete.** The launcher is still 10,908 lines.
+
+### SYRD-390 (slice 19g): polkit readiness
+
+Measured on `1d5a8c4`. The design was posted **before** any edit.
+
+**Moved:** `POLKIT_RULES_DIR`, `POLKIT_ANSWERED_EXIT_CODES`,
+`POLKIT_RESTART_COMMAND`, `POLKIT_QUERY_TIMEOUT_SECONDS` (each with its `#:`
+comment), `_apt_archive_has`, `polkit_install_command`, `polkit_service_problem`
+and `polkit_readiness_problems`, whole and in order, into the new
+`scripts/polkit_readiness.py` (168 lines).
+- **Re-export:** one explicit, unaliased import in the launcher, above
+  `precheck_new_project`, whose `polkit_problems` default binds the same
+  object as before.
+- **Seams:** 6 call-time reads of 6 names, all moved siblings or
+  constants, read through the launcher. That includes the `POLKIT_RULES_DIR`
+  fallback, so the suites' rebinds of `team_launcher.POLKIT_RULES_DIR` still
+  reach it.
+- **Definition-time defaults stay eager, as at the baseline:** `shutil.which`,
+  `subprocess.run` and the query timeout.
+- **The launcher** goes from 10,908 to 10,788 lines. No guard needed
+  widening.
+
+**Proof.** The independent proof (`equiv390.py`) holds, and 20 of 20
+planted faults are caught, among them a default late-bound, a default
+qualified, and the rules-dir fallback bound early.
+
+**Evidence.**
+- **New boundary test:** `tests/polkit_readiness_boundary_test.py`,
+  62 checks. Every `which` and runner is a recording fake, and
+  `os.getpid` is a stand-in.
+- **Mutations:** 44 of 44 are killed by assertions, each with zero guard
+  refusals (required). The behaviour tests alone kill 38 of 44. The
+  6 left are the import-structure mutants plus three
+  definition-time values that the structure tests pin: rules dir changed, which default dropped, runner default dropped, the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected case screened first:
+  - the new test, role_identity_cutover and role_pane_entry run whole and pass;
+  - polkit_dependency_test's 5 fake-runner cases run and
+    pass identically. Measured by the call profiler, each of them executes the
+    moved functions;
+  - 12 of its cases and mains were excluded (the installer
+    dry-runs, executed remedies, live pkcheck, `switchyard new` and
+    provisioning drivers).
+- **Containment:** no live change. The CLI help is identical (36
+  invocations plus `team-launcher --help`).
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented** (larger than the recent slices; the Director may split it):
+
+- Next closure, measured on this candidate and NOT implemented: the tenant-control helper's state and repair -- 15 definitions, 373 lines (lines 9159-9594, not contiguous):
+  -   9159   19  _tenant_control_can_serve  launcher callers outside: ['switchyard_invocation_requires_root']; production readers outside the launcher: -
+  -   9200    1  TENANT_CONTROL_OPERATIONS  launcher callers outside: -; production readers outside the launcher: -
+  -   9201    1  TENANT_CONTROL_ROOT  launcher callers outside: ['_switchyard_exec_through_tenant_control']; production readers outside the launcher: -
+  -   9204   15  _tenant_control_grant  launcher callers outside: ['_switchyard_cross_account', 'switchyard_recover_display_command']; production readers outside the launcher: ['scripts/desktop_presentation.py', 'scripts/presentation_controller.py']
+  -   9221   11  _tenant_control_operation  launcher callers outside: ['_switchyard_cross_account']; production readers outside the launcher: -
+  -   9236    1  TENANT_CONTROL_REPAIR_LABEL  launcher callers outside: -; production readers outside the launcher: -
+  -   9248    1  TENANT_CONTROL_OWNER_UID  launcher callers outside: -; production readers outside the launcher: ['scripts/agent_cli_promotion.py']
+  -   9252   23  TenantControlHelperState  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   9277   71  tenant_control_helper_state  launcher callers outside: -; production readers outside the launcher: -
+  -   9350   30  tenant_control_repair_command  launcher callers outside: -; production readers outside the launcher: -
+  -   9382   27  repair_tenant_control_helper  launcher callers outside: ['ensure_staged_role_bundle_before_crossing']; production readers outside the launcher: -
+  -   9416    4  PROTOCOL_STAGED_EXECUTABLES  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   9422   28  staged_protocol_states  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   9452   43  staged_tooling_out_of_date  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   9497   98  ensure_tenant_control_helper  launcher callers outside: ['_switchyard_exec_through_tenant_control']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 4: ['PROJECT_SLUG_RE', 'switchyard_shared_install_root', 'current_user_name', '_rollout_recorder_path']
+  - launcher callers outside the closure: 5: ['_switchyard_cross_account', '_switchyard_exec_through_tenant_control', 'ensure_staged_role_bundle_before_crossing', 'switchyard_invocation_requires_root', 'switchyard_recover_display_command']
+  - production modules reading it through the launcher: 3: ['scripts/agent_cli_promotion.py', 'scripts/desktop_presentation.py', 'scripts/presentation_controller.py']
+  - test files naming any of them: 12 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive piece of the privileged-boundary domain, after polkit readiness: the helper those authorizations serve -- its state, grant, operations and repair)
+  - it also reads 2 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['role_tooling_staging_commands (scripts.ticket_board.project_provision)', 'untrusted_root_executable_reasons (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+  -   - the tenant board-root resolvers (alternative): 2 definitions, 17 lines; launcher callers outside: ['_plan_data_from_config', 'upgrade_generated_project_config']; production readers: 6
+- Largest remaining launcher domains (`domains.py`):
+  -  2262 lines  208 defs  general helpers (unclassified)
+  -  1820 lines   75 defs  provisioning (new/register/teardown/owner accounts)
+  -  1277 lines   37 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1039 lines   11 defs  CLI parsers and dispatch
+
+**SYRD-272 is not complete.** The launcher is still 10,788 lines.

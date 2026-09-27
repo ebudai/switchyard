@@ -34,6 +34,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -740,3 +741,25 @@ def fetch_project_worktree_ref(
             file=sys.stderr,
         )
     return int(fetch_proc.returncode)
+
+def _prepare_project_worktrees_for_launch(
+    config: ProjectConfig,
+    *,
+    running_roles: list[RoleConfig],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> WorktreeProvisionResult:
+    from scripts import team_launcher as launcher
+
+    if not running_roles:
+        return launcher.ensure_project_worktrees(config, refresh=True, runner=runner)
+    running_role_names = {role.role for role in running_roles}
+    if config.control_repository is not None:
+        stopped_roles = [role for role in config.roles if role.role not in running_role_names]
+        if not stopped_roles:
+            return launcher.WorktreeProvisionResult({})
+        result = launcher.ensure_project_worktrees(replace(config, roles=stopped_roles), refresh=True, runner=runner)
+    else:
+        result = launcher.ensure_project_worktrees(config, refresh=False, runner=runner)
+    return launcher.WorktreeProvisionResult(
+        {role: reason for role, reason in result.failed_roles.items() if role not in running_role_names}
+    )

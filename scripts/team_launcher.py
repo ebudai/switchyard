@@ -240,6 +240,7 @@ from scripts.project_worktrees import (
     _config_git_owner_rules,
     _control_repository_boundary_error,
     _control_repository_owner_home,
+    _prepare_project_worktrees_for_launch,
     chown_control_repository_args,
     control_repository_refspec,
     control_repository_state,
@@ -2663,27 +2664,6 @@ def _running_project_roles(
         if result.returncode == 0 and live_command_matches_role(role, runner=role_runner):
             running_roles.append(role)
     return running_roles
-
-
-def _prepare_project_worktrees_for_launch(
-    config: ProjectConfig,
-    *,
-    running_roles: list[RoleConfig],
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> WorktreeProvisionResult:
-    if not running_roles:
-        return ensure_project_worktrees(config, refresh=True, runner=runner)
-    running_role_names = {role.role for role in running_roles}
-    if config.control_repository is not None:
-        stopped_roles = [role for role in config.roles if role.role not in running_role_names]
-        if not stopped_roles:
-            return WorktreeProvisionResult({})
-        result = ensure_project_worktrees(replace(config, roles=stopped_roles), refresh=True, runner=runner)
-    else:
-        result = ensure_project_worktrees(config, refresh=False, runner=runner)
-    return WorktreeProvisionResult(
-        {role: reason for role, reason in result.failed_roles.items() if role not in running_role_names}
-    )
 
 
 # The process table this scan reads. A module attribute so the callers that must

@@ -229,14 +229,14 @@ def test_the_seams_the_nested_closure_and_the_defaults() -> None:
         t.id for n in launcher.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
     check(not defined & set(MOVED), f"the launcher defines none of them: {defined & set(MOVED)}")
     # The interleaved packet-completion definitions did not come here. SYRD-363
-    # moved them on to scripts/packet_completion.py, which the launcher
-    # re-exports; recovery_readiness_problems is still the launcher's own.
+    # moved them on to scripts/packet_completion.py and SYRD-365 moved
+    # recovery_readiness_problems to scripts/recovery_readiness.py; the launcher
+    # re-exports both.
     own = {n.name for n in launcher.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-    packet_exports = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.packet_completion"
-                      for a in n.names}
-    check({"PacketCompletion", "privileged_packet_completion"} <= own | packet_exports
-          and "recovery_readiness_problems" in own
-          and not {"PacketCompletion", "privileged_packet_completion"} & {
+    reexported = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom)
+                  and n.module in ("scripts.packet_completion", "scripts.recovery_readiness") for a in n.names}
+    check({"PacketCompletion", "privileged_packet_completion", "recovery_readiness_problems"} <= own | reexported
+          and not {"PacketCompletion", "privileged_packet_completion", "recovery_readiness_problems"} & {
               n.name for n in module.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))},
           "the interleaved packet-completion definitions did not move here, and the launcher still has them")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.tenant_config_records"]

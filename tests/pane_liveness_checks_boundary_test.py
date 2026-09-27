@@ -155,8 +155,13 @@ def test_the_seams_the_class_and_the_defaults() -> None:
           "the defaults: /proc, subprocess.run, no deadline, interactive")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     defined = {n.name for n in launcher.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-    check(not defined & set(MOVED) and "recovery_readiness_problems" in defined,
-          f"the launcher defines none of them, and keeps the readiness check that reads them: {defined & set(MOVED)}")
+    # The readiness check that reads them did not come here. SYRD-365 moved it on
+    # to scripts/recovery_readiness.py, which the launcher re-exports.
+    readiness_exports = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.recovery_readiness"
+                         for a in n.names}
+    check(not defined & set(MOVED) and "recovery_readiness_problems" in defined | readiness_exports
+          and "recovery_readiness_problems" not in {n.name for n in module.body if isinstance(n, ast.FunctionDef)},
+          f"the launcher defines none of them, and still has the readiness check that reads them: {defined & set(MOVED)}")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.pane_liveness_checks"]
     check(exported == [sorted(MOVED)], f"one explicit re-export of all five: {exported}")
     status = ast.parse((ROOT / "scripts" / "project_status.py").read_text(encoding="utf-8"))

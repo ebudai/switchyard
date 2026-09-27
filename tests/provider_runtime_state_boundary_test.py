@@ -119,10 +119,20 @@ def test_the_launcher_seams_are_reached() -> None:
                       and n.value.id == "launcher" and n.attr in LAUNCHER_SEAMS})
     check(bare == [], f"no launcher seam is read past the launcher: {bare}")
     check(through == ["FIRST_RUN_SETUP_CLIS", "_read_json_object"], f"and the shared ones are read through it: {through}")
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    calls = [n for n in ast.walk(launcher_tree)
-             if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "await_runtime_registration"]
-    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
+    # The recovery check moved to scripts/recovery_readiness.py (SYRD-365), where
+    # the launcher's own name is read as `launcher.await_runtime_registration`;
+    # a bare call there would read that module's global and miss the patch.
+    calls = []
+    for name in ("team_launcher.py", "recovery_readiness.py"):
+        if not (ROOT / "scripts" / name).exists():
+            continue
+        tree = ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8"))
+        calls += [(name, n) for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "await_runtime_registration"]
+    check(len(calls) == 1 and (
+              (calls[0][0] == "team_launcher.py" and isinstance(calls[0][1].func, ast.Name))
+              or (calls[0][0] == "recovery_readiness.py" and isinstance(calls[0][1].func, ast.Attribute)
+                  and isinstance(calls[0][1].func.value, ast.Name) and calls[0][1].func.value.id == "launcher")),
           "the recovery check calls the wait by the launcher's own (patched) name")
 
 

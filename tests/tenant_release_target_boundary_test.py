@@ -202,8 +202,15 @@ def test_the_seams_the_local_import_and_the_defaults() -> None:
           "every default is the object it was: the leaf's deploy ref, subprocess.run, None")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     defined = {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)}
-    check(not defined & set(MOVED) and "TenantReleaseStatus" in {n.name for n in launcher.body if isinstance(n, ast.ClassDef)},
-          f"the launcher defines none of them, and keeps the status class: {defined & set(MOVED)}")
+    # SYRD-379 moved the status class to scripts/tenant_release_report.py; the launcher still keeps it as its own
+    # name -- defined there, or re-exported by exactly that name -- and it never moved here.
+    keeps_status = "TenantReleaseStatus" in {n.name for n in launcher.body if isinstance(n, ast.ClassDef)} or any(
+        isinstance(n, ast.ImportFrom) and n.module == "scripts.tenant_release_report"
+        and any(a.name == "TenantReleaseStatus" and a.asname is None for a in n.names) for n in launcher.body)
+    here = ast.parse((ROOT / "scripts" / "tenant_release_target.py").read_text(encoding="utf-8"))
+    check(not defined & set(MOVED) and keeps_status
+          and "TenantReleaseStatus" not in {n.name for n in here.body if isinstance(n, ast.ClassDef)},
+          f"the launcher defines none of them, and keeps the status class, which is not defined here: {defined & set(MOVED)}")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.tenant_release_target"]
     check(exported == [sorted(MOVED)], f"one explicit re-export of all ten: {exported}")
     for consumer, used in (("launcher_checkout.py", ("_parse_ls_remote_head",)), ("project_status.py", ("tenant_release_status",))):

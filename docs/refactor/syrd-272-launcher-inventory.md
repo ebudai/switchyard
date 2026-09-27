@@ -10758,3 +10758,118 @@ implemented**:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 12,096 lines.
+
+### SYRD-379 (slice 18d): the tenant release carrier, its commands, the deploy report and the transaction's pointer helpers
+
+Measured on `8d83333`. The design was posted **before** any edit, and a
+one-line correction also before any edit: `OWNER_BOUNDARY_SCRIPT`'s node spans
+5984-5988.
+
+**Moved:** thirteen definitions, in the launcher's order, from
+`scripts/team_launcher.py` into the new `scripts/tenant_release_report.py`
+(498 lines). The launcher re-exports them in one explicit, unaliased
+import. They are `TenantReleaseStatus` (with its decorator and field note),
+`tenant_release_deploy_command`, `tenant_release_listener_command`,
+`recorded_rollout_command`, `tenant_release_unit_install_command`,
+`release_update_blocked`, `_format_release_path`,
+`report_tenant_release_upgrade`, `OWNER_BOUNDARY_SCRIPT` (with its 15-line
+`#:` block), `_owner_boundary_env_args`, `capture_release_pointer`,
+`deploy_release_in_transaction` and `restore_release_pointer`.
+- **Interleaved launcher code stays:** `_rollout_recorder_path`,
+  `recorded_provisioning_command` and `_format_release_sha`.
+- **Definition-time bindings, each the same object:**
+  - `@dataclass(frozen=True)`;
+  - the report's `deploy_ref` default is `DEFAULT_TENANT_RELEASE_DEPLOY_REF`,
+    imported from its own acyclic leaf `scripts.release_refs` (the object the
+    launcher and `tenant_release_target` hold);
+  - its `runner` default is `subprocess.run`;
+  - `print`.
+  - The module loads only that leaf.
+- **Local imports kept:** the project-provision helpers
+  `readable_system_unit_path` and `system_unit_proof_chain` are still imported
+  inside the two functions that use them, verbatim and unqualified.
+- **Seams:** 35 call-time reads of 19 names in 8 functions,
+  through `from scripts import team_launcher as launcher`. 8 of those names
+  are moved siblings, and the release resolver `tenant_release_status` is among
+  them.
+- **Comments:** 70 comment lines moved, 15 of them the `#:` block.
+- **`_finish_upgrade_preview`** still reads two of them bare, as launcher
+  globals.
+- **The launcher** goes from 12,096 to 11,678 lines.
+
+**One guard widened, predicate kept.**
+`tenant_release_target_boundary_test` (SYRD-361) asserted that
+`TenantReleaseStatus` was a class defined in the launcher: "keeps the status
+class". It now holds when the launcher defines it OR re-exports it by exactly
+that, unaliased, name from `scripts.tenant_release_report`, and it newly
+asserts that `tenant_release_target` does not define it.
+- The widened test passes on the candidate and on a `git archive` copy of the
+  baseline.
+- Three mutants on the widened guard are killed: the re-export dropped, the
+  re-export aliased, and the class defined in the target module.
+
+Every other guard was measured unaffected.
+
+**Proof.** The independent proof (`equiv379.py`) holds:
+- each of the thirteen equals its baseline node, whole;
+- the seams are exactly the symtable body globals; the local imports and the
+  parameter and except names are not seams and shadow none;
+- scope: every global the module reads is bound in it or is a builtin;
+- the default objects are as above, and the local imports are kept;
+- the rest of the launcher reads the thirteen exactly where and as the baseline
+  did;
+- comments are conserved;
+- every other `scripts/` file is unchanged.
+
+I planted 19 faults, and 19 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/tenant_release_report_boundary_test.py`,
+  116 checks, with fake runners (no rendered command runs), owned symlinks
+  for the pointer, and stand-ins for every launcher facility. It pins every
+  rendered command byte for byte, and shows a launcher stand-in reaching all
+  19 seams.
+- **Mutations:** 57 of 57 are killed by assertions under the guard (the
+  three guard mutants included), with a clean restore. The behaviour tests
+  alone kill 55 of 57; the 2 left are import-structure mutants:
+  the launcher imported at load, a name not re-exported.
+- **Every run was under the in-process execution guard.**
+  - **Whole suites:** 4 per tree. 3 pass on both;
+    the new test is absent at baseline.
+  - **Per case:** 28 cases across 7 suites, screened. 11 pass on
+    both, with no refusal; 17 stop at the guard identically on both, as
+    limited pre-effect parity only; 0 fail otherwise.
+  - Refusal signatures compared: 28; differing: 0.
+- **Containment:** live snapshots before and after; **no live change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module from the release, with one set of objects and the same defaults.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**. Note that `trusted_owner_identity` (and its result class) is
+read by several other modules, so it may belong with the privileged-boundary
+helpers rather than with this closure:
+
+- Next closure, measured on this candidate and NOT implemented: tenant release root preparation -- 8 definitions, 267 lines (lines 5151-7808, not contiguous):
+  -   5151   12  TrustedOwnerIdentity  launcher callers outside: -; production readers outside the launcher: -
+  -   5165   53  trusted_owner_identity  launcher callers outside: -; production readers outside the launcher: ['scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/workflow_adoption.py']
+  -   7599    1  RELEASE_ROOT_WRITABLE_DIRS  launcher callers outside: -; production readers outside the launcher: -
+  -   7600    1  RELEASE_ROOT_WRITABLE_FILES  launcher callers outside: -; production readers outside the launcher: -
+  -   7603    4  release_root_repair_record_path  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7609   51  _open_release_root_entries  launcher callers outside: -; production readers outside the launcher: -
+  -   7662  121  prepare_tenant_release_root  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   7785   24  owner_release_root_problems  launcher callers outside: ['_finish_upgrade_preview']; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/upgrade_phases.py']
+  - launcher names it reads (through the launcher once moved): 9: ['ProjectConfig', 'current_user_name', '_write_private_json_atomic', 'switchyard_privileged_provision_root', 'privileged_baseline_plan_path', 'ensure_privileged_provision_dir', 'root_controlled_problems_for', 'read_plan_no_follow', '_walk_no_follow']
+  - launcher callers outside the closure: 1: ['_finish_upgrade_preview']
+  - production modules reading it through the launcher: 7: ['scripts/director_upgrade.py', 'scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/upgrade_phases.py', 'scripts/workflow_adoption.py']
+  - test files naming any of them: 7 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - release/install/upgrade closures measured after it: none left from the SYRD-375 list; the remaining domain is re-measured below
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['home_dir_for_user (scripts.host_accounts)', 'privileged_provision_dir (scripts.ticket_board.project_provision)', 'uid_for_user (scripts.host_accounts)']
+- Largest remaining launcher domains (`domains.py`):
+  -  2290 lines  205 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1601 lines   45 defs  release selection, install and upgrade
+  -  1443 lines   53 defs  privileged boundary, tenant control and repair
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 11,678 lines.

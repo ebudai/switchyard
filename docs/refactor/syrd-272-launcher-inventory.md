@@ -11423,3 +11423,82 @@ implemented**:
   -  1067 lines   37 defs  privileged boundary, tenant control and repair
 
 **SYRD-272 is not complete.** The launcher is still 11,022 lines.
+
+### SYRD-385 (slice 19e): root's pending-identity records
+
+Measured on `99eea8c`. The design was posted **before** any edit.
+
+**Moved:** `PENDING_IDENTITIES_SCHEMA`, `pending_identities_path`,
+`write_pending_identities`, `read_pending_identities` and
+`pending_identity_for`, whole and in the launcher's order, into the new
+`scripts/pending_identity_records.py` (127 lines).
+- **The launcher re-exports all five** in one explicit, unaliased import,
+  placed after the privileged-artifacts import.
+- **Seams:** 16 call-time reads of 10 names across 4 functions.
+  3 of the names are moved siblings or the schema, read through the
+  launcher as every extraction since SYRD-380 has done.
+- **`ProjectConfig` and `RoleConfig`** are imported only under TYPE_CHECKING.
+- **Unchanged:** the schema literal, the euid return, the payload and its
+  bytes, the staged no-follow write with its tolerated chown, the stderr
+  diagnostic, and every read fallback, filter and coercion.
+- **The launcher** goes from 11,022 to 10,947 lines.
+- **No guard needed widening.**
+
+**Proof.** The independent proof (`equiv385.py`) holds, and I planted
+22 faults, of which 22 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/pending_identity_records_boundary_test.py`,
+  64 checks, with every launcher facility a stand-in, `os.geteuid` a
+  stand-in, `os.fchown` a recorder and every file operation confined to owned
+  temp.
+- **Mutations:** 56 of 56 are killed by assertions under the guard. The
+  behaviour tests alone kill 54 of 56; the 2 left are
+  import-structure mutants: the launcher imported at load, the launcher redefines one. One equivalent mutant was
+  dropped and disclosed: role not coerced: `str(role)` -> `role`. JSON object keys are always str, so for any record json.loads can return the two are identical; dropped as an equivalent mutant.
+- **Comparison, both trees, under the in-process guard,** with every selected
+  case screened before it ran:
+  - **Whole:** 3 suites per tree; agent_credentials_boundary_test.py, pending_identity_records_boundary_test.py pass.
+  - **Per case:** 22 cases, identical on both trees: 12 pass,
+    10 stop at the guard (pre-effect only), 0 fail otherwise.
+  - **Excluded:** 78 flagged cases.
+- **What the comparison exercised:** measured by a call profiler on the
+  candidate, only the new boundary test runs any of the five. The consumer
+  suites import the module and run none of it.
+- **Containment:** no live change. The CLI help is identical for all 36
+  invocations, plus `team-launcher --help`.
+
+**Baseline defect found (not fixed here):**
+`tests/role_identity_cutover_boundary_test.py` is red on main. Its guard counts
+launcher-exported functions with a string `deploy_ref` default, but only from
+`scripts.team_launcher` and `scripts.tenant_release_target`. SYRD-379
+(`20cc0e6`, my slice) moved `report_tenant_release_upgrade` into
+`scripts.tenant_release_report`, so the count fell from 2 to 1: the suite passes
+at `8d83333` and fails from `20cc0e6` on. It needs its module filter widened.
+
+**Baseline observation (preserved):** a pending record that is valid JSON but
+not an object raises AttributeError from `read_pending_identities`, instead of
+falling back.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the tenant-side artifact publisher -- 1 definitions, 40 lines (lines 3109-3148, not contiguous):
+  -   3109   40  publish_tenant_artifact  launcher callers outside: -; production readers outside the launcher: ['scripts/runtime_artifact_refresh.py', 'scripts/upgrade_records.py']
+  - launcher names it reads (through the launcher once moved): 1: ['ProjectConfig']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 2: ['scripts/runtime_artifact_refresh.py', 'scripts/upgrade_records.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive privilege-boundary responsibility after root's own records: how a tenant publishes one generated artifact into its own tree without following a link)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_walk_no_follow (scripts.no_follow_records)']
+  - alternatives measured the same way:
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+  -   - the tenant board-root resolvers (alternative): 2 definitions, 17 lines; launcher callers outside: ['_plan_data_from_config', 'upgrade_generated_project_config']; production readers: 6
+- Largest remaining launcher domains (`domains.py`):
+  -  2262 lines  207 defs  general helpers (unclassified)
+  -  1820 lines   75 defs  provisioning (new/register/teardown/owner accounts)
+  -  1319 lines   38 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1067 lines   37 defs  privileged boundary, tenant control and repair
+
+**SYRD-272 is not complete.** The launcher is still 10,947 lines.

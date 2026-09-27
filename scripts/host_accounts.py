@@ -11,6 +11,12 @@ and patches on the launcher still reach every launcher caller.
 `add_project_role_command`'s `account_exists` default. The launcher imports it
 from here, so `team_launcher.local_account_exists` is the same object and the
 launcher's own callers still read it through the launcher.
+
+`uid_for_user` moved here unchanged from `scripts/team_launcher.py`
+(SYRD-367) for the same reason: `scripts/project_teardown.py` binds it as
+`owner_removal_refusal`'s `uid_lookup` default. The launcher imports it from
+here, so `team_launcher.uid_for_user` is the same object, and patches on the
+launcher still reach every launcher caller.
 """
 
 from __future__ import annotations
@@ -39,3 +45,10 @@ def local_account_exists(account: str) -> bool:
     except KeyError:
         return False
     return True
+
+
+def uid_for_user(user_name: str) -> int | None:
+    try:
+        return int(pwd.getpwnam(user_name).pw_uid)
+    except KeyError:
+        return None

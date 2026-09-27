@@ -165,8 +165,13 @@ def test_the_seams_the_modules_own_names_and_the_launchers_file() -> None:
     check(not {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)} & (set(MOVED) | {"local_account_exists"}),
           "the launcher defines none of them any more")
     leaf = ast.parse((ROOT / "scripts" / "host_accounts.py").read_text(encoding="utf-8"))
-    check([n.name for n in leaf.body if isinstance(n, ast.FunctionDef)] == ["home_dir_for_user", "local_account_exists"],
-          "the leaf holds the two account lookups")
+    # Later slices may move further account lookups here (SYRD-367: uid_for_user);
+    # the leaf still leads with these two, and holds nothing the launcher does not
+    # import from it.
+    in_leaf = [n.name for n in leaf.body if isinstance(n, ast.FunctionDef)]
+    from_leaf = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.host_accounts" for a in n.names}
+    check(in_leaf[:2] == ["home_dir_for_user", "local_account_exists"] and set(in_leaf) == from_leaf,
+          f"the leaf holds the two account lookups, and only lookups the launcher imports from it: {in_leaf} {sorted(from_leaf)}")
 
 
 def test_the_leaf_answers_from_the_passwd_database() -> None:

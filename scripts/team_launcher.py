@@ -1015,6 +1015,13 @@ from scripts.tenant_config_records import (
     tenant_config_record_path,
     verified_tenant_config,
 )
+from scripts.packet_completion import (
+    PacketCompletion,
+    _board_answers,
+    _owner_unit_is_active,
+    _owner_user_unit_args,
+    privileged_packet_completion,
+)
 from scripts.github_identity import (
     GITHUB_IDENTITY_TIMEOUT_SECONDS,
     _plan_with_selection,
@@ -7307,103 +7314,12 @@ def _resume_provision_hint(slug: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class PacketCompletion:
-    """What the privileged packet has left undone, if anything."""
-
-    problems: tuple[str, ...] = ()
-
-    @property
-    def done(self) -> bool:
-        return not self.problems
-
-
-def _owner_user_unit_args(plan: "ProjectBoardProvision", *args: str) -> list[str]:
-    """Drive the owner's user manager the way the packet itself drives it."""
-    uid = uid_for_user(plan.owner_user)
-    runtime_dir = f"/run/user/{uid}"
-    return [
-        "sudo", "-u", plan.owner_user, "env",
-        f"XDG_RUNTIME_DIR={runtime_dir}",
-        f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime_dir}/bus",
-        *args,
-    ]
-
-
 def _system_unit_is_active(unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool:
     result = runner(
         ["systemctl", "is-active", "--quiet", unit],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return getattr(result, "returncode", 1) == 0
-
-
-def _owner_unit_is_active(
-    plan: "ProjectBoardProvision", unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]
-) -> bool:
-    result = runner(
-        _owner_user_unit_args(plan, "systemctl", "--user", "is-active", "--quiet", unit),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    return getattr(result, "returncode", 1) == 0
-
-
-def _board_answers(plan: "ProjectBoardProvision", *, opener: Callable[[str], Any]) -> bool:
-    try:
-        with opener(f"http://127.0.0.1:{plan.port}/api/board"):
-            return True
-    except Exception:  # noqa: BLE001 - any failure to read is "not answering"
-        return False
-
-
-def privileged_packet_completion(
-    plan: "ProjectBoardProvision",
-    *,
-    exists: Callable[[Path], bool] = lambda path: path.exists(),
-    system_unit_active: Callable[[str], bool] | None = None,
-    owner_unit_active: Callable[[str], bool] | None = None,
-    board_answers: Callable[[], bool] | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    opener: Callable[[str], Any] | None = None,
-) -> PacketCompletion:
-    """Whether the privileged packet has finished, read from what it installs.
-
-    Not from a marker the packet could have written: a marker says a script
-    reached its last line, and what the continuation needs to know is whether
-    the things the rest of the recovery depends on are actually there. Each
-    problem names the step of the packet that would have produced it, because
-    the answer to an incomplete packet is to run it again and read what it
-    says.
-    """
-    system_active = system_unit_active or (lambda unit: _system_unit_is_active(unit, runner=runner))
-    owner_active = owner_unit_active or (lambda unit: _owner_unit_is_active(plan, unit, runner=runner))
-    answers = board_answers or (lambda: _board_answers(plan, opener=opener or _open_board_url))
-
-    problems: list[str] = []
-    for path, description in (
-        (Path("/etc/systemd/system") / plan.board_unit, f"the board unit {plan.board_unit} is not installed"),
-        (Path("/etc/tmpfiles.d") / plan.tmpfiles_name, f"the tmpfiles configuration {plan.tmpfiles_name} is not installed"),
-        (Path("/etc/polkit-1/rules.d") / plan.polkit_name, f"the polkit rule {plan.polkit_name} is not installed"),
-        (
-            Path(plan.owner_home) / ".config" / "systemd" / "user" / plan.listener_unit,
-            f"the listener unit {plan.listener_unit} is not installed for {plan.owner_user}",
-        ),
-        (
-            Path(plan.board_current) / "scripts" / "ticket-board.py",
-            f"no board release is exported at {plan.board_current}",
-        ),
-    ):
-        if not exists(path):
-            problems.append(f"{description} ({path})")
-    if not system_active(plan.board_unit):
-        problems.append(f"the board service {plan.board_unit} is not running")
-    if not owner_active(plan.listener_unit):
-        problems.append(
-            f"the notify listener {plan.listener_unit} is not running for {plan.owner_user}"
-        )
-    if not answers():
-        problems.append(f"the board does not answer on port {plan.port}")
-    return PacketCompletion(tuple(problems))
 
 
 def recovery_readiness_problems(

@@ -882,6 +882,14 @@ from scripts.legacy_presentation import (
 from scripts.presentation_window_replacement import (
     replace_presentation_window_command,
 )
+from scripts.live_role_runtime import (
+    _drop_roles_with_stale_provider_runtime,
+    _model_from_argv,
+    live_cli_for_role,
+    live_model_for_role,
+    process_tree_argvs,
+    roles_with_stale_provider_runtime,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -2619,68 +2627,6 @@ def process_tree_command_names(pane_pid: int) -> set[str]:
     return names
 
 
-def process_tree_argvs(pane_pid: int) -> list[list[str]]:
-    if pane_pid <= 0:
-        return []
-    _parents_by_pid, children_by_parent, _process_names, argv_by_pid = _process_snapshot()
-    stack = [pane_pid]
-    seen: set[int] = set()
-    records: list[list[str]] = []
-    while stack:
-        pid = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        argv = argv_by_pid.get(pid, [])
-        if argv:
-            records.append(list(argv))
-        stack.extend(children_by_parent.get(pid, []))
-    return records
-
-
-def _model_from_argv(argv: Sequence[str], *, model_arg: str) -> str:
-    if not model_arg:
-        return ""
-    for index, token in enumerate(argv):
-        if token == model_arg and index + 1 < len(argv):
-            return str(argv[index + 1]).strip()
-        if token.startswith(f"{model_arg}="):
-            return token.split("=", 1)[1].strip()
-    return ""
-
-
-def live_cli_for_role(
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> list[str]:
-    pane_pid = pane_pid_for_role(role, runner=runner)
-    if pane_pid <= 0:
-        return []
-    matches = sorted(name for name in process_tree_command_names(pane_pid) if name in KNOWN_LIVE_CLI_NAMES)
-    if len(matches) == 1:
-        return [matches[0]]
-    configured_cli = _command_name(role.cli[0])
-    if configured_cli in matches:
-        return [configured_cli]
-    return []
-
-
-def live_model_for_role(
-    role: RoleConfig,
-    *,
-    session_dir: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> str:
-    pane_pid = pane_pid_for_role(role, runner=runner)
-    if pane_pid > 0:
-        for argv in process_tree_argvs(pane_pid):
-            model = _model_from_argv(argv, model_arg=role.model_arg)
-            if model:
-                return model
-    return _session_payload_model_for_role(role, session_dir)
-
-
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     leaves: list[dict[str, Any]] = []
     if isinstance(node, dict):
@@ -2710,112 +2656,6 @@ def _running_project_roles(
         if result.returncode == 0 and live_command_matches_role(role, runner=role_runner):
             running_roles.append(role)
     return running_roles
-
-
-def roles_with_stale_provider_runtime(
-    config: ProjectConfig,
-    running_roles: Sequence[RoleConfig],
-    *,
-    owner_home: Path,
-) -> list[RoleConfig]:
-    """Running roles whose runtime predates the provider state it needs.
-
-    A process reads its provider state once, when it starts. Anything recorded
-    afterwards -- a login, an account's first run, a worktree's trust -- is
-    invisible to it, and it goes on showing whatever it was showing. Live on the
-    testing tenant, five sessions from the previous day were presented after two
-    logins and a completed setup, every one of them still on a first-run screen.
-
-    A role with no record at all counts as stale: nothing says its runtime was
-    started against the state that exists now, and one restart settles it.
-    """
-    stale: list[RoleConfig] = []
-    for role in running_roles:
-        cli = _role_cli_name(role)
-        if not cli:
-            continue
-        # A store this process cannot read or write answers nothing, and a
-        # restart over it would end a live pane and leave the same question
-        # for the next launch (SYRD-233).
-        if provider_state_store_problem(config, role):
-            continue
-        if recorded_provider_state_generation(config, role) != provider_state_generation(
-            cli, owner_home=owner_home
-        ):
-            stale.append(role)
-    return stale
-
-
-def _drop_roles_with_stale_provider_runtime(
-    config: ProjectConfig,
-    running_roles: Sequence[RoleConfig],
-    *,
-    owner_home: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-    print_func: Callable[[str], None] = print,
-) -> list[RoleConfig]:
-    """Roles that may be presented as they are, rather than started again.
-
-    A process reads its provider state once, when it starts, so a login, an
-    account's first run or a worktree's trust recorded afterwards never reaches
-    a runtime that was already up. Live on the testing tenant: two logins and a
-    completed setup, and five sessions from the previous day presented as they
-    were, each still on a first-run screen.
-
-    Staleness is decided by comparing each role's recorded generation with the
-    one the account carries now, so it does not depend on this run having
-    performed a login -- the failing case had none -- and a token refresh, which
-    changes no decision, changes no generation and restarts nobody. A role with
-    no record is stale by definition: nothing says what its runtime was started
-    against, and one restart settles it (SYRD-191).
-    """
-    # Said once, before anything is ended: these roles are left exactly as they
-    # are, and the reason is a repair rather than a restart.
-    for role, problem in unreadable_provider_state_roles(config, running_roles):
-        print_func(
-            f"team-launcher: leaving {role.role} running: {problem}. Its runtime is not "
-            f"checked against the account's provider state, and restarting it would settle "
-            f"nothing. Run `sudo switchyard upgrade {config.project}` to give the tenant "
-            "account its own role state back."
-        )
-    stale = roles_with_stale_provider_runtime(config, running_roles, owner_home=owner_home)
-    if not stale:
-        return list(running_roles), set()
-    wanted = {role.role for role in stale}
-    keep: list[RoleConfig] = []
-    restarted: list[str] = []
-    unreconciled: set[str] = set()
-    for role in running_roles:
-        if role.role not in wanted:
-            keep.append(role)
-            continue
-        role_runner = role_process_runner_for(config, role, runner=runner)
-        result = role_runner(
-            tmux_kill_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        if getattr(result, "returncode", 1) != 0:
-            # It could not be ended, so it will not be started either: say so
-            # rather than reporting a restart that did not happen, and leave the
-            # record alone so the next launch tries again.
-            print_func(
-                f"team-launcher: {role.role} is running against older "
-                f"{_role_cli_name(role)} state and its session could not be ended; it will keep "
-                "showing whatever it was showing until it is restarted"
-            )
-            keep.append(role)
-            unreconciled.add(role.role)
-            continue
-        # The record is NOT updated here: it is written after the launch, for
-        # roles that actually came up. A restart that ends a session and then
-        # fails to start one must leave the role stale.
-        restarted.append(role.role)
-    if restarted:
-        print_func(
-            "team-launcher: restarting "
-            + ", ".join(sorted(restarted))
-            + ": their runtimes started against older provider state than this account now has"
-        )
-    return keep, unreconciled
 
 
 def _prepare_project_worktrees_for_launch(

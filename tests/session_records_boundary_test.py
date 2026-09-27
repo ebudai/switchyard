@@ -65,6 +65,7 @@ READ_ELSEWHERE = {
     "scripts/presentation_controller.py": ("session_id_for_role",),
     "scripts/role_command.py": ("session_id_for_role",),
     "scripts/role_runtime.py": ("clear_session_record_for_role",),
+    "scripts/live_role_runtime.py": ("_session_payload_model_for_role",),
 }
 
 

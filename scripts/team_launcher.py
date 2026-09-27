@@ -795,6 +795,18 @@ from scripts.gui_window_launch import (
     _refusal_command,
     write_konsole_config_defaults,
 )
+from scripts.presentation_layout_files import (
+    chown_layout_output_args,
+    default_layout_output_path,
+    desktop_layout_destination_problem,
+    desktop_presentation_layout_path,
+    desktop_state_dir,
+    ensure_layout_output_owner,
+    inert_pane_command,
+    materialize_layout,
+    pane_split_title,
+    role_display_name,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -1031,30 +1043,6 @@ def project_window_title(config: ProjectConfig) -> str:
     return config.project_name.strip() or config.project
 
 
-def role_display_name(role: RoleConfig) -> str:
-    """One role's name as a person reads it, from the slug the project uses."""
-    slug = str(role.role or "").strip()
-    return slug[:1].upper() + slug[1:] if slug else slug
-
-
-def pane_split_title(config: ProjectConfig, role: RoleConfig) -> str:
-    """What one split in the presentation calls itself: its role, and no more.
-
-    SYRD-122 put the project name in here too, on the understanding that
-    Konsole gives a window no title of its own -- the title bar shows the
-    active split's, so the project reached it only by being inside every split
-    title. That bought the window a name at the price of six headers all
-    beginning `Switchyard -- `, and it did not even hold: the title bar still
-    changed as focus moved, because it was reading whichever split had it.
-
-    Konsole does distinguish the two. The window title an escape sequence sets
-    is separate from a split's title, and the pane wrapper now reports both
-    (SYRD-139). So this is the role's name, which is what the header is for --
-    as the document says it reads, which is not always the slug capitalised:
-    implementers read `<role> Developer` unless their tenant says otherwise
-    (SYRD-141).
-    """
-    return role.presentation_label or role_display_name(role) or project_window_title(config)
 KNOWN_LIVE_CLI_NAMES = set(SUPPORTED_CONFIG_CLI_NAMES)
 AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
 # Machine-scoped for the same reason: the desktop owner says once that Switchyard
@@ -3104,27 +3092,6 @@ def pane_window_program(script_path: Path) -> Path:
     return Path(script_path).expanduser().resolve(strict=False).with_name(PANE_WINDOW_NAME)
 
 
-def inert_pane_command(
-    program: Path, args: Sequence[str], *, title: str = "", window_title: str = ""
-) -> str:
-    """Wrap a pane's client so its terminal never falls back to a shell.
-
-    Konsole runs the tab's program directly; when that program is the attach
-    command, a detach returns the tab to whatever shell opened the window. That
-    shell belongs to whoever invoked switchyard, so on a privileged invocation
-    the pane becomes a root prompt. The wrapper ends inert instead (SYRD-43).
-
-    The wrapper is also where both titles come from, because Konsole's layout
-    file has no key for either (SYRD-122, SYRD-139): the split's own name, and
-    the window name every split reports identically so the title bar stops
-    following focus.
-    """
-    window_args = ["--window-title", window_title] if window_title.strip() else []
-    title_args = ["--title", title] if title.strip() else []
-    # Konsole's own splitter, not a shell's: see `_konsole_quote`.
-    return _konsole_command([str(program), *window_args, *title_args, *args])
-
-
 def failed_role_command(role: RoleConfig, reason: str, *, window_title: str = "") -> str:
     message = f"PGU launcher did not start {role.role}: checkout refresh failed: {reason}"
     # This pane does not go through the wrapper, so it reports the window's name
@@ -3142,71 +3109,6 @@ def failed_role_command(role: RoleConfig, reason: str, *, window_title: str = ""
     return _konsole_command(
         ["sh", "-c", f"{naming}printf '%s\\n' {shlex.quote(message)}; exec sleep infinity"]
     )
-
-
-def materialize_layout(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    mode: str,
-    script_path: Path,
-    output_path: Path,
-    pane_state_dir: Path | None = None,
-    force_reload: bool = False,
-    failed_roles: dict[str, str] | None = None,
-) -> Path:
-    failed_roles = failed_roles or {}
-    visible_roles = [role.role for role in config.roles if not role.detached]
-    if len(visible_roles) > MAX_VISIBLE_PANES_PER_WINDOW:
-        raise SystemExit(
-            f"team-launcher: {config.project} has {len(visible_roles)} visible roles; at most "
-            f"{MAX_VISIBLE_PANES_PER_WINDOW} panes can be visible in one window; detach extra roles or open an "
-            "additional director-invoked window"
-        )
-    layout = json.loads(config.layout.read_text(encoding="utf-8"))
-    leaves = _layout_leaves(layout)
-    for role in config.roles:
-        if role.detached:
-            continue
-        if role.slot is None:
-            continue
-        if role.slot < 0 or role.slot >= len(leaves):
-            raise SystemExit(f"role {role.role} slot {role.slot} is outside layout leaf count {len(leaves)}")
-        leaf = leaves[role.slot]
-        if role.role in failed_roles:
-            leaf["Command"] = failed_role_command(
-                role, failed_roles[role.role], window_title=project_window_title(config)
-            )
-            leaf["WorkingDirectory"] = str(Path.home())
-        else:
-            leaf["Command"] = inert_pane_command(
-                pane_window_program(script_path),
-                pane_command_args(
-                    config.project,
-                    role,
-                    config_path=config_path,
-                    mode=mode,
-                    script_path=script_path,
-                    pane_state_dir=pane_state_dir,
-                    force_reload=force_reload,
-                    skip_launcher_check=True,
-                    run_as_user=role_run_as_user(config, role),
-                ),
-                title=pane_split_title(config, role),
-                window_title=project_window_title(config),
-            )
-            leaf["WorkingDirectory"] = role.workdir
-        # Konsole 26.08.1 does not read this key -- its layout parser knows
-        # Widgets, Orientation, Command, WorkingDirectory, Lines, Columns and
-        # SessionRestoreId, and nothing else -- so the title that reaches the
-        # header is the one the pane program sets for itself. This is kept
-        # written and correct for anything that does read it, and so that a
-        # reader comparing the file with the window is not told two different
-        # things (SYRD-122).
-        leaf["Title"] = pane_split_title(config, role)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return output_path
 
 
 def _verify_pane_launcher_path(
@@ -3238,36 +3140,6 @@ def _owner_state_layout_output_path(project: str, *, owner_home: Path) -> Path:
     return owner_home / ".local" / "state" / "switchyard" / "projects" / project / f"{project}-team-layout.json"
 
 
-def default_layout_output_path(config: ProjectConfig, *, config_path: Path) -> Path:
-    if config.run_as_user:
-        try:
-            owner_home = Path(pwd.getpwnam(config.run_as_user).pw_dir)
-        except KeyError:
-            owner_home = None
-            paths = [config_path.expanduser().resolve(strict=False)]
-            if config.repository is not None:
-                paths.append(config.repository.expanduser().resolve(strict=False))
-            for path in paths:
-                for candidate in (path, *path.parents):
-                    if candidate.name == config.run_as_user:
-                        owner_home = candidate
-                        break
-                if owner_home is not None:
-                    break
-            if owner_home is None:
-                owner_home = Path("/home") / config.run_as_user
-        return _owner_state_layout_output_path(config.project, owner_home=owner_home)
-    else:
-        base_dir = config_path.parent / SWITCHYARD_PROJECT_DIR_NAME / config.project
-        return base_dir / f"{config.project}-team-layout.json"
-
-
-def chown_layout_output_args(config: ProjectConfig, output_path: Path) -> list[str]:
-    if not config.run_as_user:
-        raise ValueError("layout ownership repair requires run_as_user")
-    return ["chown", "-R", f"{config.run_as_user}:{config.run_as_user}", str(output_path.parent)]
-
-
 def chown_owner_file_args(config: ProjectConfig, path: Path) -> list[str]:
     if not config.run_as_user:
         raise ValueError("file ownership repair requires run_as_user")
@@ -3286,67 +3158,6 @@ def ensure_owner_file(
     if result.returncode != 0:
         reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
         raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
-
-
-def desktop_state_dir(project: str, user: str) -> Path:
-    """A desktop account's own private state directory for one project.
-
-    Derived from the account and the project and nothing else, so the two sides
-    of the bridge handoff agree on it by construction rather than by passing a
-    path across (SYRD-90).
-    """
-    return Path(_gui_home(user)) / ".local" / "state" / "switchyard" / "projects" / project
-
-
-def desktop_presentation_layout_path(
-    config: ProjectConfig, *, config_path: Path, gui_user: str
-) -> Path:
-    """Where a presentation window's layout file goes so its terminal can read it.
-
-    Konsole is handed this path and reads it as the desktop account. The
-    tenant's own state directory is 0700 and its files 0600, both owned by the
-    project owner, so a window correctly dropped to the desktop user cannot
-    open it at all and the terminal aborts before anything appears (SYRD-65).
-    When the desktop account is the owner there is no boundary and the tenant's
-    own location is right; otherwise it belongs under that person's state
-    directory, still 0700 over 0600 -- protected, and owned by the reader.
-    """
-    tenant = default_layout_output_path(config, config_path=config_path).with_name(
-        f"{config.project}-presentation-layout.json"
-    )
-    user = (gui_user or "").strip()
-    if not user or user == config.run_as_user or (not config.run_as_user and user == current_user_name()):
-        return tenant
-    return desktop_state_dir(config.project, user) / f"{config.project}-presentation-layout.json"
-
-
-def desktop_layout_destination_problem(path: Path, *, gui_user: str, project: str) -> str:
-    """Why `path` is not the one place a layout for this project may cross to, or "".
-
-    Exactly `~<gui_user>/.local/state/switchyard/projects/<project>/<file>`: the
-    pinned desktop account's own state root for this project. Anything else is
-    root being asked to write somewhere it was not told it could (SYRD-233).
-    """
-    if not project:
-        return "no project was named for a layout that has to cross into another account"
-    expected = desktop_state_dir(project, gui_user)
-    if Path(os.path.normpath(path)).parent != expected or path.name in {"", ".", ".."}:
-        return f"{path} is not in {gui_user}'s own state directory for {project} ({expected})"
-    return ""
-
-
-def ensure_layout_output_owner(
-    config: ProjectConfig,
-    output_path: Path,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    if not config.run_as_user or current_user_name() == config.run_as_user:
-        return
-    result = runner(chown_layout_output_args(config, output_path))
-    if result.returncode != 0:
-        reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
-        raise SystemExit(f"team-launcher: failed to assign layout output {output_path.parent} to {config.run_as_user}: {reason}")
 
 
 def install_owner_state_dir_args(config: ProjectConfig, path: Path) -> list[str]:

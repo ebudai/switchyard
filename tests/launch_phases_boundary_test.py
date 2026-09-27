@@ -25,6 +25,13 @@ returns at once). Its cases below pin every branch, the order of every step, the
 runner each is given, the objects handed back, both refusals with their exact
 output, and the launch returning the phase's code before the layout is written.
 
+SYRD-341 added P6, layout, plan and dry run (`_write_layout_and_plan`, answering
+None to go on or 0 after a dry run's plan). Its cases pin the layout's
+arguments (the caller's own pane-state directory, not the effective one), the
+owner hand-off, every plan field and which lookups each role needs, the dry
+run's layout-mode resolution and viewer additions, the exact output, and the
+launch stopping at 0 before any worker starts.
+
 Every lookup is this test's own fake, patched on the launcher and recorded; no
 account, path, git, provider, GUI, board, socket or tmux is touched.
 """
@@ -43,7 +50,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 CHECKS = 0
-EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch")
+EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch",
+            "_write_layout_and_plan")
 #: The phase's launcher lookups, each called once at most, through the launcher.
 SEAMS = ("current_user_name", "_owner_process_runner", "_owner_project_git_runner", "_control_repository_owned_roots",
          "default_pane_state_dir_for_user", "default_layout_output_path", "project_window_title")
@@ -80,6 +88,16 @@ class patched:
     def __exit__(self, *exc: object) -> None:
         for name, value in self.saved.items():
             setattr(self.module, name, value)
+
+
+def fence_workers():
+    """P7's first step, fenced: a case that should stop before workers start fails here, clearly,
+    instead of running real worker code if a mutant carries the launch past its phase."""
+    from scripts import presentation_controller
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the launch went past its phase into starting workers")
+    return patched(presentation_controller, presentation_enabled=refuse)
 
 
 def caller_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -331,50 +349,34 @@ def test_a_refused_board_preflight_still_comes_before_the_phase() -> None:
           f"the launch is refused before the phase is asked anything: {result} {printed}")
 
 
-def test_a_dry_run_carries_the_phases_paths_title_and_layout_owner_into_the_layout_and_plan() -> None:
-    # The dry run reaches the layout (P6) without starting anything, so it shows
-    # where four of the phase's values land; worktree_runner is followed above.
-    # role_process_runner, delegate_role_sessions_to_owner and
-    # effective_pane_state_dir are first read when workers start, which no fake
-    # here reaches: their wiring is the AST proof's (equiv_phase step 4).
-    import contextlib
-    import io
-    import json
-
+def test_a_dry_run_carries_the_phases_paths_title_and_layout_owner_into_the_next_phase() -> None:
+    # P3's values that P6 (layout, plan and dry run) reads are handed to it as the same objects; P6 is stood
+    # in, as P5 is, so no real phase code runs here, and P7 is fenced. P6's own cases are below.
+    # role_process_runner, delegate_role_sessions_to_owner and effective_pane_state_dir are first read when
+    # workers start, which no fake here reaches: their wiring is the AST proof's (equiv_phase step 4).
     from scripts import team_launcher
-    from scripts.launch_phases import LaunchSetup
+    from scripts.launch_phases import LaunchPreparation, LaunchSetup
 
     sentinel = LaunchSetup(worktree_runner=object(), role_process_runner=object(),
                            delegate_role_sessions_to_owner=False, effective_pane_state_dir=Path("/n/state"),
                            output_path=Path("/n/syrd339-layout.json"), window_title="SYRD339 window",
                            should_assign_layout_owner=True, pane_script_path=Path("/n/syrd339-pane"))
-    laid_out: list[dict] = []
-    owned: list[tuple] = []
-    cfg = SimpleNamespace(project="p339", role_state_isolation=False, run_as_user="syrd339-owner", repository=None,
-                          roles=[])
-    printed = io.StringIO()
-    from scripts.launch_phases import LaunchPreparation
+    handed: list[dict] = []
+    cfg = SimpleNamespace(project="p339", role_state_isolation=False)
 
     def inert_p5(c: object, **k: object) -> LaunchPreparation:
-        # P5 is inert in a dry run; standing it in keeps any real preparation code out of this case.
         return LaunchPreparation(exit_code=None, config=c, failed_roles={}, running_roles=[], reconcile_home=None,
                                  unreconciled_roles=set())
 
     with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: sentinel, _prepare_launch=inert_p5,
-                 materialize_layout=lambda c, **k: laid_out.append(k),
-                 ensure_layout_output_owner=lambda c, path, *, runner: owned.append((path, runner))):
-        with contextlib.redirect_stdout(printed):
-            result = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
-                                                  runner=caller_runner, dry_run=True)
-    plan = json.loads(printed.getvalue())
-    check(result == 0 and len(laid_out) == 1 and laid_out[0]["output_path"] is sentinel.output_path
-          and laid_out[0]["script_path"] is sentinel.pane_script_path,
-          f"the layout is written to the phase's output path, with its pane script: {laid_out}")
-    check(owned == [(sentinel.output_path, caller_runner)],
-          f"the phase's layout-owner flag decides that the output is handed to its owner: {owned}")
-    check(plan["window_title"] == "SYRD339 window" and plan["layout"] == "/n/syrd339-layout.json",
-          f"and the plan carries the phase's title and layout path: {plan}")
-
+                 _write_layout_and_plan=lambda c, **k: handed.append(k) or 0), fence_workers():
+        result = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
+                                              runner=caller_runner, dry_run=True)
+    check(result == 0 and len(handed) == 1, f"the dry run ends with P6's 0: {result!r}")
+    got = handed[0]
+    check(got["output_path"] is sentinel.output_path and got["pane_script_path"] is sentinel.pane_script_path
+          and got["should_assign_layout_owner"] is True and got["window_title"] == "SYRD339 window",
+          f"P6 is handed P3's output path, pane script, layout-owner flag and title: {got}")
 
 #: P5's launcher lookups, each read once, through the launcher (measured).
 P5_SEAMS = ("LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV", "NO_LAUNCHER_SELF_DEPLOY_ENV",
@@ -615,9 +617,6 @@ def test_p5_a_failing_step_stops_the_phase() -> None:
 
 
 def test_the_launch_returns_p5s_code_before_the_layout_and_hands_its_values_on() -> None:
-    import contextlib
-    import io
-
     from scripts import team_launcher
     from scripts.launch_phases import LaunchPreparation
 
@@ -655,16 +654,254 @@ def test_the_launch_returns_p5s_code_before_the_layout_and_hands_its_values_on()
     going_on = LaunchPreparation(exit_code=None, config=prepared, failed_roles={"x": "y"}, running_roles=[],
                                  reconcile_home=None, unreconciled_roles=set())
     laid_out: list[tuple] = []
-    printed = io.StringIO()
     with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: setup,
                  _prepare_launch=lambda c, **k: going_on,
-                 materialize_layout=lambda c, **k: laid_out.append((c, k["failed_roles"]))), \
-            contextlib.redirect_stdout(printed):
+                 _write_layout_and_plan=lambda c, **k: laid_out.append((c, k["failed_roles"])) or 0), fence_workers():
         result = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
                                               runner=caller_runner, dry_run=True, assign_layout_owner=False)
     check(result == 0 and laid_out == [(prepared, going_on.failed_roles)]
           and laid_out[0][1] is going_on.failed_roles,
-          f"going on, the layout is written from the prepared config and failures, the same objects: {laid_out}")
+          f"going on, the next phase is handed the prepared config and failures, the same objects: {laid_out}")
+
+
+#: P6's launcher lookups and the number of times each is read, through the launcher (measured).
+P6_SEAMS = {"materialize_layout": 1, "ensure_layout_output_owner": 1, "current_user_name": 1, "worktree_ref": 1,
+            "failed_role_command": 1, "pane_command": 1, "role_run_as_user": 1, "resolve_layout_mode": 1,
+            "viewer_session_for_project": 1, "visible_roles_for_viewer": 1, "LAYOUT_MODE_AUTO": 1,
+            "LAYOUT_MODE_SEPARATE": 1, "LAYOUT_MODE_VIEWER": 2}
+FAKE_HOME = Path("/nonexistent/syrd341/home")
+
+
+class fake_home:
+    """Path.home answering FAKE_HOME for one block, restored exactly: no real account home is read."""
+
+    def __enter__(self) -> None:
+        self.saved = Path.__dict__["home"]
+        Path.home = classmethod(lambda cls: FAKE_HOME)
+
+    def __exit__(self, *exc: object) -> None:
+        Path.home = self.saved
+
+
+class Layout:
+    """P6's launcher lookups, answering from objects this test owns, into one ordered log."""
+
+    def __init__(self, *, current: str = "syrd341-me", resolved: str = "SYRD341_SEPARATE",
+                 error: Exception | None = None):
+        self.current, self.resolved, self.error = current, resolved, error
+        self.log: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+
+        def materialize(cfg, **kwargs):
+            L.append(("layout", cfg, kwargs))
+            if self.error:
+                raise self.error
+
+        return dict(
+            materialize_layout=materialize,
+            ensure_layout_output_owner=lambda cfg, path, *, runner: L.append(("owner", cfg, path, runner)),
+            current_user_name=lambda: L.append(("current",)) or self.current,
+            worktree_ref=lambda cfg: L.append(("worktree-ref",)) or "syrd341/ref",
+            failed_role_command=lambda role, reason: L.append(("failed-command", role.role, reason))
+            or f"FAILED {role.role}: {reason}",
+            pane_command=lambda project, role, **kwargs: L.append(("pane-command", role.role, kwargs))
+            or f"PANE {role.role}",
+            role_run_as_user=lambda cfg, role: L.append(("run-as", role.role)) or f"acct-{role.role}",
+            resolve_layout_mode=lambda mode, *, environ, runner: L.append(("resolve", mode, environ, runner))
+            or self.resolved,
+            viewer_session_for_project=lambda project: L.append(("viewer-session", project)) or f"view-{project}",
+            visible_roles_for_viewer=lambda cfg: L.append(("viewer-roles",))
+            or [r for r in cfg.roles if not r.detached],
+            LAYOUT_MODE_AUTO="SYRD341_AUTO", LAYOUT_MODE_SEPARATE="SYRD341_SEPARATE",
+            LAYOUT_MODE_VIEWER="SYRD341_VIEWER",
+        )
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def p6_config(*, owner: str | None = "syrd341-owner", repository: object = None) -> SimpleNamespace:
+    def role(name, slot, detached=False):
+        return SimpleNamespace(role=name, slot=slot, detached=detached, tmux_session=f"p341-{name}",
+                               target=f"p341-{name}:0.0", workdir=f"/nonexistent/syrd341/{name}")
+    return SimpleNamespace(project="p341", run_as_user=owner, repository=repository,
+                           roles=[role("zeta", 0), role("alpha", 1), role("bg", None, detached=True)])
+
+
+def layout(lay: Layout, cfg: SimpleNamespace, *, dry_run: bool, layout_mode: str = "SYRD341_AUTO",
+           layout_environ: object = None, failed: dict | None = None, assign: bool = True):
+    import contextlib
+    import io
+
+    from scripts import launch_phases, team_launcher
+
+    out = io.StringIO()
+    kwargs = dict(config_path=CONFIG_PATH, dry_run=dry_run, failed_roles=failed if failed is not None else {},
+                  force_reload="syrd341-force", layout_environ=layout_environ, layout_mode=layout_mode, mode="attach",
+                  output_path=Path("/nonexistent/syrd341/layout.json"), pane_script_path=PANE_SCRIPT,
+                  pane_state_dir=Path("/nonexistent/syrd341/caller-pane-state"), runner=caller_runner,
+                  should_assign_layout_owner=assign, window_title="P341 window")
+    with patched(team_launcher, **lay.names()), fake_home(), contextlib.redirect_stdout(out):
+        result = launch_phases._write_layout_and_plan(cfg, **kwargs)
+    return result, out.getvalue(), kwargs
+
+
+def test_the_layout_phase_reads_its_lookups_through_the_launcher() -> None:
+    import json as _json
+
+    from scripts import launch_phases
+    module = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_write_layout_and_plan")
+    for name, count in P6_SEAMS.items():
+        uses = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(uses) == count and all(isinstance(n.value, ast.Name) and n.value.id == "launcher" for n in uses)
+              and not bare, f"P6 reads {name} at its {count} site(s), through the launcher")
+    bound = {a.arg for a in function.args.args + function.args.kwonlyargs}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute)
+                      and isinstance(n.value, ast.Name) and n.value.id == "launcher" and n.attr in bound})
+    check("launcher" not in bound and through == [], f"nothing P6 binds is read as the launcher's: {through}")
+    check(launch_phases.json is _json and launch_phases.Path is Path,
+          "json and Path are the module's own, the very objects the launcher holds")
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_write_layout_and_plan"]
+    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
+          "launch_project calls P6 at one site, by the launcher's own (patchable) name")
+
+
+def test_p6_a_launch_writes_the_layout_hands_it_over_and_goes_on() -> None:
+    lay = Layout(); cfg = p6_config()
+    result, out, kwargs = layout(lay, cfg, dry_run=False, failed={"alpha": "busy"})
+    check(result is None and out == "", f"a launch goes on, printing nothing: {result!r} {out!r}")
+    first = lay.log[0]
+    check(first[0] == "layout" and first[1] is cfg and first[2] == dict(
+        config_path=CONFIG_PATH, mode="attach", script_path=PANE_SCRIPT, output_path=kwargs["output_path"],
+        pane_state_dir=kwargs["pane_state_dir"], force_reload="syrd341-force", failed_roles=kwargs["failed_roles"])
+          and first[2]["failed_roles"] is kwargs["failed_roles"],
+          f"the layout first, with the caller's own pane-state directory and failures: {first}")
+    check(lay.log[1] == ("owner", cfg, kwargs["output_path"], caller_runner),
+          f"then handed to its owner through the caller's runner: {lay.log[1]}")
+    # zeta, visible: its account is looked up as an argument, then its pane command; alpha, failed: its command.
+    check(lay.kinds()[2:] == ["run-as", "pane-command", "failed-command"] and "resolve" not in lay.kinds()
+          and "current" not in lay.kinds() and "worktree-ref" not in lay.kinds(),
+          f"the plan is still built -- a failed role's command, a visible role's pane command -- but nothing it "
+          f"does not need: {lay.kinds()}")
+    lay = Layout(); layout(lay, cfg, dry_run=False, assign=False)
+    check("owner" not in lay.kinds(), "and not handed over when the phase is told not to")
+
+
+def test_p6_a_dry_run_prints_the_plan_and_answers_zero() -> None:
+    import json as _json
+
+    lay = Layout(); cfg = p6_config(owner=None, repository=Path("/nonexistent/syrd341/repo"))
+    result, out, kwargs = layout(lay, cfg, dry_run=True, failed={"alpha": "busy"})
+    try:
+        plan = _json.loads(out)
+    except ValueError:
+        plan = None
+    check(result == 0 and plan is not None and out == _json.dumps(plan, indent=2, sort_keys=True) + "\n",
+          f"a dry run prints the plan on stdout as sorted, two-space JSON and answers 0: {result!r} {out[:60]!r}")
+    check(plan["project"] == "p341" and plan["window_title"] == "P341 window" and plan["mode"] == "attach"
+          and plan["layout"] == "/nonexistent/syrd341/layout.json" and plan["run_as_user"] == "syrd341-me"
+          and plan["worktree_ref"] == "syrd341/ref" and "layout_mode" not in plan,
+          f"its fields, the current user standing in for a missing owner: {plan}")
+    check([r["role"] for r in plan["roles"]] == ["zeta", "alpha"]
+          and [r["role"] for r in plan["detached_roles"]] == ["bg"],
+          f"visible roles in config order, detached ones apart: {plan['roles']}")
+    zeta, alpha = plan["roles"]
+    check(zeta["command"] == "PANE zeta" and zeta["workdir"] == "/nonexistent/syrd341/zeta"
+          and zeta["worktree_error"] == ""
+          and alpha["command"] == "FAILED alpha: busy" and alpha["workdir"] == str(FAKE_HOME)
+          and alpha["worktree_error"] == "busy",
+          f"a failed role runs its failure command from the home directory, with its error: {alpha}")
+    pane = next(e for e in lay.log if e[0] == "pane-command")
+    check(pane[2] == dict(config_path=CONFIG_PATH, mode="attach", script_path=PANE_SCRIPT,
+                          pane_state_dir=kwargs["pane_state_dir"], force_reload="syrd341-force",
+                          skip_launcher_check=True, run_as_user="acct-zeta"),
+          f"the pane command for a visible role: {pane}")
+    check("resolve" not in lay.kinds() and lay.kinds()[0] == "layout",
+          f"with the default mode and no environment the layout mode is not resolved, and the layout is still "
+          f"written first: "
+          f"{lay.kinds()}")
+
+
+def test_p6_a_dry_run_resolves_an_explicit_mode_and_adds_the_viewer() -> None:
+    import json as _json
+
+    lay = Layout(resolved="SYRD341_VIEWER"); cfg = p6_config()
+    result, out, _ = layout(lay, cfg, dry_run=True, layout_mode="viewer", layout_environ={"X": "1"})
+    plan = _json.loads(out)
+    check(result == 0 and ("resolve", "viewer", {"X": "1"}, caller_runner) in lay.log,
+          f"an explicit mode is resolved with the caller's environment and runner: {lay.log}")
+    check(plan.get("layout_mode") == "SYRD341_VIEWER" and plan.get("viewer_session") == "view-p341"
+          and plan.get("viewer_roles") == ["zeta", "alpha"] and "current" not in lay.kinds(),
+          f"a viewer plan names the viewer session and its roles: {plan}")
+    lay = Layout(); layout(lay, cfg, dry_run=True, layout_environ={"Y": "2"})
+    check(any(e[0] == "resolve" and e[1] == "SYRD341_AUTO" for e in lay.log),
+          "the default mode is resolved too when an environment is given")
+
+
+def test_p6_a_failing_layout_stops_the_phase() -> None:
+    refusal = PermissionError("syrd341: layout")
+    lay = Layout(error=refusal)
+    try:
+        layout(lay, p6_config(), dry_run=True); raised = None
+    except PermissionError as exc:
+        raised = exc
+    check(raised is refusal and lay.kinds() == ["layout"],
+          f"the failure reaches the caller, nothing after it: {lay.kinds()}")
+
+
+def test_the_launch_stops_at_p6s_exit_before_any_worker_starts() -> None:
+    from scripts import presentation_controller, team_launcher
+    from scripts.launch_phases import LaunchPreparation, LaunchSetup
+
+    setup = LaunchSetup(worktree_runner=worktree_runner, role_process_runner=caller_runner,
+                        delegate_role_sessions_to_owner=False, effective_pane_state_dir=PANES,
+                        output_path=Path("/nonexistent/syrd341/layout.json"), window_title="P341",
+                        should_assign_layout_owner=True, pane_script_path=SCRIPT)
+    prepared = SimpleNamespace(project="p341")
+    going_on = LaunchPreparation(exit_code=None, config=prepared, failed_roles={}, running_roles=[],
+                                 reconcile_home=None, unreconciled_roles=set())
+    asked: list[tuple] = []
+
+    def workers_start(*a: object, **k: object) -> object:
+        raise Stop("workers")
+
+    cfg = SimpleNamespace(project="p341", role_state_isolation=False, pane_launcher=None)
+    common = dict(_launch_runners_and_paths=lambda c, **k: setup,
+                  upgrade_generated_project_layout=lambda c, **k: SimpleNamespace(changed=False),
+                  _verify_pane_launcher_path=lambda c, **k: SCRIPT)
+    for answer, want in ((0, 0), (None, "workers")):
+        asked.clear()
+        with patched(team_launcher, **common, _prepare_launch=lambda c, **k: going_on,
+                     _write_layout_and_plan=lambda c, **k: asked.append((c, k)) or answer), \
+                patched(presentation_controller, presentation_enabled=workers_start):
+            try:
+                got = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
+                                                   runner=caller_runner, pane_state_dir=Path("/n/given"))
+            except Stop as stop:
+                got = stop.args[0]
+        outcome = "returns 0 before any worker" if want == 0 else "goes on to the workers"
+        check(got == want, f"P6 answering {answer!r}: the launch {outcome}: {got!r}")
+    check(asked[0][0] is prepared and asked[0][1]["pane_state_dir"] == Path("/n/given")
+          and asked[0][1]["output_path"] is setup.output_path and asked[0][1]["window_title"] == "P341",
+          f"P6 is handed P5's config, the caller's pane-state directory and P3's paths: {asked[0][1]}")
+    stopped = LaunchPreparation(exit_code=3, config=None, failed_roles={}, running_roles=[], reconcile_home=None,
+                                unreconciled_roles=set())
+
+    def never(*a: object, **k: object) -> None:
+        raise AssertionError("P6 ran after P5 stopped the launch")
+
+    with patched(team_launcher, **common, _prepare_launch=lambda c, **k: stopped, _write_layout_and_plan=never), \
+            fence_workers():
+        got = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
+                                           runner=caller_runner)
+    check(got == 3, f"P5's exit comes before P6: {got!r}")
 
 
 #: Run first: a seam taken past the launcher must be caught before any
@@ -672,7 +909,8 @@ def test_the_launch_returns_p5s_code_before_the_layout_and_hands_its_values_on()
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
              "test_the_call_site_the_seams_and_the_phases_own_names",
-             "test_the_preparation_reads_every_launcher_lookup_through_the_launcher")
+             "test_the_preparation_reads_every_launcher_lookup_through_the_launcher",
+             "test_the_layout_phase_reads_its_lookups_through_the_launcher")
 
 
 def main() -> int:

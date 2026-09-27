@@ -58,7 +58,8 @@ LAUNCHER_CALLS = {"default_gui_user": 2, "presentation_gui_user": 1, "resolve_la
 #: Modules those launcher callers moved to (SYRD-328 moved legacy_presentation_refusal,
 #: SYRD-329 replace_presentation_window_command),
 #: whose calls must still go through the launcher; the totals are the baseline's.
-MOVED_CALLERS = ("legacy_presentation.py", "presentation_window_replacement.py")
+#: SYRD-341 moved launch_project's P6 (the dry run's layout-mode resolution) to launch_phases.
+MOVED_CALLERS = ("legacy_presentation.py", "presentation_window_replacement.py", "launch_phases.py")
 ACCOUNT_VARIABLES = ("TEAM_LAUNCHER_GUI_USER", "PGU_TEAM_LAUNCHER_GUI_USER", "SUDO_USER",
                      "SWITCHYARD_TENANT_CONTROL_CALLER")
 

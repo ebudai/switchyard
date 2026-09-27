@@ -914,6 +914,7 @@ from scripts.launch_phases import (
     LaunchSetup,
     _launch_runners_and_paths,
     _prepare_launch,
+    _write_layout_and_plan,
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
@@ -4899,75 +4900,24 @@ def launch_project(
     running_roles = launch_preparation.running_roles
     reconcile_home = launch_preparation.reconcile_home
     unreconciled_roles = launch_preparation.unreconciled_roles
-    materialize_layout(
+    layout_exit = _write_layout_and_plan(
         config,
         config_path=config_path,
-        mode=mode,
-        script_path=pane_script_path,
-        output_path=output_path,
-        pane_state_dir=pane_state_dir,
-        force_reload=force_reload,
+        dry_run=dry_run,
         failed_roles=failed_roles,
+        force_reload=force_reload,
+        layout_environ=layout_environ,
+        layout_mode=layout_mode,
+        mode=mode,
+        output_path=output_path,
+        pane_script_path=pane_script_path,
+        pane_state_dir=pane_state_dir,
+        runner=runner,
+        should_assign_layout_owner=should_assign_layout_owner,
+        window_title=window_title,
     )
-    if should_assign_layout_owner:
-        ensure_layout_output_owner(config, output_path, runner=runner)
-    plan = {
-        "project": config.project,
-        "window_title": window_title,
-        "mode": mode,
-        "layout": str(output_path),
-        "run_as_user": config.run_as_user or current_user_name(),
-        "worktree_ref": worktree_ref(config) if config.repository is not None else None,
-        "roles": [
-            {
-                "role": role.role,
-                "slot": role.slot,
-                "tmux_session": role.tmux_session,
-                "target": role.target,
-                "workdir": str(Path.home()) if role.role in failed_roles else role.workdir,
-                "command": (
-                    failed_role_command(role, failed_roles[role.role])
-                    if role.role in failed_roles
-                    else pane_command(
-                        config.project,
-                        role,
-                        config_path=config_path,
-                        mode=mode,
-                        script_path=pane_script_path,
-                        pane_state_dir=pane_state_dir,
-                        force_reload=force_reload,
-                        skip_launcher_check=True,
-                        run_as_user=role_run_as_user(config, role),
-                    )
-                ),
-                "worktree_error": failed_roles.get(role.role, ""),
-            }
-            for role in config.roles
-            if not role.detached
-        ],
-        "detached_roles": [
-            {
-                "role": role.role,
-                "tmux_session": role.tmux_session,
-                "target": role.target,
-                "workdir": role.workdir,
-            }
-            for role in config.roles
-            if role.detached
-        ],
-    }
-    if dry_run:
-        resolved_layout_mode = (
-            resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
-            if layout_mode != LAYOUT_MODE_AUTO or layout_environ is not None
-            else LAYOUT_MODE_SEPARATE
-        )
-        if resolved_layout_mode == LAYOUT_MODE_VIEWER:
-            plan["layout_mode"] = LAYOUT_MODE_VIEWER
-            plan["viewer_session"] = viewer_session_for_project(config.project)
-            plan["viewer_roles"] = [role.role for role in visible_roles_for_viewer(config)]
-        print(json.dumps(plan, indent=2, sort_keys=True))
-        return 0
+    if layout_exit is not None:
+        return layout_exit
     from scripts import presentation_controller
 
     use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)

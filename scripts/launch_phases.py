@@ -15,6 +15,10 @@ old position, by the launcher's own name.
   reload's sync and the isolation check, returned as a frozen
   `LaunchPreparation` whose `exit_code` is `None` to go on, or the code the
   launch returns at once.
+- **P6, layout, plan and dry run** (`_write_layout_and_plan`, SYRD-341): the
+  layout written and handed to its owner, the launch plan, and on a dry run
+  the plan printed and 0 returned; it hands nothing on, so it answers `None`
+  to go on.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -23,6 +27,7 @@ imports `team_launcher` at its top.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -227,3 +232,95 @@ def _prepare_launch(
         reconcile_home=reconcile_home,
         unreconciled_roles=unreconciled_roles,
     )
+
+
+def _write_layout_and_plan(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool,
+    failed_roles: dict[str, str],
+    force_reload: bool,
+    layout_environ: dict[str, str] | None,
+    layout_mode: str,
+    mode: str,
+    output_path: Path,
+    pane_script_path: Path,
+    pane_state_dir: Path | None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    should_assign_layout_owner: bool,
+    window_title: str,
+) -> int | None:
+    """P6 of `launch_project`, unchanged: the layout, the plan and the dry run's exit."""
+    from scripts import team_launcher as launcher
+
+    launcher.materialize_layout(
+        config,
+        config_path=config_path,
+        mode=mode,
+        script_path=pane_script_path,
+        output_path=output_path,
+        pane_state_dir=pane_state_dir,
+        force_reload=force_reload,
+        failed_roles=failed_roles,
+    )
+    if should_assign_layout_owner:
+        launcher.ensure_layout_output_owner(config, output_path, runner=runner)
+    plan = {
+        "project": config.project,
+        "window_title": window_title,
+        "mode": mode,
+        "layout": str(output_path),
+        "run_as_user": config.run_as_user or launcher.current_user_name(),
+        "worktree_ref": launcher.worktree_ref(config) if config.repository is not None else None,
+        "roles": [
+            {
+                "role": role.role,
+                "slot": role.slot,
+                "tmux_session": role.tmux_session,
+                "target": role.target,
+                "workdir": str(Path.home()) if role.role in failed_roles else role.workdir,
+                "command": (
+                    launcher.failed_role_command(role, failed_roles[role.role])
+                    if role.role in failed_roles
+                    else launcher.pane_command(
+                        config.project,
+                        role,
+                        config_path=config_path,
+                        mode=mode,
+                        script_path=pane_script_path,
+                        pane_state_dir=pane_state_dir,
+                        force_reload=force_reload,
+                        skip_launcher_check=True,
+                        run_as_user=launcher.role_run_as_user(config, role),
+                    )
+                ),
+                "worktree_error": failed_roles.get(role.role, ""),
+            }
+            for role in config.roles
+            if not role.detached
+        ],
+        "detached_roles": [
+            {
+                "role": role.role,
+                "tmux_session": role.tmux_session,
+                "target": role.target,
+                "workdir": role.workdir,
+            }
+            for role in config.roles
+            if role.detached
+        ],
+    }
+    if dry_run:
+        resolved_layout_mode = (
+            launcher.resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+            if layout_mode != launcher.LAYOUT_MODE_AUTO or layout_environ is not None
+            else launcher.LAYOUT_MODE_SEPARATE
+        )
+        if resolved_layout_mode == launcher.LAYOUT_MODE_VIEWER:
+            plan["layout_mode"] = launcher.LAYOUT_MODE_VIEWER
+            plan["viewer_session"] = launcher.viewer_session_for_project(config.project)
+            plan["viewer_roles"] = [role.role for role in launcher.visible_roles_for_viewer(config)]
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    return None

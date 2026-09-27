@@ -375,8 +375,11 @@ def test_a_konsole_quoting_is_reached_through_the_launcher() -> None:
     # any behaviour check runs the real code it reached.
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     module = ast.parse((ROOT / "scripts" / "presentation_layout_files.py").read_text(encoding="utf-8"))
+    # SYRD-341 moved launch_project's P6, whose plan calls failed_role_command,
+    # to launch_phases; it calls it through the launcher, like this module.
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
     for name, count in KONSOLE_CALLS.items():
-        here = [n for n in ast.walk(module) if isinstance(n, ast.Call)
+        here = [n for tree in (module, phases) for n in ast.walk(tree) if isinstance(n, ast.Call)
                 and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
         there = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
                  and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]

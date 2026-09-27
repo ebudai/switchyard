@@ -105,10 +105,17 @@ def test_the_patched_names_are_reached_where_the_suites_patch_them() -> None:
         node for node in ast.walk(ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")))
         if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "install_handed_off_workflow"
     ]
+    # SYRD-352 moved `finish_upgrade_command` into director_upgrade, which reads it through the launcher.
+    moved = [
+        node for node in ast.walk(ast.parse((ROOT / "scripts" / "director_upgrade.py").read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "install_handed_off_workflow"
+    ]
     # `finish_upgrade_command` and `_finish_upgrade_preview`, as at the baseline.
-    check(len(calls) == 2 and all(isinstance(node.func, ast.Name) for node in calls),
+    check(len(calls) + len(moved) == 2 and all(isinstance(node.func, ast.Name) for node in calls)
+          and all(isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                  and node.func.value.id == "launcher" for node in moved),
           "finish-upgrade installs a handed-off workflow only by the launcher's own (patchable) name: "
-          f"{[ast.unparse(node.func) for node in calls]}")
+          f"{[ast.unparse(node.func) for node in calls + moved]}")
 
 
 def test_reading_a_handoff_goes_through_the_launchers_root_checks() -> None:

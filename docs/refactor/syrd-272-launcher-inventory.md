@@ -11564,3 +11564,85 @@ implemented**:
   -   - the tenant board-root resolvers (alternative): 2 definitions, 17 lines; launcher callers outside: ['_plan_data_from_config', 'upgrade_generated_project_config']; production readers: 6
 
 **SYRD-272 is not complete.** The launcher is still 10,947 lines.
+
+### SYRD-387 (slice 19f): the tenant artifact publisher
+
+Measured on `e8c9ff7`. The design was posted **before** any edit.
+
+**Moved:** `publish_tenant_artifact`, whole, into the new
+`scripts/tenant_artifact_publish.py` (72 lines).
+- **Re-export:** the launcher re-exports it in one explicit, unaliased import,
+  after the pending-identity-records import.
+- **Seam:** the no-follow walk is read as `launcher._walk_no_follow` when it
+  runs.
+- **Imports:** `os`, `pwd` and `Path` are the module's own; no test rebinds
+  `pwd` on the launcher. `ProjectConfig` is imported only under TYPE_CHECKING.
+- **Unchanged:** the walk and its refusal, the modes, the staged
+  descriptor-relative write, the root/account lookup and chown, both closes,
+  the rename, and every message.
+- **The launcher** goes from 10,947 to 10,908 lines. No guard needed
+  widening.
+
+**Proof.** The independent proof (`equiv387.py`) holds, and 21 of 21
+planted faults are caught. It now also reports a crash as `PROOF FAILS`; a
+renamed definition had crashed it after clause 0.
+
+**Evidence.**
+- **New boundary test:** `tests/tenant_artifact_publish_boundary_test.py`,
+  42 checks.
+  - The walk, `os.geteuid` and `pwd.getpwnam` are stand-ins, and `os.fchown`
+    is a recorder.
+  - Every descriptor operation is recorded, with the file and directory
+    descriptors told apart.
+  - It adds an end-to-end run with the real walk, over owned temp.
+- **Mutations:** 33 of 33 are killed by assertions, every one with zero
+  guard refusals (the runner requires it). The behaviour tests alone kill 30
+  of 33; the 3 left are import-structure mutants:
+  the launcher imported at load, not re-exported, the launcher redefines it.
+- **Audit kick-back, fixed.** The first candidate (`1730e19`) left
+  `pwd.getpwnam` unstubbed in the end-to-end case. The `lookup without root`
+  mutant was then killed only because the guard refused a real passwd lookup.
+  Both end-to-end branches now stand it in with a recorder that raises
+  `AssertionError("a real account lookup was attempted for <user>")`, and both
+  assert that nothing was looked up. That mutant is now killed by that
+  diagnosis, with no refusal. `scripts/` is byte-identical to `1730e19`.
+- **Comparison, both trees, guarded,** with every selected case screened first:
+  - whole: role_identity_cutover_boundary_test.py, role_pane_entry_boundary_test.py, runtime_artifact_refresh_boundary_test.py, tenant_artifact_publish_boundary_test.py pass, including both introspective guards
+    (role_identity_cutover and role_pane_entry);
+  - per case: 19 runs are identical and all pass, including
+    upgrade_records' reach check, run after its 18
+    preceding cases.
+- **What ran the publisher:** measured by a call profiler, only the new
+  boundary test executes it; the consumer suites stand it in.
+- **Containment:** no live change. The CLI help is identical (36
+  invocations plus `team-launcher --help`).
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: polkit readiness -- 8 definitions, 108 lines (lines 4469-4594, not contiguous):
+  -   4469    1  POLKIT_RULES_DIR  launcher callers outside: -; production readers outside the launcher: -
+  -   4475    1  POLKIT_ANSWERED_EXIT_CODES  launcher callers outside: -; production readers outside the launcher: -
+  -   4479    1  POLKIT_RESTART_COMMAND  launcher callers outside: -; production readers outside the launcher: -
+  -   4482    1  POLKIT_QUERY_TIMEOUT_SECONDS  launcher callers outside: -; production readers outside the launcher: -
+  -   4485   11  _apt_archive_has  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   4498   18  polkit_install_command  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   4518   35  polkit_service_problem  launcher callers outside: -; production readers outside the launcher: -
+  -   4555   40  polkit_readiness_problems  launcher callers outside: ['precheck_new_project']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 0: []
+  - launcher callers outside the closure: 1: ['precheck_new_project']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 1 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive piece of the privileged-boundary domain: whether polkit can answer the tenant-control helper's authorization questions)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+  -   - the tenant board-root resolvers (alternative): 2 definitions, 17 lines; launcher callers outside: ['_plan_data_from_config', 'upgrade_generated_project_config']; production readers: 6
+- Largest remaining launcher domains (`domains.py`):
+  -  2265 lines  208 defs  general helpers (unclassified)
+  -  1820 lines   75 defs  provisioning (new/register/teardown/owner accounts)
+  -  1277 lines   37 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1067 lines   37 defs  privileged boundary, tenant control and repair
+
+**SYRD-272 is not complete.** The launcher is still 10,908 lines.

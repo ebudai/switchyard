@@ -1196,6 +1196,9 @@ from scripts.pending_identity_records import (
     read_pending_identities,
     write_pending_identities,
 )
+from scripts.tenant_artifact_publish import (
+    publish_tenant_artifact,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3104,48 +3107,6 @@ def upgrade_generated_project_layout(
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> LauncherUpgradeResult:
     return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
-
-
-def publish_tenant_artifact(
-    config: ProjectConfig, provision_dir: Path, name: str, body: bytes
-) -> tuple[bool, str]:
-    """Write the tenant's copy of a generated file without following anything.
-
-    These are untrusted output: root produces them for the tenant's own tooling
-    and never reads them back to decide what root installs. The write still runs
-    as root, so every path component is opened with O_NOFOLLOW and the file is
-    replaced by rename rather than truncated in place -- a symlink left at the
-    destination is replaced, never followed to its referent (SYRD-39).
-    """
-    destination = provision_dir / name
-    relative = Path(str(provision_dir).lstrip("/")) / name
-    dir_fd, problem = _walk_no_follow(Path(provision_dir.anchor or "/"), relative)
-    if dir_fd < 0:
-        return False, f"switchyard: refusing to write {destination}: {problem}"
-    mode = 0o755 if name.endswith(".sh") else 0o644
-    staged = f".{name}.new"
-    try:
-        descriptor = os.open(
-            staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, mode, dir_fd=dir_fd
-        )
-        try:
-            os.write(descriptor, body)
-            os.fchmod(descriptor, mode)
-            if os.geteuid() == 0 and config.run_as_user:
-                try:
-                    owner = pwd.getpwnam(config.run_as_user)
-                except KeyError:
-                    owner = None
-                if owner is not None:
-                    os.fchown(descriptor, owner.pw_uid, owner.pw_gid)
-        finally:
-            os.close(descriptor)
-        os.rename(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-    except OSError as exc:
-        return False, f"switchyard: could not write {destination}: {exc}"
-    finally:
-        os.close(dir_fd)
-    return True, ""
 
 
 PRIVILEGED_PROVISION_ROOT_ENV = "SWITCHYARD_PRIVILEGED_PROVISION_ROOT"

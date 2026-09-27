@@ -1078,10 +1078,12 @@ from scripts.owner_preparation import (
 )
 from scripts.new_project_phases import (
     NewProjectAccounts,
+    NewProjectBoard,
     NewProjectChoices,
     NewProjectPreflight,
     _check_new_project_preflight,
     _prepare_new_project_accounts,
+    _prepare_new_project_board,
     _resolve_new_project_choices,
 )
 from scripts.github_identity import (
@@ -7016,41 +7018,32 @@ def switchyard_new_command(
         worktree_branch=worktree_branch,
     )
     provision_dir = new_project_accounts.provision_dir
-    stages.begin("database and board")
-    result = new_project_command(
-        resolved_slug,
-        from_artifact=artifact_path,
-        owner_home=home_base / owner_user,
+    new_project_board = _prepare_new_project_board(
         source_repo=source_repo,
         workflow_config=workflow_config,
         commit_git_dir=commit_git_dir,
-        output_dir=provision_dir,
-        director_onboarding=director_onboarding,
         port=port,
         database=database,
-        execute=True,
-        runner=runner,
+        home_base=home_base,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
-        require_owner_user=False,
-        enable_owner_linger=False,
-        role_models=selected_role_models,
-        role_efforts=selected_role_efforts,
+        registry_dir=registry_dir,
         print_func=print_func,
-    )
-    if result != 0:
-        return result
-    _commit_project_git_changes(
+        artifact_path=artifact_path,
+        director_onboarding=director_onboarding,
         owner_user=owner_user,
         project_dir=project_dir,
-        message="Record Switchyard provisioning artifacts",
+        resolved_slug=resolved_slug,
         runner=runner,
+        selected_role_efforts=selected_role_efforts,
+        selected_role_models=selected_role_models,
+        stages=stages,
+        provision_dir=provision_dir,
     )
-    config_path = provision_dir / f"{resolved_slug}.json"
-    config = load_project_config(resolved_slug, config_path)
-    config = prepare_project_desktop(config, runner=runner)
-    _register_switchyard_project(config_path, registry_dir=registry_dir)
-    _prepare_first_run_auth_worktrees(config, runner=runner)
+    if not isinstance(new_project_board, NewProjectBoard):
+        return new_project_board
+    config = new_project_board.config
+    config_path = new_project_board.config_path
     # No live model probe here, deliberately. This used to ask every configured
     # role's model to read a file and prove it had, once per role and again when
     # the answer came back without the token -- up to 180 seconds an attempt on

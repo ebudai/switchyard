@@ -33,6 +33,14 @@ phase's old position, by the launcher's own name.
   git repository, and last the provisioning directory with the desktop policy.
   Every refusal and every partial step is the command's own, in the command's
   order. Going on returns a frozen `NewProjectAccounts` with `provision_dir`.
+- **P3, database and board** (`_prepare_new_project_board`, SYRD-372): the
+  stage begun, the project provisioned -- its database, board, service and
+  generated configuration -- and, when that answers anything but 0, that very
+  status returned at once, before anything else runs; `switchyard_new_command`
+  returns it unchanged. Otherwise the provisioning artifacts committed, the
+  configuration loaded and its desktop prepared, the project registered and the
+  first-run worktrees prepared. Going on returns a frozen `NewProjectBoard`
+  with `config` and `config_path`.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -47,7 +55,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 if TYPE_CHECKING:
-    from scripts.team_launcher import ProvisioningStages, _NoRunnerInjected
+    from scripts.team_launcher import ProjectConfig, ProvisioningStages, _NoRunnerInjected
     from scripts.ticket_board.project_provision import ProjectBoardProvision
 
 
@@ -584,4 +592,80 @@ def _prepare_new_project_accounts(
     launcher._write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
     return NewProjectAccounts(
         provision_dir=provision_dir,
+    )
+
+
+@dataclass(frozen=True)
+class NewProjectBoard:
+    """What P3 hands the rest of `switchyard_new_command` when provisioning
+    succeeded, by the command's own local names. A failed provisioning is
+    answered with its own status instead, and a refusal raises."""
+
+    config: ProjectConfig
+    config_path: Path
+
+
+def _prepare_new_project_board(
+    *,
+    source_repo: Path | None,
+    workflow_config: Path | None,
+    commit_git_dir: str | None,
+    port: int | None,
+    database: str | None,
+    home_base: Path,
+    port_in_use: Callable[[int], bool],
+    socket_exists: Callable[[Path], bool],
+    registry_dir: Path | None,
+    print_func: Callable[[str], None],
+    artifact_path: Path,
+    director_onboarding: Path,
+    owner_user: str,
+    project_dir: Path,
+    resolved_slug: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    selected_role_efforts: dict[str, str],
+    selected_role_models: dict[str, str],
+    stages: ProvisioningStages,
+    provision_dir: Path,
+) -> NewProjectBoard | int:
+    from scripts import team_launcher as launcher
+
+    stages.begin("database and board")
+    result = launcher.new_project_command(
+        resolved_slug,
+        from_artifact=artifact_path,
+        owner_home=home_base / owner_user,
+        source_repo=source_repo,
+        workflow_config=workflow_config,
+        commit_git_dir=commit_git_dir,
+        output_dir=provision_dir,
+        director_onboarding=director_onboarding,
+        port=port,
+        database=database,
+        execute=True,
+        runner=runner,
+        port_in_use=port_in_use,
+        socket_exists=socket_exists,
+        require_owner_user=False,
+        enable_owner_linger=False,
+        role_models=selected_role_models,
+        role_efforts=selected_role_efforts,
+        print_func=print_func,
+    )
+    if result != 0:
+        return result
+    launcher._commit_project_git_changes(
+        owner_user=owner_user,
+        project_dir=project_dir,
+        message="Record Switchyard provisioning artifacts",
+        runner=runner,
+    )
+    config_path = provision_dir / f"{resolved_slug}.json"
+    config = launcher.load_project_config(resolved_slug, config_path)
+    config = launcher.prepare_project_desktop(config, runner=runner)
+    launcher._register_switchyard_project(config_path, registry_dir=registry_dir)
+    launcher._prepare_first_run_auth_worktrees(config, runner=runner)
+    return NewProjectBoard(
+        config=config,
+        config_path=config_path,
     )

@@ -255,7 +255,16 @@ def test_the_command_calls_it_where_the_steps_were() -> None:
           and [(k.arg, ast.unparse(k.value)) for k in call.keywords] == [(n, n) for n in PARAMETERS + FROM_P0 + FROM_P1],
           "called by the launcher's name, with the command's own values")
     check(ast.unparse(body[at + 1]) == "provision_dir = new_project_accounts.provision_dir", "provision_dir read back")
-    check(ast.unparse(body[at + 2]) == "stages.begin('database and board')", "then P3 begins, as before")
+    after = body[at + 2]
+    if ast.unparse(after) != "stages.begin('database and board')":
+        # SYRD-372: P3 is its own phase now, and that phase begins it first.
+        board = next(n for n in module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "_prepare_new_project_board")
+        check(isinstance(after, ast.Assign) and isinstance(after.value, ast.Call)
+              and ast.unparse(after.value.func) == "_prepare_new_project_board"
+              and ast.unparse(board.body[1]) == "stages.begin('database and board')",
+              f"then the P3 phase, which begins it first: {ast.unparse(after)[:80]}")
+    else:
+        check(True, "then P3 begins, as before")
 
 
 # --- behaviour -------------------------------------------------------------------------------------------------------

@@ -250,7 +250,26 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
 
     positions = [begun_at(name) for name in team_launcher.NEW_PROJECT_STAGES]
     assert positions == sorted(positions), positions
-    assert body.index("stages.begin(\"database and board\")") < body.index("result = new_project_command(")
+
+    def executed_at(line: str) -> tuple[int, int]:
+        """A line of `switchyard new` in the order it runs: its own place in the
+        command, or -- since SYRD-372 -- the command's one call to the phase
+        that holds it, then its place inside that phase."""
+        if line in body:
+            return (body.index(line), 0)
+        import ast
+
+        from scripts import new_project_phases
+
+        phases = inspect.getsource(new_project_phases)
+        for phase in (node for node in ast.parse(phases).body if isinstance(node, ast.FunctionDef)):
+            text = ast.get_source_segment(phases, phase).replace("launcher.", "")
+            if line in text:
+                assert body.count(f"= {phase.name}(") == 1, phase.name
+                return (body.index(f"= {phase.name}("), text.index(line))
+        raise AssertionError(f"switchyard new never runs {line!r}")
+
+    assert executed_at("stages.begin(\"database and board\")") < executed_at("result = new_project_command(")
     assert body.index("stages.begin(\"provider sign-in and folder trust\", waits_for_you=True)") < body.index(
         "run_first_run_auth_phase("
     )

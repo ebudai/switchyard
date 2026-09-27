@@ -735,6 +735,20 @@ from scripts.tmux_session_argv import (
     tmux_has_session_args,
     tmux_kill_session_args,
 )
+from scripts.layout_modes import (
+    LAYOUT_MODE_AUTO,
+    LAYOUT_MODE_CHOICES,
+    LAYOUT_MODE_SEPARATE,
+    LAYOUT_MODE_VIEWER,
+)
+from scripts.presentation_reconnect import (
+    PRESENTATION_HANDOFF_FD_ENV,
+    hand_presentation_back_to_the_caller,
+    presentation_is_attached,
+    presentation_slot_titles,
+    reconnect_presentation,
+    render_presentation_handoff,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -829,10 +843,6 @@ TENANT_CONTROL_CALLER_ENV = "SWITCHYARD_TENANT_CONTROL_CALLER"
 #: The wrapper creates and owns the file; root only ever writes it as that
 #: person (SYRD-221 UAT, test10).
 NEW_RESULT_FILE_ENV = "SWITCHYARD_NEW_RESULT_FILE"
-LAYOUT_MODE_AUTO = "auto"
-LAYOUT_MODE_SEPARATE = "separate"
-LAYOUT_MODE_VIEWER = "viewer"
-LAYOUT_MODE_CHOICES = frozenset({LAYOUT_MODE_AUTO, LAYOUT_MODE_SEPARATE, LAYOUT_MODE_VIEWER})
 MAX_VISIBLE_PANES_PER_WINDOW = 6
 SWITCHYARD_VERSION = "dev"
 SWITCHYARD_COMMANDS = (
@@ -1873,63 +1883,6 @@ def running_through_tenant_control() -> bool:
     screen" from "this is the owner account, which has no screen at all".
     """
     return bool(os.environ.get(TENANT_CONTROL_CALLER_ENV, "").strip())
-
-
-def hand_presentation_back_to_the_caller(
-    config: "ProjectConfig",
-    *,
-    slot_count: int,
-    window_title: str = "",
-    layout: str = LAYOUT_MODE_SEPARATE,
-    slot_titles: Sequence[str] | None = None,
-    pane_program: Path | None = None,
-    print_func: Callable[[str], None] = print,
-) -> bool:
-    """Report the window for the bridge caller to open, and say so if it cannot.
-
-    `_hand_off_desktop_half` does this for tenants that run the presentation
-    controller, and only those: it is reached through `launch_presentation`,
-    which `presentation_enabled` gates on the config carrying a `presentation`
-    section. A provisioned tenant carries `desktop_access` and a `layout` and no
-    such section, so a bridged launch of one fell through to opening Konsole
-    HERE -- as the owner account, which has no screen -- and the caller, finding
-    no handoff, opened nothing and returned success.
-
-    That is what live Zorin UAT saw: every worker started or attached, then the
-    shell back, no window and no complaint (SYRD-211 live UAT).
-    """
-    raw_fd = os.environ.get(PRESENTATION_HANDOFF_FD_ENV, "").strip()
-    if not raw_fd.isdigit():
-        return False
-    payload = render_presentation_handoff(
-        config.project,
-        slot_count=slot_count,
-        pane_program=(
-            pane_program
-            if pane_program is not None
-            else pane_window_program(switchyard_pane_launcher_for(config))
-        ),
-        slot_titles=(
-            list(slot_titles)
-            if slot_titles is not None
-            else presentation_slot_titles(config, slot_count)
-        ),
-        window_title=window_title or project_window_title(config),
-        layout=layout,
-    )
-    try:
-        with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
-    except OSError as exc:
-        raise SystemExit(
-            f"switchyard: could not hand {config.project}'s presentation window back to "
-            f"the account that asked for it: {exc}"
-        )
-    print_func(
-        f"switchyard: {config.project}'s panes are up; its window opens in the session that "
-        "ran this, which owns the screen."
-    )
-    return True
 
 
 def launch_presentation_terminal(
@@ -3784,10 +3737,6 @@ PRESENTATION_HANDOFF_SCHEMA = "switchyard.presentation-handoff.v2"
 #: header is bounded.
 PRESENTATION_TITLE_MAX_LENGTH = 120
 PRESENTATION_TITLE_REJECTED = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-#: The bridge tells its child which descriptor to answer on. The bridge chooses
-#: it, never the caller: the environment the child gets is rebuilt from
-#: root-owned data, and this is one more field of it.
-PRESENTATION_HANDOFF_FD_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_FD"
 
 
 def desktop_state_dir(project: str, user: str) -> Path:
@@ -3816,21 +3765,6 @@ def presentation_title_problem(value: Any) -> str:
     if PRESENTATION_TITLE_REJECTED.search(value):
         return "a presentation slot title carries a control character"
     return ""
-
-
-def presentation_slot_titles(config: ProjectConfig, slot_count: int) -> list[str]:
-    """What each slot in the presentation window calls itself.
-
-    A slot no role occupies keeps the project's own name: the window is still
-    that project's, and there is no role to claim it (SYRD-130).
-    """
-    titles = [project_window_title(config)] * max(int(slot_count), 0)
-    for role in config.roles:
-        if role.detached or role.slot is None:
-            continue
-        if 0 <= role.slot < len(titles):
-            titles[role.slot] = pane_split_title(config, role)
-    return titles
 
 
 def presentation_pane_program_problem(
@@ -3869,49 +3803,6 @@ def presentation_pane_program_problem(
     if reasons:
         return f"the program each tab runs, {program}, is not pinned to root: {reasons[0]}"
     return ""
-
-
-def render_presentation_handoff(
-    project: str,
-    *,
-    slot_count: int,
-    pane_program: Path,
-    slot_titles: Sequence[str],
-    window_title: str = "",
-    layout: str = "",
-) -> dict[str, Any]:
-    """Everything the caller needs to build its own layout, and nothing else.
-
-    Not the layout itself. The account that owns the sessions renders nothing
-    the desktop account will run: it reports what it alone knows -- how many
-    slots there are, which pinned program a tab runs, and what each slot is
-    called -- and the caller builds the layout from its own code. What crosses
-    is checkable, and a payload that is not is refused rather than written into
-    somebody's home (SYRD-90).
-
-    The titles are here because the desktop half has no other way to learn
-    them: it knows the project's slug and nothing about its roles, which is why
-    its window opened with the fallback title (SYRD-130).
-
-    The window's own name crosses for the same reason and is checked the same
-    way. The desktop half could read the project's registered display name for
-    itself, and does for `--qwindowtitle`; but this one is handed to a terminal
-    as an escape sequence, so it travels as a field that both sides validate
-    rather than as something one side looks up unchecked (SYRD-139).
-    """
-    return {
-        "schema": PRESENTATION_HANDOFF_SCHEMA,
-        "project": project,
-        # Which shape the owner actually built. On a desktop that is not KDE the
-        # auto layout resolves to `viewer` -- one tiled tmux session holding
-        # every role -- and a caller told only "five slots" would build five
-        # tabs for display sessions that do not exist (SYRD-211 live UAT).
-        "layout": str(layout or LAYOUT_MODE_SEPARATE),
-        "slot_count": int(slot_count),
-        "pane_program": str(pane_program),
-        "slot_titles": [str(title) for title in slot_titles],
-        "window_title": str(window_title),
-    }
 
 
 def validated_presentation_handoff(
@@ -18375,56 +18266,6 @@ def install_board_authority(
     # started again only once the workers, their writes and the presentation
     # have all verified (SYRD-45).
     return activate_board_authority(config, runner=runner, restart=True, print_func=print_func)
-
-
-def reconnect_presentation(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> list[str]:
-    """Point the display slots back at the roles that just came back.
-
-    The slots are long-lived sessions that proxy a worker; when the workers are
-    replaced the proxies have to be re-pointed, in place. Re-running the whole
-    launch instead is what opens a second six-pane window and stacks two status
-    bars, so the mapping is reapplied rather than relaunched (SYRD-45).
-    """
-    from scripts import presentation_controller
-
-    if not presentation_controller.presentation_enabled(config, config_path=config_path):
-        return []
-    try:
-        presentation_controller.reconnect_display_slots(config, config_path=config_path, runner=runner)
-    except Exception as exc:  # noqa: BLE001 - reported, never fatal to the cutover
-        return [str(exc)]
-    return []
-
-
-def presentation_is_attached(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> bool:
-    """Whether a terminal outside presentation is actually displaying it.
-
-    Every slot reporting a connected client is not the same thing: in the
-    viewer topology those clients are presentation's own panes, so six of them
-    can exist with no window on any screen at all. This asks the question the
-    tenant cares about -- is somebody looking at it -- and a project with no
-    presentation configured is not claimed to be attached (SYRD-65).
-    """
-    from scripts import presentation_controller
-
-    if not presentation_controller.presentation_enabled(config, config_path=config_path):
-        return False
-    try:
-        return presentation_controller.presentation_window_attached(
-            config, config_path=config_path, runner=runner
-        )
-    except Exception:  # noqa: BLE001 - an unreadable presentation is not an attachment
-        return False
 
 
 def finish_upgrade_command(

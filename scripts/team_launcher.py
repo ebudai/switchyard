@@ -723,6 +723,18 @@ from scripts.role_pane_entry import (
     run_role_pane,
     tmux_new_session_args,
 )
+# The tmux session argv, pane commands and live pane-command matching
+# (SYRD-314), moved out whole. Named here because launching, the role session
+# code and the modules already moved out read them through the launcher -- the
+# suites patch `tmux_has_session_args` and `tmux_kill_session_args` here -- and
+# because `team_launcher.<name>` is how tests reach them.
+from scripts.tmux_session_argv import (
+    live_command_matches_role,
+    pane_command,
+    pane_command_args,
+    tmux_has_session_args,
+    tmux_kill_session_args,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -3055,20 +3067,8 @@ def role_pane_declaration(role: "RoleConfig") -> dict[str, Any]:
     return {"runtime": runtime, "target": target, "slot": role.slot}
 
 
-def tmux_has_session_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "has-session", "-t", role.tmux_session]
-
-
-def tmux_kill_session_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "kill-session", "-t", role.tmux_session]
-
-
 def tmux_detach_clients_args(role: RoleConfig) -> list[str]:
     return ["tmux", "detach-client", "-s", role.tmux_session]
-
-
-def tmux_current_command_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_current_command}"]
 
 
 def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
@@ -3148,11 +3148,6 @@ def _path_owner_ids(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return info.st_uid, info.st_gid
-
-
-def expected_live_commands(role: RoleConfig) -> set[str]:
-    configured = role.live_commands or [_command_name(role.cli[0])]
-    return {_command_name(command) for command in configured if _command_name(command)}
 
 
 def _process_snapshot() -> tuple[dict[int, int], dict[int, list[int]], dict[int, set[str]], dict[int, list[str]]]:
@@ -3238,10 +3233,6 @@ def _model_from_argv(argv: Sequence[str], *, model_arg: str) -> str:
     return ""
 
 
-def process_tree_contains_command(pane_pid: int, expected_commands: set[str]) -> bool:
-    return bool(process_tree_command_names(pane_pid) & expected_commands)
-
-
 def live_cli_for_role(
     role: RoleConfig,
     *,
@@ -3274,23 +3265,6 @@ def live_model_for_role(
     return _session_payload_model_for_role(role, session_dir)
 
 
-def live_command_matches_role(
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> bool:
-    expected = expected_live_commands(role)
-    pane_pid = pane_pid_for_role(role, runner=runner)
-    if pane_pid > 0:
-        return process_tree_contains_command(pane_pid, expected)
-
-    proc = runner(tmux_current_command_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if proc.returncode != 0:
-        return False
-    actual = _command_name(str(proc.stdout).strip())
-    return actual in expected
-
-
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     leaves: list[dict[str, Any]] = []
     if isinstance(node, dict):
@@ -3301,79 +3275,6 @@ def _layout_leaves(node: Any) -> list[dict[str, Any]]:
         elif "Command" in node:
             leaves.append(node)
     return leaves
-
-
-def pane_command_args(
-    project: str,
-    role: RoleConfig,
-    *,
-    config_path: Path,
-    mode: str,
-    script_path: Path,
-    slot: int | None = None,
-    pane_state_dir: Path | None = None,
-    force_reload: bool = False,
-    skip_launcher_check: bool = False,
-    allow_stale_launcher: bool = False,
-    no_attach: bool = False,
-    run_as_user: str = "",
-) -> list[str]:
-    args = [
-        str(script_path),
-        project,
-        "pane",
-        mode,
-        role.role,
-        "--config",
-        str(config_path),
-    ]
-    if mode == "reload" and force_reload:
-        args.append("--force")
-    if slot is not None:
-        args.extend(["--slot", str(slot)])
-    if skip_launcher_check:
-        args.append("--skip-launcher-check")
-    if allow_stale_launcher:
-        args.append("--allow-stale-launcher")
-    if no_attach:
-        args.append("--no-attach")
-    if pane_state_dir is not None:
-        args.extend(["--pane-state-dir", str(pane_state_dir)])
-    if run_as_user and current_user_name() != run_as_user:
-        args = ["sudo", "-u", run_as_user, "-H", *args]
-    return args
-
-
-def pane_command(
-    project: str,
-    role: RoleConfig,
-    *,
-    config_path: Path,
-    mode: str,
-    script_path: Path,
-    slot: int | None = None,
-    pane_state_dir: Path | None = None,
-    force_reload: bool = False,
-    skip_launcher_check: bool = False,
-    allow_stale_launcher: bool = False,
-    no_attach: bool = False,
-    run_as_user: str = "",
-) -> str:
-    args = pane_command_args(
-        project,
-        role,
-        config_path=config_path,
-        mode=mode,
-        script_path=script_path,
-        slot=slot,
-        pane_state_dir=pane_state_dir,
-        force_reload=force_reload,
-        skip_launcher_check=skip_launcher_check,
-        allow_stale_launcher=allow_stale_launcher,
-        no_attach=no_attach,
-        run_as_user=run_as_user,
-    )
-    return _quote_command(args)
 
 
 def _running_project_roles(

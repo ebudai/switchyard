@@ -177,7 +177,11 @@ def test_every_reader_reaches_its_names_through_the_launcher() -> None:
 
 def test_the_seams_and_the_functions_own_imports() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    # SYRD-350 moved the upgrade's U2 phase to upgrade_phases, which calls through
+    # the launcher too; its sites count with launch_phases' and the totals are unchanged.
+    phases = ast.Module(body=[*ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8")).body,
+                              *ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8")).body],
+                        type_ignores=[])
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]

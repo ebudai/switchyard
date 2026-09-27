@@ -155,8 +155,16 @@ def test_the_seams_and_the_privileged_names_are_read_where_they_were() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     calls = [n for n in ast.walk(launcher_tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "ensure_display_bridge"]
-    check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
-          "the upgrade calls ensure_display_bridge at its one baseline site, by the launcher's name")
+    # SYRD-350 moved the upgrade's U2 phase, holding that site, to upgrade_phases,
+    # which calls it through the launcher; the total is unchanged.
+    phases = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
+    phase_calls = [n for n in ast.walk(phases)
+                   if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "ensure_display_bridge"]
+    check(len(calls) + len(phase_calls) == 1 and all(isinstance(n.func, ast.Name) for n in calls)
+          and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                  and n.func.value.id == "launcher" for n in phase_calls),
+          "the upgrade calls ensure_display_bridge at its one baseline site, by the launcher's name, "
+          "or through the launcher from upgrade_phases")
     moved = ast.parse((ROOT / "scripts" / "display_bridge.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in ("display_bridge_state", "display_bridge_launch_problem", "current_user_name")})

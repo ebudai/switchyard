@@ -51,6 +51,14 @@ order, the reload only for a real layout change, the artifact source's None, the
 onboarding commit cache and owner fallbacks, the board skill and hooks, the
 report link's config going on, the problems said in order and not fatal, and the
 upgrade keeping the report config taken before U3.
+
+SYRD-350 added U2, manager, desktop and repatriation (`_recover_upgrade_state`,
+a frozen `UpgradeStateReady` or 1 from each of its five refusals). Its cases pin
+the source resolution, the manager's repair, the desktop's configuration and
+dry-run planning, the presentation and display bridge, restore before
+repatriation, the reloads only for real work, and the partial cutover's report
+and revert; the desktop policy validator is patched where it lives, and config
+is a real frozen dataclass, so `replace` really runs.
 """
 
 from __future__ import annotations
@@ -69,7 +77,7 @@ if str(ROOT) not in sys.path:
 
 CHECKS = 0
 EXPORTED = ("UpgradeToolingStaged", "_stage_upgrade_tooling", "UpgradeIdentitiesDone", "_upgrade_identities_and_accounts",
-            "_finish_upgrade", "_refresh_upgrade_artifacts")
+            "_finish_upgrade", "_refresh_upgrade_artifacts", "UpgradeStateReady", "_recover_upgrade_state")
 #: U4's launcher lookups and how many times each is read (measured on the SYRD-346 baseline: 16 reads of 9 names).
 SEAMS = {"_staged_tooling_dir": 1, "refresh_role_pane_hooks": 2, "resolve_trusted_upgrade_release": 2,
          "remove_tenant_publication_boundary": 2, "remove_untrusted_role_account_migration": 1,
@@ -250,8 +258,9 @@ def test_the_seams_the_phases_own_names_and_the_call_site() -> None:
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
           "the upgrade calls U4 by the launcher's own (patchable) name")
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 4]]
-    # U4 was statement [43]; SYRD-349 folded U3's fourteen statements into one, so it is [30] now.
-    check(at == 30 and wiring == ["if not isinstance(tooling_staged, UpgradeToolingStaged):\n    return tooling_staged",
+    # U4 was statement [43]; SYRD-349 folded U3's fourteen statements into one ([30]), and SYRD-350 U2's
+    # thirteen into six, so it is [23] now.
+    check(at == 23 and wiring == ["if not isinstance(tooling_staged, UpgradeToolingStaged):\n    return tooling_staged",
                                   "trusted_release_root = tooling_staged.trusted_release_root",
                                   "publication_detail = tooling_staged.publication_detail"],
           f"the upgrade calls U4 at its old position, returns a refusal before reading either value, then takes both: "
@@ -269,7 +278,7 @@ def run_wiring(answer: object):
     """The upgrade's own call, dispatch and unpacking, compiled from the launcher and run against a stand-in U4."""
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
-    statements = upgrade.body[30:34]
+    statements = upgrade.body[23:27]
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in (
             "config", "config_path", "deploy_ref", "deploy_ref_chosen", "dry_run", "effective_source_repo",
@@ -564,8 +573,8 @@ def test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local()
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
           "the upgrade calls U5 by the launcher's own (patchable) name")
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 4]]
-    # U5 was statement [47]; [34] since SYRD-349 folded U3 into one statement.
-    check(at == 34 and wiring == ["if not isinstance(identities_done, UpgradeIdentitiesDone):\n    return identities_done",
+    # U5 was statement [47]; [34] after SYRD-349, [27] after SYRD-350.
+    check(at == 27 and wiring == ["if not isinstance(identities_done, UpgradeIdentitiesDone):\n    return identities_done",
                                   "config = identities_done.config",
                                   "release_report_config = identities_done.release_report_config"],
           f"at U5's old position, a refusal is returned before either value is read: {at} {wiring}")
@@ -784,7 +793,7 @@ def run_u5_wiring(answer: object):
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=[*upgrade.body[34:38], ast.parse("return ('went on', config, release_report_config)").body[0]],
+        body=[*upgrade.body[27:31], ast.parse("return ('went on', config, release_report_config)").body[0]],
         decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeIdentitiesDone
     asked: list[tuple] = []
@@ -895,7 +904,7 @@ def test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade() -> Non
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
     tail = upgrade.body[-1]
-    check(len(upgrade.body) == 39 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
+    check(len(upgrade.body) == 32 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
           and isinstance(tail.value.func, ast.Name) and tail.value.func.id == "_finish_upgrade"
           and {k.arg: ast.unparse(k.value) for k in tail.value.keywords}.get("release_report_config") == "release_report_config",
           f"the upgrade ends by returning U6's answer, called by the launcher's own name at U6's old position: "
@@ -1014,7 +1023,7 @@ def test_the_upgrade_returns_u6s_answer_after_u5() -> None:
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=upgrade.body[34:39], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+        body=upgrade.body[27:32], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeIdentitiesDone
     for u5_answer in (Code(4), "continue"):
         asked: list[tuple] = []
@@ -1129,9 +1138,9 @@ def test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config() -> N
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_refresh_upgrade_artifacts")), None)
-    check(at == 29 and isinstance(upgrade.body[at].value.func, ast.Name)
+    check(at == 22 and isinstance(upgrade.body[at].value.func, ast.Name)
           and ast.unparse(upgrade.body[at].targets[0]) == "config"
-          and [ast.unparse(n) for n in upgrade.body[26:29]] == ["release_report_config = config",
+          and [ast.unparse(n) for n in upgrade.body[19:22]] == ["release_report_config = config",
                                                                  "trusted_release_root: Path | None = None",
                                                                  "publication_detail = ''"],
           "the upgrade assigns U3's config at U3's old position, by the launcher's own name, after the report config "
@@ -1241,7 +1250,7 @@ def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=[*upgrade.body[26:30],
+        body=[*upgrade.body[19:23],
               ast.parse("return config, release_report_config, trusted_release_root, publication_detail").body[0]],
         decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     new = SimpleNamespace(name="u3 config")
@@ -1255,10 +1264,321 @@ def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
           f"U3's config goes on, while the report config stays the one from before U3: {result}")
 
 
+# --- U2: manager, desktop and repatriation (SYRD-350) --------------------------------------------------------------
+
+#: U2's launcher lookups and how many times each is read (measured on the SYRD-350 baseline: 25 reads of 21 names).
+U2_SEAMS = {"resolved_source_selection": 1, "_repo_root": 1, "owner_user_manager_state": 1, "MANAGER_WEDGED": 1,
+            "current_user_name": 3, "repair_owner_user_manager": 1, "configure_project_desktop": 1, "_load_json": 1,
+            "migrate_legacy_presentation": 1, "pinned_presentation_gui_user": 1, "presentation_controller_enabled": 1,
+            "legacy_presentation_migration": 1, "ensure_display_bridge": 1, "_privileged_upgrade_check_command": 1,
+            "restore_interrupted_role_state": 1, "repatriate_role_runtime_state": 1, "load_project_config": 2,
+            "role_account_cutover": 2, "running_role_identities": 1, "revert_incomplete_role_account_cutover": 1,
+            "record_upgrade_phase": 1}
+REPO = Path("/nonexistent/syrd350/repo")
+#: A given source with a `..` in it, so the resolved-and-normalised effective source differs from it.
+U2_SOURCE = Path("/nonexistent/syrd350/checkouts/../source")
+U2_RESOLVED = Path("/nonexistent/syrd350/checkouts/../source-resolved")
+U2_EFFECTIVE = Path("/nonexistent/syrd350/source-resolved")
+POLICY = Path("/nonexistent/syrd350/policy.json")
+
+
+@dataclasses.dataclass(frozen=True)
+class U2Config:
+    project: str = PROJECT
+    run_as_user: object = "syrd350-owner"
+    desktop_access: object = None
+    name: str = "incoming"
+
+
+class Recovery:
+    """U2's launcher facilities and the desktop policy validator, from objects this test owns, into one log."""
+
+    def __init__(self, *, wedged: bool = False, repair: list | None = None, ready: bool = True, pinned: str = "",
+                 controller: bool = False, needed: bool = False, bridge: bool = True, restored: bool = True,
+                 repatriated: bool = False, repatriation_problems: list | None = None, partial: bool = False,
+                 live: tuple = (), reverted: bool = False, error: Exception | None = None) -> None:
+        self.wedged, self.repair, self.ready, self.pinned = wedged, repair or [], ready, pinned
+        self.controller, self.needed, self.bridge, self.restored = controller, needed, bridge, restored
+        self.repatriated, self.repatriation_problems = repatriated, repatriation_problems or []
+        self.partial, self.live, self.reverted, self.error = partial, live, reverted, error
+        self.configured = U2Config(name="configured", desktop_access="configured-access")
+        self.migrated = U2Config(name="migrated", desktop_access="migrated-access")
+        self.reloads = [U2Config(name=f"reload-{i}") for i in range(3)]
+        self.cutovers = [SimpleNamespace(is_partial=partial, problems=["syrd350: half moved"], missing_accounts=["a", "b"],
+                                         name=f"cutover-{i}") for i in range(3)]
+        self.log: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+        reloads, cutovers = iter(self.reloads), iter(self.cutovers)
+
+        def repatriate(config, **kw):
+            L.append(("repatriate", config, kw))
+            if self.error:
+                raise self.error
+            return self.repatriated, list(self.repatriation_problems)
+
+        return dict(
+            resolved_source_selection=lambda path: L.append(("resolve-source", path)) or f"{path}-resolved",
+            _repo_root=lambda: L.append(("repo-root",)) or REPO,
+            owner_user_manager_state=lambda config, **kw: L.append(("manager?", config, kw))
+                or (("SYRD350_WEDGED" if self.wedged else "healthy"), "syrd350 detail"),
+            MANAGER_WEDGED="SYRD350_WEDGED",
+            current_user_name=lambda: L.append(("current-user",)) or "syrd350-me",
+            repair_owner_user_manager=lambda config, **kw: L.append(("repair", config, kw)) or list(self.repair),
+            configure_project_desktop=lambda config, **kw: L.append(("configure", config, kw)) or self.configured,
+            _load_json=lambda path: L.append(("load-json", path)) or {"mode": "file"},
+            migrate_legacy_presentation=lambda planned, **kw: L.append(("migrate", planned, kw))
+                or (self.migrated, self.ready),
+            pinned_presentation_gui_user=lambda planned: L.append(("pinned?", planned)) or self.pinned,
+            presentation_controller_enabled=lambda planned, *, config_path: L.append(("controller?", planned))
+                or self.controller,
+            legacy_presentation_migration=lambda planned, *, config_path: L.append(("migration?", planned))
+                or SimpleNamespace(needed=self.needed),
+            ensure_display_bridge=lambda planned, **kw: L.append(("bridge", planned, kw)) or self.bridge,
+            _privileged_upgrade_check_command=lambda project, ref: L.append(("root-check", project, ref)) or "ROOTCHECK",
+            restore_interrupted_role_state=lambda config, **kw: L.append(("restore", config, kw)) or self.restored,
+            repatriate_role_runtime_state=repatriate,
+            load_project_config=lambda project, path: L.append(("reload", project, path)) or next(reloads),
+            role_account_cutover=lambda config, *, runner: L.append(("cutover", config, runner)) or next(cutovers),
+            running_role_identities=lambda config, *, runner: L.append(("serving", config)) or set(self.live),
+            revert_incomplete_role_account_cutover=lambda config, **kw: L.append(("revert", config, kw))
+                or (self.reverted, "SYRD350 REVERTED" if self.reverted else ""),
+            record_upgrade_phase=lambda config, **kw: L.append(("journal", config, kw)),
+        )
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def u2(rec: Recovery, *, dry_run: bool = False, source_repo: object = U2_SOURCE, desktop_policy: object = None,
+       config: object = None):
+    from scripts import desktop_access, team_launcher, upgrade_phases
+
+    said: list[str] = []
+    config = config if config is not None else U2Config()
+    with patched(team_launcher, **rec.names()), \
+            patched(desktop_access, validate_policy=lambda raw, *, project, tenant:
+                    rec.log.append(("validate", raw, project, tenant)) or "validated-access"):
+        result = upgrade_phases._recover_upgrade_state(
+            config, config_path=CONFIG_PATH, deploy_ref="v350", desktop_policy=desktop_policy, dry_run=dry_run,
+            print_func=said.append, runner=refusing_runner, source_repo=source_repo)
+    return result, said, config
+
+
+def test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> None:
+    module = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_recover_upgrade_state")
+    for name, count in U2_SEAMS.items():
+        through = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name
+                   and isinstance(n.value, ast.Name) and n.value.id == "launcher"]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(through) == count and not bare, f"U2 reads {name} at its {count} site(s), through the launcher")
+    local = [(n.module, [(a.name, a.asname) for a in n.names]) for n in ast.walk(function)
+             if isinstance(n, ast.ImportFrom) and not (n.module == "scripts" and n.names[0].name == "team_launcher")]
+    check(local == [("scripts", [("desktop_access", "_desktop")])], f"the desktop policy import stays U2's own: {local}")
+    bound = {a.arg for a in ast.walk(function) if isinstance(a, ast.arg)}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                      and n.value.id == "launcher" and n.attr in bound | {"_desktop", "replace", "Path", "sorted", "str"}})
+    check(through == [], f"nothing U2 binds, nor replace, Path or a builtin, is read as the launcher's: {through}")
+    from scripts import upgrade_phases
+    check(upgrade_phases.replace is dataclasses.replace, "replace is dataclasses' own, the module's import")
+    fields = dataclasses.fields(upgrade_phases.UpgradeStateReady)
+    check([f.name for f in fields] == ["source_repo", "effective_source_repo", "config", "cutover"]
+          and upgrade_phases.UpgradeStateReady.__dataclass_params__.frozen, f"a frozen four-field continuation: {fields}")
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+               and ast.unparse(n.value.func).endswith("_recover_upgrade_state")), None)
+    wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 6]] if at is not None else []
+    check(at == 13 and isinstance(upgrade.body[at].value.func, ast.Name) and wiring == [
+        "if not isinstance(state_ready, UpgradeStateReady):\n    return state_ready",
+        "source_repo = state_ready.source_repo", "effective_source_repo = state_ready.effective_source_repo",
+        "config = state_ready.config", "cutover = state_ready.cutover"]
+          and ast.unparse(upgrade.body[at + 6]) == "release_report_config = config",
+          f"U2 at its old position, by the launcher's name; a refusal returned before any value is read; the report "
+          f"config still taken after: {at} {wiring}")
+
+
+def test_u2_a_bare_upgrade_resolves_the_source_and_reads_the_cutover() -> None:
+    rec = Recovery()
+    result, said, config = u2(rec)
+    check(rec.kinds() == ["resolve-source", "manager?", "restore", "repatriate", "cutover", "serving"] and said == [],
+          f"source, manager, restore, repatriation, then a fresh cutover and who is serving: {rec.kinds()}")
+    check(result.source_repo == U2_RESOLVED and result.effective_source_repo == U2_EFFECTIVE
+          and result.config is config and result.cutover is rec.cutovers[0],
+          f"the resolved source, its effective path, the caller's own config, the fresh cutover: {result}")
+    check(rec.log[1][2] == dict(runner=refusing_runner, config_path=CONFIG_PATH)
+          and rec.log[2][2] == dict(dry_run=False, runner=refusing_runner, print_func=said.append)
+          and rec.log[3][2] == dict(config_path=CONFIG_PATH, dry_run=False, runner=refusing_runner),
+          f"each step's exact arguments: {rec.log[1:4]}")
+    rec = Recovery()
+    result, _, _ = u2(rec, source_repo=None)
+    check(result.source_repo is None and result.effective_source_repo == REPO.resolve(strict=False)
+          and "resolve-source" not in rec.kinds() and "repo-root" in rec.kinds(),
+          f"no source: the checkout's own root, and source_repo stays None: {result}")
+
+
+def test_u2_a_wedged_manager_is_repaired_or_stops_the_upgrade() -> None:
+    rec = Recovery(wedged=True)
+    result, said, _ = u2(rec)
+    check(said[:1] == [("switchyard: syrd350-owner's user manager is not answering (syrd350 detail); its units, including "
+                        "this tenant's notify listener, cannot be started or stopped until it is recovered.")]
+          and len(rec.log) > 2 and rec.log[2][0] == "repair" and rec.log[2][2] == dict(runner=refusing_runner, config_path=CONFIG_PATH,
+                                                                  dry_run=False, print_func=said.append)
+          and isinstance(result, SimpleNamespace) is False and result.cutover is rec.cutovers[0],
+          f"a wedged manager is said, repaired, and the upgrade goes on: {said}")
+    rec = Recovery(wedged=True, repair=["syrd350: still wedged"])
+    result, said, _ = u2(rec)
+    check(result == 1 and type(result) is int and rec.kinds()[-1] == "repair" and said[-2:] == [
+        "switchyard: syrd350: still wedged",
+        f"switchyard: stopping before any phase runs: moving {PROJECT} onto per-role identities would stop its roles and "
+        "then wait on that manager."], f"an unrepaired manager stops everything after it: {said[-2:]}")
+
+
+def test_u2_the_desktop_is_configured_and_its_presentation_migrated() -> None:
+    rec = Recovery()
+    result, said, config = u2(rec, config=U2Config(desktop_access="present"))
+    configure = next(e for e in rec.log if e[0] == "configure")
+    check(configure[2] == dict(config_path=CONFIG_PATH, policy_path=None, dry_run=False,
+                               helper=U2_EFFECTIVE / "scripts/desktop_access.py", runner=refusing_runner),
+          f"configured with the effective source's helper: {configure}")
+    migrate = next(e for e in rec.log if e[0] == "migrate")
+    check(migrate[1] is rec.configured and migrate[2] == dict(config_path=CONFIG_PATH, dry_run=False, print_func=said.append)
+          and result.config is rec.migrated and next(e for e in rec.log if e[0] == "restore")[1] is rec.migrated,
+          f"the configured config's presentation migrated, and that is what goes on: {result.config}")
+    rec = Recovery()
+    result, _, _ = u2(rec, dry_run=True, config=U2Config(desktop_access="present"))
+    check(result.config is rec.configured, "a dry run carries the configured config, not the planned one")
+
+
+def test_u2_a_dry_run_policy_is_planned_by_hand() -> None:
+    for policy, raw, loaded in ((Path("headless"), {"mode": "headless"}, False), (POLICY, {"mode": "file"}, True)):
+        rec = Recovery()
+        u2(rec, dry_run=True, desktop_policy=policy)
+        validate = next(e for e in rec.log if e[0] == "validate")
+        migrate = next(e for e in rec.log if e[0] == "migrate")
+        check(validate[1:] == (raw, PROJECT, "syrd350-owner") and ("load-json" in rec.kinds()) == loaded
+              and migrate[1] == dataclasses.replace(rec.configured, desktop_access="validated-access")
+              and migrate[1] is not rec.configured,
+              f"{policy}: validated for the tenant and planned into a replaced config: {validate} {migrate[1]}")
+    rec = Recovery()
+    u2(rec, desktop_policy=POLICY)
+    check("validate" not in rec.kinds() and next(e for e in rec.log if e[0] == "migrate")[1] is rec.configured,
+          "a real run's policy is the configured one, never re-validated by hand")
+    rec = Recovery(ready=False)
+    result, _, _ = u2(rec, desktop_policy=POLICY)
+    check(result == 1 and rec.kinds()[-1] == "migrate", f"a presentation that is not ready stops the upgrade: {rec.kinds()}")
+
+
+def test_u2_the_display_bridge_only_when_the_window_crosses_accounts() -> None:
+    for controller, needed, asked in ((True, False, True), (False, True, True), (False, False, False)):
+        rec = Recovery(pinned="syrd350-desk", controller=controller, needed=needed)
+        u2(rec, desktop_policy=POLICY)
+        check(("bridge" in rec.kinds()) == asked, f"controller {controller}, migration needed {needed}: bridge {asked}")
+    rec = Recovery(pinned="syrd350-desk", controller=True)
+    _, said, _ = u2(rec, desktop_policy=POLICY)
+    bridge = next(e for e in rec.log if e[0] == "bridge")
+    check(bridge[1] is rec.migrated and bridge[2] == dict(gui_user="syrd350-desk", dry_run=False, runner=refusing_runner,
+                                                          print_func=said.append, root_check="ROOTCHECK")
+          and ("root-check", PROJECT, "v350") in rec.log and "migration?" not in rec.kinds(),
+          f"the bridge for the pinned desktop user, with the privileged check, and the migration never asked once the "
+          f"controller answered: {bridge}")
+    rec = Recovery(pinned="")
+    u2(rec, desktop_policy=POLICY)
+    check(not {"controller?", "migration?", "bridge"} & set(rec.kinds()), "no pinned user: nothing asked")
+    rec = Recovery(pinned="syrd350-desk", controller=True, bridge=False)
+    result, _, _ = u2(rec, desktop_policy=POLICY)
+    check(result == 1 and rec.kinds()[-1] == "bridge", f"a refused bridge stops the upgrade: {rec.kinds()}")
+
+
+def test_u2_restore_then_repatriate() -> None:
+    rec = Recovery(restored=False)
+    result, _, _ = u2(rec)
+    check(result == 1 and rec.kinds()[-1] == "restore", f"interrupted state not restored: stop before repatriating")
+    rec = Recovery(repatriation_problems=["syrd350: role a busy", "syrd350: role b busy"])
+    result, said, _ = u2(rec)
+    check(result == 1 and rec.kinds()[-1] == "repatriate" and said == [
+        f"switchyard: refusing {PROJECT}'s project-account migration:\n  syrd350: role a busy\n  syrd350: role b busy",
+        "switchyard: no account, worktree, installed unit, or release was changed; resume after every named role is "
+        "safely checkpointed"], f"repatriation problems refuse: {said}")
+    rec = Recovery(repatriated=True)
+    result, said, config = u2(rec, dry_run=True)
+    check(said == [f"switchyard: would repatriate {PROJECT}'s resumable role state and remove dedicated-account bindings"]
+          and "reload" not in rec.kinds() and result.config is config, f"a dry run says so and reloads nothing: {said}")
+    rec = Recovery(repatriated=True)
+    result, said, _ = u2(rec)
+    check(said == [f"switchyard: repatriated {PROJECT}'s resumable role state to syrd350-owner; dedicated accounts were "
+                   "left intact"] and result.config is rec.reloads[0] and rec.log[rec.kinds().index("cutover")][1] is rec.reloads[0],
+          f"a real repatriation reloads, and the cutover reads the reloaded config: {said}")
+
+
+def test_u2_a_partial_cutover_is_reported_and_reverted_with_live_roles() -> None:
+    rec = Recovery(partial=True, live=("zeta", "alpha"), reverted=True)
+    result, said, config = u2(rec)
+    revert = next(e for e in rec.log if e[0] == "revert")
+    check(revert[1] is config and revert[2] == dict(config_path=CONFIG_PATH, dry_run=False)
+          and said == [f"switchyard: {PROJECT} is part-way onto per-role accounts and the two do not agree:\n  "
+                       "syrd350: half moved", "SYRD350 REVERTED"]
+          and ("journal", config, dict(config_path=CONFIG_PATH, phase="identities", state="reverted", detail="a; b",
+                                       dry_run=False)) in rec.log,
+          f"reported, reverted, and journalled with the missing accounts: {said}")
+    check(result.config is rec.reloads[0] and result.cutover is rec.cutovers[1],
+          f"a real revert reloads the config and reads the cutover again: {result}")
+    rec = Recovery(partial=True, live=("zeta",), reverted=True)
+    result, _, config = u2(rec, dry_run=True)
+    check(result.config is config and result.cutover is rec.cutovers[0] and "reload" not in rec.kinds(),
+          "a dry-run revert keeps both")
+    rec = Recovery(partial=True, live=())
+    result, said, config = u2(rec)
+    check("revert" not in rec.kinds() and said[-1] == (f"switchyard: no {PROJECT} role session is running, so the "
+                                                       "configuration is left as provisioned and waits for the accounts.")
+          and result.config is config and "journal" in rec.kinds(),
+          f"no live roles: nothing is reverted, it waits, and it is still journalled: {said}")
+
+
+def test_u2_an_error_reaches_the_caller() -> None:
+    boom = OSError("syrd350: repatriation raised")
+    rec = Recovery(error=boom)
+    try:
+        u2(rec); raised = None
+    except OSError as exc:
+        raised = exc
+    check(raised is boom and rec.kinds()[-1] == "repatriate", f"not caught, nothing after it: {rec.kinds()}")
+
+
+def test_the_upgrade_returns_u2s_refusal_and_unpacks_its_state() -> None:
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    names = ["config", "config_path", "deploy_ref", "desktop_policy", "dry_run", "print_func", "runner", "source_repo"]
+    code = ast.Module(body=[ast.FunctionDef(
+        name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
+                                          kw_defaults=[], defaults=[]),
+        body=[*upgrade.body[13:20],
+              ast.parse("return source_repo, effective_source_repo, config, cutover, release_report_config").body[0]],
+        decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+    from scripts.upgrade_phases import UpgradeStateReady
+    for answer in (Code(1), "continue"):
+        state = UpgradeStateReady(source_repo=Path("/s"), effective_source_repo=Path("/e"),
+                                  config=SimpleNamespace(name="u2 config"), cutover=SimpleNamespace(name="u2 cutover"))
+        got = state if answer == "continue" else answer
+        namespace = {"UpgradeStateReady": UpgradeStateReady, "_recover_upgrade_state": lambda config, **k: got}
+        exec(compile(ast.fix_missing_locations(code), "upgrade_project_command", "exec"), namespace)
+        result = namespace["wiring"](SimpleNamespace(name="incoming"), CONFIG_PATH, "v", None, False, print, refusing_runner,
+                                     None)
+        if answer == "continue":
+            check(result == (Path("/s"), Path("/e"), state.config, state.cutover, state.config)
+                  and result[4] is state.config, f"going on, all four values are taken, then the report config: {result}")
+        else:
+            check(result is answer, f"a refusal is returned as the very object, before anything after U2: {result!r}")
+
+
 #: Run first: a seam taken past the launcher must be caught before any
 #: behaviour check runs the real code it reached.
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
+             "test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names",
              "test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config",
              "test_the_seams_the_phases_own_names_and_the_call_site",
              "test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local",

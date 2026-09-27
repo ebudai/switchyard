@@ -921,8 +921,10 @@ from scripts.launch_phases import (
 )
 from scripts.upgrade_phases import (
     UpgradeIdentitiesDone,
+    UpgradeStateReady,
     UpgradeToolingStaged,
     _finish_upgrade,
+    _recover_upgrade_state,
     _refresh_upgrade_artifacts,
     _stage_upgrade_tooling,
     _upgrade_identities_and_accounts,
@@ -13634,150 +13636,22 @@ def upgrade_project_command(
                 "would have to guess at. Nothing was changed."
             )
             return 1
-    # Resolved, so every phase after this one works on the tree the operator was
-    # looking at rather than on whatever a moved symlink comes to mean.
-    if source_repo is not None:
-        source_repo = Path(resolved_source_selection(source_repo))
-    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
-
-    # Before anything else, because everything else depends on it. The identities
-    # transaction stops the roles and then talks to this manager; against a wedged
-    # one it would hang there indefinitely, with the roles down. Recovering it is
-    # part of the ordered upgrade rather than a command an operator has to know
-    # about (SYRD-54).
-    manager_state, manager_detail = owner_user_manager_state(
-        config, runner=runner, config_path=config_path
+    state_ready = _recover_upgrade_state(
+        config,
+        config_path=config_path,
+        deploy_ref=deploy_ref,
+        desktop_policy=desktop_policy,
+        dry_run=dry_run,
+        print_func=print_func,
+        runner=runner,
+        source_repo=source_repo,
     )
-    if manager_state == MANAGER_WEDGED:
-        print_func(
-            f"switchyard: {config.run_as_user or current_user_name()}'s user manager is not "
-            f"answering ({manager_detail}); its units, including this tenant's notify listener, "
-            "cannot be started or stopped until it is recovered."
-        )
-        problems = repair_owner_user_manager(
-            config, runner=runner, config_path=config_path, dry_run=dry_run, print_func=print_func
-        )
-        if problems:
-            for problem in problems:
-                print_func(f"switchyard: {problem}")
-            print_func(
-                f"switchyard: stopping before any phase runs: moving {config.project} onto per-role "
-                "identities would stop its roles and then wait on that manager."
-            )
-            return 1
-
-    if desktop_policy is not None or config.desktop_access is not None:
-        config = configure_project_desktop(config, config_path=config_path, policy_path=desktop_policy,
-            dry_run=dry_run, helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
-        # Once the desktop account is known, and before any phase can declare the
-        # tenant ready to restart: a legacy tenant presenting to a different
-        # account needs the presentation section new tenants are born with, or
-        # its workers start and its window cannot read its own layout (SYRD-233).
-        # A dry run's policy was not persisted, so it is carried in by hand.
-        planned = config
-        if dry_run and desktop_policy is not None:
-            from scripts import desktop_access as _desktop
-
-            raw_policy = (
-                {"mode": "headless"} if str(desktop_policy) == "headless" else _load_json(desktop_policy)
-            )
-            planned = replace(config, desktop_access=_desktop.validate_policy(
-                raw_policy, project=config.project, tenant=config.run_as_user or current_user_name()
-            ))
-        planned, presentation_ready = migrate_legacy_presentation(
-            planned, config_path=config_path, dry_run=dry_run, print_func=print_func
-        )
-        if not presentation_ready:
-            return 1
-        # Every upgrade, not only the one that adds the section: a tenant moved
-        # onto the desktop-account window by an earlier run can still lack the
-        # bridge its tabs cross, which is the state live mefp was left in
-        # (SYRD-233). Asked only when the window will cross accounts.
-        pinned = pinned_presentation_gui_user(planned)
-        if pinned and (
-            presentation_controller_enabled(planned, config_path=config_path)
-            or legacy_presentation_migration(planned, config_path=config_path).needed
-        ):
-            if not ensure_display_bridge(
-                planned, gui_user=pinned, dry_run=dry_run, runner=runner, print_func=print_func,
-                root_check=_privileged_upgrade_check_command(config.project, deploy_ref),
-            ):
-                return 1
-        if not dry_run:
-            config = planned
-
-    # Every tenant, desktop or not: a role whose own state directory is not the
-    # tenant account's cannot record what its runtime was started against, and
-    # every launch would then end that role's live pane over an answer it could
-    # not keep (SYRD-233).
-    if not restore_interrupted_role_state(
-        config, dry_run=dry_run, runner=runner, print_func=print_func
-    ):
-        return 1
-
-    repatriated, repatriation_problems = repatriate_role_runtime_state(
-        config, config_path=config_path, dry_run=dry_run, runner=runner
-    )
-    if repatriation_problems:
-        print_func(
-            f"switchyard: refusing {config.project}'s project-account migration:\n  "
-            + "\n  ".join(repatriation_problems)
-        )
-        print_func(
-            "switchyard: no account, worktree, installed unit, or release was changed; "
-            "resume after every named role is safely checkpointed"
-        )
-        return 1
-    if repatriated:
-        if dry_run:
-            print_func(
-                f"switchyard: would repatriate {config.project}'s resumable role state and "
-                "remove dedicated-account bindings"
-            )
-        else:
-            print_func(
-                f"switchyard: repatriated {config.project}'s resumable role state to "
-                f"{config.run_as_user or current_user_name()}; dedicated accounts were left intact"
-            )
-            config = load_project_config(config.project, config_path)
-
-    # Detect the partial state before doing anything else, so every later phase
-    # reads a configuration that matches the host.
-    cutover = role_account_cutover(config, runner=runner)
-    # Probed under both identities: a configuration naming accounts that do not
-    # exist makes every probe through them fail, and the live tenant then looks
-    # like a fresh one (SYRD-45).
-    serving = running_role_identities(config, runner=runner)
-    live_roles = sorted(serving)
-    if cutover.is_partial:
-        print_func(
-            f"switchyard: {config.project} is part-way onto per-role accounts and the two do not "
-            "agree:\n  " + "\n  ".join(
-                cutover.problems)
-        )
-        # Reverting is for a tenant with sessions to protect. A freshly
-        # provisioned project declares its accounts before the operator creates
-        # them and has nothing running, so there is nothing to preserve and
-        # nothing to undo -- it simply waits for the accounts (SYRD-45).
-        reverted, message = (
-            revert_incomplete_role_account_cutover(config, config_path=config_path, dry_run=dry_run)
-            if live_roles
-            else (False, "")
-        )
-        if not live_roles:
-            print_func(
-                f"switchyard: no {config.project} role session is running, so the configuration is "
-                "left as provisioned and waits for the accounts."
-            )
-        if message:
-            print_func(message)
-        record_upgrade_phase(
-            config, config_path=config_path, phase="identities", state="reverted",
-            detail="; ".join(cutover.missing_accounts), dry_run=dry_run,
-        )
-        if reverted and not dry_run:
-            config = load_project_config(config.project, config_path)
-            cutover = role_account_cutover(config, runner=runner)
+    if not isinstance(state_ready, UpgradeStateReady):
+        return state_ready
+    source_repo = state_ready.source_repo
+    effective_source_repo = state_ready.effective_source_repo
+    config = state_ready.config
+    cutover = state_ready.cutover
 
     release_report_config = config
     trusted_release_root: Path | None = None

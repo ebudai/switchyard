@@ -4,6 +4,12 @@
 it keeps its name, signature and defaults, and calls each phase here, at the
 phase's old position, by the launcher's own name.
 
+- **U2, manager, desktop and repatriation** (`_recover_upgrade_state`, SYRD-350):
+  the source resolved, the owner's user manager recovered, the desktop
+  configured with its presentation and display bridge, interrupted role state
+  restored and repatriated, and the cutover read afresh -- a partial one
+  reported and, with live roles, reverted. Five refusals answer 1; going on
+  returns a frozen `UpgradeStateReady`.
 - **U3, generated artifacts and the upstream report** (`_refresh_upgrade_artifacts`,
   SYRD-349): the stale-source warning, the generated layout (reloading the
   configuration when it changed), runtime artifacts, onboarding documents, the
@@ -39,7 +45,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -752,3 +758,185 @@ def _refresh_upgrade_artifacts(
             "about this upgrade depends on it."
         )
     return config
+
+
+@dataclass(frozen=True)
+class UpgradeStateReady:
+    """What U2 hands the rest of `upgrade_project_command` when the upgrade goes
+    on, in the order U2 assigns them. A refusal gets its code instead."""
+
+    source_repo: Path | None
+    effective_source_repo: Path
+    config: ProjectConfig
+    cutover: RoleAccountCutover
+
+
+def _recover_upgrade_state(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    deploy_ref: str | None,
+    desktop_policy: Path | None,
+    dry_run: bool,
+    print_func: Callable[[str], None],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    source_repo: Path | None,
+) -> UpgradeStateReady | int:
+    """U2 of `upgrade_project_command`, unchanged: the source resolved, the
+    owner's user manager recovered, the desktop configured with its presentation
+    and bridge, interrupted role state restored and repatriated, and the cutover
+    read afresh -- a partial one reported and, with live roles, reverted.
+    `source_repo` and `config` go back out as the caller's own unless this phase
+    changed them."""
+    from scripts import team_launcher as launcher
+
+    # Resolved, so every phase after this one works on the tree the operator was
+    # looking at rather than on whatever a moved symlink comes to mean.
+    if source_repo is not None:
+        source_repo = Path(launcher.resolved_source_selection(source_repo))
+    effective_source_repo = (source_repo or launcher._repo_root()).expanduser().resolve(strict=False)
+
+    # Before anything else, because everything else depends on it. The identities
+    # transaction stops the roles and then talks to this manager; against a wedged
+    # one it would hang there indefinitely, with the roles down. Recovering it is
+    # part of the ordered upgrade rather than a command an operator has to know
+    # about (SYRD-54).
+    manager_state, manager_detail = launcher.owner_user_manager_state(
+        config, runner=runner, config_path=config_path
+    )
+    if manager_state == launcher.MANAGER_WEDGED:
+        print_func(
+            f"switchyard: {config.run_as_user or launcher.current_user_name()}'s user manager is not "
+            f"answering ({manager_detail}); its units, including this tenant's notify listener, "
+            "cannot be started or stopped until it is recovered."
+        )
+        problems = launcher.repair_owner_user_manager(
+            config, runner=runner, config_path=config_path, dry_run=dry_run, print_func=print_func
+        )
+        if problems:
+            for problem in problems:
+                print_func(f"switchyard: {problem}")
+            print_func(
+                f"switchyard: stopping before any phase runs: moving {config.project} onto per-role "
+                "identities would stop its roles and then wait on that manager."
+            )
+            return 1
+
+    if desktop_policy is not None or config.desktop_access is not None:
+        config = launcher.configure_project_desktop(config, config_path=config_path, policy_path=desktop_policy,
+            dry_run=dry_run, helper=effective_source_repo / "scripts/desktop_access.py", runner=runner)
+        # Once the desktop account is known, and before any phase can declare the
+        # tenant ready to restart: a legacy tenant presenting to a different
+        # account needs the presentation section new tenants are born with, or
+        # its workers start and its window cannot read its own layout (SYRD-233).
+        # A dry run's policy was not persisted, so it is carried in by hand.
+        planned = config
+        if dry_run and desktop_policy is not None:
+            from scripts import desktop_access as _desktop
+
+            raw_policy = (
+                {"mode": "headless"} if str(desktop_policy) == "headless" else launcher._load_json(desktop_policy)
+            )
+            planned = replace(config, desktop_access=_desktop.validate_policy(
+                raw_policy, project=config.project, tenant=config.run_as_user or launcher.current_user_name()
+            ))
+        planned, presentation_ready = launcher.migrate_legacy_presentation(
+            planned, config_path=config_path, dry_run=dry_run, print_func=print_func
+        )
+        if not presentation_ready:
+            return 1
+        # Every upgrade, not only the one that adds the section: a tenant moved
+        # onto the desktop-account window by an earlier run can still lack the
+        # bridge its tabs cross, which is the state live mefp was left in
+        # (SYRD-233). Asked only when the window will cross accounts.
+        pinned = launcher.pinned_presentation_gui_user(planned)
+        if pinned and (
+            launcher.presentation_controller_enabled(planned, config_path=config_path)
+            or launcher.legacy_presentation_migration(planned, config_path=config_path).needed
+        ):
+            if not launcher.ensure_display_bridge(
+                planned, gui_user=pinned, dry_run=dry_run, runner=runner, print_func=print_func,
+                root_check=launcher._privileged_upgrade_check_command(config.project, deploy_ref),
+            ):
+                return 1
+        if not dry_run:
+            config = planned
+
+    # Every tenant, desktop or not: a role whose own state directory is not the
+    # tenant account's cannot record what its runtime was started against, and
+    # every launch would then end that role's live pane over an answer it could
+    # not keep (SYRD-233).
+    if not launcher.restore_interrupted_role_state(
+        config, dry_run=dry_run, runner=runner, print_func=print_func
+    ):
+        return 1
+
+    repatriated, repatriation_problems = launcher.repatriate_role_runtime_state(
+        config, config_path=config_path, dry_run=dry_run, runner=runner
+    )
+    if repatriation_problems:
+        print_func(
+            f"switchyard: refusing {config.project}'s project-account migration:\n  "
+            + "\n  ".join(repatriation_problems)
+        )
+        print_func(
+            "switchyard: no account, worktree, installed unit, or release was changed; "
+            "resume after every named role is safely checkpointed"
+        )
+        return 1
+    if repatriated:
+        if dry_run:
+            print_func(
+                f"switchyard: would repatriate {config.project}'s resumable role state and "
+                "remove dedicated-account bindings"
+            )
+        else:
+            print_func(
+                f"switchyard: repatriated {config.project}'s resumable role state to "
+                f"{config.run_as_user or launcher.current_user_name()}; dedicated accounts were left intact"
+            )
+            config = launcher.load_project_config(config.project, config_path)
+
+    # Detect the partial state before doing anything else, so every later phase
+    # reads a configuration that matches the host.
+    cutover = launcher.role_account_cutover(config, runner=runner)
+    # Probed under both identities: a configuration naming accounts that do not
+    # exist makes every probe through them fail, and the live tenant then looks
+    # like a fresh one (SYRD-45).
+    serving = launcher.running_role_identities(config, runner=runner)
+    live_roles = sorted(serving)
+    if cutover.is_partial:
+        print_func(
+            f"switchyard: {config.project} is part-way onto per-role accounts and the two do not "
+            "agree:\n  " + "\n  ".join(
+                cutover.problems)
+        )
+        # Reverting is for a tenant with sessions to protect. A freshly
+        # provisioned project declares its accounts before the operator creates
+        # them and has nothing running, so there is nothing to preserve and
+        # nothing to undo -- it simply waits for the accounts (SYRD-45).
+        reverted, message = (
+            launcher.revert_incomplete_role_account_cutover(config, config_path=config_path, dry_run=dry_run)
+            if live_roles
+            else (False, "")
+        )
+        if not live_roles:
+            print_func(
+                f"switchyard: no {config.project} role session is running, so the configuration is "
+                "left as provisioned and waits for the accounts."
+            )
+        if message:
+            print_func(message)
+        launcher.record_upgrade_phase(
+            config, config_path=config_path, phase="identities", state="reverted",
+            detail="; ".join(cutover.missing_accounts), dry_run=dry_run,
+        )
+        if reverted and not dry_run:
+            config = launcher.load_project_config(config.project, config_path)
+            cutover = launcher.role_account_cutover(config, runner=runner)
+    return UpgradeStateReady(
+        source_repo=source_repo,
+        effective_source_repo=effective_source_repo,
+        config=config,
+        cutover=cutover,
+    )

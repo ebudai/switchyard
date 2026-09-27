@@ -954,6 +954,15 @@ from scripts.runtime_artifact_refresh import (
     installed_controller,
     refresh_generated_project_runtime_artifacts,
 )
+from scripts.project_role_plan_support import (
+    _commit_git_dir_from_plan_data,
+    _configured_audit_roles,
+    _configured_implementer_roles,
+    _install_and_restart_board_unit,
+    _loaded_plan_field,
+    _owner_home_from_plan_data,
+    _regenerated_control_user,
+)
 from scripts.project_role_add import (
     add_project_role_command,
     _add_role_payload,
@@ -13169,64 +13178,6 @@ def director_release_divergence_report(
     ]
 
 
-def _configured_implementer_roles(
-    config: ProjectConfig,
-    *,
-    plan_data: dict[str, Any] | None = None,
-    extra_role: str | None = None,
-) -> tuple[str, ...]:
-    roles: list[str] = []
-    raw_plan_roles = (plan_data or {}).get("implementer_roles")
-    if isinstance(raw_plan_roles, list):
-        source_roles = [str(role).strip().lower() for role in raw_plan_roles if str(role).strip()]
-    else:
-        source_roles = [
-            role.role
-            for role in config.roles
-            if role.role not in NEW_PROJECT_RESERVED_ROLE_NAMES
-        ]
-    for role in source_roles:
-        if role not in roles:
-            roles.append(role)
-    if extra_role and extra_role not in roles:
-        roles.append(extra_role)
-    return tuple(roles)
-
-
-def _configured_audit_roles(
-    config: ProjectConfig,
-    *,
-    plan_data: dict[str, Any] | None = None,
-    extra_role: str | None = None,
-) -> tuple[str, ...]:
-    raw_plan_roles = (plan_data or {}).get("audit_roles")
-    if isinstance(raw_plan_roles, list):
-        roles = list(_dedupe_role_names(tuple(str(role).strip().lower() for role in raw_plan_roles if str(role).strip())))
-    else:
-        roles = ["audit"] if any(role.role == "audit" for role in config.roles) else []
-    if extra_role and extra_role not in roles:
-        roles.append(extra_role)
-    return tuple(roles)
-
-
-def _regenerated_control_user(config: ProjectConfig, plan_data: dict[str, Any]) -> str:
-    """Regenerated, never read from plan.json.
-
-    The controller decides who may cross into the owner account, so taking it
-    from a document the tenant can write would let the tenant name whoever it
-    liked. It comes from the installed root-owned grant instead, which is also
-    why re-rendering a tenant's artifacts reproduces the grant it already has.
-    """
-    owner = str(
-        _loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())
-    )
-    return resolve_control_user(config.project, invoking_user=invoking_human(), owner_user=owner)
-
-
-def _loaded_plan_field(plan_data: dict[str, Any], key: str, default: Any) -> Any:
-    return plan_data[key] if key in plan_data and plan_data[key] not in (None, "") else default
-
-
 def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str, Any]:
     plan_path = config_path.parent / "plan.json"
     # Following nothing, and falling back to what the configuration itself says
@@ -13257,42 +13208,6 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
         "board_service_traversal": True,
         "operation_allowed_roles": [],
     }
-
-
-def _owner_home_from_plan_data(config: ProjectConfig, plan_data: dict[str, Any]) -> Path:
-    return Path(str(_loaded_plan_field(
-        plan_data,
-        "owner_home",
-        _owner_home_for_auth(config.run_as_user or current_user_name()),
-    )))
-
-
-def _commit_git_dir_from_plan_data(config: ProjectConfig, plan_data: dict[str, Any]) -> str:
-    return str(_loaded_plan_field(
-        plan_data,
-        "commit_git_dir",
-        commit_git_dir_env_for_project(
-            project=config.project,
-            owner_home=_owner_home_from_plan_data(config, plan_data),
-        ),
-    ))
-
-
-def _install_and_restart_board_unit(
-    plan: ProjectBoardProvision,
-    *,
-    board_unit_path: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    install = runner(["sudo", "install", "-m", "0644", str(board_unit_path), f"/etc/systemd/system/{plan.board_unit}"])
-    if install.returncode != 0:
-        raise SystemExit(f"team-launcher: failed to install updated board unit {plan.board_unit}")
-    daemon_reload = runner(["sudo", "systemctl", "daemon-reload"])
-    if daemon_reload.returncode != 0:
-        raise SystemExit("team-launcher: failed to reload systemd after updating the board unit")
-    restart = runner(["sudo", "systemctl", "restart", plan.board_unit])
-    if restart.returncode != 0:
-        raise SystemExit(f"team-launcher: failed to restart {plan.board_unit}")
 
 
 @dataclass(frozen=True)

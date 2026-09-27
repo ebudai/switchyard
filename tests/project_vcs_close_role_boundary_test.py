@@ -131,9 +131,12 @@ def test_the_seams_the_modules_own_names_and_the_callers() -> None:
     check(sum(through.values()) == 29 and all(through.get(n) for n in SHARED) and through.get("_loaded_plan_field") == 6
           and not bare, f"29 call-time reads, the seven shared facilities among them, none bare: {through} {bare}")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    check(not {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)} & set(MOVED)
-          and {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)} >= set(SHARED),
-          "the launcher defines none of them, and keeps every shared facility")
+    # SYRD-357 moved the shared facilities into project_role_plan_support; the launcher re-exports them,
+    # so each is still bound on the launcher, where this module reads (and suites patch) it.
+    bound = {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)}
+    bound |= {(a.asname or a.name) for n in launcher.body if isinstance(n, ast.ImportFrom) for a in n.names}
+    check(not {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)} & set(MOVED) and bound >= set(SHARED),
+          "the launcher defines none of them, and keeps every shared facility bound")
     dispatch = [n for n in ast.walk(launcher) if isinstance(n, ast.Call) and ast.unparse(n.func) == "set_project_vcs_close_role_command"]
     check(len(dispatch) == 2, "`main` and `switchyard_main` still call it by the launcher's own name")
 

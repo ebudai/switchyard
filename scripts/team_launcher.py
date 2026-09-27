@@ -1130,6 +1130,15 @@ from scripts.release_alignment import (
     director_release_divergence_report,
     release_alignment,
 )
+from scripts.release_rollback import (
+    RELEASE_ROLLBACK_SCHEMA,
+    _write_publication_remote,
+    record_publication_remote,
+    record_release_rollback,
+    release_rollback_commands,
+    release_rollback_path,
+    restore_publication_remote,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1210,8 +1219,6 @@ SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
 SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
-#: Root's note of what a host was running before an upgrade replaced it.
-RELEASE_ROLLBACK_SCHEMA = "switchyard.release-rollback.v1"
 #: The workflow seed of a tenant that keeps schema.sql's own workflow and
 #: declares no per-project document. Such a tenant is not a legacy tenant: it
 #: has nothing to adopt and no scaffold onboarding to migrate away from, so the
@@ -7167,200 +7174,6 @@ def running_launcher_release(root: Path | None = None) -> SharedSwitchyardReleas
     return shared_switchyard_release_for_path(
         (root or Path(__file__).resolve().parent.parent)
     )
-
-
-def release_rollback_path(project: str) -> Path:
-    """Root's own note of what this host was running before an upgrade."""
-    return privileged_provision_dir(
-        project, root=switchyard_privileged_provision_root()
-    ) / "release-rollback.json"
-
-
-def record_release_rollback(
-    config: ProjectConfig,
-    *,
-    release,
-    staging_root: Path | None = None,
-    dry_run: bool = False,
-    print_func: Callable[[str], None] = print,
-) -> list[str]:
-    """Write down what to come back to, before anything is replaced.
-
-    An upgrade repoints the shared release, restages the tenant's root-owned
-    tooling and rewrites its sudo grant. Each of those is recoverable only if
-    something remembers what was there: otherwise the way back is whatever an
-    operator can reconstruct from timestamps under /opt, at the moment they are
-    least able to reconstruct anything.
-
-    Written before the first replacement and left alone afterwards, so a retry
-    that runs after a partial upgrade still names the release the host was whole
-    on rather than the half-installed one it is on now (SYRD-93 live
-    acceptance).
-    """
-    if dry_run:
-        return []
-    install_root = switchyard_shared_install_root()
-    pointer = install_root / "current"
-    previous_root = ""
-    try:
-        if os.path.islink(pointer):
-            previous_root = os.readlink(pointer)
-    except OSError as exc:
-        return [f"could not read the current release pointer {pointer}: {exc}"]
-    previous = shared_switchyard_release_for_path(Path(previous_root)) if previous_root else None
-    staged = _staged_tooling_dir(config, staging_root)
-    staged_marker = staged / SWITCHYARD_RELEASE_MARKER_NAME
-    staged_commit = ""
-    try:
-        if staged_marker.is_file():
-            staged_commit = str(
-                json.loads(staged_marker.read_text(encoding="utf-8")).get("commit") or ""
-            )
-    except (OSError, ValueError):
-        staged_commit = ""
-    record = {
-        "schema": RELEASE_ROLLBACK_SCHEMA,
-        "project": config.project,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
-        "upgrading_to": release.commit,
-        "previous_release_root": previous_root,
-        "previous_release_commit": previous.marker_commit if previous else "",
-        "previous_staged_commit": staged_commit,
-    }
-    path = release_rollback_path(config.project)
-    if path.is_file():
-        # A retry after a partial upgrade must not overwrite the note taken when
-        # the host was last whole. Only a record of a DIFFERENT upgrade is
-        # replaced.
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            existing = {}
-        if str(existing.get("upgrading_to") or "") == release.commit:
-            return []
-    try:
-        ensure_privileged_provision_dir(path.parent)
-        _write_private_json_atomic(path, record)
-        path.chmod(privileged_artifact_mode(path.name))
-    except OSError as exc:
-        return [f"could not record the rollback for {config.project}: {exc}"]
-    print_func(
-        f"switchyard: recorded the way back for {config.project} in {path}: "
-        + (record["previous_release_commit"] or previous_root or "no previous release")
-    )
-    return []
-
-
-def record_publication_remote(
-    project: str,
-    remote: str,
-    *,
-    dry_run: bool = False,
-    print_func: Callable[[str], None] = print,
-) -> tuple[bool, str, list[str]]:
-    """Root's own record of where this tenant publishes, from `--publish-remote`.
-
-    `resolve_pinned_remote` has always read this file, but the only thing that
-    wrote it was the publication boundary's installer, and the boundary was
-    retired -- so `switchyard upgrade <project> --publish-remote <url>` stopped
-    being remembered, and everything that decides by the remote found none.
-    Live on mefp: `set-owner-identity mefp --clear` refused for want of a pin
-    right after an upgrade that had been given one (SYRD-229). Written here
-    alone, in root's private provision directory; nothing of the boundary is
-    recreated. An unchanged value is left as it is.
-
-    Returns (whether it was changed, what it replaced -- "" for nothing --, and
-    why not). The upgrade calls this before its first write and treats any
-    problem as fatal, so a failed pin never follows a half-done upgrade.
-    """
-    from scripts.ticket_board.publication_boundary import publish_remote_registration_path
-
-    value = remote.strip()
-    if not value or len(value) > 1024 or any(ch.isspace() or not ch.isprintable() for ch in value):
-        return False, "", [
-            f"{remote!r} is not a single git remote, so it cannot be recorded as {project}'s "
-            "publication remote"
-        ]
-    path = publish_remote_registration_path(project, switchyard_privileged_provision_root())
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        return False, "", [f"{path} is not a regular file, so {project}'s publication remote cannot be recorded there"]
-    try:
-        current = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
-    except OSError as exc:
-        return False, "", [f"{path} cannot be read ({exc.strerror})"]
-    if current == value:
-        print_func(f"switchyard: {project}'s publication remote is already recorded as {value}")
-        return False, current, []
-    if dry_run:
-        print_func(
-            f"switchyard: would record {project}'s publication remote as {value} in {path}"
-            + (f" (replacing {current})" if current else "")
-        )
-        return False, current, []
-    if os.geteuid() != 0:
-        return False, current, [
-            f"recording {project}'s publication remote is root's; run the upgrade with sudo"
-        ]
-    problem = _write_publication_remote(path, value)
-    if problem:
-        return False, current, [problem]
-    print_func(f"switchyard: recorded {project}'s publication remote as {value} in {path}")
-    return True, current, []
-
-
-def _write_publication_remote(path: Path, value: str) -> str:
-    try:
-        ensure_privileged_provision_dir(path.parent)
-        staged = path.with_name(f".{path.name}.new")
-        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        try:
-            os.write(descriptor, (value + "\n").encode("utf-8"))
-        finally:
-            os.close(descriptor)
-        os.replace(staged, path)
-    except OSError as exc:
-        return f"could not record the publication remote at {path}: {exc}"
-    return ""
-
-
-def restore_publication_remote(project: str, previous: str) -> str:
-    """Put the pin back as it was, after a later step of the same upgrade refused."""
-    from scripts.ticket_board.publication_boundary import publish_remote_registration_path
-
-    path = publish_remote_registration_path(project, switchyard_privileged_provision_root())
-    if previous:
-        return _write_publication_remote(path, previous)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        return f"could not remove {path}: {exc}"
-    return ""
-
-
-def release_rollback_commands(project: str, *, publish_remote: str = "") -> list[str]:
-    """The exact way back, from root's own note. Empty when there is nothing to say."""
-    path = release_rollback_path(project)
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if str(record.get("schema") or "") != RELEASE_ROLLBACK_SCHEMA:
-        return []
-    previous_root = str(record.get("previous_release_root") or "")
-    previous_commit = str(record.get("previous_release_commit") or "")
-    if not previous_root or not previous_commit:
-        return []
-    install_root = switchyard_shared_install_root()
-    pointer = shlex.quote(str(install_root / "current"))
-    remote = publish_remote or "<url>"
-    return [
-        f"sudo ln -sfn {shlex.quote(previous_root)} {pointer}",
-        # The same reviewed path the upgrade took, pointed backwards: it
-        # restages the tenant's tooling and rewrites its grant from the release
-        # being returned to, rather than leaving the two halves disagreeing.
-        f"sudo switchyard upgrade {shlex.quote(project)} --source-repo {shlex.quote(previous_root)} "
-        f"--deploy-ref {shlex.quote(previous_commit)} --publish-remote {shlex.quote(remote)}",
-    ]
 
 
 #: The label an install attempt carries in the rollout journal.

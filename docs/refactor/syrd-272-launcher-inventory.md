@@ -10655,3 +10655,106 @@ implemented**:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 12,283 lines.
+
+### SYRD-378 (slice 18c): release rollback and publication-remote records
+
+Measured on `4ac4f21`. The design was posted **before** any edit.
+
+**Moved:** seven definitions, in the launcher's order, from
+`scripts/team_launcher.py` into the new `scripts/release_rollback.py`
+(247 lines). The launcher re-exports them in one explicit, unaliased
+import. They are `RELEASE_ROLLBACK_SCHEMA` (with its `#:` note),
+`release_rollback_path`, `record_release_rollback`,
+`record_publication_remote`, `_write_publication_remote`,
+`restore_publication_remote` and `release_rollback_commands`.
+- **Local imports kept:** the publication boundary's
+  `publish_remote_registration_path` is still imported inside the two functions
+  that use it, at call time and verbatim, and is never qualified.
+- **Definition-time bindings:** the only defaults are plain values and the
+  builtin `print`. There is no decorator or class. The module imports nothing
+  of Switchyard's at its top.
+- **Seams:** 19 call-time reads of 12 names in 6 functions,
+  through `from scripts import team_launcher as launcher`. 3 of those names
+  are moved siblings, and the release marker name is included.
+- **Comments:** 7 comment lines moved, 1 of them the `#:` note.
+- **`switchyard_main`** still reads `release_rollback_commands` bare, as a
+  launcher global; `upgrade_phases` reads the other three through the launcher.
+- **The launcher** goes from 12,283 to 12,096 lines.
+
+**Guards: none widened.** Every name→count table naming these or their callees
+is scoped to its own module. The one launcher-source reader inspects
+`upgrade_project_command`.
+
+**Proof.** The independent proof (`equiv378.py`) holds:
+- each of the seven equals its baseline node, whole;
+- the seams are exactly the symtable body globals; the local import and the
+  parameter and except names are not seams and shadow none;
+- scope: every global the module reads is bound in it or is a builtin;
+- the local imports are kept, right after the call-time import;
+- the publication writer's order is structural;
+- the rest of the launcher is unchanged;
+- comments are conserved;
+- every other `scripts/` file is unchanged.
+
+I planted 18 faults, and 18 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/release_rollback_boundary_test.py`, 89
+  checks, with owned release, staging and root directories, and stand-ins for
+  euid, `os.readlink`, the private writer and every launcher facility. It shows
+  a launcher stand-in reaching all 12 seams.
+- **Mutations:** 46 of 46 are killed by assertions under the guard, with a
+  clean restore. The behaviour tests alone kill 43 of 46; the 3
+  left are import-structure mutants: the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Every run was under the in-process execution guard.**
+  - **Whole suites:** 2 per tree. 1 passes on both;
+    the new test is absent at baseline.
+  - **Per case:** 5 cases of `release_bootstrap_rollback_test`. 1
+    passes on both; 4 stop at the guard identically on both (a `git init`
+    spawn), as limited pre-effect parity only; 0 fail otherwise.
+  - **Excluded:** one case, which fakes root without redirecting the privileged
+    root.
+  - **Included by inspection, though the closure screen flags it:** "the way
+    back is written down before anything is replaced". Its only `/run/`
+    reference is a `board_socket` string on a fake config, and it redirects
+    both roots to owned temp. It passes on both trees with two refused
+    `chown(…, 0)` attempts, from `ensure_privileged_provision_dir`, which
+    tolerates them.
+  - Refusal signatures compared: 5; differing: 0.
+- **Containment:** live snapshots before and after; **no live change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module from the release, with one set of objects.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: tenant release status and the deploy report -- 13 definitions, 391 lines (lines 1492-8812, not contiguous):
+  -   1492   22  TenantReleaseStatus  launcher callers outside: -; production readers outside the launcher: ['scripts/tenant_release_target.py', 'scripts/upgrade_records.py']
+  -   3328   57  tenant_release_deploy_command  launcher callers outside: -; production readers outside the launcher: -
+  -   3387   23  tenant_release_listener_command  launcher callers outside: -; production readers outside the launcher: -
+  -   3445   28  recorded_rollout_command  launcher callers outside: -; production readers outside the launcher: -
+  -   3475   36  tenant_release_unit_install_command  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3513   15  release_update_blocked  launcher callers outside: ['_finish_upgrade_preview']; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/upgrade_phases.py']
+  -   3534    2  _format_release_path  launcher callers outside: -; production readers outside the launcher: -
+  -   3538  108  report_tenant_release_upgrade  launcher callers outside: ['_finish_upgrade_preview']; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/upgrade_phases.py']
+  -   5984    5  OWNER_BOUNDARY_SCRIPT  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   5991   14  _owner_boundary_env_args  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   8728   10  capture_release_pointer  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  -   8740   51  deploy_release_in_transaction  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  -   8793   20  restore_release_pointer  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  - launcher names it reads (through the launcher once moved): 11: ['DEFAULT_PANE_BASE_PATH', 'SWITCHYARD_RELEASE_MARKER_NAME', 'ProjectConfig', '_repo_root', 'switchyard_shared_install_root', '_owner_home_bin_dirs', '_quote_command', '_prepend_paths', 'switchyard_privileged_provision_root', '_tenant_board_root_from_config_or_plan', '_format_release_sha']
+  - launcher callers outside the closure: 1: ['_finish_upgrade_preview']
+  - production modules reading it through the launcher: 5: ['scripts/director_upgrade.py', 'scripts/role_identity_cutover.py', 'scripts/tenant_release_target.py', 'scripts/upgrade_phases.py', 'scripts/upgrade_records.py']
+  - test files naming any of them: 10 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - the other measured release/install/upgrade closures, for the order after it:
+  -   - release root preparation: 8 definitions, 267 lines; launcher callers outside: ['_finish_upgrade_preview']; production readers: 7
+  - it also reads 2 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['DEFAULT_TENANT_RELEASE_DEPLOY_REF (scripts.release_refs)', 'tenant_release_status (scripts.tenant_release_target)']
+- Largest remaining launcher domains (`domains.py`):
+  -  2275 lines  204 defs  general helpers (unclassified)
+  -  1958 lines   55 defs  release selection, install and upgrade
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1481 lines   55 defs  privileged boundary, tenant control and repair
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 12,096 lines.

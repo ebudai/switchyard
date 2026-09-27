@@ -47,7 +47,9 @@ EXPORTED = ('LegacyPresentationMigration', 'presentation_controller_enabled', 'p
             'legacy_presentation_section', 'legacy_presentation_migration', '_desktop_state_root_problem',
             'migrate_legacy_presentation', 'legacy_presentation_refusal')
 READ_ELSEWHERE = {"pane_rebind": ("presentation_section_for_roles",)}
-#: Measured on the baseline: the launcher's own call sites.
+#: Measured on the baseline: the launcher's own call sites. SYRD-342 moved
+#: launch_project's P7+P8, and with it the refusal's one site, to launch_phases,
+#: which calls it through the launcher; the total is unchanged.
 LAUNCHER_CALLS = {"legacy_presentation_refusal": 1, "migrate_legacy_presentation": 1,
                   "legacy_presentation_migration": 1, "presentation_controller_enabled": 1}
 LAUNCHER_READS = ("_gui_home", "uid_for_user", "current_user_name", "_load_json", "_write_json_atomic",
@@ -154,11 +156,17 @@ def test_the_readers_the_seams_and_the_functions_own_imports() -> None:
                        and n.value.id in ("launcher", "team_launcher")]
             check(uses and through == uses, f"{module} reads {name} through the launcher, and only there")
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} baseline site, by its own name")
+        phase_calls = [n for n in ast.walk(phases)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(phase_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in phase_calls),
+              f"the launcher calls {name} at its {count} baseline site, by its own name there, "
+              "through the launcher from launch_phases")
     moved = ast.parse((ROOT / "scripts" / "legacy_presentation.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in LAUNCHER_READS})

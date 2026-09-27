@@ -32,6 +32,17 @@ owner hand-off, every plan field and which lookups each role needs, the dry
 run's layout-mode resolution and viewer additions, the exact output, and the
 launch stopping at 0 before any worker starts.
 
+SYRD-342 added P7 and P8 together, worker start and presentation
+(`_start_workers_and_present`): they share the nested failure recorder, which
+keeps the first failing exit and writes each failure into the caller's own
+`failed_roles`. A code the launch stops on is returned as the very object it
+was; going on returns a frozen `WorkerStartup`. Its cases pin every branch --
+detached and visible starts, delegated and direct, with and without runtime
+presentation; the viewer, runtime-separate, handed-back, refused and Konsole
+windows; the skips, the stderr text and the first failure kept -- and the
+launch: stopping before the layout mode exists, P9 fenced from a stop, and P9
+seeing the four values and the same failures dict.
+
 Every lookup is this test's own fake, patched on the launcher and recorded; no
 account, path, git, provider, GUI, board, socket or tmux is touched.
 """
@@ -51,7 +62,7 @@ if str(ROOT) not in sys.path:
 
 CHECKS = 0
 EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch",
-            "_write_layout_and_plan")
+            "_write_layout_and_plan", "WorkerStartup", "_start_workers_and_present")
 #: The phase's launcher lookups, each called once at most, through the launcher.
 SEAMS = ("current_user_name", "_owner_process_runner", "_owner_project_git_runner", "_control_repository_owned_roots",
          "default_pane_state_dir_for_user", "default_layout_output_path", "project_window_title")
@@ -879,7 +890,8 @@ def test_the_launch_stops_at_p6s_exit_before_any_worker_starts() -> None:
     for answer, want in ((0, 0), (None, "workers")):
         asked.clear()
         with patched(team_launcher, **common, _prepare_launch=lambda c, **k: going_on,
-                     _write_layout_and_plan=lambda c, **k: asked.append((c, k)) or answer), \
+                     _write_layout_and_plan=lambda c, **k: asked.append((c, k)) or answer,
+                     _start_workers_and_present=workers_start), \
                 patched(presentation_controller, presentation_enabled=workers_start):
             try:
                 got = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
@@ -897,11 +909,514 @@ def test_the_launch_stops_at_p6s_exit_before_any_worker_starts() -> None:
     def never(*a: object, **k: object) -> None:
         raise AssertionError("P6 ran after P5 stopped the launch")
 
-    with patched(team_launcher, **common, _prepare_launch=lambda c, **k: stopped, _write_layout_and_plan=never), \
-            fence_workers():
+    with patched(team_launcher, **common, _prepare_launch=lambda c, **k: stopped, _write_layout_and_plan=never,
+                 _start_workers_and_present=never), fence_workers():
         got = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode="attach", script_path=SCRIPT,
                                            runner=caller_runner)
     check(got == 3, f"P5's exit comes before P6: {got!r}")
+
+
+#: P7+P8's launcher lookups and the number of times each is read, through the launcher (measured on the
+#: SYRD-342 baseline: 46 reads of 21 names).
+P78_SEAMS = {"pane_command_args": 3, "role_pane_state_dir": 6, "role_run_as_user": 6, "run_detached_role": 1,
+             "role_session_dir": 3, "role_process_runner_for": 3, "resolve_layout_mode": 1, "LAYOUT_MODE_VIEWER": 3,
+             "visible_roles_for_viewer": 3, "ensure_visible_role_session_for_viewer": 2, "ensure_owner_state_dirs": 2,
+             "RUNTIME_REGISTRATION_TIMEOUT_SECONDS": 2, "launch_tmux_viewer_session": 1,
+             "viewer_session_for_project": 1, "running_through_tenant_control": 2,
+             "hand_presentation_back_to_the_caller": 2, "project_window_title": 1, "display_attach_helper_path": 1,
+             "LAYOUT_MODE_SEPARATE": 1, "legacy_presentation_refusal": 1, "launch_konsole_window": 1}
+P78_OUTPUTS = ("worker_start_exit_code", "launch_started_at", "launch_started_ns", "resolved_layout_mode")
+EFFECTIVE = Path("/nonexistent/syrd342/effective-pane-state")
+OUTPUT = Path("/nonexistent/syrd342/out/layout.json")
+GIVEN_LAYOUT = Path("/nonexistent/syrd342/given/layout.json")
+WAIT = 342.5
+
+
+class Code(int):
+    """An exit code with an identity, so a stop can be shown to hand back the very object it got."""
+
+
+def viewer_runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    raise AssertionError(f"the role process runner is only handed on, never run here: {argv}")
+
+
+def konsole_launcher(*args: object, **kwargs: object) -> None:
+    raise AssertionError("the Konsole process launcher is only handed on, never run here")
+
+
+class Workers:
+    """P7+P8's launcher lookups, the presentation controller and the clock, answering from objects this test
+    owns, into one ordered log. `codes` answers each role's start; a role not named starts with 0."""
+
+    def __init__(self, *, runtime: bool = False, resolved: str = "SYRD342_SEPARATE", codes: dict | None = None,
+                 tenant: bool = False, handback: bool = True, refusal: str = "", konsole: int = 0,
+                 viewer: int = 0, presentation: int = 0, error: Exception | None = None):
+        self.runtime, self.resolved, self.codes = runtime, resolved, codes or {}
+        self.tenant, self.handback, self.refusal = tenant, handback, refusal
+        self.konsole, self.viewer, self.presentation, self.error = konsole, viewer, presentation, error
+        self.log: list[tuple] = []
+        self.runners: dict[str, object] = {}
+
+    def start(self, kind: str, role: SimpleNamespace, detail: object) -> object:
+        self.log.append((kind, role.role, detail))
+        if self.error and kind == "detached":
+            raise self.error
+        return self.codes.get(role.role, 0)
+
+    def caller_runner(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        check(kwargs == {}, f"a delegated start is run as argv alone: {kwargs}")
+        code = self.start("delegated", SimpleNamespace(role=argv[1]), list(argv))
+        return subprocess.CompletedProcess(argv, code, "", "")
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+
+        def process_runner_for(cfg, role, *, runner):
+            L.append(("role-runner", role.role, runner))
+            return self.runners.setdefault(role.role, object())
+
+        return dict(
+            pane_command_args=lambda project, role, **kw: L.append(("pane-args", role.role, kw))
+            or ["PANE", role.role],
+            role_pane_state_dir=lambda cfg, role, effective: Path(f"{effective}/{role.role}"),
+            role_run_as_user=lambda cfg, role: f"acct-{role.role}",
+            run_detached_role=lambda role, **kw: self.start("detached", role, kw),
+            role_session_dir=lambda cfg, role: Path(f"/nonexistent/syrd342/sessions/{role.role}"),
+            role_process_runner_for=process_runner_for,
+            resolve_layout_mode=lambda mode, *, environ, runner: L.append(("resolve", mode, environ, runner))
+            or self.resolved,
+            LAYOUT_MODE_VIEWER="SYRD342_VIEWER", LAYOUT_MODE_SEPARATE="SYRD342_SEPARATE",
+            RUNTIME_REGISTRATION_TIMEOUT_SECONDS=WAIT,
+            visible_roles_for_viewer=lambda cfg: L.append(("viewer-roles",))
+            or [r for r in cfg.roles if not r.detached],
+            ensure_visible_role_session_for_viewer=lambda role, **kw: self.start("visible", role, kw),
+            ensure_owner_state_dirs=lambda cfg, *, pane_state_dir, runner: L.append(("owner-dirs", pane_state_dir,
+                                                                                      runner)),
+            launch_tmux_viewer_session=lambda roles, **kw: L.append(("viewer", [r.role for r in roles], kw))
+            or self.viewer,
+            viewer_session_for_project=lambda project: f"view-{project}",
+            running_through_tenant_control=lambda: L.append(("tenant?",)) or self.tenant,
+            hand_presentation_back_to_the_caller=lambda cfg, **kw: L.append(("handback", kw)) or self.handback,
+            project_window_title=lambda cfg: "P342 title",
+            display_attach_helper_path=lambda project: f"/nonexistent/syrd342/{project}-attach",
+            legacy_presentation_refusal=lambda cfg, *, output_path: L.append(("refusal?", output_path))
+            or self.refusal,
+            launch_konsole_window=lambda path, **kw: L.append(("konsole", path, kw)) or self.konsole,
+        )
+
+    def controller(self) -> dict[str, object]:
+        def enabled(cfg, *, config_path):
+            self.log.append(("runtime?", config_path))
+            return self.runtime
+
+        def launch(cfg, **kw):
+            self.log.append(("presentation", kw))
+            return self.presentation
+        return dict(presentation_enabled=enabled, launch_presentation=launch)
+
+    def clock(self) -> SimpleNamespace:
+        return SimpleNamespace(time=lambda: self.log.append(("time",)) or 342.25,
+                               time_ns=lambda: self.log.append(("time_ns",)) or 342_250_000_000)
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def p78_config(*roles: tuple[str, bool]) -> SimpleNamespace:
+    return SimpleNamespace(project="p342", roles=[SimpleNamespace(role=name, detached=detached)
+                                                  for name, detached in roles])
+
+
+def workers(w: Workers, cfg: SimpleNamespace, *, delegate: bool = False, failed: dict | None = None,
+            window_title: str = "P342 window", layout_output: object = OUTPUT):
+    import contextlib
+    import io
+
+    from scripts import launch_phases, presentation_controller, team_launcher
+
+    said: list[str] = []
+    err = io.StringIO()
+    kwargs = dict(allow_stale_launcher="syrd342-stale", config_path=CONFIG_PATH,
+                  delegate_role_sessions_to_owner=delegate, effective_pane_state_dir=EFFECTIVE,
+                  failed_roles=failed if failed is not None else {}, force_reload="syrd342-force",
+                  konsole_process_launcher=konsole_launcher, layout_environ={"SYRD342": "env"},
+                  layout_mode="SYRD342_AUTO", layout_output=layout_output, mode="attach", output_path=OUTPUT,
+                  pane_script_path=PANE_SCRIPT, print_func=said.append, role_process_runner=viewer_runner,
+                  runner=w.caller_runner, window_title=window_title)
+    with patched(team_launcher, **w.names()), patched(presentation_controller, **w.controller()), \
+            patched(launch_phases, time=w.clock()), contextlib.redirect_stderr(err):
+        result = launch_phases._start_workers_and_present(cfg, **kwargs)
+    return result, err.getvalue(), said, kwargs
+
+
+def pane_args(role: str, *, no_attach: bool = False) -> dict[str, object]:
+    args = dict(config_path=CONFIG_PATH, mode="attach", script_path=PANE_SCRIPT,
+                pane_state_dir=Path(f"{EFFECTIVE}/{role}"), force_reload="syrd342-force",
+                skip_launcher_check=True, allow_stale_launcher="syrd342-stale")
+    if no_attach:
+        args["no_attach"] = True
+    args["run_as_user"] = f"acct-{role}"
+    return args
+
+
+def direct_args(w: Workers, role: str) -> dict[str, object]:
+    return dict(mode="attach", session_dir=Path(f"/nonexistent/syrd342/sessions/{role}"),
+                pane_state_dir=Path(f"{EFFECTIVE}/{role}"), force_reload="syrd342-force", bin_user=f"acct-{role}",
+                runner=w.runners[role])
+
+
+def test_the_worker_phase_reads_its_lookups_through_the_launcher() -> None:
+    import sys as _sys
+    import time as _time
+
+    from scripts import launch_phases
+    module = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_start_workers_and_present")
+    for name, count in P78_SEAMS.items():
+        uses = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(uses) == count and all(isinstance(n.value, ast.Name) and n.value.id == "launcher" for n in uses)
+              and not bare, f"P7+P8 read {name} at its {count} site(s), through the launcher")
+    imports = [n for n in function.body if isinstance(n, ast.ImportFrom)]
+    check([(n.module, [(a.name, a.asname) for a in n.names]) for n in imports]
+          == [("scripts", [("team_launcher", "launcher")]), ("scripts", [("presentation_controller", None)])],
+          "the launcher, then the presentation controller, are the phase's own imports, in that order")
+    controller = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == "presentation_controller"]
+    calls = sorted(n.func.attr for n in ast.walk(function) if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                   and n.func.value.id == "presentation_controller")
+    check(controller == [] and calls == ["launch_presentation", "launch_presentation", "presentation_enabled"],
+          f"the controller is the local import, never the launcher's, and is called through it: {calls}")
+    nested = [n for n in function.body if isinstance(n, ast.FunctionDef)]
+    check([n.name for n in nested] == ["record_worker_start_failure"]
+          and isinstance(nested[0].body[0], ast.Nonlocal) and nested[0].body[0].names == ["worker_start_exit_code"],
+          "the failure recorder stays nested, holding the phase's own exit code")
+    bound = {a.arg for a in function.args.args + function.args.kwonlyargs}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    bound |= {"presentation_controller", "record_worker_start_failure", "reason"}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute)
+                      and isinstance(n.value, ast.Name) and n.value.id == "launcher" and n.attr in bound})
+    check("launcher" not in bound - {"launcher"} and through == [],
+          f"nothing P7+P8 bind, nor the recorder's own names, is read as the launcher's: {through}")
+    check(launch_phases.time is _time and launch_phases.sys is _sys and launch_phases.Path is Path,
+          "time, sys and Path are the module's own, the very objects the launcher holds")
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    sites = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_start_workers_and_present"]
+    check(len(sites) == 1 and isinstance(sites[0].func, ast.Name),
+          "launch_project calls P7+P8 at one site, by the launcher's own (patchable) name")
+    launch = next(n for n in launcher_tree.body if isinstance(n, ast.FunctionDef) and n.name == "launch_project")
+    at = next(i for i, n in enumerate(launch.body) if isinstance(n, ast.Assign) and n.value is sites[0])
+    dispatch, *unpack = launch.body[at + 1:at + 1 + 1 + len(P78_OUTPUTS)]
+    check(ast.unparse(dispatch) == "if not isinstance(worker_startup, WorkerStartup):\n    return worker_startup"
+          and [ast.unparse(n) for n in unpack] == [f"{name} = worker_startup.{name}" for name in P78_OUTPUTS],
+          "a stop is returned right after the call, before any of the four values is read, then each is unpacked")
+
+
+def test_the_worker_result_is_a_frozen_record_of_exactly_the_four_outputs() -> None:
+    from scripts.launch_phases import WorkerStartup
+
+    check(tuple(f.name for f in dataclasses.fields(WorkerStartup)) == P78_OUTPUTS
+          and all(f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+                  for f in dataclasses.fields(WorkerStartup)),
+          f"WorkerStartup holds the four outputs, in the order P7+P8 assign them, with no defaults: "
+          f"{[f.name for f in dataclasses.fields(WorkerStartup)]}")
+    result, _, _, _ = workers(Workers(), p78_config())
+    try:
+        result.worker_start_exit_code = 9
+        refused = False
+    except dataclasses.FrozenInstanceError:
+        refused = True
+    check(refused, "and it cannot be changed once made")
+
+
+def test_p78_detached_roles_start_direct_then_the_window_opens() -> None:
+    w = Workers(); cfg = p78_config(("zeta", False), ("bg", True), ("bg2", True))
+    result, err, said, kwargs = workers(w, cfg)
+    check(w.kinds()[:3] == ["runtime?", "time", "time_ns"] and w.log[0] == ("runtime?", CONFIG_PATH),
+          f"runtime presentation is asked first, then the clock, time before time_ns: {w.kinds()}")
+    starts = [e for e in w.log if e[0] in ("detached", "delegated", "visible")]
+    check([(e[0], e[1]) for e in starts] == [("detached", "bg"), ("detached", "bg2")],
+          f"only the detached roles start here, in config order: {starts}")
+    check(("role-runner", "bg", w.caller_runner) in w.log and starts[0][2] == direct_args(w, "bg")
+          and starts[1][2] == direct_args(w, "bg2"),
+          f"each directly, as its own account, with its own runner made from the caller's: {starts[0][2]}")
+    check(w.kinds()[w.kinds().index("time_ns") + 1:] == ["role-runner", "detached", "role-runner", "detached",
+                                                         "resolve", "owner-dirs", "tenant?", "refusal?", "konsole"],
+          f"then the layout mode, the owner's directories, and with no runtime, no bridge and no refusal, Konsole: "
+          f"{w.kinds()}")
+    check(("resolve", "SYRD342_AUTO", {"SYRD342": "env"}, w.caller_runner) in w.log
+          and ("owner-dirs", EFFECTIVE, w.caller_runner) in w.log
+          and ("refusal?", OUTPUT) in w.log
+          and w.log[-1] == ("konsole", OUTPUT, dict(project="p342", window_title="P342 window",
+                                                   runner=w.caller_runner, process_launcher=konsole_launcher)),
+          f"with the caller's layout mode, environment, runner and Konsole launcher: {w.log[-1]}")
+    from scripts.launch_phases import WorkerStartup
+    check(result == WorkerStartup(worker_start_exit_code=0, launch_started_at=342.25,
+                                  launch_started_ns=342_250_000_000, resolved_layout_mode="SYRD342_SEPARATE")
+          and err == "" and said == [],
+          f"going on, the four values, and nothing said: {result!r} {err!r} {said}")
+
+
+def test_p78_delegated_detached_roles_run_as_pane_commands() -> None:
+    w = Workers(); cfg = p78_config(("bg", True))
+    result, _, _, _ = workers(w, cfg, delegate=True)
+    check(("pane-args", "bg", pane_args("bg")) in w.log and ("delegated", "bg", ["PANE", "bg"]) in w.log
+          and "detached" not in w.kinds() and "role-runner" not in w.kinds(),
+          f"a delegated start is the pane command, run on the caller's runner, never a direct start: {w.log}")
+    check(result.worker_start_exit_code == 0, f"and it goes on: {result!r}")
+
+
+def test_p78_a_failed_detached_start_without_runtime_stops_before_the_layout_mode() -> None:
+    code = Code(5)
+    for delegate in (False, True):
+        w = Workers(codes={"bg": code}); failed: dict = {}
+        cfg = p78_config(("zeta", False), ("bg", True), ("bg2", True))
+        result, err, said, _ = workers(w, cfg, delegate=delegate, failed=failed)
+        check(result is code,
+              f"the launch stops on the start's own code ({'delegated' if delegate else 'direct'}): {result!r}")
+        check([e[1] for e in w.log if e[0] in ("detached", "delegated")] == ["bg"],
+              f"only the detached role before it was started, never a visible one: {w.log}")
+        check("resolve" not in w.kinds() and w.kinds()[-1] in ("detached", "delegated"),
+              f"at once: no later role, no layout mode, no window: {w.kinds()}")
+        check(failed == {} and err == "" and said == [], f"and nothing is recorded or said: {failed} {err!r}")
+
+
+def test_p78_with_runtime_failures_are_recorded_and_the_first_is_kept() -> None:
+    import io as _io
+    w = Workers(runtime=True, codes={"bg": 5.0, "bg2": 7, "zeta": 6})
+    failed: dict = {"old": "kept"}
+    cfg = p78_config(("zeta", False), ("bg", True), ("bg2", True))
+    result, err, said, kwargs = workers(w, cfg, failed=failed)
+    check(result.worker_start_exit_code == 5 and type(result.worker_start_exit_code) is int,
+          f"the first failing exit is kept, as an int: {result!r}")
+    check(failed == {"old": "kept", "bg": "pane start failed with exit 5.0", "bg2": "pane start failed with exit 7",
+                     "zeta": "pane start failed with exit 6"},
+          f"each failure is written into the caller's own dict, in its own words: {failed}")
+    check(err == ("team-launcher: pane start failed with exit 5.0 for bg; leaving presentation recovery status\n"
+                  "team-launcher: pane start failed with exit 7 for bg2; leaving presentation recovery status\n"
+                  "team-launcher: pane start failed with exit 6 for zeta; leaving presentation recovery status\n"),
+          f"and said on stderr: {err!r}")
+    presentation = next(e for e in w.log if e[0] == "presentation")
+    check(presentation[1] == dict(config_path=CONFIG_PATH, layout="SYRD342_SEPARATE",
+                                  state_path=OUTPUT.with_name("presentation.json"), runner=w.caller_runner,
+                                  process_launcher=konsole_launcher, assignment_wait_seconds=WAIT,
+                                  print_func=kwargs["print_func"],
+                                  unstarted=("old", "bg", "bg2", "zeta")),
+          f"a separate runtime presentation, told which roles never started: {presentation[1]}")
+    check(w.kinds()[w.kinds().index("resolve"):] == ["resolve", "owner-dirs", "viewer-roles", "role-runner",
+                                                     "visible", "presentation"]
+          and "tenant?" not in w.kinds() and "konsole" not in w.kinds(),
+          f"its visible roles are started first, then the presentation, and no other window: {w.kinds()}")
+
+
+def test_p78_skips_say_why_and_start_nothing() -> None:
+    w = Workers(resolved="SYRD342_VIEWER")
+    cfg = p78_config(("zeta", False), ("alpha", False), ("bg", True))
+    result, err, said, _ = workers(w, cfg, failed={"bg": "stale", "zeta": "busy"})
+    check(err == "skipping detached role bg: stale\nskipping visible role zeta: busy\n",
+          f"a failed detached or viewer role is skipped, saying why: {err!r}")
+    check([(e[0], e[1]) for e in w.log if e[0] in ("detached", "visible")] == [("visible", "alpha")]
+          and ("viewer", ["alpha"], dict(viewer_session="view-p342", window_title="P342 window",
+                                         runner=viewer_runner)) in w.log,
+          f"only alpha starts, and the viewer holds only it, on the role process runner: {w.log}")
+    w = Workers(runtime=True)
+    workers(w, p78_config(("zeta", False)), failed={"zeta": "busy"})
+    check("visible" not in w.kinds() and "presentation" in w.kinds(),
+          "a separate runtime start skips a failed role silently, and still presents")
+
+
+def test_p78_the_viewer_starts_its_roles_then_opens_one_session() -> None:
+    for delegate in (False, True):
+        w = Workers(resolved="SYRD342_VIEWER")
+        cfg = p78_config(("zeta", False), ("alpha", False), ("bg", True))
+        result, err, said, _ = workers(w, cfg, delegate=delegate)
+        if delegate:
+            check(("pane-args", "zeta", pane_args("zeta", no_attach=True)) in w.log
+                  and ("pane-args", "bg", pane_args("bg")) in w.log and "visible" not in w.kinds(),
+                  f"delegated viewer roles are pane commands that do not attach: {w.log}")
+        else:
+            visible = [e for e in w.log if e[0] == "visible"]
+            check([e[1] for e in visible] == ["zeta", "alpha"] and visible[0][2] == direct_args(w, "zeta"),
+                  f"direct viewer roles start as their own accounts, in order: {visible}")
+        after = w.kinds()[w.kinds().index("resolve"):]
+        check(after[:2] == ["resolve", "viewer-roles"] and after[-3:] == ["owner-dirs", "viewer", "tenant?"],
+              f"the roles, then the owner's directories, the viewer, and the bridge asked: {after}")
+        check(("owner-dirs", EFFECTIVE, w.caller_runner) in w.log,
+              f"the owner's directories are made in the effective pane-state directory, on the caller's runner: "
+              f"{w.log}")
+        check(result.resolved_layout_mode == "SYRD342_VIEWER" and said == [] and "handback" not in w.kinds(),
+              f"goes on, with nothing handed back outside the bridge: {result!r}")
+
+
+def test_p78_a_failed_viewer_role_without_runtime_stops() -> None:
+    code = Code(6)
+    w = Workers(resolved="SYRD342_VIEWER", codes={"zeta": code}); failed: dict = {}
+    result, err, said, _ = workers(w, p78_config(("zeta", False), ("alpha", False)), failed=failed)
+    check(result is code and w.kinds()[-1] == "visible" and "owner-dirs" not in w.kinds() and failed == {},
+          f"the launch stops on that role's own code, at once: {result!r} {w.kinds()}")
+
+
+def test_p78_a_viewer_with_runtime_presentation() -> None:
+    w = Workers(runtime=True, resolved="SYRD342_VIEWER", codes={"bg": 5, "zeta": 6})
+    failed: dict = {}
+    result, err, said, kwargs = workers(w, p78_config(("zeta", False), ("alpha", False), ("bg", True)),
+                                        failed=failed, layout_output=None)
+    check(list(failed) == ["bg", "zeta"], f"both failures are written into the caller's own dict: {failed}")
+    presentation = next(e for e in w.log if e[0] == "presentation")
+    check(presentation[1] == dict(config_path=CONFIG_PATH, layout="SYRD342_VIEWER", state_path=None,
+                                  runner=w.caller_runner, assignment_wait_seconds=WAIT,
+                                  print_func=kwargs["print_func"], unstarted=("bg", "zeta")),
+          f"the viewer is the controller's, with no state path when no layout output was given: {presentation}")
+    check(result.worker_start_exit_code == 5 and list(failed) == ["bg", "zeta"] and "viewer" not in w.kinds()
+          and w.kinds()[-3:] == ["owner-dirs", "presentation", "tenant?"],
+          f"the first failure, detached then visible, is kept, and no tmux viewer opens: {result!r} {w.kinds()}")
+
+
+def test_p78_the_viewers_empty_and_all_failed_answers() -> None:
+    w = Workers(resolved="SYRD342_VIEWER")
+    result, _, _, _ = workers(w, p78_config(("bg", True)))
+    check(result.worker_start_exit_code == 0 and "viewer" not in w.kinds() and "tenant?" in w.kinds(),
+          f"no visible role: nothing to open, and it goes on as a success: {result!r} {w.kinds()}")
+    w = Workers(resolved="SYRD342_VIEWER")
+    result, err, _, _ = workers(w, p78_config(("zeta", False)), failed={"zeta": "busy"})
+    check(result == 1 and "viewer" not in w.kinds() and "tenant?" not in w.kinds(),
+          f"every visible role failed: the launch stops with 1 and nothing is handed back: {result!r} {w.kinds()}")
+    w = Workers(resolved="SYRD342_VIEWER", viewer=4)
+    result, _, _, _ = workers(w, p78_config(("zeta", False)))
+    check(result == 4 and "tenant?" not in w.kinds(), f"a viewer that fails stops the launch with its code: {result}")
+
+
+def test_p78_a_bridged_viewer_is_handed_back_as_one_tab() -> None:
+    for title, handback in (("P342 window", True), ("", False)):
+        w = Workers(resolved="SYRD342_VIEWER", tenant=True, handback=handback)
+        result, _, said, kwargs = workers(w, p78_config(("zeta", False), ("alpha", False)), window_title=title)
+        hb = next(e for e in w.log if e[0] == "handback")
+        check(hb[1] == dict(slot_count=1, window_title=title, layout="SYRD342_VIEWER",
+                            slot_titles=[title or "P342 title"], pane_program=Path("/nonexistent/syrd342/p342-attach"),
+                            print_func=kwargs["print_func"]),
+              f"one tab, titled by the window or the project, running the attach helper: {hb}")
+        warning = ("warning: switchyard: p342's panes are up, but this invocation was given no way to hand its "
+                   "window back, so none will open. Run it again from the session that owns the screen")
+        check(said == ([] if handback else [warning]) and result.worker_start_exit_code == 0,
+              f"a failed hand-back is said, as a warning, and the launch goes on: {said}")
+
+
+def test_p78_separate_windows_bridged_refused_or_konsole() -> None:
+    w = Workers(tenant=True, handback=True)
+    result, _, said, kwargs = workers(w, p78_config(("zeta", False), ("alpha", False), ("bg", True)))
+    hb = next(e for e in w.log if e[0] == "handback")
+    check(hb[1] == dict(slot_count=2, window_title="P342 window", print_func=kwargs["print_func"])
+          and "refusal?" not in w.kinds() and "konsole" not in w.kinds() and result.worker_start_exit_code == 0,
+          f"bridged: handed back, one slot per visible role, and nothing opened here: {hb} {w.kinds()}")
+    w = Workers(tenant=True, handback=False)
+    workers(w, p78_config(("zeta", False)))
+    check(w.kinds()[-3:] == ["handback", "refusal?", "konsole"], f"a failed hand-back falls through: {w.kinds()}")
+    w = Workers(refusal="syrd342: refused")
+    result, _, said, _ = workers(w, p78_config(("zeta", False)))
+    check(result == 1 and said == ["syrd342: refused"] and "konsole" not in w.kinds() and "handback" not in w.kinds(),
+          f"a legacy refusal is said, and stops the launch with 1: {result!r} {said}")
+    w = Workers(konsole=3)
+    result, _, _, _ = workers(w, p78_config(("zeta", False)))
+    check(result == 3, f"Konsole's own failure stops the launch with its code: {result!r}")
+    w = Workers(runtime=True, presentation=9)
+    result, _, _, _ = workers(w, p78_config(("zeta", False)))
+    check(result == 9, f"and so does the runtime presentation's: {result!r}")
+
+
+def test_p78_an_error_reaches_the_caller_with_nothing_after() -> None:
+    boom = OSError("syrd342: start")
+    w = Workers(error=boom); failed: dict = {}
+    try:
+        workers(w, p78_config(("bg", True), ("bg2", True)), failed=failed); raised = None
+    except OSError as exc:
+        raised = exc
+    check(w.kinds()[3:5] == ["role-runner", "detached"],
+          f"not delegated, the first detached role is started directly: {w.kinds()}")
+    check(raised is boom and w.kinds()[-1] == "detached" and failed == {},
+          f"a start that raises is not caught or recorded: {w.kinds()}")
+
+
+def launch_through_p78(answer: object, *, mode: str = "attach", running: list | None = None,
+                       failed: dict | None = None, mutate: dict | None = None, report: bool = False):
+    """launch_project with P3, P5 and P6 stood in, P7+P8 answering `answer`, and P9's first lookup recorded."""
+    from scripts import team_launcher
+    from scripts.launch_phases import LaunchPreparation, LaunchSetup
+
+    setup = LaunchSetup(worktree_runner=worktree_runner, role_process_runner=viewer_runner,
+                        delegate_role_sessions_to_owner="syrd342-delegate", effective_pane_state_dir=EFFECTIVE,
+                        output_path=OUTPUT, window_title="P342 window", should_assign_layout_owner=True,
+                        pane_script_path=PANE_SCRIPT)
+    prepared = SimpleNamespace(project="p342", roles=[])
+    failures = failed if failed is not None else {}
+    going_on = LaunchPreparation(exit_code=None, config=prepared, failed_roles=failures,
+                                 running_roles=running or [], reconcile_home=None, unreconciled_roles=set())
+    asked: list[tuple] = []
+    seen: list[tuple] = []
+
+    def phase(c: object, **k: object) -> object:
+        asked.append((c, k))
+        if mutate:
+            k["failed_roles"].update(mutate)
+        return answer
+
+    def p9(c: object, *, config_path: object) -> list:
+        seen.append(("p9", c))
+        return []
+    said: list[str] = []
+    cfg = SimpleNamespace(project="p342", role_state_isolation=False, pane_launcher=None)
+    with patched(team_launcher, _launch_runners_and_paths=lambda c, **k: setup,
+                 upgrade_generated_project_layout=lambda c, **k: SimpleNamespace(changed=False),
+                 _verify_pane_launcher_path=lambda c, **k: PANE_SCRIPT,
+                 prepare_project_desktop=lambda c, **k: c,
+                 _prepare_launch=lambda c, **k: going_on, _write_layout_and_plan=lambda c, **k: None,
+                 _start_workers_and_present=phase, unsafe_root_presentation_windows=p9,
+                 report_launch_session_records=lambda c, **k: seen.append(("records", k))), fence_workers():
+        got = team_launcher.launch_project(cfg, config_path=CONFIG_PATH, mode=mode, script_path=SCRIPT,
+                                           runner=caller_runner, layout_output=GIVEN_LAYOUT, layout_mode="SYRD342_AUTO",
+                                           layout_environ={"SYRD342": "env"}, konsole_process_launcher=konsole_launcher,
+                                           print_func=said.append, report_session_records=report)
+    return got, asked, seen, said, setup, prepared, failures
+
+
+def test_the_launch_returns_a_p78_stop_before_p9() -> None:
+    code = Code(7)
+    got, asked, seen, said, setup, prepared, failures = launch_through_p78(code)
+    check(got is code and seen == [] and said == [],
+          f"a stop is returned as the very object P7+P8 gave, and P9 never runs: {got!r} {seen}")
+    check(asked[0][0] is prepared and asked[0][1] == dict(
+        allow_stale_launcher=False, config_path=CONFIG_PATH, delegate_role_sessions_to_owner="syrd342-delegate",
+        effective_pane_state_dir=EFFECTIVE, failed_roles=failures, force_reload=False,
+        konsole_process_launcher=konsole_launcher, layout_environ={"SYRD342": "env"}, layout_mode="SYRD342_AUTO",
+        layout_output=GIVEN_LAYOUT, mode="attach", output_path=OUTPUT, pane_script_path=PANE_SCRIPT,
+        print_func=asked[0][1]["print_func"], role_process_runner=viewer_runner, runner=caller_runner,
+        window_title="P342 window") and asked[0][1]["failed_roles"] is failures,
+          f"P7+P8 get P5's config and its failures dict itself, P3's runners and paths, and the caller's own "
+          f"arguments: {asked[0][1]}")
+
+
+def test_the_launch_hands_p78s_four_values_and_its_failures_to_p9() -> None:
+    from scripts.launch_phases import WorkerStartup
+    zeta = SimpleNamespace(role="zeta", detached=False)
+    going = WorkerStartup(worker_start_exit_code=4, launch_started_at=342.25, launch_started_ns=342_250_000_000,
+                          resolved_layout_mode="SYRD342_SEPARATE")
+    got, _, seen, said, _, prepared, _ = launch_through_p78(going, mode="attach-or-start", running=[zeta],
+                                                            report=True)
+    records = next(e for e in seen if e[0] == "records")[1]
+    check(got == 4 and seen[0] == ("p9", prepared) and records["fallback_changed_since_ns"] == 342_250_000_000
+          and records["pane_state_updated_since"] == 342.25 and records["pane_state_dir"] == EFFECTIVE,
+          f"going on, P9 runs and returns P7+P8's exit code, with their clock: {got!r} {records}")
+    check(len(said) == 1 and said[0].startswith("switchyard: opened a new window attached to running pane: zeta"),
+          f"P9 reads the separate layout mode P7+P8 resolved: {said}")
+    viewer = dataclasses.replace(going, resolved_layout_mode="SYRD342_VIEWER")
+    from scripts import team_launcher
+    with patched(team_launcher, LAYOUT_MODE_VIEWER="SYRD342_VIEWER"):
+        _, _, _, said, _, _, _ = launch_through_p78(viewer, mode="attach-or-start", running=[zeta])
+    check(said == [], f"and a viewer mode keeps P9 quiet: {said}")
+    _, _, _, said, _, _, failures = launch_through_p78(going, mode="attach-or-start", running=[zeta],
+                                                       mutate={"zeta": "pane start failed with exit 6"})
+    check(said == [] and failures == {"zeta": "pane start failed with exit 6"},
+          f"a failure P7+P8 recorded is in the very dict P9 reads: {said} {failures}")
 
 
 #: Run first: a seam taken past the launcher must be caught before any
@@ -910,7 +1425,8 @@ STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
              "test_the_call_site_the_seams_and_the_phases_own_names",
              "test_the_preparation_reads_every_launcher_lookup_through_the_launcher",
-             "test_the_layout_phase_reads_its_lookups_through_the_launcher")
+             "test_the_layout_phase_reads_its_lookups_through_the_launcher",
+             "test_the_worker_phase_reads_its_lookups_through_the_launcher")
 
 
 def main() -> int:

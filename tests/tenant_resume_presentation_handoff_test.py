@@ -286,8 +286,10 @@ def test_a_deferred_hook_warning_does_not_suppress_the_window() -> None:
     A missing deferred Codex SessionStart hook is reported and the launch goes
     on; it must not be what stops the presentation being handed back.
     """
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    start = source.index("        elif running_through_tenant_control()")
+    # SYRD-342 moved this branch, in launch_project's P7+P8, to launch_phases,
+    # where the launcher's names are read through it.
+    source = (ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8")
+    start = source.index("        elif launcher.running_through_tenant_control()")
     window_branch = source[start : start + 700]
     check("hand_presentation_back_to_the_caller" in window_branch,
           "the bridged branch hands the window back")

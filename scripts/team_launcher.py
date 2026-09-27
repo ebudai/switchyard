@@ -912,8 +912,10 @@ from scripts.pane_launcher_preflight import (
 from scripts.launch_phases import (
     LaunchPreparation,
     LaunchSetup,
+    WorkerStartup,
     _launch_runners_and_paths,
     _prepare_launch,
+    _start_workers_and_present,
     _write_layout_and_plan,
 )
 
@@ -4918,223 +4920,32 @@ def launch_project(
     )
     if layout_exit is not None:
         return layout_exit
-    from scripts import presentation_controller
-
-    use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)
-    worker_start_exit_code = 0
-
-    def record_worker_start_failure(role: RoleConfig, result: int) -> None:
-        nonlocal worker_start_exit_code
-        worker_start_exit_code = worker_start_exit_code or int(result)
-        reason = f"pane start failed with exit {result}"
-        failed_roles[role.role] = reason
-        print(f"team-launcher: {reason} for {role.role}; leaving presentation recovery status", file=sys.stderr)
-
-    launch_started_at = time.time()
-    launch_started_ns = time.time_ns()
-    for role in config.roles:
-        if not role.detached:
-            continue
-        if role.role in failed_roles:
-            print(f"skipping detached role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
-            continue
-        if delegate_role_sessions_to_owner:
-            result = runner(
-                pane_command_args(
-                    config.project,
-                    role,
-                    config_path=config_path,
-                    mode=mode,
-                    script_path=pane_script_path,
-                    pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
-                    force_reload=force_reload,
-                    skip_launcher_check=True,
-                    allow_stale_launcher=allow_stale_launcher,
-                    run_as_user=role_run_as_user(config, role),
-                )
-            ).returncode
-        else:
-            result = run_detached_role(
-                role,
-                mode=mode,
-                session_dir=role_session_dir(config, role),
-                pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
-                force_reload=force_reload,
-                bin_user=role_run_as_user(config, role),
-                runner=role_process_runner_for(config, role, runner=runner),
-            )
-        if result != 0:
-            if not use_runtime_presentation:
-                return result
-            record_worker_start_failure(role, result)
-    resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
-    if resolved_layout_mode == LAYOUT_MODE_VIEWER:
-        viewer_roles = visible_roles_for_viewer(config)
-        for role in viewer_roles:
-            if role.role in failed_roles:
-                print(f"skipping visible role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
-                continue
-            if delegate_role_sessions_to_owner:
-                result = runner(
-                    pane_command_args(
-                        config.project,
-                        role,
-                        config_path=config_path,
-                        mode=mode,
-                        script_path=pane_script_path,
-                        pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
-                        force_reload=force_reload,
-                        skip_launcher_check=True,
-                        allow_stale_launcher=allow_stale_launcher,
-                        no_attach=True,
-                        run_as_user=role_run_as_user(config, role),
-                    )
-                ).returncode
-            else:
-                result = ensure_visible_role_session_for_viewer(
-                    role,
-                    mode=mode,
-                    session_dir=role_session_dir(config, role),
-                    pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
-                    force_reload=force_reload,
-                    bin_user=role_run_as_user(config, role),
-                    runner=role_process_runner_for(config, role, runner=runner),
-                )
-            if result != 0:
-                if not use_runtime_presentation:
-                    return result
-                record_worker_start_failure(role, result)
-        ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
-        launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
-        if use_runtime_presentation:
-            launch_result = presentation_controller.launch_presentation(
-                config,
-                config_path=config_path,
-                layout=LAYOUT_MODE_VIEWER,
-                state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
-                runner=runner,
-                # The panes this is about were started a moment ago, and their
-                # runtime registration is their own asynchronous work. Sampling
-                # once refused a launch that had in fact succeeded (SYRD-162).
-                assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
-                print_func=print_func,
-                unstarted=tuple(failed_roles),
-            )
-        elif launchable_viewer_roles:
-            launch_result = launch_tmux_viewer_session(
-                launchable_viewer_roles,
-                viewer_session=viewer_session_for_project(config.project),
-                window_title=window_title,
-                runner=role_process_runner,
-            )
-        elif viewer_roles:
-            launch_result = 1
-        else:
-            launch_result = 0
-        if launch_result == 0 and running_through_tenant_control():
-            # After the whole chain, not inside one arm of it. The viewer is
-            # reached two ways -- through the presentation controller when this
-            # tenant has presentation state, and directly when it does not --
-            # and the first of those never handed anything back. Live Zorin took
-            # exactly that one: every pane attached, the command returned, and
-            # no window and no complaint (SYRD-211 live UAT).
-            #
-            # The viewer is one tiled session holding every role, and it is
-            # detached: this account cannot display it and there are no per-slot
-            # display sessions to open tabs on. So the caller is told it is a
-            # viewer and shown one tab.
-            if not hand_presentation_back_to_the_caller(
-                config,
-                slot_count=1,
-                window_title=window_title,
-                layout=LAYOUT_MODE_VIEWER,
-                slot_titles=[window_title or project_window_title(config)],
-                pane_program=Path(display_attach_helper_path(config.project)),
-                print_func=print_func,
-            ):
-                # Said rather than swallowed. This account has no screen, so a
-                # handoff that cannot be made means nobody is going to open a
-                # window and nothing downstream will notice.
-                print_func(
-                    f"warning: switchyard: {config.project}'s panes are up, but this "
-                    "invocation was given no way to hand its window back, so none will "
-                    "open. Run it again from the session that owns the screen"
-                )
-    else:
-        ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
-        if use_runtime_presentation:
-            for role in visible_roles_for_viewer(config):
-                if role.role in failed_roles:
-                    continue
-                if delegate_role_sessions_to_owner:
-                    result = runner(
-                        pane_command_args(
-                            config.project,
-                            role,
-                            config_path=config_path,
-                            mode=mode,
-                            script_path=pane_script_path,
-                            pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
-                            force_reload=force_reload,
-                            skip_launcher_check=True,
-                            allow_stale_launcher=allow_stale_launcher,
-                            no_attach=True,
-                            run_as_user=role_run_as_user(config, role),
-                        )
-                    ).returncode
-                else:
-                    result = ensure_visible_role_session_for_viewer(
-                        role,
-                        mode=mode,
-                        session_dir=role_session_dir(config, role),
-                        pane_state_dir=role_pane_state_dir(config, role, effective_pane_state_dir),
-                        force_reload=force_reload,
-                        bin_user=role_run_as_user(config, role),
-                        runner=role_process_runner_for(config, role, runner=runner),
-                    )
-                if result != 0:
-                    record_worker_start_failure(role, result)
-            launch_result = presentation_controller.launch_presentation(
-                config,
-                config_path=config_path,
-                layout=LAYOUT_MODE_SEPARATE,
-                state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
-                runner=runner,
-                process_launcher=konsole_process_launcher,
-                # Same race, same bound: these workers were started above.
-                assignment_wait_seconds=RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
-                print_func=print_func,
-                unstarted=tuple(failed_roles),
-            )
-        elif running_through_tenant_control() and hand_presentation_back_to_the_caller(
-            config,
-            slot_count=len(visible_roles_for_viewer(config)),
-            window_title=window_title,
-            print_func=print_func,
-        ):
-            # Opened by the caller, which owns the screen. This account does
-            # not, and Konsole started from here goes nowhere (SYRD-211).
-            launch_result = 0
-        else:
-            refusal = legacy_presentation_refusal(config, output_path=output_path)
-            if refusal:
-                # The workers are up and stay up; only the window is refused.
-                # Handing the terminal this path is the defect itself: it is in
-                # the owner's 0700 state directory and the terminal runs as the
-                # desktop account, so it aborts with "A problem occurred when
-                # loading the Layout" and nothing says why (SYRD-233).
-                print_func(refusal)
-                launch_result = 1
-            else:
-                launch_result = launch_konsole_window(
-                    output_path,
-                    project=config.project,
-                    window_title=window_title,
-                    runner=runner,
-                    process_launcher=konsole_process_launcher,
-                )
-    if launch_result != 0:
-        return launch_result
+    worker_startup = _start_workers_and_present(
+        config,
+        allow_stale_launcher=allow_stale_launcher,
+        config_path=config_path,
+        delegate_role_sessions_to_owner=delegate_role_sessions_to_owner,
+        effective_pane_state_dir=effective_pane_state_dir,
+        failed_roles=failed_roles,
+        force_reload=force_reload,
+        konsole_process_launcher=konsole_process_launcher,
+        layout_environ=layout_environ,
+        layout_mode=layout_mode,
+        layout_output=layout_output,
+        mode=mode,
+        output_path=output_path,
+        pane_script_path=pane_script_path,
+        print_func=print_func,
+        role_process_runner=role_process_runner,
+        runner=runner,
+        window_title=window_title,
+    )
+    if not isinstance(worker_startup, WorkerStartup):
+        return worker_startup
+    worker_start_exit_code = worker_startup.worker_start_exit_code
+    launch_started_at = worker_startup.launch_started_at
+    launch_started_ns = worker_startup.launch_started_ns
+    resolved_layout_mode = worker_startup.resolved_layout_mode
     # A window opened by an earlier release can still be running as root, and
     # the tenant cannot signal it. Saying the project is attached while that is
     # true would be the wrong report to act on (SYRD-43).

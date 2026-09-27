@@ -53,6 +53,11 @@ EXPORTED = {
 REBOUND = ("AGY_CONVERSATION_ROOT", "RESUME_STARTUP_TIMEOUT_SECONDS", "RESUME_STARTUP_POLL_SECONDS",
            "DETACHED_SESSION_STABILITY_SECONDS")
 PATCHED_ENTRY_POINTS = ("run_role_pane", "run_detached_role", "ensure_visible_role_session_for_viewer")
+#: Measured on the SYRD-342 baseline: each entry point's call sites. SYRD-342
+#: moved launch_project's P7+P8, holding one detached start and two viewer
+#: starts, to launch_phases, which calls them through the launcher; the totals
+#: are unchanged.
+ENTRY_POINT_CALLS = {"run_role_pane": 1, "run_detached_role": 2, "ensure_visible_role_session_for_viewer": 3}
 
 
 def check(condition: bool, detail: str) -> None:
@@ -153,11 +158,18 @@ def test_the_rebound_timings_and_roots_stay_the_launchers() -> None:
 
 def test_the_patched_entry_points_are_called_by_the_launchers_name() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
     for name in PATCHED_ENTRY_POINTS:
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(calls and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} by its own patchable name")
+        phase_calls = [n for n in ast.walk(phases)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(calls and len(calls) + len(phase_calls) == ENTRY_POINT_CALLS[name]
+              and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in phase_calls),
+              f"the launcher calls {name} by its own patchable name, and launch_phases through it, "
+              f"at its {ENTRY_POINT_CALLS[name]} baseline sites")
     moved = ast.parse((ROOT / "scripts" / "role_pane_entry.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in PATCHED_ENTRY_POINTS})

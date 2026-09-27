@@ -134,8 +134,10 @@ def test_the_patched_seams_are_reached_through_the_launcher() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     # Two baseline sites: launch_project's, and replace_presentation_window_command's,
     # which SYRD-329 moved to presentation_window_replacement, where it still calls
-    # through the launcher.
-    moved_trees = [ast.parse((ROOT / "scripts" / "presentation_window_replacement.py").read_text(encoding="utf-8"))]
+    # through the launcher. SYRD-342 moved launch_project's, in its P7+P8, to
+    # launch_phases, which calls it through the launcher too.
+    moved_trees = [ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8"))
+                   for name in ("presentation_window_replacement.py", "launch_phases.py")]
     for name, count in {"launch_konsole_window": 2}.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]

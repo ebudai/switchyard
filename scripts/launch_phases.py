@@ -19,6 +19,13 @@ old position, by the launcher's own name.
   layout written and handed to its owner, the launch plan, and on a dry run
   the plan printed and 0 returned; it hands nothing on, so it answers `None`
   to go on.
+- **P7 and P8, worker start and presentation** (`_start_workers_and_present`,
+  SYRD-342): the detached workers started, then the layout mode resolved and
+  the viewer, runtime presentation, handed-back or Konsole window opened. They
+  stay one phase because the failure recorder nested in them keeps the first
+  failing exit and records each failure into the caller's own `failed_roles`,
+  which the rest of the launch reads. A code the launch stops on is returned
+  as it was; going on returns a frozen `WorkerStartup`.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -30,6 +37,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -324,3 +332,266 @@ def _write_layout_and_plan(
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
     return None
+
+
+@dataclass(frozen=True)
+class WorkerStartup:
+    """What P7 and P8 hand the rest of `launch_project` when the launch goes on,
+    in the order they assign them. A launch that stops gets its code instead."""
+
+    worker_start_exit_code: int
+    launch_started_at: float
+    launch_started_ns: int
+    resolved_layout_mode: str
+
+
+def _start_workers_and_present(
+    config: ProjectConfig,
+    *,
+    allow_stale_launcher: bool,
+    config_path: Path,
+    delegate_role_sessions_to_owner: bool,
+    effective_pane_state_dir: Path,
+    failed_roles: dict[str, str],
+    force_reload: bool,
+    konsole_process_launcher: Callable[..., Any] | None,
+    layout_environ: dict[str, str] | None,
+    layout_mode: str,
+    layout_output: Path | None,
+    mode: str,
+    output_path: Path,
+    pane_script_path: Path,
+    print_func: Callable[[str], None],
+    role_process_runner: Callable[..., subprocess.CompletedProcess[Any]],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    window_title: str,
+) -> WorkerStartup | int:
+    """P7 and P8 of `launch_project`, unchanged: the workers started, then the
+    presentation. A code the launch stops on is returned as it was; going on
+    returns a `WorkerStartup`. Failures are recorded into the caller's own
+    `failed_roles`."""
+    from scripts import team_launcher as launcher
+
+    from scripts import presentation_controller
+
+    use_runtime_presentation = presentation_controller.presentation_enabled(config, config_path=config_path)
+    worker_start_exit_code = 0
+
+    def record_worker_start_failure(role: RoleConfig, result: int) -> None:
+        nonlocal worker_start_exit_code
+        worker_start_exit_code = worker_start_exit_code or int(result)
+        reason = f"pane start failed with exit {result}"
+        failed_roles[role.role] = reason
+        print(f"team-launcher: {reason} for {role.role}; leaving presentation recovery status", file=sys.stderr)
+
+    launch_started_at = time.time()
+    launch_started_ns = time.time_ns()
+    for role in config.roles:
+        if not role.detached:
+            continue
+        if role.role in failed_roles:
+            print(f"skipping detached role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
+            continue
+        if delegate_role_sessions_to_owner:
+            result = runner(
+                launcher.pane_command_args(
+                    config.project,
+                    role,
+                    config_path=config_path,
+                    mode=mode,
+                    script_path=pane_script_path,
+                    pane_state_dir=launcher.role_pane_state_dir(config, role, effective_pane_state_dir),
+                    force_reload=force_reload,
+                    skip_launcher_check=True,
+                    allow_stale_launcher=allow_stale_launcher,
+                    run_as_user=launcher.role_run_as_user(config, role),
+                )
+            ).returncode
+        else:
+            result = launcher.run_detached_role(
+                role,
+                mode=mode,
+                session_dir=launcher.role_session_dir(config, role),
+                pane_state_dir=launcher.role_pane_state_dir(config, role, effective_pane_state_dir),
+                force_reload=force_reload,
+                bin_user=launcher.role_run_as_user(config, role),
+                runner=launcher.role_process_runner_for(config, role, runner=runner),
+            )
+        if result != 0:
+            if not use_runtime_presentation:
+                return result
+            record_worker_start_failure(role, result)
+    resolved_layout_mode = launcher.resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+    if resolved_layout_mode == launcher.LAYOUT_MODE_VIEWER:
+        viewer_roles = launcher.visible_roles_for_viewer(config)
+        for role in viewer_roles:
+            if role.role in failed_roles:
+                print(f"skipping visible role {role.role}: {failed_roles[role.role]}", file=sys.stderr)
+                continue
+            if delegate_role_sessions_to_owner:
+                result = runner(
+                    launcher.pane_command_args(
+                        config.project,
+                        role,
+                        config_path=config_path,
+                        mode=mode,
+                        script_path=pane_script_path,
+                        pane_state_dir=launcher.role_pane_state_dir(config, role, effective_pane_state_dir),
+                        force_reload=force_reload,
+                        skip_launcher_check=True,
+                        allow_stale_launcher=allow_stale_launcher,
+                        no_attach=True,
+                        run_as_user=launcher.role_run_as_user(config, role),
+                    )
+                ).returncode
+            else:
+                result = launcher.ensure_visible_role_session_for_viewer(
+                    role,
+                    mode=mode,
+                    session_dir=launcher.role_session_dir(config, role),
+                    pane_state_dir=launcher.role_pane_state_dir(config, role, effective_pane_state_dir),
+                    force_reload=force_reload,
+                    bin_user=launcher.role_run_as_user(config, role),
+                    runner=launcher.role_process_runner_for(config, role, runner=runner),
+                )
+            if result != 0:
+                if not use_runtime_presentation:
+                    return result
+                record_worker_start_failure(role, result)
+        launcher.ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
+        launchable_viewer_roles = [role for role in viewer_roles if role.role not in failed_roles]
+        if use_runtime_presentation:
+            launch_result = presentation_controller.launch_presentation(
+                config,
+                config_path=config_path,
+                layout=launcher.LAYOUT_MODE_VIEWER,
+                state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
+                runner=runner,
+                # The panes this is about were started a moment ago, and their
+                # runtime registration is their own asynchronous work. Sampling
+                # once refused a launch that had in fact succeeded (SYRD-162).
+                assignment_wait_seconds=launcher.RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
+                print_func=print_func,
+                unstarted=tuple(failed_roles),
+            )
+        elif launchable_viewer_roles:
+            launch_result = launcher.launch_tmux_viewer_session(
+                launchable_viewer_roles,
+                viewer_session=launcher.viewer_session_for_project(config.project),
+                window_title=window_title,
+                runner=role_process_runner,
+            )
+        elif viewer_roles:
+            launch_result = 1
+        else:
+            launch_result = 0
+        if launch_result == 0 and launcher.running_through_tenant_control():
+            # After the whole chain, not inside one arm of it. The viewer is
+            # reached two ways -- through the presentation controller when this
+            # tenant has presentation state, and directly when it does not --
+            # and the first of those never handed anything back. Live Zorin took
+            # exactly that one: every pane attached, the command returned, and
+            # no window and no complaint (SYRD-211 live UAT).
+            #
+            # The viewer is one tiled session holding every role, and it is
+            # detached: this account cannot display it and there are no per-slot
+            # display sessions to open tabs on. So the caller is told it is a
+            # viewer and shown one tab.
+            if not launcher.hand_presentation_back_to_the_caller(
+                config,
+                slot_count=1,
+                window_title=window_title,
+                layout=launcher.LAYOUT_MODE_VIEWER,
+                slot_titles=[window_title or launcher.project_window_title(config)],
+                pane_program=Path(launcher.display_attach_helper_path(config.project)),
+                print_func=print_func,
+            ):
+                # Said rather than swallowed. This account has no screen, so a
+                # handoff that cannot be made means nobody is going to open a
+                # window and nothing downstream will notice.
+                print_func(
+                    f"warning: switchyard: {config.project}'s panes are up, but this "
+                    "invocation was given no way to hand its window back, so none will "
+                    "open. Run it again from the session that owns the screen"
+                )
+    else:
+        launcher.ensure_owner_state_dirs(config, pane_state_dir=effective_pane_state_dir, runner=runner)
+        if use_runtime_presentation:
+            for role in launcher.visible_roles_for_viewer(config):
+                if role.role in failed_roles:
+                    continue
+                if delegate_role_sessions_to_owner:
+                    result = runner(
+                        launcher.pane_command_args(
+                            config.project,
+                            role,
+                            config_path=config_path,
+                            mode=mode,
+                            script_path=pane_script_path,
+                            pane_state_dir=launcher.role_pane_state_dir(config, role, effective_pane_state_dir),
+                            force_reload=force_reload,
+                            skip_launcher_check=True,
+                            allow_stale_launcher=allow_stale_launcher,
+                            no_attach=True,
+                            run_as_user=launcher.role_run_as_user(config, role),
+                        )
+                    ).returncode
+                else:
+                    result = launcher.ensure_visible_role_session_for_viewer(
+                        role,
+                        mode=mode,
+                        session_dir=launcher.role_session_dir(config, role),
+                        pane_state_dir=launcher.role_pane_state_dir(config, role, effective_pane_state_dir),
+                        force_reload=force_reload,
+                        bin_user=launcher.role_run_as_user(config, role),
+                        runner=launcher.role_process_runner_for(config, role, runner=runner),
+                    )
+                if result != 0:
+                    record_worker_start_failure(role, result)
+            launch_result = presentation_controller.launch_presentation(
+                config,
+                config_path=config_path,
+                layout=launcher.LAYOUT_MODE_SEPARATE,
+                state_path=output_path.with_name("presentation.json") if layout_output is not None else None,
+                runner=runner,
+                process_launcher=konsole_process_launcher,
+                # Same race, same bound: these workers were started above.
+                assignment_wait_seconds=launcher.RUNTIME_REGISTRATION_TIMEOUT_SECONDS,
+                print_func=print_func,
+                unstarted=tuple(failed_roles),
+            )
+        elif launcher.running_through_tenant_control() and launcher.hand_presentation_back_to_the_caller(
+            config,
+            slot_count=len(launcher.visible_roles_for_viewer(config)),
+            window_title=window_title,
+            print_func=print_func,
+        ):
+            # Opened by the caller, which owns the screen. This account does
+            # not, and Konsole started from here goes nowhere (SYRD-211).
+            launch_result = 0
+        else:
+            refusal = launcher.legacy_presentation_refusal(config, output_path=output_path)
+            if refusal:
+                # The workers are up and stay up; only the window is refused.
+                # Handing the terminal this path is the defect itself: it is in
+                # the owner's 0700 state directory and the terminal runs as the
+                # desktop account, so it aborts with "A problem occurred when
+                # loading the Layout" and nothing says why (SYRD-233).
+                print_func(refusal)
+                launch_result = 1
+            else:
+                launch_result = launcher.launch_konsole_window(
+                    output_path,
+                    project=config.project,
+                    window_title=window_title,
+                    runner=runner,
+                    process_launcher=konsole_process_launcher,
+                )
+    if launch_result != 0:
+        return launch_result
+    return WorkerStartup(
+        worker_start_exit_code=worker_start_exit_code,
+        launch_started_at=launch_started_at,
+        launch_started_ns=launch_started_ns,
+        resolved_layout_mode=resolved_layout_mode,
+    )

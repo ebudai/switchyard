@@ -141,8 +141,17 @@ def test_the_patched_entry_points_are_called_by_the_launchers_name() -> None:
     calls = [n for n in ast.walk(launcher_tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", ""))
              == "hand_presentation_back_to_the_caller"]
-    check(len(calls) == 2 and all(isinstance(n.func, ast.Name) for n in calls),
-          "launch_project hands the window back at its two baseline sites, by the launcher's patchable name")
+    # SYRD-342 moved both sites, in launch_project's P7+P8, to launch_phases,
+    # which calls through the launcher; the total is unchanged.
+    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
+    phase_calls = [n for n in ast.walk(phases)
+                   if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", ""))
+                   == "hand_presentation_back_to_the_caller"]
+    check(len(calls) + len(phase_calls) == 2 and all(isinstance(n.func, ast.Name) for n in calls)
+          and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                  and n.func.value.id == "launcher" for n in phase_calls),
+          "launch_project hands the window back at its two baseline sites, by the launcher's patchable name, "
+          "through the launcher from launch_phases")
     moved = ast.parse((ROOT / "scripts" / "presentation_reconnect.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in PATCHED_ENTRY_POINTS})

@@ -11190,3 +11190,123 @@ implemented**:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 11,192 lines.
+
+### SYRD-383 (slice 19c): the privileged provision records and their directory
+
+Measured on `d19b574`. The design was posted **before** any edit.
+
+**Moved:** `switchyard_privileged_provision_root`,
+`privileged_baseline_plan_path`, `workflow_record_path`,
+`recorded_declared_workflow`, `PRIVILEGED_PROVISION_DIR_MODE`,
+`PRIVILEGED_ARTIFACT_MODE`, `PRIVILEGED_EXECUTABLE_ARTIFACT_MODE`,
+`privileged_artifact_mode` and `ensure_privileged_provision_dir`. They move
+whole, in the launcher's order, together with the `#:` comment on the modes,
+into the new `scripts/privileged_provision_records.py` (176 lines).
+- **The launcher re-exports all nine** in one explicit, unaliased import,
+  placed after the no-follow-readers import.
+- **Stays in the launcher:** the override's variable, and
+  `render_privileged_artifacts`, which sat between the two moved runs. The
+  default root and the provision-directory builder stay in `project_provision`,
+  and the no-follow readers in `no_follow_records`.
+- **Seams:** 13 call-time reads of 11 names across 6 functions.
+  6 of the names are moved siblings or modes, read through the launcher as
+  the contract requires.
+- **Local imports:** `WORKFLOW_RECORD_NAME` and `workflow_record_document` are
+  still imported locally, verbatim and unqualified.
+- **Unchanged:** the literal modes, the `root=None` default, the traversal,
+  refusals, repairs and best-effort chown.
+- **Callers:** the nine launcher callers and the seventeen production modules
+  are unchanged.
+- **The launcher** goes from 11,192 to 11,072 lines.
+- **No guard needed widening.**
+
+**Proof.** The independent proof (`equiv383.py`) holds:
+- membership and order;
+- symtable seams equal to the generated table's totals;
+- scope: nothing free;
+- whole-node equality modulo the call-time import and `launcher.X`;
+- the literal modes and default;
+- both local imports kept;
+- no TYPE_CHECKING;
+- the rest of the launcher unchanged, and the remaining reads exactly the
+  baseline's;
+- comments conserved;
+- every other `scripts/` file unchanged.
+
+I planted 21 faults, and 21 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/privileged_provision_records_boundary_test.py`,
+  88 checks. Everything real is in an owned temp directory:
+  - `os.chown` is always a recorder;
+  - `Path.mkdir` and `Path.chmod` refuse anything outside the owned directory;
+  - whose files count as root's is a stand-in.
+
+  It covers:
+  - **The root:** the stripped, user-expanded override; the default object;
+    the launcher's variable.
+  - **Paths:** the baseline and workflow paths, including the name read from
+    `project_provision` when it runs.
+  - **The workflow record:** missing versus unusable, both before the reader
+    is asked; an unsafe record refused by the no-follow reader, including a
+    real symlink; validation of the document end to end.
+  - **Modes:** the exact values, and `.sh` versus other names.
+  - **The directory, over an owned tree:**
+    - traversal order, and parents outside the base skipped;
+    - an explicit versus a derived base;
+    - creation modes;
+    - symlink, type and owner refusals with their exact texts, and nothing
+      written past a refusal;
+    - ancestor and target repairs, with only the target reported;
+    - chown attempted with (0, 0), an OSError tolerated for every directory,
+      anything else propagated;
+    - nothing touched outside the selected path.
+  - **Reachability:** all 11 seams reached through launcher stand-ins or
+    patched launcher values.
+- **Mutations:** 56 of 56 are killed by assertions under the guard, with a
+  clean restore. The behaviour tests alone kill 54 of 56; the 2
+  left are import-structure mutants: the launcher imported at load, the launcher redefines one.
+- **Every run was under the in-process execution guard,** which refuses
+  `os.chown`/`lchown`/`fchown`, xattr writes, chmod outside /tmp, spawns,
+  pwd/grp and sockets.
+  - **Whole suites:** 11 per tree (privileged_provision_records_boundary_test.py, privileged_runtime_plan_boundary_test.py, release_rollback_boundary_test.py, resume_provision_command_boundary_test.py, role_account_migration_boundary_test.py, root_plan_reconstruction_boundary_test.py, runtime_artifact_refresh_boundary_test.py, tenant_release_root_boundary_test.py, tenant_release_target_boundary_test.py, trusted_owner_identity_boundary_test.py, workflow_adoption_boundary_test.py).
+    10 pass on the candidate, and each has the baseline's status and
+    refusal list. The new test is absent at baseline.
+    `role_account_migration_boundary_test` stops at the guard on both trees;
+    per case it gives 3 passing and 1 guard-stopped cases,
+    identically.
+  - **Per case:** 17 suites and 134 screened cases, with
+    identical results on both trees: 91 pass and 41 stop at
+    the guard, which is pre-effect parity only. 2 fail the same way
+    on both: the reach-every-seam check of a boundary suite run alone, without
+    the cases that reach its seams.
+  - **Excluded:** 152 cases the call-closure and execute screens
+    flagged (upgrade-driving, fake root, namespace root, pkexec, setfacl,
+    `/run/`, tmux, a generated command).
+- **Containment:** live snapshots before and after; **no live change.**
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: rendering and installing root's privileged artifacts -- 2 definitions, 50 lines (lines 3143-3194, not contiguous):
+  -   3143   18  render_privileged_artifacts  launcher callers outside: ['new_project_command']; production readers outside the launcher: ['scripts/resume_provision_command.py', 'scripts/runtime_artifact_refresh.py']
+  -   3163   32  install_privileged_artifacts  launcher callers outside: ['new_project_command']; production readers outside the launcher: ['scripts/resume_provision_command.py', 'scripts/runtime_artifact_refresh.py']
+  - launcher names it reads (through the launcher once moved): 0: []
+  - launcher callers outside the closure: 1: ['new_project_command']
+  - production modules reading it through the launcher: 2: ['scripts/resume_provision_command.py', 'scripts/runtime_artifact_refresh.py']
+  - test files naming any of them: 8 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive privilege-boundary responsibility after the provision records: what root renders into, and installs from, that directory)
+  - it also reads 7 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['ProjectBoardProvision (scripts.ticket_board.project_provision)', 'ensure_privileged_provision_dir (scripts.privileged_provision_records)', 'privileged_artifact_mode (scripts.privileged_provision_records)', 'privileged_artifact_names (scripts.ticket_board.project_provision)', 'privileged_provision_dir (scripts.ticket_board.project_provision)', 'switchyard_privileged_provision_root (scripts.privileged_provision_records)', 'write_artifacts (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - with root's pending-identity records (alternative): 4 definitions, 91 lines; launcher callers outside: ['new_project_command', 'read_pending_identities']; production readers: 3
+  -   - the tenant-side artifact publisher alone (alternative): 1 definitions, 40 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2321 lines  209 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1319 lines   38 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1121 lines   39 defs  privileged boundary, tenant control and repair
+
+**SYRD-272 is not complete.** The launcher is still 11,072 lines.

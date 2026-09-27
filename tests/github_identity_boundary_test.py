@@ -161,9 +161,17 @@ def test_the_seams_and_the_codes_own_names() -> None:
                     and n.func.id == name]
              for name in ("github_identity_status", "set_owner_github_identity_command",
                           "clear_owner_github_identity_command")}
+    # SYRD-347 moved the upgrade's readiness read-back, in its U5 phase, to
+    # upgrade_phases, which calls it through the launcher; the total is unchanged.
+    phases = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
+    for name in calls:
+        calls[name] += [n for n in ast.walk(phases) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and isinstance(n.func.value, ast.Name) and n.func.value.id == "launcher" and n.func.attr == name]
+    bare_in_phases = [n.func.id for n in ast.walk(phases) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                      and n.func.id in calls]
     check({k: len(v) for k, v in calls.items()} == {"github_identity_status": 1, "set_owner_github_identity_command": 1,
-                                                     "clear_owner_github_identity_command": 1},
-          f"upgrade and the CLI still call them by the launcher's own names: {calls}")
+                                                     "clear_owner_github_identity_command": 1} and bare_in_phases == [],
+          f"upgrade and the CLI still call them by the launcher's own names, or through it: {calls}")
 
 
 # --- github_identity_status ---------------------------------------------------------------------------------------

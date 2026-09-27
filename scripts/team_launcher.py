@@ -920,8 +920,10 @@ from scripts.launch_phases import (
     _write_layout_and_plan,
 )
 from scripts.upgrade_phases import (
+    UpgradeIdentitiesDone,
     UpgradeToolingStaged,
     _stage_upgrade_tooling,
+    _upgrade_identities_and_accounts,
 )
 from scripts.github_identity import (
     GITHUB_IDENTITY_TIMEOUT_SECONDS,
@@ -13866,251 +13868,28 @@ def upgrade_project_command(
         return tooling_staged
     trusted_release_root = tooling_staged.trusted_release_root
     publication_detail = tooling_staged.publication_detail
-    # The owner's GitHub identity, on every upgrade as well as at provisioning:
-    # the account this found had a key and no configuration selecting it, and an
-    # existing tenant never re-runs the operator script. Idempotent, and it
-    # reads no private material (SYRD-74).
-    owner_home_for_identity = _tenant_owner_home(config, config_path)
-    owner_for_identity = config.run_as_user or current_user_name()
-    from scripts.ticket_board.project_provision import (
-        owner_github_identity_commands,
-        owner_github_key_path,
-        resolve_owner_github_identity,
-    )
-
-    # Which key this tenant publishes with, before anything is rendered from it.
-    # The renderer defaults to `id_ed25519` when it is not told, and being not
-    # told is how a live upgrade generated that key, pointed the managed block
-    # at it, and left the tenant unable to push with the deploy key it had been
-    # using for weeks (SYRD-100).
-    plan_data = _plan_data_from_config(config, config_path)
-    # Only a tenant that publishes to GitHub has a GitHub identity to manage.
-    # mefp publishes to a local bare repository, and this ran anyway: it warned
-    # that no GitHub key was selected and sent the operator to
-    # set-owner-identity, which then wrote a github.com block onto a local-only
-    # tenant and reported an authentication failure against a forge it never
-    # uses (SYRD-229). The remote is root's, never the tenant's git config.
-    from scripts.ticket_board.project_provision import publication_uses_github
-    from scripts.ticket_board.publication_boundary import resolve_pinned_remote
-
-    effective_remote, _remote_problem = resolve_pinned_remote(
-        config.project,
-        registration_root=switchyard_privileged_provision_root(),
-        declared_remote=publish_remote,
-    )
-    github_applies = publication_uses_github(
-        effective_remote,
-        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
-    )
-    selected_identity = resolve_owner_github_identity(
-        str(owner_home_for_identity),
-        recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
-        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
-    )
-    if github_applies is False:
-        print_func(
-            f"switchyard: {config.project} publishes to {effective_remote}, not GitHub, so no "
-            "owner GitHub identity is selected, configured or checked"
-        )
-        if str(plan_data.get("owner_github_key_name") or "") or str(
-            plan_data.get("owner_github_host_alias") or ""
-        ):
-            print_func(
-                f"switchyard: {config.project}'s plan still records a GitHub identity it does not "
-                f"use; clear it with `sudo switchyard set-owner-identity {config.project} --clear` "
-                "(try --dry-run first)"
-            )
-    elif not selected_identity.resolved:
-        # Nothing is rendered, nothing is generated, and the managed block is
-        # left exactly as it is. Choosing among the owner's keys, or making a
-        # new one beside them, is the substitution this must not perform.
-        for problem in selected_identity.problems:
-            print_func(f"warning: switchyard: {problem}")
-        print_func(
-            f"warning: switchyard: {config.project}'s owner GitHub identity was left untouched, "
-            "so publication continues with whatever is already configured."
-        )
-    elif dry_run:
-        print_func(
-            f"switchyard: would keep {owner_for_identity}'s GitHub identity on "
-            f"{owner_github_key_path(str(owner_home_for_identity), key_name=selected_identity.key_name)}, "
-            f"from {selected_identity.source}"
-        )
-    if github_applies is not False and selected_identity.resolved and not dry_run and os.geteuid() == 0:
-        identity_script = "set -eu\n" + "\n".join(
-            owner_github_identity_commands(
-                owner_for_identity,
-                str(owner_home_for_identity),
-                key_name=selected_identity.key_name,
-                host=selected_identity.host,
-                host_alias=selected_identity.host_alias,
-                comment=f"{owner_for_identity} switchyard {config.project}",
-            )
-        )
-        applied = runner(
-            ["sh", "-c", identity_script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        if getattr(applied, "returncode", 1) != 0:
-            print_func(
-                f"switchyard: could not provision {owner_for_identity}'s GitHub identity "
-                f"(exit {applied.returncode}): "
-                f"{(str(getattr(applied, 'stderr', '') or '').strip() or 'no output')[:300]}"
-            )
-    if github_applies is not False and selected_identity.resolved and not dry_run:
-        # Read back against the same key the block selects. Checking the default
-        # while the block names another is a readiness answer about a key nobody
-        # publishes with.
-        identity = github_identity_status(
-            owner_for_identity,
-            owner_home_for_identity,
-            key_name=selected_identity.key_name,
-            host=selected_identity.host,
-            runner=runner,
-        )
-        remedy = github_identity_remedy(identity, project=config.project)
-        if remedy:
-            print_func(remedy)
-        else:
-            print_func(
-                f"switchyard: {owner_for_identity} can publish to GitHub as its own identity "
-                f"({selected_identity.key_name}, from {selected_identity.source})"
-            )
-    if not dry_run:
-        # Preparation needs the accounts before the active configuration names
-        # them, and it must not read that list from the tenant (SYRD-45).
-        write_pending_identities(config)
-    # The phase's own verdict, recorded once and last. Recording the publication
-    # failure and then unconditionally recording "done" over it left the journal
-    # claiming a phase completed cleanly when part of it had not run at all
-    # (SYRD-97 review).
-    record_upgrade_phase(
+    identities_done = _upgrade_identities_and_accounts(
         config,
+        commit_git_dir=commit_git_dir,
         config_path=config_path,
-        phase="artifacts",
-        state="incomplete" if publication_detail else "done",
-        detail=publication_detail,
+        cutover=cutover,
+        deploy_ref=deploy_ref,
+        desktop_choice=desktop_choice,
         dry_run=dry_run,
+        effective_source_repo=effective_source_repo,
+        print_func=print_func,
+        publication_detail=publication_detail,
+        publish_remote=publish_remote,
+        release_report_config=release_report_config,
+        runner=runner,
+        source_repo=source_repo,
+        tooling_root=tooling_root,
+        trusted_release_root=trusted_release_root,
     )
-
-    accounts_ready = _role_accounts_ready(config)
-    if not accounts_ready:
-        migration_path: Path | None = None
-        migration_problems: list[str] = []
-        if dry_run:
-            migration_path = trusted_role_account_migration_path(config)
-        elif os.geteuid() == 0:
-            migration_path, migration_problems = publish_role_account_migration(
-                config,
-                config_path=config_path,
-                resume_source=read_upgrade_source(config),
-                runner=runner,
-                print_func=print_func,
-            )
-            if migration_path is None:
-                # Naming it is telling an operator to run it as root, so root
-                # publishing one it cannot vouch for stops here rather than
-                # handing it over (SYRD-62).
-                for problem in migration_problems:
-                    print_func(f"switchyard: {problem}")
-                print_func(
-                    f"switchyard: {config.project}'s roles still share the project account, and its "
-                    "role-account migration is not an artifact root can vouch for, so it is not "
-                    "being handed to an operator to run."
-                )
-                record_upgrade_phase(
-                    config, config_path=config_path, phase="accounts", state="blocked",
-                    detail="; ".join(migration_problems),
-                )
-                return 1
-        else:
-            # Unprivileged: this run regenerates the tenant's own artifacts and
-            # reports. Publishing root's copy is root's, so it names the one
-            # that is already published or the command that publishes it, and
-            # writes nothing itself (SYRD-62).
-            migration_path, migration_problems = role_account_migration_instruction(
-                config, runner=runner
-            )
-        if migration_path is not None:
-            next_step = f"run {migration_path} (safe to re-run)"
-        else:
-            next_step = (
-                f"run `sudo switchyard upgrade {config.project}`, which publishes the role-account "
-                "migration where only root can write it"
-                + (f": {'; '.join(migration_problems)}" if migration_problems else "")
-            )
-        print_func(
-            f"switchyard: {config.project}'s roles still share the project account. An operator must "
-            f"{next_step}, then rerun `switchyard upgrade {config.project}`, "
-            "which runs whichever phase is next in order."
-        )
-        record_upgrade_phase(
-            config, config_path=config_path, phase="accounts", state="pending", dry_run=dry_run
-        )
-    else:
-        record_upgrade_phase(
-            config, config_path=config_path, phase="accounts", state="done", dry_run=dry_run
-        )
-        if not cutover.is_complete:
-            # The whole transaction: workers, trees, configuration, installed
-            # units, services, and a real write from each role. Nothing about
-            # the director gates it -- the director's own write comes after,
-            # from an identity this creates (SYRD-45).
-            cutover_result = cutover_role_identities_command(
-                config,
-                config_path=config_path,
-                dry_run=dry_run,
-                runner=runner,
-                # The verified release, not the checkout. The transaction
-                # restarts every role against the staged bundle and checks that
-                # bundle against this source, and the bundle now comes out of
-                # the release rather than out of a tree the project account can
-                # write. Pinning it here is the same repair, one layer up: the
-                # check and the thing being checked have to name one release
-                # (SYRD-97 review).
-                source_repo=(
-                    trusted_release_root
-                    if trusted_release_root is not None
-                    else (effective_source_repo if source_repo is not None else None)
-                ),
-                commit_git_dir=commit_git_dir,
-                deploy_ref=deploy_ref,
-                tooling_dir=_staged_tooling_dir(config, tooling_root),
-                print_func=print_func,
-            )
-            if not dry_run:
-                config = load_project_config(config.project, config_path)
-                release_report_config = config
-                cutover = role_account_cutover(config, runner=runner)
-            if cutover_result != 0:
-                # The transaction has already said why it stopped and what the
-                # rollback brought back, so the only thing left is to stop here
-                # and say so. Everything after this point -- the director phase,
-                # the release, the "the remaining step is the director's" line --
-                # describes an upgrade still moving forward. Reporting those
-                # after a rolled-back identities phase is what let a retry read
-                # as progress, and left the failure detectable only by an
-                # unrelated assertion about the board build much later
-                # (SYRD-64).
-                print_func(
-                    f"switchyard: stopping: {config.project}'s identities phase did not complete, "
-                    "so no later phase ran and none is being reported. What the transaction said "
-                    "above -- what it refused to start, or what the rollback brought back -- is "
-                    "the state this tenant is in."
-                )
-                for line in upgrade_phase_report(
-                    config,
-                    config_path=config_path,
-                    cutover=cutover,
-                    journal=read_upgrade_journal(config, config_path=config_path, trusted=True),
-                    desktop_policy=desktop_choice,
-                    dry_run=dry_run,
-                ):
-                    print_func(line)
-                return cutover_result
-        else:
-            record_upgrade_phase(
-                config, config_path=config_path, phase="identities", state="done", dry_run=dry_run
-            )
+    if not isinstance(identities_done, UpgradeIdentitiesDone):
+        return identities_done
+    config = identities_done.config
+    release_report_config = identities_done.release_report_config
 
     # Asked after the cutover, because the director makes that write from the
     # identity the cutover gives it.

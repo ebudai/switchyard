@@ -296,7 +296,9 @@ def test_the_upgrade_step_removes_it_and_restarts_no_worker() -> None:
     # SYRD-346 moved the upgrade's tooling phase, where the removal is, to
     # scripts/upgrade_phases.py; the upgrade calls that phase by name.
     phases = (ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8")
-    staging = phases[phases.index("def _stage_upgrade_tooling("):]
+    staging = phases[phases.index("def _stage_upgrade_tooling("):phases.index("def _upgrade_identities_and_accounts(")]
+    # SYRD-347 moved the identities transaction, in U5, there too.
+    identities_phase = phases[phases.index("def _upgrade_identities_and_accounts("):]
 
     assert "_stage_upgrade_tooling(" in body, "the upgrade never runs its tooling phase"
     assert "remove_tenant_publication_boundary" in staging, "the upgrade never removes it"
@@ -304,7 +306,8 @@ def test_the_upgrade_step_removes_it_and_restarts_no_worker() -> None:
     # Before the identities transaction, in the phase that runs on every upgrade
     # including a resumed one, and nowhere near a stop or a start.
     artifacts = body.index("_stage_upgrade_tooling(")
-    identities = body.index("cutover_role_identities_command")
+    assert "cutover_role_identities_command" in identities_phase, "the upgrade never moves a role"
+    identities = body.index("_upgrade_identities_and_accounts(")
     assert artifacts < identities, "the grant must be gone before any role is moved"
 
     step = source[source.index("def remove_tenant_publication_boundary("):]

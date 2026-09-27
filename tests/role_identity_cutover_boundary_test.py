@@ -131,11 +131,19 @@ def test_the_patched_and_generic_seams_are_reached() -> None:
                      "reconnect_presentation"],
           f"the ones it uses, it reads through the launcher: {through}")
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    # SYRD-347 moved the upgrade's identities transaction, in its U5 phase, to
+    # upgrade_phases, which calls it through the launcher; the total is unchanged.
+    phases = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
     for name in PATCHED_MOVED:
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
-              f"the launcher calls {name} at its one baseline site, by its own patchable name")
+        phase_calls = [n for n in ast.walk(phases)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(phase_calls) == 1 and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id == "launcher" for n in phase_calls),
+              f"the launcher calls {name} at its one baseline site, by its own patchable name there, "
+              "through the launcher from upgrade_phases")
 
 
 def test_no_call_time_import_shadows_what_a_function_binds() -> None:

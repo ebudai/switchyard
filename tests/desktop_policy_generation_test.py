@@ -514,10 +514,12 @@ def test_a_desktop_project_is_granted_installed_and_verified_before_its_first_ro
                 for target in {id(mod): mod, id(phase_launcher): phase_launcher}.values():
                     stack.enter_context(patch.object(target, name, return_value=None))
             stack.enter_context(patch.object(mod, "role_isolation_gaps", return_value=[]))
-            stack.enter_context(
-                patch.object(mod, "_ensure_owner_user_and_project_dir",
-                             return_value=mod.OwnerUserProvisionResult(False, False))
-            )
+            # SYRD-371: the accounts phase reads it from `scripts.team_launcher` too.
+            for target in {id(mod): mod, id(phase_launcher): phase_launcher}.values():
+                stack.enter_context(
+                    patch.object(target, "_ensure_owner_user_and_project_dir",
+                                 return_value=mod.OwnerUserProvisionResult(False, False))
+                )
             stack.enter_context(patch.object(mod, "_owner_home_for_auth", return_value=owner_home))
             stack.enter_context(patch.object(mod, "run_first_run_auth_phase", side_effect=first_auth))
             stack.enter_context(patch.object(mod, "launch_project", side_effect=first_launch))

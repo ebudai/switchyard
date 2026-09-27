@@ -252,7 +252,16 @@ def test_the_command_calls_it_where_the_checks_were() -> None:
           "called by the launcher's name, with the command's own values")
     back = [ast.unparse(s) for s in body[at + 1:at + 1 + len(OUTPUTS)]]
     check(back == [f"{f} = new_project_preflight.{f}" for f in OUTPUTS], f"every field read back to its old name: {back}")
-    check(ast.unparse(body[at + 1 + len(OUTPUTS)]) == "stages.begin('project accounts and files')", "then P2 begins, as before")
+    after = body[at + 1 + len(OUTPUTS)]
+    if ast.unparse(after) != "stages.begin('project accounts and files')":
+        # SYRD-371: P2 is its own phase now, and that phase begins it first.
+        accounts = next(n for n in module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "_prepare_new_project_accounts")
+        check(isinstance(after, ast.Assign) and isinstance(after.value, ast.Call)
+              and ast.unparse(after.value.func) == "_prepare_new_project_accounts"
+              and ast.unparse(accounts.body[1]) == "stages.begin('project accounts and files')",
+              f"then the P2 phase, which begins it first: {ast.unparse(after)[:80]}")
+    else:
+        check(True, "then P2 begins, as before")
 
 
 # --- behaviour -------------------------------------------------------------------------------------------------------

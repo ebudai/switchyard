@@ -24,6 +24,15 @@ phase's old position, by the launcher's own name.
   own, in the command's order. Going on returns a frozen `NewProjectPreflight`:
   the source checkout, the plan, the worktree branch and the gate's
   `selected_role_clis`, which replaces P0's.
+- **P2, project accounts and files** (`_prepare_new_project_accounts`, SYRD-371):
+  the stage begun, the board service user and its peer authentication, the
+  owner account and project directory, the owner's agent CLIs verified once the
+  account exists, the account reported, the agy credential left, refused or
+  seeded, then -- fresh or from the design artifact -- the onboarding files,
+  the initial artifact, ownership, the onboarding documents and the project's
+  git repository, and last the provisioning directory with the desktop policy.
+  Every refusal and every partial step is the command's own, in the command's
+  order. Going on returns a frozen `NewProjectAccounts` with `provision_dir`.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -365,4 +374,214 @@ def _check_new_project_preflight(
         precheck_plan=precheck_plan,
         selected_role_clis=selected_role_clis,
         worktree_branch=worktree_branch,
+    )
+
+
+@dataclass(frozen=True)
+class NewProjectAccounts:
+    """What P2 hands the rest of `switchyard_new_command`, by the command's own
+    local name. A refusal raises instead."""
+
+    provision_dir: Path
+
+
+def _prepare_new_project_accounts(
+    *,
+    from_artifact: Path | None,
+    output_dir: Path | None,
+    home_base: Path,
+    git_init: bool,
+    print_func: Callable[[str], None],
+    agy_source_origin: str,
+    artifact_path: Path,
+    design_document: Path,
+    director_onboarding: Path,
+    include_audit: bool,
+    include_designer: bool,
+    owner_shell: str,
+    owner_user: str,
+    project_dir: Path,
+    resolved_agy_credential_source: str,
+    resolved_project_name: str,
+    resolved_slug: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    selected_audit_roles: tuple[str, ...],
+    selected_desktop_policy: dict,
+    selected_implementer_roles: tuple[str, ...],
+    selected_role_efforts: dict[str, str],
+    selected_role_models: dict[str, str],
+    stages: ProvisioningStages,
+    effective_source_repo: Path,
+    precheck_plan: ProjectBoardProvision,
+    selected_role_clis: Sequence[tuple[str, str]],
+    worktree_branch: str,
+) -> NewProjectAccounts:
+    from scripts import team_launcher as launcher
+
+    stages.begin("project accounts and files")
+    launcher._ensure_board_service_user(precheck_plan.service_user, runner=runner)
+    launcher._ensure_board_service_peer_auth(precheck_plan, source_repo=effective_source_repo, runner=runner)
+    owner_result = launcher._ensure_owner_user_and_project_dir(
+        owner_user,
+        project_dir,
+        runner=runner,
+        shell=owner_shell,
+        owner_home=home_base / owner_user,
+    )
+    # Only meaningful once the account exists, which is why it is HERE and not
+    # beside the precheck. The precheck asks whether this host can serve a
+    # tenant; this asks what the tenant it just created actually resolves, and
+    # they can differ -- the owner's own PATH is searched first, so an
+    # owner-local copy would win at pane launch and nothing else would say so
+    # (SYRD-210).
+    launcher.verify_agent_clis_for_owner(
+        selected_role_clis,
+        owner_user=owner_user,
+        owner_home=home_base / owner_user,
+        runner=runner,
+        print_func=print_func,
+    )
+    if owner_result.created:
+        created_shell = owner_result.shell_path or owner_shell
+        if owner_shell == launcher.PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS["shell"] and Path(created_shell).name != owner_shell:
+            print_func(
+                f"switchyard: created user {owner_user} with shell {created_shell} "
+                f"({owner_shell} unavailable); linger enabled"
+            )
+        else:
+            display_shell = created_shell if "/" in owner_shell else owner_shell
+            print_func(f"switchyard: created user {owner_user} with shell {display_shell}; linger enabled")
+    else:
+        print_func(f"switchyard: using existing user {owner_user} (not modifying)")
+    if resolved_agy_credential_source:
+        credential_state = launcher._agy_credential_state(owner_user, home_base)
+        if credential_state == launcher.AGY_CREDENTIAL_INSTALLED:
+            print_func(
+                f"switchyard: agy credential already present for {owner_user}; leaving it in place"
+            )
+        elif credential_state == launcher.AGY_CREDENTIAL_UNUSABLE:
+            raise SystemExit(
+                f"switchyard: {home_base / owner_user / launcher.AGY_CREDENTIAL_DIR_NAME / launcher.AGY_CREDENTIAL_TOKEN_NAME} "
+                f"exists but is not a 0600 regular file owned by {owner_user}, so agy could not "
+                "read it; remove it and rerun, or clear capability_grants.agy_credential_source"
+            )
+        else:
+            # Not gated on owner_result.created. Reaching here with a pre-existing owner
+            # already required consent to reuse that account, and gating on creation is
+            # what made a failed seed unrecoverable: the retry would skip and then let
+            # provisioning record a credential source that was never installed.
+            launcher._seed_agy_credential_for_owner(
+                owner_user=owner_user,
+                source_user=resolved_agy_credential_source,
+                home_base=home_base,
+                runner=runner,
+                print_func=print_func,
+            )
+    if from_artifact is None:
+        launcher._write_switchyard_onboarding_files(
+            project_name=resolved_project_name,
+            slug=resolved_slug,
+            owner_user=owner_user,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=design_document,
+            director_onboarding=director_onboarding,
+            include_designer=include_designer,
+        )
+        launcher._write_initial_switchyard_project_artifact(
+            project_name=resolved_project_name,
+            slug=resolved_slug,
+            owner_user=owner_user,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=design_document,
+            owner_shell=owner_shell,
+            implementer_roles=selected_implementer_roles,
+            role_clis=selected_role_clis,
+            role_models=selected_role_models,
+            role_efforts=selected_role_efforts,
+            include_designer=include_designer,
+            include_audit=include_audit,
+            audit_roles=selected_audit_roles,
+            agy_credential_source=resolved_agy_credential_source,
+            agy_credential_source_origin=agy_source_origin,
+        )
+        launcher._chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+        if include_designer and design_document.exists():
+            launcher._chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
+        launcher._install_switchyard_onboarding_docs(
+            source_repo=effective_source_repo,
+            project_dir=project_dir,
+            owner_user=owner_user,
+            runner=runner,
+            print_func=print_func,
+        )
+        if git_init:
+            created_git_repository = launcher._ensure_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                branch=worktree_branch,
+                runner=runner,
+            )
+            if created_git_repository:
+                print_func(
+                    f"switchyard: initialized git repository in {project_dir} "
+                    f"on branch {worktree_branch} with an initial commit"
+                )
+            else:
+                print_func(f"switchyard: using existing git repository in {project_dir} without modifying it")
+        else:
+            print_func(f"switchyard: skipped project git initialization for {project_dir} (--no-git-init)")
+            launcher._require_existing_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                runner=runner,
+            )
+    else:
+        artifact = launcher.load_project_design_artifact(artifact_path)
+        launcher._write_switchyard_onboarding_files(
+            project_name=resolved_project_name,
+            slug=resolved_slug,
+            owner_user=owner_user,
+            project_dir=project_dir,
+            artifact_path=artifact_path,
+            design_document=artifact.design_document,
+            director_onboarding=director_onboarding,
+            include_designer=artifact.include_designer,
+        )
+        launcher._chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
+        launcher._install_switchyard_onboarding_docs(
+            source_repo=effective_source_repo,
+            project_dir=project_dir,
+            owner_user=owner_user,
+            runner=runner,
+            print_func=print_func,
+        )
+        if git_init:
+            created_git_repository = launcher._ensure_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                branch=worktree_branch,
+                runner=runner,
+            )
+            if created_git_repository:
+                print_func(
+                    f"switchyard: initialized git repository in {project_dir} "
+                    f"on branch {worktree_branch} with an initial commit"
+                )
+            else:
+                print_func(f"switchyard: using existing git repository in {project_dir} without modifying it")
+        else:
+            print_func(f"switchyard: skipped project git initialization for {project_dir} (--no-git-init)")
+            launcher._require_existing_project_git_repository(
+                owner_user=owner_user,
+                project_dir=project_dir,
+                runner=runner,
+            )
+
+    provision_dir = (output_dir or (launcher._switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
+    provision_dir.mkdir(parents=True, exist_ok=True)
+    launcher._write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
+    return NewProjectAccounts(
+        provision_dir=provision_dir,
     )

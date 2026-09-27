@@ -492,28 +492,32 @@ def test_a_missing_version_is_said_rather_than_faked() -> None:
     assert "version not reported" in rec.text
 
 
-def _gate_position(source: str) -> int:
-    """Where `switchyard new` runs the CLI gate, in the launcher's source.
+def _executed_at(source: str, line: str) -> tuple[int, int] | None:
+    """Where `switchyard new` runs a line of its own, in execution order.
 
-    The gate was written in the command itself. SYRD-370 moved it, verbatim,
-    into the host-and-CLI phase in `new_project_phases.py`; the command runs it
-    where it calls that phase, so that call is the gate's position here, and
-    the phase has to still hold the gate.
+    Written in the command itself, a line runs at its place in the launcher's
+    source: `(position, 0)`. SYRD-370 and SYRD-371 moved lines verbatim --
+    but for reading launcher names through `launcher.` -- into phases in
+    `new_project_phases.py`, which the command calls once each; such a line
+    runs at that call, and then at its place inside the phase. The tuples
+    compare in the order the lines run. None: the line is nowhere.
     """
-    gate = "selected_role_clis = require_agent_clis_for_new_tenant("
-    if gate in source:
-        return source.index(gate)
+    if line in source:
+        return (source.index(line), 0)
     import ast
 
     phases = (ROOT / "scripts" / "new_project_phases.py").read_text(encoding="utf-8")
-    phase = next(node for node in ast.parse(phases).body
-                 if isinstance(node, ast.FunctionDef) and node.name == "_check_new_project_preflight")
-    assert "selected_role_clis = launcher.require_agent_clis_for_new_tenant(" in ast.get_source_segment(phases, phase), (
-        "the CLI gate is gone from the host-and-CLI phase"
-    )
-    call = "= _check_new_project_preflight("
-    assert source.count(call) == 1, f"the command calls the host-and-CLI phase once: {source.count(call)}"
-    return source.index(call)
+    for phase in (node for node in ast.parse(phases).body if isinstance(node, ast.FunctionDef)):
+        text = ast.get_source_segment(phases, phase).replace("launcher.", "")
+        if line in text:
+            call = f"= {phase.name}("
+            assert source.count(call) == 1, f"the command calls {phase.name} once: {source.count(call)}"
+            return (source.index(call), text.index(line))
+    return None
+
+
+GATE = "selected_role_clis = require_agent_clis_for_new_tenant("
+CREATED = "owner_result = _ensure_owner_user_and_project_dir("
 
 
 def test_owner_verification_runs_after_the_owner_account_is_created() -> None:
@@ -524,13 +528,14 @@ def test_owner_verification_runs_after_the_owner_account_is_created() -> None:
     place that distinction is visible.
     """
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    gate = _gate_position(source)
-    created = source.index("owner_result = _ensure_owner_user_and_project_dir(")
+    gate = _executed_at(source, GATE)
+    created = _executed_at(source, CREATED)
     # Searched from the top, not from `created`: searching forward turns "it
     # moved above the account" into a ValueError about a missing substring,
     # which says nothing about what is actually wrong.
-    verified = source.find("    verify_agent_clis_for_owner(")
-    assert verified != -1, "the owner verification call is gone entirely"
+    verified = _executed_at(source, "    verify_agent_clis_for_owner(")
+    assert gate is not None and created is not None, "the gate or the account creation is gone entirely"
+    assert verified is not None, "the owner verification call is gone entirely"
     assert gate < created, "the precheck must run before the account is created"
     assert created < verified, (
         "owner verification runs before the account is created, where it can only ever "
@@ -545,12 +550,15 @@ def test_the_gate_runs_before_the_first_mutation() -> None:
     to be driven with a real root environment to show it any other way.
     """
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    gate = _gate_position(source)
+    gate = _executed_at(source, GATE)
+    assert gate is not None, "the CLI gate is gone entirely"
     for mutator in (
         "_ensure_board_service_user(precheck_plan.service_user",
-        "owner_result = _ensure_owner_user_and_project_dir(",
+        CREATED,
     ):
-        assert gate < source.index(mutator, gate - 4000), (
+        at = _executed_at(source, mutator)
+        assert at is not None, f"{mutator} is gone entirely"
+        assert gate < at, (
             f"{mutator} runs before the CLI gate; a refusal would strand a partial tenant"
         )
 

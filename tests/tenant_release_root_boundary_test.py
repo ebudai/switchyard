@@ -222,7 +222,9 @@ def test_either_import_order_gives_one_set_of_objects_and_defaults() -> None:
                         "d = inspect.signature(m.prepare_tenant_release_root).parameters; "
                         f"print(all(getattr(t, n) is getattr(m, n) for n in {MOVED!r}), "
                         "d['dry_run'].default is False and d['print_func'].default is builtins.print, "
-                        "not hasattr(m, 'trusted_owner_identity') and t.trusted_owner_identity.__module__ == 'scripts.team_launcher')")
+                        # SYRD-381 moved the trusted owner identity to its own module; it is still not this module's.
+                        "not hasattr(m, 'trusted_owner_identity') and t.trusted_owner_identity.__module__ in "
+                        "('scripts.team_launcher', 'scripts.trusted_owner_identity'))")
         check(result.stdout.strip() == "True True True", f"{' then '.join(order)}: {result.stdout}{result.stderr[-600:]}")
     check(m.RELEASE_ROOT_WRITABLE_DIRS == ("releases",) and m.RELEASE_ROOT_WRITABLE_FILES == ("system-unit.sha256",),
           "exactly the entries a deploy writes")
@@ -269,8 +271,14 @@ def test_the_launcher_reexports_the_six_and_keeps_the_trusted_identity() -> None
     check(len(imports) == 1 and sorted(a.name for a in imports[0].names) == sorted(MOVED)
           and all(a.asname is None for a in imports[0].names), "one explicit import of exactly the six, unaliased")
     defined = {getattr(n, "name", None) for n in tree.body} | {x.id for n in tree.body if isinstance(n, ast.Assign) for x in n.targets if isinstance(x, ast.Name)}
-    check(not defined & set(MOVED) and {"TrustedOwnerIdentity", "trusted_owner_identity"} <= defined,
-          "the launcher defines none of the six, and still defines the trusted owner identity")
+    # SYRD-381 moved the trusted owner identity to scripts/trusted_owner_identity.py: the launcher keeps both names
+    # -- defined there, or re-exported by exactly those names -- and neither ever moved into this slice's module.
+    kept = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.trusted_owner_identity"
+            for a in n.names if a.asname is None}
+    here = ast.parse((ROOT / "scripts" / "tenant_release_root.py").read_text(encoding="utf-8"))
+    check(not defined & set(MOVED) and {"TrustedOwnerIdentity", "trusted_owner_identity"} <= defined | kept
+          and not {"TrustedOwnerIdentity", "trusted_owner_identity"} & {getattr(n, "name", None) for n in here.body},
+          "the launcher defines none of the six, and still keeps the trusted owner identity, which is not defined here")
 
 
 # --- behaviour ------------------------------------------------------------------------------------------------------

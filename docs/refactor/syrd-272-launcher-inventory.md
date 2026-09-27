@@ -10973,3 +10973,103 @@ implemented**:
   -  1157 lines   42 defs  project config and registry
 
 **SYRD-272 is not complete.** The launcher is still 11,468 lines.
+
+### SYRD-381 (slice 19a): the trusted owner identity
+
+Measured on `d962993`. The design was posted **before** any edit.
+
+**Moved:** `TrustedOwnerIdentity` (with its `@dataclass(frozen=True)`, fields,
+the `problems=()` default and the `trusted` property) and
+`trusted_owner_identity`, whole and in order, from `scripts/team_launcher.py`
+into the new `scripts/trusted_owner_identity.py` (100 lines). The launcher
+re-exports both in one explicit, unaliased import. This starts the
+privilege-boundary extraction.
+- **The six privileged consumers** (github_identity, pane_rebind,
+  repository_boundary_repair, resume_provision_command, tenant_release_root,
+  workflow_adoption) keep reading `launcher.trusted_owner_identity`, unchanged.
+  No remaining launcher definition reads either name.
+- **Seams:** 11 call-time reads of 5 names: exactly the ticket's
+  four facilities plus the result class, read through the launcher (1 moved
+  sibling).
+- **`pwd`, `json` and `Path`** are the module's own. `pwd` is the singleton the
+  launcher also holds, and is not a launcher facility.
+- **No `TYPE_CHECKING` block:** nothing annotation-only is needed, and
+  ProjectConfig is not used.
+- **The launcher** goes from 11,468 to 11,402 lines.
+
+**One guard widened (my own SYRD-380 stay check).** `tenant_release_root_boundary_test`
+pinned that the trusted identity was not moved with the release-root slice:
+its `__module__` was the launcher's, and the launcher defined both names. The
+widened check accepts the launcher re-exporting both, unaliased, from
+`scripts.trusted_owner_identity`, and newly asserts that neither is defined in
+`tenant_release_root.py`.
+- The widened test passes on the candidate and on a `git archive` copy of the
+  baseline.
+- Three mutants on it are killed: the re-export dropped, the re-export aliased,
+  and the class defined in the release-root module.
+
+**Proof.** The independent proof (`equiv381.py`) holds:
+- both nodes are equal to the baseline, whole;
+- the symtable seams are as above;
+- scope: nothing free;
+- the decorator and field default are as above;
+- `pwd.getpwuid` is read bare, only where it was, and the KeyError-only fallback
+  is kept;
+- there is no TYPE_CHECKING block;
+- the remaining launcher reads the two exactly where the baseline did (nowhere);
+- comments are conserved;
+- every other `scripts/` file is unchanged.
+
+I planted 17 faults, and 17 are caught.
+
+**Evidence.**
+- **New boundary test:** `tests/trusted_owner_identity_boundary_test.py`,
+  36 checks. Root's baseline is an owned temp file. The root-control walk,
+  the baseline path and the account and home lookups are launcher stand-ins,
+  and `pwd.getpwuid` is patched with an explicit fake, so there is no real
+  passwd lookup. It covers:
+  - every refusal and its message, in order;
+  - stripping, and a trailing slash in the recorded home;
+  - the passwd gid converted to int, and the KeyError fallback to the uid;
+  - passwd never asked after a refusal;
+  - all 5 seams reached.
+- **Mutations:** 30 of 30 are killed by assertions under the guard (the
+  three guard mutants included), with a clean restore. The behaviour tests
+  alone kill 27 of 30; the 3 left are import-structure mutants:
+  the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Every run was under the in-process execution guard.**
+  - **Whole suites:** 7 per tree: the new test, the widened release-root
+    test, and the boundary suites of all six consumers. 6
+    pass on both with no refusal; the new test is absent at baseline.
+  - **Not run:** `legacy_root_owned_provision_upgrade_test`, which is
+    namespace-root.
+- **Containment:** live snapshots before and after; **no live change.** There
+  was no real passwd or group lookup.
+- **CLI:** `switchyard --help` is identical for all 36 invocations under
+  the guard, and so is `scripts/team-launcher --help`. The staged commit loads
+  the module and all six consumers from the release.
+
+**Next, for a Director decision,** measured on this candidate and **not
+implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: root-controlled, no-follow record reading -- 6 definitions, 206 lines (lines 5162-5780, not contiguous):
+  -   5162    9  expected_privileged_uid  launcher callers outside: ['ensure_privileged_provision_dir']; production readers outside the launcher: ['scripts/desktop_approval.py', 'scripts/privileged_runtime_plan.py', 'scripts/role_account_migration.py', 'scripts/tenant_config_records.py', 'scripts/workflow_adoption.py']
+  -   5173    6  root_controlled_problems_for  launcher callers outside: -; production readers outside the launcher: ['scripts/repository_boundary_repair.py', 'scripts/root_plan_reconstruction.py', 'scripts/trusted_owner_identity.py']
+  -   5193   96  read_plan_no_follow  launcher callers outside: ['recorded_declared_workflow']; production readers outside the launcher: ['scripts/desktop_approval.py', 'scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/tenant_config_records.py', 'scripts/tenant_release_root.py', 'scripts/workflow_adoption.py']
+  -   5291   13  _directory_owner_no_follow  launcher callers outside: -; production readers outside the launcher: -
+  -   5306   42  read_tenant_document_no_follow  launcher callers outside: ['_plan_data_from_config', 'load_project_config', 'upgrade_generated_project_config']; production readers outside the launcher: ['scripts/runtime_artifact_refresh.py']
+  -   5741   40  _walk_no_follow  launcher callers outside: ['publish_tenant_artifact']; production readers outside the launcher: ['scripts/github_identity.py', 'scripts/privileged_runtime_plan.py', 'scripts/role_account_migration.py', 'scripts/role_credentials.py', 'scripts/tenant_release_root.py']
+  - launcher names it reads (through the launcher once moved): 2: ['PRIVILEGED_PROVISION_ROOT_ENV', 'PlanDocument']
+  - launcher callers outside the closure: 6: ['_plan_data_from_config', 'ensure_privileged_provision_dir', 'load_project_config', 'publish_tenant_artifact', 'recorded_declared_workflow', 'upgrade_generated_project_config']
+  - production modules reading it through the launcher: 14: ['scripts/desktop_approval.py', 'scripts/github_identity.py', 'scripts/pane_rebind.py', 'scripts/privileged_runtime_plan.py', 'scripts/repository_boundary_repair.py', 'scripts/resume_provision_command.py', 'scripts/role_account_migration.py', 'scripts/role_credentials.py', 'scripts/root_plan_reconstruction.py', 'scripts/runtime_artifact_refresh.py', 'scripts/tenant_config_records.py', 'scripts/tenant_release_root.py', 'scripts/trusted_owner_identity.py', 'scripts/workflow_adoption.py']
+  - test files naming any of them: 14 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (the next cohesive privilege-boundary responsibility after the trusted owner identity: the no-follow readers it and its consumers depend on)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+- Largest remaining launcher domains (`domains.py`):
+  -  2302 lines  207 defs  general helpers (unclassified)
+  -  1832 lines   76 defs  provisioning (new/register/teardown/owner accounts)
+  -  1437 lines   52 defs  privileged boundary, tenant control and repair
+  -  1319 lines   38 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+
+**SYRD-272 is not complete.** The launcher is still 11,402 lines.

@@ -1162,6 +1162,10 @@ from scripts.tenant_release_root import (
     prepare_tenant_release_root,
     release_root_repair_record_path,
 )
+from scripts.trusted_owner_identity import (
+    TrustedOwnerIdentity,
+    trusted_owner_identity,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -5153,76 +5157,6 @@ class GithubIdentityStatus:
     @property
     def ready(self) -> bool:
         return self.checked and not self.problems and self.authenticated
-
-
-@dataclass(frozen=True)
-class TrustedOwnerIdentity:
-    """Who a tenant's owner is, taken from root's own record and the kernel."""
-
-    owner_user: str
-    owner_home: Path
-    owner_uid: int
-    owner_gid: int
-    problems: tuple[str, ...] = ()
-
-    @property
-    def trusted(self) -> bool:
-        return not self.problems
-
-
-def trusted_owner_identity(project: str) -> TrustedOwnerIdentity:
-    """The owner root will act for, derived from things the tenant cannot write.
-
-    The tenant's configuration and its plan are both writable by the account
-    every role runs as, so neither can say whose SSH state a root command
-    modifies: a role could point `run_as_user` or `owner_home` somewhere else
-    between the operator deciding to run this and the command reading it. Root's
-    own baseline plan lives in a directory only root can write, and passwd is the
-    kernel's. Both are consulted, and they have to agree (SYRD-100 review).
-    """
-    baseline = privileged_baseline_plan_path(project)
-    problems: list[str] = []
-    walk = root_controlled_problems_for(str(baseline))
-    if walk:
-        return TrustedOwnerIdentity("", Path(), -1, -1, tuple(
-            [f"{baseline} is not root-controlled, so it cannot say who this tenant's owner is"] + walk
-        ))
-    try:
-        recorded = json.loads(baseline.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return TrustedOwnerIdentity("", Path(), -1, -1, (f"{baseline} could not be read: {exc}",))
-    if not isinstance(recorded, dict):
-        return TrustedOwnerIdentity("", Path(), -1, -1, (f"{baseline} is not a plan document",))
-    owner_user = str(recorded.get("owner_user") or "").strip()
-    recorded_home = str(recorded.get("owner_home") or "").strip()
-    if not owner_user:
-        problems.append(f"{baseline} records no owner_user")
-    if not recorded_home:
-        problems.append(f"{baseline} records no owner_home")
-    if problems:
-        return TrustedOwnerIdentity("", Path(), -1, -1, tuple(problems))
-    owner_uid = uid_for_user(owner_user)
-    owner_home = home_dir_for_user(owner_user)
-    if owner_uid is None or owner_home is None:
-        return TrustedOwnerIdentity(
-            "", Path(), -1, -1, (f"{owner_user} is not an account on this host",)
-        )
-    # The kernel's answer and root's record have to be the same answer. A
-    # divergence is not something to pick a winner from.
-    if owner_home != Path(recorded_home):
-        return TrustedOwnerIdentity(
-            "", Path(), -1, -1,
-            (
-                f"{baseline} records {owner_user}'s home as {recorded_home}, and this host says "
-                f"{owner_home}. Nothing was changed: which one is right is not this command's "
-                "to decide.",
-            ),
-        )
-    try:
-        owner_gid = int(pwd.getpwuid(owner_uid).pw_gid)
-    except KeyError:
-        owner_gid = owner_uid
-    return TrustedOwnerIdentity(owner_user, owner_home, owner_uid, owner_gid)
 
 
 def expected_privileged_uid() -> int:

@@ -55,6 +55,9 @@ PATCHED_SEAMS = ("detected_invoking_desktop", "presentation_gui_user", "default_
 #: (default_gui_user, twice), legacy_presentation_refusal (presentation_gui_user),
 #: launch_project (resolve_layout_mode, twice) and switchyard_new_command (once).
 LAUNCHER_CALLS = {"default_gui_user": 2, "presentation_gui_user": 1, "resolve_layout_mode": 3}
+#: Modules those launcher callers moved to (SYRD-328 moved legacy_presentation_refusal),
+#: whose calls must still go through the launcher; the totals are the baseline's.
+MOVED_CALLERS = ("legacy_presentation.py",)
 ACCOUNT_VARIABLES = ("TEAM_LAUNCHER_GUI_USER", "PGU_TEAM_LAUNCHER_GUI_USER", "SUDO_USER",
                      "SWITCHYARD_TENANT_CONTROL_CALLER")
 
@@ -145,11 +148,17 @@ def test_every_reader_reaches_its_names_through_the_launcher() -> None:
 
 def test_the_patched_seams_are_reached_through_the_launcher() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    moved_trees = [ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8")) for name in MOVED_CALLERS]
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
-              f"the launcher calls {name} at its {count} remaining sites, by its own patchable name")
+        moved_calls = [n for tree in moved_trees for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
+        check(len(calls) + len(moved_calls) == count and all(isinstance(n.func, ast.Name) for n in calls)
+              and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                      and n.func.value.id in ("launcher", "team_launcher") for n in moved_calls),
+              f"{name} is called at its {count} baseline sites, by the launcher's own name there and through "
+              "the launcher where a caller moved")
     moved = ast.parse((ROOT / "scripts" / "desktop_detection.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in PATCHED_SEAMS + ("_env_first", "current_user_name")})

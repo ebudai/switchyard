@@ -55,14 +55,15 @@ READ_ELSEWHERE = {
     "presentation_reconnect": ("pane_split_title",),
 }
 PATCHED_SEAMS = ("materialize_layout", "default_layout_output_path", "desktop_state_dir", "pane_split_title")
-#: The call sites of the seams outside this module: launch_project,
-#: replace_presentation_window_command and _desktop_state_root_problem in the
-#: launcher, and presentation_window_processes and desktop_presentation_windows,
-#: which SYRD-321 moved to presentation_windows, where they still call through
-#: the launcher.
+#: The call sites of the seams outside this module: launch_project and
+#: replace_presentation_window_command in the launcher;
+#: presentation_window_processes and desktop_presentation_windows, which
+#: SYRD-321 moved to presentation_windows; and _desktop_state_root_problem,
+#: which SYRD-328 moved to legacy_presentation. The moved ones still call
+#: through the launcher.
 LAUNCHER_CALLS = {"materialize_layout": 2, "default_layout_output_path": 3, "desktop_state_dir": 2}
 #: Modules the launcher's callers moved to, whose calls must go through it.
-MOVED_CALLERS = ("presentation_windows.py",)
+MOVED_CALLERS = ("presentation_windows.py", "legacy_presentation.py")
 
 
 def check(condition: bool, detail: str) -> None:

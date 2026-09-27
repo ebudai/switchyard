@@ -923,6 +923,7 @@ from scripts.upgrade_phases import (
     UpgradeIdentitiesDone,
     UpgradeToolingStaged,
     _finish_upgrade,
+    _refresh_upgrade_artifacts,
     _stage_upgrade_tooling,
     _upgrade_identities_and_accounts,
 )
@@ -13781,76 +13782,19 @@ def upgrade_project_command(
     release_report_config = config
     trusted_release_root: Path | None = None
     publication_detail = ""
-    warn_if_artifact_source_checkout_is_stale(
-        config, source_repo=effective_source_repo, runner=runner, print_func=print_func,
-    )
-    result = upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run, runner=runner)
-    print_func(result.message)
-    if result.changed and not dry_run:
-        config = load_project_config(config.project, config_path)
-    runtime_artifacts = refresh_generated_project_runtime_artifacts(
+    config = _refresh_upgrade_artifacts(
         config,
-        config_path=config_path,
-        dry_run=dry_run,
-        source_repo=effective_source_repo if source_repo is not None else None,
         commit_git_dir=commit_git_dir,
-        runner=runner,
-    )
-    print_func(runtime_artifacts.message)
-    project_dir = _project_dir_from_generated_config_path(config_path)
-    if project_dir is not None:
-        onboarding_commit_git_dir = commit_git_dir
-        if onboarding_commit_git_dir is None:
-            plan_commit_git_dir = _plan_data_from_config(config, config_path).get("commit_git_dir")
-            if isinstance(plan_commit_git_dir, str) and plan_commit_git_dir.strip():
-                onboarding_commit_git_dir = plan_commit_git_dir.strip()
-        upgrade_switchyard_onboarding_docs(
-            source_repo=effective_source_repo,
-            project_dir=project_dir,
-            owner_user=config.run_as_user or current_user_name(),
-            commit_git_dir=onboarding_commit_git_dir,
-            dry_run=dry_run,
-            runner=runner,
-            print_func=print_func,
-        )
-    ensure_generated_project_board_skill(
-        config,
         config_path=config_path,
-        script_path=effective_source_repo / "scripts" / "team-launcher",
-        source_repo=effective_source_repo,
         dry_run=dry_run,
-        runner=runner,
+        effective_source_repo=effective_source_repo,
         print_func=print_func,
-    )
-    repair_repository_policy_hooks(
-        config_path, source_repo=effective_source_repo, dry_run=dry_run, print_func=print_func,
-    )
-    # Before the phases, because a tenant that cannot file a report is how this
-    # host finds out anything is wrong with it at all (SYRD-238).
-    config, report_link_problems = record_upstream_report_link(
-        config,
-        config_path=config_path,
-        upstream_report_url=upstream_report_url,
+        registry_dir=registry_dir,
+        runner=runner,
+        source_repo=source_repo,
         upstream_report_token_file=upstream_report_token_file,
-        dry_run=dry_run,
-        print_func=print_func,
+        upstream_report_url=upstream_report_url,
     )
-    report_problems = report_link_problems + refresh_upstream_report_credential(
-        config, dry_run=dry_run, registry_dir=registry_dir, print_func=print_func,
-    )
-    # A tenant registered before its CLI selection was recorded cannot be
-    # offered a promotion at launch without guessing, and guessing is what
-    # asked the `test` tenant about a Hermes no role of its uses (SYRD-220).
-    report_problems += refresh_registered_agent_clis(
-        config, registry_dir=registry_dir, dry_run=dry_run, print_func=print_func,
-    )
-    if report_problems:
-        for problem in report_problems:
-            print_func(f"switchyard: {problem}")
-        print_func(
-            f"switchyard: {config.project} keeps the report credential it had; nothing else "
-            "about this upgrade depends on it."
-        )
     tooling_staged = _stage_upgrade_tooling(
         config,
         config_path=config_path,

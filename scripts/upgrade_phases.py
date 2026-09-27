@@ -4,6 +4,12 @@
 it keeps its name, signature and defaults, and calls each phase here, at the
 phase's old position, by the launcher's own name.
 
+- **U3, generated artifacts and the upstream report** (`_refresh_upgrade_artifacts`,
+  SYRD-349): the stale-source warning, the generated layout (reloading the
+  configuration when it changed), runtime artifacts, onboarding documents, the
+  board skill and repository hooks, then the upstream report link and
+  credential and the registered agent CLIs, whose problems are reported and not
+  fatal. It answers the configuration the rest of the upgrade uses.
 - **U4, role tooling: preview and privileged staging** (`_stage_upgrade_tooling`,
   SYRD-346): on a dry run, what staging would do; as root, the untrusted
   migration removed, a verified release resolved, the rollback note, the staged
@@ -652,3 +658,97 @@ def _finish_upgrade(
         )
         return 1
     return 0
+
+
+def _refresh_upgrade_artifacts(
+    config: ProjectConfig,
+    *,
+    commit_git_dir: str | None,
+    config_path: Path,
+    dry_run: bool,
+    effective_source_repo: Path,
+    print_func: Callable[[str], None],
+    registry_dir: Path | None,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    source_repo: Path | None,
+    upstream_report_token_file: str,
+    upstream_report_url: str,
+) -> ProjectConfig:
+    """U3 of `upgrade_project_command`, unchanged: the generated layout, runtime
+    artifacts, onboarding documents, board skill and repository hooks refreshed,
+    and the upstream report link, credential and agent CLIs recorded. It answers
+    the configuration the rest of the upgrade uses -- reloaded when the layout
+    changed, and as the report link recorded it."""
+    from scripts import team_launcher as launcher
+
+    launcher.warn_if_artifact_source_checkout_is_stale(
+        config, source_repo=effective_source_repo, runner=runner, print_func=print_func,
+    )
+    result = launcher.upgrade_generated_project_layout(config, config_path=config_path, dry_run=dry_run, runner=runner)
+    print_func(result.message)
+    if result.changed and not dry_run:
+        config = launcher.load_project_config(config.project, config_path)
+    runtime_artifacts = launcher.refresh_generated_project_runtime_artifacts(
+        config,
+        config_path=config_path,
+        dry_run=dry_run,
+        source_repo=effective_source_repo if source_repo is not None else None,
+        commit_git_dir=commit_git_dir,
+        runner=runner,
+    )
+    print_func(runtime_artifacts.message)
+    project_dir = launcher._project_dir_from_generated_config_path(config_path)
+    if project_dir is not None:
+        onboarding_commit_git_dir = commit_git_dir
+        if onboarding_commit_git_dir is None:
+            plan_commit_git_dir = launcher._plan_data_from_config(config, config_path).get("commit_git_dir")
+            if isinstance(plan_commit_git_dir, str) and plan_commit_git_dir.strip():
+                onboarding_commit_git_dir = plan_commit_git_dir.strip()
+        launcher.upgrade_switchyard_onboarding_docs(
+            source_repo=effective_source_repo,
+            project_dir=project_dir,
+            owner_user=config.run_as_user or launcher.current_user_name(),
+            commit_git_dir=onboarding_commit_git_dir,
+            dry_run=dry_run,
+            runner=runner,
+            print_func=print_func,
+        )
+    launcher.ensure_generated_project_board_skill(
+        config,
+        config_path=config_path,
+        script_path=effective_source_repo / "scripts" / "team-launcher",
+        source_repo=effective_source_repo,
+        dry_run=dry_run,
+        runner=runner,
+        print_func=print_func,
+    )
+    launcher.repair_repository_policy_hooks(
+        config_path, source_repo=effective_source_repo, dry_run=dry_run, print_func=print_func,
+    )
+    # Before the phases, because a tenant that cannot file a report is how this
+    # host finds out anything is wrong with it at all (SYRD-238).
+    config, report_link_problems = launcher.record_upstream_report_link(
+        config,
+        config_path=config_path,
+        upstream_report_url=upstream_report_url,
+        upstream_report_token_file=upstream_report_token_file,
+        dry_run=dry_run,
+        print_func=print_func,
+    )
+    report_problems = report_link_problems + launcher.refresh_upstream_report_credential(
+        config, dry_run=dry_run, registry_dir=registry_dir, print_func=print_func,
+    )
+    # A tenant registered before its CLI selection was recorded cannot be
+    # offered a promotion at launch without guessing, and guessing is what
+    # asked the `test` tenant about a Hermes no role of its uses (SYRD-220).
+    report_problems += launcher.refresh_registered_agent_clis(
+        config, registry_dir=registry_dir, dry_run=dry_run, print_func=print_func,
+    )
+    if report_problems:
+        for problem in report_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: {config.project} keeps the report credential it had; nothing else "
+            "about this upgrade depends on it."
+        )
+    return config

@@ -44,6 +44,13 @@ reported for the original report config and recorded against the current one,
 the trusted journal and reports, unsafe windows, and the blocked line and 1 said
 after everything else; the upgrade returns U6's answer, and a U5 stop never
 reaches it.
+
+SYRD-349 added U3, generated artifacts and the upstream report
+(`_refresh_upgrade_artifacts`, answering the configuration). Its cases pin the
+order, the reload only for a real layout change, the artifact source's None, the
+onboarding commit cache and owner fallbacks, the board skill and hooks, the
+report link's config going on, the problems said in order and not fatal, and the
+upgrade keeping the report config taken before U3.
 """
 
 from __future__ import annotations
@@ -62,7 +69,7 @@ if str(ROOT) not in sys.path:
 
 CHECKS = 0
 EXPORTED = ("UpgradeToolingStaged", "_stage_upgrade_tooling", "UpgradeIdentitiesDone", "_upgrade_identities_and_accounts",
-            "_finish_upgrade")
+            "_finish_upgrade", "_refresh_upgrade_artifacts")
 #: U4's launcher lookups and how many times each is read (measured on the SYRD-346 baseline: 16 reads of 9 names).
 SEAMS = {"_staged_tooling_dir": 1, "refresh_role_pane_hooks": 2, "resolve_trusted_upgrade_release": 2,
          "remove_tenant_publication_boundary": 2, "remove_untrusted_role_account_migration": 1,
@@ -243,7 +250,8 @@ def test_the_seams_the_phases_own_names_and_the_call_site() -> None:
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
           "the upgrade calls U4 by the launcher's own (patchable) name")
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 4]]
-    check(at == 43 and wiring == ["if not isinstance(tooling_staged, UpgradeToolingStaged):\n    return tooling_staged",
+    # U4 was statement [43]; SYRD-349 folded U3's fourteen statements into one, so it is [30] now.
+    check(at == 30 and wiring == ["if not isinstance(tooling_staged, UpgradeToolingStaged):\n    return tooling_staged",
                                   "trusted_release_root = tooling_staged.trusted_release_root",
                                   "publication_detail = tooling_staged.publication_detail"],
           f"the upgrade calls U4 at its old position, returns a refusal before reading either value, then takes both: "
@@ -261,7 +269,7 @@ def run_wiring(answer: object):
     """The upgrade's own call, dispatch and unpacking, compiled from the launcher and run against a stand-in U4."""
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
-    statements = upgrade.body[43:47]
+    statements = upgrade.body[30:34]
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in (
             "config", "config_path", "deploy_ref", "deploy_ref_chosen", "dry_run", "effective_source_repo",
@@ -556,7 +564,8 @@ def test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local()
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
           "the upgrade calls U5 by the launcher's own (patchable) name")
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 4]]
-    check(at == 47 and wiring == ["if not isinstance(identities_done, UpgradeIdentitiesDone):\n    return identities_done",
+    # U5 was statement [47]; [34] since SYRD-349 folded U3 into one statement.
+    check(at == 34 and wiring == ["if not isinstance(identities_done, UpgradeIdentitiesDone):\n    return identities_done",
                                   "config = identities_done.config",
                                   "release_report_config = identities_done.release_report_config"],
           f"at U5's old position, a refusal is returned before either value is read: {at} {wiring}")
@@ -775,7 +784,7 @@ def run_u5_wiring(answer: object):
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=[*upgrade.body[47:51], ast.parse("return ('went on', config, release_report_config)").body[0]],
+        body=[*upgrade.body[34:38], ast.parse("return ('went on', config, release_report_config)").body[0]],
         decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeIdentitiesDone
     asked: list[tuple] = []
@@ -886,7 +895,7 @@ def test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade() -> Non
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
     tail = upgrade.body[-1]
-    check(len(upgrade.body) == 52 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
+    check(len(upgrade.body) == 39 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
           and isinstance(tail.value.func, ast.Name) and tail.value.func.id == "_finish_upgrade"
           and {k.arg: ast.unparse(k.value) for k in tail.value.keywords}.get("release_report_config") == "release_report_config",
           f"the upgrade ends by returning U6's answer, called by the launcher's own name at U6's old position: "
@@ -1005,7 +1014,7 @@ def test_the_upgrade_returns_u6s_answer_after_u5() -> None:
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
                                           kw_defaults=[], defaults=[]),
-        body=upgrade.body[47:52], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+        body=upgrade.body[34:39], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
     from scripts.upgrade_phases import UpgradeIdentitiesDone
     for u5_answer in (Code(4), "continue"):
         asked: list[tuple] = []
@@ -1027,10 +1036,230 @@ def test_the_upgrade_returns_u6s_answer_after_u5() -> None:
             check(result is u5_answer and asked == [], f"a U5 stop never reaches U6: {result!r} {asked}")
 
 
+# --- U3: generated artifacts and the upstream report (SYRD-349) ----------------------------------------------------
+
+#: U3's launcher lookups, each read once, through the launcher (measured on the SYRD-349 baseline: 13 names).
+U3_SEAMS = ("warn_if_artifact_source_checkout_is_stale", "upgrade_generated_project_layout", "load_project_config",
+            "refresh_generated_project_runtime_artifacts", "_project_dir_from_generated_config_path",
+            "_plan_data_from_config", "upgrade_switchyard_onboarding_docs", "current_user_name",
+            "ensure_generated_project_board_skill", "repair_repository_policy_hooks", "record_upstream_report_link",
+            "refresh_upstream_report_credential", "refresh_registered_agent_clis")
+PROJECT_DIR = Path("/nonexistent/syrd349/project")
+GIVEN_SOURCE = Path("/nonexistent/syrd349/given-source")
+
+
+class Artifacts:
+    """U3's launcher facilities, answering from objects this test owns, into one ordered log."""
+
+    def __init__(self, *, changed: bool = False, project_dir: object = PROJECT_DIR, plan: dict | None = None,
+                 link_problems: list | None = None, credential_problems: list | None = None,
+                 cli_problems: list | None = None, error: Exception | None = None) -> None:
+        self.changed, self.project_dir, self.plan = changed, project_dir, plan or {}
+        self.link_problems, self.credential_problems = link_problems or [], credential_problems or []
+        self.cli_problems, self.error = cli_problems or [], error
+        self.reloaded = SimpleNamespace(project=PROJECT, run_as_user="syrd349-owner", name="reloaded")
+        self.linked = SimpleNamespace(project=PROJECT, run_as_user="syrd349-owner", name="linked")
+        self.log: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+
+        def link(config, **kw):
+            L.append(("link", config, kw))
+            return self.linked, list(self.link_problems)
+
+        def hooks(config_path, **kw):
+            L.append(("hooks", config_path, kw))
+            if self.error:
+                raise self.error
+
+        return dict(
+            warn_if_artifact_source_checkout_is_stale=lambda config, **kw: L.append(("stale?", config, kw)),
+            upgrade_generated_project_layout=lambda config, **kw: L.append(("layout", config, kw))
+                or SimpleNamespace(changed=self.changed, message="SYRD349 LAYOUT"),
+            load_project_config=lambda project, path: L.append(("reload", project, path)) or self.reloaded,
+            refresh_generated_project_runtime_artifacts=lambda config, **kw: L.append(("runtime", config, kw))
+                or SimpleNamespace(message="SYRD349 RUNTIME"),
+            _project_dir_from_generated_config_path=lambda path: L.append(("project-dir", path)) or self.project_dir,
+            _plan_data_from_config=lambda config, path: L.append(("plan", config, path)) or dict(self.plan),
+            upgrade_switchyard_onboarding_docs=lambda **kw: L.append(("onboarding", kw)),
+            current_user_name=lambda: L.append(("current-user",)) or "syrd349-me",
+            ensure_generated_project_board_skill=lambda config, **kw: L.append(("board-skill", config, kw)),
+            repair_repository_policy_hooks=hooks,
+            record_upstream_report_link=link,
+            refresh_upstream_report_credential=lambda config, **kw: L.append(("credential", config, kw))
+                or list(self.credential_problems),
+            refresh_registered_agent_clis=lambda config, **kw: L.append(("clis", config, kw)) or list(self.cli_problems),
+        )
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def u3(art: Artifacts, *, dry_run: bool = False, commit_git_dir: object = "syrd349-commit",
+       source_repo: object = GIVEN_SOURCE, owner: object = "syrd349-owner"):
+    from scripts import team_launcher, upgrade_phases
+
+    said: list[str] = []
+    config = SimpleNamespace(project=PROJECT, run_as_user=owner, name="incoming")
+    with patched(team_launcher, **art.names()):
+        result = upgrade_phases._refresh_upgrade_artifacts(
+            config, commit_git_dir=commit_git_dir, config_path=CONFIG_PATH, dry_run=dry_run,
+            effective_source_repo=SOURCE, print_func=said.append, registry_dir=Path("/nonexistent/syrd349/registry"),
+            runner=refusing_runner, source_repo=source_repo, upstream_report_token_file="syrd349-token",
+            upstream_report_url="https://example.invalid/syrd349")
+    return result, said, config
+
+
+def test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config() -> None:
+    module = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_refresh_upgrade_artifacts")
+    for name in U3_SEAMS:
+        through = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name
+                   and isinstance(n.value, ast.Name) and n.value.id == "launcher"]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(through) == 1 and not bare, f"U3 reads {name} at its one site, through the launcher")
+    bound = {a.arg for a in ast.walk(function) if isinstance(a, ast.arg)}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                      and n.value.id == "launcher" and n.attr in bound | {"isinstance", "str"}})
+    check(through == [] and ast.unparse(function.body[-1]) == "return config",
+          f"nothing U3 binds, nor a builtin, is read as the launcher's, and it returns its config: {through}")
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+               and ast.unparse(n.value.func).endswith("_refresh_upgrade_artifacts")), None)
+    check(at == 29 and isinstance(upgrade.body[at].value.func, ast.Name)
+          and ast.unparse(upgrade.body[at].targets[0]) == "config"
+          and [ast.unparse(n) for n in upgrade.body[26:29]] == ["release_report_config = config",
+                                                                 "trusted_release_root: Path | None = None",
+                                                                 "publication_detail = ''"],
+          "the upgrade assigns U3's config at U3's old position, by the launcher's own name, after the report config "
+          "was taken")
+    following = ast.unparse(upgrade.body[at + 1]).split("\n")[0] if at is not None else ""
+    check(following.startswith("tooling_staged = _stage_upgrade_tooling("),
+          f"and nothing -- no report config taken from U3's answer -- comes between U3 and U4: {following}")
+
+
+def test_u3_in_order_with_an_unchanged_layout() -> None:
+    art = Artifacts(plan={"commit_git_dir": "  plan-cache  "})
+    result, said, config = u3(art)
+    check(art.kinds() == ["stale?", "layout", "runtime", "project-dir", "onboarding", "board-skill", "hooks", "link",
+                          "credential", "clis"],
+          f"warning, layout, runtime, onboarding, board skill, hooks, then the report link, credential and CLIs: "
+          f"{art.kinds()}")
+    check(art.log[0] == ("stale?", config, dict(source_repo=SOURCE, runner=refusing_runner, print_func=said.append))
+          and SOURCE != GIVEN_SOURCE
+          and art.log[1] == ("layout", config, dict(config_path=CONFIG_PATH, dry_run=False, runner=refusing_runner)),
+          f"the stale-source warning and the layout, for the incoming config: {art.log[:2]}")
+    check(art.log[2] == ("runtime", config, dict(config_path=CONFIG_PATH, dry_run=False, source_repo=SOURCE,
+                                                commit_git_dir="syrd349-commit", runner=refusing_runner)),
+          f"runtime artifacts from the effective source whenever a source was given: {art.log[2]}")
+    check(art.log[4] == ("onboarding", dict(source_repo=SOURCE, project_dir=PROJECT_DIR, owner_user="syrd349-owner",
+                                            commit_git_dir="syrd349-commit", dry_run=False, runner=refusing_runner,
+                                            print_func=said.append)),
+          f"the given commit cache wins, and the plan is never read for it: {art.log[4]}")
+    check(art.log[5] == ("board-skill", config, dict(config_path=CONFIG_PATH, script_path=SOURCE / "scripts" / "team-launcher",
+                                                    source_repo=SOURCE, dry_run=False, runner=refusing_runner,
+                                                    print_func=said.append))
+          and art.log[6] == ("hooks", CONFIG_PATH, dict(source_repo=SOURCE, dry_run=False, print_func=said.append)),
+          f"the board skill and repository hooks: {art.log[5:7]}")
+    check(art.log[7] == ("link", config, dict(config_path=CONFIG_PATH, upstream_report_url="https://example.invalid/syrd349",
+                                              upstream_report_token_file="syrd349-token", dry_run=False,
+                                              print_func=said.append))
+          and art.log[8][1] is art.linked and art.log[9][1] is art.linked
+          and art.log[8][2] == dict(dry_run=False, registry_dir=Path("/nonexistent/syrd349/registry"), print_func=said.append),
+          f"the credential and CLIs are refreshed for the linked config: {art.log[7:]}")
+    check(result is art.linked and said == ["SYRD349 LAYOUT", "SYRD349 RUNTIME"],
+          f"U3 answers the linked config itself; the two messages are said: {result} {said}")
+
+
+def test_u3_reloads_only_when_the_layout_changed_for_real() -> None:
+    art = Artifacts(changed=True)
+    result, _, config = u3(art)
+    check(art.kinds()[:4] == ["stale?", "layout", "reload", "runtime"] and art.log[2] == ("reload", PROJECT, CONFIG_PATH)
+          and art.log[3][1] is art.reloaded and next(e for e in art.log if e[0] == "link")[1] is art.reloaded,
+          f"a changed layout reloads the config, and everything after reads the reloaded one: {art.kinds()}")
+    art = Artifacts(changed=True)
+    u3(art, dry_run=True)
+    check("reload" not in art.kinds() and art.log[2][2]["dry_run"] is True, "a dry run never reloads")
+    dry = {e[0]: e[-1].get("dry_run") for e in art.log if isinstance(e[-1], dict) and "dry_run" in e[-1]}
+    check(dry == {"layout": True, "runtime": True, "onboarding": True, "board-skill": True, "hooks": True, "link": True,
+                  "credential": True, "clis": True},
+          f"and every step it drives is told it is a dry run: {dry}")
+
+
+def test_u3_the_artifact_source_distinction() -> None:
+    art = Artifacts()
+    u3(art, source_repo=None)
+    check(art.log[2][2]["source_repo"] is None, "no source asked for: the runtime artifacts get None, not the checkout")
+
+
+def test_u3_the_onboarding_cache_and_owner_fallbacks() -> None:
+    for plan, want in (({"commit_git_dir": "  plan-cache  "}, "plan-cache"), ({"commit_git_dir": "   "}, None),
+                       ({"commit_git_dir": 7}, None), ({}, None)):
+        art = Artifacts(plan=plan)
+        u3(art, commit_git_dir=None)
+        onboarding = next(e for e in art.log if e[0] == "onboarding")
+        check(onboarding[1]["commit_git_dir"] == want and "plan" in art.kinds(),
+              f"no cache given: the plan's, stripped, only when it is a non-blank string: {plan} {onboarding[1]}")
+    art = Artifacts()
+    u3(art, owner=None)
+    check(next(e for e in art.log if e[0] == "onboarding")[1]["owner_user"] == "syrd349-me" and "current-user" in art.kinds(),
+          "no owner configured: the current user")
+    art = Artifacts(project_dir=None)
+    u3(art)
+    check("onboarding" not in art.kinds() and "board-skill" in art.kinds(),
+          "no project directory: no onboarding documents, and the rest still runs")
+
+
+def test_u3_report_problems_are_said_in_order_and_are_not_fatal() -> None:
+    art = Artifacts(link_problems=["syrd349: link"], credential_problems=["syrd349: credential"],
+                    cli_problems=["syrd349: cli"])
+    result, said, _ = u3(art)
+    check(said[2:] == ["switchyard: syrd349: link", "switchyard: syrd349: credential", "switchyard: syrd349: cli",
+                       f"switchyard: {PROJECT} keeps the report credential it had; nothing else about this upgrade "
+                       "depends on it."] and result is art.linked,
+          f"link, credential, CLIs, in that order, then the upgrade goes on with the linked config: {said}")
+
+
+def test_u3_an_error_reaches_the_caller() -> None:
+    boom = OSError("syrd349: hooks raised")
+    art = Artifacts(error=boom)
+    try:
+        u3(art); raised = None
+    except OSError as exc:
+        raised = exc
+    check(raised is boom and art.kinds()[-1] == "hooks", f"not caught, nothing after it: {art.kinds()}")
+
+
+def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    names = ["config", "commit_git_dir", "config_path", "dry_run", "effective_source_repo", "print_func", "registry_dir",
+             "runner", "source_repo", "upstream_report_token_file", "upstream_report_url"]
+    code = ast.Module(body=[ast.FunctionDef(
+        name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
+                                          kw_defaults=[], defaults=[]),
+        body=[*upgrade.body[26:30],
+              ast.parse("return config, release_report_config, trusted_release_root, publication_detail").body[0]],
+        decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+    new = SimpleNamespace(name="u3 config")
+    asked: list[tuple] = []
+    namespace = {"Path": Path, "_refresh_upgrade_artifacts": lambda config, **k: asked.append((config, k)) or new}
+    exec(compile(ast.fix_missing_locations(code), "upgrade_project_command", "exec"), namespace)
+    incoming = SimpleNamespace(name="incoming")
+    result = namespace["wiring"](incoming, "c", CONFIG_PATH, False, SOURCE, print, None, refusing_runner, None, "t", "u")
+    check(result == (new, incoming, None, "") and result[1] is incoming and asked[0][0] is incoming
+          and asked[0][1]["upstream_report_url"] == "u",
+          f"U3's config goes on, while the report config stays the one from before U3: {result}")
+
+
 #: Run first: a seam taken past the launcher must be caught before any
 #: behaviour check runs the real code it reached.
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
+             "test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config",
              "test_the_seams_the_phases_own_names_and_the_call_site",
              "test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local",
              "test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade")

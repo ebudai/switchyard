@@ -1081,10 +1081,12 @@ from scripts.new_project_phases import (
     NewProjectBoard,
     NewProjectChoices,
     NewProjectPreflight,
+    NewProjectSignIn,
     _check_new_project_preflight,
     _prepare_new_project_accounts,
     _prepare_new_project_board,
     _resolve_new_project_choices,
+    _run_new_project_sign_in,
 )
 from scripts.github_identity import (
     GITHUB_IDENTITY_TIMEOUT_SECONDS,
@@ -7044,86 +7046,27 @@ def switchyard_new_command(
         return new_project_board
     config = new_project_board.config
     config_path = new_project_board.config_path
-    # No live model probe here, deliberately. This used to ask every configured
-    # role's model to read a file and prove it had, once per role and again when
-    # the answer came back without the token -- up to 180 seconds an attempt on
-    # the critical path of a first launch, and a launch refused outright when a
-    # capable model simply answered without reaching for the tool. On test17
-    # that is exactly what happened: Codex answered twice without reading
-    # `switchyard-model-probe.txt`, and a tenant whose login and trust were both
-    # complete was returned to the shell with no panes (SYRD-246).
-    #
-    # What stays is what is cheap and certain: the CLI is installed for the
-    # owner, and the account is authenticated. Those are the two things that
-    # make a pane unusable before it starts. Whether a model can call a tool is
-    # the provider's own answer to give, in the pane, in its own words -- and
-    # `switchyard validate-models` still asks it on purpose.
-    stages.begin("provider sign-in and folder trust", waits_for_you=True)
-    first_run_auth_report = run_first_run_auth_phase(
-        config,
-        owner_user=owner_user,
-        owner_home=_owner_home_for_auth(owner_user, fallback=home_base / owner_user),
-        runner=runner,
-        foreground_runner=foreground_runner_for(first_run_runner),
-        print_func=print_func,
-    )
-    if stop_before_launch_for_missing_owner_clis(first_run_auth_report, print_func=print_func):
-        return 1
-    if stop_before_launch_for_unauthenticated_providers(
-        first_run_auth_report, print_func=print_func
-    ):
-        return 1
-    # The account exists and has authenticated now, which is the first moment
-    # its model list is a real answer. The operator chose before either was
-    # true, so they are offered the real list rather than refused for having
-    # used the only one available to them (SYRD-250 DAT).
-    config, first_run_auth_report = confirm_unknown_models_with_owner(
-        config,
-        first_run_auth_report,
-        config_path=config_path,
-        runner=runner,
-        interactive=interactive,
+    new_project_sign_in = _run_new_project_sign_in(
+        home_base=home_base,
+        euid_getter=euid_getter,
         input_func=input_func,
         print_func=print_func,
-    )
-    if stop_before_launch_for_unknown_models(
-        first_run_auth_report, project=config.project, print_func=print_func
-    ):
-        return 1
-    report_models_were_not_probed(config, print_func=print_func)
-    launch_runner = _owner_project_git_runner(
+        interactive=interactive,
+        first_run_runner=first_run_runner,
         owner_user=owner_user,
         project_dir=project_dir,
-        owned_roots=_control_repository_owned_roots(config),
+        resolved_slug=resolved_slug,
         runner=runner,
+        stages=stages,
+        config=config,
+        config_path=config_path,
     )
-    # A newly provisioned project declares per-role accounts that the operator
-    # has not created yet, so its roles cannot start with their own identities.
-    # Provisioning itself succeeded; the launch is deferred rather than failed,
-    # and the artifacts say what to run next (SYRD-39).
-    pending_isolation = role_isolation_gaps(config)
-    launch_deferred = bool(pending_isolation)
-    if launch_deferred:
-        # The complete handoff -- accounts, ownership, runtime, tooling AND
-        # credential seeding -- is written here, not left to a later failed
-        # start, so following the printed instruction once is enough to make the
-        # next start operable (SYRD-39).
-        handoff_path, handoff_problems = publish_role_account_migration(
-            config, config_path=config_path, euid_getter=euid_getter, print_func=print_func
-        )
-        next_step = (
-            f"Run {handoff_path} as an operator (safe to re-run), then start it with "
-            f"`switchyard {resolved_slug}`."
-            if handoff_path is not None
-            else (
-                "Its role-account migration was not published where root can run it, so there is "
-                "nothing to hand you yet: " + "; ".join(handoff_problems)
-            )
-        )
-        print_func(
-            f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
-            "were not started:\n  " + "\n  ".join(pending_isolation) + "\n" + next_step
-        )
+    if not isinstance(new_project_sign_in, NewProjectSignIn):
+        return new_project_sign_in
+    config = new_project_sign_in.config
+    first_run_auth_report = new_project_sign_in.first_run_auth_report
+    launch_deferred = new_project_sign_in.launch_deferred
+    launch_runner = new_project_sign_in.launch_runner
     # Before any window opens: a pane's first act is to run a program out of
     # the root-owned staged bundle, and a tenant whose staging was skipped
     # opened its tabs onto a command that was not there while provisioning

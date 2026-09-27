@@ -2232,6 +2232,28 @@ def test_the_launch_actually_consults_that_gate() -> None:
     # Naming the path that is ungated beats counting occurrences.
     for name in ("switchyard_new_command", "switchyard_main"):
         body = inspect.getsource(getattr(team_launcher, name))
+        gate = "stop_before_launch_for_unauthenticated_providers("
+        if name == "switchyard_new_command" and gate not in body:
+            # SYRD-373: the command's sign-in phase holds the gate. The command
+            # must still return that phase's stop, not carry on past it.
+            import ast
+
+            from scripts import new_project_phases
+
+            phases = inspect.getsource(new_project_phases)
+            holder = next((node for node in ast.parse(phases).body
+                           if isinstance(node, ast.FunctionDef) and gate in ast.get_source_segment(phases, node)), None)
+            check(holder is not None,
+                  f"{name} starts panes without checking that every provider is "
+                  "signed in, which is how three Codex roles came up with no "
+                  "credentials")
+            call = next(node for node in ast.walk(ast.parse(body.strip() if body.startswith("def") else body))
+                        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                        and ast.unparse(node.value.func) == holder.name)
+            local = call.targets[0].id
+            check(f"if not isinstance({local}, " in body and f"return {local}\n" in body.split(f"{local} = {holder.name}(")[1][:4000],
+                  f"{name} calls the sign-in phase but does not return its stop")
+            body = ast.get_source_segment(phases, holder)
         check("stop_before_launch_for_unauthenticated_providers(" in body,
               f"{name} starts panes without checking that every provider is "
               "signed in, which is how three Codex roles came up with no "

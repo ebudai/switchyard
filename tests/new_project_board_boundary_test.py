@@ -233,7 +233,16 @@ def test_the_command_calls_it_and_returns_a_failed_status_itself() -> None:
     check(ast.unparse(body[at + 1]) == "if not isinstance(new_project_board, NewProjectBoard):\n    return new_project_board",
           "a status is returned as it came, without comparing it again")
     check([ast.unparse(s) for s in body[at + 2:at + 4]] == [f"{f} = new_project_board.{f}" for f in OUTPUTS], "both read back")
-    check(ast.unparse(body[at + 4]) == "stages.begin('provider sign-in and folder trust', waits_for_you=True)", "then P4 begins")
+    after = body[at + 4]
+    if ast.unparse(after) != "stages.begin('provider sign-in and folder trust', waits_for_you=True)":
+        # SYRD-373: P4 is its own phase now, and that phase begins it first.
+        sign_in = next(n for n in module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "_run_new_project_sign_in")
+        check(isinstance(after, ast.Assign) and isinstance(after.value, ast.Call)
+              and ast.unparse(after.value.func) == "_run_new_project_sign_in"
+              and ast.unparse(sign_in.body[1]) == "stages.begin('provider sign-in and folder trust', waits_for_you=True)",
+              f"then the P4 phase, which begins it first: {ast.unparse(after)[:80]}")
+    else:
+        check(True, "then P4 begins")
 
 
 # --- behaviour -------------------------------------------------------------------------------------------------------

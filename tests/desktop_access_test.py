@@ -269,12 +269,18 @@ def test_exported_new_project_before_first_role():
             # created the per-role Unix accounts. This case is about what the
             # FIRST role process inherits when it does start, so isolation is
             # stated as a precondition rather than asserted past.
-            stack.enter_context(patch.object(mod,'role_isolation_gaps',return_value=[]))
+            # SYRD-373: the sign-in phase reads it from `scripts.team_launcher` too.
+            for target in {id(mod):mod,id(phase_launcher):phase_launcher}.values():
+                stack.enter_context(patch.object(target,'role_isolation_gaps',return_value=[]))
             # SYRD-371: the accounts phase reads it from `scripts.team_launcher` too.
             for target in {id(mod):mod,id(phase_launcher):phase_launcher}.values():
                 stack.enter_context(patch.object(target,'_ensure_owner_user_and_project_dir',return_value=mod.OwnerUserProvisionResult(False,False)))
-            stack.enter_context(patch.object(mod,'_owner_home_for_auth',return_value=owner_home))
-            stack.enter_context(patch.object(mod,'run_first_run_auth_phase',side_effect=first_auth))
+            # SYRD-373: the sign-in phase reads it from `scripts.team_launcher` too.
+            for target in {id(mod):mod,id(phase_launcher):phase_launcher}.values():
+                stack.enter_context(patch.object(target,'_owner_home_for_auth',return_value=owner_home))
+            # SYRD-373: the sign-in phase reads it from `scripts.team_launcher` too.
+            for target in {id(mod):mod,id(phase_launcher):phase_launcher}.values():
+                stack.enter_context(patch.object(target,'run_first_run_auth_phase',side_effect=first_auth))
             stack.enter_context(patch.object(mod,'launch_project',side_effect=first_launch))
             stack.enter_context(patch.object(desktop,'install',side_effect=lambda *a,**k:events.append('gui-policy-unit-acl-installed')))
             assert mod.switchyard_new_command(from_artifact=artifact,desktop_policy=choice,source_repo=export,

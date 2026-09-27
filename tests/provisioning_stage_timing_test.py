@@ -270,7 +270,7 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
         raise AssertionError(f"switchyard new never runs {line!r}")
 
     assert executed_at("stages.begin(\"database and board\")") < executed_at("result = new_project_command(")
-    assert body.index("stages.begin(\"provider sign-in and folder trust\", waits_for_you=True)") < body.index(
+    assert executed_at("stages.begin(\"provider sign-in and folder trust\", waits_for_you=True)") < executed_at(
         "run_first_run_auth_phase("
     )
     assert body.rstrip().endswith("stages.finish()\n    return 0") or "stages.finish()\n    return 0" in body

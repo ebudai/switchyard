@@ -41,6 +41,16 @@ phase's old position, by the launcher's own name.
   configuration loaded and its desktop prepared, the project registered and the
   first-run worktrees prepared. Going on returns a frozen `NewProjectBoard`
   with `config` and `config_path`.
+- **P4, provider sign-in and folder trust** (`_run_new_project_sign_in`,
+  SYRD-373): the stage begun, the first-run sign-in and folder trust for the
+  owner -- watched when nobody injected a runner -- then three stops, each the
+  command's own 1: an owner missing a role's CLI, a provider not signed in, and
+  (after the owner confirms a model the list now shows) a model still unknown.
+  Otherwise the models reported as not probed, the launch runner built, and a
+  launch deferred -- with its role-account handoff published -- while the roles
+  are not isolated yet. Going on returns a frozen `NewProjectSignIn` with
+  `config` and the report as the confirmation left them, `launch_deferred` and
+  `launch_runner`.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -55,7 +65,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 if TYPE_CHECKING:
-    from scripts.team_launcher import ProjectConfig, ProvisioningStages, _NoRunnerInjected
+    from scripts.team_launcher import FirstRunAuthReport, ProjectConfig, ProvisioningStages, _NoRunnerInjected
     from scripts.ticket_board.project_provision import ProjectBoardProvision
 
 
@@ -668,4 +678,123 @@ def _prepare_new_project_board(
     return NewProjectBoard(
         config=config,
         config_path=config_path,
+    )
+
+
+@dataclass(frozen=True)
+class NewProjectSignIn:
+    """What P4 hands the rest of `switchyard_new_command` when the roles can
+    go on to their panes, by the command's own local names -- `config` and
+    `first_run_auth_report` as the owner's confirmation left them. A stop is
+    answered with the command's own 1 instead, and a refusal raises."""
+
+    config: ProjectConfig
+    first_run_auth_report: FirstRunAuthReport
+    launch_deferred: bool
+    launch_runner: Callable[..., subprocess.CompletedProcess[Any]]
+
+
+def _run_new_project_sign_in(
+    *,
+    home_base: Path,
+    euid_getter: Callable[[], int],
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+    interactive: bool | None,
+    first_run_runner: Callable[..., subprocess.CompletedProcess[Any]] | _NoRunnerInjected,
+    owner_user: str,
+    project_dir: Path,
+    resolved_slug: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    stages: ProvisioningStages,
+    config: ProjectConfig,
+    config_path: Path,
+) -> NewProjectSignIn | int:
+    from scripts import team_launcher as launcher
+
+    # No live model probe here, deliberately. This used to ask every configured
+    # role's model to read a file and prove it had, once per role and again when
+    # the answer came back without the token -- up to 180 seconds an attempt on
+    # the critical path of a first launch, and a launch refused outright when a
+    # capable model simply answered without reaching for the tool. On test17
+    # that is exactly what happened: Codex answered twice without reading
+    # `switchyard-model-probe.txt`, and a tenant whose login and trust were both
+    # complete was returned to the shell with no panes (SYRD-246).
+    #
+    # What stays is what is cheap and certain: the CLI is installed for the
+    # owner, and the account is authenticated. Those are the two things that
+    # make a pane unusable before it starts. Whether a model can call a tool is
+    # the provider's own answer to give, in the pane, in its own words -- and
+    # `switchyard validate-models` still asks it on purpose.
+    stages.begin("provider sign-in and folder trust", waits_for_you=True)
+    first_run_auth_report = launcher.run_first_run_auth_phase(
+        config,
+        owner_user=owner_user,
+        owner_home=launcher._owner_home_for_auth(owner_user, fallback=home_base / owner_user),
+        runner=runner,
+        foreground_runner=launcher.foreground_runner_for(first_run_runner),
+        print_func=print_func,
+    )
+    if launcher.stop_before_launch_for_missing_owner_clis(first_run_auth_report, print_func=print_func):
+        return 1
+    if launcher.stop_before_launch_for_unauthenticated_providers(
+        first_run_auth_report, print_func=print_func
+    ):
+        return 1
+    # The account exists and has authenticated now, which is the first moment
+    # its model list is a real answer. The operator chose before either was
+    # true, so they are offered the real list rather than refused for having
+    # used the only one available to them (SYRD-250 DAT).
+    config, first_run_auth_report = launcher.confirm_unknown_models_with_owner(
+        config,
+        first_run_auth_report,
+        config_path=config_path,
+        runner=runner,
+        interactive=interactive,
+        input_func=input_func,
+        print_func=print_func,
+    )
+    if launcher.stop_before_launch_for_unknown_models(
+        first_run_auth_report, project=config.project, print_func=print_func
+    ):
+        return 1
+    launcher.report_models_were_not_probed(config, print_func=print_func)
+    launch_runner = launcher._owner_project_git_runner(
+        owner_user=owner_user,
+        project_dir=project_dir,
+        owned_roots=launcher._control_repository_owned_roots(config),
+        runner=runner,
+    )
+    # A newly provisioned project declares per-role accounts that the operator
+    # has not created yet, so its roles cannot start with their own identities.
+    # Provisioning itself succeeded; the launch is deferred rather than failed,
+    # and the artifacts say what to run next (SYRD-39).
+    pending_isolation = launcher.role_isolation_gaps(config)
+    launch_deferred = bool(pending_isolation)
+    if launch_deferred:
+        # The complete handoff -- accounts, ownership, runtime, tooling AND
+        # credential seeding -- is written here, not left to a later failed
+        # start, so following the printed instruction once is enough to make the
+        # next start operable (SYRD-39).
+        handoff_path, handoff_problems = launcher.publish_role_account_migration(
+            config, config_path=config_path, euid_getter=euid_getter, print_func=print_func
+        )
+        next_step = (
+            f"Run {handoff_path} as an operator (safe to re-run), then start it with "
+            f"`switchyard {resolved_slug}`."
+            if handoff_path is not None
+            else (
+                "Its role-account migration was not published where root can run it, so there is "
+                "nothing to hand you yet: " + "; ".join(handoff_problems)
+            )
+        )
+        print_func(
+            f"switchyard: provisioned {resolved_slug}. Its roles are not isolated yet, so they "
+            "were not started:\n  " + "\n  ".join(pending_isolation) + "\n" + next_step
+        )
+    return NewProjectSignIn(
+        config=config,
+        first_run_auth_report=first_run_auth_report,
+        launch_deferred=launch_deferred,
+        launch_runner=launch_runner,
     )

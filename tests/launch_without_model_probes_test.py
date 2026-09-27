@@ -288,14 +288,31 @@ def test_the_new_command_says_it_before_it_launches() -> None:
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
     body = source[source.index("def switchyard_new_command("):]
     body = body[: body.index("\ndef ", 1)]
-    check("report_models_were_not_probed(" in body,
-          "the launch says the models were not checked")
-    told = body.index("report_models_were_not_probed(")
-    gate = body.index("stop_before_launch_for_unauthenticated_providers(")
-    launched = body.index("launch_result = 0 if launch_deferred else launch_project(")
-    check(gate < told < launched,
+    # SYRD-369 onward: the command runs its phases from `new_project_phases.py`.
+    # A line inside one runs where the command calls that phase, then at its
+    # place in the phase; the command and every phase it calls are its code.
+    import ast
+
+    phases = (ROOT / "scripts" / "new_project_phases.py").read_text(encoding="utf-8")
+    called = {node.name: ast.get_source_segment(phases, node).replace("launcher.", "")
+              for node in ast.parse(phases).body
+              if isinstance(node, ast.FunctionDef) and f"= {node.name}(" in body}
+
+    def executed_at(line: str) -> tuple[int, int] | None:
+        if line in body:
+            return (body.index(line), 0)
+        for name, text in called.items():
+            if line in text:
+                return (body.index(f"= {name}("), text.index(line))
+        return None
+
+    told = executed_at("report_models_were_not_probed(")
+    check(told is not None, "the launch says the models were not checked")
+    gate = executed_at("stop_before_launch_for_unauthenticated_providers(")
+    launched = executed_at("launch_result = 0 if launch_deferred else launch_project(")
+    check(gate is not None and launched is not None and gate < told < launched,
           "after the checks that can stop a launch, and before the panes open")
-    check("model_validation_failures" not in body,
+    check("model_validation_failures" not in body and not any("model_validation_failures" in t for t in called.values()),
           "and nothing in this command stops a launch over a model probe")
 
 

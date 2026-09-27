@@ -316,8 +316,17 @@ def test_the_command_hands_its_own_values_and_reads_every_field_back() -> None:
           "the phase first, called by the launcher's name, with the command's own values")
     back = [ast.unparse(s) for s in command.body[1:1 + len(OUTPUTS)]]
     check(back == [f"{f} = new_project_choices.{f}" for f in OUTPUTS], f"then every field, to its old name: {back[:3]}")
-    check(ast.unparse(command.body[1 + len(OUTPUTS)]) == "stages.begin('host and agent CLI checks')",
-          "then the host checks begin, where they always did")
+    after = command.body[1 + len(OUTPUTS)]
+    if ast.unparse(after) != "stages.begin('host and agent CLI checks')":
+        # SYRD-370: the host checks are the next phase, and that phase begins them first.
+        preflight = next(n for n in ast.parse((ROOT / "scripts" / "new_project_phases.py").read_text(encoding="utf-8")).body
+                         if isinstance(n, ast.FunctionDef) and n.name == "_check_new_project_preflight")
+        check(isinstance(after, ast.Assign) and isinstance(after.value, ast.Call)
+              and ast.unparse(after.value.func) == "_check_new_project_preflight"
+              and ast.unparse(preflight.body[1]) == "stages.begin('host and agent CLI checks')",
+              f"then the host-checks phase, which begins them first: {ast.unparse(after)[:80]}")
+    else:
+        check(True, "then the host checks begin, where they always did")
 
 
 # --- behaviour -------------------------------------------------------------------------------------------------------

@@ -488,6 +488,8 @@ def test_a_desktop_project_is_granted_installed_and_verified_before_its_first_ro
             events.append("first-role")
             return 0
 
+        import scripts.team_launcher as phase_launcher
+
         with ExitStack() as stack:
             real_getpwnam = mod.pwd.getpwnam
             fixture_owner = SimpleNamespace(
@@ -507,7 +509,10 @@ def test_a_desktop_project_is_granted_installed_and_verified_before_its_first_ro
                 "_require_existing_project_git_repository", "_commit_project_git_changes",
                 "_prepare_first_run_auth_worktrees", "report_launch_session_records",
             ]:
-                stack.enter_context(patch.object(mod, name, return_value=None))
+                # SYRD-370: the command's phases read these from `scripts.team_launcher`, which is
+                # not this copy, so each is stood in on that launcher too.
+                for target in {id(mod): mod, id(phase_launcher): phase_launcher}.values():
+                    stack.enter_context(patch.object(target, name, return_value=None))
             stack.enter_context(patch.object(mod, "role_isolation_gaps", return_value=[]))
             stack.enter_context(
                 patch.object(mod, "_ensure_owner_user_and_project_dir",

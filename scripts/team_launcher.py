@@ -1076,7 +1076,12 @@ from scripts.owner_preparation import (
     _resolve_owner_shell_path,
     _verify_project_path_writable_by_owner,
 )
-from scripts.new_project_phases import NewProjectChoices, _resolve_new_project_choices
+from scripts.new_project_phases import (
+    NewProjectChoices,
+    NewProjectPreflight,
+    _check_new_project_preflight,
+    _resolve_new_project_choices,
+)
 from scripts.github_identity import (
     GITHUB_IDENTITY_TIMEOUT_SECONDS,
     _plan_with_selection,
@@ -6945,60 +6950,39 @@ def switchyard_new_command(
     selected_role_efforts = new_project_choices.selected_role_efforts
     selected_role_models = new_project_choices.selected_role_models
     stages = new_project_choices.stages
-    stages.begin("host and agent CLI checks")
-    _precheck_project_path_before_mutating(owner_user, project_dir)
-    effective_source_repo = (source_repo or _repo_root()).expanduser().resolve(strict=False)
-    precheck_artifact = load_project_design_artifact(from_artifact, expected_project=resolved_slug) if from_artifact else None
-    worktree_branch = precheck_artifact.default_branch if precheck_artifact else "main"
-    precheck_plan = build_plan(
-        project=resolved_slug,
-        project_name=precheck_artifact.project_name if precheck_artifact else resolved_project_name,
-        owner_user=owner_user,
-        owner_home=home_base / owner_user,
+    new_project_preflight = _check_new_project_preflight(
+        from_artifact=from_artifact,
+        source_repo=source_repo,
+        commit_git_dir=commit_git_dir,
         port=port,
         database=database,
-        source_repo=effective_source_repo,
-        commit_git_dir=commit_git_dir,
-        ticket_prefix=precheck_artifact.ticket_prefix if precheck_artifact else None,
-        implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else selected_implementer_roles,
-        include_designer=precheck_artifact.include_designer if precheck_artifact else include_designer,
-        include_audit=precheck_artifact.include_audit if precheck_artifact else include_audit,
-        audit_roles=precheck_artifact.audit_roles if precheck_artifact else selected_audit_roles,
-        board_service_traversal=(
-            bool(precheck_artifact.capability_grants.get("board_service_traversal", True))
-            if precheck_artifact
-            else True
-        ),
-    )
-    precheck_new_project(
-        precheck_plan,
-        source_repo=effective_source_repo,
-        repository=project_dir,
-        runner=runner,
+        yes=yes,
+        home_base=home_base,
         port_in_use=port_in_use,
         socket_exists=socket_exists,
         config_dir=config_dir,
         registry_dir=registry_dir,
-        require_owner_user=False,
-        require_repository=False,
-    )
-    if resolved_agy_credential_source:
-        _validate_agy_credential_source(resolved_agy_credential_source, owner_user, home_base)
-    # BEFORE the first mutation, and that placement is the fix. Everything below
-    # this line creates something: the service user, the owner account, the
-    # project directory, the provisioning artifacts. A CLI problem discovered
-    # after any of them has already stranded a partly built tenant, which is
-    # what "declining installation must never strand a partially provisioned
-    # tenant" means in practice (SYRD-210).
-    selected_role_clis = require_agent_clis_for_new_tenant(
-        selected_role_clis,
-        owner_user=owner_user,
-        policy=agent_cli_policy,
-        sources=_parse_agent_cli_sources(agent_cli_sources),
-        interactive=not yes,
         input_func=input_func,
         print_func=print_func,
+        agent_cli_policy=agent_cli_policy,
+        agent_cli_sources=agent_cli_sources,
+        include_audit=include_audit,
+        include_designer=include_designer,
+        owner_user=owner_user,
+        project_dir=project_dir,
+        resolved_agy_credential_source=resolved_agy_credential_source,
+        resolved_project_name=resolved_project_name,
+        resolved_slug=resolved_slug,
+        runner=runner,
+        selected_audit_roles=selected_audit_roles,
+        selected_implementer_roles=selected_implementer_roles,
+        selected_role_clis=selected_role_clis,
+        stages=stages,
     )
+    effective_source_repo = new_project_preflight.effective_source_repo
+    precheck_plan = new_project_preflight.precheck_plan
+    selected_role_clis = new_project_preflight.selected_role_clis
+    worktree_branch = new_project_preflight.worktree_branch
     stages.begin("project accounts and files")
     _ensure_board_service_user(precheck_plan.service_user, runner=runner)
     _ensure_board_service_peer_auth(precheck_plan, source_repo=effective_source_repo, runner=runner)

@@ -492,6 +492,30 @@ def test_a_missing_version_is_said_rather_than_faked() -> None:
     assert "version not reported" in rec.text
 
 
+def _gate_position(source: str) -> int:
+    """Where `switchyard new` runs the CLI gate, in the launcher's source.
+
+    The gate was written in the command itself. SYRD-370 moved it, verbatim,
+    into the host-and-CLI phase in `new_project_phases.py`; the command runs it
+    where it calls that phase, so that call is the gate's position here, and
+    the phase has to still hold the gate.
+    """
+    gate = "selected_role_clis = require_agent_clis_for_new_tenant("
+    if gate in source:
+        return source.index(gate)
+    import ast
+
+    phases = (ROOT / "scripts" / "new_project_phases.py").read_text(encoding="utf-8")
+    phase = next(node for node in ast.parse(phases).body
+                 if isinstance(node, ast.FunctionDef) and node.name == "_check_new_project_preflight")
+    assert "selected_role_clis = launcher.require_agent_clis_for_new_tenant(" in ast.get_source_segment(phases, phase), (
+        "the CLI gate is gone from the host-and-CLI phase"
+    )
+    call = "= _check_new_project_preflight("
+    assert source.count(call) == 1, f"the command calls the host-and-CLI phase once: {source.count(call)}"
+    return source.index(call)
+
+
 def test_owner_verification_runs_after_the_owner_account_is_created() -> None:
     """My first attempt put this before the account existed, where it could only fail.
 
@@ -500,7 +524,7 @@ def test_owner_verification_runs_after_the_owner_account_is_created() -> None:
     place that distinction is visible.
     """
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    gate = source.index("selected_role_clis = require_agent_clis_for_new_tenant(")
+    gate = _gate_position(source)
     created = source.index("owner_result = _ensure_owner_user_and_project_dir(")
     # Searched from the top, not from `created`: searching forward turns "it
     # moved above the account" into a ValueError about a missing substring,
@@ -521,7 +545,7 @@ def test_the_gate_runs_before_the_first_mutation() -> None:
     to be driven with a real root environment to show it any other way.
     """
     source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    gate = source.index("selected_role_clis = require_agent_clis_for_new_tenant(")
+    gate = _gate_position(source)
     for mutator in (
         "_ensure_board_service_user(precheck_plan.service_user",
         "owner_result = _ensure_owner_user_and_project_dir(",

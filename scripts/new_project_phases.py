@@ -15,6 +15,15 @@ phase's old position, by the launcher's own name.
   before the root gate. Going on returns a frozen `NewProjectChoices`: the
   twenty-one values the rest of the command reads -- `runner` the plain runner
   every later step uses, `first_run_runner` exactly what the caller passed.
+- **P1, host and agent CLI checks** (`_check_new_project_preflight`, SYRD-370):
+  the stage begun, the project path checked before anything is created, the
+  source checkout and the design artifact's branch resolved, the provisioning
+  plan built and prechecked with the plain runner, the agy credential source
+  validated when there is one, and -- last, before the first mutation -- every
+  role's agent CLI required for the new owner. Every refusal is the command's
+  own, in the command's order. Going on returns a frozen `NewProjectPreflight`:
+  the source checkout, the plan, the worktree branch and the gate's
+  `selected_role_clis`, which replaces P0's.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -30,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Callable, Sequence
 
 if TYPE_CHECKING:
     from scripts.team_launcher import ProvisioningStages, _NoRunnerInjected
+    from scripts.ticket_board.project_provision import ProjectBoardProvision
 
 
 @dataclass(frozen=True)
@@ -249,4 +259,110 @@ def _resolve_new_project_choices(
         selected_role_efforts=selected_role_efforts,
         selected_role_models=selected_role_models,
         stages=stages,
+    )
+
+
+@dataclass(frozen=True)
+class NewProjectPreflight:
+    """What P1 hands the rest of `switchyard_new_command`, by the command's own
+    local names -- `selected_role_clis` the gate's answer, which replaces P0's.
+    A refusal raises instead."""
+
+    effective_source_repo: Path
+    precheck_plan: ProjectBoardProvision
+    selected_role_clis: Sequence[tuple[str, str]]
+    worktree_branch: str
+
+
+def _check_new_project_preflight(
+    *,
+    from_artifact: Path | None,
+    source_repo: Path | None,
+    commit_git_dir: str | None,
+    port: int | None,
+    database: str | None,
+    yes: bool,
+    home_base: Path,
+    port_in_use: Callable[[int], bool],
+    socket_exists: Callable[[Path], bool],
+    config_dir: Path | None,
+    registry_dir: Path | None,
+    input_func: Callable[[str], str],
+    print_func: Callable[[str], None],
+    agent_cli_policy: str,
+    agent_cli_sources: Sequence[str] | None,
+    include_audit: bool,
+    include_designer: bool,
+    owner_user: str,
+    project_dir: Path,
+    resolved_agy_credential_source: str,
+    resolved_project_name: str,
+    resolved_slug: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    selected_audit_roles: tuple[str, ...],
+    selected_implementer_roles: tuple[str, ...],
+    selected_role_clis: tuple[tuple[str, str], ...],
+    stages: ProvisioningStages,
+) -> NewProjectPreflight:
+    from scripts import team_launcher as launcher
+
+    stages.begin("host and agent CLI checks")
+    launcher._precheck_project_path_before_mutating(owner_user, project_dir)
+    effective_source_repo = (source_repo or launcher._repo_root()).expanduser().resolve(strict=False)
+    precheck_artifact = launcher.load_project_design_artifact(from_artifact, expected_project=resolved_slug) if from_artifact else None
+    worktree_branch = precheck_artifact.default_branch if precheck_artifact else "main"
+    precheck_plan = launcher.build_plan(
+        project=resolved_slug,
+        project_name=precheck_artifact.project_name if precheck_artifact else resolved_project_name,
+        owner_user=owner_user,
+        owner_home=home_base / owner_user,
+        port=port,
+        database=database,
+        source_repo=effective_source_repo,
+        commit_git_dir=commit_git_dir,
+        ticket_prefix=precheck_artifact.ticket_prefix if precheck_artifact else None,
+        implementer_roles=precheck_artifact.implementer_roles if precheck_artifact else selected_implementer_roles,
+        include_designer=precheck_artifact.include_designer if precheck_artifact else include_designer,
+        include_audit=precheck_artifact.include_audit if precheck_artifact else include_audit,
+        audit_roles=precheck_artifact.audit_roles if precheck_artifact else selected_audit_roles,
+        board_service_traversal=(
+            bool(precheck_artifact.capability_grants.get("board_service_traversal", True))
+            if precheck_artifact
+            else True
+        ),
+    )
+    launcher.precheck_new_project(
+        precheck_plan,
+        source_repo=effective_source_repo,
+        repository=project_dir,
+        runner=runner,
+        port_in_use=port_in_use,
+        socket_exists=socket_exists,
+        config_dir=config_dir,
+        registry_dir=registry_dir,
+        require_owner_user=False,
+        require_repository=False,
+    )
+    if resolved_agy_credential_source:
+        launcher._validate_agy_credential_source(resolved_agy_credential_source, owner_user, home_base)
+    # BEFORE the first mutation, and that placement is the fix. Everything below
+    # this line creates something: the service user, the owner account, the
+    # project directory, the provisioning artifacts. A CLI problem discovered
+    # after any of them has already stranded a partly built tenant, which is
+    # what "declining installation must never strand a partially provisioned
+    # tenant" means in practice (SYRD-210).
+    selected_role_clis = launcher.require_agent_clis_for_new_tenant(
+        selected_role_clis,
+        owner_user=owner_user,
+        policy=agent_cli_policy,
+        sources=launcher._parse_agent_cli_sources(agent_cli_sources),
+        interactive=not yes,
+        input_func=input_func,
+        print_func=print_func,
+    )
+    return NewProjectPreflight(
+        effective_source_repo=effective_source_repo,
+        precheck_plan=precheck_plan,
+        selected_role_clis=selected_role_clis,
+        worktree_branch=worktree_branch,
     )

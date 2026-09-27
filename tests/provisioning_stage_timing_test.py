@@ -229,7 +229,26 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
     import inspect
 
     body = inspect.getsource(team_launcher.switchyard_new_command)
-    positions = [body.index(f'stages.begin("{name}"') for name in team_launcher.NEW_PROJECT_STAGES]
+
+    def begun_at(name: str) -> int:
+        """The command begins a stage itself, or -- since SYRD-370 -- calls the
+        phase that begins it first thing, and the stage starts at that call."""
+        marker = f'stages.begin("{name}"'
+        if marker in body:
+            return body.index(marker)
+        import ast
+
+        from scripts import new_project_phases
+
+        tree = ast.parse(inspect.getsource(new_project_phases))
+        for phase in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+            statements = [s for s in phase.body if not isinstance(s, (ast.Import, ast.ImportFrom))]
+            if statements and ast.unparse(statements[0]).startswith(f"stages.begin({name!r}"):
+                assert body.count(f"= {phase.name}(") == 1, (phase.name, name)
+                return body.index(f"= {phase.name}(")
+        raise AssertionError(f"nothing begins the stage {name!r}")
+
+    positions = [begun_at(name) for name in team_launcher.NEW_PROJECT_STAGES]
     assert positions == sorted(positions), positions
     assert body.index("stages.begin(\"database and board\")") < body.index("result = new_project_command(")
     assert body.index("stages.begin(\"provider sign-in and folder trust\", waits_for_you=True)") < body.index(

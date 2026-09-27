@@ -966,6 +966,12 @@ from scripts.project_role_add import (
     _write_added_role_config,
     _write_updated_project_plan_artifacts,
 )
+from scripts.project_vcs_close_role import (
+    _apply_vcs_close_role_board_sql,
+    _project_plan_for_vcs_close_role,
+    _write_vcs_close_role_artifacts,
+    set_project_vcs_close_role_command,
+)
 from scripts.github_identity import (
     GITHUB_IDENTITY_TIMEOUT_SECONDS,
     _plan_with_selection,
@@ -13272,93 +13278,6 @@ def _commit_git_dir_from_plan_data(config: ProjectConfig, plan_data: dict[str, A
     ))
 
 
-def _project_plan_for_vcs_close_role(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    role_name: str,
-) -> ProjectBoardProvision:
-    role = role_name.strip().lower()
-    if not ROLE_RE.fullmatch(role):
-        raise SystemExit("team-launcher: VCS close role must match ^[a-z][a-z0-9_-]{0,63}$")
-    if config.project == "pgu":
-        raise SystemExit("team-launcher: pgu uses the full built-in workflow; set-vcs-close-role is only for provisioned projects")
-    configured_roles = {configured.role for configured in config.roles}
-    if role not in configured_roles:
-        raise SystemExit(f"team-launcher: VCS close role {role!r} does not exist in project {config.project}")
-    plan_data = _plan_data_from_config(config, config_path)
-    if plan_data.get("workflow") or _load_json(config_path).get("workflow"):
-        raise SystemExit("use ticket-board-workflow apply to update configured roles and stages")
-    audit_roles = _configured_audit_roles(config, plan_data=plan_data)
-    implementer_roles = _configured_implementer_roles(config, plan_data=plan_data)
-    include_designer = any(configured.role == "designer" for configured in config.roles)
-    return build_plan(
-        project=config.project,
-        project_name=config.project_name,
-        owner_user=str(_loaded_plan_field(plan_data, "owner_user", config.run_as_user or current_user_name())),
-        owner_home=_owner_home_from_plan_data(config, plan_data),
-        control_user=_regenerated_control_user(config, plan_data),
-        port=_loaded_plan_field(plan_data, "port", None),
-        database=_loaded_plan_field(plan_data, "database", None),
-        source_repo=Path(str(_loaded_plan_field(plan_data, "source_repo", _repo_root()))),
-        commit_git_dir=_commit_git_dir_from_plan_data(config, plan_data),
-        ticket_prefix=str(_loaded_plan_field(plan_data, "ticket_prefix", config.ticket_prefix)),
-        board_root=(
-            Path(str(plan_data["board_root"]))
-            if plan_data.get("board_root")
-            else _tenant_board_root_from_config(config)
-        ),
-        asset_dir=Path(str(plan_data["asset_dir"])) if plan_data.get("asset_dir") else None,
-        frame_dir=Path(str(plan_data["frame_dir"])) if plan_data.get("frame_dir") else None,
-        implementer_roles=implementer_roles,
-        include_designer=include_designer,
-        include_audit=bool(audit_roles),
-        audit_roles=audit_roles,
-        board_service_traversal=bool(_loaded_plan_field(plan_data, "board_service_traversal", True)),
-        vcs_close_role=role,
-    )
-
-
-def _write_vcs_close_role_artifacts(
-    plan: ProjectBoardProvision,
-    *,
-    role_name: str,
-    provision_dir: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-    config: ProjectConfig,
-) -> tuple[Path, Path, Path]:
-    plan_path = provision_dir / "plan.json"
-    board_unit_path = provision_dir / plan.board_unit
-    workflow_sql_path = provision_dir / f"{plan.project}-vcs-close-role.sql"
-    _write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
-    board_unit_path.write_text(render_board_unit(plan), encoding="utf-8")
-    workflow_sql_path.write_text(render_vcs_close_role_sql(plan), encoding="utf-8")
-    for path in (plan_path, board_unit_path, workflow_sql_path):
-        ensure_owner_file(config, path, runner=runner)
-    return plan_path, board_unit_path, workflow_sql_path
-
-
-def _apply_vcs_close_role_board_sql(
-    plan: ProjectBoardProvision,
-    *,
-    role_name: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    sql = render_vcs_close_role_sql(plan)
-    result = runner(
-        ["sudo", "-u", "postgres", "psql", "-X", "-v", "ON_ERROR_STOP=1", plan.admin_database_url, "-f", "-"],
-        input=sql,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        reason = _proc_failure_reason(result, f"psql failed with exit {result.returncode}")
-        raise SystemExit(
-            f"team-launcher: failed to configure VCS close role {role_name} in board database {plan.database}: {reason}"
-        )
-
-
 def _install_and_restart_board_unit(
     plan: ProjectBoardProvision,
     *,
@@ -13374,33 +13293,6 @@ def _install_and_restart_board_unit(
     restart = runner(["sudo", "systemctl", "restart", plan.board_unit])
     if restart.returncode != 0:
         raise SystemExit(f"team-launcher: failed to restart {plan.board_unit}")
-
-
-def set_project_vcs_close_role_command(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    role_name: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    plan = _project_plan_for_vcs_close_role(config, config_path=config_path, role_name=role_name)
-    role = dict(plan.operation_allowed_roles)["mark_done"][0]
-    render_vcs_close_role_sql(plan)
-    plan_path, board_unit_path, workflow_sql_path = _write_vcs_close_role_artifacts(
-        plan,
-        role_name=role,
-        provision_dir=config_path.parent,
-        runner=runner,
-        config=config,
-    )
-    _apply_vcs_close_role_board_sql(plan, role_name=role, runner=runner)
-    _install_and_restart_board_unit(plan, board_unit_path=board_unit_path, runner=runner)
-    print_func(
-        f"team-launcher: set VCS close role for {config.project} to {role}; "
-        f"updated {plan_path}, {board_unit_path}, and {workflow_sql_path}"
-    )
-    return 0
 
 
 @dataclass(frozen=True)

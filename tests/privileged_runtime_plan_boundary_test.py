@@ -188,14 +188,17 @@ def test_the_seams_the_modules_own_names_and_the_refresh_callers() -> None:
         check(not bound & set(through) and not set(OWN) & set(through),
               f"{name}: nothing it binds, nor a standard-library name, is read as the launcher's")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    refresh = next(n for n in launcher.body if isinstance(n, ast.FunctionDef)
+    # SYRD-354 moved the refresh into runtime_artifact_refresh, which reads them through the launcher.
+    refresher = ast.parse((ROOT / "scripts" / "runtime_artifact_refresh.py").read_text(encoding="utf-8"))
+    refresh = next(n for n in refresher.body if isinstance(n, ast.FunctionDef)
                    and n.name == "refresh_generated_project_runtime_artifacts")
-    called = sorted({n.func.id for n in ast.walk(refresh) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                     and n.func.id in MOVED})
+    called = sorted({n.func.attr for n in ast.walk(refresh) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and isinstance(n.func.value, ast.Name) and n.func.value.id == "launcher" and n.func.attr in MOVED})
+    bare = sorted({n.id for n in ast.walk(refresh) if isinstance(n, ast.Name) and n.id in MOVED})
     check(called == sorted(["_provision_owner", "legacy_owner_from_host_records", "repair_legacy_provision_ownership",
                             "_privileged_baseline_plan", "plan_for_current_identities", "authoritative_refresh_plan",
-                            "privileged_provision_privacy_problems", "close_privileged_artifacts"]),
-          f"the refresh command still calls them by the launcher's own (patchable) names: {called}")
+                            "privileged_provision_privacy_problems", "close_privileged_artifacts"]) and not bare,
+          f"the refresh command still calls them through the launcher's own (patchable) names: {called} {bare}")
     defined = {n.name for n in launcher.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
     defined |= {t.id for n in launcher.body if isinstance(n, (ast.Assign, ast.AnnAssign))
                 for t in (n.targets if isinstance(n, ast.Assign) else [n.target]) if isinstance(t, ast.Name)}

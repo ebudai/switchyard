@@ -36,6 +36,14 @@ published, named, or refused), and the identities transaction with its reload.
 after a real transaction; a refusal is the very object U5 returned. Its local
 provision and publication imports are patched where they live, never through
 the launcher, and no key, account, migration or worker is touched.
+
+SYRD-348 added U6, finish (`_finish_upgrade`, the upgrade's last sixteen
+statements, ending in its own returns). Its cases pin the director phase and
+instruction, the fresh cutover, the release root as root or owner, the release
+reported for the original report config and recorded against the current one,
+the trusted journal and reports, unsafe windows, and the blocked line and 1 said
+after everything else; the upgrade returns U6's answer, and a U5 stop never
+reaches it.
 """
 
 from __future__ import annotations
@@ -53,7 +61,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 CHECKS = 0
-EXPORTED = ("UpgradeToolingStaged", "_stage_upgrade_tooling", "UpgradeIdentitiesDone", "_upgrade_identities_and_accounts")
+EXPORTED = ("UpgradeToolingStaged", "_stage_upgrade_tooling", "UpgradeIdentitiesDone", "_upgrade_identities_and_accounts",
+            "_finish_upgrade")
 #: U4's launcher lookups and how many times each is read (measured on the SYRD-346 baseline: 16 reads of 9 names).
 SEAMS = {"_staged_tooling_dir": 1, "refresh_role_pane_hooks": 2, "resolve_trusted_upgrade_release": 2,
          "remove_tenant_publication_boundary": 2, "remove_untrusted_role_account_migration": 1,
@@ -790,12 +799,241 @@ def test_the_upgrade_returns_u5s_refusal_and_unpacks_its_continuation() -> None:
     check(result == ("went on", new, new), f"going on, both values are taken: {result!r}")
 
 
+# --- U6: finish (SYRD-348) -----------------------------------------------------------------------------------------
+
+#: U6's launcher lookups and how many times each is read (measured on the SYRD-348 baseline: 14 reads of 13 names).
+U6_SEAMS = {"director_onboarding_state": 1, "record_upgrade_phase": 2, "role_account_cutover": 1,
+            "prepare_tenant_release_root": 1, "owner_release_root_problems": 1, "report_tenant_release_upgrade": 1,
+            "record_release_phase_from_status": 1, "release_update_blocked": 1, "read_upgrade_journal": 1,
+            "upgrade_phase_report": 1, "outstanding_release_phase_report": 1, "unsafe_root_presentation_windows": 1,
+            "unsafe_presentation_report": 1}
+
+
+class Finish:
+    """U6's launcher facilities, answering from objects this test owns, into one ordered log."""
+
+    def __init__(self, *, euid: int = 0, director: tuple = ("done", ""), complete: bool = True,
+                 root_problems: list | None = None, deployed: bool = False, blocked: str = "",
+                 unsafe: list | None = None, error: Exception | None = None) -> None:
+        self.euid, self.director, self.complete = euid, director, complete
+        self.root_problems, self.deployed, self.blocked = root_problems or [], deployed, blocked
+        self.unsafe, self.error = unsafe or [], error
+        self.cutover = SimpleNamespace(is_complete=complete, name="fresh cutover")
+        self.status = SimpleNamespace(name="release status")
+        self.journal = SimpleNamespace(name="trusted journal")
+        self.log: list[tuple] = []
+
+    def names(self) -> dict[str, object]:
+        L = self.log
+
+        def report(config, **kw):
+            L.append(("release-report", config, kw))
+            if self.error:
+                raise self.error
+            return self.status
+
+        return dict(
+            director_onboarding_state=lambda config, *, config_path: L.append(("director", config)) or self.director,
+            record_upgrade_phase=lambda config, **kw: L.append(("journal", config, kw)),
+            role_account_cutover=lambda config, *, runner: L.append(("cutover", config, runner)) or self.cutover,
+            prepare_tenant_release_root=lambda config, *, dry_run, print_func:
+                L.append(("prepare-root", config, dry_run)) or self.root_problems,
+            owner_release_root_problems=lambda config: L.append(("owner-root", config)) or self.root_problems,
+            report_tenant_release_upgrade=report,
+            record_release_phase_from_status=lambda config, **kw: L.append(("record-status", config, kw)) or self.deployed,
+            release_update_blocked=lambda status: L.append(("blocked?", status)) or self.blocked,
+            read_upgrade_journal=lambda config, *, config_path, trusted: L.append(("read-journal", config, trusted))
+                or self.journal,
+            upgrade_phase_report=lambda config, **kw: L.append(("phase-report", config, kw)) or ["SYRD348 PHASES"],
+            outstanding_release_phase_report=lambda config, *, config_path, journal:
+                L.append(("outstanding", config, journal)) or ["SYRD348 OUTSTANDING"],
+            unsafe_root_presentation_windows=lambda config, *, config_path: L.append(("unsafe?", config)) or self.unsafe,
+            unsafe_presentation_report=lambda config, windows: L.append(("unsafe-report", windows)) or "SYRD348 UNSAFE",
+        )
+
+    def kinds(self) -> list[str]:
+        return [e[0] for e in self.log]
+
+
+def u6(fin: Finish, *, dry_run: bool = False):
+    from scripts import team_launcher, upgrade_phases
+
+    said: list[str] = []
+    config = SimpleNamespace(project=PROJECT, name="current")
+    report_config = SimpleNamespace(project=PROJECT, name="report")
+    with patched(team_launcher, **fin.names()), patched(os, geteuid=lambda: fin.euid):
+        result = upgrade_phases._finish_upgrade(
+            config, commit_git_dir="syrd348-commit", config_path=CONFIG_PATH, deploy_ref="v348",
+            desktop_choice="syrd348-desktop", dry_run=dry_run, effective_source_repo=SOURCE, print_func=said.append,
+            release_report_config=report_config, runner=refusing_runner)
+    return result, said, config, report_config
+
+
+def test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade() -> None:
+    module = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
+    function = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "_finish_upgrade")
+    for name, count in U6_SEAMS.items():
+        through = [n for n in ast.walk(function) if isinstance(n, ast.Attribute) and n.attr == name
+                   and isinstance(n.value, ast.Name) and n.value.id == "launcher"]
+        bare = [n for n in ast.walk(function) if isinstance(n, ast.Name) and n.id == name]
+        check(len(through) == count and not bare, f"U6 reads {name} at its {count} site(s), through the launcher")
+    bound = {a.arg for a in ast.walk(function) if isinstance(a, ast.arg)}
+    bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    through = sorted({n.attr for n in ast.walk(function) if isinstance(n, ast.Attribute)
+                      and isinstance(n.value, ast.Name) and n.value.id == "launcher" and n.attr in bound | {"os"}})
+    check(through == [], f"nothing U6 binds, nor os, is read as the launcher's: {through}")
+    check([ast.unparse(n) for n in function.body[-2:]][-1] == "return 0", "the upgrade's own final `return 0` ends U6")
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    tail = upgrade.body[-1]
+    check(len(upgrade.body) == 52 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
+          and isinstance(tail.value.func, ast.Name) and tail.value.func.id == "_finish_upgrade"
+          and {k.arg: ast.unparse(k.value) for k in tail.value.keywords}.get("release_report_config") == "release_report_config",
+          f"the upgrade ends by returning U6's answer, called by the launcher's own name at U6's old position: "
+          f"{ast.unparse(tail)[:80]}")
+
+
+def test_u6_a_complete_release_as_root_in_order() -> None:
+    fin = Finish(deployed=True)
+    result, said, config, report_config = u6(fin)
+    check(fin.kinds() == ["director", "journal", "cutover", "prepare-root", "release-report", "record-status", "blocked?",
+                          "read-journal", "phase-report", "outstanding", "unsafe?"],
+          f"director, fresh cutover, root, release report and record, then the reports, then unsafe windows: {fin.kinds()}")
+    check(fin.log[1] == ("journal", config, dict(config_path=CONFIG_PATH, phase="director", state="done", detail="",
+                                                 dry_run=False)) and fin.log[2][1] is config
+          and fin.log[3] == ("prepare-root", config, False),
+          f"the director phase recorded, the cutover asked afresh of the current config: {fin.log[:4]}")
+    check(fin.log[4][1] is report_config and fin.log[4][2] == dict(
+        config_path=CONFIG_PATH, source_repo=SOURCE, commit_git_dir="syrd348-commit", deploy_ref="v348",
+        runner=refusing_runner, print_func=fin.log[4][2]["print_func"])
+          and fin.log[5] == ("record-status", config, dict(config_path=CONFIG_PATH, status=fin.status, dry_run=False)),
+          f"the release is reported for the ORIGINAL report config, recorded against the current one: {fin.log[4:6]}")
+    check(fin.log[7] == ("read-journal", config, True)
+          and fin.log[8] == ("phase-report", config, dict(config_path=CONFIG_PATH, cutover=fin.cutover,
+                                                          journal=fin.journal, desktop_policy="syrd348-desktop",
+                                                          dry_run=False)),
+          f"the trusted journal and the fresh cutover are what is reported: {fin.log[7:9]}")
+    check(result == 0 and type(result) is int and said == ["SYRD348 PHASES", "SYRD348 OUTSTANDING"],
+          f"a clean finish answers 0: {result!r} {said}")
+
+
+def test_u6_the_release_root_as_owner_and_its_problems() -> None:
+    fin = Finish(euid=1000)
+    u6(fin)
+    check("owner-root" in fin.kinds() and "prepare-root" not in fin.kinds(), "not root: the owner's own check")
+    fin = Finish(root_problems=["syrd348: no board root"], unsafe=["window"])
+    result, said, config, _ = u6(fin)
+    check(not {"release-report", "record-status", "blocked?"} & set(fin.kinds())
+          and ("journal", config, dict(config_path=CONFIG_PATH, phase="release", state="blocked",
+                                       detail="syrd348: no board root", dry_run=False)) in fin.log,
+          f"root problems withhold the release and record it blocked: {fin.kinds()}")
+    check(result == 1 and said == [
+        "switchyard: syrd348: no board root",
+        f"switchyard: withholding {PROJECT}'s release deploy sequence: its owner cannot publish a release under the "
+        "board root yet. Nothing was deployed, and no listener needs stopping.",
+        "SYRD348 PHASES", "SYRD348 OUTSTANDING", "SYRD348 UNSAFE",
+        f"switchyard: {PROJECT}'s release phase did not complete: syrd348: no board root. Nothing after it is claimed."],
+          f"the reports and unsafe windows still come before the blocked line and the 1: {result!r} {said}")
+
+
+def test_u6_a_blocked_release_after_everything_else() -> None:
+    fin = Finish(blocked="syrd348: listener still up", unsafe=["window"])
+    result, said, _, _ = u6(fin)
+    check(result == 1 and said[-2:] == ["SYRD348 UNSAFE", f"switchyard: {PROJECT}'s release phase did not complete: "
+                                         "syrd348: listener still up. Nothing after it is claimed."],
+          f"blocked by its status: said last, after the unsafe report, and 1: {said}")
+
+
+def test_u6_an_incomplete_cutover_withholds_the_release() -> None:
+    fin = Finish(complete=False, director=("pending", ""))
+    result, said, _, _ = u6(fin)
+    check(not {"prepare-root", "owner-root", "release-report"} & set(fin.kinds()) and result == 0,
+          f"no release is attempted and the upgrade still answers 0: {fin.kinds()}")
+    check(said[:2] == [
+        f"switchyard: withholding the {PROJECT} release deploy instruction until its legacy role state is repatriated to "
+        "the project account: the release enforces process-bound authority and must not strand a resumable pane.",
+        f"switchyard: once its roles are on their own accounts and the release is deployed, the director runs "
+        f"`switchyard finish-upgrade {PROJECT}` from their own session (outstanding); root cannot make that write and "
+        "will not pretend to."], f"withheld, and the director told when: {said[:2]}")
+
+
+def test_u6_the_director_phase_and_instruction() -> None:
+    for state, recorded in (("done", "done"), ("not required", "not required"), ("pending", "pending"),
+                            ("unknown", "pending"), ("syrd348-other", "pending")):
+        fin = Finish(director=(state, "syrd348 reason"))
+        _, said, _, _ = u6(fin)
+        check(fin.log[1][2]["state"] == recorded and fin.log[1][2]["detail"] == "syrd348 reason",
+              f"{state!r} is recorded as {recorded!r}, with its reason: {fin.log[1]}")
+        told = [s for s in said if "finish-upgrade" in s]
+        check(bool(told) == (state in {"pending", "unknown"}), f"{state!r}: the director is told only when outstanding")
+    fin = Finish(director=("pending", "syrd348 reason"), deployed=True)
+    _, said, _, _ = u6(fin)
+    check(said[0] == (f"switchyard: {PROJECT}'s board release is deployed and no further deploy is needed. The remaining "
+                      f"step is the director's: the director runs `switchyard finish-upgrade {PROJECT}` from their own "
+                      "session (syrd348 reason); root cannot make that write and will not pretend to."),
+          f"deployed: no further deploy is needed: {said[0]}")
+    fin = Finish(director=("unknown", ""), deployed=False)
+    _, said, _, _ = u6(fin)
+    check(said[0].startswith("switchyard: after that deploy, the director runs") and "(outstanding)" in said[0],
+          f"not deployed: after that deploy, the reason falling back to 'outstanding': {said[0]}")
+
+
+def test_u6_a_dry_run_reports_nothing_outstanding() -> None:
+    fin = Finish()
+    result, said, _, _ = u6(fin, dry_run=True)
+    check("outstanding" not in fin.kinds() and ("prepare-root", fin.log[3][1], True) == fin.log[3]
+          and fin.log[8][2]["dry_run"] is True and result == 0 and said == ["SYRD348 PHASES"],
+          f"a dry run prepares as a dry run and names nothing outstanding: {fin.kinds()} {said}")
+
+
+def test_u6_an_error_reaches_the_caller() -> None:
+    boom = OSError("syrd348: report raised")
+    fin = Finish(error=boom)
+    try:
+        u6(fin); raised = None
+    except OSError as exc:
+        raised = exc
+    check(raised is boom and fin.kinds()[-1] == "release-report", f"not caught, nothing after it: {fin.kinds()}")
+
+
+def test_the_upgrade_returns_u6s_answer_after_u5() -> None:
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    names = ["config", "commit_git_dir", "config_path", "cutover", "deploy_ref", "desktop_choice", "dry_run",
+             "effective_source_repo", "print_func", "publication_detail", "publish_remote", "release_report_config",
+             "runner", "source_repo", "tooling_root", "trusted_release_root"]
+    code = ast.Module(body=[ast.FunctionDef(
+        name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
+                                          kw_defaults=[], defaults=[]),
+        body=upgrade.body[47:52], decorator_list=[], returns=None, type_params=[])], type_ignores=[])
+    from scripts.upgrade_phases import UpgradeIdentitiesDone
+    for u5_answer in (Code(4), "continue"):
+        asked: list[tuple] = []
+        final = Code(9)
+        reloaded = SimpleNamespace(name="reloaded")
+        answer = (UpgradeIdentitiesDone(config=reloaded, release_report_config=reloaded)
+                  if u5_answer == "continue" else u5_answer)
+        namespace = {"UpgradeIdentitiesDone": UpgradeIdentitiesDone,
+                     "_upgrade_identities_and_accounts": lambda config, **k: answer,
+                     "_finish_upgrade": lambda config, **k: asked.append((config, k)) or final}
+        exec(compile(ast.fix_missing_locations(code), "upgrade_project_command", "exec"), namespace)
+        result = namespace["wiring"](SimpleNamespace(name="cfg"), "c", CONFIG_PATH, "cut", "v", "d", False, SOURCE,
+                                     print, "", "", SimpleNamespace(name="report"), refusing_runner, None, TOOLING, None)
+        if u5_answer == "continue":
+            check(result is final and asked[0][0] is reloaded and asked[0][1]["release_report_config"] is reloaded
+                  and asked[0][1]["desktop_choice"] == "d",
+                  f"going on, U6 gets U5's values and its answer is the upgrade's: {result!r}")
+        else:
+            check(result is u5_answer and asked == [], f"a U5 stop never reaches U6: {result!r} {asked}")
+
+
 #: Run first: a seam taken past the launcher must be caught before any
 #: behaviour check runs the real code it reached.
 STRUCTURE = ("test_the_module_loads_nothing_of_switchyards_at_import",
              "test_either_import_order_gives_one_set_of_objects",
              "test_the_seams_the_phases_own_names_and_the_call_site",
-             "test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local")
+             "test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local",
+             "test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade")
 
 
 def main() -> int:

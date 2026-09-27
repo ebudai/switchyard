@@ -18,6 +18,11 @@ phase's old position, by the launcher's own name.
   answers 1, a failed transaction its own code; going on returns a frozen
   `UpgradeIdentitiesDone` with `config` and `release_report_config`, reloaded
   after a real transaction and otherwise the caller's own.
+- **U6, finish** (`_finish_upgrade`, SYRD-348): the director phase, a fresh
+  cutover, the release root and the release deployed and recorded, the director
+  instruction, the phase report and what is still outstanding, unsafe windows,
+  then the upgrade's own exit code -- 1 when the release is blocked, else 0 --
+  which `upgrade_project_command` returns.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -514,3 +519,136 @@ def _upgrade_identities_and_accounts(
         config=config,
         release_report_config=release_report_config,
     )
+
+
+def _finish_upgrade(
+    config: ProjectConfig,
+    *,
+    commit_git_dir: str | None,
+    config_path: Path,
+    deploy_ref: str | None,
+    desktop_choice: Any,
+    dry_run: bool,
+    effective_source_repo: Path,
+    print_func: Callable[[str], None],
+    release_report_config: ProjectConfig,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> int:
+    """U6 of `upgrade_project_command`, unchanged: the director phase, the release
+    phase and its report, and the upgrade's closing report; it answers the
+    upgrade's own exit code."""
+    from scripts import team_launcher as launcher
+
+    # Asked after the cutover, because the director makes that write from the
+    # identity the cutover gives it.
+    director_state, director_reason = launcher.director_onboarding_state(config, config_path=config_path)
+    launcher.record_upgrade_phase(
+        config, config_path=config_path, phase="director",
+        state={"done": "done", "not required": "not required"}.get(director_state, "pending"),
+        detail=director_reason, dry_run=dry_run,
+    )
+
+    final_cutover = launcher.role_account_cutover(config, runner=runner)
+    release_deployed = False
+    release_blocked = ""
+    release_root_problems: list[str] = []
+    if not final_cutover.is_complete:
+        print_func(
+            f"switchyard: withholding the {config.project} release deploy instruction until its "
+            "legacy role state is repatriated to the project account: the release enforces "
+            "process-bound authority and must not strand a resumable pane."
+        )
+    else:
+        release_root_problems = (
+            launcher.prepare_tenant_release_root(config, dry_run=dry_run, print_func=print_func)
+            if os.geteuid() == 0
+            else launcher.owner_release_root_problems(config)
+        )
+    if final_cutover.is_complete and release_root_problems:
+        # Before any deploy sequence is printed and before the phase is called
+        # ready: live mefp was told `ready`, had its listener stopped, and then
+        # the deploy could not create its release (SYRD-231).
+        for problem in release_root_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: withholding {config.project}'s release deploy sequence: its owner "
+            "cannot publish a release under the board root yet. Nothing was deployed, and no "
+            "listener needs stopping."
+        )
+        launcher.record_upgrade_phase(
+            config, config_path=config_path, phase="release", state="blocked",
+            detail="; ".join(release_root_problems), dry_run=dry_run,
+        )
+        release_blocked = "; ".join(release_root_problems)
+    elif final_cutover.is_complete:
+        release_status = launcher.report_tenant_release_upgrade(
+            release_report_config,
+            config_path=config_path,
+            source_repo=effective_source_repo,
+            commit_git_dir=commit_git_dir,
+            deploy_ref=deploy_ref,
+            runner=runner,
+            print_func=print_func,
+        )
+        release_deployed = launcher.record_release_phase_from_status(
+            config,
+            config_path=config_path,
+            status=release_status,
+            dry_run=dry_run,
+        )
+        release_blocked = launcher.release_update_blocked(release_status)
+
+    if director_state in {"pending", "unknown"}:
+        director_action = (
+            f"the director runs `switchyard finish-upgrade {config.project}` from their own "
+            f"session ({director_reason or 'outstanding'}); root cannot make that write and "
+            "will not pretend to"
+        )
+        if release_deployed:
+            # Saying "after that deploy" here is what sent an operator looking for a
+            # deploy the transaction had already made (SYRD-48).
+            print_func(
+                f"switchyard: {config.project}'s board release is deployed and no further deploy "
+                f"is needed. The remaining step is the director's: {director_action}."
+            )
+        else:
+            when = (
+                "after that deploy"
+                if final_cutover.is_complete
+                else "once its roles are on their own accounts and the release is deployed"
+            )
+            print_func(f"switchyard: {when}, {director_action}.")
+    trusted_journal = launcher.read_upgrade_journal(config, config_path=config_path, trusted=True)
+    for line in launcher.upgrade_phase_report(
+        config,
+        config_path=config_path,
+        cutover=final_cutover,
+        journal=trusted_journal,
+        desktop_policy=desktop_choice,
+        dry_run=dry_run,
+    ):
+        print_func(line)
+    # What exit 0 means, said before the operator reads it as "done". Preparing
+    # artifacts and deploying the board are different things, and an upgrade
+    # that returns 0 having only done the first has to say which one it did and
+    # name the exact command that does the other (SYRD-117).
+    if not dry_run:
+        for line in launcher.outstanding_release_phase_report(
+            config, config_path=config_path, journal=trusted_journal
+        ):
+            print_func(line)
+    unsafe_windows = launcher.unsafe_root_presentation_windows(config, config_path=config_path)
+    if unsafe_windows:
+        print_func(launcher.unsafe_presentation_report(config, unsafe_windows))
+    if release_blocked:
+        # The release this upgrade was asked to deploy could not be. Saying so
+        # and exiting 0 is worse than either on its own: every wrapper that reads
+        # the status reported the upgrade complete over a board that had not
+        # moved, and the operator had to read the transcript to find out
+        # otherwise (SYRD-100 review).
+        print_func(
+            f"switchyard: {config.project}'s release phase did not complete: {release_blocked}. "
+            "Nothing after it is claimed."
+        )
+        return 1
+    return 0

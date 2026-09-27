@@ -898,6 +898,9 @@ from scripts.owner_state_dirs import (
     ensure_owner_state_dirs,
     install_owner_state_dir_args,
 )
+from scripts.board_authority_preflight import (
+    process_authority_board_compatibility,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -2214,47 +2217,6 @@ def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> l
         )
         for role in roles
     ]
-
-
-def process_authority_board_compatibility(
-    config: ProjectConfig,
-    *,
-    connection_factory: Callable[[str, float], Any] | None = None,
-) -> tuple[bool, str]:
-    """Prove the running board understands shared-account process authority.
-
-    This check happens before launch mutates layouts, worktrees, state files, or
-    tmux.  It is the mixed-version boundary: a config repatriated by the new
-    launcher must not start against an older board that would either reject the
-    shared uid or authorize it with the retired uid map (SYRD-69).
-    """
-    if not config.role_state_isolation:
-        return True, "legacy account authority"
-    try:
-        from scripts.ticket_board.write_client import UnixHTTPConnection
-
-        factory = connection_factory or (
-            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
-        )
-        connection = factory(config.board_socket, 3)
-        try:
-            connection.request("GET", "/api/runtime-assignments")
-            response = connection.getresponse()
-            body = response.read().decode("utf-8", errors="replace")
-        finally:
-            connection.close()
-        if response.status != 200:
-            return False, f"runtime assignment probe returned HTTP {response.status}: {body}"
-        payload = json.loads(body)
-        if not isinstance(payload, dict) or payload.get("project") != config.project:
-            return False, "runtime assignment probe returned another project's identity"
-        if payload.get("authority_mode") != "process":
-            return False, "running board still uses legacy uid authority"
-        if not isinstance(payload.get("assignments"), dict):
-            return False, "runtime assignment probe omitted its assignments object"
-    except Exception as exc:  # noqa: BLE001 - refusal must preserve the exact boundary failure
-        return False, str(exc)
-    return True, "process authority ready"
 
 
 def load_project_config(

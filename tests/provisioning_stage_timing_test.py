@@ -230,6 +230,13 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
 
     body = inspect.getsource(team_launcher.switchyard_new_command)
 
+    def called_at(phase: str) -> int:
+        """Where the command calls a phase: for its answer (`x = phase(`), or --
+        its tail since SYRD-374 -- by returning it (`return phase(`). Once."""
+        forms = [form for form in (f"= {phase}(", f"return {phase}(") if form in body]
+        assert len(forms) == 1 and body.count(forms[0]) == 1, (phase, forms)
+        return body.index(forms[0])
+
     def begun_at(name: str) -> int:
         """The command begins a stage itself, or -- since SYRD-370 -- calls the
         phase that begins it first thing, and the stage starts at that call."""
@@ -244,8 +251,7 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
         for phase in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
             statements = [s for s in phase.body if not isinstance(s, (ast.Import, ast.ImportFrom))]
             if statements and ast.unparse(statements[0]).startswith(f"stages.begin({name!r}"):
-                assert body.count(f"= {phase.name}(") == 1, (phase.name, name)
-                return body.index(f"= {phase.name}(")
+                return called_at(phase.name)
         raise AssertionError(f"nothing begins the stage {name!r}")
 
     positions = [begun_at(name) for name in team_launcher.NEW_PROJECT_STAGES]
@@ -265,15 +271,25 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
         for phase in (node for node in ast.parse(phases).body if isinstance(node, ast.FunctionDef)):
             text = ast.get_source_segment(phases, phase).replace("launcher.", "")
             if line in text:
-                assert body.count(f"= {phase.name}(") == 1, phase.name
-                return (body.index(f"= {phase.name}("), text.index(line))
+                return (called_at(phase.name), text.index(line))
         raise AssertionError(f"switchyard new never runs {line!r}")
 
     assert executed_at("stages.begin(\"database and board\")") < executed_at("result = new_project_command(")
     assert executed_at("stages.begin(\"provider sign-in and folder trust\", waits_for_you=True)") < executed_at(
         "run_first_run_auth_phase("
     )
-    assert body.rstrip().endswith("stages.finish()\n    return 0") or "stages.finish()\n    return 0" in body
+    if not (body.rstrip().endswith("stages.finish()\n    return 0") or "stages.finish()\n    return 0" in body):
+        # SYRD-374: the tail is its own phase; the command's last statement
+        # returns it, and that phase finishes the stages and answers 0 last.
+        import ast
+
+        from scripts import new_project_phases
+
+        command = ast.parse(body.strip()).body[0]
+        tail = command.body[-1]
+        assert isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call), ast.unparse(tail)
+        phase = getattr(new_project_phases, ast.unparse(tail.value.func))
+        assert inspect.getsource(phase).rstrip().endswith("stages.finish()\n    return 0"), phase.__name__
 
 
 def main() -> int:

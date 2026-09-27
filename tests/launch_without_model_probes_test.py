@@ -296,14 +296,15 @@ def test_the_new_command_says_it_before_it_launches() -> None:
     phases = (ROOT / "scripts" / "new_project_phases.py").read_text(encoding="utf-8")
     called = {node.name: ast.get_source_segment(phases, node).replace("launcher.", "")
               for node in ast.parse(phases).body
-              if isinstance(node, ast.FunctionDef) and f"= {node.name}(" in body}
+              if isinstance(node, ast.FunctionDef) and (f"= {node.name}(" in body or f"return {node.name}(" in body)}
 
     def executed_at(line: str) -> tuple[int, int] | None:
         if line in body:
             return (body.index(line), 0)
         for name, text in called.items():
             if line in text:
-                return (body.index(f"= {name}("), text.index(line))
+                call = f"= {name}(" if f"= {name}(" in body else f"return {name}("
+                return (body.index(call), text.index(line))
         return None
 
     told = executed_at("report_models_were_not_probed(")

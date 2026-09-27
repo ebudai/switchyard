@@ -528,7 +528,9 @@ def test_a_desktop_project_is_granted_installed_and_verified_before_its_first_ro
             # SYRD-373: the sign-in phase reads it from `scripts.team_launcher` too.
             for target in {id(mod): mod, id(phase_launcher): phase_launcher}.values():
                 stack.enter_context(patch.object(target, "run_first_run_auth_phase", side_effect=first_auth))
-            stack.enter_context(patch.object(mod, "launch_project", side_effect=first_launch))
+            # SYRD-374: the panes phase reads it from `scripts.team_launcher` too.
+            for target in {id(mod): mod, id(phase_launcher): phase_launcher}.values():
+                stack.enter_context(patch.object(target, "launch_project", side_effect=first_launch))
             stack.enter_context(
                 patch.object(desktop, "install", side_effect=lambda *a, **k: events.append("gui-installed"))
             )

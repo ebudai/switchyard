@@ -51,6 +51,15 @@ phase's old position, by the launcher's own name.
   are not isolated yet. Going on returns a frozen `NewProjectSignIn` with
   `config` and the report as the confirmation left them, `launch_deferred` and
   `launch_runner`.
+- **P5, role panes** (`_launch_new_project_panes`, SYRD-374): the command's
+  tail. The stage begun and the staged role tooling ensured -- a problem there
+  is reported and the command's 1 returned before any clock or window -- then
+  the clocks, the launch (unless it is deferred), a failed launch's own status
+  returned, the layout resolved, the presentation announced and the session
+  records awaited only for a launch that happened, the sign-in warnings, the
+  designer instruction, and the stages finished with 0. The launcher script it
+  names is the launcher's own file (`launcher.__file__`), read only when a launch
+  actually happens. `switchyard_new_command` returns this phase's answer.
 
 Every launcher facility a phase uses is read from `scripts/team_launcher.py`
 when the phase runs, so a patch there still reaches it. This module never
@@ -798,3 +807,90 @@ def _run_new_project_sign_in(
         launch_deferred=launch_deferred,
         launch_runner=launch_runner,
     )
+
+
+def _launch_new_project_panes(
+    *,
+    home_base: Path,
+    pane_state_dir: Path | None,
+    session_record_timeout: float,
+    session_record_poll: float,
+    layout_mode: str,
+    layout_environ: dict[str, str] | None,
+    konsole_process_launcher: Callable[..., Any] | None,
+    print_func: Callable[[str], None],
+    include_designer: bool,
+    owner_user: str,
+    resolved_slug: str,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    stages: ProvisioningStages,
+    config_path: Path,
+    config: ProjectConfig,
+    first_run_auth_report: FirstRunAuthReport,
+    launch_deferred: bool,
+    launch_runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> int:
+    from scripts import team_launcher as launcher
+
+    # Before any window opens: a pane's first act is to run a program out of
+    # the root-owned staged bundle, and a tenant whose staging was skipped
+    # opened its tabs onto a command that was not there while provisioning
+    # reported success (SYRD-249).
+    stages.begin("role panes")
+    staging_problems = launcher.ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
+    if staging_problems:
+        for problem in staging_problems:
+            print_func(f"switchyard: {problem}")
+        print_func(
+            f"switchyard: not opening {resolved_slug}'s windows. Everything else it needs was "
+            "created and nothing was removed; the tenant is startable once its tooling is staged."
+        )
+        return 1
+    launch_started_at = launcher.time.time()
+    launch_started_ns = launcher.time.time_ns()
+    launch_result = 0 if launch_deferred else launcher.launch_project(
+        config,
+        config_path=config_path,
+        mode="start",
+        script_path=Path(launcher.__file__).resolve().with_name(launcher.TEAM_LAUNCHER_NAME),
+        layout_output=launcher._owner_state_layout_output_path(resolved_slug, owner_home=home_base / owner_user),
+        assign_layout_owner=True,
+        pane_state_dir=pane_state_dir,
+        runner=launch_runner,
+        layout_mode=layout_mode,
+        layout_environ=layout_environ,
+        konsole_process_launcher=konsole_process_launcher,
+    )
+    if launch_result != 0:
+        return launch_result
+    # Only a launch that actually happened may be reported as one, and only
+    # then are there session records to wait for. Polling a deferred launch
+    # would burn the full timeout on panes that were never started (SYRD-39).
+    resolved_layout_mode = launcher.resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
+    if not launch_deferred:
+        launcher.announce_new_project_presentation(
+            resolved_slug, resolved_layout_mode=resolved_layout_mode, print_func=print_func
+        )
+    launcher.report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
+    if not launch_deferred:
+        launcher.report_launch_session_records(
+            config,
+            timeout_seconds=session_record_timeout,
+            poll_seconds=session_record_poll,
+            fallback_changed_since_ns=launch_started_ns,
+            pane_state_dir=pane_state_dir or launcher.default_pane_state_dir_for_user(config.run_as_user, project=config.project),
+            pane_state_updated_since=launch_started_at,
+            print_func=print_func,
+        )
+    if resolved_layout_mode == launcher.LAYOUT_MODE_VIEWER:
+        if include_designer:
+            print_func("switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore")
+        else:
+            print_func("switchyard: design phase skipped; no designer pane configured")
+    else:
+        if include_designer:
+            print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
+        else:
+            print_func("switchyard: design phase skipped; no designer pane configured")
+    stages.finish()
+    return 0

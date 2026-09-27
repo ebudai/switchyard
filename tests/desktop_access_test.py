@@ -281,7 +281,9 @@ def test_exported_new_project_before_first_role():
             # SYRD-373: the sign-in phase reads it from `scripts.team_launcher` too.
             for target in {id(mod):mod,id(phase_launcher):phase_launcher}.values():
                 stack.enter_context(patch.object(target,'run_first_run_auth_phase',side_effect=first_auth))
-            stack.enter_context(patch.object(mod,'launch_project',side_effect=first_launch))
+            # SYRD-374: the panes phase reads it from `scripts.team_launcher` too.
+            for target in {id(mod):mod,id(phase_launcher):phase_launcher}.values():
+                stack.enter_context(patch.object(target,'launch_project',side_effect=first_launch))
             stack.enter_context(patch.object(desktop,'install',side_effect=lambda *a,**k:events.append('gui-policy-unit-acl-installed')))
             assert mod.switchyard_new_command(from_artifact=artifact,desktop_policy=choice,source_repo=export,
                 output_dir=output,yes=True,allow_existing_owner_user=True,git_init=False,runner=runner,euid_getter=lambda:0,

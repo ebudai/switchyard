@@ -130,15 +130,16 @@ def test_the_patched_reporter_is_still_called_by_the_launchers_name() -> None:
     calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "report_launch_session_records"]
     # SYRD-344 moved the launch's site, in launch_project's P9, to launch_phases,
-    # which calls through the launcher; the total is unchanged.
-    phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
-    phase_calls = [n for n in ast.walk(phases) if isinstance(n, ast.Call)
-                   and getattr(n.func, "id", getattr(n.func, "attr", "")) == "report_launch_session_records"]
+    # and SYRD-374 moved `switchyard new`'s, in its tail, to new_project_phases;
+    # both call through the launcher, and the total is unchanged.
+    phase_calls = [n for name in ("launch_phases.py", "new_project_phases.py")
+                   for n in ast.walk(ast.parse((ROOT / "scripts" / name).read_text(encoding="utf-8")))
+                   if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "report_launch_session_records"]
     check(len(calls) + len(phase_calls) == 2 and all(isinstance(n.func, ast.Name) for n in calls)
           and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
                   and n.func.value.id == "launcher" for n in phase_calls),
           "the launch and `switchyard new` call it at their two baseline sites, by the launcher's patchable name, "
-          "through the launcher from launch_phases")
+          "through the launcher from the phase modules")
     moved = ast.parse((ROOT / "scripts" / "session_records.py").read_text(encoding="utf-8"))
     bare = [n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
             and n.id in ("DEFAULT_SESSION_DIR", "role_session_dir")]

@@ -510,9 +510,11 @@ def _executed_at(source: str, line: str) -> tuple[int, int] | None:
     for phase in (node for node in ast.parse(phases).body if isinstance(node, ast.FunctionDef)):
         text = ast.get_source_segment(phases, phase).replace("launcher.", "")
         if line in text:
-            call = f"= {phase.name}("
-            assert source.count(call) == 1, f"the command calls {phase.name} once: {source.count(call)}"
-            return (source.index(call), text.index(line))
+            # Called for its answer (`x = phase(`), or -- the command's tail since
+            # SYRD-374 -- returned (`return phase(`); either way, once.
+            forms = [form for form in (f"= {phase.name}(", f"return {phase.name}(") if form in source]
+            assert len(forms) == 1 and source.count(forms[0]) == 1, f"the command calls {phase.name} once: {forms}"
+            return (source.index(forms[0]), text.index(line))
     return None
 
 

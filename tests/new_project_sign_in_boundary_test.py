@@ -250,7 +250,16 @@ def test_the_command_calls_it_and_returns_its_stops() -> None:
     check(ast.unparse(body[at + 1]) == "if not isinstance(new_project_sign_in, NewProjectSignIn):\n    return new_project_sign_in",
           "a stop is returned as it came")
     check([ast.unparse(s) for s in body[at + 2:at + 6]] == [f"{f} = new_project_sign_in.{f}" for f in OUTPUTS], "all four read back")
-    check(ast.unparse(body[at + 6]) == "stages.begin('role panes')", "then P5 begins")
+    after = body[at + 6]
+    if ast.unparse(after) != "stages.begin('role panes')":
+        # SYRD-374: P5 is the command's tail phase, returned, and it begins the stage first.
+        panes = next(n for n in module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "_launch_new_project_panes")
+        check(isinstance(after, ast.Return) and isinstance(after.value, ast.Call)
+              and ast.unparse(after.value.func) == "_launch_new_project_panes"
+              and ast.unparse(panes.body[1]) == "stages.begin('role panes')",
+              f"then the P5 phase, returned, which begins it first: {ast.unparse(after)[:80]}")
+    else:
+        check(True, "then P5 begins")
 
 
 # --- behaviour -------------------------------------------------------------------------------------------------------

@@ -59,7 +59,8 @@ LAUNCHER_CALLS = {"default_gui_user": 2, "presentation_gui_user": 1, "resolve_la
 #: SYRD-329 replace_presentation_window_command),
 #: whose calls must still go through the launcher; the totals are the baseline's.
 #: SYRD-341 moved launch_project's P6 (the dry run's layout-mode resolution) to launch_phases.
-MOVED_CALLERS = ("legacy_presentation.py", "presentation_window_replacement.py", "launch_phases.py")
+#: SYRD-374 moved `switchyard new`'s tail, with its `resolve_layout_mode` call, into new_project_phases.
+MOVED_CALLERS = ("legacy_presentation.py", "presentation_window_replacement.py", "launch_phases.py", "new_project_phases.py")
 ACCOUNT_VARIABLES = ("TEAM_LAUNCHER_GUI_USER", "PGU_TEAM_LAUNCHER_GUI_USER", "SUDO_USER",
                      "SWITCHYARD_TENANT_CONTROL_CALLER")
 

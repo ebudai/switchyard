@@ -683,8 +683,25 @@ def test_an_older_tenant_is_repaired_from_its_own_release_not_the_hosts() -> Non
 def test_the_new_flow_checks_before_it_opens_any_window() -> None:
     """Placement, in the source: the gate precedes the launch that opens panes."""
     body = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    gate = body.index("staging_problems = ensure_staged_role_tooling(config, runner=runner")
-    launch = body.index("launch_result = 0 if launch_deferred else launch_project(")
+    gate_line = "staging_problems = ensure_staged_role_tooling(config, runner=runner"
+    launch_line = "launch_result = 0 if launch_deferred else launch_project("
+    if launch_line in body:
+        gate, launch = body.index(gate_line), body.index(launch_line)
+    else:
+        # SYRD-374: both are in the tail phase `switchyard new` returns; the
+        # command must return it, and inside it the gate still comes first.
+        import ast
+        import inspect
+
+        from scripts import new_project_phases
+
+        phases = inspect.getsource(new_project_phases)
+        holder = next((node for node in ast.parse(phases).body if isinstance(node, ast.FunctionDef)
+                       and gate_line in ast.get_source_segment(phases, node).replace("launcher.", "")), None)
+        assert holder is not None, "the new flow no longer checks the staged bundle before it opens a window"
+        assert f"return {holder.name}(" in body, f"switchyard new does not return {holder.name}"
+        text = ast.get_source_segment(phases, holder).replace("launcher.", "")
+        gate, launch = text.index(gate_line), text.index(launch_line)
     assert gate < launch, (gate, launch)
     # And a resumed tenant repairs the same bundle on its way back up.
     resume = body.index("def resume_tenant(")

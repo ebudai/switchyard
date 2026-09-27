@@ -1083,6 +1083,7 @@ from scripts.new_project_phases import (
     NewProjectPreflight,
     NewProjectSignIn,
     _check_new_project_preflight,
+    _launch_new_project_panes,
     _prepare_new_project_accounts,
     _prepare_new_project_board,
     _resolve_new_project_choices,
@@ -7067,68 +7068,26 @@ def switchyard_new_command(
     first_run_auth_report = new_project_sign_in.first_run_auth_report
     launch_deferred = new_project_sign_in.launch_deferred
     launch_runner = new_project_sign_in.launch_runner
-    # Before any window opens: a pane's first act is to run a program out of
-    # the root-owned staged bundle, and a tenant whose staging was skipped
-    # opened its tabs onto a command that was not there while provisioning
-    # reported success (SYRD-249).
-    stages.begin("role panes")
-    staging_problems = ensure_staged_role_tooling(config, runner=runner, print_func=print_func)
-    if staging_problems:
-        for problem in staging_problems:
-            print_func(f"switchyard: {problem}")
-        print_func(
-            f"switchyard: not opening {resolved_slug}'s windows. Everything else it needs was "
-            "created and nothing was removed; the tenant is startable once its tooling is staged."
-        )
-        return 1
-    launch_started_at = time.time()
-    launch_started_ns = time.time_ns()
-    launch_result = 0 if launch_deferred else launch_project(
-        config,
-        config_path=config_path,
-        mode="start",
-        script_path=Path(__file__).resolve().with_name(TEAM_LAUNCHER_NAME),
-        layout_output=_owner_state_layout_output_path(resolved_slug, owner_home=home_base / owner_user),
-        assign_layout_owner=True,
+    return _launch_new_project_panes(
+        home_base=home_base,
         pane_state_dir=pane_state_dir,
-        runner=launch_runner,
+        session_record_timeout=session_record_timeout,
+        session_record_poll=session_record_poll,
         layout_mode=layout_mode,
         layout_environ=layout_environ,
         konsole_process_launcher=konsole_process_launcher,
+        print_func=print_func,
+        include_designer=include_designer,
+        owner_user=owner_user,
+        resolved_slug=resolved_slug,
+        runner=runner,
+        stages=stages,
+        config_path=config_path,
+        config=config,
+        first_run_auth_report=first_run_auth_report,
+        launch_deferred=launch_deferred,
+        launch_runner=launch_runner,
     )
-    if launch_result != 0:
-        return launch_result
-    # Only a launch that actually happened may be reported as one, and only
-    # then are there session records to wait for. Polling a deferred launch
-    # would burn the full timeout on panes that were never started (SYRD-39).
-    resolved_layout_mode = resolve_layout_mode(layout_mode, environ=layout_environ, runner=runner)
-    if not launch_deferred:
-        announce_new_project_presentation(
-            resolved_slug, resolved_layout_mode=resolved_layout_mode, print_func=print_func
-        )
-    report_first_run_auth_warnings(first_run_auth_report, print_func=print_func)
-    if not launch_deferred:
-        report_launch_session_records(
-            config,
-            timeout_seconds=session_record_timeout,
-            poll_seconds=session_record_poll,
-            fallback_changed_since_ns=launch_started_ns,
-            pane_state_dir=pane_state_dir or default_pane_state_dir_for_user(config.run_as_user, project=config.project),
-            pane_state_updated_since=launch_started_at,
-            print_func=print_func,
-        )
-    if resolved_layout_mode == LAYOUT_MODE_VIEWER:
-        if include_designer:
-            print_func("switchyard: maximize the designer pane during design with Ctrl+a z; press it again to restore")
-        else:
-            print_func("switchyard: design phase skipped; no designer pane configured")
-    else:
-        if include_designer:
-            print_func("switchyard: maximize the designer pane during design with Konsole Ctrl+Shift+E; restore it when done")
-        else:
-            print_func("switchyard: design phase skipped; no designer pane configured")
-    stages.finish()
-    return 0
 
 
 def provision_runtime_command(user_name: str | None, config: ProjectConfig | None = None) -> int:

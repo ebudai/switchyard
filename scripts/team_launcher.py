@@ -906,6 +906,9 @@ from scripts.owner_state_dirs import (
 from scripts.board_authority_preflight import (
     process_authority_board_compatibility,
 )
+from scripts.pane_launcher_preflight import (
+    _verify_pane_launcher_path,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "team-launcher"
 DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
@@ -2633,31 +2636,6 @@ def switchyard_pane_launcher_for(config: ProjectConfig) -> Path:
 def pane_window_program(script_path: Path) -> Path:
     """The inert pane program that ships beside the launcher this pane runs."""
     return Path(script_path).expanduser().resolve(strict=False).with_name(PANE_WINDOW_NAME)
-
-
-def _verify_pane_launcher_path(
-    config: ProjectConfig,
-    *,
-    script_path: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> Path:
-    pane_script_path = config.pane_launcher or script_path
-    if config.pane_launcher is None:
-        return pane_script_path
-    result = runner(["test", "-x", str(pane_script_path)])
-    if result.returncode != 0:
-        owner = f" by {config.run_as_user}" if config.run_as_user else ""
-        raise SystemExit(f"team-launcher: configured pane_launcher {pane_script_path} is not readable/executable{owner}")
-    # Every pane's terminal program is the inert window beside that launcher. A
-    # release without it would fall back to a shell on detach, which is the
-    # whole defect, so refuse rather than open panes that do (SYRD-43).
-    pane_window = pane_window_program(pane_script_path)
-    if runner(["test", "-x", str(pane_window)]).returncode != 0:
-        raise SystemExit(
-            f"team-launcher: {pane_window} is missing or not executable; this release cannot open "
-            "panes that stay inert when they detach. Upgrade the shared release before starting."
-        )
-    return pane_script_path
 
 
 def _owner_state_layout_output_path(project: str, *, owner_home: Path) -> Path:

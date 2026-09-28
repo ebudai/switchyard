@@ -1474,6 +1474,13 @@ from scripts.switchyard_registration import (
     _registered_project_collision,
     switchyard_register_command,
 )
+from scripts.legacy_layouts import (
+    _known_generated_project_layout_payloads,
+    _legacy_new_project_chunked_row_major_layout_payload,
+    _legacy_new_project_column_major_layout_payload,
+    _legacy_new_project_sqrt_column_major_layout_payload,
+    _legacy_new_project_stacked_layout_payload,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2474,97 +2481,6 @@ def ensure_owner_file(
     if result.returncode != 0:
         reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
         raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
-
-
-def _legacy_new_project_stacked_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = [
-        {
-            "Command": "",
-            "SessionRestoreId": index,
-            "WorkingDirectory": "",
-        }
-        for index in range(role_count)
-    ]
-    if role_count <= 1:
-        return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
-    return {
-        "Orientation": "Horizontal",
-        "Widgets": [
-            leaves[0],
-            {
-                "Orientation": "Vertical",
-                "Widgets": leaves[1:],
-            },
-        ],
-    }
-
-
-def _legacy_new_project_column_major_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = _new_project_layout_leaves(role_count)
-    # Historical recognizer: old generated layouts used a single row through 4 roles.
-    # Do not read the live layout threshold here or existing layouts stop upgrading.
-    if role_count <= 4:
-        return _single_row_layout_payload(leaves)
-    return _legacy_new_project_sqrt_column_major_layout_payload(role_count)
-
-
-def _legacy_new_project_sqrt_column_major_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = _new_project_layout_leaves(role_count)
-    if role_count <= 1:
-        return _single_row_layout_payload(leaves)
-    column_count = math.ceil(math.sqrt(role_count))
-    row_count = math.ceil(role_count / column_count)
-    columns: list[dict[str, Any]] = []
-    for start in range(0, role_count, row_count):
-        column = leaves[start : start + row_count]
-        if len(column) == 1:
-            columns.append(column[0])
-        else:
-            columns.append(
-                {
-                    "Orientation": "Vertical",
-                    "Widgets": column,
-                }
-            )
-    return {
-        "Orientation": "Horizontal",
-        "Widgets": columns,
-    }
-
-
-def _legacy_new_project_chunked_row_major_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = _new_project_layout_leaves(role_count)
-    # Historical recognizer: old generated layouts used a single row through 4 roles.
-    # Do not read the live layout threshold here or existing layouts stop upgrading.
-    if role_count <= 4:
-        return _single_row_layout_payload(leaves)
-    column_count = math.ceil(math.sqrt(len(leaves)))
-    rows: list[dict[str, Any]] = []
-    for start in range(0, len(leaves), column_count):
-        row = leaves[start : start + column_count]
-        if len(row) == 1:
-            rows.append(row[0])
-        else:
-            rows.append(
-                {
-                    "Orientation": "Horizontal",
-                    "Widgets": row,
-                }
-            )
-    return {
-        "Orientation": "Vertical",
-        "Widgets": rows,
-    }
-
-
-def _known_generated_project_layout_payloads(role_count: int) -> tuple[dict[str, Any], ...]:
-    return (
-        _new_project_layout_payload(role_count),
-        _legacy_new_project_stacked_layout_payload(role_count),
-        _legacy_new_project_column_major_layout_payload(role_count),
-        _legacy_new_project_sqrt_column_major_layout_payload(role_count),
-        _legacy_new_project_chunked_row_major_layout_payload(role_count),
-    )
 
 
 def _is_generated_project_layout_template(config: ProjectConfig, *, config_path: Path) -> bool:

@@ -12104,3 +12104,113 @@ and **not implemented**:
   -  1013 lines   10 defs  CLI parsers and dispatch
 
 **SYRD-272 is not complete.** The launcher is still 9,958 lines.
+
+### SYRD-396 (slice 19k): the stale-launcher check and the trusted bootstrap commands
+
+Measured on `b0abf5b`. The design was posted **before** any edit, and its
+one correction -- excluding the cases that execute the printed bootstrap --
+before the comparison it concerns.
+
+**Moved:** the seven ordered definitions of the ticket, with their two leading
+`#:` comments, into the new `scripts/trusted_bootstrap.py` (315 lines):
+- the rollout labels `INSTALL_ROLLOUT_LABEL` and `INSTALL_BOUNDARY_ROLLOUT_LABEL`;
+- `installed_rollout_recorder`, `recorded_install_command` and
+  `install_boundary_command`;
+- `trusted_bootstrap_commands`;
+- `stale_launcher_problems`.
+
+They are contiguous; `running_launcher_release` above and
+`resolve_trusted_upgrade_release` below stay, unchanged.
+- **Re-export:** one explicit, unaliased import of all seven, above every
+  definition. The upgrade's tooling phase (`scripts/upgrade_phases.py`) still
+  reads the check through the launcher.
+- **Seams:** 12 call-time reads of 9 names across 4 functions,
+  through the launcher: the shared install root and its default, the release
+  this process runs from, 5 moved siblings (the boundary label among
+  them), and the launcher's own file.
+- **The launcher's own file.** The check refuses root running the launcher out
+  of a path root does not control, and it asked about `__file__`. Moved as-is,
+  that would have named this module instead. It now resolves
+  `launcher.__file__` when it runs: the same file, resolved at the same time.
+  The proof normalizes that one reference explicitly and asserts no bare
+  `__file__` is left. The new test shows it for a checkout and for an
+  installed release reached through `current`, and for a launcher file
+  changed after import.
+- **Unchanged:** the trust helper is still imported inside the root test, when
+  it is reached, and before anything is rendered. The install label default is
+  bound at definition time to the constant the launcher re-exports. `select`
+  in the renderer is a local, so the module does not import the stdlib module.
+- **The launcher** goes from 9,958 to 9,697 lines. No guard needed
+  to follow the move.
+
+**Proof.** The independent proof (`equiv396.py`) holds. 22 of 22
+planted faults are caught, among them:
+- this module's file asked about, the launcher's file unresolved or bound at
+  load, or trusted against the caller;
+- the trust helper imported at load, or the real-install-root test dropped;
+- `GIT_NO_REPLACE_OBJECTS`, fsck or fail-fast dropped;
+- the recorder selection inverted;
+- a neighbour changed.
+
+**Evidence.**
+- **New boundary test:** `tests/trusted_bootstrap_boundary_test.py`, 59
+  checks.
+  - Every command line of the upgrade, first-install and guidance branches,
+    the recorded install and boundary commands and their refusal, and every
+    answer and call order of the stale-launcher check are compared, byte for
+    byte, with a golden set of 20 renderings. That set was produced by
+    running the BASELINE launcher's own functions with the same stand-ins, not
+    typed.
+  - Its 10 behaviour cases also pass against the baseline's own seven
+    definitions (29 checks).
+- **Mutations:** 47 of 47 are killed by assertions with zero guard
+  refusals. They include:
+  - every provenance fault above;
+  - trust asked of anyone or under a redirected root;
+  - the running release asked late;
+  - each answer of the check;
+  - each command's quoting, order and branch;
+  - a directory, or the checkout's copy, taken for the recorder.
+  - The behaviour tests alone kill 40; the 7 left are structural:
+    label default late, select imported, the launcher imported at load, a name not re-exported, re-export aliased, the launcher redefines one, upgrade phase bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 1 suite whole (the new test, candidate only);
+  - 17 cases, identical: 16 pass, 0 pass with a
+    tolerated refusal, 1 stop at the guard (pre-effect only: a
+    fixture's git), and 0 fail otherwise;
+  - 58 cases excluded:
+    - 6 that execute the printed bootstrap (`run_chain`, `run_sequence`),
+      which this ticket forbids;
+    - the pkexec, fake-root and `/run` cases;
+    - the upgrade-driver and fake-root cases of
+      `upgrade_phases_boundary_test`, as before.
+- **What the comparison exercised (call profiler):** 5 of 17 passing runs execute a moved function: the new test and the rendering cases of `team_launcher_recorded_install_test`.
+- **Containment:** no release installed, no bootstrap executed, no live
+  change (live snapshot identical before and after). The CLI help is
+  identical (36 invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: resolving the trusted upgrade release and checking a recovered pin against the host -- 3 definitions, 183 lines (lines 6041-6275, not contiguous):
+  -   6041   71  _recovered_pin_behind_host  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   6162   95  resolve_trusted_upgrade_release  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   6259   17  _selected_release_commit  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 5: ['DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT', '_repo_root', 'switchyard_shared_install_root', 'install_host_privileged_boundary', 'running_launcher_release']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/upgrade_phases.py']
+  - test files naming any of them: 6 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded next piece of the release/upgrade domain: which verified release an upgrade installs, and whether a recovered pin is behind what the host runs)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['untrusted_root_executable_reasons (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the staged role tooling (alternative): 1 definitions, 66 lines; launcher callers outside: ['resume_tenant']; production readers: 1
+  -   - the privileged upgrade journal path alone (alternative): 1 definitions, 10 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2273 lines  209 defs  general helpers (unclassified)
+  -  1813 lines   74 defs  provisioning (new/register/teardown/owner accounts)
+  -  1157 lines   42 defs  project config and registry
+  -  1073 lines   33 defs  release selection, install and upgrade
+  -  1013 lines   10 defs  CLI parsers and dispatch
+
+**SYRD-272 is not complete.** The launcher is still 9,697 lines.

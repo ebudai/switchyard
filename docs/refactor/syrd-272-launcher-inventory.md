@@ -14778,3 +14778,142 @@ and **not implemented**:
   -   282 lines   11 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,008 lines.
+
+### SYRD-420 (slice 19af): project design artifact loader
+
+Measured on `65531dd`. The design was posted **before** any edit.
+
+| file | before (`65531dd`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,008 | 6,740 |
+| `scripts/project_design_artifact.py` | - | 332 |
+| `tests/project_design_artifact_boundary_test.py` | - | 577 |
+
+**Moved:** `AGY_SOURCE_ORIGINS`, `PROJECT_DESIGN_FORBIDDEN_KEYS`,
+`_artifact_forbidden_keys`, `_artifact_string`, `_artifact_optional_string`,
+`_artifact_role_list`, `_artifact_audit_role_list`,
+`_artifact_role_value_pairs`, `_artifact_role_cli_pairs`,
+`_artifact_bool_mapping`, `_artifact_capability_grants` and
+`load_project_design_artifact`, whole, in order, into the new
+`scripts/project_design_artifact.py`. They were noncontiguous: two constants
+beside the other design defaults (whose surrounding lines stay), six helpers
+after `_load_json`, and the rest after `_role_cli_map`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all twelve.
+- **Callers:** `new_project_command` still calls the loader by its launcher
+  global, and `scripts/new_project_phases.py` still reads
+  `launcher.load_project_design_artifact` (3 sites) at call time. The three
+  `new_project_*` boundary suites that stand it in on the launcher still
+  reach it.
+- **Seams:** all 43 call-time reads of 26 names are now
+  `launcher.X` (11 of them siblings): the schema, the default gates and
+  grants, the reserved roles, the worktree policies, the result type, the
+  launcher's validators and its JSON and path helpers, and the imported
+  implementer defaults, role syntax and ticket-prefix check.
+- **Imports:** no default is bound from another module, so the module
+  imports no Switchyard module at load. The result type is imported under
+  TYPE_CHECKING.
+- **Guards:** none needed adapting.
+
+**Proof.** The independent proof (`equiv420.py`, 14 clauses) holds.
+It compares the twelve whole nodes (both constants' values included) after
+normalizing `launcher.X`, and the launcher remainder as AST and as text. It
+fixes the order of refusals:
+- forbidden keys at the top first, then the schema, then the project object,
+  then forbidden keys inside it, then the slug and the requested project;
+- no role is both an implementer and an auditor;
+- the agy source is a plain user name, and its origin one of the allowed
+  ones;
+- reserved roles are refused in both lists.
+
+22 of 22 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/project_design_artifact_boundary_test.py`,
+  245 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  89 cases produced by the BASELINE launcher's own functions
+  (`gold420.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane. By group:
+  - 16 on the document: JSON, the schema, the project
+    object, and forbidden keys at every depth;
+  - 21 on identity and paths: slug, requested project,
+    name, prefix, owner, and relative, `~` and variable paths;
+  - 25 on roles and choices;
+  - 16 on gates and every capability grant;
+  - 3 with the schema, forbidden keys and agy origins
+    rebound on the launcher;
+  - 8 on the string, forbidden-key and role-value helpers
+    directly.
+
+  Each case writes its own artifact into a test-owned directory. The
+  launcher's validators run for real, recorded, and HOME and one environment
+  variable are pinned for path expansion. Its 3 behaviour cases also
+  pass against the baseline's own definitions, in both environments
+  (201 checks).
+- **Mutations:** 46 of 46 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first run left one, "project forbidden keys not refused". The second
+    forbidden-key check only matters for keys one level deeper
+    (`project.project.*`), and a new generated case now covers that.
+  - The behaviour tests alone kill 43. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased, the phases bypass the launcher.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 24 files accounted for (the nine that
+  name the twelve, `new_project_phases`' importers, and those naming
+  `new_project_command`):
+  - 8 suites whole: 8 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    none;
+  - 264 cases, per case, identical on both sides: 140 pass,
+    114 stop at the same guard refusal, and 10 fail
+    identically on both (`first_run_setup_completion_test::test_the_provider_is_given_the_window_the_person_is_looking_at`; `first_run_setup_completion_test::test_the_provider_follows_the_window_when_it_is_resized`; `first_run_setup_completion_test::test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode`; `first_run_setup_completion_test::test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too`; `first_run_setup_completion_test::test_a_resize_reaches_the_provider_as_a_signal`; `first_run_setup_completion_test::test_the_terminal_is_given_back_even_when_switchyard_is_killed`; `first_run_setup_completion_test::test_a_keystroke_does_not_wait_for_the_next_tick`; `first_run_setup_completion_test::test_test9_the_answer_reaches_the_question_before_anything_is_typed`; `first_run_setup_completion_test::test_test8_the_sign_in_survives_the_browser_on_a_real_terminal`; `first_run_setup_completion_test::test_test8_nothing_is_echoed_when_the_person_comes_back`). All of these are pseudo-terminal
+    (`termios`) cases of `first_run_setup_completion_test` that fail
+    identically in this harness, which has no terminal, and none of them runs
+    a moved function (reach below);
+  - **Excluded (94):** 6 that drive an upgrade
+    or `switchyard_main`, and 88 whose own execution screen hits;
+  - **Not run:** team_launcher_declarative_workflow_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child); team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function.
+- **What the comparison exercised (call profiler, real functions only):**
+  7 of 148 passing runs execute a moved function:
+  `project_design_artifact_boundary_test.py`, `provisioning_selector_test.py`, `team_launcher_design_test.py`, `team_launcher_project_artifacts_test.py`, `team_launcher_registry_test.py`.
+- **Containment:** no project was provisioned, and no tenant, board, account,
+  service, release, pane or desktop was touched (live snapshot identical
+  before and after). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the new-project precheck -- 12 definitions, 268 lines (lines 3549-3971, not contiguous):
+  -   3549    6  _looks_like_switchyard_release_tree  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3557   29  _switchyard_release_source_error  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3588   28  _precheck_deploy_source  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3618   14  _system_unit_file_exists  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3636    1  POSTGRES_SERVICE_UNIT  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3637    1  POSTGRES_ADMIN_SOCKET_DIR  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3640    3  postgres_cluster_script  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3645   41  postgres_availability_remedy  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3688   33  _database_exists  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3723   28  _ticket_board_table_count  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3886   13  _installed_unit_is_this_plans  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3901   71  precheck_new_project  launcher callers outside: ['new_project_command']; production readers outside the launcher: ['scripts/new_project_phases.py']
+  - launcher names it reads (through the launcher once moved): 8: ['DEFAULT_CONFIG_DIR', 'switchyard_registry_dir', 'TEAM_LAUNCHER_NAME', '_path_exists', '_tcp_port_in_use', '_usable_switchyard_entry_for_project', '_system_unit_is_active', '_installed_unit_path']
+  - launcher callers outside the closure: 1: ['new_project_command']
+  - production modules reading it through the launcher: 1: ['scripts/new_project_phases.py']
+  - test files naming any of them: 10 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: what must be true before a new project is provisioned -- the accounts, paths, board, database and tools it will need, checked before anything is created -- called only by new_project_command)
+  - it also reads 8 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['ProjectBoardProvision (scripts.ticket_board.project_provision)', 'SWITCHYARD_RELEASE_MARKER_NAME (scripts.shared_release)', '_git_status_porcelain (scripts.owner_git)', '_read_switchyard_release_marker (scripts.shared_release)', 'polkit_readiness_problems (scripts.polkit_readiness)', 'render_board_unit (scripts.ticket_board.project_provision)', 'shared_switchyard_release_for_path (scripts.shared_release)', 'uid_for_user (scripts.host_accounts)']
+  - alternatives measured the same way:
+  -   - the design command (alternative): 4 definitions, 134 lines; launcher callers outside: ['main']; production readers: 0
+  -   - the role-plan prompt (alternative): 6 definitions, 178 lines; launcher callers outside: ['_prompt_switchyard_role_choices']; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2058 lines  205 defs  general helpers (unclassified)
+  -  1267 lines   60 defs  provisioning (new/register/teardown/owner accounts)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   886 lines   35 defs  project config and registry
+  -   282 lines   11 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 6,740 lines.

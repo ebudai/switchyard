@@ -1388,6 +1388,20 @@ from scripts.new_project_artifacts import (
     _new_project_role_env,
     write_new_project_launcher_artifacts,
 )
+from scripts.project_design_artifact import (
+    AGY_SOURCE_ORIGINS,
+    PROJECT_DESIGN_FORBIDDEN_KEYS,
+    _artifact_audit_role_list,
+    _artifact_bool_mapping,
+    _artifact_capability_grants,
+    _artifact_forbidden_keys,
+    _artifact_optional_string,
+    _artifact_role_cli_pairs,
+    _artifact_role_list,
+    _artifact_role_value_pairs,
+    _artifact_string,
+    load_project_design_artifact,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1452,16 +1466,6 @@ PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS = {
     "agy_credential_source": "",
     "agy_credential_source_origin": "unset",
 }
-AGY_SOURCE_ORIGINS = frozenset({"unset", "host_default", "project_override", "opt_out"})
-PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
-    {
-        "stages",
-        "workflow",
-        "workflow_stages",
-        "workflow_transitions",
-        "extra_implementer_roles",
-    }
-)
 WORKTREE_POLICIES = frozenset({"shared", "isolated"})
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -1929,67 +1933,6 @@ def _load_json(path: Path) -> dict[str, Any]:
     return parsed
 
 
-def _artifact_forbidden_keys(raw: dict[str, Any]) -> list[str]:
-    found = [key for key in raw if key in PROJECT_DESIGN_FORBIDDEN_KEYS]
-    project_raw = raw.get("project")
-    if isinstance(project_raw, dict):
-        found.extend(f"project.{key}" for key in project_raw if key in PROJECT_DESIGN_FORBIDDEN_KEYS)
-    return sorted(found)
-
-
-def _artifact_string(raw: dict[str, Any], key: str, *, path: Path, default: str = "") -> str:
-    value = raw.get(key, default)
-    if not isinstance(value, str):
-        raise SystemExit(f"{path} field {key!r} must be a JSON string")
-    value = value.strip()
-    if not value:
-        raise SystemExit(f"{path} field {key!r} must be non-empty")
-    return value
-
-
-def _artifact_optional_string(raw: dict[str, Any], key: str, *, path: Path, default: str = "") -> str:
-    value = raw.get(key, default)
-    if value is None:
-        return default
-    if not isinstance(value, str):
-        raise SystemExit(f"{path} field {key!r} must be a JSON string")
-    return value.strip() or default
-
-
-def _artifact_role_list(raw: Any, *, path: Path, field: str, defaults: Sequence[str]) -> tuple[str, ...]:
-    if raw is None:
-        return tuple(defaults)
-    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
-        raise SystemExit(f"{path} field {field!r} must be a JSON string list")
-    result: list[str] = []
-    for item in raw:
-        role = item.strip().lower()
-        if role in {"designer", "director", "audit", "user", "unassigned"}:
-            raise SystemExit(f"{path} field {field!r} contains reserved role {role!r}")
-        if role not in result:
-            result.append(role)
-    if not result:
-        raise SystemExit(f"{path} field {field!r} must contain at least one implementer role")
-    return tuple(result)
-
-
-def _artifact_audit_role_list(raw: Any, *, path: Path, defaults: Sequence[str]) -> tuple[str, ...]:
-    if raw is None:
-        return tuple(defaults)
-    if not isinstance(raw, list) or not all(isinstance(item, str) and item.strip() for item in raw):
-        raise SystemExit(f"{path} field 'project.audit_roles' must be a JSON string list")
-    result: list[str] = []
-    for item in raw:
-        role = item.strip().lower()
-        if not ROLE_RE.fullmatch(role):
-            raise SystemExit(f"{path} field 'project.audit_roles' role {role!r} must match ^[a-z][a-z0-9_-]{{0,63}}$")
-        if role in NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES:
-            raise SystemExit(f"{path} field 'project.audit_roles' contains reserved role {role!r}")
-        if role not in result:
-            result.append(role)
-    return tuple(result)
-
-
 def _validate_new_project_cli(value: str, *, context: str = "CLI") -> str:
     cli = value.strip().lower()
     if cli not in SUPPORTED_NEW_PROJECT_CLIS:
@@ -2042,217 +1985,6 @@ def _default_role_cli_pairs(
 
 def _role_cli_map(role_clis: Sequence[tuple[str, str]]) -> dict[str, str]:
     return {role: cli for role, cli in role_clis}
-
-
-def _artifact_role_value_pairs(
-    raw: object, *, path: Path, field: str
-) -> tuple[tuple[str, str], ...]:
-    """A role -> value map out of an artifact, or nothing.
-
-    Absent is the ordinary case: every artifact written before these fields
-    existed has no such key, and that must load rather than fail. What is
-    refused is a key that is present and is not a map of strings, because a
-    half-understood one would be written back out as though it were read.
-    """
-    if raw is None:
-        return ()
-    if not isinstance(raw, dict):
-        raise SystemExit(f"{path} {field} must be a mapping of role to value")
-    pairs: list[tuple[str, str]] = []
-    for role, value in raw.items():
-        if not isinstance(role, str) or not isinstance(value, str):
-            raise SystemExit(f"{path} {field} must map role names to strings")
-        if value.strip():
-            pairs.append((role, value.strip()))
-    return tuple(pairs)
-
-
-def _artifact_role_cli_pairs(
-    raw: Any,
-    *,
-    path: Path,
-    implementer_roles: Sequence[str],
-    include_designer: bool,
-    include_audit: bool = True,
-    audit_roles: Sequence[str] | None = None,
-) -> tuple[tuple[str, str], ...]:
-    defaults = _default_role_cli_pairs(
-        implementer_roles,
-        include_designer=include_designer,
-        include_audit=include_audit,
-        audit_roles=audit_roles,
-    )
-    if raw is None:
-        return defaults
-    if not isinstance(raw, dict):
-        raise SystemExit(f"{path} field 'project.role_clis' must be a JSON object")
-    allowed_roles = {role for role, _cli in defaults}
-    pairs_by_role = dict(defaults)
-    for raw_role, raw_cli in raw.items():
-        if not isinstance(raw_role, str) or not isinstance(raw_cli, str):
-            raise SystemExit(f"{path} field 'project.role_clis' must map role strings to CLI strings")
-        role = raw_role.strip().lower()
-        if role not in allowed_roles:
-            raise SystemExit(f"{path} field 'project.role_clis' contains unknown role {role!r}")
-        pairs_by_role[role] = _validate_new_project_cli(raw_cli, context=f"CLI for {role}")
-    return tuple((role, pairs_by_role[role]) for role, _cli in defaults)
-
-
-def _artifact_bool_mapping(raw: Any, *, path: Path, field: str, defaults: dict[str, bool]) -> dict[str, bool]:
-    if raw is None:
-        return dict(defaults)
-    if not isinstance(raw, dict):
-        raise SystemExit(f"{path} field {field!r} must be a JSON object")
-    result = dict(defaults)
-    for key, value in raw.items():
-        if key not in defaults:
-            raise SystemExit(f"{path} field {field!r} contains unknown key {key!r}")
-        if not isinstance(value, bool):
-            raise SystemExit(f"{path} field {field}.{key} must be a JSON boolean")
-        result[key] = value
-    return result
-
-
-def _artifact_capability_grants(raw: Any, *, path: Path) -> dict[str, object]:
-    if raw is None:
-        return dict(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS)
-    if not isinstance(raw, dict):
-        raise SystemExit(f"{path} field 'capability_grants' must be a JSON object")
-    result = dict(PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS)
-    allowed = set(result)
-    for key, value in raw.items():
-        if key not in allowed:
-            raise SystemExit(f"{path} field 'capability_grants' contains unknown key {key!r}")
-        if key == "supplementary_groups":
-            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
-                raise SystemExit(f"{path} field 'capability_grants.supplementary_groups' must be a JSON string list")
-            result[key] = [item.strip() for item in value]
-        elif key == "shell":
-            if not isinstance(value, str) or not value.strip():
-                raise SystemExit(f"{path} field 'capability_grants.shell' must be a non-empty JSON string")
-            result[key] = value.strip()
-        elif key == "agy_credential_source":
-            if not isinstance(value, str):
-                raise SystemExit(
-                    f"{path} field 'capability_grants.agy_credential_source' must be a JSON string"
-                )
-            candidate = value.strip()
-            if candidate and not _is_valid_owner_user_name(candidate):
-                raise SystemExit(
-                    f"{path} field 'capability_grants.agy_credential_source' must be a plain Unix "
-                    f"user name, not {candidate!r}"
-                )
-            result[key] = candidate
-        elif key == "agy_credential_source_origin":
-            if not isinstance(value, str) or value.strip() not in AGY_SOURCE_ORIGINS:
-                raise SystemExit(
-                    f"{path} field 'capability_grants.agy_credential_source_origin' must be "
-                    f"one of {', '.join(sorted(AGY_SOURCE_ORIGINS))}"
-                )
-            result[key] = value.strip()
-        elif not isinstance(value, bool):
-            raise SystemExit(f"{path} field 'capability_grants.{key}' must be a JSON boolean")
-        else:
-            result[key] = value
-    return result
-
-
-def load_project_design_artifact(path: Path, *, expected_project: str | None = None) -> ProjectDesignArtifact:
-    artifact_path = path.expanduser().resolve(strict=False)
-    raw = _load_json(artifact_path)
-    forbidden = _artifact_forbidden_keys(raw)
-    if forbidden:
-        raise SystemExit(
-            f"{artifact_path} must not preconfigure stages or roles for new projects: {', '.join(forbidden)}"
-        )
-    schema = _artifact_string(raw, "schema", path=artifact_path)
-    if schema != PROJECT_DESIGN_ARTIFACT_SCHEMA:
-        raise SystemExit(
-            f"{artifact_path} schema must be {PROJECT_DESIGN_ARTIFACT_SCHEMA!r}, got {schema!r}"
-        )
-    project_raw = raw.get("project")
-    if not isinstance(project_raw, dict):
-        raise SystemExit(f"{artifact_path} field 'project' must be a JSON object")
-    forbidden = _artifact_forbidden_keys(project_raw)
-    if forbidden:
-        raise SystemExit(
-            f"{artifact_path} must not preconfigure stages or roles for new projects: {', '.join(forbidden)}"
-        )
-    slug = _validate_project_slug(_artifact_string(project_raw, "slug", path=artifact_path))
-    if expected_project is not None and slug != expected_project:
-        raise SystemExit(f"{artifact_path} project slug {slug!r} does not match requested project {expected_project!r}")
-    project_name = _artifact_optional_string(project_raw, "name", path=artifact_path, default=slug)
-    ticket_prefix = validate_ticket_prefix(_artifact_string(project_raw, "ticket_prefix", path=artifact_path))
-    owner_user = _artifact_string(project_raw, "owner_user", path=artifact_path)
-    repository = _expand_path(_artifact_string(project_raw, "repository", path=artifact_path), base=artifact_path.parent)
-    remote = _artifact_string(project_raw, "remote", path=artifact_path, default="origin")
-    default_branch = _artifact_string(project_raw, "default_branch", path=artifact_path, default="main")
-    worktree_policy = _artifact_string(project_raw, "worktree_policy", path=artifact_path, default="shared")
-    if worktree_policy not in WORKTREE_POLICIES:
-        raise SystemExit(f"{artifact_path} field 'project.worktree_policy' must be one of {sorted(WORKTREE_POLICIES)}")
-    design_document = _expand_path(_artifact_string(raw, "design_document", path=artifact_path), base=artifact_path.parent)
-    implementer_roles = _artifact_role_list(
-        project_raw.get("roles", project_raw.get("implementer_roles")),
-        path=artifact_path,
-        field="project.roles",
-        defaults=DEFAULT_PROJECT_IMPLEMENTER_ROLES,
-    )
-    include_designer_raw = project_raw.get("include_designer", True)
-    if not isinstance(include_designer_raw, bool):
-        raise SystemExit(f"{artifact_path} field 'project.include_designer' must be a JSON boolean")
-    include_audit_raw = project_raw.get("include_audit", True)
-    if not isinstance(include_audit_raw, bool):
-        raise SystemExit(f"{artifact_path} field 'project.include_audit' must be a JSON boolean")
-    audit_roles = _artifact_audit_role_list(
-        project_raw.get("audit_roles"),
-        path=artifact_path,
-        defaults=("audit",) if include_audit_raw else (),
-    )
-    role_overlap = set(implementer_roles) & set(audit_roles)
-    if role_overlap:
-        raise SystemExit(
-            f"{artifact_path} roles cannot be both implementers and auditors: {', '.join(sorted(role_overlap))}"
-        )
-    role_clis = _artifact_role_cli_pairs(
-        project_raw.get("role_clis"),
-        path=artifact_path,
-        implementer_roles=implementer_roles,
-        include_designer=include_designer_raw,
-        include_audit=bool(audit_roles),
-        audit_roles=audit_roles,
-    )
-    role_models = _artifact_role_value_pairs(
-        project_raw.get("role_models"), path=artifact_path, field="project.role_models"
-    )
-    role_efforts = _artifact_role_value_pairs(
-        project_raw.get("role_efforts"), path=artifact_path, field="project.role_efforts"
-    )
-    catalog_version = project_raw.get("catalog_version")
-    push_policy = _artifact_string(project_raw, "push_policy", path=artifact_path, default="director-main-only")
-    gates = _artifact_bool_mapping(project_raw.get("gates"), path=artifact_path, field="project.gates", defaults=PROJECT_DESIGN_DEFAULT_GATES)
-    capability_grants = _artifact_capability_grants(project_raw.get("capability_grants"), path=artifact_path)
-    return ProjectDesignArtifact(
-        project=slug,
-        project_name=project_name,
-        ticket_prefix=ticket_prefix,
-        owner_user=owner_user,
-        repository=repository,
-        remote=remote,
-        default_branch=default_branch,
-        worktree_policy=worktree_policy,
-        design_document=design_document,
-        implementer_roles=implementer_roles,
-        audit_roles=audit_roles,
-        role_clis=role_clis,
-        role_models=role_models,
-        role_efforts=role_efforts,
-        catalog_version=int(catalog_version) if isinstance(catalog_version, int) else 0,
-        include_designer=include_designer_raw,
-        include_audit=bool(audit_roles),
-        push_policy=push_policy,
-        gates=gates,
-        capability_grants=capability_grants,
-    )
 
 
 def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str, Any]:

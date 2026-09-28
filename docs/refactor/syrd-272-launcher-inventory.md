@@ -13689,3 +13689,119 @@ and **not implemented**:
   -   675 lines   27 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,459 lines.
+
+### SYRD-411 (slice 19y): Switchyard command-line parsers
+
+Measured on `debd5b6`. The design was posted **before** any edit.
+
+| file | before (`debd5b6`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,459 | 7,976 |
+| `scripts/switchyard_parsers.py` | - | 536 |
+| `tests/switchyard_parsers_boundary_test.py` | - | 405 |
+
+**Moved:** all twenty-one remaining `_build_switchyard_<verb>_parser`
+definitions (new, repair_boundary, approve_desktop, resume_provision,
+register, upgrade, install_shared_release, privileged_action, rollout_log,
+cutover_roles, finish_upgrade, add_role, set_vcs_close_role, replace_window,
+stop, recover_display, start, teardown, set_role_runtime, present, attach),
+each whole with its comments and in the launcher's order, into the new
+`scripts/switchyard_parsers.py`.
+- **Not moved:** `publication_status`, which moved with its command in
+  SYRD-410, and the definitions between the runs (6556-6846, 6896-7057 and 7085-7131): `rollout_log_command`,
+  `_owner_account_exists`, `_owner_catalog_args` and
+  `switchyard_attach_command`.
+- **Re-export:** one explicit, unaliased import of all twenty-one, above every
+  definition. `switchyard_main` and `switchyard_recover_display_command` still
+  build them by their own globals
+  (22 sites, measured).
+- **Seams:** the 8 reads of 6 launcher constants in four parsers
+  (the agent CLI policies, three layout modes, the supported CLI names) are
+  `launcher.X`, through a call-time import. The privileged-action parser still
+  imports its catalogue when it is built.
+- **Unchanged:** no parser takes an argument, and every one is annotated
+  `-> argparse.ArgumentParser`.
+
+**No guard needed to follow the move.** Every test that names a parser calls
+it through the launcher. `agent_cli_boundary_test`'s "only team_launcher.py
+names the install table" still holds.
+
+**Proof.** The independent proof (`equiv411.py`) holds, including:
+- all 21 nodes are equal to the baseline's;
+- every parser builds `switchyard <its verb>` and returns it;
+- only the privileged-action parser imports anything, inside;
+- the remaining launcher is unchanged node for node.
+
+16 of 16 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/switchyard_parsers_boundary_test.py`,
+  207 checks, each run gated on its screen. It is pure: parsers are only
+  built and asked to parse. For every parser, produced by the BASELINE
+  launcher's own parsers (`gold411.py`) over the very case text the test
+  embeds, not typed, it compares:
+  - every action (options, choices, defaults, types, nargs, requirement,
+    metavar, help), sub-commands included;
+  - the usage, the help at a fixed width, and the error with no arguments;
+  - 99 generated parses: one per option and per sub-command, with a
+    representative non-default value (desktop policy, release pins, role
+    runtime and sub-command slots included).
+
+  With the six launcher constants and the privileged catalogue rebound to
+  ordered, deliberately unsorted markers, each reader shows its marker. The
+  test passes under three hash seeds. Its 3 behaviour cases also pass
+  against the baseline's own parsers (113 checks).
+- **Mutations:** 32 of 32 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The first run left
+  two:
+  - "a parser that returns nothing" crashed the harness; its answer is now
+    recorded;
+  - "the runtime CLI choices unsorted" survived because the markers were
+    one-element sets. They are now ordered tuples, and the layout default is
+    neither the first nor the last choice.
+
+  The behaviour tests alone kill 25; the 7 left are placement,
+  import, re-export and dispatch changes: the catalogue imported at load, the launcher imported at load, a name not re-exported, re-export aliased, the dispatcher bypasses its global, recovery bypasses its global, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 4 boundary suites whole: the new test on the candidate
+    only. 2 pass on both, and 1
+    (director_upgrade_boundary_test.py) stops at the same refused account lookup on
+    both.
+  - 93 cases, per case, from the suites that build these
+    parsers, identical on both sides: 71 pass, 22 stop at the same
+    guard refusal, and none fails otherwise.
+  - **Excluded (88):** 21 cases that drive
+    `switchyard_main` or an upgrade, and 67 whose own execution screen
+    hits.
+- **What the comparison exercised (call profiler, functions only):**
+  15 of 74 passing runs execute a moved parser: the new test
+  and 14 existing cases that parse real verbs through the launcher.
+- **Containment:** no verb was executed and nothing live was touched (live
+  snapshot identical before and after). Both entry points' help is identical
+  (36 `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the presentation commands (`switchyard attach`, `present`, `recover-display`) -- 3 definitions, 101 lines (lines 6651-7015, not contiguous):
+  -   6651   16  switchyard_attach_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6669   31  switchyard_present_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6962   54  switchyard_recover_display_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 4: ['ProjectConfig', 'current_user_name', '_resolve_switchyard_project', '_load_switchyard_project_config_for_command']
+  - launcher callers outside the closure: 1: ['switchyard_main']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: the three verbs that attach to, map and recover a tenant's presentation, whose parsers moved in SYRD-411; only switchyard_main dispatches them)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_build_switchyard_present_parser (scripts.switchyard_parsers)', '_build_switchyard_recover_display_parser (scripts.switchyard_parsers)', '_tenant_control_grant (scripts.tenant_control_helper)']
+  - alternatives measured the same way:
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the owner account and catalogue helpers (alternative): 2 definitions, 21 lines; launcher callers outside: ['_prompt_switchyard_role_plan']; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2141 lines  213 defs  general helpers (unclassified)
+  -  1673 lines   70 defs  provisioning (new/register/teardown/owner accounts)
+  -  1017 lines   39 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   569 lines   22 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,976 lines.

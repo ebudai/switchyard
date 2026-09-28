@@ -12665,3 +12665,109 @@ starts from a new boundary test:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 9,172 lines.
+
+### SYRD-401 (slice 19p): tenant board authority unit installation
+
+Measured on `98d260f`. The design was posted **before** any edit.
+
+| file | before (`98d260f`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 9,172 | 9,095 |
+| `scripts/board_authority_install.py` | - | 118 |
+| `tests/board_authority_install_boundary_test.py` | - | 697 |
+
+**Moved:** `install_board_authority_files` and `install_board_authority`,
+contiguous and in order, into the new `scripts/board_authority_install.py`.
+`capture_installed_units` above and `_finish_upgrade_preview` below stay.
+- **Re-export:** one explicit, unaliased import of both, above every
+  definition. The identity cutover (`role_identity_cutover.py`, unchanged)
+  still installs the units through `team_launcher.install_board_authority_files`.
+- **Seams:** 6 call-time reads across 2 functions, through the
+  launcher: root's staged provisioning directory and its root, the current
+  user, the units a tenant's authority installs, the board's activation, and
+  the sibling files half the whole operation calls. All of them are patched on
+  the launcher by existing suites, so every patch stays effective.
+- **Unchanged:** the `print_func` defaults are bound when each function is
+  defined; `runner` stays required. `ProjectConfig` is an annotation only.
+- **Security semantics:** each unit still comes from root's staged copy and is
+  installed `0644` with its ownership. A unit not staged or not installed is a
+  problem, and the rest carry on. There is no reload unless every unit
+  installed, and nothing is restarted in the files half. The whole operation
+  activates -- and restarts -- only after a clean install. The proof pins the
+  staged source, the mode and ownership, and both short circuits.
+- **Unchanged edge case:** both functions read `result.returncode` directly,
+  as before.
+
+**No guard needed to follow the move.** No test names either function. They
+are reached only through the identity cutover, whose cases fake root and are
+excluded.
+
+**Proof.** The independent proof (`equiv401.py`) holds. 20 of 20
+planted faults are caught, among them:
+- units from the release rather than root's staging;
+- installed world-writable, or ownership dropped;
+- a reload, or an activation, despite problems;
+- activation without a restart;
+- a missing unit skipped silently, or a failed install ignored;
+- the sibling read directly.
+
+**Evidence.**
+- **New boundary test:** `tests/board_authority_install_boundary_test.py`,
+  36 checks, each run gated on its screen.
+  - Every answer, print, runner argv and call, in order, is compared with
+    8 files-half cases and 4 whole-operation
+    cases, produced by the BASELINE launcher's own functions over the same
+    owned staged units with the same stand-ins, not typed. The cases cover:
+    all installed and reloaded; the current user; one or no unit staged; one
+    or two installs failing; missing plus failing; the reload failing; the
+    files failing with nothing activated; installed then activated; and
+    activation's own problems.
+  - Its 3 behaviour cases also pass against the baseline's own two
+    definitions (19 checks).
+  - The recorder matches the reload by `daemon-reload` alone, so the
+    execution screen finds no `systemctl` in any executed closure.
+- **Mutations:** 28 of 28 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 24; the 4 left are the
+  module's placement and re-export: the launcher imported at load, a name not re-exported, re-export aliased, a consumer bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 2 suites whole (the new test on the candidate only);
+  - 2 cases, identical: 1 pass, 0 pass with a
+    tolerated refusal, 1 stop at the guard (pre-effect only: a probe
+    script's spawn), and 0 fail otherwise;
+  - 34 cases excluded: the identity-cutover drivers,
+    which fake root and reach `systemctl`.
+- **What the comparison exercised (call profiler, functions only):** 1 of 3 passing runs execute a moved function: the new test. Every existing path to these functions is an excluded cutover driver, so the behaviour rests on the new test, its baseline-generated cases, the run against the baseline, the mutants and the proof.
+- **Containment:** no unit installed or reloaded, board or listener
+  restarted, authority changed or release deployed (live snapshot identical
+  before and after). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**. It reads `/proc` process state, so its boundary test
+must stand in the process table from the start:
+
+- Next closure, measured on this candidate and NOT implemented: finding and containing a suspended tenant's residual processes -- 6 definitions, 146 lines (lines 6495-6650, not contiguous):
+  -   6495    6  ResidualProcess  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6503   11  _process_environ  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6516   21  _process_ancestry  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6539   21  process_systemd_unit  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6562   55  residual_project_processes  launcher callers outside: -; production readers outside the launcher: -
+  -   6619   32  contain_residual_project_processes  launcher callers outside: ['suspend_tenant']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 1: ['ProjectConfig']
+  - launcher callers outside the closure: 1: ['suspend_tenant']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 1 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the tenant lifecycle: what is still running for a project once it is suspended, and stopping it)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['managed_unit_names (scripts.board_services)']
+  - alternatives measured the same way:
+  -   - the tenant runtime description (alternative): 2 definitions, 35 lines; launcher callers outside: -; production readers: 0
+  -   - the upgrade preview's finish (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2224 lines  213 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 9,095 lines.

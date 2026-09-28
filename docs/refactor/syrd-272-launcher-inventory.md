@@ -16710,3 +16710,131 @@ and **not implemented**:
   -   137 lines   18 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 4,594 lines.
+
+### SYRD-436 (slice 19as): current generated-layout builders
+
+Measured on `b72969c`. Before any edit, the rooted closure was verified. As
+SYRD-436 measured, the builders read no launcher name outside the six. The
+guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 24 files naming the
+  six were run on both scratch trees (96 whole, 373 cases).
+- **Result:** nothing differed, so no test guard needed adapting and none
+  changed.
+  - The three tests asserting the thresholds' values read them through
+    `team_launcher`.
+  - No test asserts their declaration text.
+
+| file | before (`b72969c`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,594 | 4,543 |
+| `scripts/project_layouts.py` | - | 85 |
+| `tests/project_layouts_boundary_test.py` | - | 443 |
+
+**Scope: exactly the ticket's six definitions, no additional production
+definition.** `NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES`,
+`NEW_PROJECT_GRID_PANES_PER_ROW`, `_new_project_layout_leaves`,
+`_single_row_layout_payload`, `_row_major_grid_layout_payload` and
+`_new_project_layout_payload` (2659-2713) move whole, in order, into the new
+`scripts/project_layouts.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all six, the two
+  thresholds included, right after the `legacy_layouts` import.
+- **Readers:** the six production readers still read the builders on the
+  launcher and are byte-identical: `generated_layout_upgrade.py`,
+  `legacy_layouts.py`, `new_project_artifacts.py`,
+  `presentation_controller.py`, `project_role_add.py` and
+  `workflow_launcher.py`.
+- **Seams:** all 5 call-time reads are now `launcher.X`, all of them
+  the six reading each other (both thresholds included).
+- **Bindings:** there are no definition-time defaults.
+- **Imports:** the module loads only `math` and `typing`.
+- **Blank lines:** the mover also removes the blank lines after a moved
+  constant when the next non-blank line starts another moved definition, so
+  the launcher keeps exactly two blank lines where the block was. The
+  proof's text clause derives the same rule from the baseline AST.
+
+**Proof.** The independent proof (`equiv436.py`, 14 clauses) holds.
+It compares the six whole nodes after normalizing `launcher.X` (the
+thresholds' literals included), and the launcher remainder as AST and text.
+It fixes:
+- a single row through the threshold, else the grid;
+- the grid's `ceil(n / 3)` rows, as even as divmod allows, the longer rows
+  first;
+- a one-leaf row and a one-row grid unwrapped.
+
+13 of 13 planted faults are caught, each parsed first, including a
+blank line left where the block was.
+
+**Evidence.**
+- **New boundary test:** `tests/project_layouts_boundary_test.py`, 138
+  checks. Each run is gated on its screen and passes both under `env -i` and
+  in this role pane's normal environment. It replays 41 cases
+  produced by the BASELINE launcher's own definitions (`gold436.py`) over the
+  very case text the test embeds, not typed. The golden output is
+  byte-identical under `env -i`, in the pane and with another HOME, USER and
+  COLUMNS.
+  - **Shapes:** the layout for 0-16 roles, either side of the row/grid
+    threshold, and the leaves, single row and grid alone.
+  - **How each is recorded:** as a value, as the exact JSON text (key order
+    included), by container type, and by whether it equals its own JSON
+    round trip.
+  - **Rebinding:** both thresholds and each helper rebound on the launcher.
+  - **Reader:** `legacy_layouts`' list of known layouts starts with the
+    current builder, read through the launcher.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (106 checks).
+- **Mutations:** 27 of 27 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first pass left one survivor: a single row's `Widgets` built as a
+    tuple. That serializes the same, but a layout read back from disk (lists)
+    would no longer equal it, so the recogniser would stop recognising it.
+    The cases now record each result's JSON round-trip equality.
+    Everything from the golden file onward was regenerated and rerun.
+  - The behaviour tests alone kill 25. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 144 files are accounted for: every boundary suite and
+  the 24 naming the six.
+  - 97 suites whole: 85 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 373 cases, per case, identical on both sides: 302 pass,
+    69 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`). All are baseline defects already
+    reported, not changed here;
+  - **Excluded (205):** 14 that drive an upgrade
+    or `switchyard_main`, 186 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** team_launcher_declarative_workflow_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child).
+- **What the comparison exercised (call profiler, real functions only):**
+  17 of 387 passing runs execute a moved function:
+  `generated_layout_upgrade_boundary_test.py`, `legacy_layouts_boundary_test.py`, `new_project_artifacts_boundary_test.py`, `presentation_slot_contraction_test.py`, `project_layouts_boundary_test.py`, `role_account_migration_boundary_test.py`, `syrd_87_process_authority_projection_test.py`, `team_launcher_generated_layout_upgrade_test.py`, `team_launcher_layout_upgrade_commands_test.py`, `team_launcher_pane_paths_test.py`, `team_launcher_smoke_layout_test.py`, `tenant_resume_presentation_handoff_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, layout or release was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the board workflow readers -- 2 definitions, 77 lines (lines 3238-3316, not contiguous):
+  -   3238   38  read_board_declared_workflow  launcher callers outside: -; production readers outside the launcher: ['scripts/tenant_config_records.py', 'scripts/workflow_adoption.py', 'scripts/workflow_presence.py']
+  -   3278   39  read_board_workflow_state  launcher callers outside: -; production readers outside the launcher: ['scripts/pane_rebind.py', 'scripts/workflow_adoption.py']
+  - launcher names it reads (through the launcher once moved): 1: ['ProjectConfig']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 4: ['scripts/pane_rebind.py', 'scripts/tenant_config_records.py', 'scripts/workflow_adoption.py', 'scripts/workflow_presence.py']
+  - test files naming any of them: 9 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: reading a tenant board's workflow state and declared workflow)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the runtime-user provisioning (alternative): 6 definitions, 69 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  1916 lines  207 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   588 lines   32 defs  project config and registry
+  -   496 lines   47 defs  provisioning (new/register/teardown/owner accounts)
+  -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
+
+**SYRD-272 is not complete.** The launcher is still 4,543 lines.

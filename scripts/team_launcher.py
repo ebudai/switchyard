@@ -1481,6 +1481,14 @@ from scripts.legacy_layouts import (
     _legacy_new_project_sqrt_column_major_layout_payload,
     _legacy_new_project_stacked_layout_payload,
 )
+from scripts.project_layouts import (
+    NEW_PROJECT_GRID_PANES_PER_ROW,
+    NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES,
+    _new_project_layout_leaves,
+    _new_project_layout_payload,
+    _row_major_grid_layout_payload,
+    _single_row_layout_payload,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2654,65 +2662,6 @@ def _new_project_session_dir(project: str, owner_user: str) -> str:
 
 def _new_project_worktree_base(project: str, owner_user: str) -> Path:
     return Path("/home") / owner_user / f"{project}-worktrees"
-
-
-NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES = 3
-NEW_PROJECT_GRID_PANES_PER_ROW = 3
-
-
-def _new_project_layout_leaves(role_count: int) -> list[dict[str, Any]]:
-    return [
-        {
-            "Command": "",
-            "SessionRestoreId": index,
-            "WorkingDirectory": "",
-        }
-        for index in range(role_count)
-    ]
-
-
-def _single_row_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
-    if len(leaves) <= 1:
-        return leaves[0] if leaves else {"Command": "", "SessionRestoreId": 0, "WorkingDirectory": ""}
-    return {
-        "Orientation": "Horizontal",
-        "Widgets": leaves,
-    }
-
-
-def _row_major_grid_layout_payload(leaves: list[dict[str, Any]]) -> dict[str, Any]:
-    row_count = math.ceil(len(leaves) / NEW_PROJECT_GRID_PANES_PER_ROW)
-    base_row_size, extra = divmod(len(leaves), row_count)
-    rows: list[dict[str, Any]] = []
-    start = 0
-    for row_index in range(row_count):
-        row_size = base_row_size + (1 if row_index < extra else 0)
-        row = leaves[start : start + row_size]
-        start += row_size
-        if len(row) == 1:
-            rows.append(row[0])
-        else:
-            rows.append(
-                {
-                    "Orientation": "Horizontal",
-                    "Widgets": row,
-                }
-            )
-    if len(rows) == 1:
-        return rows[0]
-    return {
-        "Orientation": "Vertical",
-        "Widgets": rows,
-    }
-
-
-def _new_project_layout_payload(role_count: int) -> dict[str, Any]:
-    leaves = _new_project_layout_leaves(role_count)
-    if role_count <= NEW_PROJECT_SINGLE_ROW_LAYOUT_MAX_ROLES:
-        return _single_row_layout_payload(leaves)
-    return _row_major_grid_layout_payload(leaves)
-
-
 
 
 def _usable_switchyard_entry_for_project(

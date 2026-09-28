@@ -1536,6 +1536,9 @@ from scripts.cli_install_instructions import (
 from scripts.role_state_restore import (
     restore_interrupted_role_state,
 )
+from scripts.policy_hook_repair import (
+    repair_repository_policy_hooks,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3103,37 +3106,6 @@ def _open_board_url(url: str) -> Any:
     import urllib.request
 
     return urllib.request.urlopen(url, timeout=5)
-
-
-def repair_repository_policy_hooks(
-    config_path: Path,
-    *,
-    source_repo: Path,
-    dry_run: bool = False,
-    print_func: Callable[[str], None] = print,
-) -> tuple[Path, ...]:
-    """Reinstall this project's managed Git policy hooks, missing or stale.
-
-    Idempotent: the installer rewrites its own managed hook and preserves any
-    pre-existing one, so repeated upgrades converge rather than accumulate. Ownership is
-    taken from the existing hooks directory, so a root-run upgrade leaves the tenant's
-    hooks owned by the tenant. Only the repositories named in this project's config are
-    touched -- no global hooksPath, no scanning of arbitrary homes.
-    """
-    if dry_run:
-        print_func(f"switchyard: would reinstall managed Git policy hooks for {config_path}")
-        return ()
-    from scripts import repository_hooks
-
-    try:
-        installed = repository_hooks.install_project_config(config_path, source_root=source_repo)
-    except Exception as exc:
-        # Warning-only policy: a repair failure must not fail an otherwise good upgrade.
-        print_func(f"warning: switchyard: could not repair Git policy hooks: {exc}")
-        return ()
-    for path in installed:
-        print_func(f"switchyard: reinstalled managed Git policy hook {path}")
-    return installed
 
 
 def _role_accounts_ready(config: ProjectConfig) -> bool:

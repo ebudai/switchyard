@@ -18155,3 +18155,125 @@ and **not implemented**:
   -   100 lines   10 defs  board service, listener and status
 
 **SYRD-272 is not complete.** The launcher is still 3,993 lines.
+
+### SYRD-449 (slice 19bc): the repository policy-hook repair
+
+Measured on `d93b7cd`. Before any edit, the rooted closure was verified; there
+was no closure expansion. The guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 2 files
+  naming the function were run on both scratch trees (106 whole, 262
+  cases).
+- **Result:** nothing differed, so no test guard needed adapting and none
+  changed.
+  - `upgrade_phases_boundary_test` lists the function among
+    `upgrade_phases.py`'s own launcher reads.
+  - `repository_policy_install_test` calls the launcher's name.
+  - No test counts calls of `repository_hooks.install_project_config`.
+
+| file | before (`d93b7cd`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 3,993 | 3,965 |
+| `scripts/policy_hook_repair.py` | - | 52 |
+| `tests/policy_hook_repair_boundary_test.py` | - | 370 |
+
+**Scope: exactly the ticket's one definition, no additional production
+definition.** `repair_repository_policy_hooks` (3108-3136) moves whole into the new
+`scripts/policy_hook_repair.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import, right after the
+  `role_state_restore` import.
+- **Reader:** `upgrade_phases.py` still reads it through the launcher when
+  it runs, and is byte-identical. No launcher definition names it.
+- **Seams:** it reads nothing from the launcher. Its one call-time
+  dependency, `from scripts import repository_hooks` (after the dry-run
+  check), moves verbatim, so rebinding the installer there still reaches it.
+- **Defaults and imports:** `dry_run=False` and the builtin `print`, the same
+  objects. `Path` and `Callable` are the module's own imports. The module
+  loads no Switchyard module.
+
+**Proof.** The independent proof (`equiv449.py`, 14 clauses) holds.
+It compares the whole node and every default, and the launcher remainder as
+AST and text. Its rules clause fixes the steps in order with `find`:
+- the dry run before the import;
+- one install with the config path and the source repository;
+- only an ordinary `Exception` caught, warned about and answered with an
+  empty tuple;
+- every reinstalled hook named, and the installer's own answer returned.
+
+18 of 18 planted faults are caught, each parsed first, and the plant
+run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/policy_hook_repair_boundary_test.py`,
+  64 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  13 cases produced by the BASELINE launcher's own definition
+  (`gold449.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane, with another
+  HOME, USER and COLUMNS, under umask 077 and under three hash seeds.
+  - **Isolation:** the hook installer is a stand-in on
+    `scripts.repository_hooks` and every path is fixed and non-existent; no
+    hook is installed in any repository.
+- **Baseline behaviour pinned, not changed:**
+  - the "warning-only" failure path catches `Exception`, so a `SystemExit`
+    from the installer still propagates;
+  - the installer's own container is returned as it is (a list stays a
+    list).
+- **A correction I made on the ticket:** my design note said that all three
+  of `repository_policy_install_test`'s direct callers stop at a guard
+  refusal. On both trees, two pass and only the idempotence case stops (at a
+  refused `os.chown`). It also said the live snapshot changed; only this
+  pane's own notification log moved.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definition in both environments (49 checks).
+- **Mutations:** 17 of 17 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout, all on the first
+  pass. The behaviour tests alone kill 15. The rest are structural, and the
+  structure checks kill them: the launcher imported at load, re-export aliased. One candidate was left out as
+  equivalent: moving the `repository_hooks` import to load time still reads
+  the installer on the module when it runs.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 136 files are accounted for: every boundary suite and
+  the 2 naming the function.
+  - 107 suites whole: 95 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 262 cases, per case, identical on both sides: 245 pass,
+    15 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (92):** 0 that drive an upgrade
+    or `switchyard_main`, 87 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, real functions only):**
+  2 of 340 passing runs execute a moved function:
+  `policy_hook_repair_boundary_test.py`, `repository_policy_install_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, repository hook or release was touched. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff449.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the owner's systemctl runner -- 1 definitions, 25 lines (lines 3136-3160):
+  -   3136   25  _owner_user_systemctl  launcher callers outside: -; production readers outside the launcher: ['scripts/board_services.py']
+  - launcher names it reads (through the launcher once moved): 4: ['ProjectConfig', 'current_user_name', '_owner_command_env_args', '_tenant_owner_home']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/board_services.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: running systemctl --user as the project owner)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: ['main']; production readers: 0
+  -   - the registry project entries (alternative): 1 definitions, 25 lines; launcher callers outside: ['_switchyard_entries']; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  1831 lines  207 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   523 lines   29 defs  project config and registry
+  -   396 lines   41 defs  provisioning (new/register/teardown/owner accounts)
+  -   100 lines   10 defs  board service, listener and status
+
+**SYRD-272 is not complete.** The launcher is still 3,965 lines.

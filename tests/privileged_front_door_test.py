@@ -472,9 +472,13 @@ def test_the_shipped_default_demands_root() -> None:
 
 def test_the_marker_name_matches_what_the_build_writes() -> None:
     """A marker name that drifted would make every release look untrusted."""
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+    from scripts import team_launcher
+
+    # SYRD-416 moved the declaration, unchanged, into scripts/shared_release.py, which the launcher re-exports.
+    sources = [(ROOT / "scripts" / name).read_text(encoding="utf-8") for name in ("team_launcher.py", "shared_release.py")]
     declared = f'SWITCHYARD_RELEASE_MARKER_NAME = "{po.RELEASE_MARKER_NAME}"'
-    check(declared in source, f"the build writes {po.RELEASE_MARKER_NAME}")
+    check(any(declared in source for source in sources), f"the build writes {po.RELEASE_MARKER_NAME}")
+    check(team_launcher.SWITCHYARD_RELEASE_MARKER_NAME == po.RELEASE_MARKER_NAME, "and the launcher reads the same name")
 
 
 def test_the_uncatalogued_half_is_recorded_with_its_reason() -> None:

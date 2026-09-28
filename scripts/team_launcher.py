@@ -1360,6 +1360,21 @@ from scripts.staged_launch_checks import (
     staged_bundle_launch_problems,
     tenant_pinned_release_root,
 )
+from scripts.shared_release import (
+    DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT,
+    SWITCHYARD_NAME,
+    SWITCHYARD_RELEASE_MARKER_NAME,
+    SWITCHYARD_VERSION,
+    SharedSwitchyardRelease,
+    _read_switchyard_release_marker,
+    report_installed_release_version,
+    running_launcher_release,
+    shared_switchyard_release_for_path,
+    switchyard_shared_install_root,
+    switchyard_shared_pane_launcher,
+    switchyard_shared_target,
+    switchyard_version_text,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1399,7 +1414,6 @@ SWITCHYARD_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 #: a record written before it existed still reads; absent means "not recorded",
 #: never "none" (SYRD-220).
 SWITCHYARD_REGISTRY_AGENT_CLIS_KEY = "agent_clis"
-SWITCHYARD_NAME = "switchyard"
 TEAM_LAUNCHER_NAME = "team-launcher"
 # SYRD-43: the program Konsole runs for a pane, so a detach never lands on a shell.
 PANE_WINDOW_NAME = "switchyard-pane-window"
@@ -1438,8 +1452,6 @@ PROJECT_DESIGN_FORBIDDEN_KEYS = frozenset(
 WORKTREE_POLICIES = frozenset({"shared", "isolated"})
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
 DEFAULT_PANE_BASE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT = Path("/opt/switchyard")
-SWITCHYARD_RELEASE_MARKER_NAME = ".switchyard-release.json"
 
 
 DEFAULT_SESSION_DIR = (
@@ -1458,7 +1470,6 @@ LEGACY_USER_BIN_ENV = "PGU_TEAM_LAUNCHER_BIN_DIR"
 #: runtime directory, where no compositor is listening (SYRD-65).
 TENANT_CONTROL_CALLER_ENV = "SWITCHYARD_TENANT_CONTROL_CALLER"
 MAX_VISIBLE_PANES_PER_WINDOW = 6
-SWITCHYARD_VERSION = "dev"
 SWITCHYARD_COMMANDS = (
     "board-skill",
     "new",
@@ -1735,73 +1746,8 @@ class ProjectDesignArtifact:
     catalog_version: int = 0
 
 
-@dataclass(frozen=True)
-class SharedSwitchyardRelease:
-    root: Path
-    marker_commit: str = ""
-    marker_error: str = ""
-
-    @property
-    def active(self) -> bool:
-        return bool(self.marker_commit)
-
-    @property
-    def undeterminable(self) -> bool:
-        return bool(self.error)
-
-
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
-
-def switchyard_shared_install_root() -> Path:
-    return Path(os.environ.get("SWITCHYARD_SHARED_INSTALL_ROOT", DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT)).expanduser()
-
-
-def switchyard_shared_target(root: Path | None = None) -> Path:
-    return (root or switchyard_shared_install_root()) / "current" / SWITCHYARD_NAME
-
-
-def switchyard_shared_pane_launcher(root: Path | None = None) -> Path:
-    return (root or switchyard_shared_install_root()) / "current" / "scripts" / TEAM_LAUNCHER_NAME
-
-
-def _read_switchyard_release_marker(path: Path) -> SharedSwitchyardRelease | None:
-    marker = path / SWITCHYARD_RELEASE_MARKER_NAME
-    if not marker.exists():
-        return None
-    try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return SharedSwitchyardRelease(root=path, marker_error=str(exc))
-    commit = str(payload.get("commit") or "").strip()
-    if not commit:
-        return SharedSwitchyardRelease(root=path, marker_error=f"{marker} has no commit")
-    return SharedSwitchyardRelease(root=path, marker_commit=commit)
-
-
-def shared_switchyard_release_for_path(path: Path, *, install_root: Path | None = None) -> SharedSwitchyardRelease | None:
-    root = (install_root or switchyard_shared_install_root()).expanduser().resolve(strict=False)
-    candidate = path.expanduser().resolve(strict=False)
-    if not _path_is_under(candidate, root):
-        return None
-    for probe in (candidate, *candidate.parents):
-        if not _path_is_under(probe, root):
-            break
-        marker = _read_switchyard_release_marker(probe)
-        if marker is not None:
-            return marker
-    if _path_is_under(candidate, root / "current") or _path_is_under(candidate, root / "releases"):
-        return SharedSwitchyardRelease(root=candidate)
-    return None
-
-
-def switchyard_version_text(repo_root: Path | None = None) -> str:
-    root = repo_root or _repo_root()
-    release = _read_switchyard_release_marker(root)
-    if release is not None and release.marker_commit:
-        return f"switchyard {release.marker_commit}"
-    return f"switchyard {SWITCHYARD_VERSION}"
 
 
 def _allocated_board_port(project: str, *, base: int = 18_770, span: int = 10_000) -> int:
@@ -6121,13 +6067,6 @@ def role_control_accounts(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def running_launcher_release(root: Path | None = None) -> SharedSwitchyardRelease | None:
-    """Which installed release this process is executing out of, if any."""
-    return shared_switchyard_release_for_path(
-        (root or Path(__file__).resolve().parent.parent)
-    )
-
-
 def process_uid(pid: int, *, proc_root: Path | None = None) -> int | None:
     """The uid a running process is actually executing as, from the kernel."""
     if pid <= 0:
@@ -6742,40 +6681,6 @@ def _project_config_path_owner_user(path: Path) -> str:
         return pwd.getpwuid(expanded.stat().st_uid).pw_name
     except (KeyError, OSError):
         return ""
-
-
-def report_installed_release_version(
-    *,
-    root: Path | None = None,
-    environ: dict[str, str] | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] | None = None,
-) -> list[str]:
-    """Say when the installed release is older than the checkout it came from.
-
-    Pulling a checkout does not change what `switchyard` runs, because it runs
-    from the installed release. The only symptom is a bug the user has already
-    been told is fixed, so the conclusion they draw is that it was not -- which
-    costs trust rather than time. This reports the mismatch and stops there:
-    reinstalling is privileged and is theirs to decide (SYRD-94).
-
-    Nothing here can fail the command it is attached to. A version notice that
-    can break the tool is worse than the silence it replaces.
-    """
-    from scripts.version_notice import release_notice_lines
-
-    emit = print_func or (lambda line: print(line, file=sys.stderr))
-    try:
-        lines = release_notice_lines(
-            (root or _repo_root()),
-            environ=dict(os.environ) if environ is None else environ,
-            runner=runner,
-        )
-    except Exception:
-        return []
-    for line in lines:
-        emit(line)
-    return lines
 
 
 def switchyard_main(argv: list[str] | None = None) -> int:

@@ -14274,3 +14274,173 @@ and **not implemented**:
   -   485 lines   18 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,496 lines.
+
+### SYRD-416 (slice 19ac): shared-release identity
+
+Measured on `8432459`. The design was posted **before** any edit.
+
+| file | before (`8432459`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,496 | 7,401 |
+| `scripts/shared_release.py` | - | 172 |
+| `tests/shared_release_boundary_test.py` | - | 634 |
+
+**Moved:** the thirteen definitions that name the shared install, read a
+release's marker, map a path or the running launcher to an installed release,
+and report the version. Each moved whole, in the launcher's order, into the
+new `scripts/shared_release.py`:
+- the constants `SWITCHYARD_NAME`, `DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT`,
+  `SWITCHYARD_RELEASE_MARKER_NAME` and `SWITCHYARD_VERSION`;
+- the frozen dataclass `SharedSwitchyardRelease`, with its decorator and
+  both properties (including `undeterminable`, which still reads a
+  non-existent `self.error`);
+- `switchyard_shared_install_root`, `switchyard_shared_target`,
+  `switchyard_shared_pane_launcher`, `_read_switchyard_release_marker`,
+  `shared_switchyard_release_for_path`, `switchyard_version_text`,
+  `running_launcher_release` and `report_installed_release_version`.
+
+They were noncontiguous. The launcher lost exactly those nodes and the blank
+lines after the moved definitions. The blank lines around the one-line
+constants stayed, so their neighbours were not glued together (proof clause 4c).
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all thirteen, beside the
+  SYRD-415 import. The class is the same object, so class identity holds, and
+  only `__module__` changes.
+- **The launcher's own readers:** seven definitions read the thirteen as
+  launcher globals, exactly as often as before: `_new_project_launcher_config_payload`, `_precheck_deploy_source`, `_rollout_recorder_path`, `_switchyard_release_source_error`, `_tenant_board_root_from_config`, `switchyard_main`, `upgrade_generated_project_config`.
+  Nothing at module level reads them.
+- **Production readers:** fourteen read them through the launcher at call
+  time, unchanged, and none imports one directly: `scripts/agent_cli_promotion.py`, `scripts/launcher_checkout.py`, `scripts/project_onboarding.py`, `scripts/project_status.py`, `scripts/release_alignment.py`, `scripts/release_rollback.py`, `scripts/role_account_migration.py`, `scripts/root_plan_reconstruction.py`, `scripts/staged_launch_checks.py`, `scripts/tenant_control_helper.py`, `scripts/tenant_release_report.py`, `scripts/tenant_release_target.py`, `scripts/trusted_bootstrap.py`, `scripts/trusted_upgrade_release.py`.
+  `publication_boundary.py` has its own marker-name constant and is not a
+  reader.
+- **Seams:** all 22 call-time reads of 12 names are now `launcher.X`,
+  8 of them siblings. They include `__file__`, which is now
+  `launcher.__file__`, so `running_launcher_release` still resolves the
+  launcher's own checkout. The other seams are `TEAM_LAUNCHER_NAME`,
+  `_repo_root` (which stays, with its own `__file__`) and `_path_is_under`.
+  Every existing launcher patch (15 test files) still reaches the moved code
+  and the seven callers.
+- **Imports:** the standard library only; no Switchyard module is imported
+  at load. The defaults stay as bound (`runner=subprocess.run`), and the
+  version notice is still imported inside the function.
+- **Guards: one adapted, after a correction comment on the ticket.** The
+  design had said none needed adapting, but the first guarded comparison
+  showed one case differing:
+  `privileged_front_door_test::test_the_marker_name_matches_what_the_build_writes`
+  searched the launcher's text for the `SWITCHYARD_RELEASE_MARKER_NAME`
+  declaration.
+  - It now looks for the same exact line in the launcher or in
+    `scripts/shared_release.py`, the module the launcher imports it from, and
+    also checks the launcher's value.
+  - A widened scan of every test's string constants for a declaration of any
+    of the thirteen finds no other such check.
+  - A mutated marker name fails the adapted case.
+  - Otherwise: the neighbour checks in seven boundary tests accept a
+    re-export. The one `__module__` filter over the launcher
+    (`role_identity_cutover_boundary_test`) counts `deploy_ref` defaults,
+    which none of the thirteen has.
+
+**Proof.** The independent proof (`equiv416.py`, 14 clauses) holds.
+It compares all thirteen whole nodes after normalizing `launcher.X`, the
+launcher remainder node by node, and the launcher text. It fixes the rules:
+- **The marker parse** catches exactly `OSError` and `JSONDecodeError`.
+- **The walk** checks the root first, stops at the root, and falls back to a
+  bare `current`/`releases` release.
+- **The running launcher** is its own file's grandparent.
+- **The notice** is fetched inside one `except Exception: return []` and
+  printed after.
+
+It also fixes that no reader was touched and that the one adapted guard changed only in its own function. 24 of
+24 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/shared_release_boundary_test.py`,
+  224 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  75 cases produced by the BASELINE launcher's own functions
+  (`gold416.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane, and each case runs through both the module and the launcher's
+  re-export. By group:
+  - 14 marker cases: absent, a stripped or non-string commit,
+    null, blank or missing commits, empty, malformed, a JSON list or null
+    (which the baseline raises on), non-UTF-8 (raised), a directory or a
+    dangling symlink in its place, and the marker name rebound on the
+    launcher;
+  - 22 path-to-release cases: outside, the root, a marked
+    release, `current` and `releases` unmarked, elsewhere under the root, a
+    missing path, the nearer marker, a malformed marker, markers at and above
+    the root, symlinks in and out, an explicit root, `~` in the environment,
+    the launcher's default and install root rebound, and a relative path;
+  - 12 path cases: the environment, `~`, empty, the real
+    default and rebound defaults, targets and pane launchers;
+  - 7 version cases;
+  - 4 running-launcher cases, including the launcher's own
+    checkout;
+  - 9 notice cases: order, the default stderr, the process
+    environment, the default runner, a raising notice (nonfatal), an exit
+    (propagated) and a raising print;
+  - 7 class cases (active, bare, the odd property, frozen,
+    equality, repr).
+
+  The shared root is always inside a test-owned tree, so the real
+  `/opt/switchyard` is never read. The notice is a recorder. Spawns, every
+  `os.exec*`, signals, connections and account or group lookups are refused.
+  Its 3 behaviour cases also pass against the baseline's own
+  definitions, in both environments (171 checks).
+- **Mutations:** 42 of 42 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The first run left
+  one, "active reads the error", which a new generated case (a bare release
+  is not active) now kills. The behaviour tests alone kill 38. The
+  4 left are structural, and the structure checks kill each one:
+  __file__ read from the module, the launcher imported at load, re-export aliased, a reader bypasses the launcher. The `__file__` one is behaviourally identical, because
+  the module sits in the same directory; the seam count pins it.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 36 files accounted for (the 31 that name
+  the thirteen, plus 5 more that import one of the readers):
+  - 18 suites whole: 17 pass on the candidate
+    (the new test only there), and `role_account_migration_boundary_test.py` stop identically on both trees at a guard refusal.
+  - 219 cases, per case, identical on both sides: 119 pass,
+    99 stop at the same guard refusal, and 1 fails
+    identically on both (`team_launcher_wrapper_test::test_switchyard_version_reports_release_marker`).
+  - **That failure is a harness artifact, not a defect:**
+    - it is a `ModuleNotFoundError`, because the suite relies on its own
+      runner to put the repository root on `sys.path`;
+    - rerun with the root on `PYTHONPATH`, it passes on both trees
+      (`versioncase416.out`).
+  - **Excluded (77):** 9 that drive an upgrade or
+    `switchyard_main`, 65 whose own execution screen hits, and
+    3 accumulators.
+- **What the comparison exercised (call profiler, real functions only):**
+  6 of 136 passing runs execute a moved function:
+  `project_status_boundary_test.py`, `release_bootstrap_rollback_test.py`, `shared_release_boundary_test.py`, `staged_launch_checks_boundary_test.py`, `team_launcher_design_test.py`, `team_launcher_env_config_test.py`, `trusted_bootstrap_boundary_test.py`.
+- **Containment:** nothing crossed; no release, tenant, service, sudo,
+  window or board was touched (live snapshot identical before and after).
+  Both entry points' help is identical (36 `switchyard` invocations
+  plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the generated project config/layout upgrade -- 3 definitions, 126 lines (lines 3060-3189, not contiguous):
+  -   3060    4  _generated_project_durable_session_dir  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3066  114  upgrade_generated_project_config  launcher callers outside: -; production readers outside the launcher: -
+  -   3182    8  upgrade_generated_project_layout  launcher callers outside: ['launch_project']; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  - launcher names it reads (through the launcher once moved): 9: ['ProjectConfig', 'LauncherUpgradeResult', '_write_json_atomic', 'ensure_owner_file', '_known_generated_project_layout_payloads', '_is_generated_project_layout_template', '_tenant_board_root_from_config_or_plan', '_new_project_session_dir', '_new_project_layout_payload']
+  - launcher callers outside the closure: 1: ['launch_project']
+  - production modules reading it through the launcher: 1: ['scripts/upgrade_phases.py']
+  - test files naming any of them: 7 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: bringing a generated project config and its layout files up to what this release generates when a project is launched -- one caller, launch_project, reached through upgrade_generated_project_layout)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['read_tenant_document_no_follow (scripts.no_follow_records)', 'session_dir_uses_user_runtime (scripts.session_paths)', 'switchyard_shared_pane_launcher (scripts.shared_release)']
+  - alternatives measured the same way:
+  -   - the deploy-source precheck (alternative): 3 definitions, 63 lines; launcher callers outside: ['precheck_new_project']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2141 lines  210 defs  general helpers (unclassified)
+  -  1563 lines   65 defs  provisioning (new/register/teardown/owner accounts)
+  -  1004 lines   38 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   398 lines   12 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,401 lines.

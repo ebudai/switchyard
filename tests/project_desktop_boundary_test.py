@@ -182,9 +182,13 @@ def test_the_seams_and_the_functions_own_imports() -> None:
     # SYRD-426 moved new_project_command, one of configure_project_desktop's two callers, to
     # scripts/new_project_command.py, which calls through the launcher too; its site counts here and the totals are unchanged.
     moved_caller = ROOT / "scripts" / "new_project_command.py"
+    moved_launch = ROOT / "scripts" / "project_launch.py"
     phases = ast.Module(body=[*ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8")).body,
                               *ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8")).body,
-                              *(ast.parse(moved_caller.read_text(encoding="utf-8")).body if moved_caller.exists() else [])],
+                              *(ast.parse(moved_caller.read_text(encoding="utf-8")).body if moved_caller.exists() else []),
+                              # SYRD-429 moved launch_project, one of prepare_project_desktop's callers, to
+                              # scripts/project_launch.py, which calls through the launcher; the totals are unchanged.
+                              *(ast.parse(moved_launch.read_text(encoding="utf-8")).body if moved_launch.exists() else [])],
                         type_ignores=[])
     for name, count in LAUNCHER_CALLS.items():
         calls = [n for n in ast.walk(launcher_tree)

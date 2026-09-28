@@ -85,6 +85,56 @@ def check(condition: bool, detail: str) -> None:
     CHECKS += 1
 
 
+#: What launch_project reads through the launcher (SYRD-429).
+LAUNCH_READS = ("_launch_runners_and_paths", "_prepare_launch", "_write_layout_and_plan", "_start_workers_and_present", "_report_launch",
+                "process_authority_board_compatibility", "migrate_declarative_director_onboarding", "upgrade_generated_project_layout",
+                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config")
+
+
+def launcher_with_launch_project() -> ast.Module:
+    """The launcher as launch_project's call sites see it: the launcher's own definitions, and launch_project.
+
+    SYRD-429 moved launch_project to scripts/project_launch.py, where it reads each phase and check through the launcher
+    when it runs. Checked first, on the source as it is: the launcher no longer defines it, re-exports it unaliased, and
+    main and switchyard_main still call it by that name; its first statement is the call-time launcher import; every one
+    of its launcher reads goes through the launcher, none bare. Only then is that import dropped, each `launcher.X` read
+    as `X`, and the command appended to the launcher's body, so the call sites and positions below are the command's
+    own. Before the move (the baseline) it is the launcher as it stands.
+    """
+    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    moved = ROOT / "scripts" / "project_launch.py"
+    if not moved.exists():
+        return launcher
+    command = next(n for n in ast.parse(moved.read_text(encoding="utf-8")).body if isinstance(n, ast.FunctionDef) and n.name == "launch_project")
+    check(not any(isinstance(n, ast.FunctionDef) and n.name == "launch_project" for n in launcher.body), "the launcher no longer defines launch_project")
+    check(any(isinstance(n, ast.ImportFrom) and n.module == "scripts.project_launch"
+              and any(a.name == "launch_project" and a.asname is None for a in n.names) for n in launcher.body),
+          "the launcher re-exports it, unaliased")
+    dispatch = {n.name: sum(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "launch_project" for c in ast.walk(n))
+                for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name in ("main", "switchyard_main")}
+    past = [n for n in ast.walk(launcher) if isinstance(n, ast.Attribute) and n.attr == "launch_project"]
+    check(dispatch == {"main": 1, "switchyard_main": 2} and past == [],
+          f"main and switchyard_main still call it by the launcher's name, as often as before, and nothing reaches past it: {dispatch}")
+    check(ast.unparse(command.body[0]) == "from scripts import team_launcher as launcher",
+          f"the command imports the launcher first thing, when it runs: {ast.unparse(command.body[0])}")
+    bare = sorted({n.id for n in ast.walk(command) if isinstance(n, ast.Name) and n.id in LAUNCH_READS})
+    through = sorted({n.attr for n in ast.walk(command)
+                      if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "launcher"})
+    check(bare == [] and through == sorted(LAUNCH_READS), f"every launch_project read goes through the launcher, none bare: {bare} {through}")
+    del command.body[0]
+
+    class AsLauncherGlobal(ast.NodeTransformer):
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            self.generic_visit(node)
+            if isinstance(node.value, ast.Name) and node.value.id == "launcher":
+                return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+            return node
+
+    AsLauncherGlobal().visit(command)
+    launcher.body.append(command)
+    return launcher
+
+
 def python(probe: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, "-c", probe], cwd=ROOT, capture_output=True, text=True,
                           env={"PATH": "/usr/bin:/bin"}, check=False)
@@ -199,7 +249,7 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
 
 
 def test_the_call_site_the_seams_and_the_phases_own_names() -> None:
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launcher_tree = launcher_with_launch_project()
     calls = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_launch_runners_and_paths"]
     check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
@@ -518,7 +568,7 @@ def test_the_preparation_reads_every_launcher_lookup_through_the_launcher() -> N
 
     from scripts import launch_phases
     check(launch_phases.sys is _sys, "sys is the module's own import, the one module object")
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launcher_tree = launcher_with_launch_project()
     calls = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_prepare_launch"]
     check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
@@ -783,7 +833,7 @@ def test_the_layout_phase_reads_its_lookups_through_the_launcher() -> None:
     check("launcher" not in bound and through == [], f"nothing P6 binds is read as the launcher's: {through}")
     check(launch_phases.json is _json and launch_phases.Path is Path,
           "json and Path are the module's own, the very objects the launcher holds")
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launcher_tree = launcher_with_launch_project()
     calls = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_write_layout_and_plan"]
     check(len(calls) == 1 and isinstance(calls[0].func, ast.Name),
@@ -1106,7 +1156,7 @@ def test_the_worker_phase_reads_its_lookups_through_the_launcher() -> None:
           f"nothing P7+P8 bind, nor the recorder's own names, is read as the launcher's: {through}")
     check(launch_phases.time is _time and launch_phases.sys is _sys and launch_phases.Path is Path,
           "time, sys and Path are the module's own, the very objects the launcher holds")
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launcher_tree = launcher_with_launch_project()
     sites = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_start_workers_and_present"]
     check(len(sites) == 1 and isinstance(sites[0].func, ast.Name),
@@ -1503,7 +1553,7 @@ def test_the_report_phase_reads_its_lookups_through_the_launcher() -> None:
     check("launcher" not in bound - {"launcher"} and through == [], f"nothing P9 binds is read as the launcher's: {through}")
     check(isinstance(function.body[-1], ast.Return) and ast.unparse(function.body[-1]) == "return worker_start_exit_code",
           "the phase ends in the launch's own return, unchanged")
-    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launcher_tree = launcher_with_launch_project()
     launch = next(n for n in launcher_tree.body if isinstance(n, ast.FunctionDef) and n.name == "launch_project")
     sites = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_report_launch"]

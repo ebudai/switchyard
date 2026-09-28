@@ -14632,3 +14632,149 @@ and **not implemented**:
   -   282 lines   11 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,274 lines.
+
+### SYRD-419 (slice 19ae): new-project launcher artifacts
+
+Measured on `72e71f0`. The design was posted **before** any edit.
+
+| file | before (`72e71f0`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,274 | 7,008 |
+| `scripts/new_project_artifacts.py` | - | 324 |
+| `tests/new_project_artifacts_boundary_test.py` | - | 547 |
+
+**Moved:** `_new_project_control_repository`,
+`_new_project_launcher_config_payload`, `_dedupe_role_defs`,
+`_new_project_role_env`, `_director_seed_project_dir` and
+`write_new_project_launcher_artifacts`, whole, in order, with their comments
+(SYRD-115, the director seed, SYRD-167), into the new
+`scripts/new_project_artifacts.py`. `_new_project_session_dir`,
+`_new_project_worktree_base`, `_new_project_layout_payload` and
+`_path_exists` stay where they were, around them.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all six.
+- **Callers:** `new_project_command` still calls the writer by its launcher
+  global. No production module outside the launcher reads any of the six,
+  and none of the 21 test files that name them patches them.
+- **Seams:** all 31 call-time reads of 17 names are now
+  `launcher.X` (5 of them siblings).
+- **Defaults:** `implementer_roles=DEFAULT_PROJECT_IMPLEMENTER_ROLES` stays
+  bound at definition, imported eagerly from `project_provision`, the same
+  module and object as the launcher's. That import loads only `ticket_board`
+  modules, none of which imports the launcher.
+- **Other imports:** `print_func=print` stays bound. `ProjectBoardProvision`
+  is imported under TYPE_CHECKING. The workflow projection and the
+  desktop-policy validator are still imported inside the functions.
+- **Guards:** none needed adapting. SYRD-416's `shared_release_boundary_test`
+  records `_new_project_launcher_config_payload`'s read of the shared pane
+  launcher. Since SYRD-417 its check follows a caller that moved on, so it
+  passed unchanged; the design predicted that, and it ran before the test was
+  written. Call-site count guards naming the seams (the SYRD-417 lesson) were
+  scanned for and their suites compared.
+
+**Proof.** The independent proof (`equiv419.py`, 14 clauses) holds.
+It compares the six whole nodes after normalizing `launcher.X`, and the
+launcher remainder as AST and as text. It fixes the rules:
+- roles are deduplicated first-wins before anything else;
+- the layout is written before the config;
+- group and other write are taken off the config right after it is written;
+- the workflow re-layout, then the desktop policy, each rewrite atomically;
+- slots run below the cap, and roles above it are detached;
+- the director seed comes from the design, else from the onboarding
+  document's project.
+
+21 of 21 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/new_project_artifacts_boundary_test.py`,
+  167 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  57 cases produced by the BASELINE launcher's own functions
+  (`gold419.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane. By group:
+  - 37 full writes: implementer counts across the cap,
+    explicit, duplicated and over-cap CLIs, designer/audit toggles and audit
+    roles, models and efforts (blank ones omitted), project name, upstream
+    settings, remote and branch, design and onboarding combinations, a
+    workflow (with the artifact present or not, projecting nothing visible,
+    or empty), desktop policies (headless, wayland, invalid, another tenant,
+    not JSON), a pre-existing 0666 config and a group-writable umask, a
+    missing output directory, and an unwritable layout;
+  - 20 cases on the parts: the payload, each role environment,
+    deduplication, the seed directory (including the directory name rebound
+    on the launcher), the control repository, and the pane cap rebound on the
+    launcher.
+
+  **Harness:** every case writes into its own test-owned directory, and every
+  file's bytes and mode afterwards are compared. The pure seams, the atomic
+  writer and the desktop-policy validator run for real. The session
+  directory, shared pane launcher and onboarding seed stand in. So does the
+  workflow projection, because the real one needs a fully validated workflow
+  document: a deterministic stand-in drops a role and re-slots the rest. The
+  layout file name comes from the launcher's own presentation markers. Its
+  3 behaviour cases also pass against the baseline's own definitions,
+  in both environments (136 checks).
+- **Mutations:** 42 of 43 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - **The one survivor, "the seed overrides a prompt"
+    (`env.setdefault` becoming `env[...] =`), is equivalent:** the prompt
+    key is written in exactly one place in the module, into an `env` built
+    fresh a few lines above (`equivalent419.out`). The proof's whole-node
+    comparison catches it anyway.
+  - The behaviour tests alone kill 39. The remaining survivors are
+    structural, and the structure checks kill them: the launcher imported at load, re-export aliased, new_project_command bypasses its global.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 42 files accounted for (the 21 that name
+  the six, the count-guard suites, and those naming `new_project_command`):
+  - 12 suites whole: 11 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused);
+  - 202 cases, per case, identical on both sides: 118 pass,
+    84 stop at the same guard refusal, and 0 fail
+    identically on both (none);
+  - **Excluded (107):** 15 that drive an upgrade
+    or `switchyard_main`, and 92 whose own execution screen hits;
+  - **Not run:** legacy_root_owned_provision_upgrade_test.py: not run -- no test_/case_ functions; main() re-executes it under unshare --user --map-auto --map-root-user and exercises root-owned provision records as root inside that namespace; privileged_plan_read_no_follow_test.py: not run -- the same shape: main() re-executes it as root in a user namespace (unshare --map-root-user); team_launcher_adopt_registry_config_test.py: not run -- unittest cases run only through main(), which re-executes it under unshare --user --map-root-user (--privileged-child) because the records it reads are root-owned; team_launcher_declarative_workflow_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child); team_launcher_desktop_policy_owner_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child); team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function.
+- **What the comparison exercised (call profiler, real functions only):**
+  4 of 129 passing runs execute a moved function:
+  `board_skill_staged_bundle_test.py`, `new_project_artifacts_boundary_test.py`, `resume_provision_continuation_test.py`, `role_account_migration_boundary_test.py`, `role_onboarding_prompt_test.py`, `ticket_board_tenant_runtime_paths_test.py`.
+- **Containment:** no real project was created, and no tenant, board,
+  account, service, release, pane or desktop was touched (live snapshot
+  identical before and after). Both entry points' help is identical
+  (36 `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the project design artifact loader -- 12 definitions, 262 lines (lines 1455-2255, not contiguous):
+  -   1455    1  AGY_SOURCE_ORIGINS  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1456    9  PROJECT_DESIGN_FORBIDDEN_KEYS  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1932    6  _artifact_forbidden_keys  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1940    8  _artifact_string  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1950    7  _artifact_optional_string  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1959   15  _artifact_role_list  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1976   15  _artifact_audit_role_list  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2047   21  _artifact_role_value_pairs  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2070   29  _artifact_role_cli_pairs  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2101   13  _artifact_bool_mapping  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2116   42  _artifact_capability_grants  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2160   96  load_project_design_artifact  launcher callers outside: ['new_project_command']; production readers outside the launcher: ['scripts/new_project_phases.py']
+  - launcher names it reads (through the launcher once moved): 12: ['PROJECT_DESIGN_ARTIFACT_SCHEMA', 'PROJECT_DESIGN_DEFAULT_GATES', 'PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS', 'WORKTREE_POLICIES', 'NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES', 'ProjectDesignArtifact', '_expand_path', '_load_json', '_validate_new_project_cli', '_default_role_cli_pairs', '_validate_project_slug', '_is_valid_owner_user_name']
+  - launcher callers outside the closure: 1: ['new_project_command']
+  - production modules reading it through the launcher: 1: ['scripts/new_project_phases.py']
+  - test files naming any of them: 9 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: reading and validating the design artifact a new project is created from -- its roles, capability grants and choices -- called only by new_project_command)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['DEFAULT_PROJECT_IMPLEMENTER_ROLES (scripts.ticket_board.project_provision)', 'ROLE_RE (scripts.ticket_board.project_provision)', 'validate_ticket_prefix (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the new-project precheck (alternative): 12 definitions, 268 lines; launcher callers outside: ['new_project_command']; production readers: 1
+  -   - the design command (alternative): 4 definitions, 134 lines; launcher callers outside: ['main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2143 lines  211 defs  general helpers (unclassified)
+  -  1311 lines   61 defs  provisioning (new/register/teardown/owner accounts)
+  -   993 lines   37 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   282 lines   11 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,008 lines.

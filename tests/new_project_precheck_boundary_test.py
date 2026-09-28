@@ -451,6 +451,22 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
         check(refused, "the guard refuses a spawn, every exec, a signal, an account or group lookup and a connection")
 
 
+def launcher_reads(fn: ast.AST, *, moved: bool) -> list[str]:
+    """The names of MOVED a definition reads as launcher globals.
+
+    In the launcher, a bare name is one. In a module a caller moved to (SYRD-426 moved new_project_command to
+    scripts/new_project_command.py), the reads are `launcher.X` in the body and the names bound as definition-time
+    defaults -- a bare name in the body there would bypass the launcher, and is not counted.
+    """
+    if not moved:
+        return [x.id for x in ast.walk(fn) if isinstance(x, ast.Name) and x.id in MOVED]
+    defaults = [d for f in ast.walk(fn) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                for d in [*f.args.defaults, *[k for k in f.args.kw_defaults if k is not None]]]
+    return ([x.attr for x in ast.walk(fn) if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)
+             and x.value.id == "launcher" and x.attr in MOVED]
+            + [x.id for d in defaults for x in ast.walk(d) if isinstance(x, ast.Name) and x.id in MOVED])
+
+
 # --- structure -----------------------------------------------------------------------------------------------------
 
 
@@ -524,14 +540,17 @@ def test_the_launcher_reexports_the_fourteen_and_its_readers_reach_them_there() 
           "the launcher defines none of them, and keeps its neighbours and every seam they read, its own or re-exported")
     uses: dict = {}
     # SYRD-425 moved switchyard_new_command, which reads two of the fourteen as its defaults, to
-    # scripts/switchyard_new_command.py; its reads are still counted, where it is defined.
-    moved_new = ROOT / "scripts" / "switchyard_new_command.py"
-    for fn in tree.body + (ast.parse(moved_new.read_text(encoding="utf-8")).body if moved_new.exists() else []):
+    # scripts/switchyard_new_command.py, and SYRD-426 moved new_project_command, which reads three, to
+    # scripts/new_project_command.py; their reads are still counted, where they are defined, through the launcher.
+    moved_defs = []
+    for moved_file in ("switchyard_new_command.py", "new_project_command.py"):
+        moved_path = ROOT / "scripts" / moved_file
+        moved_defs += [(fn, True) for fn in (ast.parse(moved_path.read_text(encoding="utf-8")).body if moved_path.exists() else [])]
+    for fn, moved in [(fn, False) for fn in tree.body] + moved_defs:
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
-            for x in ast.walk(fn):
-                if isinstance(x, ast.Name) and x.id in MOVED:
-                    uses.setdefault(fn.name, {}).setdefault(x.id, 0)
-                    uses[fn.name][x.id] += 1
+            for name in launcher_reads(fn, moved=moved):
+                uses.setdefault(fn.name, {}).setdefault(name, 0)
+                uses[fn.name][name] += 1
     check(uses == DISPATCH, f"the launcher's own callers read them as launcher globals, exactly as often as before: {uses}")
     loose = sorted({x.id for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)) for x in ast.walk(n)
                     if isinstance(x, ast.Name) and x.id in MOVED})

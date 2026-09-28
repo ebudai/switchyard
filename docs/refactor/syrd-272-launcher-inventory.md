@@ -15693,3 +15693,163 @@ and **not implemented**:
   -   228 lines   23 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 5,759 lines.
+
+### SYRD-426 (slice 19al): team-launcher new command
+
+Measured on `96d593d`. Before any edit, the guards were measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 19 files naming the
+  three were run on both scratch trees (90 whole, 349 cases).
+- **Result:** three suites differed. Applying the proposed adaptations in both
+  copies and re-running uncovered one more masked check.
+- **Decision:** the design disclosed all of them and the already-red
+  `project_desktop_boundary_test`. The Director chose A+ before the edit.
+
+| file | before (`96d593d`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 5,759 | 5,483 |
+| `scripts/new_project_command.py` | - | 320 |
+| `tests/new_project_command_boundary_test.py` | - | 636 |
+
+**Scope: exactly the ticket's three definitions, no additional production
+definition.** `recorded_provisioning_command` (2867-2888),
+`_new_project_artifact_dir` (3175-3176) and `new_project_command` (3380-3630)
+move whole, in order, into the new `scripts/new_project_command.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all three.
+- **Callers:** `main` still dispatches `new` to the launcher's name.
+  `scripts/new_project_phases.py` still reads `launcher.new_project_command`
+  and is byte-identical.
+- **Seams:** all 29 call-time reads of 25 names are now
+  `launcher.X` (2 of them siblings); the ticket's ten launcher names and
+  fifteen imported names are all among them.
+- **Defaults:** the port and socket probes are imported from
+  `new_project_precheck`, the module the launcher imports them from, so they
+  are the same objects. `subprocess.run` and `print` are unchanged.
+- **Imports:** the command's two nested imports stay where they were. The
+  module loads only `new_project_precheck` at import, never the launcher.
+
+**The approved guard adaptations (A+):**
+- **G1a/G2/G3:** `new_project_artifacts`, `project_design_artifact` and
+  `new_project_precheck` count their names' launcher-global reads with one
+  identical `launcher_reads` helper. It counts bare names in the launcher,
+  and in the moved caller's module the `launcher.X` reads and
+  definition-time defaults, never a bare body read, so a bypass still fails.
+  Every `DISPATCH` literal is unchanged.
+- **G1b:** `new_project_artifacts`' reader scan also skips
+  `new_project_command.py`, the launcher's own caller whose reads G1a
+  counts. `READERS` is unchanged.
+- **G4:** `project_desktop`'s phase-module list gains `new_project_command.py`,
+  so `configure_project_desktop`'s total stays the baseline 2 (launcher 1 + moved/phases 1 = 2 (baseline 2), launcher sites bare, moved sites through the launcher: True; launcher 0 + moved/phases 2 = 2 (baseline 2), launcher sites bare, moved sites through the launcher: True).
+  That suite stays red on both trees for its recorded SYRD-372
+  `prepare_project_desktop` reason, which this slice neither repairs nor hides.
+- **Verification:** G1-G3 pass on the clean baseline (the adapted files copied
+  onto its archive) and on the candidate. 10 guard-kill runs fail
+  them with assertions and zero guard refusals: a bare read of the writer,
+  loader and precheck; the re-export aliased; the caller still defined in the
+  launcher; the desktop configured bare (G4's count). Proof clause 6b confines
+  the four edits exactly.
+
+**Proof.** The independent proof (`equiv426.py`, 14 clauses) holds.
+It compares the three whole nodes after normalizing `launcher.X`, and the
+launcher remainder as AST and text. It fixes:
+- the execute/dry-run clash refused first;
+- plan, then precheck, then artifacts, then launcher config;
+- a dry run printing the recorded command;
+- executing: sudo, then the packet (recorded when possible), then the failure
+  refusal;
+- the quoted script and the fresh temp directory.
+
+17 of 17 planted faults are caught, each parsed first (one 3c clause
+was tightened after a plant showed it accepted an unquoted bare-bash line).
+
+**Evidence.**
+- **New boundary test:** `tests/new_project_command_boundary_test.py`,
+  130 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  40 cases produced by the BASELINE launcher's own functions
+  (`gold426.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane and under umask
+  077.
+  - **Stand-ins:** every host-facing step is a recording stand-in on the
+    launcher (the projection-owner assignment on its own module, since the
+    command imports it there). No account, board, database, desktop or
+    service is touched, and the effective uid is the case's.
+  - **By group:** 35 runs of the command, covering:
+    - artifact and explicit answers, and every refusal;
+    - the precheck refusing;
+    - the desktop policy headless, from a file and refused;
+    - the workflow seed;
+    - the isolation handoff published or not;
+    - execution as the operator and as root, with staging failing;
+    - sudo and packet failures;
+    - the recorder present or absent;
+    - the policies and default implementers rebound on the launcher.
+
+    Also covered: `team-launcher new` through `main`, the recorded command and
+    the default directory.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (106 checks).
+- **Mutations:** 41 of 41 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - One first-draft mutant was equivalent: on the artifact branch
+    `owner_user` is always None, because the line above refuses it. It was
+    replaced by a real one.
+  - The behaviour tests alone kill 39. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 131 files are accounted for: every boundary suite and
+  the 19 naming the three. The four adapted guards run against their
+  originals on the baseline.
+  - 91 suites whole: 79 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 349 cases, per case, identical on both sides: 280 pass,
+    67 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`). Both are baseline defects, not changed
+    here:
+    - `presentation_windows_boundary_test`'s `MOVED_CALLERS` lacks
+      `tenant_suspension.py` (SYRD-405, disclosed on SYRD-417);
+    - `desktop_presentation_boundary_test` (SYRD-317) no longer finds
+      `complete_desktop_presentation` called by the launcher's name in the
+      bridge exec.
+    Neither involves the three moved definitions;
+  - **Excluded (153):** 6 that drive an upgrade
+    or `switchyard_main`, 142 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function; team_launcher_declarative_workflow_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child).
+- **What the comparison exercised (call profiler, real functions only):**
+  1 of 359 passing runs execute a moved function:
+  `new_project_command_boundary_test.py`, `team_launcher_switchyard_new_prompts_test.py`. Every existing case that drives `team-launcher new`
+  or `main new` is either excluded (upgrade- or `switchyard_main`-driving, or
+  its execution screen hits) or stops at a guard refusal on both trees before
+  the command runs. That is why the new test replays the command with every
+  host step stood in.
+- **Containment:** no project was provisioned, and no service, database,
+  account, tenant, board, desktop or socket was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the team-launcher parser -- 1 definitions, 102 lines (lines 4537-4638):
+  -   4537  102  _build_parser  launcher callers outside: ['main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 1: ['WORKTREE_POLICIES']
+  - launcher callers outside the closure: 1: ['main']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 7 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `team-launcher`'s argument parser -- every verb and option the entry point accepts)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['DEFAULT_PANE_STATE_DIR (scripts.launcher_env)', 'LAYOUT_MODE_AUTO (scripts.layout_modes)', 'LAYOUT_MODE_CHOICES (scripts.layout_modes)']
+  - alternatives measured the same way:
+  -   - the launch command (alternative): 1 definitions, 162 lines; launcher callers outside: ['main', 'switchyard_main']; production readers: 2
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the switchyard help text (alternative): 1 definitions, 39 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2019 lines  206 defs  general helpers (unclassified)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   754 lines   33 defs  project config and registry
+  -   662 lines   52 defs  provisioning (new/register/teardown/owner accounts)
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 5,483 lines.

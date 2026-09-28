@@ -14099,3 +14099,178 @@ and **not implemented**:
   -   569 lines   22 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,608 lines.
+
+### SYRD-415 (slice 19ab): staged-tooling launch checks
+
+Measured on `a7cd4eb`. The design was posted **before** any edit.
+
+| file | before (`a7cd4eb`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,608 | 7,496 |
+| `scripts/staged_launch_checks.py` | - | 161 |
+| `tests/staged_launch_checks_boundary_test.py` | - | 550 |
+
+**Moved:** the five definitions that decide which release a tenant's staged
+bundle names, whether the director may believe that marker, and which bundle
+problems an ordinary launch may restage or must refuse. Each moved whole,
+with its comments, in the launcher's order, into the new
+`scripts/staged_launch_checks.py`:
+- `STAGED_TOOLING_ABSENT_MARKER` and `STAGED_TOOLING_HOSTILE_MARKERS`, with
+  their `#:` comment blocks;
+- `tenant_pinned_release_root`;
+- `director_readable_pinned_release`;
+- `staged_bundle_launch_problems`.
+
+They were one contiguous region; `switchyard_invocation_requires_root` stays
+above it and `_project_config_path_owner_user` below. Nothing unrelated moved:
+no release installation and no account crossing.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all five, beside the
+  SYRD-414 import.
+- **Callers:** no launcher definition calls or names them (measured before
+  and after).
+- **Readers:** the three production readers still reach them through the
+  launcher at call time: `scripts/command_crossing.py` (2), `scripts/director_upgrade.py` (1), `scripts/staged_role_tooling.py` (1).
+- **Seams:** all 13 call-time reads of 8 names are now `launcher.X`,
+  3 of them siblings (`tenant_pinned_release_root` and both markers). The
+  other five:
+  - 3 launcher globals: `SWITCHYARD_RELEASE_MARKER_NAME`,
+    `_read_switchyard_release_marker` and `switchyard_shared_install_root`;
+  - 2 imported from `ticket_board.project_provision`:
+    `role_tooling_staging_dir` and `staged_role_tooling_problems`.
+- **The default:** `expect_uid=STAGED_TOOLING_OWNER_UID` stays bound at
+  definition, imported eagerly from `scripts.staged_role_tooling`. It is the
+  same object, and that module loads alone, so there is no cycle.
+- **Walk import:** the root-controlled walk is still imported inside
+  `director_readable_pinned_release`, at call time.
+- **Guards:** none needed adapting. The four test files that name the five
+  (`command_crossing_boundary_test`, `finish_upgrade_boundary_test`,
+  `single_owner_staged_tooling_test`, `staged_role_tooling_boundary_test`)
+  patch or call them through the launcher. Their neighbour checks already
+  accept a name defined or re-exported.
+
+**Proof.** The independent proof (`equiv415.py`, 13 clauses) holds.
+It compares all five whole nodes after normalizing `launcher.X`, and the
+launcher remainder node by node. It fixes the pinned-release rules:
+- **The director's marker:** walked root-controlled first (from `root`, else
+  the environment's staging root, else "/"; expecting the caller only off the
+  host, else root), before a byte of it is read. Then a commit, then 40
+  lowercase hex, then an installed release.
+- **The pin:** the marker's commit, only when that release is a directory.
+- **The bundle:** an explicit release, else the pin, else `current`.
+  Absence is restaged and hostile shapes are refused. A problem is never
+  both, and drift is left alone.
+
+The proof also fixes that no existing test was touched. 21 of
+21 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/staged_launch_checks_boundary_test.py`,
+  162 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  55 cases produced by the BASELINE launcher's own functions
+  (`gold415.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane, and each case runs through both the module and the launcher's
+  re-export. By function:
+  - 13 for `tenant_pinned_release_root`;
+  - 23 for `director_readable_pinned_release`;
+  - 19 for `staged_bundle_launch_problems`.
+
+  **Coverage:** every case builds its own test-owned tree, and the marker
+  and releases exist only where the code must look. The cases cover:
+  - an old pinned release, no marker or an uninstalled pin (current), and an
+    explicit release over the pin;
+  - an empty, blank, non-JSON, short, 41-character, non-hex or uppercase
+    commit (the director lowers it, the pin does not, so an uppercase marker
+    pins nothing and the bundle falls back to `current`);
+  - a missing release, and a release that is a file;
+  - a group-writable staging root, tenant directory or marker;
+  - the host (a walk from "/" expecting root), the environment's staging
+    root (padded, loosened, only spaces), and an explicit root over it;
+  - absent, each hostile shape, an overlap, drift (including a
+    `staged at` line that is not absent), and unordered or duplicate problems;
+  - the default and an explicit owner.
+
+  **Real code and stand-ins:** the marker is read by the launcher's own
+  reader, and the root-controlled walk is the real one inside the tree. The
+  host is never read: its staging directory is redirected into the tree and
+  a walk from "/" stands in, both recorded. Spawns, every `os.exec*`, signals,
+  connections and account or group lookups are refused. Its 3
+  behaviour cases also pass against the baseline's own definitions, in both
+  environments (137 checks).
+- **Mutations:** 44 of 44 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 38. The 6 left are placement, import, default-source,
+  re-export and reader changes that the structure checks kill:
+  a marker read bare, the launcher imported at load, the owner default from the launcher, re-export aliased, the director reader bypasses the launcher, the gate reader bypasses the launcher. The mutation that would hoist the walk's import to module
+  level was not run: it would un-patch the walk and let it `lstat` the real
+  "/". The structure check on the function's imports pins it instead.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 26 files that name the five or their
+  callers accounted for:
+  - 12 suites whole: 11 pass on the candidate
+    (the new test only there). `director_upgrade_boundary_test.py` stops identically
+    on both trees at a guard refusal of its own real account lookup
+    (`pwd.getpwnam('stellaris-agent',)`). That is a baseline condition,
+    reported here and not changed.
+  - 156 cases, per case, identical on both sides: 68 pass,
+    87 stop at the same guard refusal, and 1 fails
+    identically on the baseline:
+    `tenant_control_helper_repair_test::test_the_repair_touches_no_other_tenant`.
+    This is the pre-existing baseline failure already reported on SYRD-414,
+    not changed here.
+  - **Excluded (70):** 44 that drive an upgrade,
+    `finish-upgrade` or `switchyard_main`, 25 whose own execution
+    screen hits, and 1 accumulator.
+  - **Not exercised by the comparison:**
+    `single_owner_staged_tooling_test::test_an_older_tenant_is_repaired_from_its_own_release_not_the_hosts`,
+    the one existing test that calls the five directly. Its fixture stages
+    through a generated `sudo install` script, which the guard refuses on
+    both trees before the moved code is reached. Its rule (an older complete
+    bundle is judged against its own release) is pinned by the golden case
+    "bundle: an older complete pinned bundle".
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 79 passing runs execute a moved function, the new
+  test alone. The existing suites patch the five on the launcher, or stop at
+  a guard refusal first.
+- **Containment:** nothing crossed; no sudo, account, tenant, release,
+  window, service or board was touched (live snapshot identical before and
+  after). Both entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the shared release identity -- 13 definitions, 91 lines (lines 1402-6778, not contiguous):
+  -   1402    1  SWITCHYARD_NAME  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1441    1  DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT  launcher callers outside: -; production readers outside the launcher: ['scripts/trusted_bootstrap.py', 'scripts/trusted_upgrade_release.py']
+  -   1442    1  SWITCHYARD_RELEASE_MARKER_NAME  launcher callers outside: ['_precheck_deploy_source', '_switchyard_release_source_error']; production readers outside the launcher: ['scripts/release_rollback.py', 'scripts/staged_launch_checks.py', 'scripts/tenant_release_report.py']
+  -   1461    1  SWITCHYARD_VERSION  launcher callers outside: -; production readers outside the launcher: -
+  -   1739   12  SharedSwitchyardRelease  launcher callers outside: -; production readers outside the launcher: -
+  -   1757    2  switchyard_shared_install_root  launcher callers outside: ['_rollout_recorder_path']; production readers outside the launcher: ['scripts/agent_cli_promotion.py', 'scripts/release_alignment.py', 'scripts/release_rollback.py', 'scripts/role_account_migration.py', 'scripts/root_plan_reconstruction.py', 'scripts/staged_launch_checks.py', 'scripts/tenant_control_helper.py', 'scripts/tenant_release_report.py', 'scripts/trusted_bootstrap.py', 'scripts/trusted_upgrade_release.py']
+  -   1761    2  switchyard_shared_target  launcher callers outside: -; production readers outside the launcher: -
+  -   1765    2  switchyard_shared_pane_launcher  launcher callers outside: ['_new_project_launcher_config_payload', 'upgrade_generated_project_config']; production readers outside the launcher: -
+  -   1769   12  _read_switchyard_release_marker  launcher callers outside: ['_switchyard_release_source_error']; production readers outside the launcher: ['scripts/project_onboarding.py', 'scripts/release_alignment.py', 'scripts/staged_launch_checks.py']
+  -   1783   14  shared_switchyard_release_for_path  launcher callers outside: ['_switchyard_release_source_error', '_tenant_board_root_from_config']; production readers outside the launcher: ['scripts/launcher_checkout.py', 'scripts/project_onboarding.py', 'scripts/project_status.py', 'scripts/release_rollback.py', 'scripts/tenant_release_target.py']
+  -   1799    6  switchyard_version_text  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6124    5  running_launcher_release  launcher callers outside: -; production readers outside the launcher: ['scripts/trusted_bootstrap.py', 'scripts/trusted_upgrade_release.py']
+  -   6747   32  report_installed_release_version  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 2: ['TEAM_LAUNCHER_NAME', '_repo_root']
+  - launcher callers outside the closure: 7: ['_new_project_launcher_config_payload', '_precheck_deploy_source', '_rollout_recorder_path', '_switchyard_release_source_error', '_tenant_board_root_from_config', 'switchyard_main', 'upgrade_generated_project_config']
+  - production modules reading it through the launcher: 14: ['scripts/agent_cli_promotion.py', 'scripts/launcher_checkout.py', 'scripts/project_onboarding.py', 'scripts/project_status.py', 'scripts/release_alignment.py', 'scripts/release_rollback.py', 'scripts/role_account_migration.py', 'scripts/root_plan_reconstruction.py', 'scripts/staged_launch_checks.py', 'scripts/tenant_control_helper.py', 'scripts/tenant_release_report.py', 'scripts/tenant_release_target.py', 'scripts/trusted_bootstrap.py', 'scripts/trusted_upgrade_release.py']
+  - test files naming any of them: 31 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: where the shared Switchyard release is installed, what its release marker says, which release a path or the running launcher belongs to, and how the version is reported -- the reads the staged launch checks, release alignment, rollback and bootstrap all make through the launcher; its many outside readers mean the re-export and each reader's call-time lookup are the slice's main risk)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_path_is_under (scripts.owner_git)']
+  - alternatives measured the same way:
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the switchyard help text (alternative): 1 definitions, 39 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2145 lines  215 defs  general helpers (unclassified)
+  -  1563 lines   65 defs  provisioning (new/register/teardown/owner accounts)
+  -  1004 lines   38 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   485 lines   18 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,496 lines.

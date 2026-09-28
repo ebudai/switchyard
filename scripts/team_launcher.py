@@ -1418,6 +1418,15 @@ from scripts.new_project_precheck import (
     postgres_cluster_script,
     precheck_new_project,
 )
+from scripts.role_plan_prompt import (
+    NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES,
+    NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES,
+    _implementer_roles_field,
+    _owner_account_exists,
+    _prompt_role_runtime_plan,
+    _prompt_switchyard_role_choices,
+    _prompt_switchyard_role_plan,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1669,14 +1678,6 @@ NEW_PROJECT_ROLE_CLI_DEFAULTS = {
 SWITCHYARD_PROMPT_MAX_ATTEMPTS = 5
 NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
 NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "user", "unassigned"})
-NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES = ("main", "ops")
-NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES = (
-    ("main", "core/domain implementation and integration"),
-    ("ops", "environment, services, tooling, and infrastructure"),
-    ("app", "application/UI work"),
-    ("research", "investigation, design support, and unknowns"),
-    ("perf", "measurement and performance work"),
-)
 
 
 @dataclass(frozen=True)
@@ -3151,182 +3152,6 @@ class RoleSelection:
     cli: str
     model: str = ""
     effort: str = ""
-
-
-def _implementer_roles_field() -> Field:
-    """The conventional roles as things to pick, not a string to compose.
-
-    The list was already printed -- and then the answer was read as one
-    comma-separated line, so a typo in the middle of it was a role nobody asked
-    for and a role nobody noticed was missing. The same names, selectable, with
-    the conventional pair as the default and a deliberate path to a role of
-    one's own (SYRD-115).
-    """
-    def validate(value: str) -> str:
-        return _validate_new_project_implementer_role(value, context="implementer role")
-
-    return Field(
-        name="roles",
-        kind=KIND_MULTI,
-        title="Implementer roles",
-        choices=tuple(
-            Choice(role, role, description)
-            for role, description in NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES
-        ),
-        default=tuple(NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES),
-        allow_custom=True,
-        custom_title="A role of your own",
-        validate=validate,
-    )
-
-
-def _prompt_role_runtime_plan(
-    role: str,
-    *,
-    default_cli: str,
-    configured: RoleSelection | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
-    owner_args: Sequence[str] = (),
-    unverified_because: str = "",
-    interactive: bool = True,
-    input_func: Callable[[str], str] = input,
-    print_func: Callable[[str], None] = print,
-) -> RoleSelection:
-    """One guided path for a role: runtime, then model, then effort.
-
-    In that order because each one narrows the next. The models offered are the
-    chosen runtime's, and the effort question is not asked at all for a runtime
-    that discards it -- `agy` drops an effort level before it reaches the
-    command line, and a question whose answer is thrown away should not be
-    asked (SYRD-115).
-    """
-    held = configured or RoleSelection(role=role, cli="")
-    schema = Schema(
-        (
-            _runtime_field(role, default=default_cli, configured=held.cli),
-            _model_field(
-                role, configured=held.model, runner=runner,
-                owner_args=owner_args, unverified_because=unverified_because,
-                print_func=print_func,
-            ),
-            _effort_field(role, configured=held.effort),
-        )
-    )
-    answers: dict[str, Any] = {}
-    runtime_field, model_field, effort_field = schema.fields
-    answers["runtime"] = terminal_select.select_one(
-        runtime_field, answers, interactive=interactive,
-        input_func=input_func, print_func=print_func,
-    )
-    model = ""
-    if model_field.choices_for(answers) or model_field.allow_custom:
-        model = terminal_select.select_one(
-            model_field, answers, interactive=interactive,
-            input_func=input_func, print_func=print_func,
-        )
-    answers["model"] = model
-    effort = ""
-    if runtime_catalog.runtime_takes_effort(answers["runtime"]):
-        effort = terminal_select.select_one(
-            effort_field, answers, interactive=interactive,
-            input_func=input_func, print_func=print_func,
-        )
-    return RoleSelection(role=role, cli=answers["runtime"], model=model, effort=effort)
-
-
-def _prompt_switchyard_role_plan(
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
-    #: Whose CLI context the model lists come from. A catalog is a property of
-    #: an ACCOUNT, not of a host: `agy models` on the operator's login and on
-    #: the tenant owner's are different lists, and the one that matters is the
-    #: owner's, because that is the account the role will run as. Asking the
-    #: wrong one is how `test2` was configured with a slug its own owner does
-    #: not recognise (SYRD-250).
-    owner_user: str = "",
-    owner_home: Path | None = None,
-    input_func: Callable[[str], str] = input,
-    print_func: Callable[[str], None] = print,
-) -> tuple[RoleSelection, ...]:
-    """Every role of a new project, chosen rather than typed."""
-    # The account usually does not exist yet: `switchyard new` chooses its
-    # roles before it creates anybody, and it must keep choosing before it
-    # creates anybody -- nothing may be mutated before the plan review. So the
-    # owner-scoped list is simply not available here, and the honest thing is
-    # to say which account could not be asked and that the choice will be
-    # confirmed once it can be. Pretending otherwise is what shipped the first
-    # time: the recorded fallback offered `gemini-3.7-flash-high`, the very
-    # slug test2 was misconfigured with (SYRD-250 DAT).
-    owner_exists = _owner_account_exists(owner_user)
-    owner_args = (
-        _owner_command_env_args(owner_user, owner_home, [])
-        if owner_user and owner_home is not None
-        else ()
-    )
-    # One guard, and it is this one. When the owner cannot be asked, NOBODY is
-    # asked: leaving the runner in place would enumerate whoever is TYPING and
-    # label their models "listed in this account" -- the original defect, moved
-    # into the code meant to fix it. Withholding the runner is what makes that
-    # impossible; withholding the prefix as well would only look careful.
-    catalog_runner = runner if owner_exists else None
-    unverified_because = (
-        f"the {owner_user} account does not exist yet, so its own list could not be read; "
-        f"this choice is confirmed against it after the account is created"
-        if owner_user and not owner_exists
-        else ""
-    )
-    include_designer = _prompt_bool("Include designer role", default=True, input_func=input_func)
-    include_audit = _prompt_bool("Include audit role", default=True, input_func=input_func)
-    fixed: list[str] = []
-    if include_designer:
-        fixed.append("designer")
-    fixed.append("director")
-    if include_audit:
-        fixed.append("audit")
-
-    try:
-        implementers = terminal_select.select_many(
-            _implementer_roles_field(), input_func=input_func, print_func=print_func
-        )
-    except terminal_select.Cancelled:
-        raise SystemExit("switchyard: too many invalid answers for implementer roles") from None
-    if not implementers:
-        raise SystemExit("switchyard: at least one implementer role is required")
-
-    plan: list[RoleSelection] = []
-    for role in fixed:
-        plan.append(
-            _prompt_role_runtime_plan(
-                role,
-                default_cli=NEW_PROJECT_ROLE_CLI_DEFAULTS.get(role, "claude"),
-                runner=catalog_runner, owner_args=owner_args,
-                unverified_because=unverified_because,
-                input_func=input_func, print_func=print_func,
-            )
-        )
-    for role in implementers:
-        plan.append(
-            _prompt_role_runtime_plan(
-                role, default_cli="codex", runner=catalog_runner, owner_args=owner_args,
-                unverified_because=unverified_because,
-                input_func=input_func, print_func=print_func,
-            )
-        )
-    return tuple(plan)
-
-
-def _prompt_switchyard_role_choices(
-    *,
-    input_func: Callable[[str], str] = input,
-    print_func: Callable[[str], None] = print,
-) -> tuple[tuple[str, str], ...]:
-    """The role/runtime pairs, for callers that want only those."""
-    return tuple(
-        (selection.role, selection.cli)
-        for selection in _prompt_switchyard_role_plan(
-            input_func=input_func, print_func=print_func
-        )
-    )
 
 
 def _comma_list(value: str) -> list[str]:
@@ -5635,22 +5460,6 @@ def rollout_log_command(
                 print_func(f"--- {name} ---")
                 print_func(path.read_text(encoding="utf-8", errors="replace").rstrip())
     return 1 if problems else 0
-
-
-def _owner_account_exists(owner_user: str) -> bool:
-    """Whether there is an account to ask anything of yet.
-
-    A `switchyard new` chooses its roles' models before it creates the owner,
-    so "cannot enumerate" and "does not exist yet" are different answers that
-    used to look identical (SYRD-250 DAT).
-    """
-    if not owner_user:
-        return False
-    try:
-        pwd.getpwnam(owner_user)
-    except KeyError:
-        return False
-    return True
 
 
 def _owner_catalog_args(config: "ProjectConfig") -> tuple[str, tuple[str, ...]]:

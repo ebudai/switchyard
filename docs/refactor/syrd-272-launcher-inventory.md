@@ -15073,3 +15073,168 @@ and **not implemented**:
   -   231 lines   10 defs  onboarding docs, prompts and skills
 
 **SYRD-272 is not complete.** The launcher is still 6,451 lines.
+
+### SYRD-422 (slice 19ah): interactive role-plan prompt
+
+Measured on `d13a644`. The design was posted **before** any edit.
+
+| file | before (`d13a644`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 6,451 | 6,260 |
+| `scripts/role_plan_prompt.py` | - | 246 |
+| `tests/role_plan_prompt_boundary_test.py` | - | 606 |
+
+**Scope: exactly the ticket's seven, no additions.** None of them binds a
+Switchyard object as a definition-time default. The only ones are the `input`
+and `print` builtins, `None`, `()`, `''` and `True`, so nothing else had to
+travel with them.
+
+**Moved:** `NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES` and
+`NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES` (from 1672-1679),
+`_implementer_roles_field`, `_prompt_role_runtime_plan`,
+`_prompt_switchyard_role_plan` and `_prompt_switchyard_role_choices` (from
+3156-3329), and `_owner_account_exists` (from 5640-5653). They move whole, in
+order, into the new `scripts/role_plan_prompt.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all seven.
+- **Callers:** no launcher definition reads any of them.
+  `scripts/new_project_phases.py` still reads
+  `launcher._prompt_switchyard_role_plan` at call time and is byte-identical.
+- **Seams:** all 27 call-time reads of 20 names are now
+  `launcher.X` (6 of them siblings), the nested implementer validator's
+  included. They are:
+  - the launcher's `_prompt_bool`, `_runtime_field`, `RoleSelection`,
+    `_validate_new_project_implementer_role`, `NEW_PROJECT_ROLE_CLI_DEFAULTS`
+    and `_owner_command_env_args`;
+  - the names it imports: `Choice`, `Field`, `KIND_MULTI`, `Schema`,
+    `_model_field`, `_effort_field`, `runtime_catalog` and `terminal_select`
+    (so `team_launcher.terminal_select.MAX_ATTEMPTS` still governs the retry
+    caps).
+- **Imports:**
+  - `pwd` is the shared module, so `team_launcher.pwd.getpwnam` patches still
+    reach `_owner_account_exists`;
+  - `RoleSelection` and `Field` are annotation-only here, imported under
+    TYPE_CHECKING;
+  - the module loads no Switchyard module at import.
+- **Guards:** none adapted. The scan covered patch and stand-in dicts,
+  declarations inside test strings, count tables, `in defined` stay checks,
+  `__module__` filters and rebinds of the launcher's `pwd`, and the only
+  changed test file is the new one (proof clause 6b).
+
+**Proof.** The independent proof (`equiv422.py`, 14 clauses) holds.
+It compares the seven whole nodes after normalizing `launcher.X`, and the
+launcher remainder as AST and text. It fixes the rules:
+- the owner account is checked first, and the model-list runner is withheld
+  unless it exists;
+- designer, audit and the implementers are asked in that order, and no
+  implementers is refused;
+- the fixed roles (designer, director, audit) run on their CLI defaults, then
+  each implementer on codex;
+- each role is asked runtime, then model, then effort only where the runtime
+  takes one;
+- the implementer field offers the conventional roles, the default pair and a
+  validated role of one's own.
+
+21 of 21 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/role_plan_prompt_boundary_test.py`,
+  174 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  57 scripted interactions produced by the BASELINE launcher's own
+  functions (`gold422.py`) over the very case text the test embeds, not
+  typed. The golden output is byte-identical whether generated under
+  `env -i` or in the pane. Each case records the transcript (every question,
+  every line shown and everything printed to stdout), the returned plan or
+  exact refusal, and every call to a launcher seam. By group:
+  - 39 whole plans:
+    - defaults, designer/audit choices and yes/no spellings, and the yes/no
+      retry caps;
+    - implementers by number, name, prefix and repeat;
+    - roles of one's own, with the reserved and invalid refusals and the
+      custom cap;
+    - unmatched and cancelled implementers, and none at all;
+    - every runtime, filtered, unmatched and cancelled runtimes, custom models
+      and efforts, a cancelled model;
+    - the owner present with and without a home, absent, and unnamed;
+    - the owner's list failing, unable to run, and empty;
+    - the CLI defaults and both moved constants rebound on the launcher;
+  - 11 single-role cases: first-time and configured roles,
+    values nobody offers, non-interactive runs, an unverified owner, an owner
+    prefix with a runner, and model filters;
+  - 3 pairs-only cases;
+  - the implementer field whole (name, kind, title, choices, default, custom
+    path, and the validator's verdict for thirteen values);
+  - three account lookups.
+
+  **Harness:** no provider CLI, account or network is touched. The answers
+  are scripted, and the model-list runner (matched on `models`), the owner
+  command prefix and `pwd.getpwnam` stand in, recorded. Its 3
+  behaviour cases also pass against the baseline's own definitions, in both
+  environments (143 checks).
+- **Mutations:** 43 of 43 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The behaviour tests alone kill 40. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased, the phases bypass the launcher.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 51 files accounted for (the four that
+  name the seven, and those naming `switchyard_new_command`,
+  `new_project_command`, `new_project_phases` or the prompt seams, plus the
+  earlier slices' boundary tests):
+  - 22 suites whole: 21 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 404 cases, per case, identical on both sides: 232 pass,
+    162 stop at the same guard refusal, and 10 fail
+    identically on both (`first_run_setup_completion_test::test_the_provider_is_given_the_window_the_person_is_looking_at`; `first_run_setup_completion_test::test_the_provider_follows_the_window_when_it_is_resized`; `first_run_setup_completion_test::test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode`; `first_run_setup_completion_test::test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too`; `first_run_setup_completion_test::test_a_resize_reaches_the_provider_as_a_signal`; `first_run_setup_completion_test::test_the_terminal_is_given_back_even_when_switchyard_is_killed`; `first_run_setup_completion_test::test_a_keystroke_does_not_wait_for_the_next_tick`; `first_run_setup_completion_test::test_test9_the_answer_reaches_the_question_before_anything_is_typed`; `first_run_setup_completion_test::test_test8_the_sign_in_survives_the_browser_on_a_real_terminal`; `first_run_setup_completion_test::test_test8_nothing_is_echoed_when_the_person_comes_back`). All of these are pseudo-terminal
+    (`termios`) cases of `first_run_setup_completion_test` that this harness
+    (no terminal) cannot drive, and none of them runs a moved function;
+  - **Excluded (123):** 9 that drive an upgrade
+    or `switchyard_main`, 114 whose own execution screen hits, and
+    0 accumulator. Among those screened out are the two
+    `owner_model_catalog_test` cases that call the plan prompt: they look up
+    real accounts and build owner commands. The new test's owner-present,
+    owner-absent and no-owner cases pin the same rules with stand-ins;
+  - **Not run:** team_launcher_declarative_workflow_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child); team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function.
+- **What the comparison exercised (call profiler, real functions only):**
+  2 of 253 passing runs execute a moved function:
+  `role_plan_prompt_boundary_test.py`, `team_launcher_project_role_prompts_test.py`.
+  Every other existing case that reaches the prompt drives `switchyard new`
+  or the owner catalog through real account lookups, so the guard or the
+  execution screen stops it before the prompt on both trees. That is why the
+  new test replays the owner-present, owner-absent and no-owner paths with
+  stand-ins.
+- **Containment:** no project was provisioned, and no service, database,
+  account, tenant, board or socket was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+- **Baseline observation, not changed:** `owner_model_catalog_test`'s first
+  provisioning case passes `owner_user="test2-agent"` without a stand-in, so
+  which branch it takes depends on whether that account exists on the host.
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the design command -- 4 definitions, 134 lines (lines 3157-3302, not contiguous):
+  -   3157    2  _comma_list  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3161    2  _default_project_artifact_path  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3165    2  _default_project_design_document_path  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3175  128  design_project_command  launcher callers outside: ['main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 13: ['PROJECT_DESIGN_DEFAULT_GATES', 'WORKTREE_POLICIES', 'ProjectDesignArtifact', '_validate_new_project_audit_role', '_dedupe_role_names', '_default_role_cli_pairs', 'project_design_artifact_payload', '_write_json_atomic', '_default_new_project_owner', '_prompt_text', '_prompt_bool', '_project_design_markdown', '_validate_project_slug']
+  - launcher callers outside the closure: 1: ['main']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 3 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `team-launcher design` -- producing and recording a project's design artifact outside `switchyard new`)
+  - it also reads 7 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['Choice (scripts.ticket_board.prompt_schema)', 'DEFAULT_PROJECT_IMPLEMENTER_ROLES (scripts.ticket_board.project_provision)', 'Field (scripts.ticket_board.prompt_schema)', 'KIND_SINGLE (scripts.ticket_board.prompt_schema)', '_owner_user_verbatim (scripts.owner_preparation)', 'terminal_select (scripts.ticket_board)', 'validate_ticket_prefix (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the new-project command (alternative): 3 definitions, 275 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the upgrade command (alternative): 1 definitions, 142 lines; launcher callers outside: ['main', 'switchyard_main']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2006 lines  203 defs  general helpers (unclassified)
+  -  1170 lines   56 defs  provisioning (new/register/teardown/owner accounts)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   888 lines   35 defs  project config and registry
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 6,260 lines.

@@ -15853,3 +15853,116 @@ and **not implemented**:
   -   228 lines   23 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 5,483 lines.
+
+### SYRD-428 (slice 19am): team-launcher argument parser
+
+Measured on `3b29fe6`. The design was posted **before** any edit.
+
+**Guard measurement (empirical):** before editing, the move was made in a
+scratch archive of the baseline under /tmp, and every screen-clean boundary
+suite plus the seven files naming `_build_parser` were run on both scratch
+trees (93 whole, 264 cases). None differed, so no test guard needed
+adapting and none changed.
+- The four boundary tests that name the parser accept a re-exported
+  neighbour.
+- The three `ticket_board`/`write_client` tests call that client's own
+  `_build_parser`.
+
+| file | before (`3b29fe6`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 5,483 | 5,382 |
+| `scripts/launcher_parser.py` | - | 124 |
+| `tests/launcher_parser_boundary_test.py` | - | 447 |
+
+**Scope: exactly the ticket's one definition.** `_build_parser` (4537-4638)
+moves whole into the new `scripts/launcher_parser.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import. `main` still builds its
+  parser through the launcher's name.
+- **Seams:** all 5 call-time reads are now `launcher.X`:
+  - `WORKTREE_POLICIES`, `DEFAULT_PANE_STATE_DIR`, `LAYOUT_MODE_AUTO` and
+    `LAYOUT_MODE_CHOICES`;
+  - the launcher's own `__file__`, so the `--script-path` default stays
+    beside the launcher.
+- **Imports:** the module loads only `argparse` and `Path`, with no
+  Switchyard import at load.
+
+**Proof.** The independent proof (`equiv428.py`, 14 clauses) holds.
+It compares the builder whole after normalizing `launcher.X` (`__file__`
+included), and the launcher remainder as AST and text. It fixes the verb
+list, the script path beside the launcher's file, the layout choices and
+default, the pane-state default in the help, and the parser returned.
+12 of 12 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/launcher_parser_boundary_test.py`, 129
+  checks. Each run is gated on its screen and passes both under `env -i` and
+  in this role pane's normal environment. It replays 45 cases
+  produced by the BASELINE launcher's own parser (`gold428.py`) over the very
+  case text the test embeds, not typed. They cover:
+  - every verb bare and with representative options;
+  - invalid choices, unknown options, missing values and too many
+    positionals (argparse's exit code and exact stderr);
+  - `--help` byte for byte, also through `main`;
+  - each name the parser reads rebound on the launcher, the layout default
+    included.
+
+  The program name and help width are pinned. The pane-state default, which
+  the environment decides at import (`pgu-` under `env -i`, `syrd-` in this
+  pane), is pinned on the launcher. So the golden output is byte-identical
+  under `env -i`, in the pane and at another COLUMNS. Its 3 behaviour
+  cases also pass against the baseline's own parser in both environments
+  (113 checks).
+- **Mutations:** 23 of 23 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first behaviour-only pass left "the layout default fixed". A case
+    rebinding `LAYOUT_MODE_AUTO` was added, and everything from the golden
+    file onward was regenerated and rerun.
+  - The behaviour tests alone kill 21. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 122 files are accounted for: every boundary suite
+  and the seven naming the parser.
+  - 93 suites whole: 79 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_write_client_test.py` (URLError: <urlopen error [Errno 1] execution guard: socket.connect refused>); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `write_client_free_text_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused);
+  - 264 cases, per case, identical on both sides: 242 pass,
+    20 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`). All are baseline defects not changed
+    here: `presentation_windows_boundary_test` (SYRD-405, disclosed on
+    SYRD-417) and `desktop_presentation_boundary_test` (SYRD-317);
+  - **Excluded (94):** 0 that drive an upgrade
+    or `switchyard_main`, 89 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, real functions only):**
+  4 of 321 passing runs execute the moved function:
+  `launcher_parser_boundary_test.py`, `new_project_command_boundary_test.py`, `project_design_command_boundary_test.py`, `project_upgrade_command_boundary_test.py`.
+- **Containment:** nothing was dispatched, and no service, database, account,
+  tenant, board, desktop or socket was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the launch command -- 1 definitions, 162 lines (lines 2885-3046):
+  -   2885  162  launch_project  launcher callers outside: ['main', 'switchyard_main']; production readers outside the launcher: ['scripts/new_project_phases.py', 'scripts/resume_provision_command.py']
+  - launcher names it reads (through the launcher once moved): 2: ['ProjectConfig', 'load_project_config']
+  - launcher callers outside the closure: 2: ['main', 'switchyard_main']
+  - production modules reading it through the launcher: 2: ['scripts/new_project_phases.py', 'scripts/resume_provision_command.py']
+  - test files naming any of them: 52 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `launch_project` -- starting or reloading a project's panes through the launch phases)
+  - it also reads 14 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['LAUNCH_SESSION_RECORD_POLL_SECONDS (scripts.session_records)', 'LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS (scripts.session_records)', 'LAYOUT_MODE_AUTO (scripts.layout_modes)', 'WorkerStartup (scripts.launch_phases)', '_launch_runners_and_paths (scripts.launch_phases)', '_prepare_launch (scripts.launch_phases)', '_report_launch (scripts.launch_phases)', '_start_workers_and_present (scripts.launch_phases)', '_verify_pane_launcher_path (scripts.pane_launcher_preflight)', '_write_layout_and_plan (scripts.launch_phases)', 'migrate_declarative_director_onboarding (scripts.project_onboarding)', 'prepare_project_desktop (scripts.project_desktop)', 'process_authority_board_compatibility (scripts.board_authority_preflight)', 'upgrade_generated_project_layout (scripts.generated_layout_upgrade)']
+  - alternatives measured the same way:
+  -   - the board-environment wiring (alternative): 3 definitions, 73 lines; launcher callers outside: ['load_project_config']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the switchyard help text (alternative): 1 definitions, 39 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2022 lines  207 defs  general helpers (unclassified)
+  -   841 lines    5 defs  CLI parsers and dispatch
+  -   754 lines   33 defs  project config and registry
+  -   662 lines   52 defs  provisioning (new/register/teardown/owner accounts)
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 5,382 lines.

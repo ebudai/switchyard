@@ -13553,3 +13553,139 @@ and **not implemented**:
   -   811 lines   29 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,601 lines.
+
+### SYRD-410 (slice 19x): publication-status command and fingerprint reader
+
+Measured on `0f0f05a`. The design was posted **before** any edit.
+
+| file | before (`0f0f05a`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,601 | 8,459 |
+| `scripts/publication_status.py` | - | 182 |
+| `tests/publication_status_boundary_test.py` | - | 484 |
+| `tests/publication_status_command_test.py` | 197 | 197 |
+
+**Moved:** `_build_switchyard_publication_status_parser`,
+`publication_status_command` (with its SYRD-116 docstring) and
+`_public_key_fingerprint`, contiguous and in order, into the new
+`scripts/publication_status.py`.
+- **Neighbours:** `rollout_log_command` above and
+  `_build_switchyard_cutover_roles_parser` below stay.
+- **Re-export and dispatch:** one explicit, unaliased import of all three,
+  above every definition. `switchyard_main` still builds the parser and runs
+  the command by its own globals
+  (2 sites, measured).
+- **Seams:** all 6 call-time reads of 5 names in the command are
+  now `launcher.X`, through a call-time import:
+  - the current user, the owner's home, the plan data and the provision root;
+  - the moved fingerprint reader, twice.
+- **Nested imports:** the `project_provision` and `publication_boundary`
+  helpers are still imported inside the command, right after that import.
+- **Bound when defined, as before:** `verify=False`,
+  `runner=subprocess.run` and `print_func=print`. `ProjectConfig` is an
+  annotation only.
+
+**No guard needed to follow the move.** The readers, patches and source
+guards were scanned first. The suites that pin `project_provision`/
+`publication_boundary` local imports, and the parser-name guards, were then
+run on both trees (below).
+
+**Proof.** The independent proof (`equiv410.py`) holds, including:
+- the helper imports first;
+- no remote refuses with 1 before any key is read;
+- the forge is asked only inside `if verify:`;
+- the check command is offered only when not ready and not verifying;
+- the reader answers the first `SHA256:` token or nothing;
+- the parser takes a project and `--verify`.
+
+18 of 18 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/publication_status_boundary_test.py`,
+  148 checks, each run gated on its screen. It replays 63 cases
+  produced by the BASELINE launcher's own functions (`gold410.py`) over the
+  very case text the test embeds, not typed:
+  - 55 command cases: every combination of each fingerprint read or
+    missing, zero or two stale reasons, ready or not, and verify off, writing
+    or refused; plus no remote (with and without verify), the owner from the
+    current user, an unresolved identity, evidence and findings with details,
+    and `--verify` left to its default;
+  - 7 fingerprint-reader cases;
+  - the parser's help (at a fixed width), program name and parses.
+
+  Its 4 behaviour cases also pass against the baseline's own
+  definitions (127 checks).
+- **Mutations:** 38 of 38 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - One mutant ("verify takes a value") was first caught only by argparse's
+    exit, not an assertion. The parser cases now record a parse's exit as an
+    answer.
+  - The behaviour tests alone kill 34; the 4 left are the runner
+    default (a behaviour case cannot exercise it without spawning) and
+    placement, re-export and dispatch changes: the runner default changed, the launcher imported at load, re-export aliased, the dispatcher bypasses its global.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 16 suites whole: the new test on the candidate only.
+    14 pass on both trees, and 1
+    (worker_pool_command_boundary_test.py) stops at the same refused account lookup on
+    both.
+  - 82 cases from the suites whose whole-suite screen hits,
+    identical on both sides: all pass.
+  - **Excluded (24):**
+    - every case whose own execution screen hits, among them the three
+      `publication_status_command_test` cases, whose fake runner answers a
+      `sudo` argv;
+    - 2 accumulator cases that need their suite's earlier cases.
+
+    The command's behaviour is in the golden cases instead.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 97 passing runs execute a moved function: the new
+  test.
+- **Containment:** no forge was asked, no key or credential read, and no
+  tenant config, release or service touched (live snapshot identical before
+  and after). Both entry points' help is identical (36 `switchyard`
+  invocations, `publication-status` among them, plus `team-launcher --help`,
+  163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the switchyard command-line parsers -- 21 definitions, 464 lines (lines 6556-7131, not contiguous):
+  -   6556   90  _build_switchyard_new_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6648   19  _build_switchyard_repair_boundary_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6669   32  _build_switchyard_approve_desktop_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6703   29  _build_switchyard_resume_provision_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6734    4  _build_switchyard_register_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6740   33  _build_switchyard_upgrade_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6775   20  _build_switchyard_install_shared_release_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6797   30  _build_switchyard_privileged_action_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6829   18  _build_switchyard_rollout_log_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6896   11  _build_switchyard_cutover_roles_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6909   14  _build_switchyard_finish_upgrade_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6925   19  _build_switchyard_add_role_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6946    8  _build_switchyard_set_vcs_close_role_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6956   10  _build_switchyard_replace_window_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6968    4  _build_switchyard_stop_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6974   11  _build_switchyard_recover_display_parser  launcher callers outside: ['switchyard_recover_display_command']; production readers outside the launcher: -
+  -   6987    4  _build_switchyard_start_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6993   30  _build_switchyard_teardown_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   7025   33  _build_switchyard_set_role_runtime_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   7085   32  _build_switchyard_present_parser  launcher callers outside: ['switchyard_main', 'switchyard_recover_display_command']; production readers outside the launcher: -
+  -   7119   13  _build_switchyard_attach_parser  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 1: ['SUPPORTED_CONFIG_CLI_NAMES']
+  - launcher callers outside the closure: 2: ['switchyard_main', 'switchyard_recover_display_command']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 17 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: every `switchyard <verb>` argument parser, built only by switchyard_main and the display-recovery command; a substantial slice of the CLI domain)
+  - it also reads 5 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['AGENT_CLI_POLICIES (scripts.agent_cli_promotion)', 'LAYOUT_MODE_AUTO (scripts.layout_modes)', 'LAYOUT_MODE_CHOICES (scripts.layout_modes)', 'LAYOUT_MODE_SEPARATE (scripts.layout_modes)', 'LAYOUT_MODE_VIEWER (scripts.layout_modes)']
+  - alternatives measured the same way:
+  -   - the rollout log command and its parser (alternative): 2 definitions, 63 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - capturing installed board-authority units (alternative): 1 definitions, 18 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2118 lines  212 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1017 lines   39 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   675 lines   27 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,459 lines.

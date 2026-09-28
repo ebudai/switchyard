@@ -1307,6 +1307,11 @@ from scripts.pane_pid import (
     pane_pid_for_role,
     tmux_pane_pid_args,
 )
+from scripts.publication_status import (
+    _build_switchyard_publication_status_parser,
+    _public_key_fingerprint,
+    publication_status_command,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -6886,153 +6891,6 @@ def rollout_log_command(
                 print_func(f"--- {name} ---")
                 print_func(path.read_text(encoding="utf-8", errors="replace").rstrip())
     return 1 if problems else 0
-
-
-def _build_switchyard_publication_status_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="switchyard publication-status",
-        description=(
-            "Report where a project's publication-key cutover stands, and optionally check the "
-            "one thing no successful push can establish."
-        ),
-    )
-    parser.add_argument("project", help="project name or slug")
-    parser.add_argument(
-        "--verify",
-        action="store_true",
-        help=(
-            "ask the forge whether the shared project credential may still write. The check is a "
-            "dry-run push of the remote's own tip onto its own ref: it proposes no change, moves "
-            "no ref, and leaves read access alone"
-        ),
-    )
-    return parser
-
-
-def publication_status_command(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    verify: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    """Report the cutover, and nothing else at all.
-
-    Deliberately not a flag on `upgrade`. Asking whether one credential may
-    write should not run a tenant upgrade: that path resolves releases, stages
-    root-owned tooling, rewrites grants and advances recorded phases, and none of
-    that is what was asked for. The only thing this can write is the root-owned,
-    non-secret evidence file, and only when --verify is given (SYRD-116 review).
-    """
-    from scripts.ticket_board.project_provision import (
-        owner_github_key_path,
-        publish_identity_path,
-        resolve_owner_github_identity,
-    )
-    from scripts.ticket_board.publication_boundary import (
-        CUTOVER_READY,
-        cutover_state,
-        read_cutover_evidence,
-        resolve_pinned_remote,
-        shared_credential_check_command,
-        verify_shared_credential,
-    )
-
-    project = config.project
-    owner_user = config.run_as_user or current_user_name()
-    owner_home = home_dir_for_user(owner_user)
-    plan_data = _plan_data_from_config(config, config_path)
-    selected = resolve_owner_github_identity(
-        str(owner_home),
-        recorded_key_name=str(plan_data.get("owner_github_key_name") or ""),
-        recorded_host_alias=str(plan_data.get("owner_github_host_alias") or ""),
-    )
-    shared_identity = owner_github_key_path(
-        str(owner_home), key_name=selected.key_name if selected.resolved else ""
-    )
-
-    remote, remote_problem = resolve_pinned_remote(
-        project, registration_root=switchyard_privileged_provision_root(), declared_remote=""
-    )
-    if not remote:
-        print_func(f"switchyard: {project} has no root-owned publication remote: {remote_problem}")
-        return 1
-
-    publication_fingerprint = _public_key_fingerprint(
-        f"{publish_identity_path(project)}.pub", runner=runner
-    )
-    shared_fingerprint = _public_key_fingerprint(f"{shared_identity}.pub", runner=runner)
-    if not publication_fingerprint:
-        print_func(
-            f"switchyard: {project}'s publication public key could not be read, so the key in use "
-            "cannot be identified and no recorded verdict describes it."
-        )
-    if not shared_fingerprint:
-        print_func(
-            f"switchyard: {project}'s shared credential could not be identified at "
-            f"{shared_identity}.pub, so any recorded verdict about it no longer describes what is "
-            "in use."
-        )
-
-    if verify:
-        finding = verify_shared_credential(
-            project,
-            remote=remote,
-            owner_user=owner_user,
-            identity_file=shared_identity,
-            publication_fingerprint=publication_fingerprint,
-            shared_fingerprint=shared_fingerprint,
-            runner=runner,
-        )
-        print_func(
-            f"switchyard: {project} shared credential write authority: {finding.state}"
-            + (f" -- {finding.detail}" if finding.detail else "")
-        )
-
-    evidence = read_cutover_evidence(
-        project,
-        remote=remote,
-        publication_fingerprint=publication_fingerprint,
-        shared_fingerprint=shared_fingerprint,
-    )
-    for reason in evidence.stale:
-        print_func(f"switchyard: {project}'s recorded cutover state no longer applies: {reason}")
-    state = cutover_state(evidence)
-    print_func(f"switchyard: {project} publication cutover: {state}")
-    print_func(
-        f"switchyard:   publication key ({publication_fingerprint or 'unidentified'}): "
-        f"{evidence.publication.state}"
-        + (f" -- {evidence.publication.detail}" if evidence.publication.detail else "")
-    )
-    print_func(
-        f"switchyard:   shared credential ({shared_fingerprint or 'unidentified'}): "
-        f"{evidence.shared.state}"
-        + (f" -- {evidence.shared.detail}" if evidence.shared.detail else "")
-    )
-    if state != CUTOVER_READY and not verify:
-        command = " ".join(
-            shlex.quote(part)
-            for part in shared_credential_check_command(
-                remote, owner_user=owner_user, identity_file=shared_identity
-            )
-        )
-        print_func(
-            f"switchyard: check the shared credential with `switchyard publication-status "
-            f"{project} --verify`, which runs: {command}"
-        )
-    return 0
-
-
-def _public_key_fingerprint(path: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> str:
-    """The SHA256 fingerprint of a public key, or nothing if it cannot be read."""
-    shown = runner(["ssh-keygen", "-l", "-f", path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if getattr(shown, "returncode", 1) != 0:
-        return ""
-    for token in str(getattr(shown, "stdout", "") or "").split():
-        if token.startswith("SHA256:"):
-            return token
-    return ""
 
 
 def _build_switchyard_cutover_roles_parser() -> argparse.ArgumentParser:

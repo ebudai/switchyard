@@ -193,8 +193,12 @@ def test_the_launcher_reexports_the_five() -> None:
     check(len(imports) == 1 and sorted(a.name for a in imports[0].names) == sorted(MOVED)
           and all(a.asname is None for a in imports[0].names), "one explicit import of exactly the five, unaliased")
     defined = {getattr(n, "name", None) for n in tree.body} | {x.id for n in tree.body if isinstance(n, ast.Assign) for x in n.targets if isinstance(x, ast.Name)}
-    check(not defined & set(MOVED) and {"_staged_tooling_dir", "process_uid"} <= defined,
-          "the launcher defines none of the five, and keeps the neighbours on either side")
+    # A neighbour stays reachable on the launcher: defined there, or -- once a later
+    # slice moves it on (SYRD-399) -- re-exported there, unaliased.
+    exported = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and {"_staged_tooling_dir", "process_uid"} <= defined | exported,
+          "the launcher defines none of the five, and keeps the neighbours on either side, its own or re-exported")
 
 
 # --- the record's place --------------------------------------------------------------------------------------------

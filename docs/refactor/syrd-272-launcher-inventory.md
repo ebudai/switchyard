@@ -12443,3 +12443,122 @@ and **not implemented**:
   -   957 lines   31 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 9,401 lines.
+
+### SYRD-399 (slice 19n): root-owned role tooling staging and refresh
+
+Measured on `750b54c`. The design was posted **before** any edit, and the
+baseline defect below was reported on the ticket separately.
+
+| file | before (`750b54c`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 9,401 | 9,282 |
+| `scripts/staged_role_tooling.py` | - | 168 |
+| `tests/staged_role_tooling_boundary_test.py` | - | 501 |
+| `tests/pending_identity_records_boundary_test.py` | 449 | 453 |
+
+**Moved:** `refresh_staged_role_tooling`, `STAGED_TOOLING_OWNER_UID` (with its
+seven-line ownership rationale), `ensure_staged_role_tooling` and
+`_staged_tooling_dir`, contiguous and in order, into the new
+`scripts/staged_role_tooling.py`. `running_launcher_release` above and
+`process_uid` below stay.
+- **Re-export:** one explicit, unaliased import of all four, above every
+  definition. That placement matters here: the launcher's own launch checks
+  that stay -- `staged_bundle_launch_problems` and
+  `ensure_staged_role_bundle_before_crossing` -- bind `STAGED_TOOLING_OWNER_UID`
+  as their `expect_uid` default when they are defined, and they still bind the
+  same object.
+  - `resume_tenant` still calls the gate by its launcher global.
+  - `new_project_phases`, `pane_hooks`, `release_rollback` and `upgrade_phases`
+    still read these through the launcher.
+- **Seams:** 8 call-time reads of 6 names across 3 functions,
+  through the launcher: the launch-problem check; the provisioning renderer,
+  verifier and staging path the launcher imports; and 2 siblings. The gate
+  uses the launcher-facing refresh and staged directory, so a patch there
+  reaches it.
+- **Unchanged:** the gate's defaults are bound when it is defined, as before:
+  `expect_uid=STAGED_TOOLING_OWNER_UID` (root), `euid_getter=os.geteuid`,
+  `runner=subprocess.run` and `print_func=print`. `ProjectConfig` is an
+  annotation only.
+
+**One guard followed the move.**
+`pending_identity_records_boundary_test` (SYRD-385) required its neighbour
+`_staged_tooling_dir` to be *defined* in the launcher. It now accepts a
+neighbour defined or re-exported, unaliased. Its "defines none of the five"
+half is unchanged.
+
+**Baseline defect, preserved and reported, not fixed.**
+`refresh_staged_role_tooling` treats a result with no `returncode` as a
+failure, then reads `result.returncode` in its message, so it raises
+`AttributeError`. `install_host_privileged_boundary` has the same pattern.
+Only an injected runner can reach it. The new test pins the baseline's answer,
+the exception, so a fix will be a visible change of its own.
+
+**Proof.** The independent proof (`equiv399.py`) holds. 19 of 19
+planted faults are caught, among them:
+- the owner made the reader, or the gate's owner or euid default changed or
+  read late;
+- a hostile bundle restaged, or any caller repairing;
+- the restage from the host's release rather than the bundle's, or the refresh
+  bypassing the launcher;
+- not fail-fast, stderr unbounded, or verification before the command;
+- a staying launch check's owner default changed.
+
+**Evidence.**
+- **New boundary test:** `tests/staged_role_tooling_boundary_test.py`,
+  47 checks, each run screened first.
+  - Every answer, print and call, in order, is compared with
+    7 gate cases and 6 refresh cases, plus the
+    staged path, all produced by the BASELINE launcher's own functions with the
+    same stand-ins, not typed. The cases cover: healthy; hostile; absent as
+    non-root; absent as root repaired, with a failed command, or with a repair
+    that does not verify; an explicit owner; a failure with long, empty or no
+    stderr; and a result with no `returncode`.
+  - Its 5 behaviour cases also pass against the baseline's own four
+    definitions (19 checks).
+  - The provisioning helpers refuse where the launcher imports them from, so a
+    body that went past the launcher fails the test.
+- **Mutations:** 36 of 36 are killed by assertions with zero guard
+  refusals.
+  - Two of my own first-draft mutants needed fixing: a malformed re-export
+    mutant, and an import order in the test that let an eager-cycle mutant
+    crash rather than fail an assertion.
+  - The behaviour tests alone kill 31; the 5 left are structural:
+    the gate's euid default replaced, the launcher imported at load, re-export aliased, a consumer bypasses the launcher, a staying launch check's owner changed.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 2 suites whole (the new test on the candidate only);
+  - 69 runs, identical: 57 pass, 0 pass with a
+    tolerated refusal, 12 stop at the guard (pre-effect only: the staging
+    commands' spawn and a fixture's git), and 0 fail otherwise;
+  - 72 cases excluded: 2 that build a `sudo` argv,
+    5 upgrade drivers through another suite's fixture, the
+    setpriv/unshare, konsole and namespace runs, and the upgrade-driver and
+    fake-root cases of `upgrade_phases_boundary_test`.
+- **What the comparison exercised (call profiler, functions only):** 1 of 58 passing runs execute a moved function: the new test. The existing gate cases stop at the guard before reaching it, so the behaviour rests on the new test, its baseline-generated cases, the run against the baseline, the mutants and the proof.
+- **Containment:** no tooling staged, tenant record changed, release deployed
+  or board altered (live snapshot identical before and after). The CLI help is
+  identical (36 invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: installing a shared release and this host's privileged boundary from it -- 2 definitions, 110 lines (lines 6052-7470, not contiguous):
+  -   6052   39  install_host_privileged_boundary  launcher callers outside: -; production readers outside the launcher: ['scripts/trusted_upgrade_release.py']
+  -   7400   71  switchyard_install_shared_release_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 0: []
+  - launcher callers outside the closure: 1: ['switchyard_main']
+  - production modules reading it through the launcher: 1: ['scripts/trusted_upgrade_release.py']
+  - test files naming any of them: 3 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the release/upgrade domain: activating a shared release on the host, and installing the root-owned boundary it carries)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - restoring interrupted role state (alternative): 1 definitions, 33 lines; launcher callers outside: -; production readers: 1
+  -   - the repository policy hooks repair (alternative): 1 definitions, 29 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2216 lines  211 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   957 lines   31 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 9,282 lines.

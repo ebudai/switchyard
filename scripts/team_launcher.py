@@ -1493,6 +1493,14 @@ from scripts.board_workflow_readers import (
     read_board_declared_workflow,
     read_board_workflow_state,
 )
+from scripts.runtime_user_provisioning import (
+    RUNTIME_READY_ATTEMPTS,
+    RUNTIME_READY_POLL_SECONDS,
+    ensure_configured_runtime_user,
+    ensure_user_linger_runtime,
+    loginctl_enable_linger_args,
+    provision_runtime_command,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1594,8 +1602,6 @@ AGY_CONVERSATION_ROOT = Path.home() / ".gemini" / "antigravity-cli"
 RESUME_STARTUP_TIMEOUT_SECONDS = 1.5
 RESUME_STARTUP_POLL_SECONDS = 0.1
 DETACHED_SESSION_STABILITY_SECONDS = 2.0
-RUNTIME_READY_ATTEMPTS = 50
-RUNTIME_READY_POLL_SECONDS = 0.1
 NO_LAUNCHER_SELF_DEPLOY_ENV = "TEAM_LAUNCHER_NO_SELF_DEPLOY"
 LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV = "PGU_TEAM_LAUNCHER_NO_SELF_DEPLOY"
 PROJECT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
@@ -1741,70 +1747,6 @@ def current_user_name() -> str:
 
 def runtime_dir_for_uid(uid: int) -> Path:
     return Path(f"/run/user/{uid}")
-
-
-def loginctl_enable_linger_args(user_name: str) -> list[str]:
-    return ["loginctl", "enable-linger", user_name]
-
-
-def ensure_user_linger_runtime(
-    user_name: str,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    runtime_exists: Callable[[Path], bool] | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
-    attempts: int = RUNTIME_READY_ATTEMPTS,
-    poll_seconds: float = RUNTIME_READY_POLL_SECONDS,
-) -> Path:
-    user = user_name.strip()
-    if not user:
-        raise SystemExit("team-launcher: cannot provision runtime for an empty user name")
-    uid = uid_for_user(user)
-    if uid is None:
-        raise SystemExit(f"team-launcher: cannot provision runtime for unknown user {user!r}")
-    runtime_dir = runtime_dir_for_uid(uid)
-    exists = runtime_exists or (lambda path: path.is_dir())
-    result = runner(
-        loginctl_enable_linger_args(user),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        stderr = str(getattr(result, "stderr", "") or "").strip()
-        detail = f": {stderr}" if stderr else ""
-        raise SystemExit(
-            f"team-launcher: failed to enable linger for {user!r}{detail}; "
-            f"run `sudo loginctl enable-linger {user}` and retry"
-        )
-    for _ in range(max(1, attempts)):
-        if exists(runtime_dir):
-            return runtime_dir
-        sleeper(poll_seconds)
-    raise SystemExit(
-        f"team-launcher: linger is enabled for {user!r}, but {runtime_dir} is still missing; "
-        "start or restart that user's systemd user manager and retry"
-    )
-
-
-def ensure_configured_runtime_user(
-    config: ProjectConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    runtime_exists: Callable[[Path], bool] | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
-    attempts: int = RUNTIME_READY_ATTEMPTS,
-) -> Path | None:
-    user = config.run_as_user or current_user_name()
-    if not user or not session_dir_uses_user_runtime(config.session_dir, user):
-        return None
-    return ensure_user_linger_runtime(
-        user,
-        runner=runner,
-        runtime_exists=runtime_exists,
-        sleeper=sleeper,
-        attempts=attempts,
-    )
 
 
 def default_user_bin(user_name: str = "") -> str:
@@ -3347,17 +3289,6 @@ def _resolve_switchyard_project(
     if hint:
         raise SystemExit(hint)
     raise SystemExit(f"switchyard: unknown project {selection!r}")
-
-
-def provision_runtime_command(user_name: str | None, config: ProjectConfig | None = None) -> int:
-    user = (user_name or "").strip()
-    if not user and config is not None:
-        user = config.run_as_user or current_user_name()
-    if not user:
-        user = current_user_name()
-    runtime_dir = ensure_user_linger_runtime(user)
-    print(f"runtime ready for {user}: {runtime_dir}")
-    return 0
 
 
 def role_isolation_gaps(config: ProjectConfig) -> list[str]:

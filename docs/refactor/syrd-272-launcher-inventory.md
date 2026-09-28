@@ -12771,3 +12771,111 @@ must stand in the process table from the start:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 9,095 lines.
+
+### SYRD-402 (slice 19q): residual tenant process discovery and containment
+
+Measured on `295a602`. The design was posted **before** any edit.
+
+| file | before (`295a602`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 9,095 | 8,944 |
+| `scripts/residual_processes.py` | - | 198 |
+| `tests/residual_processes_boundary_test.py` | - | 485 |
+
+**Moved:** the frozen `ResidualProcess` record, `_process_environ`,
+`_process_ancestry`, `process_systemd_unit`, `residual_project_processes` and
+`contain_residual_project_processes`, contiguous and in order, into the new
+`scripts/residual_processes.py`. `_plan_data_from_config` above and
+`TENANT_RUNTIME_STATES` below (with its comment) stay.
+- **Re-export:** one explicit, unaliased import of all six -- the
+  private-looking helpers included -- above every definition.
+  `suspend_tenant` still contains through its launcher global.
+- **Seams:** 6 call-time reads, through the launcher: the project's
+  managed unit names, and the siblings discovery and containment use (the
+  record included).
+- **Unchanged:** the record's decorator and the `signaller=os.kill`,
+  `print_func=print`, `proc_root=None` and `exclude=()` defaults are bound when
+  each is defined. `ProjectConfig` is an annotation only. `stat` in the
+  ancestry walk is a local, so the module does not import the stdlib module.
+- **Safety semantics, pinned by the proof's clause 3c:** this process and its
+  ancestors excluded (the parent read after the LAST `)`); the exact slug; a
+  non-blank caller role; managed services and scopes out by the cgroup; name
+  order; SIGTERM only; a vanished process ignored; a refusal and other errors
+  reported, bounded.
+
+**No guard needed to follow the move.** The only test naming the six --
+`team_launcher_tenant_suspension_test` -- calls them through the launcher.
+
+**Proof.** The independent proof (`equiv402.py`) holds. 21 of 21
+planted faults are caught, among them:
+- a prefix slug, no caller role, or ancestors not excluded;
+- the parent read by a whitespace split, or managed units kept;
+- SIGKILL, a vanished process reported, or an unsorted scan;
+- the record not frozen, or the signaller default changed.
+
+**Evidence.**
+- **New boundary test:** `tests/residual_processes_boundary_test.py`,
+  70 checks, each run gated on its screen.
+  - Every `/proc` is a synthetic tree in an owned temporary directory, and
+    every signaller a recorder. For the whole run the real `os.kill` is
+    refused, and so is every `Path` read outside the owned tree -- the host's
+    process table included. The test proves that guard on itself.
+  - Every selection, signal, message and reader result is compared with
+    31 cases produced by the BASELINE launcher's own functions over
+    identical trees, not typed: 9 discovery,
+    4 containment, 5 environ,
+    7 cgroup and 6 ancestry cases.
+  - Its 5 behaviour cases also pass against the baseline's own six
+    definitions (42 checks).
+- **Mutations:** 34 of 34 are killed by assertions with zero guard
+  refusals, each mutant now bounded by a 300-second timeout.
+  - The first run hung on my own mutant: a cycle guard replaced by a bound
+    that a set never reaches, so it never ended. It was stopped, the file
+    restored, and the mutant replaced by one that changes the result.
+  - That run then left four alive, each a gap in the trees: a non-digit entry
+    that looks like a process, an entry owned by someone else, a grandparent,
+    and a longer chain. The trees gained them (regenerated from the baseline),
+    and all four are killed.
+  - The behaviour tests alone kill 29; the 5 left are structural:
+    the record not frozen, the signaller default changed, the launcher imported at load, a name not re-exported, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - the new test whole;
+  - 10 cases of `team_launcher_tenant_suspension_test`, identical:
+    3 pass, 0 pass with a tolerated refusal, 7 stop at
+    the guard (pre-effect only: the project fixture's account lookup), and
+    0 fail otherwise;
+  - six of those were flagged `tmux` only by the synthetic cgroup text
+    (`tmux-spawn.scope`) and were included;
+  - 7 cases excluded (window/konsole, board/systemctl
+    and recorder/unshare).
+- **What the comparison exercised (call profiler, functions only):** 2 of 4 passing runs execute a moved function: the new test, and the suite's cgroup-parsing case.
+- **Containment:** no live `/proc` scanned, process signalled, tenant
+  suspended or service changed (live snapshot identical before and after).
+  Both entry points' help is identical (36 `switchyard` invocations plus
+  `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: what state a tenant's runtime is in, as status and list report it -- 3 definitions, 42 lines (lines 6505-6551, not contiguous):
+  -   6505    7  TENANT_RUNTIME_STATES  launcher callers outside: -; production readers outside the launcher: -
+  -   6515   21  TenantRuntime  launcher callers outside: -; production readers outside the launcher: -
+  -   6538   14  describe_tenant_runtime  launcher callers outside: -; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 0: []
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the tenant lifecycle: the five runtime states and the record status and list print)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - detaching a role from its slot (alternative): 4 definitions, 62 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the upgrade preview's finish (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2187 lines  211 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1066 lines   40 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,944 lines.

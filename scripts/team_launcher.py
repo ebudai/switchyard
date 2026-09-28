@@ -1468,6 +1468,12 @@ from scripts.switchyard_commands import (
     switchyard_help_text,
     switchyard_invocation_requires_root,
 )
+from scripts.switchyard_registration import (
+    _check_switchyard_registration_available,
+    _register_switchyard_project,
+    _registered_project_collision,
+    switchyard_register_command,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3309,99 +3315,6 @@ def _switchyard_entries(
     return sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.slug.casefold()))
 
 
-def _registered_project_collision(
-    *,
-    slug: str,
-    name: str,
-    config_dir: Path | None = None,
-    registry_dir: Path | None = None,
-    skip_config_path: Path | None = None,
-) -> str:
-    skip_resolved = skip_config_path.expanduser().resolve(strict=False) if skip_config_path is not None else None
-    for entry in _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir):
-        if skip_resolved is not None and entry.config_path.expanduser().resolve(strict=False) == skip_resolved:
-            continue
-        if entry.slug.casefold() == slug.casefold():
-            return (
-                f"switchyard: project slug {slug!r} is already registered to "
-                f"{entry.name!r} at {entry.config_path}"
-            )
-        if entry.name.casefold() == name.casefold():
-            return (
-                f"switchyard: project name {name!r} is already registered as "
-                f"{entry.slug!r} at {entry.config_path}"
-            )
-    return ""
-
-
-def _check_switchyard_registration_available(
-    *,
-    slug: str,
-    name: str,
-    config_dir: Path | None = None,
-    registry_dir: Path | None = None,
-    skip_config_path: Path | None = None,
-) -> None:
-    collision = _registered_project_collision(
-        slug=slug,
-        name=name,
-        config_dir=config_dir,
-        registry_dir=registry_dir,
-        skip_config_path=skip_config_path,
-    )
-    if collision:
-        raise SystemExit(collision)
-
-
-def _register_switchyard_project(
-    config_path: Path,
-    *,
-    config_dir: Path | None = None,
-    registry_dir: Path | None = None,
-) -> Path:
-    resolved_config_path = config_path.expanduser().resolve(strict=False)
-    raw = _load_json(resolved_config_path)
-    raw_slug = str(raw.get("project") or resolved_config_path.stem).strip()
-    if not raw_slug:
-        raise SystemExit(f"switchyard: cannot register {resolved_config_path}: project slug is empty")
-    slug = _validate_project_slug(raw_slug)
-    config = load_project_config(slug, resolved_config_path)
-    name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
-    registry_dir = registry_dir or switchyard_registry_dir()
-    registry_path = registry_dir / f"{slug}.json"
-    _check_switchyard_registration_available(
-        slug=slug,
-        name=name,
-        config_dir=config_dir,
-        registry_dir=registry_dir,
-        skip_config_path=resolved_config_path,
-    )
-    if registry_path.exists():
-        raise SystemExit(f"switchyard: registry entry {registry_path} already exists; refusing to overwrite")
-    payload = {
-        "schema": SWITCHYARD_REGISTRY_SCHEMA,
-        "slug": slug,
-        "name": name,
-        "config_path": str(resolved_config_path),
-        # Recorded here because this is the last moment the configuration and a
-        # root-owned, world-readable file are both in reach: afterwards the
-        # configuration is under the owner's home, and a launch cannot read it
-        # from the operator's side of the boundary. Without it a launch has to
-        # guess which CLIs a tenant uses, and guessing "all of them" asked the
-        # `test` tenant to promote a Hermes no role of its uses (SYRD-220).
-        SWITCHYARD_REGISTRY_AGENT_CLIS_KEY: _configured_agent_clis(config),
-    }
-    try:
-        registry_dir.mkdir(parents=True, exist_ok=True)
-        registry_dir.parent.chmod(0o755)
-        registry_dir.chmod(0o755)
-        registry_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        registry_path.chmod(0o644)
-    except OSError as exc:
-        raise SystemExit(f"switchyard: failed to register project {slug!r} in {registry_dir}: {exc}") from exc
-    return registry_path
-
-
 def partial_provision_record(slug: str) -> Path | None:
     """Root's own record of a project whose provisioning did not finish.
 
@@ -3536,18 +3449,6 @@ def read_board_workflow_state(
         document if isinstance(document, dict) else None,
         "",
     )
-
-
-def switchyard_register_command(
-    config_path: Path,
-    *,
-    config_dir: Path | None = None,
-    registry_dir: Path | None = None,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    registry_path = _register_switchyard_project(config_path, config_dir=config_dir, registry_dir=registry_dir)
-    print_func(f"switchyard: registered {config_path.expanduser().resolve(strict=False)} at {registry_path}")
-    return 0
 
 
 def switchyard_menu_command(

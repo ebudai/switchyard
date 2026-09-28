@@ -366,6 +366,18 @@ def test_the_launcher_reexports_the_twenty_one_and_builds_them_there() -> None:
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:
                     calls.setdefault(fn.name, {}).setdefault(ast.unparse(x.func), 0)
                     calls[fn.name][ast.unparse(x.func)] += 1
+    # SYRD-412 moved switchyard_recover_display_command on: follow the launcher's exact unaliased re-export of a
+    # caller it no longer defines, and count its builds there, which must read the launcher's names.
+    for caller in sorted(set(DISPATCH) - defined):
+        source = [n.module for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                  and any(a.name == caller and a.asname is None for a in n.names)]
+        check(len(source) == 1, f"the launcher re-exports {caller}, unaliased: {source}")
+        module = ast.parse((ROOT / f"{source[0].replace('.', '/')}.py").read_text(encoding="utf-8"))
+        fn = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == caller)
+        for x in ast.walk(fn):
+            if isinstance(x, ast.Call) and ast.unparse(x.func).startswith("launcher.") and ast.unparse(x.func)[len("launcher."):] in MOVED:
+                calls.setdefault(caller, {}).setdefault(ast.unparse(x.func)[len("launcher."):], 0)
+                calls[caller][ast.unparse(x.func)[len("launcher."):]] += 1
     check(calls == DISPATCH, f"both callers build them by the launcher's own globals, as often as before: {calls}")
 
 

@@ -13805,3 +13805,147 @@ and **not implemented**:
   -   569 lines   22 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,976 lines.
+
+### SYRD-412 (slice 19z): presentation attach, present and recovery commands
+
+Measured on `34282d3`. The design was posted **before** any edit.
+
+| file | before (`34282d3`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,976 | 7,874 |
+| `scripts/presentation_commands.py` | - | 143 |
+| `tests/presentation_commands_boundary_test.py` | - | 422 |
+| `tests/switchyard_parsers_boundary_test.py` | 405 | 417 |
+
+**Moved:** `switchyard_attach_command` and `switchyard_present_command`
+(adjacent), and `switchyard_recover_display_command` (with its SYRD-239
+docstring and inline comments), each whole and in order, into the new
+`scripts/presentation_commands.py`.
+- **Neighbours:** `_owner_catalog_args`, `switchyard_help_text`,
+  `ensure_staged_role_bundle_before_crossing` and
+  `_switchyard_exec_through_tenant_control` stay.
+- **Re-export and dispatch:** one explicit, unaliased import of all three.
+  `switchyard_main` still dispatches them by its own globals
+  (3 sites, measured).
+- **Seams:** the recovery's 7 call-time reads of 7 names are now
+  `launcher.X`: both parsers, the project resolver, the configuration loader,
+  the tenant-control grant, the current user and the moved present command.
+- **Nested imports:** each command still imports `presentation_controller`
+  inside.
+- **Bound when defined, as before:** `runner=subprocess.run`,
+  `print_func=print` and `environ=None`. `ProjectConfig` is an annotation
+  only.
+
+**One guard follows the move** (my own SYRD-411 test):
+`switchyard_parsers_boundary_test`'s parser-build count now follows the
+launcher's exact unaliased re-export of `switchyard_recover_display_command`,
+and counts its `launcher.<parser>` builds there. The recorded counts are
+unchanged.
+
+**Proof.** The independent proof (`equiv412.py`) holds, including the
+authority order:
+- parse, resolve, then load across the bridge with the slug;
+- the actor from either role variable, lowercased;
+- only the Director or the operator the controller authenticates passes the
+  gate, and everyone else is refused with `SystemExit` before anything is
+  presented;
+- the forwarded `present <slug> recover director`.
+
+20 of 20 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/presentation_commands_boundary_test.py`,
+  58 checks, each run gated on its screen. It replays 27 cases
+  produced by the BASELINE launcher's own commands (`gold412.py`) over the very
+  case text the test embeds, not typed:
+  - 3 attach cases;
+  - 14 present cases: `list` with and without JSON, every action,
+    restore and bootstrap with and without a layout, the definition-time
+    defaults, and a caller-built namespace asking an action for JSON;
+  - 10 recovery cases: the Director by either variable (mixed case),
+    the operator (including one whose role variable names a worker),
+    refusals with and without a grant, a display name typed, and `environ`
+    left to its default with the process environment pinned.
+
+  Its 3 behaviour cases also pass against the baseline's own commands
+  (37 checks).
+- **Mutations:** 35 of 35 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The first run left
+  two, each closed with a new generated case:
+  - "an action's report in JSON", by the caller-built namespace;
+  - "a worker recovered instead", by the operator whose role variable names
+    a worker.
+
+  The behaviour tests alone kill 31; the 4 left are placement,
+  import, re-export and dispatch changes: the launcher imported at load, re-export aliased, the dispatcher bypasses its global, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 2 suites whole: the new test on the candidate only,
+    and the adapted parsers test, which passes on both;
+  - 26 cases, per case, identical on both sides: 21 pass,
+    5 stop at the same refused account lookup, and none fails
+    otherwise.
+  - **Excluded (27):** 25 whose own execution
+    screen hits (the live-tmux display recovery suite among them), 1
+    driving `switchyard_main`, and 1 accumulator.
+  - **Not run:** `tenant_control_bridge_e2e_test` has no `test_*` cases. Its
+    `case_*` functions run as root inside a namespace against real accounts,
+    which the guard cannot contain.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 23 passing runs execute a moved command: the new
+  test. The existing cases that call the recovery stop at a refused account
+  lookup before reaching it, and the dispatcher case is excluded as
+  `switchyard_main`-driving.
+- **Containment:** no display was attached or recovered, and no grant,
+  release or service was touched (live snapshot identical before and after).
+  Both entry points' help is identical (36 `switchyard` invocations plus
+  `team-launcher --help`, 163 lines).
+
+**Correction after Audit.** Audit returned the first candidate (`b711440`)
+because the new test failed in a normal role pane.
+- **The fault:** the fixture cleared only the two caller-role variables for
+  its `environ=None` cases, but recorded every `TICKET_BOARD*`/`PGU_TICKET*`
+  variable the pane carries. I had run it only under `env -i`.
+- **The fix:** it now removes every variable of those families for each case,
+  pins the case's own values, and restores them afterwards. The production
+  extraction is unchanged.
+- **Verified:**
+  - the submitted test fails in this pane's normal environment, as Audit saw;
+  - the fixed test passes there and under `env -i`;
+  - the baseline golden, regenerated in both environments, is byte-identical
+    to the one first submitted;
+  - my seven earlier boundary tests (SYRD-405 to 411) also pass in the normal
+    pane environment.
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: loading a command's project configuration, crossing to the owner or root -- 11 definitions, 257 lines (lines 6697-7122, not contiguous):
+  -   6697    4  _switchyard_command_display  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6722   15  _switchyard_user_can_prompt_for_sudo  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6858   56  ensure_staged_role_bundle_before_crossing  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6916   65  _switchyard_exec_through_tenant_control  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6983   19  _switchyard_exec_with_root  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7015   14  _configured_role_account_caller  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7031    2  _switchyard_command_is_unprivileged  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7035   52  _switchyard_cross_account  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7089   12  _require_switchyard_owner_hint_or_root  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7103    7  _require_switchyard_project_owner_or_root  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   7112   11  _load_switchyard_project_config_for_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: ['scripts/presentation_commands.py']
+  - launcher names it reads (through the launcher once moved): 7: ['SWITCHYARD_UNPRIVILEGED_COMMANDS', 'ProjectConfig', 'current_user_name', 'load_project_config', 'SwitchyardProjectEntry', 'staged_bundle_launch_problems', '_project_config_path_owner_user']
+  - launcher callers outside the closure: 1: ['switchyard_main']
+  - production modules reading it through the launcher: 1: ['scripts/presentation_commands.py']
+  - test files naming any of them: 12 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: how every per-project switchyard verb loads its configuration -- through the tenant-control bridge, as the owner, or as root -- with the ten helpers only it reaches)
+  - it also reads 11 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['AgentCliAvailability (scripts.agent_cli_discovery)', 'STAGED_TOOLING_OWNER_UID (scripts.staged_role_tooling)', 'TENANT_CONTROL_ROOT (scripts.tenant_control_helper)', '_tenant_control_grant (scripts.tenant_control_helper)', '_tenant_control_operation (scripts.tenant_control_helper)', 'caller_aware_which (scripts.agent_cli_discovery)', 'close_desktop_presentation (scripts.presentation_windows)', 'complete_desktop_presentation (scripts.desktop_presentation)', 'ensure_tenant_control_helper (scripts.tenant_control_helper)', 'offer_host_wide_promotion_before_launch (scripts.agent_cli_promotion)', 'repair_tenant_control_helper (scripts.tenant_control_helper)']
+  - alternatives measured the same way:
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the switchyard help text (alternative): 1 definitions, 39 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2146 lines  214 defs  general helpers (unclassified)
+  -  1673 lines   70 defs  provisioning (new/register/teardown/owner accounts)
+  -  1017 lines   39 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   569 lines   22 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,874 lines.

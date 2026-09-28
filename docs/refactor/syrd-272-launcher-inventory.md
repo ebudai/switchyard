@@ -12972,3 +12972,133 @@ and **not implemented**:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,897 lines.
+
+### SYRD-405 (slice 19s): reversible tenant suspend and resume
+
+Measured on `b6af782`. The design was posted **before** any edit.
+
+| file | before (`b6af782`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,897 | 8,795 |
+| `scripts/tenant_suspension.py` | - | 141 |
+| `tests/tenant_suspension_boundary_test.py` | - | 482 |
+| `tests/single_owner_staged_tooling_test.py` | 828 | 843 |
+| `tests/staged_role_tooling_boundary_test.py` | 501 | 521 |
+| `tests/residual_processes_boundary_test.py` | 485 | 505 |
+| `tests/tenant_runtime_boundary_test.py` | 298 | 318 |
+
+**Moved:** `suspend_tenant` and `resume_tenant`, contiguous and in order,
+into the new `scripts/tenant_suspension.py`.
+- **Neighbours:** `_plan_data_from_config` above and `stop_project` below
+  stay.
+- **Re-export:** one explicit, unaliased import of both, above every
+  definition. `switchyard_main` still calls both by its own globals (3
+  sites, as measured on the baseline).
+- **Seams:** all 18 call-time reads of the 11 launcher names the two
+  bodies call are now `launcher.X`, through a call-time import, as measured
+  from the AST (0 of them siblings):
+  - the board and listener units (`board_services`);
+  - the window (`presentation_windows`);
+  - residual containment (`residual_processes`);
+  - the staged tooling (`staged_role_tooling`);
+  - the launcher's own `stop_project`.
+- **Bound when defined, as before:** the `runner=subprocess.run`,
+  `signaller=os.kill` and `print_func=print` defaults. `ProjectConfig` is an
+  annotation only, under TYPE_CHECKING. The module's top imports only the
+  standard library.
+
+**Guards that follow the move.**
+- **`single_owner_staged_tooling_test`'s staging-before-start guard** (the one
+  the ticket names). When the launcher no longer defines `resume_tenant`, it
+  requires the launcher's exact unaliased re-export from
+  `scripts.tenant_suspension`. It then reads that module's `resume_tenant`
+  with `launcher.` removed, and proves the same staged-tooling gate line
+  comes before the board ask.
+- **Three earlier boundary tests** that looked `resume_tenant` or
+  `suspend_tenant` up in the launcher AST: `staged_role_tooling` (SYRD-399),
+  `residual_processes` (SYRD-402) and `tenant_runtime` (SYRD-404).
+  - Each now finds the definition, or follows the exact unaliased
+    re-export, dropping the call-time import and reading `launcher.X` as `X`.
+  - Their assertions are unchanged, `tenant_runtime`'s node-for-node
+    comparison with the baseline's `suspend_tenant` included.
+
+**Proof.** The independent proof (`equiv405.py`) holds. It includes the order
+and failure semantics:
+- suspend calls every step in order and returns only at its end;
+- resume asks the staged gate, then the board, then the listener, and each
+  problem gate returns.
+
+18 of 18 planted faults are caught, among them:
+- the sessions stopped before the window, or a suspension that gives up
+  early or raises;
+- a resume past unstaged tooling or past a failed board, or the listener
+  asked first;
+- a message or a default changed, or a seam read bare or at definition time;
+- a neighbour, the re-export, a comment or a prior module changed.
+
+**Evidence.**
+- **New boundary test:** `tests/tenant_suspension_boundary_test.py`,
+  168 checks, each run gated on its screen.
+  - All 11 seams stand in on the launcher. Their defining modules, the
+    real `subprocess.run`/`Popen` and `os.kill` are refused.
+  - It replays 132 cases produced by the BASELINE launcher's own
+    functions (`gold405.py`), not typed, comparing the answer, the messages
+    and every call with its arguments, in order:
+    - 34 suspensions: every combination of the five steps failing, and the
+      definition-time defaults;
+    - 98 resumes: every path through staging, board ask, start, re-ask,
+      listener state and listener start, and the defaults.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (149 checks).
+- **Mutations:** 35 of 35 are killed by assertions with zero guard
+  refusals, each mutant bounded by a timeout. The behaviour tests alone kill
+  30; the 5 left are the module's placement, re-export and
+  dispatch: the launcher imported at load, a name not re-exported, re-export aliased, the dispatcher bypasses its global, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 4 suites whole: the new test on the candidate only,
+    and the three edited boundary tests, which pass on both.
+  - `single_owner_staged_tooling_test.py`, 17 cases, identical on both sides: 6 pass, 11
+    stop at the guard (a `sudo` staging spawn, refused), 0 fail
+    otherwise. The adapted guard case passes on both. 3 are
+    excluded by the screens.
+  - `team_launcher_tenant_suspension_test.py`, 10 cases, identical on both sides: 3 pass, 7
+    stop at the guard (an owner-name lookup, refused), 0 fail
+    otherwise. 7 are excluded because the execution screen finds
+    `konsole`, `systemctl` or `unshare` in what they would run. That
+    includes both of the suite's resume cases, so their behaviour is covered
+    by the golden cases above instead.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 13 passing runs execute a moved function: the new
+  test (34 suspensions, 98 resumes). The existing suites that reach
+  them are excluded or stop at the guard first.
+- **Containment:** no tenant suspended or resumed, no service, window,
+  signal, provider or database touched (live snapshot identical before and
+  after). Both entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: detaching a role from its slot -- 4 definitions, 62 lines (lines 2741-6631, not contiguous):
+  -   2741    2  tmux_detach_clients_args  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6568    7  _raw_role_for_update  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6577   25  _write_role_visibility  launcher callers outside: -; production readers outside the launcher: ['scripts/role_pane_entry.py']
+  -   6604   28  detach_role_from_slot  launcher callers outside: ['main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 7: ['RoleConfig', 'ProjectConfig', '_load_json', '_write_json_atomic', 'load_project_config', 'ensure_owner_file', '_role_by_name']
+  - launcher callers outside the closure: 1: ['main']
+  - production modules reading it through the launcher: 1: ['scripts/role_pane_entry.py']
+  - test files naming any of them: 1 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of role placement: taking a role out of the pane slot it occupies, and recording that it is no longer visible there)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['tmux_has_session_args (scripts.tmux_session_argv)']
+  - alternatives measured the same way:
+  -   - stopping a project's sessions (alternative): 1 definitions, 47 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the upgrade preview's finish (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2144 lines  210 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1066 lines   40 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,795 lines.

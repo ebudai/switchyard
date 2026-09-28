@@ -704,6 +704,21 @@ def test_the_new_flow_checks_before_it_opens_any_window() -> None:
         gate, launch = text.index(gate_line), text.index(launch_line)
     assert gate < launch, (gate, launch)
     # And a resumed tenant repairs the same bundle on its way back up.
+    if "def resume_tenant(" not in body:
+        # SYRD-405: it lives in `tenant_suspension`, which the launcher
+        # re-exports by its own name; the gate must still come first there.
+        import ast
+        import inspect
+
+        from scripts import tenant_suspension
+
+        assert any(isinstance(node, ast.ImportFrom) and node.module == "scripts.tenant_suspension"
+                   and any(alias.name == "resume_tenant" and alias.asname is None for alias in node.names)
+                   for node in ast.parse(body).body), "the launcher no longer re-exports resume_tenant"
+        suspension = inspect.getsource(tenant_suspension)
+        holder = next(node for node in ast.parse(suspension).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "resume_tenant")
+        body = ast.get_source_segment(suspension, holder).replace("launcher.", "")
     resume = body.index("def resume_tenant(")
     resume_gate = body.index("ensure_staged_role_tooling(config, runner=runner", resume)
     board = body.index("if board_system_unit_is_active(config, runner=runner):", resume)

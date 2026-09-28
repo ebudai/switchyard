@@ -257,6 +257,26 @@ def test_the_module_reads_nothing_of_the_launcher() -> None:
     check([ast.unparse(d) for d in record.decorator_list] == ["dataclass(frozen=True)"], "frozen by the decorator bound when it is defined")
 
 
+def launcher_definition(tree: ast.Module, name: str) -> ast.FunctionDef:
+    """The launcher's `name`: its own, or -- once a later slice moves it on (SYRD-405) -- the definition its
+    unaliased re-export names, with the call-time `launcher` import dropped and `launcher.X` read as the global `X`."""
+    node = next((n for n in tree.body if getattr(n, "name", None) == name), None)
+    if node is not None:
+        return node
+    source = next(n.module for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                  and any(a.name == name and a.asname is None for a in n.names))
+    node = next(n for n in ast.parse((ROOT / f"{source.replace('.', '/')}.py").read_text(encoding="utf-8")).body
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    node.body = [s for s in node.body if ast.unparse(s) != "from scripts import team_launcher as launcher"]
+
+    class AsGlobal(ast.NodeTransformer):
+        def visit_Attribute(self, x: ast.Attribute) -> ast.AST:
+            self.generic_visit(x)
+            return ast.Name(id=x.attr, ctx=x.ctx) if isinstance(x.value, ast.Name) and x.value.id == "launcher" else x
+
+    return AsGlobal().visit(node)
+
+
 def test_the_launcher_reexports_the_three_and_keeps_its_neighbours() -> None:
     tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     imports = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.tenant_runtime"]
@@ -270,7 +290,7 @@ def test_the_launcher_reexports_the_three_and_keeps_its_neighbours() -> None:
                 for a in n.names if a.asname is None}
     check(not defined & set(MOVED) and {"_plan_data_from_config", "suspend_tenant"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours, its own or re-exported")
-    suspend = next(n for n in tree.body if getattr(n, "name", None) == "suspend_tenant")
+    suspend = launcher_definition(tree, "suspend_tenant")
     check(ast.dump(suspend, include_attributes=False) == SUSPEND_TENANT, "suspend_tenant is the baseline's, node for node")
 
 

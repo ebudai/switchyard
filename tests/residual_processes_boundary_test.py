@@ -376,6 +376,26 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
     check(order == list(MOVED), f"the six in the launcher's order, and nothing else: {order}")
 
 
+def launcher_definition(tree: ast.Module, name: str) -> ast.FunctionDef:
+    """The launcher's `name`: its own, or -- once a later slice moves it on (SYRD-405) -- the definition its
+    unaliased re-export names, with the call-time `launcher` import dropped and `launcher.X` read as the global `X`."""
+    node = next((n for n in tree.body if getattr(n, "name", None) == name), None)
+    if node is not None:
+        return node
+    source = next(n.module for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                  and any(a.name == name and a.asname is None for a in n.names))
+    node = next(n for n in ast.parse((ROOT / f"{source.replace('.', '/')}.py").read_text(encoding="utf-8")).body
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    node.body = [s for s in node.body if ast.unparse(s) != "from scripts import team_launcher as launcher"]
+
+    class AsGlobal(ast.NodeTransformer):
+        def visit_Attribute(self, x: ast.Attribute) -> ast.AST:
+            self.generic_visit(x)
+            return ast.Name(id=x.attr, ctx=x.ctx) if isinstance(x.value, ast.Name) and x.value.id == "launcher" else x
+
+    return AsGlobal().visit(node)
+
+
 def test_the_launcher_reexports_the_six_above_every_reader() -> None:
     tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     imports = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.residual_processes"]
@@ -389,7 +409,7 @@ def test_the_launcher_reexports_the_six_above_every_reader() -> None:
                 for a in n.names if a.asname is None}
     check(not defined & set(MOVED) and {"_plan_data_from_config", "TENANT_RUNTIME_STATES", "suspend_tenant"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and the suspension, its own or re-exported")
-    suspend = next(n for n in tree.body if getattr(n, "name", None) == "suspend_tenant")
+    suspend = launcher_definition(tree, "suspend_tenant")
     check([ast.unparse(x.func) for x in ast.walk(suspend) if isinstance(x, ast.Call) and ast.unparse(x.func).endswith("contain_residual_project_processes")]
           == ["contain_residual_project_processes"], "the suspension contains through its launcher global")
 

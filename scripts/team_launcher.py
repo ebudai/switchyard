@@ -1504,6 +1504,11 @@ from scripts.runtime_user_provisioning import (
 from scripts.rollout_log import (
     rollout_log_command,
 )
+from scripts.control_role import (
+    CONTROL_ROLE_CAPABILITIES,
+    control_role_name,
+    director_role_name,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3308,61 +3313,6 @@ def role_isolation_gaps(config: ProjectConfig) -> list[str]:
     if legacy:
         return legacy
     return []
-
-
-# What makes a role the tenant's control role is what the workflow lets it do,
-# not what it is called. These are the capabilities that take a ticket out of
-# the ordinary flow, and no implementer or reviewer role carries them (SYRD-49).
-CONTROL_ROLE_CAPABILITIES = frozenset({"set_manually_controlled", "merge"})
-
-
-def control_role_name(
-    config: ProjectConfig, *, config_path: Path | None = None
-) -> tuple[str, str]:
-    """The configured role that controls this tenant, and why not when it is not.
-
-    A declarative tenant says which role that is by giving it the control
-    capabilities, so the name is the tenant's to choose. Zero matches and more
-    than one both fail closed: a privileged grant is not something to guess at.
-    Only a tenant with no workflow document falls back to the historical name
-    (SYRD-49).
-    """
-    document = None
-    if config_path is not None:
-        try:
-            document = (_load_json(config_path) or {}).get("workflow")
-        except SystemExit:
-            document = None
-    configured = {role.role for role in config.roles}
-    if isinstance(document, Mapping) and document.get("roles"):
-        matches = [
-            str(role.get("name") or "")
-            for role in document.get("roles") or []
-            if isinstance(role, Mapping)
-            and role.get("active", True)
-            and CONTROL_ROLE_CAPABILITIES <= set(role.get("capabilities") or [])
-        ]
-        present = [name for name in matches if name in configured]
-        if not present:
-            return "", (
-                "this project's workflow declares no active role with the control capabilities "
-                f"({', '.join(sorted(CONTROL_ROLE_CAPABILITIES))})"
-            )
-        if len(present) > 1:
-            return "", (
-                "this project's workflow gives the control capabilities to more than one role: "
-                + ", ".join(sorted(present))
-            )
-        return present[0], ""
-    if "director" in configured:
-        return "director", ""
-    return "", "this project configures no director role"
-
-
-def director_role_name(config: ProjectConfig, *, config_path: Path | None = None) -> str:
-    """The control role's name, or empty when it cannot be established."""
-    name, _reason = control_role_name(config, config_path=config_path)
-    return name
 
 
 def role_control_accounts(config: ProjectConfig) -> tuple[tuple[str, str], ...]:

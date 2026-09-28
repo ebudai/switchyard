@@ -18011,3 +18011,147 @@ and **not implemented**:
   -   100 lines   10 defs  board service, listener and status
 
 **SYRD-272 is not complete.** The launcher is still 4,025 lines.
+
+### SYRD-448 (slice 19bb): the interrupted role-state restore
+
+Measured on `478f6c9`. Before any edit, the rooted closure was verified; there
+was no closure expansion. The guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 4 files
+  naming the function were run on both scratch trees (105 whole, 260
+  cases).
+- **Result:** exactly two guards broke.
+  - `role_state_ownership_boundary_test`'s stay check required a launcher
+    definition, never a re-export.
+  - `role_identity_cutover_boundary_test` requires exactly one call of
+    `_interrupted_provider_state_roles` across the launcher and
+    `upgrade_phases.py`. That call is the one this function makes, and it
+    moved to a file the guard did not scan.
+  - The second is keyed by a name the function *calls*, so my name-based
+    inventory missed it and the scratch comparison caught it.
+- **The Director's decision:** approved both adaptations exactly as proposed
+  before any edit. The stay check accepts the definition or an unaliased
+  re-export from exactly `scripts.role_state_restore`. The call count also
+  scans exactly `scripts/role_state_restore.py`, still exactly one call,
+  through the launcher there.
+- **Checks on the adaptation:** the committed edit is the approved diff line
+  for line, which the proof checks. Both guards pass on the baseline and the
+  candidate. They still refuse an aliased re-export, an unnamed module, a
+  dropped re-export, the moved call read past the launcher, and a second call
+  (`guardkill448.py`).
+- **Every other suite:** nothing else differed.
+
+| file | before (`478f6c9`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,025 | 3,993 |
+| `scripts/role_state_restore.py` | - | 63 |
+| `tests/role_state_restore_boundary_test.py` | - | 453 |
+| `tests/role_state_ownership_boundary_test.py` | 577 | 582 |
+| `tests/role_identity_cutover_boundary_test.py` | 205 | 209 |
+
+**Scope: exactly the ticket's one definition, no additional production
+definition.** `restore_interrupted_role_state` (3136-3168) moves whole into the new
+`scripts/role_state_restore.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import, right after the
+  `cli_install_instructions` import.
+- **Reader:** `upgrade_phases.py` still reads it through the launcher when
+  it runs, and is byte-identical. No launcher definition names it.
+- **Seams:** all 6 call-time reads of 6 names are now
+  `launcher.X`:
+  - the owner-home lookup and the current user;
+  - the interrupted-role scan and its finisher;
+  - the ownership repair;
+  - a role's CLI name.
+- **Imports:** four of those names are the launcher's imports from
+  `scripts.host_accounts`, `scripts.role_identity_cutover` and
+  `scripts.role_state_ownership`, read on the launcher as before.
+- **Defaults:** `False`, `subprocess.run`, the builtin `print` and `None`,
+  the same objects. `Path.home()` stays the fallback owner home.
+  `ProjectConfig` is under TYPE_CHECKING.
+
+**Proof.** The independent proof (`equiv448.py`, 14 clauses) holds.
+It compares the whole node and every default, and the launcher remainder as
+AST and text. Its rules clause fixes the steps in order with `find`: the
+owner's home, the scan, the dry-run lines, the repair, the dry-run answer and
+the finisher, plus the baseline's returns and branches. Its clause 6b allows
+exactly the new test and the two approved guard edits, and requires the
+approved diff line for line. 20 of 20 planted faults are caught,
+each parsed first, and the plant run first requires the proof to hold on the
+untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/role_state_restore_boundary_test.py`,
+  73 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  17 cases produced by the BASELINE launcher's own definition
+  (`gold448.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane, with another
+  HOME, USER and COLUMNS, under umask 077 and under three hash seeds.
+  - **Isolation:** every role-state, account and ownership step is a
+    stand-in on the launcher. `$HOME` points at a test-owned directory for the
+    `Path.home()` fallback, so no real role state or account home is touched.
+  - **Cases:**
+    - nothing captured, or several roles;
+    - the repair or the finisher refusing;
+    - a dry run, per role;
+    - the owner's home as given, or the owner's, the caller's or the
+      process's;
+    - every option passed on;
+    - a failing scan;
+    - the CLI name rebound on the launcher.
+- **Fix before relying on a result:** my first rendered test failed its
+  reader check. Re-running the inventory for the design had overwritten the
+  per-module read counts with the inventory's list format; I regenerated the
+  counts and re-rendered. No production code or existing test was touched.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definition in both environments (57 checks).
+- **Mutations:** 24 of 24 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout, all on the first
+  pass. The behaviour tests alone kill 22. The rest are structural, and the
+  structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 135 files are accounted for: every boundary suite and
+  the 4 naming the function.
+  - 106 suites whole: 94 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 260 cases, per case, identical on both sides: 242 pass,
+    16 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (95):** 0 that drive an upgrade
+    or `switchyard_main`, 90 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, real functions only):**
+  1 of 336 passing runs execute a moved function:
+  `role_state_restore_boundary_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account or release was touched, and no real role state or
+  account home was read or written. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff448.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the repository policy-hook repair -- 1 definitions, 29 lines (lines 3108-3136):
+  -   3108   29  repair_repository_policy_hooks  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  - launcher names it reads (through the launcher once moved): 0: []
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/upgrade_phases.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: reinstalling the repository policy hooks a project's worktrees rely on)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the owner's systemctl runner (alternative): 1 definitions, 25 lines; launcher callers outside: -; production readers: 1
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: ['main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  1828 lines  206 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   523 lines   29 defs  project config and registry
+  -   396 lines   41 defs  provisioning (new/register/teardown/owner accounts)
+  -   100 lines   10 defs  board service, listener and status
+
+**SYRD-272 is not complete.** The launcher is still 3,993 lines.

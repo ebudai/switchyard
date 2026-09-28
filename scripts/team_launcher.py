@@ -1533,6 +1533,9 @@ from scripts.cli_install_instructions import (
     _missing_cli_install_clause,
     host_wide_install_instruction,
 )
+from scripts.role_state_restore import (
+    restore_interrupted_role_state,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3131,41 +3134,6 @@ def repair_repository_policy_hooks(
     for path in installed:
         print_func(f"switchyard: reinstalled managed Git policy hook {path}")
     return installed
-
-
-def restore_interrupted_role_state(
-    config: ProjectConfig,
-    *,
-    dry_run: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-    owner_home: Path | None = None,
-) -> bool:
-    """Give the role state back AND finish what the broken store interrupted.
-
-    Ownership alone is half a repair. A role left running because its store was
-    unusable still has no record, `roles_with_stale_provider_runtime` calls a
-    missing record stale, and the ordinary launch that follows the upgrade ends
-    the very panes this was protecting -- the restart postponed by one command
-    rather than avoided (SYRD-233 post-DAT).
-    """
-    if owner_home is None:
-        owner_home = home_dir_for_user(config.run_as_user or current_user_name()) or Path.home()
-    captured = _interrupted_provider_state_roles(config, runner=runner, owner_home=owner_home)
-    if dry_run and captured:
-        for role, pane_pid, _generation in captured:
-            print_func(
-                f"switchyard: would finish the provider-state record {role.role} could not write, "
-                f"so its live {_role_cli_name(role)} (pid {pane_pid}) would not be restarted; "
-                "nothing written"
-            )
-    if not repair_role_state_ownership(config, dry_run=dry_run, print_func=print_func):
-        return False
-    if dry_run:
-        return True
-    return _finish_interrupted_provider_state(
-        config, captured, runner=runner, owner_home=owner_home, print_func=print_func
-    )
 
 
 def _role_accounts_ready(config: ProjectConfig) -> bool:

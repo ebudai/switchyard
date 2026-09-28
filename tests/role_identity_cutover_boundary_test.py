@@ -141,16 +141,20 @@ def test_the_patched_and_generic_seams_are_reached() -> None:
     # SYRD-347 moved the upgrade's identities transaction, in its U5 phase, to
     # upgrade_phases, which calls it through the launcher; the total is unchanged.
     phases = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
+    # SYRD-448 moved the interrupted role-state restore, which makes the other call, to
+    # role_state_restore.py; it too calls through the launcher, and the total is unchanged.
+    restore_path = ROOT / "scripts" / "role_state_restore.py"
+    restore = ast.parse(restore_path.read_text(encoding="utf-8")) if restore_path.exists() else ast.Module(body=[], type_ignores=[])
     for name in PATCHED_MOVED:
         calls = [n for n in ast.walk(launcher_tree)
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
-        phase_calls = [n for n in ast.walk(phases)
+        phase_calls = [n for tree in (phases, restore) for n in ast.walk(tree)
                        if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
         check(len(calls) + len(phase_calls) == 1 and all(isinstance(n.func, ast.Name) for n in calls)
               and all(isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
                       and n.func.value.id == "launcher" for n in phase_calls),
               f"the launcher calls {name} at its one baseline site, by its own patchable name there, "
-              "through the launcher from upgrade_phases")
+              "through the launcher from upgrade_phases or role_state_restore")
 
 
 def test_no_call_time_import_shadows_what_a_function_binds() -> None:

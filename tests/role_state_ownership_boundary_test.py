@@ -264,7 +264,12 @@ def test_the_launcher_reexports_the_nine() -> None:
     check(len(imports) == 1 and sorted(a.name for a in imports[0].names) == sorted(MOVED) and all(a.asname is None for a in imports[0].names),
           "one explicit import of exactly the nine, unaliased")
     defined = {getattr(n, "name", None) for n in tree.body} | {x.id for n in tree.body if isinstance(n, ast.Assign) for x in n.targets if isinstance(x, ast.Name)}
-    check(not defined & set(MOVED) and "restore_interrupted_role_state" in defined, "the launcher defines none of them, and keeps its caller")
+    # Its caller moved on to scripts/role_state_restore.py (SYRD-448); the launcher keeps it as an unaliased re-export from
+    # exactly that module.
+    restored = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.role_state_restore"
+                for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and "restore_interrupted_role_state" in defined | restored,
+          "the launcher defines none of them, and keeps its caller, its own or re-exported from scripts.role_state_restore")
 
 
 # --- the root ------------------------------------------------------------------------------------------------------

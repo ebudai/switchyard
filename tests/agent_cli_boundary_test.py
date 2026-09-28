@@ -136,8 +136,10 @@ def test_the_vendor_install_table_is_read_only_where_its_guard_looks() -> None:
         path.relative_to(ROOT).as_posix() for path in (ROOT / "scripts").rglob("*.py")
         if "AGENT_CLI_INSTALL_COMMANDS" in path.read_text(encoding="utf-8")
     )
-    check(readers == ["scripts/team_launcher.py"],
-          f"only team_launcher.py, which the no-execution guard scans, names the install table: {readers}")
+    # The missing-CLI failure text moved to launch_owner_clis.py (SYRD-445), which the
+    # no-execution guard scans alongside the launcher; nowhere else may name the table.
+    check(readers in (["scripts/team_launcher.py"], ["scripts/launch_owner_clis.py", "scripts/team_launcher.py"]),
+          f"only the files the no-execution guard scans -- the launcher, and the launch-time CLI checks -- name the install table: {readers}")
 
 
 def test_discovery_reads_the_launchers_patched_proc_root_and_probe_table() -> None:

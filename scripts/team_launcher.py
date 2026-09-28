@@ -1524,6 +1524,11 @@ from scripts.project_design_payload import (
     _role_cli_map,
     project_design_artifact_payload,
 )
+from scripts.launch_owner_clis import (
+    _format_missing_cli_launch_failure,
+    run_switchyard_launch_first_run_auth,
+    stop_before_launch_for_missing_owner_clis,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2847,73 +2852,6 @@ def _read_toml_object(path: Path) -> dict[str, Any]:
 #: rather than written: Switchyard asks the CLI to run its own setup and then
 #: looks again, and never manufactures the answer (SYRD-191).
 FIRST_RUN_SETUP_CLIS = frozenset({"claude"})
-
-
-def _format_missing_cli_launch_failure(report: FirstRunAuthReport) -> str:
-    owner_detail = f" for owner user {report.owner_user}" if report.owner_user else ""
-    cli_details = "; ".join(
-        f"{cli} (roles: {', '.join(roles)})" for cli, roles in report.missing_cli_roles.items()
-    )
-    lines = [
-        f"switchyard: cannot launch panes because required CLI(s) are missing{owner_detail}: "
-        f"{cli_details}. Install the missing CLI(s){owner_detail} and rerun switchyard.",
-        _owner_user_cli_reminder(report.owner_user),
-    ]
-    width = max((len(cli) for cli in report.missing_cli_roles), default=0)
-    for cli in report.missing_cli_roles:
-        command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
-        detail = command or "see that vendor's own installation documentation"
-        lines.append(f"switchyard:   {cli.ljust(width)}  {detail}")
-    lines.append(
-        "switchyard: switchyard never fetches or runs a vendor's installer, so these commands are "
-        "yours to run. It can promote an executable you already have to a host-wide copy; that "
-        "offer is made before launch."
-    )
-    return "\n".join(lines)
-
-
-def stop_before_launch_for_missing_owner_clis(
-    report: FirstRunAuthReport,
-    *,
-    print_func: Callable[[str], None] = print,
-) -> bool:
-    if not report.missing_cli_roles:
-        return False
-    print_func(_format_missing_cli_launch_failure(report))
-    return True
-
-
-def run_switchyard_launch_first_run_auth(
-    config: ProjectConfig,
-    *,
-    validate_models: bool = False,
-    #: How this process runs its PROBES -- auth status, "is it installed",
-    #: model validation. Ordinary callers pass `subprocess.run` and are right
-    #: to; `switchyard validate-models` and the workflow launcher's
-    #: `prepare_role` both do.
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    #: Who drives the windows a person sits in front of, which is a separate
-    #: question and used to be answered by `runner` alone. Any runner at all
-    #: meant "fired and forgotten", so every live caller -- each passing
-    #: `subprocess.run` for its probes -- silently gave up the pty, the title,
-    #: the countdown and the deadline. `None` is the watched path and the right
-    #: default for a person at a terminal; a suite driving the steps itself
-    #: passes its own runner here (SYRD-221).
-    foreground_runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
-    print_func: Callable[[str], None] = print,
-) -> FirstRunAuthReport:
-    owner_user = (config.run_as_user or current_user_name()).strip()
-    if not owner_user:
-        return FirstRunAuthReport({}, [])
-    return run_first_run_auth_phase(
-        config,
-        owner_user=owner_user,
-        owner_home=_owner_home_for_auth(owner_user),
-        validate_models=validate_models,
-        runner=runner,
-        foreground_runner=foreground_runner,
-        print_func=print_func,
-    )
 
 
 def _group_ids_for_user(user_name: str) -> set[int]:

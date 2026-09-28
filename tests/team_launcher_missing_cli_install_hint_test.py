@@ -174,19 +174,26 @@ def test_nothing_can_execute_a_vendor_install_command() -> None:
     is to run them. This fails if the table is ever read anywhere that could.
     """
     source = Path(team_launcher.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    # The missing-CLI failure text moved out of the launcher with the launch-time
+    # CLI checks (SYRD-445) and reads the table through the launcher; both files
+    # are scanned, so a reader in either one is held to the same rule. On a tree
+    # from before the move the file is absent and the reader is the launcher's;
+    # either way the exact set below must hold.
+    moved_path = Path(team_launcher.__file__).with_name("launch_owner_clis.py")
+    moved = moved_path.read_text(encoding="utf-8") if moved_path.exists() else ""
 
     readers: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        body = ast.dump(node)
-        if "AGENT_CLI_INSTALL_COMMANDS" not in body:
-            continue
-        readers.add(node.name)
-        lowered = ast.unparse(node).lower()
-        for marker in EXECUTION_MARKERS:
-            assert marker not in lowered, f"{node.name} reads the install table and mentions {marker}"
+    for tree in (ast.parse(source), ast.parse(moved)):
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.dump(node)
+            if "AGENT_CLI_INSTALL_COMMANDS" not in body:
+                continue
+            readers.add(node.name)
+            lowered = ast.unparse(node).lower()
+            for marker in EXECUTION_MARKERS:
+                assert marker not in lowered, f"{node.name} reads the install table and mentions {marker}"
 
     assert readers == COMMAND_TABLE_READERS, sorted(readers)
 

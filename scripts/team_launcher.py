@@ -1303,6 +1303,10 @@ from scripts.project_stop import (
 from scripts.finish_upgrade_preview import (
     _finish_upgrade_preview,
 )
+from scripts.pane_pid import (
+    pane_pid_for_role,
+    tmux_pane_pid_args,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2748,24 +2752,6 @@ def role_pane_declaration(role: "RoleConfig") -> dict[str, Any]:
     """How a declared workflow describes this tenant's pane for `role`."""
     runtime, target = role_runtime_binding(role)
     return {"runtime": runtime, "target": target, "slot": role.slot}
-
-
-def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "display-message", "-p", "-t", role.target, "#{pane_pid}"]
-
-
-def pane_pid_for_role(
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> int:
-    proc = runner(tmux_pane_pid_args(role), text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    if proc.returncode != 0:
-        return 0
-    try:
-        return int(str(proc.stdout).strip())
-    except ValueError:
-        return 0
 
 
 def worktree_ref(config: ProjectConfig) -> str:

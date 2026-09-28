@@ -13445,3 +13445,111 @@ and **not implemented**:
   -   811 lines   29 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,615 lines.
+
+### SYRD-409 (slice 19w): role pane PID reader
+
+Measured on `335511e`. The design was posted **before** any edit (with one
+posted correction: the neighbour below is `worktree_ref`).
+
+| file | before (`335511e`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,615 | 8,601 |
+| `scripts/pane_pid.py` | - | 45 |
+| `tests/pane_pid_boundary_test.py` | - | 346 |
+| `scripts/live_role_runtime.py` | 262 | 262 |
+| `scripts/role_identity_cutover.py` | 1,012 | 1,012 |
+| `scripts/tmux_session_argv.py` | 152 | 152 |
+
+**Moved:** `tmux_pane_pid_args` and `pane_pid_for_role`, whole, adjacent and
+in order, into the new `scripts/pane_pid.py`.
+- **Neighbours:** `role_pane_declaration` above and `worktree_ref` below stay.
+- **Re-export:** one explicit, unaliased import of both, above every
+  definition. The launcher itself calls neither
+  (0 sites, measured).
+- **Readers:** `live_role_runtime` (2), `role_identity_cutover` (3), `tmux_session_argv` (1) still read
+  `launcher.pane_pid_for_role` when they run; all are byte-identical.
+- **The seam:** `pane_pid_for_role` reads the argv builder through a
+  call-time `launcher` import (1 site), so a patch on the launcher's
+  name still intercepts.
+- **Bound when defined, as before:** `runner=subprocess.run`. `RoleConfig` is
+  an annotation only.
+- **Unchanged:** the argv, `text=True`/`stdout=PIPE`/`stderr=DEVNULL`, 0 on a
+  nonzero status, and `int(str(stdout).strip())` with only a ValueError
+  answered by 0. No validation was added.
+
+**No guard needed to follow the move.** The readers, patches and source
+guards were scanned first; `live_role_runtime`'s `STAYED` and `MOVED_CALLS`,
+`tmux_session_argv`'s patch and `role_visibility`'s neighbour check all hold
+unchanged.
+
+**Proof.** The independent proof (`equiv409.py`) holds, including the exact
+argv, the one runner call with its capture, the nonzero answer, and the
+conversion with its ValueError-only fallback. 17 of 17 planted
+faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/pane_pid_boundary_test.py`, 52 checks,
+  each run gated on its screen. It replays 24 cases produced by the
+  BASELINE launcher's own functions (`gold409.py`) over the very case text the
+  test embeds, not typed:
+  - a pid, and surrounding whitespace;
+  - nonzero exits (1, 255, -9);
+  - empty, malformed, two-number, `None`, bytes and int output;
+  - negative, zero, `+7`, `1_000`, a Unicode digit and a float;
+  - `\x1c`/`\x1f` around the number: `str.strip()` removes them and
+    `int()` alone would not, so the strip is not redundant;
+  - output whose text raises (it propagates);
+  - runners that raise.
+
+  Its 2 behaviour cases also pass against the baseline's own
+  definitions (30 checks).
+- **Mutations:** 23 of 23 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. In the first runs
+  "no strip" survived the whole test, and "every exception answered 0"
+  survived the behaviour tests. Each was closed with a new generated case
+  (the control-character separators, and output whose text raises), not an
+  equivalence claim. The behaviour tests alone kill
+  18; the 5 left are the runner default (which a behaviour case
+  cannot exercise without spawning) and placement, re-export and
+  reader-file changes: the runner default changed, the launcher imported at load, a name not re-exported, re-export aliased, a reader bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 4 suites whole: the new test on the candidate only,
+    and `live_role_runtime`, `role_visibility` and `role_identity_cutover`,
+    which pass on both;
+  - 4 `tmux_session_argv` cases, identical: 4 pass.
+  - **Excluded (16):**
+    - all 15 `legacy_presentation_launch_test` cases, which run
+      `pane_pid_for_role` with the real `subprocess.run` against real tmux
+      and start konsole with a pinned PATH;
+    - the one `tmux_session_argv` case the screen hits.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 8 passing runs execute a moved function: the new
+  test.
+- **Containment:** no tmux or live pid was queried, and no pane, config or
+  release was touched (live snapshot identical before and after). Both entry
+  points' help is identical (36 `switchyard` invocations plus
+  `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: capturing the installed board-authority units -- 1 definitions, 18 lines (lines 6380-6397, not contiguous):
+  -   6380   18  capture_installed_units  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  - launcher names it reads (through the launcher once moved): 1: ['ProjectConfig']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/role_identity_cutover.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the board-authority transaction: reading what is installed now, so the rollback can put it back exactly (SYRD-45, SYRD-63); the install half moved in SYRD-401)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['authority_unit_installs (scripts.board_services)']
+  - alternatives measured the same way:
+  -   - a role's pane declaration (alternative): 2 definitions, 12 lines; launcher callers outside: -; production readers: 3
+  -   - the layout's slot count (alternative): 1 definitions, 6 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2124 lines  212 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1017 lines   39 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   811 lines   29 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,601 lines.

@@ -54,7 +54,8 @@ MOVED = ("STATE_TREE_MAX_DEPTH", "_open_tenant_state_root", "_root_placed_link",
          "role_state_roots", "role_state_ownership_problems", "_uid_owner_name", "repair_role_state_ownership")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
-    '_open_tenant_state_root': {'_close_quietly': 2, '_root_placed_link': 1},
+    # SYRD-393 closes the walked-from descriptor on each of the four early returns, through the launcher: 2 + 4.
+    '_open_tenant_state_root': {'_close_quietly': 6, '_root_placed_link': 1},
     '_walk_tenant_state_tree': {'STATE_TREE_MAX_DEPTH': 2, '_open_tenant_state_root': 1},
     'role_state_roots': {'role_session_dir': 1},
     'role_state_ownership_problems': {'_uid_owner_name': 1, '_walk_tenant_state_tree': 1, 'current_user_name': 1, 'role_state_roots': 1},
@@ -117,7 +118,8 @@ class Host:
     """Descriptors opened and closed, chowns recorded (never real), and chosen stats for chosen names."""
 
     def __init__(self, *, root_links: dict | None = None, holder_mode: int = 0o755, scandir_fails: set | None = None,
-                 lstat_fails: set | None = None, link_uid: int = 0, holder_uid: int = 0, lstat_as_dir: set | None = None) -> None:
+                 lstat_fails: set | None = None, link_uid: int = 0, holder_uid: int = 0, lstat_as_dir: set | None = None,
+                 close_fails: int = 0) -> None:
         self.opened: list[int] = []
         self.closed: list[int] = []
         self.chowned: list = []
@@ -127,6 +129,8 @@ class Host:
         self.holders: set[int] = set()
         self.live: set[int] = set()
         self.link_uid, self.holder_uid, self.lstat_as_dir = link_uid, holder_uid, lstat_as_dir or set()
+        self.double_closed: list[int] = []
+        self.close_fails = close_fails  # the Nth close releases the descriptor and then reports EIO, as Linux does
 
     def __enter__(self) -> "Host":
         def open_(path, flags, mode=0o777, *, dir_fd=None):
@@ -137,8 +141,13 @@ class Host:
 
         def close(fd):
             self.closed.append(fd)
+            if fd not in self.live:
+                self.double_closed.append(fd)
             self.live.discard(fd)
-            return self.real["close"](fd)
+            answer = self.real["close"](fd)
+            if self.close_fails and len(self.closed) == self.close_fails:
+                raise OSError(errno.EIO, "Input/output error")
+            return answer
 
         def lstat(path, *, dir_fd=None):
             if str(path) in self.lstat_fails:
@@ -177,18 +186,19 @@ class Host:
     def __exit__(self, *exc: object) -> None:
         self.p.__exit__(*exc)
 
-    def baseline_one_left_open(self) -> bool:
-        """The BASELINE leaves exactly one directory descriptor open on an early-return refusal (reported on
-        SYRD-392, preserved by this extraction, not fixed). Close it here so the test itself leaks nothing."""
+    def nothing_left_open(self) -> bool:
+        """SYRD-393: an early-return refusal closes the descriptor it was walking from -- nothing is left open and
+        nothing is closed twice. (SYRD-392 pinned the baseline's one leaked descriptor here.) Anything left is
+        closed so the test itself leaks nothing."""
         left = sorted(self.live)
         for fd in left:
             self.real["close"](fd)
         self.live.clear()
-        return len(left) == 1
+        return left == [] and self.double_closed == []
 
-    def leaked(self, keep: int = -1) -> list[int]:
-        """Descriptors opened here and still open (tracked live: the kernel reuses numbers)."""
-        return sorted(self.live - {keep})
+    def leaked(self, keep: int = -1) -> list:
+        """Descriptors opened here and still open (tracked live: the kernel reuses numbers), and any closed twice."""
+        return sorted(self.live - {keep}) + [f"closed twice: {fd}" for fd in self.double_closed]
 
 
 # --- structure -----------------------------------------------------------------------------------------------------
@@ -270,13 +280,13 @@ def test_a_store_root_is_opened_without_following_the_tenants_links() -> None:
                   f"a real directory: its descriptor, every other one closed: {h.leaked(keep=fd)}")
             os.close(fd)
         with Host() as h:
-            check(m._open_tenant_state_root(base / "a" / "missing" / "c") == (-1, "") and h.baseline_one_left_open(),
-                  "a missing component: simply not there (one descriptor left open, as at the baseline)")
+            check(m._open_tenant_state_root(base / "a" / "missing" / "c") == (-1, "") and h.nothing_left_open(),
+                  "a missing component: simply not there, and nothing left open")
         (base / "a" / "tenant-link").symlink_to(base / "a" / "b")
         with Host() as h:
             answer = m._open_tenant_state_root(base / "a" / "tenant-link" / "x")
             check(answer == (-1, f"tenant-link is a symlink that root did not place (it belongs to uid {ME}, in a directory owned by uid {ME}), "
-                                 "and a root-run chown does not follow one") and h.baseline_one_left_open(),
+                                 "and a root-run chown does not follow one") and h.nothing_left_open(),
                   f"a link the tenant could have placed is refused: {answer}")
         with Host(root_links={"tenant-link"}) as h:
             fd, problem = m._open_tenant_state_root(base / "a" / "tenant-link")
@@ -287,12 +297,12 @@ def test_a_store_root_is_opened_without_following_the_tenants_links() -> None:
             with Host(root_links={"tenant-link"}, link_uid=link_uid, holder_uid=holder_uid) as h:
                 answer = m._open_tenant_state_root(base / "a" / "tenant-link")
             check(answer == (-1, f"tenant-link is a symlink that root did not place (it belongs to uid {link_uid}, in a directory owned by uid {holder_uid}), "
-                                 "and a root-run chown does not follow one") and h.baseline_one_left_open(),
+                                 "and a root-run chown does not follow one") and h.nothing_left_open(),
                   f"link uid {link_uid} in a holder of uid {holder_uid}: both must be root's: {answer}")
         with Host(root_links={"tenant-link"}, holder_mode=0o775) as h:
             answer = m._open_tenant_state_root(base / "a" / "tenant-link")
             check(answer[0] == -1 and "is a symlink that root did not place (it belongs to uid 0, in a directory owned by uid 0)" in answer[1]
-                  and h.baseline_one_left_open(), f"root's link in a directory others can write is refused: {answer}")
+                  and h.nothing_left_open(), f"root's link in a directory others can write is refused: {answer}")
         closed: list = []
         failure = RuntimeError("the link check failed")
         with Host() as h, patched(t, _root_placed_link=seam("_root_placed_link", lambda component, *, dir_fd: (_ for _ in ()).throw(failure)),
@@ -301,13 +311,27 @@ def test_a_store_root_is_opened_without_following_the_tenants_links() -> None:
         check(answer is failure and len(closed) == 1 and h.leaked() == [],
               f"an error while deciding about a link propagates, the open descriptor closed through the launcher's quiet close: {closed} {h.leaked()}")
         with Host() as h, patched(t, _root_placed_link=seam("_root_placed_link", lambda component, *, dir_fd: "SYRD392-REFUSED")):
-            check(m._open_tenant_state_root(base / "a" / "tenant-link") == (-1, "SYRD392-REFUSED") and h.baseline_one_left_open(), "the link rule is the launcher's")
+            check(m._open_tenant_state_root(base / "a" / "tenant-link") == (-1, "SYRD392-REFUSED") and h.nothing_left_open(), "the link rule is the launcher's")
+        (base / "locked").mkdir()
+        (base / "a" / "locked-link").symlink_to(base / "locked")
+        os.chmod(base / "locked", 0)
+        try:
+            with Host(root_links={"locked-link"}) as h:
+                answer = m._open_tenant_state_root(base / "a" / "locked-link")
+        finally:
+            os.chmod(base / "locked", 0o700)
+        check(answer == (-1, f"{base / 'a' / 'locked-link'} cannot be opened (Permission denied)") and h.nothing_left_open(),
+              f"a link root placed whose target still cannot be opened: refused, and nothing left open: {answer}")
+        with Host(close_fails=1) as h:
+            answer = m._open_tenant_state_root(base / "a" / "b")
+        check(answer == (-1, f"{Path(base.parts[0]) / base.parts[1]} cannot be opened (Input/output error)") and h.nothing_left_open(),
+              f"closing a parent fails: the child is closed instead, nothing twice, nothing left: {answer} {h.double_closed}")
         with Host() as h:
             m._close_quietly(-1)
             check(h.closed == [], "a negative descriptor is not closed")
         (base / "a" / "file").write_text("")
         with Host() as h:
-            check(m._open_tenant_state_root(base / "a" / "file" / "x") == (-1, "file is not a directory") and h.baseline_one_left_open(), "a file where a directory should be")
+            check(m._open_tenant_state_root(base / "a" / "file" / "x") == (-1, "file is not a directory") and h.nothing_left_open(), "a file where a directory should be")
         (base / "shut").mkdir()
         (base / "shut" / "x").mkdir()
         os.chmod(base / "shut", 0)
@@ -316,7 +340,7 @@ def test_a_store_root_is_opened_without_following_the_tenants_links() -> None:
                 answer = m._open_tenant_state_root(base / "shut" / "x")
         finally:
             os.chmod(base / "shut", 0o700)
-        check(answer == (-1, f"{base / 'shut'} cannot be opened (Permission denied)") and h.baseline_one_left_open(),
+        check(answer == (-1, f"{base / 'shut'} cannot be opened (Permission denied)") and h.nothing_left_open(),
               f"a component that cannot be opened: {answer}")
 
 
@@ -374,12 +398,12 @@ def test_the_tree_is_visited_in_order_without_following_any_link() -> None:
             os.chmod(root / "b", 0o700)
         check(findings == [(root / "b", "cannot be opened (Permission denied)")] and h.leaked() == [], f"a directory that cannot be opened: {findings}")
         with Host() as h:
-            check(m._walk_tenant_state_tree(root.parent / "absent", refuse("act")) == ([], []) and h.baseline_one_left_open(),
-                  "no store: nothing (one descriptor left open, as at the baseline)")
+            check(m._walk_tenant_state_tree(root.parent / "absent", refuse("act")) == ([], []) and h.nothing_left_open(),
+                  "no store: nothing, and nothing left open")
         with Host() as h:
             answer = judged(m._walk_tenant_state_tree, root / "c", refuse("act"))
             check(answer == ([], [(root / "c", f"c is a symlink that root did not place (it belongs to uid {ME}, in a directory owned by uid {ME}), "
-                                               "and a root-run chown does not follow one")]) and h.baseline_one_left_open(), f"a store that is a tenant link is refused: {answer}")
+                                               "and a root-run chown does not follow one")]) and h.nothing_left_open(), f"a store that is a tenant link is refused: {answer}")
         seen_race: list = []
         with Host(lstat_as_dir={"c"}) as h:
             answer = judged(m._walk_tenant_state_tree, root, lambda path, *a: seen_race.append(path.name) or "")
@@ -436,7 +460,7 @@ def test_what_is_not_the_owners() -> None:
                      _uid_owner_name=lambda uid: ""), \
                 patched(pwd, getpwnam=lambda user: SimpleNamespace(pw_uid=ME, pw_gid=ME)), Host() as h:
             found, refused = m.role_state_ownership_problems(config(base))
-            h.baseline_one_left_open()
+            check(h.nothing_left_open(), "the findings leave nothing open when a root is refused")
         check(found == [] and refused == [(base / "linked", f"linked is a symlink that root did not place (it belongs to uid {ME}, in a directory owned by uid {ME}), "
                                                            "and a root-run chown does not follow one")],
               f"a store root that is a tenant link is refused, and the rest is still read: {refused}")

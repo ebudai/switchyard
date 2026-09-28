@@ -74,21 +74,26 @@ def _open_tenant_state_root(root: Path) -> tuple[int, str]:
                     dir_fd=fd,
                 )
             except FileNotFoundError:
+                launcher._close_quietly(fd)
                 return -1, ""
             except OSError as exc:
                 if exc.errno not in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                    launcher._close_quietly(fd)
                     return -1, f"{walked} cannot be opened ({exc.strerror})"
                 allowed = launcher._root_placed_link(component, dir_fd=fd)
                 if allowed:
+                    launcher._close_quietly(fd)
                     return -1, allowed
                 try:
                     child = os.open(
                         component, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd
                     )
                 except OSError as followed:
+                    launcher._close_quietly(fd)
                     return -1, f"{walked} cannot be opened ({followed.strerror})"
-            os.close(fd)
-            fd = child
+            # The child is the one to close if closing its parent fails.
+            previous, fd = fd, child
+            os.close(previous)
     except OSError as exc:  # pragma: no cover - defensive
         launcher._close_quietly(fd)
         return -1, f"{walked} cannot be opened ({exc.strerror})"

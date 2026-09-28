@@ -11931,3 +11931,76 @@ and **not implemented**:
   -  1013 lines   10 defs  CLI parsers and dispatch
 
 **SYRD-272 is not complete.** The launcher is still 10,091 lines.
+
+### SYRD-393: close role-state root descriptors on early return (fixes the SYRD-392 baseline defect)
+
+**Correction to the SYRD-392 record above.** SYRD-392 moved
+`_open_tenant_state_root` unchanged and recorded that it leaves the current
+directory descriptor open on early refusals. SYRD-393 fixes that. The
+SYRD-392 test's "exactly one left open" expectation is replaced by "nothing
+left open, nothing closed twice".
+
+**The change (`scripts/`: 1 file changed, 7 insertions(+), 2 deletions(-), all in `_open_tenant_state_root`):**
+- Each of the four early returns in the component loop now closes the
+  walked-from descriptor first, through `launcher._close_quietly`:
+  - a missing component;
+  - a component that cannot be opened;
+  - a link or non-directory `_root_placed_link` refuses;
+  - a root-placed link whose followed open fails.
+- Stepping to a child now rebinds `fd` to the child *before* closing the
+  parent (`previous, fd = fd, child; os.close(previous)`). If that close
+  fails, the outer handler closes the child, not the already-released parent.
+- Unchanged:
+  - the result tuple and every refusal reason;
+  - the returned descriptor on success (still the caller's to close);
+  - the link-authorization predicate, which never follows a tenant link;
+  - the sorted walk, the chown target and the upgrade output.
+- The launcher is byte-identical (10,091 lines).
+
+**Before and after, measured under the guard** (descriptors left open by one
+call; results identical except the success path's descriptor number):
+- missing component: 1 -> 0
+- unopenable component: 1 -> 0
+- refused link: 1 -> 0
+- not a directory (refused): 1 -> 0
+- followed link that cannot be opened: 1 -> 0
+- a real directory (returned fd closed by the caller): 0 -> 0
+
+**Evidence.**
+- **Source proof** (`proof393.py`): the only file changed under `scripts/` is
+  the module; every other top-level node is AST-identical. Stripping
+  close-before-return pairs from both versions and undoing the reorder gives
+  identical functions. The candidate has exactly four more such pairs and
+  four more `launcher._close_quietly` reads. 5 planted faults are
+  caught (a fifth close before a return; a refusal reason changed; the reorder undone the other way; an edit elsewhere in the module; a close without its return).
+- **Boundary test:** `tests/role_state_ownership_boundary_test.py`, 81
+  checks (was 78). Descriptors are tracked live by number, so a
+  reused number is not mistaken for a leak and a second close of a released
+  descriptor is recorded.
+  - New cases: a root-placed link to a directory that cannot be opened, and
+    a parent whose close fails after releasing (the child is closed, nothing
+    twice, nothing left).
+  - On the baseline the new test fails; its behaviour cases alone fail
+    3: ('test_a_store_root_is_opened_without_following_the_tenants_links', 'a missing component: simply not there, and nothing left open'); ('test_the_tree_is_visited_in_order_without_following_any_link', 'no store: nothing, and nothing left open'); ('test_what_is_not_the_owners', 'the findings leave nothing open when a root is refused').
+- **Mutations:** 66 of 66 are killed by assertions with zero guard
+  refusals. They include a focused negative for each early return:
+  missing component leaks; unopenable component leaks; refused link leaks; unopenable followed link leaks; close order reverted (child leaked, parent closed twice); an early close made unquiet. The behaviour tests alone kill 62, all 6 SYRD-393
+  negatives among them. The 4 left are structural:
+  print default late, the launcher imported at load, a name not re-exported, the launcher redefines one.
+- **Comparison, both trees, guarded,** every selected case screened first
+  (0 hits on either tree):
+  - 3 suites whole, all passing with zero refusals (the
+    baseline runs its own version of the boundary test);
+  - 42 cases identical: 32 pass, 10 stop at the guard
+    (pre-effect only), and 0 fail otherwise;
+  - 65 flagged cases excluded (namespace root and
+    setpriv, konsole, tmux, upgrade drivers), as in SYRD-392.
+- **Containment:** no live change (live snapshot identical before and after).
+  CLI help is identical (36 invocations plus `team-launcher --help`).
+  The exact commit and the staged-release smoke are in the Audit packet.
+
+**Next bounded slice:** unchanged from SYRD-392's measurement above, because
+the launcher is byte-identical. The proposal is installing and removing the
+tenant publication boundary, for a Director decision.
+
+**SYRD-272 is not complete.** The launcher is still 10,091 lines.

@@ -14917,3 +14917,159 @@ and **not implemented**:
   -   282 lines   11 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 6,740 lines.
+
+### SYRD-421 (slice 19ag): new-project precheck
+
+Measured on `31551ca`. The design was posted **before** any edit.
+
+| file | before (`31551ca`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 6,740 | 6,451 |
+| `scripts/new_project_precheck.py` | - | 368 |
+| `tests/new_project_precheck_boundary_test.py` | - | 588 |
+
+**Scope, as the Director amended it before the edit.**
+- **The conflict:** `precheck_new_project` binds `port_in_use=_tcp_port_in_use` and `socket_exists=_path_exists` when it is defined. Both are launcher functions outside the ticket's twelve. A moved precheck could bind those objects only by importing the launcher at load, which is a cycle the ticket forbids.
+- **The decision:** the design asked, and the Director chose to move the two probes with the closure (the ticket is amended to fourteen names).
+
+**Moved:** `_path_exists`, `_tcp_port_in_use`,
+`_looks_like_switchyard_release_tree`, `_switchyard_release_source_error`,
+`_precheck_deploy_source`, `_system_unit_file_exists`, `POSTGRES_SERVICE_UNIT`,
+`POSTGRES_ADMIN_SOCKET_DIR` (with their `#:` comment), `postgres_cluster_script`,
+`postgres_availability_remedy`, `_database_exists`, `_ticket_board_table_count`,
+`_installed_unit_is_this_plans` and `precheck_new_project`, whole, in order,
+into the new `scripts/new_project_precheck.py`. They were two runs, 3534-3752
+and 3886-3973, with `_usable_switchyard_entry_for_project` and its neighbours
+staying between them.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all fourteen.
+- **Callers:**
+  - `new_project_command` still calls the precheck by its launcher global;
+  - `new_project_command` and `switchyard_new_command` still read the two probes as launcher globals;
+  - `scripts/new_project_phases.py` still reads `launcher.precheck_new_project` at call time.
+- **Seams:** all 41 call-time reads of 25 names are now
+  `launcher.X` (12 of them siblings), including `_path_exists` inside the
+  bodies (so `team_launcher_project_precheck_test`'s patch of it still
+  applies) and `__file__` in `postgres_cluster_script`, which still resolves
+  beside the launcher.
+- **Defaults, the same objects the launcher bound:**
+  - `runner=subprocess.run`;
+  - the two probes, now defined above the precheck in this module;
+  - the polkit check, imported eagerly from `scripts.polkit_readiness`, the
+    only Switchyard module loaded.
+  - The plan type is imported under TYPE_CHECKING.
+- **Guards: one adapted, after a correction comment on the ticket.** The
+  design had said none needed adapting, but the first guarded comparison
+  differed in one case:
+  `polkit_readiness_boundary_test::test_the_launcher_reexports_the_eight`
+  required the launcher to *define* `precheck_new_project`, a stay check that
+  did not accept a re-export.
+  - It now accepts the caller defined or re-exported unaliased, the neighbour
+    rule the other boundary tests use.
+  - Removing the re-export fails it with an assertion.
+  - A scan of every test for `in defined` naming any of the fourteen finds no
+    other. Proof clause 6b confines the change to that one function.
+
+**Proof.** The independent proof (`equiv421.py`, 14 clauses) holds.
+It compares the fourteen whole nodes after normalizing `launcher.X`, and the
+launcher remainder as AST and text (the constants' comment lead included). It
+fixes the rules:
+- polkit, owner, repository and deploy source are collected in order before
+  the unit, database, socket and port probes, and it raises once with every
+  reason;
+- a failed database probe names the PostgreSQL remedy and says nothing was
+  created;
+- a failed unit listing falls back to the unit file;
+- as root, psql runs as the postgres user.
+
+22 of 22 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/new_project_precheck_boundary_test.py`,
+  184 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  55 cases produced by the BASELINE launcher's own functions
+  (`gold421.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane. By group:
+  - 35 whole prechecks: clean, each reason alone and all at
+    once, the unit/database/socket/port combinations, this plan's half-done
+    unit and anyone else's, board tables with and without a usable entry,
+    root, the unit-listing fallbacks, every database and table-count failure;
+  - 11 deploy-source shapes: missing, dirty, not git,
+    broken git, release trees and markers, the shared install;
+  - 9 helper cases: the remedy per state, the cluster
+    script, the release-tree test, and the launcher name and postgres unit
+    rebound on the launcher.
+
+  **Harness:** no live service, database, account or socket is touched. The
+  runner stand-in answers by argument, and the account, git, unit, registry,
+  port, socket and polkit checks stand in, recorded. Host paths reached
+  through `_path_exists` are answered by the case. The release-tree and
+  marker checks run for real in an owned tree. Its 3 behaviour cases
+  also pass against the baseline's own definitions, in both environments
+  (133 checks).
+- **Screen:** it first hit on the test's literal `sudo`, in the root-case
+  check. That check now matches the distinguishing `-u postgres psql`
+  arguments instead.
+- **Mutations:** 41 of 41 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first run left two, and each now dies on a new generated case:
+    "tables counted from one" (exactly one board table) and "any output means
+    the database exists" (a probe that answers something other than 1).
+  - The behaviour tests alone kill 35. The rest are structural, and the
+    structure checks kill them: the port default replaced, the socket default replaced, __file__ read from the module, the launcher imported at load, re-export aliased, the phases bypass the launcher. The two default mutants
+    are invisible to behaviour because every case injects the probes; the
+    structure checks pin the default objects.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 38 files accounted for (the eleven that
+  name the fourteen, `new_project_phases`' importers, and those naming
+  `new_project_command` or `switchyard_new_command`):
+  - 13 suites whole: 13 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    none;
+  - 305 cases, per case, identical on both sides: 154 pass,
+    141 stop at the same guard refusal, and 10 fail
+    identically on both (`first_run_setup_completion_test::test_the_provider_is_given_the_window_the_person_is_looking_at`; `first_run_setup_completion_test::test_the_provider_follows_the_window_when_it_is_resized`; `first_run_setup_completion_test::test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode`; `first_run_setup_completion_test::test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too`; `first_run_setup_completion_test::test_a_resize_reaches_the_provider_as_a_signal`; `first_run_setup_completion_test::test_the_terminal_is_given_back_even_when_switchyard_is_killed`; `first_run_setup_completion_test::test_a_keystroke_does_not_wait_for_the_next_tick`; `first_run_setup_completion_test::test_test9_the_answer_reaches_the_question_before_anything_is_typed`; `first_run_setup_completion_test::test_test8_the_sign_in_survives_the_browser_on_a_real_terminal`; `first_run_setup_completion_test::test_test8_nothing_is_echoed_when_the_person_comes_back`). All of these are pseudo-terminal
+    (`termios`) cases of `first_run_setup_completion_test` that this harness
+    (no terminal) cannot drive, and none of them runs a moved function;
+  - **Excluded (123):** 9 that drive an upgrade
+    or `switchyard_main`, 113 whose own execution screen hits, and
+    1 accumulator;
+  - **Not run:** team_launcher_declarative_workflow_test.py: not run -- main() re-executes it as root in a user namespace (--ownership-child); team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function.
+- **What the comparison exercised (call profiler, real functions only):**
+  2 of 167 passing runs execute a moved function:
+  `new_project_precheck_boundary_test.py`, `team_launcher_project_precheck_test.py`.
+- **Containment:** no project was provisioned, and no service, database,
+  account, tenant, board or socket was touched. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff421.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the interactive role-plan prompt -- 7 definitions, 190 lines (lines 1672-5653, not contiguous):
+  -   1672    1  NEW_PROJECT_DEFAULT_IMPLEMENTER_ROLES  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1673    7  NEW_PROJECT_CONVENTIONAL_IMPLEMENTER_ROLES  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3156   25  _implementer_roles_field  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3183   52  _prompt_role_runtime_plan  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3237   79  _prompt_switchyard_role_plan  launcher callers outside: -; production readers outside the launcher: ['scripts/new_project_phases.py']
+  -   3318   12  _prompt_switchyard_role_choices  launcher callers outside: -; production readers outside the launcher: -
+  -   5640   14  _owner_account_exists  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 6: ['NEW_PROJECT_ROLE_CLI_DEFAULTS', '_validate_new_project_implementer_role', '_prompt_bool', '_runtime_field', 'RoleSelection', '_owner_command_env_args']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/new_project_phases.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: asking the person creating a project which roles to run and on which runtime, and turning the answers into a role plan -- the interactive half of `switchyard new`)
+  - it also reads 8 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['Choice (scripts.ticket_board.prompt_schema)', 'Field (scripts.ticket_board.prompt_schema)', 'KIND_MULTI (scripts.ticket_board.prompt_schema)', 'Schema (scripts.ticket_board.prompt_schema)', '_effort_field (scripts.model_validation)', '_model_field (scripts.model_validation)', 'runtime_catalog (scripts.ticket_board)', 'terminal_select (scripts.ticket_board)']
+  - alternatives measured the same way:
+  -   - the design command (alternative): 4 definitions, 134 lines; launcher callers outside: ['main']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2024 lines  203 defs  general helpers (unclassified)
+  -  1194 lines   59 defs  provisioning (new/register/teardown/owner accounts)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   888 lines   35 defs  project config and registry
+  -   231 lines   10 defs  onboarding docs, prompts and skills
+
+**SYRD-272 is not complete.** The launcher is still 6,451 lines.

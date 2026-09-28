@@ -17126,3 +17126,149 @@ and **not implemented**:
   -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
 
 **SYRD-272 is not complete.** The launcher is still 4,397 lines.
+
+### SYRD-439 (slice 19av): the rollout log command
+
+Measured on `be6eef0`. Before any edit, the rooted closure was verified. The
+guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the four files naming the
+  command were run on both scratch trees (99 whole, 252 cases).
+- **Result:** nothing differed, so no test guard needed adapting and none
+  changed.
+  - `publication_status` and `switchyard_parsers` name the command only in
+    stay checks that already accept "own or re-exported".
+  - `rollout_journal_test` (in its `main()`) and `rollout_journal_identity_test`
+    reach it through the launcher's re-exported name. No test patches it or
+    quotes its body.
+
+| file | before (`be6eef0`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,397 | 4,353 |
+| `scripts/rollout_log.py` | - | 65 |
+| `tests/rollout_log_boundary_test.py` | - | 565 |
+
+**Scope: exactly the ticket's one definition, no additional production
+definition.** `rollout_log_command` (3615-3659) moves whole into the
+new `scripts/rollout_log.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import, right after the
+  `runtime_user_provisioning` import.
+- **Caller:** `switchyard_main` still calls it by the launcher's name. No
+  other production module reads it.
+- **Seams:** it reads no launcher global (0 call-time reads), as before.
+  What it reads when it runs is `scripts.ticket_board.rollout_journal`,
+  imported inside it verbatim, so a rebinding there still reaches it.
+- **Defaults:** `attempt=""`, `output=False` and the builtin `print`, the same
+  objects as before. `Path` is the module's own import. The module loads no
+  Switchyard module.
+
+**Proof.** The independent proof (`equiv439.py`, 14 clauses) holds.
+It compares the whole node (the nested import, every message and every
+default included), and the launcher remainder as AST and text. Its rules
+clause fixes, in order and with `find`:
+- the journal imported first when it runs;
+- the attempts read, then the integrity check;
+- with no attempt named: the summary, and where the journal would be with 0
+  when nothing is recorded; otherwise the latest attempt, returning early
+  unless `--output`;
+- a named attempt that is not recorded refused with 1;
+- the result trimmed, or when the attempt started;
+- the logs, stdout then stderr, with replacement;
+- 1 whenever the index has problems.
+
+It also requires the baseline's four `return` statements. 18 of 18
+planted faults are caught, each parsed first, and the plant run first
+requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/rollout_log_boundary_test.py`, 123
+  checks. Each run is gated on its screen and passes both under `env -i` and
+  in this role pane's normal environment. It replays 40 cases
+  produced by the BASELINE launcher's own definition (`gold439.py`) over the
+  very case text the test embeds, not typed. The golden output is
+  byte-identical under `env -i`, in the pane, with another HOME, USER and
+  COLUMNS, and under umask 077.
+  - **Isolation:** every journal is written into a test-owned tree that
+    `SWITCHYARD_ROLLOUT_JOURNAL_ROOT` points at, so the live journal is never
+    read.
+  - **A real synthetic journal (22 cases), hash chain
+    included:** nothing recorded; one or two attempts; the latest or a named
+    attempt; `--output`; an unknown attempt; an interrupted attempt; a
+    missing result, or one that is a directory; a broken chain; an unreadable
+    index line; output and a result that are not UTF-8; an attempt that
+    recorded no directory.
+  - **Journal stand-ins (12 cases):** refusals and
+    malformed records, and `RESULT_NAME` and the journal functions read when
+    it runs.
+  - **`switchyard rollout-log` through `switchyard_main`
+    (5 cases)**, and the default printer.
+- **Fixes made before any result was relied on:**
+  - The chain's digests cover the test-owned tree's random path, so the case
+    normalizer replaces 12-hex digests.
+  - A stand-in case that named no attempt, so never read a result, now
+    names one.
+  - An unreadable-result case that would answer differently as root was
+    replaced by a dangling link.
+  - The golden file was regenerated after each of these, before the test was
+    rendered.
+  - In the proof, the rules clause first required five `return` statements,
+    a number I typed; the function has four, and the clause now compares
+    with the baseline node's own count.
+  - The needle `return 1` also matched the later `return 1 if problems else
+    0`; it is now `return 1` plus its newline.
+  - The first plant run reported every plant missed because that edit had
+    broken the proof's syntax. The plant script now refuses to start unless
+    the proof holds.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definition in both environments (107 checks).
+- **Mutations:** 32 of 32 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout, all on the first
+  pass. The behaviour tests alone kill 30. The rest are structural, and the
+  structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 130 files are accounted for: every boundary suite and
+  the four naming the command.
+  - 100 suites whole: 88 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 252 cases, per case, identical on both sides: 243 pass,
+    7 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`). All are baseline defects already
+    reported, not changed here;
+  - **Excluded (91):** 1 that drive an upgrade
+    or `switchyard_main`, 85 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** rollout_journal_test.py: main() not run -- it holds the one direct call of rollout_log_command (section 8) and runs the recorder in a user namespace (unshare), so its whole-suite execution screen HITs; its one test_ case runs per case, and the direct call reaches the launcher's re-exported name; rollout_journal_identity_test.py: main() not run -- it runs pkexec, sudo and unshare, so its whole-suite execution screen HITs; its switchyard_main case drives the dispatcher and its other case HITs its own screen.
+- **What the comparison exercised (call profiler, real functions only):**
+  1 of 331 passing runs execute a moved function:
+  `rollout_log_boundary_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, journal or release was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the control-role names -- 3 definitions, 46 lines (lines 3316-3365, not contiguous):
+  -   3316    1  CONTROL_ROLE_CAPABILITIES  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3319   41  control_role_name  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py', 'scripts/role_account_migration.py']
+  -   3362    4  director_role_name  launcher callers outside: -; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 2: ['ProjectConfig', '_load_json']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 2: ['scripts/director_upgrade.py', 'scripts/role_account_migration.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: which configured role controls the tenant -- the one holding the control capabilities in its workflow, else the historical director -- and why not when none or several do)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the process runners and snapshot (alternative): 5 definitions, 74 lines; launcher callers outside: ['_running_project_roles']; production readers: 8
+  -   - the process snapshot alone (alternative): 1 definitions, 34 lines; launcher callers outside: ['process_tree_command_names']; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  1925 lines  207 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   588 lines   32 defs  project config and registry
+  -   425 lines   44 defs  provisioning (new/register/teardown/owner accounts)
+  -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
+
+**SYRD-272 is not complete.** The launcher is still 4,353 lines.

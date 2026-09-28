@@ -17588,3 +17588,141 @@ and **not implemented**:
   -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
 
 **SYRD-272 is not complete.** The launcher is still 4,197 lines.
+
+### SYRD-443 (slice 19ay): the project design artifact payload
+
+Measured on `1ec1715`. Before any edit, the rooted closure was verified. The
+guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 4 files
+  naming the four were run on both scratch trees (102 whole, 251
+  cases).
+- **Result:** nothing differed, so no test guard needed adapting and none
+  changed.
+  - The stay checks naming them accept a re-export.
+  - The seam tables count reads in their own modules.
+  - `new_project_support_boundary_test` stands the four in on the launcher,
+    which its module reads when it runs.
+
+| file | before (`1ec1715`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,197 | 4,134 |
+| `scripts/project_design_payload.py` | - | 95 |
+| `tests/project_design_payload_boundary_test.py` | - | 543 |
+
+**Scope: exactly the ticket's four definitions, no additional production
+definition.** They move whole, in the launcher's order, into the new
+`scripts/project_design_payload.py` (the name `project_design_artifact.py` is
+the loader's): `ProjectDesignArtifact` (1709-1736), `_role_cli_map` (1895-1896), `project_design_artifact_payload` (1899-1924), `_project_design_markdown` (2549-2552).
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all four, right after the
+  `process_inspection` import. No launcher definition names them.
+- **Readers:** three production modules read them through the launcher when
+  they run, as often as before, and are byte-identical:
+  `new_project_support.py`, `project_design_artifact.py`, `project_design_command.py`. `project_design_artifact.py`
+  also names the record's type there for annotations only, under
+  TYPE_CHECKING.
+- **Seams:** both call-time reads (2 sites, 2 names, 1
+  sibling) are now `launcher.X`: the schema constant and the role/CLI map.
+- **Definition time:** the record is the standard `@dataclass(frozen=True)`,
+  applied when the class is defined. `dataclass`, `Path`, `Any` and
+  `Sequence` are the module's own imports, so its hints resolve as before.
+- **One observable difference:** the class's `__module__` now names the new
+  module. Its qualified name, and so its repr and every dataclass behaviour,
+  is unchanged. Nothing reads its `__module__`, pickles it or resolves its
+  hints (scanned).
+
+**Proof.** The independent proof (`equiv443.py`, 14 clauses) holds.
+It compares the four whole nodes (the record's decorator, fields, annotations
+and defaults included), and the launcher remainder as AST and text. Its rules
+clause fixes:
+- the record's 20 fields against the baseline class, and nothing else in its
+  body;
+- every payload entry in order (models, efforts and catalog version only when
+  set);
+- the map built pair by pair;
+- the document's defaults.
+
+20 of 20 planted faults are caught, each parsed first, and the
+plant run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/project_design_payload_boundary_test.py`,
+  119 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  33 cases produced by the BASELINE launcher's own definitions
+  (`gold443.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane, with another
+  HOME, USER and COLUMNS, under umask 077 and under three hash seeds.
+  - **Isolation:** every path is fixed and non-existent; nothing is written.
+  - **Cases (cli map 5, markdown 6, payload 15, record 7):**
+    - the exact payload JSON text (key order included);
+    - optional models, efforts and catalog version;
+    - gates and grants passed through as the record's own objects;
+    - missing and invalid fields;
+    - the record's fields, defaults, frozenness, equality and refusals;
+    - the role/CLI map;
+    - the design document;
+    - the schema and the map rebound on the launcher.
+- **Fixes made before relying on a result, each disclosed:**
+  - The first rendered test compared the record's field list with a tuple
+    and so could never pass; it now compares list to list.
+  - The first mutation pass left one survivor, the designer and audit flags
+    swapped: every case set the two equal. I added a designer-without-audit
+    case and regenerated everything from the golden file onward, and the
+    second pass killed every mutant.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (92 checks).
+- **Mutations:** 30 of 30 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour
+  tests alone kill 27. The rest are structural, and the structure checks
+  kill them: the record ordered, the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 131 files are accounted for: every boundary suite and
+  the 4 naming the four.
+  - 103 suites whole: 91 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 251 cases, per case, identical on both sides: 242 pass,
+    7 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (89):** 0 that drive an upgrade
+    or `switchyard_main`, 84 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** none.
+- **Baseline observation, reported and not changed:** the frozen record
+  cannot be hashed, because its gates and grants are dicts.
+- **What the comparison exercised (call profiler, the three functions only -- the record's class body runs once at import and is not counted as a call):**
+  2 of 333 passing runs execute a moved function:
+  `project_design_command_boundary_test.py`, `project_design_payload_boundary_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account or release was touched, and no project artifact or
+  document was written. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the launch-time owner CLI checks -- 3 definitions, 61 lines (lines 2852-2916, not contiguous):
+  -   2852   21  _format_missing_cli_launch_failure  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2875    9  stop_before_launch_for_missing_owner_clis  launcher callers outside: ['switchyard_main']; production readers outside the launcher: ['scripts/new_project_phases.py']
+  -   2886   31  run_switchyard_launch_first_run_auth  launcher callers outside: ['switchyard_main', 'switchyard_validate_models_command']; production readers outside the launcher: ['scripts/workflow_launcher.py']
+  - launcher names it reads (through the launcher once moved): 4: ['ProjectConfig', 'current_user_name', 'AGENT_CLI_INSTALL_COMMANDS', '_owner_user_cli_reminder']
+  - launcher callers outside the closure: 2: ['switchyard_main', 'switchyard_validate_models_command']
+  - production modules reading it through the launcher: 2: ['scripts/new_project_phases.py', 'scripts/workflow_launcher.py']
+  - test files naming any of them: 10 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: what `switchyard` checks about the owner's agent CLIs before a launch -- first-run sign-in, and stopping when a configured CLI is missing)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['FirstRunAuthReport (scripts.first_run_auth)', '_owner_home_for_auth (scripts.provider_auth_status)', 'run_first_run_auth_phase (scripts.first_run_auth)']
+  - alternatives measured the same way:
+  -   - the interrupted role-state restore (alternative): 1 definitions, 33 lines; launcher callers outside: -; production readers: 1
+  -   - the repository policy-hook repair (alternative): 1 definitions, 29 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  1861 lines  205 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   523 lines   29 defs  project config and registry
+  -   407 lines   42 defs  provisioning (new/register/teardown/owner accounts)
+  -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
+
+**SYRD-272 is not complete.** The launcher is still 4,134 lines.

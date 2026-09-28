@@ -1518,6 +1518,12 @@ from scripts.process_inspection import (
     process_uid,
     role_process_runner_for,
 )
+from scripts.project_design_payload import (
+    ProjectDesignArtifact,
+    _project_design_markdown,
+    _role_cli_map,
+    project_design_artifact_payload,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1705,37 +1711,6 @@ class LauncherUpgradeResult:
     message: str
 
 
-@dataclass(frozen=True)
-class ProjectDesignArtifact:
-    project: str
-    project_name: str
-    ticket_prefix: str
-    owner_user: str
-    repository: Path
-    remote: str
-    default_branch: str
-    worktree_policy: str
-    design_document: Path
-    implementer_roles: tuple[str, ...]
-    audit_roles: tuple[str, ...]
-    role_clis: tuple[tuple[str, str], ...]
-    include_designer: bool
-    include_audit: bool
-    push_policy: str
-    gates: dict[str, bool]
-    capability_grants: dict[str, object]
-    #: What each role was chosen to run on, by stable identifier. Optional, so
-    #: every artifact written before these existed still loads, and absent means
-    #: "not chosen" rather than "no model" -- the launcher reads a missing model
-    #: as the runtime's own default (SYRD-115).
-    role_models: tuple[tuple[str, str], ...] = ()
-    role_efforts: tuple[tuple[str, str], ...] = ()
-    #: Which version of the recorded option catalog those identifiers were
-    #: chosen from. A label may be reworded and a catalog may gain entries
-    #: without changing what this project runs; this says what it was read off.
-    catalog_version: int = 0
-
-
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -1890,38 +1865,6 @@ def _default_role_cli_pairs(
     pairs.extend((role, NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"]) for role in resolved_audit_roles)
     pairs.extend((role, "codex") for role in implementer_roles)
     return tuple(pairs)
-
-
-def _role_cli_map(role_clis: Sequence[tuple[str, str]]) -> dict[str, str]:
-    return {role: cli for role, cli in role_clis}
-
-
-def project_design_artifact_payload(artifact: ProjectDesignArtifact) -> dict[str, Any]:
-    return {
-        "schema": PROJECT_DESIGN_ARTIFACT_SCHEMA,
-        "design_document": str(artifact.design_document),
-        "project": {
-            "slug": artifact.project,
-            "name": artifact.project_name,
-            "ticket_prefix": artifact.ticket_prefix,
-            "owner_user": artifact.owner_user,
-            "repository": str(artifact.repository),
-            "remote": artifact.remote,
-            "default_branch": artifact.default_branch,
-            "worktree_policy": artifact.worktree_policy,
-            "roles": list(artifact.implementer_roles),
-            "audit_roles": list(artifact.audit_roles),
-            "include_designer": artifact.include_designer,
-            "include_audit": artifact.include_audit,
-            "role_clis": _role_cli_map(artifact.role_clis),
-            **({"role_models": dict(artifact.role_models)} if artifact.role_models else {}),
-            **({"role_efforts": dict(artifact.role_efforts)} if artifact.role_efforts else {}),
-            **({"catalog_version": artifact.catalog_version} if artifact.catalog_version else {}),
-            "push_policy": artifact.push_policy,
-            "gates": artifact.gates,
-            "capability_grants": artifact.capability_grants,
-        },
-    }
 
 
 def _resolve_launcher_project_config(
@@ -2544,12 +2487,6 @@ class RoleSelection:
     cli: str
     model: str = ""
     effort: str = ""
-
-
-def _project_design_markdown(project: str, *, title: str, body: str) -> str:
-    heading = title.strip() or f"{project} design"
-    body_text = body.strip() or "TBD."
-    return f"# {heading}\n\n{body_text}\n"
 
 
 def _new_project_session_dir(project: str, owner_user: str) -> str:

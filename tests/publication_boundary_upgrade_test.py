@@ -310,7 +310,10 @@ def test_the_upgrade_step_removes_it_and_restarts_no_worker() -> None:
     identities = body.index("_upgrade_identities_and_accounts(")
     assert artifacts < identities, "the grant must be gone before any role is moved"
 
-    step = source[source.index("def remove_tenant_publication_boundary("):]
+    # SYRD-395 moved the removal, with the installation after it, to
+    # scripts/tenant_publication_boundary.py; the launcher re-exports both.
+    module = (ROOT / "scripts" / "tenant_publication_boundary.py").read_text(encoding="utf-8")
+    step = module[module.index("def remove_tenant_publication_boundary("):]
     step = step[: step.index("def install_tenant_publication_boundary(")]
     for restarts in ("stop_project", "launch_project", "_start_role_sessions", "systemctl restart"):
         assert restarts not in step, f"{restarts} would disturb a running worker"

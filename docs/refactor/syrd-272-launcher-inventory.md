@@ -12004,3 +12004,103 @@ the launcher is byte-identical. The proposal is installing and removing the
 tenant publication boundary, for a Director decision.
 
 **SYRD-272 is not complete.** The launcher is still 10,091 lines.
+
+### SYRD-395 (slice 19j): the tenant publication boundary
+
+Measured on `fb7920e`. The design was posted **before** any edit.
+
+**Moved:** `remove_tenant_publication_boundary` and
+`install_tenant_publication_boundary`, in order, into the new
+`scripts/tenant_publication_boundary.py` (172 lines). The two are
+contiguous; `role_control_accounts` above and `_recovered_pin_behind_host`
+below stay, unchanged.
+- **Re-export:** one explicit, unaliased import of both, in the block of
+  re-exports above every definition. The upgrade's tooling phase
+  (`scripts/upgrade_phases.py`) still reads the removal through the launcher,
+  twice, and a suite's rebind there still intercepts.
+- **Seams:** 4 call-time reads of 4 names in 1 function (the
+  installation): the current user, a user's home, the recorded plan and the
+  privileged provision root, all launcher facilities, read through the
+  launcher. The removal reads none.
+- **Unchanged:** the `project_provision` and `publication_boundary` helpers
+  are still imported inside each function, when it runs, in the same order.
+  The `runner=subprocess.run` and `print_func=print` defaults are bound at
+  definition time. `ProjectConfig` is imported only under TYPE_CHECKING. Every
+  signature is the baseline's.
+- **The launcher** goes from 10,091 to 9,958 lines.
+
+**One guard followed the move.**
+`publication_boundary_upgrade_test::test_the_upgrade_step_removes_it_and_restarts_no_worker`
+slices the removal out of the source text, up to the installation, and asserts
+it restarts nothing and names the rule but not the credential. It read
+`team_launcher.py`; it now reads the new module. Its other assertions, on the
+upgrade and its phases, are unchanged. It still bites: each of 3 plants in
+the moved removal fails it (a restart in the removal; the credential touched; the rule no longer named).
+
+**Proof.** The independent proof (`equiv395.py`) holds. 23 of 23
+planted faults are caught, among them: the rm argv or its capture changed;
+the failure detail unbounded; the recheck dropped; pending dropped; the
+report before the warnings; a default changed or made late; a helper import
+hoisted or reordered; a neighbour changed.
+
+**Evidence.**
+- **New boundary test:** `tests/tenant_publication_boundary_boundary_test.py`,
+  44 checks. The process runner is always a recorder and `os.geteuid` a
+  stand-in; the real `subprocess.run`/`Popen` and the launcher facilities'
+  own modules are refused; the installer, its report and the identity lookup
+  are stand-ins on the modules the functions import them from when they run.
+  Its 10 behaviour cases also pass against the baseline launcher's own
+  two functions (23 checks), reaching all four seams.
+- **Mutations:** 50 of 50 are killed by assertions with zero guard
+  refusals: every step of the removal (a dry run asking who runs it, the root
+  check after the existence check, the argv, its capture, the bounded detail,
+  the recheck, the message) and of the installation (the owner, the plan only
+  with a config path, the key only when resolved, the registration root
+  fallback, each keyword handed to the installer, warnings before the report,
+  no report on a dry run, pending returned, the helpers bound only at load).
+  The behaviour tests alone kill 43; the 7 left are structural:
+  identity helpers bound at load, print default late, the launcher imported at load, a name not re-exported, re-export aliased, the launcher redefines one, upgrade phase bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 2 suites whole (the new test on the candidate only);
+  - 18 cases, identical: 17 pass, 0 pass with a
+    tolerated refusal, 1 stop at the guard (pre-effect only: the
+    pending-artifact case's fixture spawns git), and 0 fail otherwise;
+  - 61 cases excluded: 12 of
+    `publication_boundary_upgrade_test` (its namespace/privileged runs, and
+    5 that drive the upgrade through another suite's fixture),
+    and the upgrade-driver and fake-root cases of
+    `upgrade_phases_boundary_test`, as before.
+- **What the comparison exercised (call profiler):** 1 of 19 passing runs execute a moved function -- the new test. The existing cases that would are excluded, so the comparison is import and structure parity, and the behaviour rests on the new test (also run against the baseline), its mutants and the proof.
+- **Containment:** no live change (live snapshot identical before and
+  after). The CLI help is identical (36 invocations plus
+  `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the stale-launcher check and the trusted bootstrap commands it prints -- 7 definitions, 256 lines (lines 6154-6420, not contiguous):
+  -   6154    1  INSTALL_ROLLOUT_LABEL  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6156    1  INSTALL_BOUNDARY_ROLLOUT_LABEL  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6159   14  installed_rollout_recorder  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6175   38  recorded_install_command  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6215   22  install_boundary_command  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6239  107  trusted_bootstrap_commands  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6348   73  stale_launcher_problems  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  - launcher names it reads (through the launcher once moved): 3: ['DEFAULT_SWITCHYARD_SHARED_INSTALL_ROOT', 'switchyard_shared_install_root', 'running_launcher_release']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/upgrade_phases.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded next piece of the release/upgrade domain: the upgrade's refusal to run from a stale installed launcher, and the root-owned bootstrap commands it prints instead)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['untrusted_root_executable_reasons (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the director-role name alone (alternative): 1 definitions, 4 lines; launcher callers outside: -; production readers: 0
+  -   - the recovered-pin staleness check (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2264 lines  208 defs  general helpers (unclassified)
+  -  1813 lines   74 defs  provisioning (new/register/teardown/owner accounts)
+  -  1277 lines   37 defs  release selection, install and upgrade
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+
+**SYRD-272 is not complete.** The launcher is still 9,958 lines.

@@ -13102,3 +13102,114 @@ and **not implemented**:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,795 lines.
+
+### SYRD-406 (slice 19t): role visibility update and detach
+
+Measured on `4327409`. The design was posted **before** any edit.
+
+| file | before (`4327409`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,795 | 8,731 |
+| `scripts/role_visibility.py` | - | 106 |
+| `tests/role_visibility_boundary_test.py` | - | 491 |
+| `scripts/role_pane_entry.py` | 407 | 407 |
+
+**Moved:** `tmux_detach_clients_args` (its own span, between
+`role_pane_declaration` and `tmux_pane_pid_args`), and `_raw_role_for_update`,
+`_write_role_visibility` and `detach_role_from_slot` (one span, between
+`_layout_slot_count` and `_role_by_name`), each whole and in the launcher's
+order, into the new `scripts/role_visibility.py`.
+- **Re-export:** one explicit, unaliased import of all four, above every
+  definition. `main` still dispatches `pane detach-role` by its own global
+  (1 site, measured).
+- **Unchanged reader:** `scripts/role_pane_entry.py`, which reads
+  `launcher._write_role_visibility` when it runs, is byte-identical.
+- **Seams:** all 9 call-time reads of 9 names are now `launcher.X`,
+  through a call-time import, as measured from the AST (3 of them the
+  moved siblings):
+  - the config reader and writer, the owner repair, the config loader and the
+    role lookup (launcher-defined);
+  - `tmux_has_session_args` (`tmux_session_argv`).
+- **Bound when defined, as before:** `detach_role_from_slot`'s
+  `runner=subprocess.run` and `print_func=print`; `_write_role_visibility`
+  still takes no default runner. `RoleConfig` and `ProjectConfig` are
+  annotations only, under TYPE_CHECKING.
+
+**No guard needed to follow the move.** The readers, patches and source
+guards were scanned first, the `vars(team_launcher)`/`__module__`
+introspection included; none reads these four from the launcher's source.
+
+**Proof.** The independent proof (`equiv406.py`) holds, including:
+- the persistence order: load, find, atomic write (only an OSError
+  reported), owner repair, reload;
+- the headless worker: an already-detached role returns before any write;
+  otherwise it writes, reports, asks `has-session` and only then runs
+  `detach-client`; every return is 0 and nothing kills a session.
+
+21 of 21 planted faults are caught, each compiled first.
+
+**Evidence.**
+- **New boundary test:** `tests/role_visibility_boundary_test.py`,
+  73 checks, each run gated on its screen.
+  - Every config is an owned temporary file, with the real reader and writer
+    wrapped. All nine seams stand in or are wrapped on the launcher. Spawns,
+    signals, account lookups, ownership calls and paths outside the root are
+    refused.
+  - It replays 40 cases produced by the BASELINE launcher's own
+    functions (`gold406.py`) over the very case text the test embeds, not
+    typed:
+    - 21 visibility updates: detached, visible with a slot (0 included) or
+      without one; invalid and missing roles; write failures; a refusing
+      owner repair;
+    - 14 detaches: already detached, unknown, absent or live session, and
+      the detach succeeding or failing, with the definition-time defaults;
+    - 5 lookup and argv cases.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (48 checks).
+- **Mutations:** 38 of 39 are killed by assertions with zero guard
+  refusals, each mutant compiled first and bounded by a timeout.
+  - The survivor, "the new slot reported" (`role.slot` for `previous_slot`),
+    is equivalent: `RoleConfig` is a frozen dataclass and nothing between
+    the two reads replaces `role`. The proof's clause 2 still fails on it.
+  - The behaviour tests alone kill 32; the 7 left are that one,
+    and placement, re-export, dispatch and reader-file changes:
+    the new slot reported, the update given a default runner, the launcher imported at load, a name not re-exported, re-export aliased, main bypasses its global, role_pane_entry edited.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 2 suites whole (the new test on the candidate only);
+  - 9 cases, identical on both sides: 5 pass, 4 stop at
+    the guard (a refused account lookup).
+  - **Excluded because the execution screen hits them:**
+    11 of `team_launcher_reload_attach_test.py`, 18 of `team_launcher_stop_reload_test.py`, 1 of `tmux_session_argv_boundary_test.py`. That
+    includes `team_launcher_stop_reload_test`'s detach case and the attach cases that write
+    visibility; their behaviour is in the golden cases instead.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 7 passing runs execute a moved function: the new
+  test.
+- **Containment:** no tmux client, tenant config, role, service or board was
+  touched (live snapshot identical before and after). Both entry points'
+  help is identical (36 `switchyard` invocations plus
+  `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: stopping a project's sessions -- 1 definitions, 47 lines (lines 6513-6559, not contiguous):
+  -   6513   47  stop_project  launcher callers outside: ['main']; production readers outside the launcher: ['scripts/tenant_suspension.py']
+  - launcher names it reads (through the launcher once moved): 5: ['viewer_session_for_project', 'ProjectConfig', 'current_user_name', '_proc_failure_reason', '_owner_process_runner']
+  - launcher callers outside the closure: 1: ['main']
+  - production modules reading it through the launcher: 1: ['scripts/tenant_suspension.py']
+  - test files naming any of them: 10 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the tenant lifecycle: closing the viewer and display, then stopping every role session as its owner; suspend_tenant already reads it through the launcher)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['stop_role_sessions (scripts.role_sessions)', 'tmux_has_session_by_name_args (scripts.role_sessions)', 'tmux_kill_session_by_name_args (scripts.role_sessions)']
+  - alternatives measured the same way:
+  -   - the upgrade preview's finish (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+  -   - a role pane's pid (alternative): 2 definitions, 14 lines; launcher callers outside: -; production readers: 3
+- Largest remaining launcher domains (`domains.py`):
+  -  2114 lines  209 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1066 lines   40 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,731 lines.

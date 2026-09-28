@@ -1291,6 +1291,12 @@ from scripts.tenant_suspension import (
     resume_tenant,
     suspend_tenant,
 )
+from scripts.role_visibility import (
+    _raw_role_for_update,
+    _write_role_visibility,
+    detach_role_from_slot,
+    tmux_detach_clients_args,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2736,10 +2742,6 @@ def role_pane_declaration(role: "RoleConfig") -> dict[str, Any]:
     """How a declared workflow describes this tenant's pane for `role`."""
     runtime, target = role_runtime_binding(role)
     return {"runtime": runtime, "target": target, "slot": role.slot}
-
-
-def tmux_detach_clients_args(role: RoleConfig) -> list[str]:
-    return ["tmux", "detach-client", "-s", role.tmux_session]
 
 
 def tmux_pane_pid_args(role: RoleConfig) -> list[str]:
@@ -6563,72 +6565,6 @@ def _layout_slot_count(config: ProjectConfig) -> int:
     except OSError as exc:
         raise SystemExit(f"team-launcher: cannot read layout {config.layout}: {exc}") from exc
     return len(_layout_leaves(layout))
-
-
-def _raw_role_for_update(raw_roles: Any, role_name: str) -> dict[str, Any]:
-    if not isinstance(raw_roles, list):
-        raise SystemExit("team-launcher: launcher config roles must be a JSON list")
-    for raw_role in raw_roles:
-        if isinstance(raw_role, dict) and str(raw_role.get("role") or "").strip() == role_name:
-            return raw_role
-    raise SystemExit(f"unknown role {role_name!r} in launcher config")
-
-
-def _write_role_visibility(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    role: RoleConfig,
-    detached: bool,
-    slot: int | None,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> ProjectConfig:
-    raw_config = _load_json(config_path)
-    raw_role = _raw_role_for_update(raw_config.get("roles"), role.role)
-    if detached:
-        raw_role["detached"] = True
-        raw_role.pop("slot", None)
-    else:
-        if slot is None:
-            raise ValueError("visible role update requires slot")
-        raw_role["detached"] = False
-        raw_role["slot"] = slot
-    try:
-        _write_json_atomic(config_path, raw_config)
-    except OSError as exc:
-        raise SystemExit(f"team-launcher: cannot update launcher config {config_path}: {exc}") from exc
-    ensure_owner_file(config, config_path, runner=runner)
-    return load_project_config(config.project, config_path)
-
-
-def detach_role_from_slot(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    role_name: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    role = _role_by_name(config, role_name)
-    if role.detached:
-        print_func(f"team-launcher: role {role.role} is already detached")
-        return 0
-    previous_slot = role.slot
-    _write_role_visibility(
-        config,
-        config_path=config_path,
-        role=role,
-        detached=True,
-        slot=None,
-        runner=runner,
-    )
-    print_func(f"team-launcher: detached role {role.role} from slot {previous_slot}; tmux session remains headless")
-    if runner(tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        return 0
-    detach_proc = runner(tmux_detach_clients_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if detach_proc.returncode != 0:
-        print_func(f"team-launcher: no live tmux client detached for {role.role}; session remains configured headless")
-    return 0
 
 
 def _role_by_name(config: ProjectConfig, role_name: str) -> RoleConfig:

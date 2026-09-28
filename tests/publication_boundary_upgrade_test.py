@@ -289,10 +289,9 @@ def test_the_upgrade_step_removes_it_and_restarts_no_worker() -> None:
     rather than putting it in -- but where it sits and what it must not disturb
     are unchanged.
     """
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    start = source.index("def upgrade_project_command(")
-    end = source.index("def _role_accounts_ready(", start)
-    body = source[start:end]
+    # SYRD-424 moved the upgrade itself to scripts/project_upgrade_command.py, where it is the last definition.
+    source = (ROOT / "scripts" / "project_upgrade_command.py").read_text(encoding="utf-8")
+    body = source[source.index("def upgrade_project_command("):]
     # SYRD-346 moved the upgrade's tooling phase, where the removal is, to
     # scripts/upgrade_phases.py; the upgrade calls that phase by name.
     phases = (ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8")

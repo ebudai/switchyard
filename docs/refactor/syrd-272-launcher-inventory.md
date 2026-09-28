@@ -15381,3 +15381,147 @@ and **not implemented**:
   -   228 lines   23 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 6,124 lines.
+
+### SYRD-424 (slice 19aj): project upgrade command
+
+Measured on `30efa2d`. The design was posted **before** any edit, and it
+declared the two guard adaptations below.
+
+| file | before (`30efa2d`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 6,124 | 5,983 |
+| `scripts/project_upgrade_command.py` | - | 173 |
+| `tests/project_upgrade_command_boundary_test.py` | - | 515 |
+| `tests/upgrade_phases_boundary_test.py` | 1,893 | 1,924 |
+| `tests/publication_boundary_upgrade_test.py` | 970 | 969 |
+
+**Scope: exactly the ticket's one definition.** `upgrade_project_command`
+(4915-5056) moves whole into the new `scripts/project_upgrade_command.py`. Its
+definition-time defaults are `runner=subprocess.run` (the module's own
+`import subprocess`, so the same object) and `print_func=print`, and otherwise
+only `False`, `None` and `''`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import.
+- **Callers:** `main` and `switchyard_main` still dispatch `upgrade` to the
+  launcher's name. `local_publication_identity_test`'s replacement of
+  `team_launcher.upgrade_project_command` still reaches both.
+- **Seams:** all 10 call-time reads of 10 names are now
+  `launcher.X`: the six phases (`_pin_upgrade_source` to `_finish_upgrade`)
+  and their four continuation types. A phase patched on the launcher still
+  reaches the orchestration.
+- **Imports:** `ProjectConfig` is annotation-only, under TYPE_CHECKING. The
+  module loads no Switchyard module at import.
+- **Out of date, left alone:** `scripts/upgrade_phases.py`'s docstring still
+  says the orchestration "stays" in the launcher. It is left byte-identical
+  (no scope expansion) and noted for a later doc fix.
+
+**Two guards adapted, as declared in the design before the edit.** Both
+located the command by *file*:
+- **`upgrade_phases_boundary_test` (SYRD-346 to SYRD-351)** parsed
+  `team_launcher.py` in twelve wiring checks. They assert statement
+  positions, calls by the launcher's name, and a call-site count, and they
+  exec the wiring against bare-name stand-ins.
+  - **The adaptation:** one helper, `upgrade_command()`, returns the defining
+    module and the command. It finds the command in the new module (or, at the
+    baseline, the launcher), and first checks that the launcher no longer
+    defines it, that its first statement after the docstring is the call-time
+    launcher import, and that every phase and continuation is read through the
+    launcher, none bare. It then drops that import and reads `launcher.X` as
+    `X`.
+  - The twelve lookups become one call each, and every assertion is unchanged.
+  - The adapted file also passes against the baseline tree (325 checks).
+- **`publication_boundary_upgrade_test::test_the_upgrade_step_removes_it_and_restarts_no_worker`**
+  now reads the command's text from the new module. Its assertions are
+  unchanged.
+- **Both still bite** (`guardkill424.out`): a phase read bare, the command
+  still defined in the launcher, and the call-time import moved each fail
+  `upgrade_phases_boundary_test` with an assertion. U4 no longer called, and
+  U5 before U4, each fail the publication case.
+- **Proof clause 6b** confines the test changes to exactly these.
+
+**Proof.** The independent proof (`equiv424.py`, 14 clauses) holds.
+It compares the command whole after normalizing `launcher.X`, and the
+launcher remainder as AST and text. It fixes the rules:
+- U1 to U6 in order;
+- anything but a continuation is returned as it came, before anything later;
+- U3's config is taken whole;
+- the report config is the one from before U3 until U5 replaces it;
+- U6's answer is the upgrade's.
+
+15 of 15 planted faults are caught, each parsed first (the first
+draft of one plant only added a comment, and it was redrafted as a real
+reorder).
+
+**Evidence.**
+- **New boundary test:** `tests/project_upgrade_command_boundary_test.py`,
+  100 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  27 cases produced by the BASELINE launcher's own function
+  (`gold424.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical in both environments. Every phase is a
+  recording stand-in on the launcher, answering with its real continuation
+  type, an int refusal, an error or a foreign object; nothing is pinned,
+  staged, deployed or migrated, and no privilege is asked for. By group:
+  - 21 runs of the command: every phase going on (dry and
+    applying), bare, the defaults, each phase refusing, a refusal of zero,
+    foreign answers, errors, empty pinned values, U3 keeping the config, and
+    a phase and a continuation type rebound on the launcher;
+  - `team-launcher upgrade` and `switchyard upgrade` through their real
+    parsers and dispatch, with the project lookup and config load stood in.
+
+  Its 3 behaviour cases also pass against the baseline's own function
+  in both environments (84 checks).
+- **Mutations:** 35 of 35 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 33. The rest are structural, and the structure checks kill
+  them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 29 files accounted for (the 17 that name
+  the command, those naming its phases, and the earlier slices' boundary
+  tests):
+  - 14 suites whole: 13 pass on the candidate
+    (the new test only there, and the two adapted guards against their
+    originals on the baseline). Identical non-passes on both trees:
+    `role_prompt_command_integration_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused). That one is a main()-style suite the per-case selector
+    cannot split; its whole run stops on both trees at the guard's refusal to
+    spawn `initdb`;
+  - 157 cases, per case, identical on both sides: 76 pass and
+    81 stop at the same guard refusal;
+  - **Excluded (106):** 67 that drive an upgrade
+    or `switchyard_main`, 38 whose own execution screen hits, and
+    1 accumulator;
+  - **Not run:** team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function; team_launcher_desktop_policy_owner_test.py: not run -- main() re-executes it as root in a user namespace (unshare --map-root-user, --ownership-child).
+- **What the comparison exercised (call profiler, real functions only):**
+  1 of 89 passing runs execute the moved function:
+  `project_upgrade_command_boundary_test.py`. Every existing case that drives
+  an upgrade is either excluded outright or stops at a guard refusal (root,
+  spawns) on both trees before the command runs. That is why the new test
+  replays the orchestration with every phase stood in.
+- **Containment:** no upgrade was run, and no service, database, account,
+  tenant, board or socket was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the switchyard new command -- 1 definitions, 225 lines (lines 4478-4702):
+  -   4478  225  switchyard_new_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 0: []
+  - launcher callers outside the closure: 1: ['switchyard_main']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 29 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `switchyard new` -- the interactive front door that gathers a new project's answers and hands them to the provisioning phases)
+  - it also reads 15 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['LAUNCH_SESSION_RECORD_POLL_SECONDS (scripts.session_records)', 'LAUNCH_SESSION_RECORD_TIMEOUT_SECONDS (scripts.session_records)', 'LAYOUT_MODE_AUTO (scripts.layout_modes)', 'NO_RUNNER_INJECTED (scripts.first_run_auth)', 'NewProjectBoard (scripts.new_project_phases)', 'NewProjectSignIn (scripts.new_project_phases)', '_NoRunnerInjected (scripts.first_run_auth)', '_check_new_project_preflight (scripts.new_project_phases)', '_launch_new_project_panes (scripts.new_project_phases)', '_path_exists (scripts.new_project_precheck)', '_prepare_new_project_accounts (scripts.new_project_phases)', '_prepare_new_project_board (scripts.new_project_phases)', '_resolve_new_project_choices (scripts.new_project_phases)', '_run_new_project_sign_in (scripts.new_project_phases)', '_tcp_port_in_use (scripts.new_project_precheck)']
+  - alternatives measured the same way:
+  -   - the new-project command (alternative): 3 definitions, 275 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the team-launcher parser (alternative): 1 definitions, 102 lines; launcher callers outside: ['main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2011 lines  204 defs  general helpers (unclassified)
+  -  1170 lines   56 defs  provisioning (new/register/teardown/owner accounts)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   754 lines   33 defs  project config and registry
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 5,983 lines.

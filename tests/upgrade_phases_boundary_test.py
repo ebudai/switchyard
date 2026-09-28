@@ -112,6 +112,50 @@ def python(probe: str) -> subprocess.CompletedProcess[str]:
                           env={"PATH": "/usr/bin:/bin"}, check=False)
 
 
+#: The upgrade's six phases and their four continuation types: the names its wiring reads (SYRD-424).
+UPGRADE_READS = ("_pin_upgrade_source", "_recover_upgrade_state", "_refresh_upgrade_artifacts", "_stage_upgrade_tooling",
+                 "_upgrade_identities_and_accounts", "_finish_upgrade", "UpgradeSourcePinned", "UpgradeStateReady",
+                 "UpgradeToolingStaged", "UpgradeIdentitiesDone")
+
+
+def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
+    """The upgrade as its phases' wiring sees it: the module that defines it, the command, and that module's text.
+
+    SYRD-424 moved `upgrade_project_command` to scripts/project_upgrade_command.py, where it reads each phase and
+    continuation type through the launcher when it runs. Its call-time launcher import is dropped here and each
+    `launcher.X` read as `X`, so the positions and names checked below are the upgrade's own -- once this has
+    checked that every one of those reads does go through the launcher, and that the launcher no longer defines it.
+    """
+    moved = ROOT / "scripts" / "project_upgrade_command.py"
+    launcher_path = ROOT / "scripts" / "team_launcher.py"
+    path = moved if moved.exists() else launcher_path
+    text = path.read_text(encoding="utf-8")
+    module = ast.parse(text)
+    upgrade = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    if path == moved:
+        launcher = ast.parse(launcher_path.read_text(encoding="utf-8"))
+        check(not any(isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command" for n in launcher.body),
+              "the launcher no longer defines the upgrade")
+        check(ast.unparse(upgrade.body[1]) == "from scripts import team_launcher as launcher",
+              f"the upgrade imports the launcher first thing, when it runs: {ast.unparse(upgrade.body[1])}")
+        bare = sorted({n.id for n in ast.walk(upgrade) if isinstance(n, ast.Name) and n.id in UPGRADE_READS})
+        through = sorted({n.attr for n in ast.walk(upgrade)
+                          if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "launcher"})
+        check(bare == [] and through == sorted(UPGRADE_READS),
+              f"every phase and continuation is read through the launcher, none bare: {bare} {through}")
+        del upgrade.body[1]
+
+        class AsLauncherGlobal(ast.NodeTransformer):
+            def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+                self.generic_visit(node)
+                if isinstance(node.value, ast.Name) and node.value.id == "launcher":
+                    return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+                return node
+
+        AsLauncherGlobal().visit(upgrade)
+    return module, upgrade, text
+
+
 class patched:
     """Rebind attributes of one object for one block, as the suites do."""
 
@@ -261,8 +305,7 @@ def test_the_seams_the_phases_own_names_and_the_call_site() -> None:
           and all(f.default is dataclasses.MISSING for f in fields)
           and UpgradeToolingStaged.__dataclass_params__.frozen,
           f"the result is frozen, holds the two carried values in the order U4 assigns them, with no defaults: {fields}")
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_stage_upgrade_tooling")), None)
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
@@ -286,8 +329,7 @@ def test_the_seams_the_phases_own_names_and_the_call_site() -> None:
 
 def run_wiring(answer: object):
     """The upgrade's own call, dispatch and unpacking, compiled from the launcher and run against a stand-in U4."""
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     statements = upgrade.body[18:22]
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in (
@@ -576,8 +618,7 @@ def test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local()
     fields = dataclasses.fields(UpgradeIdentitiesDone)
     check([f.name for f in fields] == ["config", "release_report_config"] and UpgradeIdentitiesDone.__dataclass_params__.frozen
           and all(f.default is dataclasses.MISSING for f in fields), f"a frozen two-field continuation: {fields}")
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_upgrade_identities_and_accounts")), None)
     check(at is not None and isinstance(upgrade.body[at].value.func, ast.Name),
@@ -795,8 +836,7 @@ def test_u5_an_error_reaches_the_caller() -> None:
 
 def run_u5_wiring(answer: object):
     """The upgrade's own U5 call, dispatch and unpacking, compiled from the launcher, against a stand-in U5."""
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     names = ["config", "commit_git_dir", "config_path", "cutover", "deploy_ref", "desktop_choice", "dry_run",
              "effective_source_repo", "print_func", "publication_detail", "publish_remote", "release_report_config",
              "runner", "source_repo", "tooling_root", "trusted_release_root"]
@@ -911,8 +951,7 @@ def test_u6_reads_its_lookups_through_the_launcher_and_ends_the_upgrade() -> Non
                       and isinstance(n.value, ast.Name) and n.value.id == "launcher" and n.attr in bound | {"os"}})
     check(through == [], f"nothing U6 binds, nor os, is read as the launcher's: {through}")
     check([ast.unparse(n) for n in function.body[-2:]][-1] == "return 0", "the upgrade's own final `return 0` ends U6")
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     tail = upgrade.body[-1]
     check(len(upgrade.body) == 27 and isinstance(tail, ast.Return) and isinstance(tail.value, ast.Call)
           and isinstance(tail.value.func, ast.Name) and tail.value.func.id == "_finish_upgrade"
@@ -1025,8 +1064,7 @@ def test_u6_an_error_reaches_the_caller() -> None:
 
 
 def test_the_upgrade_returns_u6s_answer_after_u5() -> None:
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     names = ["config", "commit_git_dir", "config_path", "cutover", "deploy_ref", "desktop_choice", "dry_run",
              "effective_source_repo", "print_func", "publication_detail", "publish_remote", "release_report_config",
              "runner", "source_repo", "tooling_root", "trusted_release_root"]
@@ -1144,8 +1182,7 @@ def test_u3_reads_its_lookups_through_the_launcher_and_returns_the_config() -> N
                       and n.value.id == "launcher" and n.attr in bound | {"isinstance", "str"}})
     check(through == [] and ast.unparse(function.body[-1]) == "return config",
           f"nothing U3 binds, nor a builtin, is read as the launcher's, and it returns its config: {through}")
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_refresh_upgrade_artifacts")), None)
     check(at == 17 and isinstance(upgrade.body[at].value.func, ast.Name)
@@ -1253,8 +1290,7 @@ def test_u3_an_error_reaches_the_caller() -> None:
 
 
 def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     names = ["config", "commit_git_dir", "config_path", "dry_run", "effective_source_repo", "print_func", "registry_dir",
              "runner", "source_repo", "upstream_report_token_file", "upstream_report_url"]
     code = ast.Module(body=[ast.FunctionDef(
@@ -1397,8 +1433,7 @@ def test_u2_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> 
     fields = dataclasses.fields(upgrade_phases.UpgradeStateReady)
     check([f.name for f in fields] == ["source_repo", "effective_source_repo", "config", "cutover"]
           and upgrade_phases.UpgradeStateReady.__dataclass_params__.frozen, f"a frozen four-field continuation: {fields}")
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     at = next((i for i, n in enumerate(upgrade.body) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
                and ast.unparse(n.value.func).endswith("_recover_upgrade_state")), None)
     wiring = [ast.unparse(n) for n in upgrade.body[at + 1:at + 6]] if at is not None else []
@@ -1559,8 +1594,7 @@ def test_u2_an_error_reaches_the_caller() -> None:
 
 
 def test_the_upgrade_returns_u2s_refusal_and_unpacks_its_state() -> None:
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     names = ["config", "config_path", "deploy_ref", "desktop_policy", "dry_run", "print_func", "runner", "source_repo"]
     code = ast.Module(body=[ast.FunctionDef(
         name="wiring", args=ast.arguments(posonlyargs=[], args=[ast.arg(arg=n) for n in names], kwonlyargs=[],
@@ -1678,9 +1712,7 @@ def test_u1_reads_its_lookups_through_the_launcher_and_keeps_its_own_names() -> 
     fields = dataclasses.fields(upgrade_phases.UpgradeSourcePinned)
     check([f.name for f in fields] == ["desktop_choice", "deploy_ref_chosen", "source_repo", "commit_git_dir", "deploy_ref"]
           and upgrade_phases.UpgradeSourcePinned.__dataclass_params__.frozen, f"a frozen five-field continuation: {fields}")
-    launcher_text = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
-    launcher = ast.parse(launcher_text)
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, launcher_text = upgrade_command()
     check(ast.get_docstring(upgrade, clean=False).startswith("Run the privileged phases of a tenant upgrade, in order")
           and "(SYRD-232)" not in (ast.get_source_segment(launcher_text, upgrade) or ""),
           "the docstring stays the upgrade's, and the comments left with U1")
@@ -1837,8 +1869,7 @@ def test_u1_an_error_reaches_the_caller() -> None:
 
 
 def test_the_upgrade_returns_u1s_refusal_before_reading_anything_or_u2() -> None:
-    launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    upgrade = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade_project_command")
+    launcher, upgrade, _ = upgrade_command()
     names = ["config", "config_path", "commit_git_dir", "deploy_ref", "desktop_policy", "dry_run", "print_func",
              "publish_remote", "runner", "source_repo", "tooling_root"]
     code = ast.Module(body=[ast.FunctionDef(

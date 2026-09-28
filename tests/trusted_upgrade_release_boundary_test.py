@@ -486,8 +486,12 @@ def test_the_launcher_reexports_the_three_above_every_reader() -> None:
     check(imports[0].lineno < min(n.lineno for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))),
           "at the top, above every definition that could read them")
     defined = {getattr(n, "name", None) for n in tree.body}
-    check(not defined & set(MOVED) and {"install_host_privileged_boundary", "running_launcher_release"} <= defined,
-          "the launcher defines none of them, and keeps the installer and the running release between them")
+    # A neighbour stays reachable on the launcher: defined there, or -- once a later
+    # slice moves it on (SYRD-400) -- re-exported there, unaliased.
+    exported = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and {"install_host_privileged_boundary", "running_launcher_release"} <= defined | exported,
+          "the launcher defines none of them, and keeps the installer and the running release between them, its own or re-exported")
     phases = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
     reads = sorted(ast.unparse(x) for x in ast.walk(phases) if isinstance(x, ast.Attribute) and x.attr in MOVED)
     check(reads == ["launcher._recovered_pin_behind_host", "launcher.resolve_trusted_upgrade_release", "launcher.resolve_trusted_upgrade_release"],

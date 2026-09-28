@@ -12562,3 +12562,106 @@ and **not implemented**:
   -   957 lines   31 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 9,282 lines.
+
+### SYRD-400 (slice 19o): shared-release activation and the host boundary install
+
+Measured on `0e86ce3`. The design was posted **before** any edit.
+
+| file | before (`0e86ce3`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 9,282 | 9,172 |
+| `scripts/host_boundary_install.py` | - | 145 |
+| `tests/host_boundary_install_boundary_test.py` | - | 466 |
+| `tests/trusted_upgrade_release_boundary_test.py` | 687 | 691 |
+
+**Moved:** `install_host_privileged_boundary` and
+`switchyard_install_shared_release_command`, in the launcher's order, into the
+new `scripts/host_boundary_install.py`.
+- **Neighbours:** the two were not contiguous. `role_control_accounts`,
+  `running_launcher_release` and both parsers around them stay, as does
+  `switchyard_main`, which dispatches the command through its launcher global.
+- **Re-export:** one explicit, unaliased import of both, above every
+  definition. The recovered-pin check (`trusted_upgrade_release.py`) still
+  installs the boundary through the launcher.
+- **Seams:** 1 call-time read -- the command reads the boundary installer
+  through the launcher, so a patch there reaches it. That is the pair's only
+  launcher read, which is what SYRD-399's measurement of "0 launcher names"
+  meant: everything else is the privileged action catalogue, the activation
+  and the install commands, all still imported inside each function where they
+  were.
+- **Unchanged:** the `runner` and `print_func` defaults are bound when each
+  function is defined.
+- **Security semantics:** the boundary still comes from the ACTIVATED release
+  -- the host's shared release, never a tenant pin. It comes after activation,
+  and never after a rollback or without a release root. The proof pins that
+  order and source explicitly.
+- **The SYRD-399 missing-`returncode` edge case** in the installer is
+  preserved.
+
+**One guard followed the move -- this refactor's own.**
+`trusted_upgrade_release_boundary_test` (SYRD-397) required its neighbour
+`install_host_privileged_boundary` to be *defined* in the launcher. It now
+accepts a neighbour defined or re-exported, unaliased. Its "defines none of
+the three" half and every trust and ordering check are unchanged.
+
+**Proof.** The independent proof (`equiv400.py`) holds. 21 of 21
+planted faults are caught, among them:
+- the boundary from the tenant's commit, after a rollback, or before
+  activating;
+- root not required, or the dry run before the root check;
+- the commit not validated, or an activation failure uncaught;
+- no repair line, not fail-fast, or the stderr bound changed;
+- the sibling read directly.
+
+**Evidence.**
+- **New boundary test:** `tests/host_boundary_install_boundary_test.py`,
+  43 checks, each run gated on its screen.
+  - Every code, print and call, in order, is compared with
+    12 command cases and 6 installer cases,
+    produced by the BASELINE launcher's own functions with the same stand-ins
+    on their own modules, not typed. The cases cover: an invalid commit; both
+    arguments; not root; a dry run of either; activated with the boundary
+    installed or failing; rolled back; a rollback whose result is not marked
+    rolled back; activation or rollback failing; no release root; and the
+    installer's dry run, success, failures and verification.
+  - Its 3 behaviour cases also pass against the baseline's own two
+    definitions (25 checks).
+- **Mutations:** 36 of 36 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 31; the 5 left are the
+  module's placement and re-export: the launcher imported at load, a name not re-exported, re-export aliased, the launcher redefines one, a consumer bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree, nothing excluded):
+  - 2 suites whole (the new test on the candidate only);
+  - 22 cases, identical: 22 pass, 0 pass with a
+    tolerated refusal, 0 stop at the guard, and 0 fail otherwise.
+  - Two cases flagged "fake root" only for a real euid test were included.
+- **What the comparison exercised (call profiler, functions only):** 2 of 24 passing runs execute a moved function: the new test, and `shared_release_activation_test`'s refusal case through the command.
+- **Containment:** no shared release activated, `/opt/switchyard/current`
+  changed, privileged action or polkit installed, or tooling staged (live
+  snapshot identical before and after). Both entry points' help is identical
+  (36 `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented** -- no existing test names this closure, so its slice
+starts from a new boundary test:
+
+- Next closure, measured on this candidate and NOT implemented: installing a tenant board's authority files -- 2 definitions, 77 lines (lines 6385-6463, not contiguous):
+  -   6385   56  install_board_authority_files  launcher callers outside: -; production readers outside the launcher: ['scripts/role_identity_cutover.py']
+  -   6443   21  install_board_authority  launcher callers outside: -; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 2: ['ProjectConfig', 'current_user_name']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/role_identity_cutover.py']
+  - test files naming any of them: 0 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the provisioning domain: the root-owned files that decide which process may act for which role on a tenant's board)
+  - it also reads 4 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['activate_board_authority (scripts.board_services)', 'authority_unit_installs (scripts.board_services)', 'privileged_provision_dir (scripts.ticket_board.project_provision)', 'switchyard_privileged_provision_root (scripts.privileged_provision_records)']
+  - alternatives measured the same way:
+  -   - the upgrade preview's finish (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+  -   - capturing the installed units (alternative): 1 definitions, 18 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2220 lines  212 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 9,172 lines.

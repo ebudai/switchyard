@@ -179,7 +179,12 @@ def test_the_launcher_reexports_the_fifteen() -> None:
     check(len(imports) == 1 and sorted(a.name for a in imports[0].names) == sorted(MOVED) and all(a.asname is None for a in imports[0].names),
           "one explicit import of exactly the fifteen, unaliased")
     defined = {getattr(n, "name", None) for n in tree.body} | {x.id for n in tree.body if isinstance(n, ast.Assign) for x in n.targets if isinstance(x, ast.Name)}
-    check(not defined & set(MOVED) and "_switchyard_user_can_prompt_for_sudo" in defined, "the launcher defines none of them, and keeps the interleaved sudo check")
+    # The interleaved sudo check stays reachable on the launcher: defined there, or -- since SYRD-414 moved it with the
+    # command crossing -- re-exported there, unaliased; either way it is not one of these fifteen.
+    exported = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                and n.module != "scripts.tenant_control_helper" for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and "_switchyard_user_can_prompt_for_sudo" in defined | exported,
+          "the launcher defines none of them, and keeps the interleaved sudo check, its own or re-exported")
 
 
 # --- classification ------------------------------------------------------------------------------------------------

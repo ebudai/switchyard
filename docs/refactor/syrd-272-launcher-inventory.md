@@ -13949,3 +13949,153 @@ and **not implemented**:
   -   569 lines   22 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,874 lines.
+
+### SYRD-414 (slice 19aa): command configuration and owner/root crossing
+
+Measured on `29248eb`. The design was posted **before** any edit.
+
+| file | before (`29248eb`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,874 | 7,608 |
+| `scripts/command_crossing.py` | - | 354 |
+| `tests/command_crossing_boundary_test.py` | - | 590 |
+| `tests/tenant_control_helper_boundary_test.py` | 535 | 540 |
+
+**Moved:** the eleven definitions that decide how a per-project command
+loads its configuration and crosses to the owner or root, each whole with its
+comments and in order, into the new `scripts/command_crossing.py`:
+- `_switchyard_command_display`, `_switchyard_user_can_prompt_for_sudo`;
+- `ensure_staged_role_bundle_before_crossing`,
+  `_switchyard_exec_through_tenant_control`, `_switchyard_exec_with_root`;
+- `_configured_role_account_caller`, `_switchyard_command_is_unprivileged`,
+  `_switchyard_cross_account`;
+- `_require_switchyard_owner_hint_or_root`,
+  `_require_switchyard_project_owner_or_root`,
+  `_load_switchyard_project_config_for_command`.
+
+**Placement:**
+- **What stays between them:** `switchyard_invocation_requires_root`, the
+  two staged-tooling markers with their comments, `tenant_pinned_release_root`,
+  `director_readable_pinned_release`, `staged_bundle_launch_problems` and
+  `_project_config_path_owner_user`.
+- **Re-export and callers:** one explicit, unaliased import of all eleven.
+  `switchyard_main` still loads through the launcher's name
+  (16 sites, measured), and
+  `presentation_commands.py` still reads
+  `launcher._load_switchyard_project_config_for_command`.
+- **Seams:** all 29 call-time reads of 22 names are now `launcher.X`
+  (10 of them siblings), so every existing launcher patch still
+  intercepts. The attached inventory reconciles exactly: 7 launcher globals
+  (5 read at call time, 2 in annotations) and 11 imported names (7 read at
+  call time, 3 bound as definition-time defaults, 1 in an annotation).
+- **Bound when defined, as Python binds them today:** the staged tooling
+  owner, the helper repair, the caller-aware `which`, `subprocess.run`,
+  `os.execvp`, `input` and `print`. The three leaf names come from the very
+  modules the launcher imports them from, and each of those loads alone.
+
+**One guard follows the move:**
+`tenant_control_helper_boundary_test::test_the_launcher_reexports_the_fifteen`
+required the launcher to define the interleaved sudo check. It now accepts
+the check defined or re-exported unaliased, and it stays disjoint from the
+fifteen.
+
+**Proof.** The independent proof (`equiv414.py`) holds: every node is equal
+after normalizing `launcher.X`, every default is the baseline's, and the
+authority order is fixed:
+- the loader crosses to root only on a `PermissionError` and only when not
+  root;
+- the grant comes first, with promotion only before a bridged start;
+- the bridge refuses a caller the grant does not name before any repair or
+  runner, and runs `<sudo> -n <helper> <project> <operation>`;
+- root is `-n -v`, then a prompting sudoer, then refusal;
+- hostile staged tooling is refused before any repair.
+
+24 of 24 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/command_crossing_boundary_test.py`,
+  121 checks, each run gated on its screen and passing both under
+  `env -i` and in this role pane's normal environment. It replays
+  57 cases produced by the BASELINE launcher's own functions
+  (`gold414.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane. By kind:
+  - 12 loading cases: the owner, root, role accounts, a stranger
+    with and without sudo, and a refused read as a user and as root;
+  - 7 crossing cases, including a bridge stand-in that returns,
+    as the suites that patch it make it do;
+  - 10 bridge cases;
+  - 6 staged-bundle cases;
+  - 5 root cases and 9 prompt-check cases;
+  - 8 small-helper cases.
+
+  Every effect is a recorder: the sudo check, the bridge, the exec, the
+  repairs, the desktop halves and the promotion. The real spawns, every
+  `os.exec*`, signals, connections and account or group lookups are refused.
+  Its 3 behaviour cases also pass against the baseline's own
+  definitions, in both environments (76 checks).
+- **Mutations:** 46 of 46 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The first run left
+  two, each closed with a new generated case:
+  - "the bridge falls through to root", by a bridge stand-in that returns;
+  - "the prompt needs only stdin", by stdin-only and stderr-only sudoers.
+
+  The behaviour tests alone kill 40; the 6 left are two
+  definition-time defaults (the harness always injects them, and the
+  structure checks pin their identity) and placement, import, re-export and
+  reader changes: the helper default changed, the which default changed, the launcher imported at load, re-export aliased, the dispatcher bypasses its global, the presentation reader bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree), and every one of the 12 files naming the
+  eleven accounted for:
+  - 4 suites whole: the new test on the candidate only;
+  - 107 cases, per case, identical on both sides: 50 pass,
+    56 stop at the same guard refusal, and 1 fails
+    identically on the baseline (below);
+  - **Excluded (31):** 13 that drive
+    `switchyard_main` or an upgrade (all of
+    `team_launcher_switchyard_resolution_test`'s crossing cases among them),
+    17 whose own execution screen hits, and 1 accumulator.
+- **A pre-existing baseline failure, reported separately and not changed
+  here:** `tenant_control_helper_repair_test::test_the_repair_touches_no_other_tenant`
+  fails identically on the baseline. It treats every
+  `/usr/local/lib/switchyard/...` path in the repair command as another
+  tenant's, but the command also names the host-wide privileged helper and
+  `ticket_board` paths.
+- **What the comparison exercised (call profiler, functions only):**
+  3 of 54 passing runs execute a moved function: the new test
+  and test_an_unauthorized_local_user_is_refused_without_a_prompt, test_the_wrapper_uses_the_bridge_first_and_sudo_only_otherwise.
+- **Containment:** nothing crossed; no sudo, account, tenant, window or
+  service was touched (live snapshot identical before and after). Both entry
+  points' help is identical (36 `switchyard` invocations plus
+  `team-launcher --help`, 163 lines).
+- **A process slip, disclosed on the ticket when it happened:** one ungated
+  pane-environment run of `tenant_control_helper_boundary_test` after its
+  screen had hit. It ran under the guard, refused nothing and spawned
+  nothing. That suite is compared per case since.
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the staged-tooling launch checks -- 5 definitions, 104 lines (lines 6734-6845, not contiguous):
+  -   6734    1  STAGED_TOOLING_ABSENT_MARKER  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6737    1  STAGED_TOOLING_HOSTILE_MARKERS  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6740   22  tenant_pinned_release_root  launcher callers outside: -; production readers outside the launcher: -
+  -   6764   47  director_readable_pinned_release  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py']
+  -   6813   33  staged_bundle_launch_problems  launcher callers outside: -; production readers outside the launcher: ['scripts/command_crossing.py', 'scripts/staged_role_tooling.py']
+  - launcher names it reads (through the launcher once moved): 3: ['SWITCHYARD_RELEASE_MARKER_NAME', 'switchyard_shared_install_root', '_read_switchyard_release_marker']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/command_crossing.py', 'scripts/director_upgrade.py', 'scripts/staged_role_tooling.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: what a launch checks about a tenant's pinned release and staged role tooling -- absent against hostile, and which pinned release may be read -- now read through the launcher by command_crossing, director_upgrade and staged_role_tooling)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['STAGED_TOOLING_OWNER_UID (scripts.staged_role_tooling)', 'role_tooling_staging_dir (scripts.ticket_board.project_provision)', 'staged_role_tooling_problems (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the switchyard help text (alternative): 1 definitions, 39 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2138 lines  214 defs  general helpers (unclassified)
+  -  1563 lines   65 defs  provisioning (new/register/teardown/owner accounts)
+  -  1004 lines   38 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   569 lines   22 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,608 lines.

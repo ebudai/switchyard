@@ -1340,6 +1340,19 @@ from scripts.presentation_commands import (
     switchyard_present_command,
     switchyard_recover_display_command,
 )
+from scripts.command_crossing import (
+    _configured_role_account_caller,
+    _load_switchyard_project_config_for_command,
+    _require_switchyard_owner_hint_or_root,
+    _require_switchyard_project_owner_or_root,
+    _switchyard_command_display,
+    _switchyard_command_is_unprivileged,
+    _switchyard_cross_account,
+    _switchyard_exec_through_tenant_control,
+    _switchyard_exec_with_root,
+    _switchyard_user_can_prompt_for_sudo,
+    ensure_staged_role_bundle_before_crossing,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -6694,12 +6707,6 @@ Bare project names start or attach the project. Recognized commands: {commands}.
 """
 
 
-def _switchyard_command_display(argv: Sequence[str]) -> str:
-    if not argv:
-        return "switchyard"
-    return f"switchyard {argv[0]}"
-
-
 def switchyard_invocation_requires_root(argv: Sequence[str]) -> bool:
     if not argv:
         return False
@@ -6717,23 +6724,6 @@ def switchyard_invocation_requires_root(argv: Sequence[str]) -> bool:
     # review). A bare project name is already unprivileged, which is why only
     # `stop` and `status` needed this.
     return not _tenant_control_can_serve(argv)
-
-
-def _switchyard_user_can_prompt_for_sudo() -> bool:
-    if not sys.stdin.isatty() or not sys.stderr.isatty():
-        return False
-    try:
-        user = pwd.getpwuid(os.geteuid())
-        group_ids = {user.pw_gid, *os.getgroups()}
-    except KeyError:
-        return False
-    group_names: set[str] = set()
-    for gid in group_ids:
-        try:
-            group_names.add(grp.getgrgid(gid).gr_name)
-        except KeyError:
-            continue
-    return bool({"sudo", "wheel", "admin"} & group_names)
 
 
 #: A staged file that is simply not there. Absence is the one shape an
@@ -6855,152 +6845,6 @@ def staged_bundle_launch_problems(
     return absent, hostile, release
 
 
-def ensure_staged_role_bundle_before_crossing(
-    project: str,
-    *,
-    release_root: str = "",
-    root: Path | None = None,
-    expect_uid: int = STAGED_TOOLING_OWNER_UID,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-) -> str:
-    """Stage what a tenant is missing, before root runs anything as its owner.
-
-    The bridge repair before this one covers the two programs whose wire
-    contract the crossing itself depends on. That is the right scope for it and
-    the wrong scope for a tenant that has NONE of its bundle: `test` was
-    provisioned with a staging directory holding only control-grant.json and
-    its board unit, so the bridge crossed cleanly and its panes still had
-    nothing to run (SYRD-249).
-
-    So absence is repaired here, through the same recorded privileged command
-    the helper repair uses -- one journalled step, scoped to this tenant's own
-    directory, rendered from the selected release. The caller is the desktop
-    operator, who has sudo; the tenant account is never asked to stage anything.
-
-    A bundle that is merely OLDER is left alone, because restaging on drift
-    would make every launch privileged (SYRD-211). A bundle that is present and
-    wrong -- another account's, writable by others, not a regular file -- is
-    refused rather than overwritten, for the same reason the helper repair
-    refuses it. Returns "" when the launch may proceed.
-    """
-    absent, hostile, release = staged_bundle_launch_problems(
-        project, release_root=release_root, root=root, expect_uid=expect_uid
-    )
-    if hostile:
-        return f"{project}'s staged tooling is not root's to replace: " + "; ".join(hostile)
-    if not absent:
-        # The healthy path -- including a complete bundle from an older release
-        # -- costs a few stats and no privileged step.
-        return ""
-    print_func(
-        f"switchyard: {project} is missing {len(absent)} of its staged role tooling; "
-        f"restaging the bundle from {release} before continuing"
-    )
-    problem = repair_tenant_control_helper(
-        project, release_root=str(release), root=root, runner=runner, print_func=print_func
-    )
-    if problem:
-        return problem
-    still_absent, _hostile, _release = staged_bundle_launch_problems(
-        project, release_root=str(release), root=root, expect_uid=expect_uid
-    )
-    if still_absent:
-        return (
-            f"{project}'s staged role tooling is still incomplete after restaging: "
-            + "; ".join(still_absent[:4])
-        )
-    return ""
-
-
-def _switchyard_exec_through_tenant_control(
-    project: str,
-    operation: str,
-    *,
-    grant: dict[str, str],
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    exec_func: Callable[[str, Sequence[str]], Any] = os.execvp,
-    print_func: Callable[[str], None] = print,
-    ensure_helper: Callable[..., None] = ensure_tenant_control_helper,
-) -> None:
-    """Run one lifecycle verb as the owner, without a password.
-
-    Only the project and the verb cross the boundary. The bridge decides the
-    owner, the launcher and whether this caller is allowed, from root-owned
-    data, so nothing here can widen what it will do.
-    """
-    sudo_bin = os.environ.get("SWITCHYARD_SUDO_BIN", "sudo")
-    helper = str(TENANT_CONTROL_ROOT / project / "switchyard-tenant-control")
-    caller = current_user_name()
-    authorized = grant.get("authorized_user", "")
-    if caller != authorized:
-        # Refused here, so an unauthorized local user never sees a prompt.
-        raise SystemExit(
-            f"switchyard: {caller} may not control {project}; it is registered to {authorized}\n"
-            "switchyard: ask that user, or run this as the project owner or an operator"
-        )
-    # Before root is asked to run it. A registered tenant whose staging was
-    # interrupted -- or which predates staging -- has a valid grant, a valid
-    # sudoers rule and no file, and handing that to sudo produced the whole of
-    # SYRD-211: `command not found`, before anything else could say why. Absent
-    # is repaired from the current release and the launch resumes; any other
-    # shape is refused here rather than executed.
-    ensure_helper(project, grant=grant, runner=runner, print_func=print_func)
-    # And the rest of the bundle, while this process still belongs to somebody
-    # with sudo. Past this line the work happens as the tenant owner, which may
-    # not stage root's files -- so a tenant missing everything but its grant
-    # would otherwise cross successfully and open panes with nothing to run
-    # (SYRD-249).
-    bundle_problem = ensure_staged_role_bundle_before_crossing(
-        project, runner=runner, print_func=print_func
-    )
-    if bundle_problem:
-        raise SystemExit(f"switchyard: {bundle_problem}")
-    # Run, not replace. The bridge answers with one validated handoff when the
-    # owner half could not do the desktop half, and this process -- which owns
-    # the desktop -- is the one that can. Its terminal is passed through
-    # untouched, so a verb that attaches a tmux client still has one (SYRD-90).
-    result = runner([sudo_bin, "-n", helper, project, operation])
-    code = int(getattr(result, "returncode", 1) or 0)
-    if code == 0:
-        # Symmetric with the open. A stop's desktop half is closing the window
-        # this account owns; the owner half cannot see it or signal it
-        # (SYRD-202).
-        if operation == "stop":
-            code = close_desktop_presentation(project, caller=caller)
-        elif operation == "recover-display":
-            # A recovery reattaches the Director inside the window that is
-            # already open; it has no window half to complete. Asking for one
-            # would find no handoff and -- on a tenant with desktop access --
-            # report the successful recovery as "no presentation window was
-            # handed back ... run it again" (SYRD-239 live UAT).
-            print_func(f"switchyard: {project}'s Director display was recovered")
-        else:
-            code = complete_desktop_presentation(project, caller=caller, runner=runner)
-    raise SystemExit(code)
-
-
-def _switchyard_exec_with_root(
-    argv: Sequence[str],
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    exec_func: Callable[[str, Sequence[str]], Any] = os.execvp,
-) -> None:
-    sudo_bin = os.environ.get("SWITCHYARD_SUDO_BIN", "sudo")
-    command_display = _switchyard_command_display(argv)
-    target_argv = [sys.argv[0], *argv]
-    if runner([sudo_bin, "-n", "-v"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        exec_func(sudo_bin, [sudo_bin, "-n", *target_argv])
-        raise SystemExit(0)
-    if _switchyard_user_can_prompt_for_sudo():
-        exec_func(sudo_bin, [sudo_bin, *target_argv])
-        raise SystemExit(0)
-    raise SystemExit(
-        f"switchyard: command requires root: {command_display}\n"
-        "switchyard: sudo is unavailable for this user or shell; run it as a sudo-capable human or ask an operator"
-    )
-
-
 def _project_config_path_owner_user(path: Path) -> str:
     expanded = path.expanduser()
     parts = expanded.parts
@@ -7010,116 +6854,6 @@ def _project_config_path_owner_user(path: Path) -> str:
         return pwd.getpwuid(expanded.stat().st_uid).pw_name
     except (KeyError, OSError):
         return ""
-
-
-def _configured_role_account_caller(config: ProjectConfig) -> str:
-    """The configured role this caller's Unix account IS, or empty.
-
-    Bound to the account, never to a role name the caller supplies: the
-    configuration says which account belongs to which role, and the board still
-    decides authority from the peer uid on its own (SYRD-49).
-    """
-    caller = current_user_name()
-    owner = (config.run_as_user or "").strip()
-    for role in config.roles:
-        account = (role.run_as_user or "").strip()
-        if account and account != owner and account == caller:
-            return role.role
-    return ""
-
-
-def _switchyard_command_is_unprivileged(argv: Sequence[str]) -> bool:
-    return bool(argv) and argv[0].casefold() in SWITCHYARD_UNPRIVILEGED_COMMANDS
-
-
-def _switchyard_cross_account(
-    project: str,
-    argv: Sequence[str],
-    *,
-    agent_cli_policy: str = "",
-    agent_cli_sources: Mapping[str, str] | None = None,
-    interactive: bool | None = None,
-    which: Callable[..., str | None] = caller_aware_which,
-    input_func: Callable[[str], str] = input,
-    print_func: Callable[[str], None] = print,
-    promoter: Callable[..., AgentCliAvailability] | None = None,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    ensure_helper: Callable[..., None] | None = None,
-) -> None:
-    """Reach the owner's account, by the narrowest route that is installed.
-
-    The bridge first: it needs no password and can run only this tenant's
-    lifecycle verbs. Sudo remains for everything else, and for tenants that
-    have no bridge at all.
-    """
-    grant = _tenant_control_grant(project)
-    if grant:
-        operation = _tenant_control_operation(argv, project)
-        if operation:
-            if operation == "start":
-                # Here, and not on the far side. Past the bridge the launcher
-                # runs as the owner with a built PATH and cannot see -- let
-                # alone promote -- this operator's private copies, so a resumed
-                # tenant reported them as per-owner installs the operator was
-                # told to repeat. Offered rather than required: nothing is being
-                # created, so declining must leave the launch untouched
-                # (SYRD-211).
-                offer_host_wide_promotion_before_launch(
-                    project,
-                    policy=agent_cli_policy,
-                    sources=agent_cli_sources,
-                    interactive=(
-                        sys.stdin.isatty() if interactive is None else interactive
-                    ),
-                    which=which,
-                    input_func=input_func,
-                    print_func=print_func,
-                    promoter=promoter,
-                    runner=runner,
-                )
-            bridge_kwargs: dict[str, Any] = {"runner": runner, "print_func": print_func}
-            if ensure_helper is not None:
-                bridge_kwargs["ensure_helper"] = ensure_helper
-            _switchyard_exec_through_tenant_control(
-                project, operation, grant=grant, **bridge_kwargs
-            )
-    _switchyard_exec_with_root(argv)
-
-
-def _require_switchyard_owner_hint_or_root(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> None:
-    owner = _project_config_path_owner_user(entry.config_path)
-    if not owner or current_user_name() == owner or os.geteuid() == 0:
-        return
-    if _switchyard_command_is_unprivileged(argv) and os.access(entry.config_path, os.R_OK):
-        # A role account running its own unprivileged command. It can read the
-        # configuration because provisioning granted that account exactly that,
-        # and escalating here would hand the command to root -- which the
-        # commands that matter then refuse, leaving no way to run them at all
-        # (SYRD-49).
-        return
-    _switchyard_cross_account(entry.slug, argv)
-
-
-def _require_switchyard_project_owner_or_root(config: ProjectConfig, argv: Sequence[str]) -> None:
-    owner = (config.run_as_user or "").strip()
-    if not owner or current_user_name() == owner or os.geteuid() == 0:
-        return
-    if _switchyard_command_is_unprivileged(argv) and _configured_role_account_caller(config):
-        return
-    _switchyard_cross_account(config.project, argv)
-
-
-def _load_switchyard_project_config_for_command(entry: SwitchyardProjectEntry, argv: Sequence[str]) -> ProjectConfig:
-    _require_switchyard_owner_hint_or_root(entry, argv)
-    try:
-        # Root's read of this path is the no-follow one, inside the loader.
-        config = load_project_config(entry.slug, entry.config_path)
-    except PermissionError:
-        if os.geteuid() != 0:
-            _switchyard_exec_with_root(argv)
-        raise
-    _require_switchyard_project_owner_or_root(config, argv)
-    return config
 
 
 def report_installed_release_version(

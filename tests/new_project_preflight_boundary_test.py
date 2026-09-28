@@ -177,9 +177,53 @@ def phase_def() -> ast.FunctionDef:
     return next(n for n in module_tree().body if isinstance(n, ast.FunctionDef) and n.name == "_check_new_project_preflight")
 
 
+#: The six phases and two continuation types `switchyard new` reads through the launcher (SYRD-425).
+NEW_COMMAND_READS = ("_resolve_new_project_choices", "_check_new_project_preflight", "_prepare_new_project_accounts",
+                     "_prepare_new_project_board", "_run_new_project_sign_in", "_launch_new_project_panes",
+                     "NewProjectBoard", "NewProjectSignIn")
+
+
 def command_def() -> ast.FunctionDef:
-    return next(n for n in ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")).body
-                if isinstance(n, ast.FunctionDef) and n.name == "switchyard_new_command")
+    """`switchyard_new_command` as its phases' wiring sees it.
+
+    SYRD-425 moved it to scripts/switchyard_new_command.py, where it reads each phase and continuation type through
+    the launcher when it runs. Checked first, on the source as it is: the launcher no longer defines it, re-exports it
+    unaliased and still dispatches `new` to that name; its first statement is the call-time launcher import; and every
+    phase and continuation is read through the launcher, none bare. Only then is the import dropped and each
+    `launcher.X` read as `X`, so the positions and names below are the command's own. Before the move (the baseline)
+    it is the launcher's definition as it stands.
+    """
+    moved = ROOT / "scripts" / "switchyard_new_command.py"
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    tree = ast.parse(moved.read_text(encoding="utf-8")) if moved.exists() else launcher_tree
+    command = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "switchyard_new_command")
+    if moved.exists():
+        check(not any(isinstance(n, ast.FunctionDef) and n.name == "switchyard_new_command" for n in launcher_tree.body),
+              "the launcher no longer defines switchyard_new_command")
+        check(any(isinstance(n, ast.ImportFrom) and n.module == "scripts.switchyard_new_command"
+                  and any(a.name == "switchyard_new_command" and a.asname is None for a in n.names) for n in launcher_tree.body),
+              "the launcher re-exports it, unaliased")
+        main = next(n for n in launcher_tree.body if isinstance(n, ast.FunctionDef) and n.name == "switchyard_main")
+        check(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "switchyard_new_command" for n in ast.walk(main)),
+              "and switchyard_main still dispatches `new` to the launcher's name")
+        check(ast.unparse(command.body[0]) == "from scripts import team_launcher as launcher",
+              f"the command imports the launcher first thing, when it runs: {ast.unparse(command.body[0])}")
+        bare = sorted({n.id for n in ast.walk(command) if isinstance(n, ast.Name) and n.id in NEW_COMMAND_READS})
+        through = sorted({n.attr for n in ast.walk(command)
+                          if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "launcher"})
+        check(bare == [] and through == sorted(NEW_COMMAND_READS),
+              f"every phase and continuation is read through the launcher, none bare: {bare} {through}")
+        del command.body[0]
+
+        class AsLauncherGlobal(ast.NodeTransformer):
+            def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+                self.generic_visit(node)
+                if isinstance(node.value, ast.Name) and node.value.id == "launcher":
+                    return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+                return node
+
+        AsLauncherGlobal().visit(command)
+    return command
 
 
 # --- structure -----------------------------------------------------------------------------------------------------

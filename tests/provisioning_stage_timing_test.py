@@ -229,6 +229,17 @@ def test_switchyard_new_reports_every_stage_in_order() -> None:
     import inspect
 
     body = inspect.getsource(team_launcher.switchyard_new_command)
+    if not inspect.getsourcefile(team_launcher.switchyard_new_command).endswith("team_launcher.py"):
+        # SYRD-425 moved the command to scripts/switchyard_new_command.py, where it calls each phase through the
+        # launcher when it runs. Each of the six must still be read there, none bare; only then is that prefix dropped,
+        # so the phases are found by their names below.
+        import re
+
+        phases = ("_resolve_new_project_choices", "_check_new_project_preflight", "_prepare_new_project_accounts",
+                  "_prepare_new_project_board", "_run_new_project_sign_in", "_launch_new_project_panes")
+        assert all(f"launcher.{phase}(" in body for phase in phases), "every phase is called through the launcher"
+        assert not [phase for phase in phases if re.search(rf"(?<![\w.]){phase}\(", body)], "and none bare"
+        body = body.replace("launcher.", "")
 
     def called_at(phase: str) -> int:
         """Where the command calls a phase: for its answer (`x = phase(`), or --

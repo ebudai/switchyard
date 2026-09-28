@@ -2232,6 +2232,13 @@ def test_the_launch_actually_consults_that_gate() -> None:
     # Naming the path that is ungated beats counting occurrences.
     for name in ("switchyard_new_command", "switchyard_main"):
         body = inspect.getsource(getattr(team_launcher, name))
+        if name == "switchyard_new_command" and not inspect.getsourcefile(team_launcher.switchyard_new_command).endswith("team_launcher.py"):
+            # SYRD-425 moved the command to scripts/switchyard_new_command.py, where it calls each phase through the
+            # launcher when it runs. It must still read the sign-in phase there, not bare; only then is that prefix
+            # dropped, so the phase is found by its name below.
+            check("launcher._run_new_project_sign_in(" in body and not re.search(r"(?<![\w.])_run_new_project_sign_in\(", body),
+                  f"{name} reads the sign-in phase through the launcher")
+            body = body.replace("launcher.", "")
         gate = "stop_before_launch_for_unauthenticated_providers("
         if name == "switchyard_new_command" and gate not in body:
             # SYRD-373: the command's sign-in phase holds the gate. The command

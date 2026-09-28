@@ -523,7 +523,10 @@ def test_the_launcher_reexports_the_fourteen_and_its_readers_reach_them_there() 
                                         "render_board_unit", "shared_switchyard_release_for_path", "uid_for_user"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and every seam they read, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    # SYRD-425 moved switchyard_new_command, which reads two of the fourteen as its defaults, to
+    # scripts/switchyard_new_command.py; its reads are still counted, where it is defined.
+    moved_new = ROOT / "scripts" / "switchyard_new_command.py"
+    for fn in tree.body + (ast.parse(moved_new.read_text(encoding="utf-8")).body if moved_new.exists() else []):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

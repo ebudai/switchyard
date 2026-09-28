@@ -183,7 +183,11 @@ def test_the_seams_the_local_imports_and_the_classes() -> None:
     check(m.OwnerUserProvisionResult(True, False).shell_path == "", "the result's shell path defaults to empty")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     defined = {n.name for n in launcher.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
-    check(not defined & set(MOVED) and {"_group_ids_for_user", "_read_prompt", "_prompt_bool", "switchyard_new_command"} <= defined,
+    # A neighbour stays reachable on the launcher: defined there, or -- once a later slice moves it on (SYRD-425) --
+    # re-exported there, unaliased.
+    reexported = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                  for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and {"_group_ids_for_user", "_read_prompt", "_prompt_bool", "switchyard_new_command"} <= defined | reexported,
           f"the launcher defines none of them, and keeps the shared prompt and group helpers: {defined & set(MOVED)}")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.owner_preparation"]
     check(exported == [sorted(MOVED)], f"one explicit re-export of all sixteen: {exported}")

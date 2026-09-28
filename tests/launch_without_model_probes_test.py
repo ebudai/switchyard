@@ -285,9 +285,13 @@ def test_the_new_command_says_it_before_it_launches() -> None:
     `/home/<owner>`. The weakness is that this checks position rather than
     behaviour; the behaviour of the line itself is checked above.
     """
-    source = (ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
+    # SYRD-425 moved the command itself to scripts/switchyard_new_command.py, where it is the last definition and
+    # calls each phase through the launcher; it is read wherever it is defined, the way the phases' text is below.
+    moved = ROOT / "scripts" / "switchyard_new_command.py"
+    source = (moved if moved.exists() else ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")
     body = source[source.index("def switchyard_new_command("):]
-    body = body[: body.index("\ndef ", 1)]
+    end = body.find("\ndef ", 1)
+    body = (body if end == -1 else body[:end]).replace("launcher.", "")
     # SYRD-369 onward: the command runs its phases from `new_project_phases.py`.
     # A line inside one runs where the command calls that phase, then at its
     # place in the phase; the command and every phase it calls are its code.

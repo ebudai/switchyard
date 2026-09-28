@@ -15525,3 +15525,171 @@ and **not implemented**:
   -   228 lines   23 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 5,983 lines.
+
+### SYRD-425 (slice 19ak): switchyard new command
+
+Measured on `daa200c`. The design was posted **before** any edit and disclosed
+nine guard changes. The Director approved Option A (move the whole command;
+adapt only those nine) before the edit. The first guarded comparison then found
+two more guards that read the command's source through the re-exported object,
+`inspect.getsource`, rather than by file. They were disclosed in a correction
+comment before either was edited, and the Director approved Option A2 for
+exactly those two: eleven adapted files in all.
+
+| file | before (`daa200c`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 5,983 | 5,759 |
+| `scripts/switchyard_new_command.py` | - | 263 |
+| `tests/switchyard_new_command_boundary_test.py` | - | 509 |
+
+**Scope: exactly the one definition, no additional production definition.**
+`switchyard_new_command` (4478-4702) moves whole into the new
+`scripts/switchyard_new_command.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import. `switchyard_main` still
+  dispatches `new` to the launcher's name.
+- **Seams:** all 8 call-time reads of 8 names are now
+  `launcher.X`: the six provisioning phases (`_resolve_new_project_choices` to
+  `_launch_new_project_panes`) and `NewProjectBoard`/`NewProjectSignIn`. The
+  phase stand-ins the suites put on the launcher still reach the command.
+- **Defaults, the effective baseline binding:**
+  - the port and socket probes, the no-runner sentinel, the session-record
+    timeout and poll, and the layout mode are imported from the very modules
+    the launcher imports them from (`new_project_precheck`, `first_run_auth`,
+    `session_records`, `layout_modes`), so they are the same objects;
+  - `os.geteuid`, `Path("/home")`, `input` and `print` are unchanged;
+  - the sentinel's type is under TYPE_CHECKING;
+  - none of those modules loads the launcher, so there is no cycle.
+
+**The eleven adapted guards (approved Options A and A2).** The first nine
+located the command by reading `team_launcher.py`:
+- **`new_project_{accounts,board,panes,preflight,sign_in}_boundary_test`:**
+  only `command_def()` changed, now a helper that finds the command wherever
+  it is defined. Before normalising, it checks that:
+  - the launcher no longer defines it and re-exports it unaliased;
+  - `switchyard_main` still dispatches to that name;
+  - the command's first statement is the call-time launcher import;
+  - the eight phases and continuations are read through the launcher, none
+    bare.
+
+  It then drops the import and reads `launcher.X` as `X`. A
+  `NEW_COMMAND_READS` tuple is added just before it.
+- **`new_project_phases_boundary_test`:** gains the same helper, and its two
+  inline lookups call it.
+- **`launch_without_model_probes_test`:** its one test reads the command's
+  text where it is defined, stripped of `launcher.` as the phases' text
+  already is.
+- **`owner_preparation_boundary_test`:** its neighbour check accepts
+  `defined | reexported`.
+- **`new_project_precheck_boundary_test`:** its uses loop also counts the
+  moved module's definitions, and the `DISPATCH` literal is unchanged.
+- **(A2) `first_run_setup_completion_test::test_the_launch_actually_consults_that_gate`
+  and `provisioning_stage_timing_test::test_switchyard_new_reports_every_stage_in_order`**
+  read the command's source through `inspect.getsource`, which follows the
+  re-export. Each gains one block that runs only when the command is defined
+  outside the launcher. It first requires the phase reads (the sign-in phase,
+  or all six) through `launcher.`, none bare, and only then drops that prefix
+  for the existing order and return assertions.
+
+Every behavioural assertion is kept, and proof clause 6b confines the changes
+to exactly these (the six helpers are one identical text). Each adapted guard
+passes on the clean baseline (the adapted files copied onto its archive) and on
+the candidate (`verify425-*.out`). 33 guard-kill runs fail them with
+assertions and zero guard refusals (`guardkill425.out`): a phase read bare, the
+board before the accounts, a duplicate launcher definition, `switchyard_main`
+no longer dispatching to the launcher's name, the call-time import not first, a
+default read no longer counted, the re-export aliased, the panes phase no
+longer called, the sign-in phase read bare, the board phase run before the
+accounts phase, and the sign-in stop not returned.
+
+**Proof.** The independent proof (`equiv425.py`, 14 clauses) holds. It
+compares the command whole after normalizing `launcher.X`, and the launcher
+remainder as AST and text. It fixes P0 to P5 in order; the board's and
+sign-in's statuses (or a foreign answer) returned before anything later; the
+panes phase's answer being the command's; and each default's source module.
+
+21 of 21 planted faults are caught, each parsed first. The plants
+found a bug in the proof itself: the new 6b clause reused the proof's global
+verdict name as a scratch variable, so earlier failing clauses still ended
+"PROOF HOLDS". It was renamed before any evidence was recorded; no earlier
+slice's proof has that shape. A later plant also showed the A2 confinement
+accepted a second normalisation placed before the check, so the clause now
+requires exactly one, as the block's last statement.
+
+**Evidence.**
+- **New boundary test:** `tests/switchyard_new_command_boundary_test.py`,
+  89 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  22 cases produced by the BASELINE launcher's own function
+  (`gold425.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical in both environments. Every phase is a
+  recording stand-in on the launcher, answering with its real continuation
+  type (each field a label naming its phase), a status, a refusal or a
+  foreign object; no account, database, desktop, provider or pane is touched.
+  By group:
+  - 18 runs of the command:
+    - every argument, every default, and the probes, timeout and poll alone;
+    - the board and sign-in statuses, including zero, and foreign answers;
+    - the panes phase's answer;
+    - each phase's refusal;
+    - a phase and a continuation type rebound on the launcher;
+  - `switchyard new` through its real parser and dispatch (every option,
+    bare, headless, and the board refusing).
+
+  Its 3 behaviour cases also pass against the baseline's own function
+  in both environments (72 checks).
+- **Mutations:** 35 of 35 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 33. The rest are structural, and the structure checks kill
+  them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 37 files accounted for (the 29 that name
+  the command, those naming its phases, and the earlier slices' boundary
+  tests). The eleven adapted guards run against their originals on the
+  baseline:
+  - 21 suites whole: 21 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    none;
+  - 255 cases, per case, identical on both sides: 124 pass,
+    121 stop at the same guard refusal, and 10 fail
+    identically on both (`first_run_setup_completion_test::test_the_provider_is_given_the_window_the_person_is_looking_at`; `first_run_setup_completion_test::test_the_provider_follows_the_window_when_it_is_resized`; `first_run_setup_completion_test::test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode`; `first_run_setup_completion_test::test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too`; `first_run_setup_completion_test::test_a_resize_reaches_the_provider_as_a_signal`; `first_run_setup_completion_test::test_the_terminal_is_given_back_even_when_switchyard_is_killed`; `first_run_setup_completion_test::test_a_keystroke_does_not_wait_for_the_next_tick`; `first_run_setup_completion_test::test_test9_the_answer_reaches_the_question_before_anything_is_typed`; `first_run_setup_completion_test::test_test8_the_sign_in_survives_the_browser_on_a_real_terminal`; `first_run_setup_completion_test::test_test8_nothing_is_echoed_when_the_person_comes_back`). All of these are pseudo-terminal
+    (`termios`) cases of `first_run_setup_completion_test` that this harness
+    (no terminal) cannot drive; the adapted gate case in the same file
+    passes on both;
+  - **Excluded (79):** 6 that drive an upgrade
+    or `switchyard_main`, 73 whose own execution screen hits, and
+    0 accumulator;
+  - **Not run:** team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function.
+- **What the comparison exercised (call profiler, real functions only):**
+  15 of 145 passing runs execute the moved function:
+  `desktop_access_test.py`, `desktop_policy_generation_test.py`, `new_project_accounts_boundary_test.py`, `new_project_board_boundary_test.py`, `new_project_panes_boundary_test.py`, `new_project_phases_boundary_test.py`, `new_project_preflight_boundary_test.py`, `new_project_sign_in_boundary_test.py`, `switchyard_new_command_boundary_test.py`, `team_launcher_new_project_test.py`, `team_launcher_onboarding_git_test.py`, `team_launcher_project_artifacts_test.py`, `team_launcher_project_precheck_test.py`, `team_launcher_project_role_prompts_test.py`, `team_launcher_registry_test.py`, `team_launcher_switchyard_commands_test.py`, `team_launcher_switchyard_new_prompts_test.py`.
+- **Containment:** no project was provisioned, and no service, database,
+  account, tenant, board, desktop or socket was touched. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff425.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the team-launcher new command -- 3 definitions, 275 lines (lines 2867-3630, not contiguous):
+  -   2867   22  recorded_provisioning_command  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3175    2  _new_project_artifact_dir  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3380  251  new_project_command  launcher callers outside: ['main']; production readers outside the launcher: ['scripts/new_project_phases.py']
+  - launcher names it reads (through the launcher once moved): 10: ['WORKTREE_POLICIES', '_repo_root', '_load_json', '_default_role_cli_pairs', '_write_json_atomic', 'load_project_config', '_rollout_recorder_path', '_default_new_project_owner', '_new_project_worktree_base', 'role_isolation_gaps']
+  - launcher callers outside the closure: 1: ['main']
+  - production modules reading it through the launcher: 1: ['scripts/new_project_phases.py']
+  - test files naming any of them: 19 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `team-launcher new` -- provisioning a project from a design artifact, non-interactively)
+  - it also reads 15 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['DEFAULT_PROJECT_IMPLEMENTER_ROLES (scripts.ticket_board.project_provision)', '_path_exists (scripts.new_project_precheck)', '_tcp_port_in_use (scripts.new_project_precheck)', 'build_plan (scripts.ticket_board.project_provision)', 'configure_project_desktop (scripts.project_desktop)', 'install_privileged_artifacts (scripts.privileged_artifacts)', 'invoking_human (scripts.ticket_board.project_provision)', 'load_project_design_artifact (scripts.project_design_artifact)', 'precheck_new_project (scripts.new_project_precheck)', 'publish_role_account_migration (scripts.role_account_migration)', 'render_privileged_artifacts (scripts.privileged_artifacts)', 'resolve_control_user (scripts.ticket_board.project_provision)', 'seed_director_onboarding (scripts.project_onboarding)', 'write_artifacts (scripts.ticket_board.project_provision)', 'write_new_project_launcher_artifacts (scripts.new_project_artifacts)']
+  - alternatives measured the same way:
+  -   - the team-launcher parser (alternative): 1 definitions, 102 lines; launcher callers outside: ['main']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the switchyard help text (alternative): 1 definitions, 39 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2014 lines  205 defs  general helpers (unclassified)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   943 lines   55 defs  provisioning (new/register/teardown/owner accounts)
+  -   754 lines   33 defs  project config and registry
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 5,759 lines.

@@ -13330,3 +13330,118 @@ and **not implemented**:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,685 lines.
+
+### SYRD-408 (slice 19v): finish-upgrade dry-run preview
+
+Measured on `e8edac3`. The design was posted **before** any edit.
+
+| file | before (`e8edac3`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,685 | 8,615 |
+| `scripts/finish_upgrade_preview.py` | - | 101 |
+| `tests/finish_upgrade_preview_boundary_test.py` | - | 459 |
+| `tests/workflow_adoption_boundary_test.py` | 153 | 164 |
+| `scripts/director_upgrade.py` | 204 | 204 |
+
+**Moved:** `_finish_upgrade_preview`, whole, with its SYRD-254 docstring, its
+`verdict()` closure and its indenting lambda, into the new
+`scripts/finish_upgrade_preview.py`.
+- **Neighbours:** `capture_installed_units` above and `_plan_data_from_config`
+  below stay.
+- **Re-export:** one explicit, unaliased import, above every definition. The
+  launcher itself still calls it nowhere
+  (0 sites, measured).
+  `scripts/director_upgrade.py`, which reads
+  `launcher._finish_upgrade_preview` when it runs, is byte-identical.
+- **Seams:** all 7 call-time reads of 7 names are now `launcher.X`,
+  through a call-time import, as measured from the AST:
+  - the workflow install, the role-account cutover, the owner's release
+    root, and the release report and its verdict;
+  - `current_user_name` and `_repo_root` (launcher-defined).
+- **Unchanged:** the signature (every argument required, keyword-only after
+  the config), the `source_repo` fallback with `expanduser().resolve(strict=False)`,
+  every output line and the return codes. `ProjectConfig` is an annotation
+  only.
+
+**One guard follows the move:**
+`workflow_adoption_boundary_test::test_the_patched_names_are_reached_where_the_suites_patch_them`.
+- It counted `install_handed_off_workflow` calls, bare in the launcher and
+  `launcher.` in `director_upgrade`, for a total of 2.
+- It now also counts the module named by the launcher's exact unaliased
+  re-export of `_finish_upgrade_preview`, where each call must be
+  `launcher.install_handed_off_workflow`. The total is still 2.
+
+**Proof.** The independent proof (`equiv408.py`) holds, including apply's
+order, read-only:
+- the workflow install is asked with `dry_run=True` only;
+- then the director line;
+- the cutover, where an incomplete one returns the verdict at once;
+- the root problems, where any returns the verdict;
+- the indented release report and the blocked check;
+- the verdict closure answers 1 with stops, else 0.
+
+18 of 18 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/finish_upgrade_preview_boundary_test.py`,
+  246 checks, each run gated on its screen.
+  - All seven seams stand in on the launcher. Their own definitions, spawns,
+    signals, account lookups and connections are refused.
+  - It replays 108 cases produced by the BASELINE launcher's own
+    function (`gold408.py`) over the very case text the test embeds, not
+    typed: every combination of the workflow (installed, refused, None), the
+    cutover, zero to two root problems, a clear or blocked release, and three
+    sources (the checkout fallback, a home-relative source, one with `..`).
+  - Its 3 behaviour cases also pass against the baseline's own
+    definition (228 checks).
+- **Mutations:** 30 of 30 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 25; the 5 left are signature, placement, re-export
+  and reader-file changes: a runner default added, the launcher imported at load, re-export aliased, the launcher redefines it, director_upgrade calls it directly.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 4 suites whole: the new test on the candidate only,
+    and `workflow_adoption`, `board_authority_install` and
+    `finish_upgrade_boundary_test` (the director-upgrade command with the
+    preview patched), which pass on both.
+  - 29 cases, identical on both sides: 6 pass, 23 stop at
+    the guard (a refused account lookup or `git` spawn).
+  - **Excluded (6):**
+    - all 4 cases of `finish_upgrade_dry_run_parity_test`, the suite
+      that runs the real dry run end to end, because each drives
+      `finish_upgrade_command`, and no upgrade-driving case is run;
+    - one `legacy_workflow_migration_test` case for the same reason;
+    - one that builds a `pkexec` argv.
+
+    The preview's behaviour is in the golden cases instead.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 10 passing runs execute the moved code: the new test.
+- **Containment:** no finish-upgrade was run on a tenant, and no board,
+  workflow, config, release or service was touched (live snapshot identical
+  before and after). Both entry points' help is identical (36
+  `switchyard` invocations, `finish-upgrade` among them, plus
+  `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: a role pane's process id -- 2 definitions, 14 lines (lines 2753-2768, not contiguous):
+  -   2753    2  tmux_pane_pid_args  launcher callers outside: -; production readers outside the launcher: -
+  -   2757   12  pane_pid_for_role  launcher callers outside: -; production readers outside the launcher: ['scripts/live_role_runtime.py', 'scripts/role_identity_cutover.py', 'scripts/tmux_session_argv.py']
+  - launcher names it reads (through the launcher once moved): 1: ['RoleConfig']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/live_role_runtime.py', 'scripts/role_identity_cutover.py', 'scripts/tmux_session_argv.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of liveness: the tmux argv that asks for a role pane's pid, and the reader that answers 0 when tmux fails or says something that is not a number)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - capturing installed board-authority units (alternative): 1 definitions, 18 lines; launcher callers outside: -; production readers: 1
+  -   - the layout's slot count (alternative): 1 definitions, 6 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2120 lines  211 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1017 lines   39 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   811 lines   29 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,615 lines.

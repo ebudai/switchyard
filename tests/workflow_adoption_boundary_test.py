@@ -110,6 +110,17 @@ def test_the_patched_names_are_reached_where_the_suites_patch_them() -> None:
         node for node in ast.walk(ast.parse((ROOT / "scripts" / "director_upgrade.py").read_text(encoding="utf-8")))
         if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "install_handed_off_workflow"
     ]
+    # SYRD-408 moved `_finish_upgrade_preview` on; the launcher re-exports it by its own name, and the
+    # module it names reads the install through the launcher too.
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    if not any(isinstance(node, ast.FunctionDef) and node.name == "_finish_upgrade_preview" for node in launcher_tree.body):
+        source = [node.module for node in launcher_tree.body if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("scripts.")
+                  and any(a.name == "_finish_upgrade_preview" and a.asname is None for a in node.names)]
+        check(len(source) == 1, f"the launcher re-exports _finish_upgrade_preview, unaliased: {source}")
+        moved += [
+            node for node in ast.walk(ast.parse((ROOT / f"{source[0].replace('.', '/')}.py").read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "install_handed_off_workflow"
+        ]
     # `finish_upgrade_command` and `_finish_upgrade_preview`, as at the baseline.
     check(len(calls) + len(moved) == 2 and all(isinstance(node.func, ast.Name) for node in calls)
           and all(isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)

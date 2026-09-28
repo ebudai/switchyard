@@ -18277,3 +18277,161 @@ and **not implemented**:
   -   100 lines   10 defs  board service, listener and status
 
 **SYRD-272 is not complete.** The launcher is still 3,965 lines.
+
+### SYRD-450 (slice 19bd): project-config loading and validation
+
+Measured on `6da00fe`. Before any edit, the rooted closure was verified; there
+was no closure expansion. The guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 129 files
+  naming the function were run on both scratch trees (110 whole, 1127
+  cases).
+- **Result:** exactly one guard broke.
+  `project_config_json_boundary_test` counts, per launcher definition, the
+  calls of SYRD-430's nine and required `load_project_config`'s two
+  (`_role_from_json` and `_with_project_board_env`) in the launcher. Moved,
+  they are `launcher.X` calls in a file it did not scan. It is keyed by names
+  the function *calls*; the scratch comparison caught it.
+- **The Director's decision:** approved the adaptation exactly as proposed
+  before any edit. The check accepts the baseline (the launcher's own
+  definition, with both calls by bare name) or the move: one unaliased
+  re-export of `load_project_config` from exactly
+  `scripts.project_config_loader`, whose `load_project_config` makes both
+  calls through the launcher exactly as often, with no other read of the nine
+  there.
+- **Checks on the adaptation:** the committed edit is the approved diff line
+  for line, which the proof checks. The guard passes on the baseline and the
+  candidate, and still refuses an aliased or dropped re-export, a loader
+  under a module it does not name, a bare-name call, a call read on its own
+  module, a second call, a dropped call, and a launcher that keeps its own
+  loader beside a stray module (`guardkill450.py`).
+- **Every other suite:** nothing else differed.
+
+| file | before (`6da00fe`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 3,965 | 3,833 |
+| `scripts/project_config_loader.py` | - | 169 |
+| `tests/project_config_loader_boundary_test.py` | - | 603 |
+| `tests/project_config_json_boundary_test.py` | 682 | 701 |
+
+**Scope: exactly the ticket's one definition, no additional production
+definition.** `load_project_config` (1997-2129) moves whole into the new
+`scripts/project_config_loader.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import, right after the
+  `policy_hook_repair` import.
+- **Callers and readers:** the launcher's own callers
+  (`_usable_switchyard_entry_for_project`, `switchyard_validate_models_command`
+  and `main` twice) name the re-exported object as before. The
+  20 production modules that read it do so through the launcher
+  when they run, and are byte-identical.
+- **Seams:** all 22 call-time reads of 15 names are now
+  `launcher.X`. 8 are the launcher's own and 7 are its
+  imports from other modules, read on the launcher as before.
+- **Security-sensitive checks, moved verbatim:**
+  - **Root no-follow read (SYRD-228):** with no document passed and
+    `os.geteuid() == 0`, the tenant-owned file is read only through
+    `launcher.read_tenant_document_no_follow`, and a problem is refused with
+    "Nothing was changed.". `os.geteuid` is still the `os` module's own.
+  - **Repository boundary:**
+    `launcher._control_repository_boundary_error(parsed_config,
+    require_existing_user=False)` runs on the parsed config before the one
+    return, and an answer is refused.
+  - Also kept: inline report tokens refused, and `control_repository`
+    requiring `repository` and `worktree_base`.
+- **Defaults and imports:** `config_path=None` and `document=None`. `os`,
+  `replace`, `Path`, `Any` and `Mapping` are the module's own imports, and
+  `ProjectConfig` and `RoleConfig` are under TYPE_CHECKING. The module loads
+  no Switchyard module.
+
+**Proof.** The independent proof (`equiv450.py`, 14 clauses) holds.
+It compares the whole node and every default, and the launcher remainder as
+AST and text. Its rules clause fixes, in order with `find`:
+- the root no-follow read and its refusal;
+- the document or the plain read;
+- every refusal, word for word;
+- the boundary check and its refusal;
+- the one return with the board environment.
+
+Its clause 6b allows exactly the new test and the one approved guard edit, and
+requires the approved diff line for line. 19 of 19 planted faults
+are caught, each parsed first, and the plant run first requires the proof to
+hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/project_config_loader_boundary_test.py`,
+  162 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  47 cases produced by the BASELINE launcher's own definition
+  (`gold450.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane, with another
+  HOME, USER and COLUMNS, under umask 077 and under three hash seeds.
+  - **Isolation:** every config is a synthetic document in a test-owned
+    temporary tree, which is also `$HOME` and the working directory.
+    - **Stood in on the launcher and recorded:** the no-follow reader
+      (`os.geteuid` stubbed to root and non-root), the session-directory
+      default, the board URL default, the board-environment pass, the
+      boundary check, and `DEFAULT_CONFIG_DIR`.
+    - **Recorded and passed through:** the validators, path helpers, the JSON
+      reader, the role and worker-pool parsers, the socket default and
+      `ProjectConfig`.
+    - No real tenant config, home, account or repository is read or written.
+- **Baseline behaviour pinned, not changed:** a non-root caller's file that
+  is not JSON raises `JSONDecodeError`, and a missing one raises
+  `FileNotFoundError`, as before.
+- **A correction to my design note:** it listed `worker_pool_command.py` as
+  reading `team_launcher.load_project_config`. That name appears only in its
+  docstring. Its one read is `launcher.load_project_config`, which the new
+  test pins by AST.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definition in both environments (125 checks).
+- **Mutations:** 41 of 41 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout, all on the first
+  pass. The behaviour tests alone kill 39. The rest are structural, and the
+  structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 238 files are accounted for: every boundary suite and
+  the 129 naming the function.
+  - 111 suites whole: 97 pass on the candidate
+    (the new test only there, the adapted guard on both). Identical
+    non-passes on both trees: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `role_prompt_command_integration_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_pane_write_client_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 1127 cases, per case, identical on both sides: 607 pass,
+    507 stop at the same guard refusal, and 13 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `first_run_setup_completion_test::test_the_provider_is_given_the_window_the_person_is_looking_at`; `first_run_setup_completion_test::test_the_provider_follows_the_window_when_it_is_resized`; `first_run_setup_completion_test::test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode`; `first_run_setup_completion_test::test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too`; `first_run_setup_completion_test::test_a_resize_reaches_the_provider_as_a_signal`; `first_run_setup_completion_test::test_the_terminal_is_given_back_even_when_switchyard_is_killed`; `first_run_setup_completion_test::test_a_keystroke_does_not_wait_for_the_next_tick`; `first_run_setup_completion_test::test_test9_the_answer_reaches_the_question_before_anything_is_typed`; `first_run_setup_completion_test::test_test8_the_sign_in_survives_the_browser_on_a_real_terminal`; `first_run_setup_completion_test::test_test8_nothing_is_echoed_when_the_person_comes_back`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`), baseline defects already reported,
+    not changed here;
+  - **Excluded (508):** 97 that drive an upgrade
+    or `switchyard_main`, 406 whose own execution screen hits, and
+    5 accumulators;
+  - **Not run:** 6 `main()`-style suites whose whole-suite
+    screen hits: `legacy_root_owned_provision_upgrade_test.py`, `migrate_workflow_installed_release_test.py`, `privileged_plan_read_no_follow_test.py`, `team_launcher_declarative_workflow_test.py`, `team_launcher_desktop_policy_owner_test.py`, `team_launcher_identity_cutover_e2e_test.py`.
+- **What the comparison exercised (call profiler, real functions only):**
+  70 of 704 passing runs execute the moved function, in
+  51 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, repository or release was touched, and no real
+  tenant config was read. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff450.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the owner's systemctl runner -- 1 definitions, 25 lines (lines 3004-3028):
+  -   3004   25  _owner_user_systemctl  launcher callers outside: -; production readers outside the launcher: ['scripts/board_services.py']
+  - launcher names it reads (through the launcher once moved): 4: ['ProjectConfig', 'current_user_name', '_owner_command_env_args', '_tenant_owner_home']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/board_services.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: running systemctl --user as the project owner)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: ['main']; production readers: 0
+  -   - the registry project entries (alternative): 1 definitions, 25 lines; launcher callers outside: ['_switchyard_entries']; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  1834 lines  208 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   396 lines   41 defs  provisioning (new/register/teardown/owner accounts)
+  -   388 lines   28 defs  project config and registry
+  -   100 lines   10 defs  board service, listener and status
+
+**SYRD-272 is not complete.** The launcher is still 3,833 lines.

@@ -566,7 +566,26 @@ def test_the_launcher_reexports_the_nine_and_its_readers_reach_them_there() -> N
                 if isinstance(x, ast.Name) and x.id in MOVED:
                     uses.setdefault(fn.name, {}).setdefault(x.id, 0)
                     uses[fn.name][x.id] += 1
-    check(uses == DISPATCH, f"load_project_config calls them by their launcher globals, exactly as often as before: {uses}")
+    # load_project_config moved on to scripts/project_config_loader.py (SYRD-450): the launcher re-exports it, unaliased, from
+    # exactly that module, and there it calls them through the launcher, exactly as often as before, and reads none otherwise.
+    loader_path = ROOT / "scripts" / "project_config_loader.py"
+    loaded = sorted(a.name for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.project_config_loader"
+                    for a in n.names if a.asname is None)
+    through: dict = {}
+    for fn in ast.parse(loader_path.read_text(encoding="utf-8")).body if loader_path.exists() else []:
+        for x in ast.walk(fn):
+            if isinstance(x, ast.Attribute) and x.attr in MOVED:
+                key = x.attr if isinstance(x.value, ast.Name) and x.value.id == "launcher" else ast.unparse(x)
+            elif isinstance(x, ast.Name) and x.id in MOVED:
+                key = f"bare {x.id}"
+            else:
+                continue
+            through.setdefault(getattr(fn, "name", "<module>"), {}).setdefault(key, 0)
+            through[getattr(fn, "name", "<module>")][key] += 1
+    check((uses == DISPATCH and not loader_path.exists() and loaded == [])
+          or (uses == {} and loaded == ["load_project_config"] and through == DISPATCH),
+          f"load_project_config calls them by their launcher globals, exactly as often as before, in the launcher or "
+          f"through it from scripts.project_config_loader: {uses} {loaded} {through}")
     past = sorted(ast.unparse(x) for x in ast.walk(tree) if isinstance(x, ast.Attribute) and x.attr in MOVED)
     loose = sorted({x.id for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)) for x in ast.walk(n)
                     if isinstance(x, ast.Name) and x.id in MOVED})

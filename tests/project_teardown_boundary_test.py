@@ -207,10 +207,15 @@ def test_the_seams_the_classes_the_constants_and_the_leaf() -> None:
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     defined = {n.name for n in launcher.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))} | {
         t.id for n in launcher.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    # SYRD-430 moved the plan parser chain to scripts/project_config_json.py; the launcher re-exports it from there,
+    # unaliased, so it stays the launcher's name. Those three: defined here (the baseline), or re-exported from exactly
+    # that module. The checkout helper still must be defined here.
+    config_json = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.project_config_json"
+                   for a in n.names if a.asname is None}
     check(not defined & (set(MOVED) | {"uid_for_user"})
-          and {"_recorded_owner_home", "_plan_migration_reference", "_project_board_provision_from_json",
-               "_project_dir_from_generated_config_path"} <= defined,
-          f"the launcher defines none of them, and keeps the shared plan parser chain and checkout helper: {defined & set(MOVED)}")
+          and {"_recorded_owner_home", "_plan_migration_reference", "_project_board_provision_from_json"} <= defined | config_json
+          and "_project_dir_from_generated_config_path" in defined,
+          f"the launcher defines none of them, and keeps the shared plan parser chain (its own or re-exported from project_config_json) and checkout helper: {defined & set(MOVED)}")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.project_teardown"]
     leaf_import = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.host_accounts"]
     check(exported == [sorted(MOVED)] and leaf_import == [["home_dir_for_user", "local_account_exists", "uid_for_user"]],

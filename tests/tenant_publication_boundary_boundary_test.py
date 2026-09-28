@@ -211,8 +211,12 @@ def test_the_launcher_reexports_both_above_every_reader() -> None:
     first_def = min(n.lineno for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
     check(imports[0].lineno < first_def, "at the top, above every definition that could read them")
     defined = {getattr(n, "name", None) for n in tree.body} | {x.id for n in tree.body if isinstance(n, ast.Assign) for x in n.targets if isinstance(x, ast.Name)}
-    check(not defined & set(MOVED) and {"role_control_accounts", "_recovered_pin_behind_host"} <= defined,
-          "the launcher defines neither, and keeps its neighbours")
+    # A neighbour stays reachable on the launcher: defined there, or -- once a later
+    # slice moves it on (SYRD-397) -- re-exported there, unaliased.
+    exported = {a.name for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and {"role_control_accounts", "_recovered_pin_behind_host"} <= defined | exported,
+          "the launcher defines neither, and keeps its neighbours, its own or re-exported")
     phases = ast.parse((ROOT / "scripts" / "upgrade_phases.py").read_text(encoding="utf-8"))
     reads = [x for x in ast.walk(phases) if isinstance(x, ast.Attribute) and x.attr in MOVED]
     check(len(reads) == 2 and all(isinstance(x.value, ast.Name) and x.value.id == "launcher" and x.attr == MOVED[0] for x in reads),

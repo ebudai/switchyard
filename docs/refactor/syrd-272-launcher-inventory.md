@@ -12214,3 +12214,121 @@ and **not implemented**:
   -  1013 lines   10 defs  CLI parsers and dispatch
 
 **SYRD-272 is not complete.** The launcher is still 9,697 lines.
+
+### SYRD-397 (slice 19l): the trusted upgrade release and the recovered-pin check
+
+Measured on `3a5bf25`. The design was posted **before** any edit.
+
+**Moved:** `_recovered_pin_behind_host`, `resolve_trusted_upgrade_release` and
+`_selected_release_commit`, in the launcher's order, into the new
+`scripts/trusted_upgrade_release.py` (229 lines). They were not
+contiguous. `install_host_privileged_boundary` and `running_launcher_release`,
+which sat between them, stay in the launcher, as does everything around them.
+- **Re-export:** one explicit, unaliased import of all three, above every
+  definition. The upgrade's phases (`scripts/upgrade_phases.py`) still read
+  them through the launcher.
+- **Seams:** 9 call-time reads of 8 names across 2 functions,
+  through the launcher: the running release, the checkout, the shared install
+  root and its default, the host-boundary installer, 2 siblings, and the
+  launcher's own file.
+  - The pin check reads the resolver through the launcher.
+    `host_boundary_bootstrap_test` rebinds the resolver there to drive the
+    check, and a bare reference would have bypassed that silently.
+- **The launcher's own file.** As root, under the real install root, the pin
+  check asks whether it is running root-owned code before it installs the
+  host's privileged boundary, and it asked about `__file__`. It now resolves
+  `launcher.__file__` when it runs: the launcher's file, never this module's.
+  - The proof normalizes that one reference explicitly and checks that the
+    trust answer is decided before the install.
+  - The new test shows it for a checkout, for an installed release reached
+    through `current`, and for a launcher file changed after import, and shows
+    that an untrusted answer installs nothing.
+- **Unchanged:** the trust helper and the publication helpers are still
+  imported inside each function, at their points. The `runner=subprocess.run`
+  defaults are bound at definition time. `"ProjectConfig"` stays the
+  baseline's string annotation.
+- **The launcher** goes from 9,697 to 9,513 lines.
+
+**Two guards followed the move -- both this refactor's own neighbour checks.**
+- `tenant_publication_boundary_boundary_test` (SYRD-395) required
+  `_recovered_pin_behind_host` to be *defined* in the launcher.
+- `trusted_bootstrap_boundary_test` (SYRD-396) required the same of
+  `resolve_trusted_upgrade_release`.
+- Unedited, both fail on this candidate at exactly that check. Each now
+  accepts a neighbour defined in the launcher *or* re-exported by it,
+  unaliased, which is what staying reachable there means. Their "the launcher
+  defines none of the moved names" halves are unchanged.
+
+**Proof.** The independent proof (`equiv397.py`) holds. 22 of 22
+planted faults are caught, among them:
+- this module's file asked about, the launcher's file unresolved, or trusted
+  against the caller;
+- the boundary installed before the trust check, or an untrusted answer
+  ignored;
+- the sibling read directly, bypassing a rebind;
+- the pin taken from the ref;
+- the symbolic-ref refusal dropped;
+- the trust base always `/`;
+- the git argv changed.
+
+**Evidence.**
+- **New boundary test:** `tests/trusted_upgrade_release_boundary_test.py`,
+  58 checks.
+  - Every answer, print and call, in order, is compared with a golden set of
+    26 cases produced by the BASELINE launcher's own functions with
+    the same stand-ins, not typed: 11 for the pin check,
+    10 for the resolver and 5 for the commit
+    selection.
+  - Its 6 behaviour cases also pass against the baseline's own three
+    definitions (36 checks).
+  - I ran it once before screening it; the screen, run straight after, found
+    nothing.
+- **Mutations:** 50 of 50 are killed by assertions with zero guard
+  refusals. They include:
+  - every provenance and ordering fault above;
+  - trust asked on a dry run or under a redirected root;
+  - each branch and message of the pin check;
+  - each refusal, trust base and materialization argument of the resolver;
+  - the git argv, capture and parsing.
+  - The behaviour tests alone kill 44; the 6 left are structural:
+    a runner default late, the launcher imported at load, a name not re-exported, re-export aliased, the launcher redefines one, upgrade phase bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 3 suites whole (the new test on the candidate only, and
+    the two edited suites, each tree running its own version);
+  - 21 cases, identical: 20 pass, 0 pass with a
+    tolerated refusal, 1 stop at the guard (pre-effect only), and
+    0 fail otherwise;
+  - 61 cases excluded (namespace/privileged runs, 5
+    upgrade drivers through another suite's fixture, and the upgrade-driver
+    and fake-root cases of `upgrade_phases_boundary_test`, as before).
+- **What the comparison exercised (call profiler):** 3 of 23 passing runs execute a moved function: the new test, and both `_recovered_pin_behind_host` cases of `host_boundary_bootstrap_test`.
+- **Containment:** no release, privileged boundary, tenant, git cache, service
+  or root-owned file action (live snapshot identical before and after). The
+  CLI help is identical (36 invocations plus `team-launcher --help`,
+  163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the declared-workflow presence record and check -- 3 definitions, 108 lines (lines 1342-6362, not contiguous):
+  -   1342    1  NON_DECLARATIVE_WORKFLOW_SEED  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   6254   67  DeclaredWorkflowPresence  launcher callers outside: -; production readers outside the launcher: ['scripts/project_onboarding.py', 'scripts/upgrade_records.py']
+  -   6323   40  declared_workflow_presence  launcher callers outside: -; production readers outside the launcher: ['scripts/release_alignment.py', 'scripts/upgrade_records.py']
+  - launcher names it reads (through the launcher once moved): 3: ['ProjectConfig', '_load_json', 'read_board_declared_workflow']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/project_onboarding.py', 'scripts/release_alignment.py', 'scripts/upgrade_records.py']
+  - test files naming any of them: 3 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the project-config domain: what a tenant declared about its workflow, and whether the board it names has it)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['recorded_declared_workflow (scripts.privileged_provision_records)']
+  - alternatives measured the same way:
+  -   - the host privileged boundary installer and the shared-release install command (alternative): 2 definitions, 110 lines; launcher callers outside: ['switchyard_main']; production readers: 1
+  -   - the staged role tooling (alternative): 2 definitions, 107 lines; launcher callers outside: ['resume_tenant']; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2205 lines  209 defs  general helpers (unclassified)
+  -  1813 lines   74 defs  provisioning (new/register/teardown/owner accounts)
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   957 lines   31 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 9,513 lines.

@@ -1529,6 +1529,10 @@ from scripts.launch_owner_clis import (
     run_switchyard_launch_first_run_auth,
     stop_before_launch_for_missing_owner_clis,
 )
+from scripts.cli_install_instructions import (
+    _missing_cli_install_clause,
+    host_wide_install_instruction,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2621,57 +2625,6 @@ AGENT_CLI_INSTALL_COMMANDS: dict[str, str] = {
 #: variable: this decides what a root-run command reads, and the caller's own
 #: environment must not be able to point it somewhere else.
 PROC_ROOT = Path("/proc")
-
-
-def host_wide_install_instruction(cli: str) -> str:
-    """How to make one CLI host-wide, scoped so it lands where panes look.
-
-    Switchyard does not run this. PGU-904 removed CLI installation from this
-    module on purpose, and the reason applies with more force here: the only
-    installers these vendors publish are `curl | sh`, and a host-wide variant
-    would have to run one as ROOT, during provisioning, from the network. That
-    is a supply-chain decision rather than a convenience, and not one to take
-    silently while fixing a usability bug (SYRD-210).
-
-    What this does fix is the half that was plainly wrong. The printed remedy
-    used to be the bare vendor line, which installs into whichever account runs
-    it -- the desktop operator's, never the owner's. This one says where the
-    executable has to end up and what must NOT travel with it.
-    """
-    command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
-    if not command:
-        return (
-            f"install {cli} with that vendor's own installer, then place the executable in "
-            "/usr/local/bin owned by root, mode 0755, so every tenant resolves it"
-        )
-    return (
-        f"install {cli} host-wide: run the vendor installer under a throwaway HOME so nothing "
-        "it writes becomes shared, then move only the executable to /usr/local/bin owned by "
-        "root, mode 0755. No configuration, token or session file may travel with it -- "
-        "credentials stay in the owner account that authenticates"
-    )
-
-
-def _missing_cli_install_clause(cli: str) -> str:
-    """How to install one missing CLI, as text the reader runs themselves.
-
-    It used to say "install <cli> for owner user <owner> with: <vendor command>".
-    Both halves were wrong together: the vendor command installs for whoever
-    runs it, so following it exactly installed into the operator's own account
-    and the tenant still could not start -- and doing it per owner is the
-    duplicate installation SYRD-210 removed. Live UAT was given this line on a
-    resumed tenant (SYRD-211 second kickback).
-
-    What it names now is the host-wide destination, which serves this owner and
-    every later one. The vendor command is still text for a person to run;
-    switchyard never fetches or runs it (PGU-904).
-    """
-    command = AGENT_CLI_INSTALL_COMMANDS.get(cli, "")
-    installer = command or "that vendor's own installer"
-    return (
-        f"install {cli} host-wide with {installer}, or let switchyard promote a copy you "
-        "already have when it offers"
-    )
 
 
 def _owner_user_cli_reminder(owner_user: str = "") -> str:

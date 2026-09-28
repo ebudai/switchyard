@@ -17878,3 +17878,136 @@ and **not implemented**:
   -   100 lines   10 defs  board service, listener and status
 
 **SYRD-272 is not complete.** The launcher is still 4,072 lines.
+
+### SYRD-446 (slice 19ba): the vendor CLI install instructions
+
+Measured on `20fc38d`. Before any edit, the rooted closure was verified; there
+was no closure expansion. The guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 3 files
+  naming the two were run on both scratch trees (104 whole, 287 cases).
+- **Result:** exactly the two vendor-installer guards adapted in SYRD-445
+  broke. After the move no launcher function reads the install table (the
+  table itself stays there), so both guards must scan the new module too.
+- **The Director's decision:** approved the proposed adaptation before any
+  edit, and specified that the file-location guard accepts only the baseline
+  pair or the exact new three-file set.
+  - I dropped the pre-SYRD-445 single-file alternative my proposal had kept,
+    which only narrows what it accepts.
+  - I recorded the difference on the ticket and re-measured the guard kills
+    with the final text.
+- **The adapted guards:**
+  - The no-execution guard scans the launcher, `launch_owner_clis.py` and
+    `cli_install_instructions.py`, with the same exact reader set and
+    executor refusal.
+  - Both pass on the baseline and the candidate. They still refuse a moved
+    reader mentioning an executor, a third reader in the new module, the
+    instructions under an unnamed module, a fourth file naming the table,
+    and a launcher function reading the table again (`guardkill446.py`).
+  - The committed edit is the final diff line for line, which the proof
+    checks.
+- **Every other suite:** nothing else differed.
+
+| file | before (`20fc38d`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,072 | 4,025 |
+| `scripts/cli_install_instructions.py` | - | 74 |
+| `tests/cli_install_instructions_boundary_test.py` | - | 365 |
+| `tests/team_launcher_missing_cli_install_hint_test.py` | 214 | 218 |
+| `tests/agent_cli_boundary_test.py` | 204 | 207 |
+
+**Scope: exactly the ticket's two definitions, no additional production
+definition.** They move whole, in the launcher's order, into the new
+`scripts/cli_install_instructions.py`: `host_wide_install_instruction` (2626-2652), `_missing_cli_install_clause` (2655-2674).
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of both, right after the
+  `launch_owner_clis` import. No launcher definition names them.
+- **Readers:** `agent_cli_promotion.py`, `first_run_auth.py`,
+  `first_run_setup.py` and `worker_pool_command.py` read them through the
+  launcher when they run, once each, and are byte-identical.
+- **Seams:** both call-time reads (2 sites, 1 name) are now
+  `launcher.AGENT_CLI_INSTALL_COMMANDS`. The install table stays on the
+  launcher, one literal per command.
+- **Imports:** no defaults, no standard-library import; the module imports
+  nothing at load.
+
+**Proof.** The independent proof (`equiv446.py`, 14 clauses) holds.
+It compares both whole nodes (their docstrings stating switchyard never runs
+an installer included), and the launcher remainder as AST and text. Its rules
+clause fixes both texts in order with `find`: one table read and nothing that
+could execute. Its clause 6b allows exactly the new test and the two guard
+edits, and requires their change to be the final diff line for line.
+19 of 19 planted faults are caught, each parsed first, and the plant
+run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/cli_install_instructions_boundary_test.py`,
+  87 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  22 cases produced by the BASELINE launcher's own definitions
+  (`gold446.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane, with another
+  HOME, USER and COLUMNS, under umask 077 and under three hash seeds.
+  - **Isolation:** nothing is fetched, run or installed. The vendor install
+    commands are recorded by name, so the test holds no installer string.
+  - **Cases (clause 11, host-wide 11):**
+    every known CLI, an unknown one, empty, padded, capitalised and
+    non-string names, and the table rebound or emptied on the launcher.
+- **Baseline behaviour pinned, not changed:** names are not normalised, so a
+  padded or capitalised known name gets the unknown-CLI text.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (66 checks).
+- **Mutations:** 18 of 18 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout, all on the first
+  pass. The behaviour tests alone kill 16. The rest are structural, and the
+  structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 135 files are accounted for: every boundary suite and
+  the 3 naming the two.
+  - 105 suites whole: 93 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 287 cases, per case, identical on both sides: 258 pass,
+    25 stop at the same guard refusal, and 4 fail
+    identically on both (`agent_cli_host_wide_test::test_owner_verification_runs_after_the_owner_account_is_created`; `agent_cli_host_wide_test::test_the_gate_runs_before_the_first_mutation`; `desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`). The desktop and presentation ones are
+    baseline defects already reported. The two `agent_cli_host_wide_test`
+    ones are a baseline defect newly visible here, not changed: they are
+    source-order guards that look for the new-project gate and owner-account
+    calls in `team_launcher.py` text. An earlier SYRD-272 slice moved those
+    calls to `new_project_phases.py`, so the guards fail on the baseline
+    too;
+  - **Excluded (89):** 0 that drive an upgrade
+    or `switchyard_main`, 84 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, real functions only):**
+  6 of 351 passing runs execute a moved function:
+  `agent_cli_host_wide_test.py`, `cli_install_instructions_boundary_test.py`, `team_launcher_missing_cli_install_hint_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account or release was touched, and no vendor installer
+  was fetched or run. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff446.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the interrupted role-state restore -- 1 definitions, 33 lines (lines 3136-3168):
+  -   3136   33  restore_interrupted_role_state  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  - launcher names it reads (through the launcher once moved): 3: ['ProjectConfig', 'current_user_name', '_role_cli_name']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/upgrade_phases.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: putting a role's resumable state back after an interrupted repatriation)
+  - it also reads 4 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_finish_interrupted_provider_state (scripts.role_identity_cutover)', '_interrupted_provider_state_roles (scripts.role_identity_cutover)', 'home_dir_for_user (scripts.host_accounts)', 'repair_role_state_ownership (scripts.role_state_ownership)']
+  - alternatives measured the same way:
+  -   - the repository policy-hook repair (alternative): 1 definitions, 29 lines; launcher callers outside: -; production readers: 1
+  -   - the owner's systemctl runner (alternative): 1 definitions, 25 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  1825 lines  205 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   523 lines   29 defs  project config and registry
+  -   396 lines   41 defs  provisioning (new/register/teardown/owner accounts)
+  -   100 lines   10 defs  board service, listener and status
+
+**SYRD-272 is not complete.** The launcher is still 4,025 lines.

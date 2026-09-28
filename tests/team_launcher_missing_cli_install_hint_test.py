@@ -175,15 +175,19 @@ def test_nothing_can_execute_a_vendor_install_command() -> None:
     """
     source = Path(team_launcher.__file__).read_text(encoding="utf-8")
     # The missing-CLI failure text moved out of the launcher with the launch-time
-    # CLI checks (SYRD-445) and reads the table through the launcher; both files
-    # are scanned, so a reader in either one is held to the same rule. On a tree
-    # from before the move the file is absent and the reader is the launcher's;
-    # either way the exact set below must hold.
-    moved_path = Path(team_launcher.__file__).with_name("launch_owner_clis.py")
-    moved = moved_path.read_text(encoding="utf-8") if moved_path.exists() else ""
+    # CLI checks (SYRD-445), and the install instructions with SYRD-446; both read
+    # the table through the launcher. Every one of these files is scanned, so a
+    # reader in any of them is held to the same rule. On a tree from before a move
+    # its file is absent and the reader is still the launcher's; either way the
+    # exact set below must hold.
+    moved = [
+        path.read_text(encoding="utf-8")
+        for path in (Path(team_launcher.__file__).with_name(name) for name in ("launch_owner_clis.py", "cli_install_instructions.py"))
+        if path.exists()
+    ]
 
     readers: set[str] = set()
-    for tree in (ast.parse(source), ast.parse(moved)):
+    for tree in (ast.parse(source), *(ast.parse(text) for text in moved)):
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue

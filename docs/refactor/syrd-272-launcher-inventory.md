@@ -14444,3 +14444,191 @@ and **not implemented**:
   -   398 lines   12 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 7,401 lines.
+
+### SYRD-417 (slice 19ad): generated config and layout upgrade
+
+Measured on `90ca1d5`. The design was posted **before** any edit.
+
+| file | before (`90ca1d5`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 7,401 | 7,274 |
+| `scripts/generated_layout_upgrade.py` | - | 177 |
+| `tests/generated_layout_upgrade_boundary_test.py` | - | 564 |
+| `tests/shared_release_boundary_test.py` | 634 | 647 |
+
+**Moved:** `_generated_project_durable_session_dir`,
+`upgrade_generated_project_config` and `upgrade_generated_project_layout`,
+whole, in order, with the SYRD-228 no-follow comment, into the new
+`scripts/generated_layout_upgrade.py`. They were contiguous:
+`_is_generated_project_layout_template` stays above them and
+`PRIVILEGED_PROVISION_ROOT_ENV` below.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all three.
+- **Callers:** `launch_project` still calls the entry point by its launcher
+  global, and `scripts/upgrade_phases.py` still reads
+  `launcher.upgrade_generated_project_layout` at call time. Those are the only
+  direct callers.
+- **Seams:** all 20 call-time reads of 13 names are now
+  `launcher.X` (2 of them siblings), so every launcher patch in the seven
+  test files still reaches the moved code. They cover the template check, the
+  layout payloads, the board root, the session directories, the shared pane
+  launcher, the no-follow read, the atomic writer, the owner step and the
+  result type.
+- **Imports and defaults:** `runner=subprocess.run` and `dry_run=False` are
+  still bound at definition from the standard library. `ProjectConfig` and
+  `LauncherUpgradeResult` are imported under TYPE_CHECKING for annotations
+  only, as in earlier slices. The result type's runtime uses are launcher
+  reads.
+
+**One guard adapted, as the design declared: SYRD-416's own
+`shared_release_boundary_test`.**
+- **Why:** its DISPATCH counted `upgrade_generated_project_config`'s read of
+  `switchyard_shared_pane_launcher` only in functions the launcher defines.
+- **Now:** a caller a later slice moved on is found where the launcher
+  re-exports it from, and its reads through the launcher are counted there,
+  exactly as often. Nothing else in that test changed (proof clause 6b).
+- **Checked:** reading the pane launcher past the launcher in the moved
+  function fails that adapted check with an assertion.
+
+**Proof.** The independent proof (`equiv417.py`, 14 clauses) holds.
+It compares the three whole nodes after normalizing `launcher.X`, and the
+launcher remainder as AST and as text. It fixes the rules:
+- the hand-maintained check comes first;
+- detached roles are not counted;
+- the layout's `OSError` and `JSONDecodeError` answers;
+- an unknown shape is never written;
+- the layout write is followed by the owner step;
+- the configuration is read without following links and refused before
+  anything is written, then written atomically and handed to its owner;
+- the entry point only delegates.
+
+It also fixes that the adapted guard changed only as declared. 22 of
+22 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/generated_layout_upgrade_boundary_test.py`,
+  158 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  56 cases produced by the BASELINE launcher's own functions
+  (`gold417.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i` or in the
+  pane. By group:
+  - 26 layout cases: hand-maintained in three ways, current,
+    each known legacy shape and its dry run (at seven roles, where every
+    shape differs), role counts, detached roles, unknown shapes alone and
+    beside a change, malformed, empty, non-UTF-8, missing, a directory, and
+    the current payload rebound on the launcher;
+  - 18 pin cases: the directorctl pin in each role shape, the
+    pane launcher (same, through a symlink, old, none), the session dir
+    (no owner, not runtime, durable, runtime), and all at once, each with
+    dry runs;
+  - 5 no-follow cases: a symlinked config (also after a
+    legacy layout write), a group-writable provision dir, a config that is
+    not JSON, and a hard link;
+  - 7 failure and entry-point cases: the owner step failing
+    on the layout and on the config, the default runner, and the public entry
+    point.
+
+  Each case records the result, every seam call in order, and every file in
+  the tree afterwards. The template check, the payloads, the no-follow read
+  and the atomic writer are the launcher's own, run in an owned tree. The
+  board root, account and session lookups and the shared pane launcher stand
+  in. The owner step is a recorder, and the runner refuses. Its 3
+  behaviour cases also pass against the baseline's own definitions, in both
+  environments (136 checks).
+- **Screen:** it first hit on the test's literal `konsole` in the generated
+  layout file name. The name is now taken from the launcher's own
+  `presentation_layout_markers`, which is production code. The golden output
+  is unchanged by that.
+- **Mutations:** 39 of 39 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The first run left
+  two, and each now dies on a new generated case:
+  - "malformed JSON read as unreadable", by a non-UTF-8 layout (the baseline
+    raises `UnicodeDecodeError`);
+  - "the layout written unsorted", by the current payload rebound on the
+    launcher with unsorted keys.
+
+  The behaviour tests alone kill 35. The 4 left are structural,
+  and the structure checks kill each one: the launcher imported at load, re-export aliased, launch_project bypasses its global, the upgrade phase bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 54 files that name the three or their
+  callers accounted for:
+  - 18 suites whole: 14 pass on the candidate
+    (the new test only there), and `legacy_presentation_boundary_test.py`, `presentation_layout_files_boundary_test.py`, `project_worktrees_boundary_test.py` stop identically on both trees at a guard refusal;
+  - 368 cases, per case, identical on both sides: 176 pass,
+    191 stop at the same guard refusal, and 1 fails
+    identically on both (`presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), explained below;
+  - **Excluded (206):** 44 that drive an upgrade
+    or `switchyard_main`, and 162 whose own execution screen hits;
+  - **Not run:** team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function; tenant_control_bridge_e2e_test.py: not run -- a case_ suite whose main() re-executes it under unshare --user --map-root-user --mount when not root and exercises accounts as root inside that namespace; it names launch_project only.
+- **A guard my own SYRD-405 slice broke, found here and disclosed:**
+  `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`
+  fails identically on both trees.
+  - SYRD-405 (`4327409`) moved `suspend_tenant`, and with it the one
+    `close_presentation_window` call, into `tenant_suspension.py`. The call
+    still goes through the launcher, so behaviour is intact.
+  - The guard counts that call only in the launcher and its `MOVED_CALLERS`
+    list, which lacks `tenant_suspension.py`. The count was 1 at SYRD-404
+    (`b6af782`) and has been 0 since (`presentationcount417.out`).
+  - SYRD-405's comparison did not select this suite, because it names the
+    callee, not a moved name.
+  - The fix, adding `tenant_suspension.py` to its `MOVED_CALLERS`, is outside
+    this slice and is left for the Director to route.
+- **A pre-existing baseline failure, reported separately:**
+  `project_desktop_boundary_test` fails identically on both trees, with the
+  same `AssertionError`: "prepare_project_desktop is called at its 6 baseline
+  sites".
+  - The test counts sites only in the launcher, `launch_phases` and
+    `upgrade_phases`.
+  - SYRD-372 (`694870e`) moved one call into `new_project_phases.py`, which
+    it does not read. The count was 6 at SYRD-371 (`dc9dd06`) and has been 5
+    since (`desktopcount417.out`).
+  - It is not caused or changed by this slice.
+- **Reported separately, not changed (baseline behaviour kept exactly):**
+  - **A dry run still rewrites the configuration** when a role's
+    `directorctl` pin is stale. The rewrite block does not look at `dry_run`,
+    so the pin is written, and handed to the owner, while the result says
+    `changed=False`.
+    - Audit returned the first candidate over this. The Director amended the
+      ticket to require exact baseline parity here and to forbid claiming a
+      write-free dry run; SYRD-418 tracks the fix.
+    - The new module's docstring, which first claimed a dry run writes
+      nothing, was corrected to say so (a docstring-only change).
+  - **A non-UTF-8 layout template raises `UnicodeDecodeError`**, uncaught,
+    instead of the "cannot read" or "not valid JSON" answer.
+- **What the comparison exercised (call profiler, real functions only):**
+  1 of 190 passing runs execute a moved function:
+  `generated_layout_upgrade_boundary_test.py`, `team_launcher_viewer_test.py`.
+- **Containment:** nothing crossed; no tenant file, generated artifact,
+  service, account, release, pane or board was touched (live snapshot
+  identical before and after). Both entry points' help is identical
+  (36 `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the new project launcher artifacts -- 6 definitions, 262 lines (lines 3733-4065, not contiguous):
+  -   3733    2  _new_project_control_repository  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3798  102  _new_project_launcher_config_payload  launcher callers outside: -; production readers outside the launcher: -
+  -   3902    9  _dedupe_role_defs  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3913   46  _new_project_role_env  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3961    9  _director_seed_project_dir  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3972   94  write_new_project_launcher_artifacts  launcher callers outside: ['new_project_command']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 9: ['SWITCHYARD_PROJECT_DIR_NAME', 'MAX_VISIBLE_PANES_PER_WINDOW', '_load_json', '_default_role_cli_pairs', '_write_json_atomic', '_new_project_session_dir', '_new_project_worktree_base', '_new_project_layout_payload', '_switchyard_dir']
+  - launcher callers outside the closure: 1: ['new_project_command']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 21 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: writing a new project's generated launcher config and layout template -- the payload, each role's environment and the files, the generating side of the upgrade SYRD-417 moved -- called only by new_project_command)
+  - it also reads 5 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['DEFAULT_PROJECT_IMPLEMENTER_ROLES (scripts.ticket_board.project_provision)', 'ProjectBoardProvision (scripts.ticket_board.project_provision)', 'SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME (scripts.project_onboarding)', 'director_onboarding_seed_text (scripts.project_onboarding)', 'switchyard_shared_pane_launcher (scripts.shared_release)']
+  - alternatives measured the same way:
+  -   - the deploy-source precheck (alternative): 3 definitions, 63 lines; launcher callers outside: ['precheck_new_project']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2146 lines  211 defs  general helpers (unclassified)
+  -  1563 lines   65 defs  provisioning (new/register/teardown/owner accounts)
+  -  1004 lines   38 defs  project config and registry
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   282 lines   11 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 7,274 lines.

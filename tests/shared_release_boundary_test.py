@@ -574,6 +574,19 @@ def test_the_launcher_reexports_the_thirteen_and_its_readers_reach_them_there() 
                 if isinstance(x, ast.Name) and x.id in MOVED:
                     uses.setdefault(fn.name, {}).setdefault(x.id, 0)
                     uses[fn.name][x.id] += 1
+    # A caller a later slice moved on is re-exported by the launcher, unaliased, from a scripts module, and reads them
+    # there through the launcher, exactly as often (SYRD-417 moved upgrade_generated_project_config).
+    sources = {a.name: n.module for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+               for a in n.names if a.asname is None}
+    for caller in sorted(set(DISPATCH) - set(uses)):
+        if caller not in sources:
+            continue
+        moved_to = ast.parse((ROOT / (sources[caller].replace(".", "/") + ".py")).read_text(encoding="utf-8"))
+        node = next((n for n in moved_to.body if getattr(n, "name", None) == caller), None)
+        for x in ast.walk(node) if node is not None else ():
+            if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == "launcher" and x.attr in MOVED:
+                uses.setdefault(caller, {}).setdefault(x.attr, 0)
+                uses[caller][x.attr] += 1
     check(uses == DISPATCH, f"the launcher's own callers read them as launcher globals, exactly as often as before: {uses}")
     loose = sorted({x.id for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)) for x in ast.walk(n)
                     if isinstance(x, ast.Name) and x.id in MOVED})

@@ -1375,6 +1375,11 @@ from scripts.shared_release import (
     switchyard_shared_target,
     switchyard_version_text,
 )
+from scripts.generated_layout_upgrade import (
+    _generated_project_durable_session_dir,
+    upgrade_generated_project_config,
+    upgrade_generated_project_layout,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3055,138 +3060,6 @@ def _is_generated_project_layout_template(config: ProjectConfig, *, config_path:
         and layout_path.parent == provision_dir
         and layout_path.name == f"{config.project}-konsole-layout.json"
     )
-
-
-def _generated_project_durable_session_dir(config: ProjectConfig) -> Path | None:
-    if not config.run_as_user:
-        return None
-    return Path(_new_project_session_dir(config.project, config.run_as_user))
-
-
-def upgrade_generated_project_config(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    dry_run: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> LauncherUpgradeResult:
-    if not _is_generated_project_layout_template(config, config_path=config_path):
-        return LauncherUpgradeResult(
-            changed=False,
-            message=f"switchyard: {config.project} layout is hand-maintained or outside a provision directory; leaving it unchanged",
-    )
-    changed_messages: list[str] = []
-    durable_session_dir = _generated_project_durable_session_dir(config)
-    session_dir_upgrade: Path | None = None
-    shared_pane_launcher = switchyard_shared_pane_launcher()
-    pane_launcher_upgrade: Path | None = None
-    board_root = _tenant_board_root_from_config_or_plan(config, config_path)
-    directorctl_upgrade = str(board_root / "current" / "scripts" / "directorctl") if board_root is not None else ""
-    roles_need_directorctl_upgrade = bool(directorctl_upgrade) and any(
-        role.env.get("TICKET_BOARD_DIRECTORCTL") != directorctl_upgrade for role in config.roles
-    )
-    if roles_need_directorctl_upgrade:
-        if dry_run:
-            changed_messages.append(f"pane directorctl can be pinned to {directorctl_upgrade}")
-        else:
-            changed_messages.append(f"pinned pane directorctl to {directorctl_upgrade}")
-    if (
-        config.pane_launcher is not None
-        and config.pane_launcher.expanduser().resolve(strict=False)
-        != shared_pane_launcher.expanduser().resolve(strict=False)
-    ):
-        if dry_run:
-            changed_messages.append(
-                f"pane launcher can be upgraded from {config.pane_launcher} to {shared_pane_launcher}"
-            )
-        else:
-            pane_launcher_upgrade = shared_pane_launcher
-            changed_messages.append(f"upgraded pane launcher to {shared_pane_launcher}")
-    if (
-        durable_session_dir is not None
-        and session_dir_uses_user_runtime(config.session_dir, config.run_as_user)
-        and config.session_dir.expanduser().resolve(strict=False) != durable_session_dir.expanduser().resolve(strict=False)
-    ):
-        if dry_run:
-            changed_messages.append(
-                f"session dir can be upgraded from {config.session_dir} to {durable_session_dir}"
-            )
-        else:
-            session_dir_upgrade = durable_session_dir
-            changed_messages.append(f"upgraded session dir to {durable_session_dir}")
-    role_count = sum(1 for role in config.roles if not role.detached)
-    current_layout = _new_project_layout_payload(role_count)
-    known_layouts = _known_generated_project_layout_payloads(role_count)
-    try:
-        existing_layout = json.loads(config.layout.read_text(encoding="utf-8"))
-    except OSError as exc:
-        return LauncherUpgradeResult(
-            changed=False,
-            message=f"switchyard: cannot read generated layout template {config.layout}: {exc}",
-        )
-    except json.JSONDecodeError as exc:
-        return LauncherUpgradeResult(
-            changed=False,
-            message=f"switchyard: generated layout template {config.layout} is not valid JSON: {exc}",
-        )
-    if existing_layout != current_layout:
-        if existing_layout not in known_layouts:
-            if not changed_messages:
-                return LauncherUpgradeResult(
-                    changed=False,
-                    message=f"switchyard: {config.project} layout template differs from the known generated legacy shapes; leaving it unchanged",
-                )
-            changed_messages.append("layout template differs from the known generated legacy shapes; leaving it unchanged")
-        elif dry_run:
-            changed_messages.append(f"layout template can be upgraded: {config.layout}")
-        else:
-            config.layout.write_text(json.dumps(current_layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            ensure_owner_file(config, config.layout, runner=runner)
-            changed_messages.append(f"upgraded generated layout template: {config.layout}")
-    elif not changed_messages:
-        return LauncherUpgradeResult(
-            changed=False,
-            message=f"switchyard: {config.project} layout template is already current",
-        )
-    if session_dir_upgrade is not None or pane_launcher_upgrade is not None or roles_need_directorctl_upgrade:
-        # Root rewrites this document, so it must be the tenant's own and not a
-        # link to somebody else's file (SYRD-228).
-        raw_config, config_problem = read_tenant_document_no_follow(
-            config_path, what=f"{config.project}'s generated configuration"
-        )
-        if config_problem:
-            return LauncherUpgradeResult(
-                changed=False, message=f"switchyard: {config_problem}. Nothing was changed."
-            )
-        if session_dir_upgrade is not None:
-            raw_config["session_dir"] = str(session_dir_upgrade)
-        if pane_launcher_upgrade is not None:
-            raw_config["pane_launcher"] = str(pane_launcher_upgrade)
-        if roles_need_directorctl_upgrade:
-            for raw_role in raw_config.get("roles", []):
-                if not isinstance(raw_role, dict):
-                    continue
-                raw_env = raw_role.get("env")
-                if not isinstance(raw_env, dict):
-                    raw_env = {}
-                    raw_role["env"] = raw_env
-                raw_env["TICKET_BOARD_DIRECTORCTL"] = directorctl_upgrade
-        _write_json_atomic(config_path, raw_config)
-        ensure_owner_file(config, config_path, runner=runner)
-    return LauncherUpgradeResult(
-        changed=not dry_run,
-        message=f"switchyard: upgraded generated project config for {config.project}: {'; '.join(changed_messages)}",
-    )
-
-
-def upgrade_generated_project_layout(
-    config: ProjectConfig,
-    *,
-    config_path: Path,
-    dry_run: bool = False,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> LauncherUpgradeResult:
-    return upgrade_generated_project_config(config, config_path=config_path, dry_run=dry_run, runner=runner)
 
 
 PRIVILEGED_PROVISION_ROOT_ENV = "SWITCHYARD_PRIVILEGED_PROVISION_ROOT"

@@ -12332,3 +12332,114 @@ and **not implemented**:
   -   957 lines   31 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 9,513 lines.
+
+### SYRD-398 (slice 19m): the declared-workflow presence record and reader
+
+Measured on `132c832`. The design was posted **before** any edit.
+
+**Moved:** `NON_DECLARATIVE_WORKFLOW_SEED` (with its four-line comment), the
+frozen `DeclaredWorkflowPresence` record and `declared_workflow_presence`, in
+the launcher's order, into the new `scripts/workflow_presence.py` (155
+lines).
+- **The seed** sat inside the launcher's block of constants. Only its comment
+  and assignment left; the two blank lines before `DEFAULT_SESSION_DIR` stay.
+- **The record and the reader** were contiguous. `resolved_source_selection`
+  above and `_open_board_url` below stay.
+- **Re-export:** one explicit, unaliased import of all three, above every
+  definition.
+  - `release_alignment.py` and `upgrade_records.py` still read the reader
+    through the launcher.
+  - `project_onboarding.py` and `upgrade_records.py` still name the record
+    from it for their annotations.
+- **Seams:** 6 call-time reads of 5 names in the reader, through
+  the launcher: the JSON loader (twice), root's recorded workflow, the board's
+  reader, the seed, and the record it makes (2 moved siblings).
+- **Unchanged:** the record's `@dataclass(frozen=True)`, fields, field
+  comments, defaults and three properties are bound when it is defined, from
+  the module's own `dataclass`. `ProjectConfig` is an annotation only.
+- **The launcher** goes from 9,513 to 9,401 lines. No guard needed to
+  follow the move.
+
+**Proof.** The independent proof (`equiv398.py`) holds. 22 of 22
+planted faults are caught, among them:
+- the record not frozen, a field reordered or its default changed, a field
+  comment or a property dropped;
+- an unreachable board taken as running none, the seed's exemption dropped, an
+  unreadable config taken as absent;
+- a narrower catch, the board asked before the plan, the override ignored, a
+  seam read directly;
+- a neighbouring constant changed.
+
+**Evidence.**
+- **New boundary test:** `tests/workflow_presence_boundary_test.py`, 43
+  checks.
+  - It compares every field, every property and the order the sources are
+    asked in with 21 golden cases, produced by the BASELINE launcher's
+    own reader over owned temporary config and plan files with the same
+    stand-ins, not typed.
+  - The cases cover each source independently: a config that declares, has no
+    key, a null workflow, is missing, bad JSON, a directory, or makes the
+    loader exit; root's record with and without a note; a plan that declares,
+    is absent, unreadable, carries the pgu-full or another seed, or makes the
+    loader exit; a board with a document (with and without a note), running
+    none, unreachable, or saying nothing; and the reader given or default.
+  - Its 3 behaviour cases also pass against the baseline's own three
+    definitions (27 checks).
+  - Root's record is refused where the launcher imports it from, so a reader
+    that went past the launcher fails the test.
+- **Mutations:** 31 of 31 are killed by assertions with zero guard
+  refusals.
+  - The first run left four alive: a document taken as running none, the
+    board's and root's answers taken from their problem text, and
+    `SystemExit` escaping the config. The golden cases gained the source
+    combinations that tell those apart (regenerated from the baseline), and a
+    reader that raises became an answer to compare. All four are now killed.
+  - The behaviour tests alone kill 25. The 6 left are structural
+    -- the record's shape, asserted against the baseline by the structure
+    cases, and the module's placement and re-export: the record not frozen, a field default changed, the launcher imported at load, re-export aliased, the launcher redefines one, a consumer bypasses the launcher.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - the new test whole;
+  - 46 runs, identical: 29 pass, 0 pass with a
+    tolerated refusal, 16 stop at the guard (pre-effect only: the
+    migration fixtures' account lookups), and 1 fail otherwise;
+  - 5 cases excluded (an upgrade driver and the pkexec
+    cases).
+  - The one failure, identical on both trees, is
+    `release_alignment_boundary_test`'s accumulator: the `release_alignment`
+    seam is missing. The only case that stands it in,
+    `test_what_the_director_says`, is one of the excluded pkexec cases.
+- **What the comparison exercised (call profiler, functions only; the class
+  body runs once at import and is not counted):** 1 of 29
+  passing runs execute a moved function: the new test. The existing presence
+  cases stop at the guard before reaching it, so the behaviour rests on the
+  new test, its baseline-generated cases, the run against the baseline, the
+  mutants and the proof.
+- **Containment:** no board, workflow, config, release or database write
+  (live snapshot identical before and after). The CLI help is identical
+  (36 invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: staging and refreshing each role's root-owned tooling -- 3 definitions, 109 lines (lines 6094-6216, not contiguous):
+  -   6094   41  refresh_staged_role_tooling  launcher callers outside: -; production readers outside the launcher: ['scripts/upgrade_phases.py']
+  -   6147   66  ensure_staged_role_tooling  launcher callers outside: ['resume_tenant']; production readers outside the launcher: ['scripts/new_project_phases.py']
+  -   6215    2  _staged_tooling_dir  launcher callers outside: -; production readers outside the launcher: ['scripts/pane_hooks.py', 'scripts/release_rollback.py', 'scripts/upgrade_phases.py']
+  - launcher names it reads (through the launcher once moved): 3: ['ProjectConfig', 'STAGED_TOOLING_OWNER_UID', 'staged_bundle_launch_problems']
+  - launcher callers outside the closure: 1: ['resume_tenant']
+  - production modules reading it through the launcher: 4: ['scripts/new_project_phases.py', 'scripts/pane_hooks.py', 'scripts/release_rollback.py', 'scripts/upgrade_phases.py']
+  - test files naming any of them: 7 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the release/upgrade domain: the root-owned copy of the tooling each role runs, staged from the verified release and refreshed on upgrade)
+  - it also reads 3 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['role_tooling_staging_commands (scripts.ticket_board.project_provision)', 'role_tooling_staging_dir (scripts.ticket_board.project_provision)', 'staged_role_tooling_problems (scripts.ticket_board.project_provision)']
+  - alternatives measured the same way:
+  -   - the host privileged boundary installer and the shared-release install command (alternative): 2 definitions, 110 lines; launcher callers outside: ['switchyard_main']; production readers: 1
+  -   - restoring interrupted role state (alternative): 1 definitions, 33 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2210 lines  210 defs  general helpers (unclassified)
+  -  1813 lines   74 defs  provisioning (new/register/teardown/owner accounts)
+  -  1157 lines   42 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   957 lines   31 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 9,401 lines.

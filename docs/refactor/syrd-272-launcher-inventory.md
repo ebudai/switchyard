@@ -15238,3 +15238,146 @@ and **not implemented**:
   -   228 lines   23 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 6,260 lines.
+
+### SYRD-423 (slice 19ai): project design command
+
+Measured on `0e40dc2`. The design was posted **before** any edit.
+
+| file | before (`0e40dc2`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 6,260 | 6,124 |
+| `scripts/project_design_command.py` | - | 171 |
+| `tests/project_design_command_boundary_test.py` | - | 551 |
+
+**Scope: exactly the ticket's four, no additions.** The command's only
+definition-time defaults are the `input` and `print` builtins and `None`; the
+helpers have none.
+
+**Moved:** `_comma_list`, `_default_project_artifact_path`,
+`_default_project_design_document_path` (from 3157-3166) and
+`design_project_command` (3175-3302), whole and in order, into the new
+`scripts/project_design_command.py`. `_project_design_markdown`, which sat
+between them, is a launcher seam the command reads, and it stays.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all four.
+- **Callers:** `main`'s `design` branch still calls `design_project_command` by
+  its launcher global. `team_launcher_test_helpers` still imports it from
+  `scripts.team_launcher`. No production module outside the launcher reads
+  any of the four.
+- **Seams:** all 40 call-time reads of 23 names are now
+  `launcher.X` (3 of them siblings):
+  - the launcher's prompts, slug/audit validators, role and owner defaults,
+    `ProjectDesignArtifact`, `project_design_artifact_payload`,
+    `_project_design_markdown`, `_write_json_atomic`, the gate defaults and
+    `WORKTREE_POLICIES`;
+  - the names it imports: `Choice`, `Field`, `KIND_SINGLE`,
+    `terminal_select`, `_owner_user_verbatim`, `validate_ticket_prefix` and
+    `DEFAULT_PROJECT_IMPLEMENTER_ROLES`.
+- **Imports:** only the standard library (`Path`, `Callable`, `Sequence`);
+  there is no TYPE_CHECKING block, and no Switchyard module is loaded at
+  import.
+- **Guards:** none adapted. The scan covered patch and stand-in dicts,
+  declarations inside test strings, `in defined` stay checks, `__module__`
+  filters and the other boundary tests' count tables, and the only changed
+  test file is the new one (proof clause 6b).
+
+**Proof.** The independent proof (`equiv423.py`, 14 clauses) holds.
+It compares the four whole nodes after normalizing `launcher.X`, and the
+launcher remainder as AST and text. It fixes the rules:
+- the slug is validated first, then the paths resolved (the document beside
+  the artifact by default);
+- the questions come in order: title, summary, code location, remote,
+  branch, worktree policy (refused unless declared), owner (verbatim),
+  prefix, push policy;
+- the audit/implementer overlap is refused, then the gates and grants are
+  asked;
+- the document is written, then the artifact atomically, then both are
+  announced.
+
+20 of 20 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/project_design_command_boundary_test.py`,
+  136 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  41 cases produced by the BASELINE launcher's own functions
+  (`gold423.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical whether generated under `env -i`, in the
+  pane, or under umask 077. Each case runs in a fresh owned tree and records
+  the transcript (every question, every line shown, stdout), the return code
+  or exact refusal, every call to a launcher seam, and every file left in the
+  tree with its content (and, for the artifact, its mode). By group:
+  - 36 runs of the command:
+    - every argument given, with a project name, roles and auditors;
+    - the refusals: overlap, reserved and invalid auditors, an undeclared
+      policy, an empty prefix, a blank owner, a dashed slug;
+    - normalization: a normalized prefix, a verbatim owner, an uppercase slug;
+    - paths: explicit, beside the artifact, the output directory, the
+      working directory, a relative output directory, a relative repository
+      given and typed;
+    - interaction: every question defaulted and answered, blank title and
+      summary, the policy by name, unmatched and cancelled, a bad yes/no and
+      the retry cap, prefixes typed, a mix of given and asked, no input left;
+    - rebinding: the gate defaults, worktree policies and default
+      implementers rebound on the launcher;
+  - the `design` verb through `main`;
+  - the comma list and both default paths directly.
+- **Harness:** the real writer, payload, markdown and validators run inside
+  the tree. Its 3 behaviour cases also pass against the baseline's own
+  definitions, in both environments (110 checks).
+- **Mutations:** 43 of 43 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first run left one, "the repository unresolved": every case had
+    passed an absolute, already-resolved repository. It now dies on the two
+    relative-repository cases, and everything from the golden file onward
+    was regenerated and rerun.
+  - The behaviour tests alone kill 41. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits), and all 28 files accounted for (the three that
+  name the four, those naming the command's design-specific seams, the
+  boundary tests naming `_write_json_atomic`, and the earlier slices'
+  boundary tests):
+  - 19 suites whole: 16 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher). The first two stop at a guard refusal of a real account
+    lookup. `project_desktop_boundary_test` has failed on public main since
+    SYRD-372 (disclosed on SYRD-417) and is not changed here;
+  - 90 cases, per case, identical on both sides: 69 pass and
+    21 stop at the same guard refusal;
+  - **Excluded (21):** 3 that drive an upgrade
+    or `switchyard_main`, 18 whose own execution screen hits, and
+    0 accumulator;
+  - **Not run:** team_launcher_test_helpers.py: not run -- a helper module for other suites; it defines no test_ or case_ function.
+- **What the comparison exercised (call profiler, real functions only):**
+  4 of 85 passing runs execute a moved function:
+  `project_design_command_boundary_test.py`, `team_launcher_design_test.py`, `team_launcher_registry_test.py`.
+- **Containment:** no project was designed or provisioned outside owned temp
+  trees, and no service, database, account, tenant, board or socket was
+  touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the upgrade command -- 1 definitions, 142 lines (lines 4915-5056):
+  -   4915  142  upgrade_project_command  launcher callers outside: ['main', 'switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 1: ['ProjectConfig']
+  - launcher callers outside the closure: 2: ['main', 'switchyard_main']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 17 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `team-launcher upgrade` / `switchyard upgrade` -- moving a project onto a newer release)
+  - it also reads 10 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['UpgradeIdentitiesDone (scripts.upgrade_phases)', 'UpgradeSourcePinned (scripts.upgrade_phases)', 'UpgradeStateReady (scripts.upgrade_phases)', 'UpgradeToolingStaged (scripts.upgrade_phases)', '_finish_upgrade (scripts.upgrade_phases)', '_pin_upgrade_source (scripts.upgrade_phases)', '_recover_upgrade_state (scripts.upgrade_phases)', '_refresh_upgrade_artifacts (scripts.upgrade_phases)', '_stage_upgrade_tooling (scripts.upgrade_phases)', '_upgrade_identities_and_accounts (scripts.upgrade_phases)']
+  - alternatives measured the same way:
+  -   - the new-project command (alternative): 3 definitions, 275 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the switchyard new command (alternative): 1 definitions, 225 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  2008 lines  203 defs  general helpers (unclassified)
+  -  1170 lines   56 defs  provisioning (new/register/teardown/owner accounts)
+  -   945 lines    6 defs  CLI parsers and dispatch
+  -   754 lines   33 defs  project config and registry
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 6,124 lines.

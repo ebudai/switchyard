@@ -16310,3 +16310,137 @@ and **not implemented**:
   -   228 lines   23 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 4,963 lines.
+
+### SYRD-432 (slice 19ap): Switchyard command table and help
+
+Measured on `0ea10f6`. Before any edit, the guards were measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 31 files naming the
+  five were run on both scratch trees (94 whole, 565 cases).
+- **Result:** nothing differed, so no test guard needed adapting and none
+  changed.
+  - The four boundary tests with stay checks naming a moved definition
+    already accept "own or re-exported".
+  - No test quotes a moved line against `team_launcher.py`.
+
+| file | before (`0ea10f6`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,963 | 4,777 |
+| `scripts/switchyard_commands.py` | - | 222 |
+| `tests/switchyard_commands_boundary_test.py` | - | 465 |
+
+**Scope: exactly the ticket's five definitions, no additional production
+definition.** The three verb tables (`SWITCHYARD_COMMANDS`,
+`SWITCHYARD_UNPRIVILEGED_COMMANDS` with its lead comment, and
+`SWITCHYARD_PRIVILEGED_COMMANDS`, 1549-1681), `switchyard_help_text`
+(4177-4215) and `switchyard_invocation_requires_root` (4218-4234) move whole,
+in order, into the new `scripts/switchyard_commands.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all five, right after the
+  `project_config_json` import.
+- **Callers:** `switchyard_main` still calls the help and the root check by
+  the launcher's names. `scripts/command_crossing.py` still reads
+  `launcher.SWITCHYARD_UNPRIVILEGED_COMMANDS` and is byte-identical, as are
+  `tenant_control_helper.py` and `install-switchyard`.
+- **Seams:** all 3 call-time reads are now `launcher.X`: the help's
+  verb list, and the root check's privileged set and `_tenant_control_can_serve`
+  (whose call-time binding is kept).
+- **Definition-time evaluation:** `SWITCHYARD_PRIVILEGED_COMMANDS` is computed
+  when the new module loads, from the two tables beside it, which are the very
+  objects the launcher re-exports.
+- **Imports:** the module imports only `typing.Sequence`. It loads no
+  Switchyard module and never the launcher.
+
+**Proof.** The independent proof (`equiv432.py`, 14 clauses) holds.
+It compares the five whole nodes, normalizing `launcher.X` in the functions,
+and the launcher remainder as AST and text. It fixes:
+- the privileged set's load-time expression over the two tables beside it;
+- the help's verb list read when it runs;
+- the root check: never crossing for no argv, a help or version word, a
+  verb's own `-h`/`--help` or a verb outside the privileged set;
+- case-folding the verb;
+- crossing otherwise exactly when the tenant-control bridge cannot serve the
+  whole argv.
+
+15 of 15 planted faults are caught, each parsed first. One plant
+was relabelled: a bare read of the verb list is clause 2's catch, since 3c
+normalizes the prefix away.
+
+**Evidence.**
+- **New boundary test:** `tests/switchyard_commands_boundary_test.py`,
+  119 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  37 cases produced by the BASELINE launcher's own definitions
+  (`gold432.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane and with another
+  HOME, USER and COLUMNS.
+  - **Tables and help:** the complete tables and their classification; the
+    help, directly and through `switchyard_main --help`/`help`.
+  - **Root decisions:** every verb in the table, served and not served over
+    the tenant-control bridge (stood in on the launcher). Also: help and
+    version words, a verb's own help, case-folding, unknown verbs, bare
+    project names, both tables rebound on the launcher, and the installed
+    wrapper's `--switchyard-wrapper-requires-root` question.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (98 checks).
+- **Mutations:** 29 of 29 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first pass left two survivors: the version word and `help` treated as
+    verbs. On real data they are equivalent, because neither word is
+    privileged. Cases now rebind the privileged set on the launcher to
+    include every help and version word, so the early return is pinned.
+    Everything from the golden file onward was regenerated and rerun.
+  - The behaviour tests alone kill 27. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 149 files are accounted for: every boundary suite and
+  the 31 naming the five.
+  - 95 suites whole: 82 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `role_prompt_command_integration_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 565 cases, per case, identical on both sides: 440 pass,
+    122 stop at the same guard refusal, and 3 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`). All are baseline defects, not changed
+    here: the two presentation cases were reported before.
+    `role_control_sudoers_install_test` is newly reached, because it names
+    `SWITCHYARD_COMMANDS`. It forbids any mention of `switchyard-publish-ref`
+    and `switchyard-integrate-main` in a fresh packet, and the packet now names
+    both in the `sudo rm -f` lines that retire them. That is the test's
+    expectation against the packet generator, not these definitions;
+  - **Excluded (195):** 14 that drive an upgrade
+    or `switchyard_main`, 176 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** tenant_control_bridge_e2e_test.py: not run -- case_* suite; its main() re-executes itself under unshare (user namespaces) and its whole-suite execution screen HITs (unshare, __file__); its child imports switchyard_invocation_requires_root from scripts.team_launcher, which re-exports it.
+- **What the comparison exercised (call profiler, real functions only):**
+  14 of 522 passing runs execute a moved function:
+  `adopt_workflow_test.py`, `board_skill_test.py`, `host_desktop_approval_test.py`, `onboarding_readiness_test.py`, `release_phase_journal_test.py`, `repository_boundary_repair_test.py`, `resume_provision_test.py`, `role_onboarding_prompt_test.py`, `role_runtime_test.py`, `switchyard_commands_boundary_test.py`, `team_launcher_attach_by_role_test.py`, `team_launcher_presentation_test.py`, `team_launcher_switchyard_commands_test.py`, `worker_pool_lifecycle_test.py`, `worker_pool_preflight_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account or release was touched. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff432.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the switchyard project registration -- 4 definitions, 97 lines (lines 3312-3550, not contiguous):
+  -   3312   23  _registered_project_collision  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   3337   17  _check_switchyard_registration_available  launcher callers outside: -; production readers outside the launcher: ['scripts/new_project_phases.py']
+  -   3356   47  _register_switchyard_project  launcher callers outside: -; production readers outside the launcher: ['scripts/new_project_phases.py', 'scripts/resume_provision_command.py']
+  -   3541   10  switchyard_register_command  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 7: ['switchyard_registry_dir', 'SWITCHYARD_REGISTRY_SCHEMA', 'SWITCHYARD_REGISTRY_AGENT_CLIS_KEY', '_load_json', 'load_project_config', '_validate_project_slug', '_switchyard_entries']
+  - launcher callers outside the closure: 1: ['switchyard_main']
+  - production modules reading it through the launcher: 2: ['scripts/new_project_phases.py', 'scripts/resume_provision_command.py']
+  - test files naming any of them: 8 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: `switchyard register` -- checking a project config can be registered, refusing a collision, and recording it)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_configured_agent_clis (scripts.agent_cli_promotion)']
+  - alternatives measured the same way:
+  -   - the legacy generated-layout payloads (alternative): 5 definitions, 81 lines; launcher callers outside: -; production readers: 2
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+- Largest remaining launcher domains (`domains.py`):
+  -  1914 lines  205 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   590 lines   32 defs  project config and registry
+  -   582 lines   50 defs  provisioning (new/register/teardown/owner accounts)
+  -   228 lines   23 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 4,777 lines.

@@ -16838,3 +16838,159 @@ and **not implemented**:
   -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
 
 **SYRD-272 is not complete.** The launcher is still 4,543 lines.
+
+### SYRD-437 (slice 19at): board workflow readers
+
+Measured on `d7adc6a`. Before any edit, the rooted closure was verified: the
+two readers read nothing from the launcher, and `ProjectConfig` appears only
+in annotations. The guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the nine files naming the
+  two were run on both scratch trees (97 whole, 270 cases).
+- **Result:** exactly two stay checks differed. Re-running both suites in full
+  with the proposed adaptation in both copies found nothing further.
+- **Decision:** the design disclosed both. The Director chose option A before
+  the edit.
+
+| file | before (`d7adc6a`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,543 | 4,466 |
+| `scripts/board_workflow_readers.py` | - | 106 |
+| `tests/board_workflow_readers_boundary_test.py` | - | 415 |
+
+**Scope: exactly the ticket's two definitions, no additional production
+definition.** `read_board_declared_workflow` (3238) and
+`read_board_workflow_state` (3278) move whole, in order, into the new
+`scripts/board_workflow_readers.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of both, right after the
+  `project_layouts` import.
+- **Readers:** `pane_rebind.py`, `tenant_config_records.py`,
+  `workflow_adoption.py` and `workflow_presence.py` still read them on the
+  launcher and are byte-identical. So is the behavioural patch site in
+  `finish_upgrade_dry_run_parity_test`.
+- **No launcher import:** the module never imports the launcher when it runs.
+  `ProjectConfig` is under TYPE_CHECKING. Each reader keeps its own call-time
+  import of `UnixHTTPConnection` from `write_client`, and its one default,
+  `connection_factory=None`.
+
+**The approved guard adaptation (option A):**
+- **Change:** `recovery_readiness_boundary_test` and
+  `resume_provision_command_boundary_test` each had a stay check requiring
+  `read_board_declared_workflow` to be defined in the launcher. For that name
+  only, each now accepts its baseline definition or an unaliased re-export
+  from exactly `scripts.board_workflow_readers`.
+- **Unchanged:** the `MOVED` exclusion, `recovery_readiness`'s
+  `_finish_provision_after_packet` clause, and every other assertion and
+  literal.
+- **Verification:** both adapted suites pass on the clean baseline (the
+  adapted files copied onto its archive) and on the candidate: `resume` whole,
+  and all 10 screen-clean `recovery_readiness` cases.
+- **Guard kills:** after a no-fault run passes both guards, 6
+  runs fail them with assertions and zero guard refusals. The faults were:
+  - the reader re-exported aliased;
+  - the reader re-exported from another module holding the same object;
+  - the reader re-exported from the right module, aliased, on a separate
+    line.
+- **Proof:** clause 6b derives the approved edit from each baseline check
+  statement and confines both edits exactly.
+
+**Proof.** The independent proof (`equiv437.py`, 14 clauses) holds.
+It compares both whole nodes (their nested imports included), and the
+launcher remainder as AST and text. It fixes:
+- the board's own socket, a 3-second timeout and one GET `/api/workflow`;
+- the connection closed in a finally;
+- any failure answered as "cannot say", and a non-200 status named;
+- the revision rule;
+- no launcher import at run time.
+
+15 of 15 planted faults are caught, each parsed first. That
+includes a guard widened to any `scripts` module, an alias allowed, and each
+of the unchanged clauses dropped. Two plants were corrected: one I wrote
+broke the syntax, which the parse-first pass caught, and one was relabelled
+to the clause that rightly catches it.
+
+**Evidence.**
+- **New boundary test:** `tests/board_workflow_readers_boundary_test.py`,
+  125 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  41 cases produced by the BASELINE launcher's own definitions
+  (`gold437.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane and with another
+  HOME, USER and COLUMNS.
+  - **Isolation:** the board is always a stand-in and nothing connects to a
+    socket.
+  - **Answers:** a declared workflow and none, and the revision's types.
+  - **Malformed answers:** a list, not JSON, not UTF-8, empty, and a
+    non-object document.
+  - **Statuses:** 201, 204, 404 and 503.
+  - **Failures:** at connect, request and read; the connection is closed
+    whenever it was opened.
+  - **Other paths:** the default connection (stood in on `write_client`),
+    and the launcher's names.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (106 checks).
+- **Mutations:** 23 of 23 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout.
+  - The first pass left four survivors:
+    - any 2xx accepted: 201 and 204 cases were added;
+    - a failure raised, and a list accepted: these crashed the fixture rather
+      than failing an assertion, so the cases now record any exception as the
+      answer;
+    - `ProjectConfig` imported at load: this makes the module unimportable
+      (an import cycle), so it was dropped from the mutation set. Proof plant
+      3b covers it.
+
+    Everything from the golden file onward was regenerated and rerun.
+  - The behaviour tests alone kill 21. The rest are structural, and the
+    structure checks kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 129 files are accounted for: every boundary suite and
+  the nine naming the two. The adapted guards run against their originals on
+  the baseline.
+  - 98 suites whole: 86 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 270 cases, per case, identical on both sides: 245 pass,
+    23 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`). All are baseline defects already
+    reported, not changed here;
+  - **Excluded (95):** 5 that drive an upgrade
+    or `switchyard_main`, 85 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** team_launcher_adopt_registry_config_test.py: not run -- a main()-style suite with no test_ function; main() re-executes it as root in a user namespace (unshare --map-root-user, --privileged-child) and its whole-suite execution screen HITs; it patches read_board_declared_workflow on team_launcher (patch.object), which the re-export keeps working.
+- **What the comparison exercised (call profiler, real functions only):**
+  1 of 331 passing runs execute a moved function:
+  `board_workflow_readers_boundary_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account or release was touched. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the runtime-user provisioning -- 6 definitions, 69 lines (lines 1597-3360, not contiguous):
+  -   1597    1  RUNTIME_READY_ATTEMPTS  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1598    1  RUNTIME_READY_POLL_SECONDS  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1746    2  loginctl_enable_linger_args  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   1750   38  ensure_user_linger_runtime  launcher callers outside: -; production readers outside the launcher: -
+  -   1790   18  ensure_configured_runtime_user  launcher callers outside: ['main']; production readers outside the launcher: ['scripts/launch_phases.py']
+  -   3352    9  provision_runtime_command  launcher callers outside: ['main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 3: ['ProjectConfig', 'current_user_name', 'runtime_dir_for_uid']
+  - launcher callers outside the closure: 1: ['main']
+  - production modules reading it through the launcher: 1: ['scripts/launch_phases.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: making sure a project's runtime user lingers and its runtime directory is ready -- `team-launcher provision-runtime`)
+  - it also reads 2 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['session_dir_uses_user_runtime (scripts.session_paths)', 'uid_for_user (scripts.host_accounts)']
+  - alternatives measured the same way:
+  -   - the rollout log command (alternative): 1 definitions, 45 lines; launcher callers outside: ['switchyard_main']; production readers: 0
+  -   - the control-role names (alternative): 2 definitions, 42 lines; launcher callers outside: ['director_role_name']; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  1920 lines  208 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   588 lines   32 defs  project config and registry
+  -   496 lines   47 defs  provisioning (new/register/teardown/owner accounts)
+  -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
+
+**SYRD-272 is not complete.** The launcher is still 4,466 lines.

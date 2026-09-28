@@ -163,7 +163,11 @@ def test_the_seams_the_local_import_and_the_defaults() -> None:
     # step on to scripts/resume_provision_command.py, which the launcher re-exports.
     finish_exports = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.resume_provision_command"
                       for a in n.names}
-    check(not defined & set(MOVED) and "read_board_declared_workflow" in defined
+    # SYRD-437 moved the board-workflow reader to scripts/board_workflow_readers.py; the launcher re-exports it from
+    # there, unaliased, so it stays the launcher's name: defined here (the baseline), or re-exported from exactly that module.
+    board_workflow = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.board_workflow_readers"
+                      for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and "read_board_declared_workflow" in defined | board_workflow
           and "_finish_provision_after_packet" in defined | finish_exports
           and not {"_finish_provision_after_packet", "read_board_declared_workflow"} & {f.name for f in functions},
           f"the launcher defines none of them, and still has the two interleaved definitions: {defined & set(MOVED)}")

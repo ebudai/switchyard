@@ -1489,6 +1489,10 @@ from scripts.project_layouts import (
     _row_major_grid_layout_payload,
     _single_row_layout_payload,
 )
+from scripts.board_workflow_readers import (
+    read_board_declared_workflow,
+    read_board_workflow_state,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -3233,87 +3237,6 @@ def _system_unit_is_active(unit: str, *, runner: Callable[..., subprocess.Comple
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     return getattr(result, "returncode", 1) == 0
-
-
-def read_board_declared_workflow(
-    config: ProjectConfig,
-    *,
-    connection_factory: Callable[[str, float], Any] | None = None,
-) -> tuple[dict | None, str]:
-    """The workflow document the running board is enforcing, over its own socket.
-
-    Asked of the board rather than of any file, because this is the thing an
-    adoption has to agree with: the board's copy is what decides every
-    transition and capability right now, and it can only have been installed
-    through the write API's own authority (SYRD-166).
-    """
-    try:
-        from scripts.ticket_board.write_client import UnixHTTPConnection
-
-        factory = connection_factory or (
-            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
-        )
-        connection = factory(config.board_socket, 3)
-        try:
-            connection.request("GET", "/api/workflow")
-            response = connection.getresponse()
-            body = response.read().decode("utf-8", errors="replace")
-        finally:
-            connection.close()
-        if response.status != 200:
-            return None, f"the board answered HTTP {response.status} for its workflow"
-        payload = json.loads(body)
-    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
-        return None, f"the board's workflow could not be read: {exc}"
-    if not isinstance(payload, dict):
-        return None, "the board's workflow response is not a document"
-    document = payload.get("document")
-    if document is None:
-        return None, "the board is running no declared workflow"
-    if not isinstance(document, dict):
-        return None, "the board's workflow response carries no document"
-    return document, ""
-
-
-def read_board_workflow_state(
-    config: ProjectConfig,
-    *,
-    connection_factory: Callable[[str, float], Any] | None = None,
-) -> tuple[int, dict | None, str]:
-    """The board's workflow revision AND document, over its own socket.
-
-    `read_board_declared_workflow` answers only the document, and the revision
-    is what makes an install safe: it is the `expected_revision` the database
-    compares under an advisory lock, so a board that changed underneath this is
-    a refused write rather than a lost one.
-    """
-    try:
-        from scripts.ticket_board.write_client import UnixHTTPConnection
-
-        factory = connection_factory or (
-            lambda socket_path, timeout: UnixHTTPConnection(socket_path, timeout=timeout)
-        )
-        connection = factory(config.board_socket, 3)
-        try:
-            connection.request("GET", "/api/workflow")
-            response = connection.getresponse()
-            body = response.read().decode("utf-8", errors="replace")
-        finally:
-            connection.close()
-        if response.status != 200:
-            return 0, None, f"the board answered HTTP {response.status} for its workflow"
-        payload = json.loads(body)
-    except Exception as exc:  # noqa: BLE001 - any failure to read is "cannot say"
-        return 0, None, f"the board's workflow could not be read: {exc}"
-    if not isinstance(payload, dict):
-        return 0, None, "the board's workflow response is not a document"
-    document = payload.get("document")
-    revision = payload.get("revision")
-    return (
-        int(revision) if isinstance(revision, int) else 0,
-        document if isinstance(document, dict) else None,
-        "",
-    )
 
 
 def switchyard_menu_command(

@@ -163,7 +163,11 @@ def test_the_seams_the_file_origin_and_the_defaults() -> None:
           "every default is the object it was: the shared timeout, os.geteuid, subprocess.run, print")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     defined = {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)}
-    check(not defined & set(MOVED) and "read_board_declared_workflow" in defined,
+    # SYRD-437 moved the board-workflow reader to scripts/board_workflow_readers.py; the launcher re-exports it from
+    # there, unaliased, so it stays the launcher's name: defined here (the baseline), or re-exported from exactly that module.
+    board_workflow = {a.name for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.board_workflow_readers"
+                      for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and "read_board_declared_workflow" in defined | board_workflow,
           f"the launcher defines none of them, and keeps the interleaved board-workflow reader: {defined & set(MOVED)}")
     exported = [sorted(a.name for a in n.names) for n in launcher.body if isinstance(n, ast.ImportFrom) and n.module == "scripts.resume_provision_command"]
     check(exported == [sorted(MOVED)], f"one explicit re-export of all three: {exported}")

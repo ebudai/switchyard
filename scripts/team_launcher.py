@@ -1509,6 +1509,15 @@ from scripts.control_role import (
     control_role_name,
     director_role_name,
 )
+from scripts.process_inspection import (
+    _list_process_command_lines,
+    _owner_process_runner,
+    _process_snapshot,
+    _role_has_pane_process,
+    process_tree_command_names,
+    process_uid,
+    role_process_runner_for,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2027,19 +2036,6 @@ def role_run_as_user(config: ProjectConfig, role: RoleConfig) -> str:
     return role.run_as_user or config.run_as_user
 
 
-def role_process_runner_for(
-    config: ProjectConfig,
-    role: RoleConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    """A runner for the project account's shared tmux server."""
-    account = role_run_as_user(config, role)
-    if account and current_user_name() != account:
-        return _owner_process_runner(owner_user=account, runner=runner)
-    return runner
-
-
 def load_project_config(
     project: str,
     config_path: Path | None = None,
@@ -2294,59 +2290,6 @@ def _path_owner_ids(path: Path) -> tuple[int, int] | None:
     except OSError:
         return None
     return info.st_uid, info.st_gid
-
-
-def _process_snapshot() -> tuple[dict[int, int], dict[int, list[int]], dict[int, set[str]], dict[int, list[str]]]:
-    proc = subprocess.run(
-        ["ps", "-eo", "pid=,ppid=,comm=,args="],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    if proc.returncode != 0:
-        return {}, {}, {}, {}
-    parents: dict[int, int] = {}
-    children: dict[int, list[int]] = {}
-    names: dict[int, set[str]] = {}
-    argv_by_pid: dict[int, list[str]] = {}
-    for line in proc.stdout.splitlines():
-        parts = line.strip().split(None, 3)
-        if len(parts) != 4:
-            continue
-        try:
-            pid = int(parts[0])
-            ppid = int(parts[1])
-        except ValueError:
-            continue
-        parents[pid] = ppid
-        argv: list[str]
-        try:
-            argv = shlex.split(parts[3])
-        except ValueError:
-            argv = []
-        argv_by_pid[pid] = argv
-        command_names = {_command_name(parts[2])}
-        command_names.update(_command_name(token) for token in argv if _command_name(token))
-        names[pid] = command_names
-        children.setdefault(ppid, []).append(pid)
-    return parents, children, names, argv_by_pid
-
-
-def process_tree_command_names(pane_pid: int) -> set[str]:
-    if pane_pid <= 0:
-        return set()
-    _parents_by_pid, children_by_parent, process_names, _argv_by_pid = _process_snapshot()
-    stack = [pane_pid]
-    seen: set[int] = set()
-    names: set[str] = set()
-    while stack:
-        pid = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        names.update(process_names.get(pid, set()))
-        stack.extend(children_by_parent.get(pid, []))
-    return names
 
 
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
@@ -2889,17 +2832,6 @@ def _owner_git_args(owner_user: str, project_dir: Path, *git_args: str) -> list[
     return ["sudo", "-u", owner_user, "git", "-C", str(project_dir), *git_args]
 
 
-def _owner_process_runner(
-    *,
-    owner_user: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> Callable[..., subprocess.CompletedProcess[Any]]:
-    def wrapped(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        return runner(["sudo", "-u", owner_user, "-H", *args], **kwargs)
-
-    return wrapped
-
-
 def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
     owned_roots: list[Path] = []
     if config.control_repository is not None:
@@ -3202,37 +3134,6 @@ def switchyard_menu_command(
     return 0
 
 
-def _list_process_command_lines(
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-) -> list[str]:
-    proc = runner(
-        ["ps", "-eo", "args=", "--no-headers"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if proc.returncode != 0:
-        reason = _proc_failure_reason(proc, f"ps failed with exit {proc.returncode}")
-        raise SystemExit(f"switchyard: failed to inspect processes: {reason}")
-    return [line for line in str(proc.stdout or "").splitlines() if line.strip()]
-
-
-def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) -> bool:
-    target_marker = f"TICKET_BOARD_PANE_TARGET={role.target}"
-    legacy_target_marker = f"PGU_PANE_TARGET={role.target}"
-    for command in process_commands:
-        try:
-            first = shlex.split(command)[0] if command.strip() else ""
-        except ValueError:
-            first = command.strip().split(maxsplit=1)[0] if command.strip() else ""
-        if Path(first).name == "tmux":
-            continue
-        if target_marker in command or legacy_target_marker in command:
-            return True
-    return False
-
-
 def switchyard_validate_models_command(
     project: str,
     *,
@@ -3338,13 +3239,6 @@ def role_control_accounts(config: ProjectConfig) -> tuple[tuple[str, str], ...]:
             continue
         pairs.append((name, account))
     return tuple(pairs)
-
-
-def process_uid(pid: int, *, proc_root: Path | None = None) -> int | None:
-    """The uid a running process is actually executing as, from the kernel."""
-    if pid <= 0:
-        return None
-    return _proc_effective_uid(proc_root or PROC_ROOT, str(pid))
 
 
 def privileged_upgrade_journal_path(config: ProjectConfig) -> Path:

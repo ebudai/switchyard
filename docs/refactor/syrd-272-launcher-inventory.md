@@ -17419,3 +17419,172 @@ and **not implemented**:
   -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
 
 **SYRD-272 is not complete.** The launcher is still 4,303 lines.
+
+### SYRD-442 (slice 19ax): process inspection and the role runners
+
+Measured on `156c6f5`. Before any edit, the rooted closure was verified. The
+guards were then measured empirically:
+- **Method:** the move was made in a scratch archive of the baseline under
+  /tmp, and every screen-clean boundary suite plus the 27 files
+  naming the seven were run on both scratch trees (104 whole, 345
+  cases).
+- **Result:** nothing differed, so no test guard needed adapting and none
+  changed.
+  - `live_role_runtime_boundary_test`'s `STAYED` checks that module holds
+    none of the seven, which is still true.
+  - The seam tables in `launch_phases`, `role_identity_cutover` and
+    `project_stop` count reads in their own modules, which this slice does
+    not touch.
+  - The two stay checks naming `process_uid` already accept a re-export.
+  - Every patch site rebinds the launcher's name, which the moved code and
+    every reader read when they run.
+
+| file | before (`156c6f5`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 4,303 | 4,197 |
+| `scripts/process_inspection.py` | - | 158 |
+| `tests/process_inspection_boundary_test.py` | - | 590 |
+
+**Scope: exactly the ticket's seven definitions, no additional production
+definition.** They move whole, in the launcher's order, into the new
+`scripts/process_inspection.py`: `role_process_runner_for` (2030-2040), `_process_snapshot` (2299-2332), `process_tree_command_names` (2335-2349), `_owner_process_runner` (2892-2900), `_list_process_command_lines` (3205-3218), `_role_has_pane_process` (3221-3233), `process_uid` (3343-3347).
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all seven, right after
+  the `control_role` import.
+- **Caller:** `_running_project_roles` still calls `role_process_runner_for`
+  by the launcher's name.
+- **Readers:** eight production modules read the seven through the launcher
+  when they run, as often as before, and are byte-identical:
+  `launch_phases.py`, `live_role_runtime.py`, `presentation_controller.py`, `project_stop.py`, `role_identity_cutover.py`, `role_sessions.py`, `tmux_session_argv.py`, `worker_pool.py`. By AST, every read is
+  inside a function.
+- **No callers:** `_list_process_command_lines` has no caller anywhere, and
+  `_role_has_pane_process` only test callers.
+- **Seams:** all 10 call-time reads of 8 names are now
+  `launcher.X` (2 of them siblings): the current user, the role's
+  account, the command-name and failure-reason helpers, the kernel uid
+  reader and `PROC_ROOT`.
+- **Defaults and imports:** `runner=subprocess.run` on two functions, the
+  same object, and `proc_root=None`. `shlex`, `subprocess`, `Path` and the
+  typing names are the module's own imports, the very objects the launcher
+  holds; no test rebinds them on the launcher. `ProjectConfig` and
+  `RoleConfig` are under TYPE_CHECKING. The module loads no Switchyard
+  module.
+
+**Proof.** The independent proof (`equiv442.py`, 14 clauses) holds.
+It compares the seven whole nodes (every `ps` argv and every default
+included), and the launcher remainder as AST and text. Its rules clause
+fixes each function's steps in order with `find`, plus every return, raise
+and handler as in the baseline. 20 of 20 planted faults are
+caught, each parsed first, and the plant run first requires the proof to
+hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/process_inspection_boundary_test.py`,
+  160 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment. It replays
+  45 cases produced by the BASELINE launcher's own definitions
+  (`gold442.py`) over the very case text the test embeds, not typed. The
+  golden output is byte-identical under `env -i`, in the pane, with another
+  HOME, USER and COLUMNS, under umask 077 and under three hash seeds.
+  - **Isolation:** `ps` never runs; `subprocess.run` answers from the
+    case's synthetic output, and every runner is a recorder. /proc is a
+    synthetic tree in a test-owned directory, with `PROC_ROOT` rebound on
+    the launcher for the default. No process is signalled, no sudo is run
+    and no role is launched.
+  - **Cases (lines 7, owner runner 1, pane 9, runner 7, snapshot 4, tree 8, uid 9):**
+    - the snapshot, with unparsable, short and non-numeric lines, and a
+      failed or empty `ps`;
+    - a pane's tree: a leaf, a cycle, a missing pid, no pid;
+    - command lines, and a failed `ps` refused with its reason (exit 1
+      included);
+    - the pane marker, current or legacy, never on tmux;
+    - the kernel uid, its fallbacks and no pid;
+    - the runner for the same account, another caller, another account
+      (`sudo -u <account> -H`) or none;
+    - each seam rebound on the launcher.
+- **Fixes made before relying on a result, each disclosed:**
+  - The first extractor run stopped before writing anything: its local-name
+    scan missed a nested function's `**kwargs`. The tree was confirmed
+    untouched and the scan now includes `*args` and `**kwargs`.
+  - A case calling `_list_process_command_lines` with its default runner
+    was dropped before any golden file was written. The default is bound
+    when the function is defined, so the case would have run the real
+    `subprocess.run`. The default is pinned structurally instead.
+  - The kernel uid reader falls back to the process directory's owner. The
+    case normalizer records that as the fixture owner rather than a uid, so
+    the answer does not depend on who runs the test.
+  - The screen hit my own assertion literals (the expected sudo argv). The
+    rules clause now checks the distinguishing arguments; the exact argv is
+    pinned by the golden comparison.
+  - The first mutation pass left one survivor, a failed `ps` with exit 1
+    listed anyway: no case used exit 1. I added one and a same-account,
+    other-caller case. Everything from the golden file onward was
+    regenerated, and the second pass killed every mutant.
+  - Two candidate mutants were deliberately not run. One drops the tree
+    walk's `seen` check and would loop forever on the cycle case. The other
+    binds `PROC_ROOT` at load and would read the live /proc.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (118 checks).
+- **Mutations:** 36 of 36 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour
+  tests alone kill 34. The rest are structural, and the structure checks
+  kill them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 147 files are accounted for: every boundary suite and
+  the 27 naming the seven.
+  - 105 suites whole: 91 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `publication_handoff_end_to_end_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused);
+  - 345 cases, per case, identical on both sides: 262 pass,
+    81 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here. `switchyard_publish_ref_test`, whose cases failed
+    assertions in the git-less scratch archive, stops at the same guard
+    refusal (its `git init`) on both worktrees;
+  - **Excluded (128):** 0 that drive an upgrade
+    or `switchyard_main`, 123 whose own execution screen hits, and
+    5 accumulator;
+  - **Not run:** migrate_workflow_installed_release_test.py: not run -- a main()-style suite with no test_ function; its whole-suite execution screen HITs (tmux, unshare). It passes an unrelated process_uid= keyword to a board function and reads none of the seven.; team_launcher_identity_cutover_e2e_test.py: not run -- a main()-style suite with no test_ function; main() re-runs under unshare, so its whole-suite execution screen HITs. It calls team_launcher.process_uid, which the re-export keeps working.; ticket_board_declarative_workflow_test.py: not run -- a main()-style suite with no test_ function; its whole-suite execution screen HITs (tmux). It passes an unrelated process_uid= keyword to a board function and reads none of the seven..
+- **Baseline observations, reported and not changed:**
+  - `PROC_ROOT` is assigned twice in the launcher.
+  - The pane marker is matched as a substring, so a target that starts with
+    another role's target matches it.
+- **What the comparison exercised (call profiler, real functions only):**
+  3 of 353 passing runs execute a moved function:
+  `process_inspection_boundary_test.py`, `project_stop_boundary_test.py`, `team_launcher_pane_liveness_test.py`, `team_launcher_viewer_test.py`.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account or release was touched by any test or run, no
+  process was signalled, and live /proc was not read by any case. One
+  incident, reported on the ticket when it happened: an unquoted heredoc in
+  one of my editing commands ran `git init` in my session's working
+  directory, a worktree of the live syrd `control.git`. That flipped its
+  `core.bare` from true to false at 16:44:24. I restored `core.bare=true`
+  within about a minute; nothing else in the repository changed. The live snapshot is identical before and after. Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the project design artifact payload -- 4 definitions, 60 lines (lines 1709-2552, not contiguous):
+  -   1709   28  ProjectDesignArtifact  launcher callers outside: -; production readers outside the launcher: ['scripts/new_project_support.py', 'scripts/project_design_artifact.py', 'scripts/project_design_command.py']
+  -   1895    2  _role_cli_map  launcher callers outside: -; production readers outside the launcher: -
+  -   1899   26  project_design_artifact_payload  launcher callers outside: -; production readers outside the launcher: ['scripts/new_project_support.py', 'scripts/project_design_command.py']
+  -   2549    4  _project_design_markdown  launcher callers outside: -; production readers outside the launcher: ['scripts/new_project_support.py', 'scripts/project_design_command.py']
+  - launcher names it reads (through the launcher once moved): 1: ['PROJECT_DESIGN_ARTIFACT_SCHEMA']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/new_project_support.py', 'scripts/project_design_artifact.py', 'scripts/project_design_command.py']
+  - test files naming any of them: 4 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: the project design artifact -- its record type, the payload a design is written as, its markdown rendering and the role-to-CLI map it carries)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the kernel process helpers (alternative): 4 definitions, 34 lines; launcher callers outside: ['_role_cli_name', 'ensure_owner_file', 'role_runtime_binding']; production readers: 26
+  -   - the repository policy-hook repair (alternative): 1 definitions, 29 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  1855 lines  204 defs  general helpers (unclassified)
+  -   714 lines    3 defs  CLI parsers and dispatch
+  -   588 lines   32 defs  project config and registry
+  -   407 lines   42 defs  provisioning (new/register/teardown/owner accounts)
+  -   101 lines    6 defs  agent CLI discovery, promotion and first-run auth
+
+**SYRD-272 is not complete.** The launcher is still 4,197 lines.

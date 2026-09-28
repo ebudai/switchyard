@@ -1297,6 +1297,9 @@ from scripts.role_visibility import (
     detach_role_from_slot,
     tmux_detach_clients_args,
 )
+from scripts.project_stop import (
+    stop_project,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -6508,55 +6511,6 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
         "board_service_traversal": True,
         "operation_allowed_roles": [],
     }
-
-
-def stop_project(
-    config: ProjectConfig,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
-    print_func: Callable[[str], None] = print,
-) -> int:
-    # The viewer and display sessions belong to the project owner; each role's
-    # session lives in that role's own tmux server, so it has to be probed and
-    # killed there or stop reports success while the session is still alive
-    # (SYRD-39).
-    owner_runner = runner
-    if config.run_as_user and current_user_name() != config.run_as_user:
-        owner_runner = _owner_process_runner(owner_user=config.run_as_user, runner=runner)
-    exit_code = 0
-    viewer_session = viewer_session_for_project(config.project)
-    viewer_exists = owner_runner(
-        tmux_has_session_by_name_args(viewer_session),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ).returncode == 0
-    if viewer_exists:
-        result = owner_runner(
-            tmux_kill_session_by_name_args(viewer_session),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        if result.returncode != 0:
-            reason = _proc_failure_reason(result, f"tmux kill-session failed with exit {result.returncode}")
-            print_func(f"failed to stop viewer: {viewer_session}: {reason}")
-            exit_code = exit_code or int(result.returncode)
-        else:
-            print_func(f"stopped viewer: {viewer_session}")
-    else:
-        print_func(f"already stopped viewer: {viewer_session}")
-    from scripts import presentation_controller
-
-    presentation_stop = presentation_controller.stop_presentation(
-        config,
-        runner=runner,
-        print_func=print_func,
-    )
-    exit_code = exit_code or presentation_stop
-    # Always, not short-circuited on an earlier failure: a viewer that would not
-    # close is no reason to leave every worker running.
-    workers_stopped = stop_role_sessions(config, runner=runner, print_func=print_func)
-    return exit_code or workers_stopped
 
 
 def _layout_slot_count(config: ProjectConfig) -> int:

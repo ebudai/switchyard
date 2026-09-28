@@ -13213,3 +13213,120 @@ and **not implemented**:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,731 lines.
+
+### SYRD-407 (slice 19u): project session stop coordination
+
+Measured on `ac12c9d`. The design was posted **before** any edit.
+
+| file | before (`ac12c9d`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,731 | 8,685 |
+| `scripts/project_stop.py` | - | 79 |
+| `tests/project_stop_boundary_test.py` | - | 382 |
+| `tests/role_sessions_boundary_test.py` | 161 | 174 |
+| `scripts/tenant_suspension.py` | 141 | 141 |
+
+**Moved:** `stop_project`, whole, with its SYRD-39 and "Always, not
+short-circuited" comments, into the new `scripts/project_stop.py`.
+- **Neighbours:** `_plan_data_from_config` above and `_layout_slot_count`
+  below stay.
+- **Re-export:** one explicit, unaliased import, above every definition.
+  `main`'s `stop` still calls it by its own global
+  (1 site, measured), and
+  `scripts/tenant_suspension.py` still reads `launcher.stop_project`
+  (byte-identical).
+- **Seams:** all 7 call-time reads of 7 names are now `launcher.X`,
+  through a call-time import, as measured from the AST:
+  - the viewer session name, the current user, the owner runner and the
+    failure reason (launcher-defined);
+  - the role-session stop and the two tmux argv builders (`role_sessions`).
+- **The presentation controller** is still imported inside the function,
+  right after the viewer step.
+- **Bound when defined, as before:** `runner=subprocess.run` and
+  `print_func=print`. `ProjectConfig` is an annotation only.
+
+**One guard follows the move:**
+`role_sessions_boundary_test::test_the_patched_start_and_stop_are_called_by_the_launchers_name`.
+- It counted `stop_role_sessions` calls in the launcher.
+- Now, once the launcher no longer defines `stop_project`, it requires the
+  exact unaliased re-export and no call left in the launcher. It also
+  requires the one call in the re-exported `stop_project` to be
+  `launcher.stop_role_sessions`: the same patchable launcher name.
+
+**Proof.** The independent proof (`equiv407.py`) holds, including:
+- the owner wrapper only when `run_as_user` is set and is not the current
+  user;
+- the viewer probed and killed with it, with the baseline's output capture;
+- the controller imported right after the viewer step;
+- the presentation stop and then the role-session stop on the caller's
+  runner;
+- one return, the first nonzero.
+
+18 of 18 planted faults are caught, each parsed first.
+
+**Evidence.**
+- **New boundary test:** `tests/project_stop_boundary_test.py`, 87
+  checks, each run gated on its screen.
+  - All seven seams stand in or are wrapped on the launcher, and the
+    presentation stop stands in on its controller. `role_sessions`' own
+    functions, spawns, signals, account lookups and connections are refused.
+  - It replays 20 cases produced by the BASELINE launcher's own
+    function (`gold407.py`) over the very case text the test embeds, not
+    typed:
+    - no owner, the owner being this user, a different owner, and no current
+      user;
+    - the viewer absent, `has-session` 2, live and stopped, or the kill
+      failing with stderr, blank stderr or none;
+    - every combination of viewer, presentation and role failures;
+    - the definition-time defaults, where `subprocess.run` is only passed on.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definition (70 checks).
+- **Mutations:** 33 of 33 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 27; the 6 left are placement, import, re-export and
+  dispatch changes: the controller imported at load, the launcher imported at load, re-export aliased, main bypasses its global, the launcher redefines it, the suspension calls it directly.
+- **Comparison, both trees, guarded,** with every selected run screened
+  first (0 hits on either tree):
+  - 3 suites whole (the new test on the candidate only);
+  - 19 cases, identical on both sides: 6 pass, 13 stop at
+    the guard (a refused account lookup or spawn).
+  - **Excluded (75):**
+    - every case the text screen flags that the execution screen does not
+      clear;
+    - 35 that drive the upgrade, `finish-upgrade` or `switchyard_main`;
+    - the model-validation case, which HITs its screen.
+
+    That includes every existing case that calls `stop_project`: three in
+    `team_launcher_stop_reload_test` and two in
+    `presentation_window_recovery_test`. Their behaviour is in the golden
+    cases instead.
+- **What the comparison exercised (call profiler, functions only):**
+  1 of 9 passing runs execute the moved function: the new
+  test.
+- **Containment:** no tmux session was stopped or probed, and no tenant,
+  service or release was touched (live snapshot identical before and after).
+  Both entry points' help is identical (36 `switchyard` invocations
+  plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the upgrade preview's finish -- 1 definitions, 71 lines (lines 6411-6481, not contiguous):
+  -   6411   71  _finish_upgrade_preview  launcher callers outside: -; production readers outside the launcher: ['scripts/director_upgrade.py']
+  - launcher names it reads (through the launcher once moved): 3: ['ProjectConfig', '_repo_root', 'current_user_name']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/director_upgrade.py']
+  - test files naming any of them: 3 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the upgrade: finish-upgrade's dry run, which walks apply's steps read-only and gives apply's verdict (SYRD-254); the director upgrade already reads it through the launcher)
+  - it also reads 5 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['install_handed_off_workflow (scripts.workflow_adoption)', 'owner_release_root_problems (scripts.tenant_release_root)', 'release_update_blocked (scripts.tenant_release_report)', 'report_tenant_release_upgrade (scripts.tenant_release_report)', 'role_account_cutover (scripts.role_identity_cutover)']
+  - alternatives measured the same way:
+  -   - a role pane's pid (alternative): 2 definitions, 14 lines; launcher callers outside: -; production readers: 3
+  -   - the layout's slot count (alternative): 1 definitions, 6 lines; launcher callers outside: -; production readers: 2
+- Largest remaining launcher domains (`domains.py`):
+  -  2117 lines  210 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1017 lines   39 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,685 lines.

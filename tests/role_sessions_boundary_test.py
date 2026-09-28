@@ -99,8 +99,21 @@ def test_the_patched_start_and_stop_are_called_by_the_launchers_name() -> None:
     tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     stops = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "stop_role_sessions"]
-    check(len(stops) == 1 and isinstance(stops[0].func, ast.Name),
-          "stop_project calls stop_role_sessions at its one baseline site, by the launcher's patchable name")
+    if any(isinstance(n, ast.FunctionDef) and n.name == "stop_project" for n in tree.body):
+        check(len(stops) == 1 and isinstance(stops[0].func, ast.Name),
+              "stop_project calls stop_role_sessions at its one baseline site, by the launcher's patchable name")
+    else:
+        # SYRD-407 moved stop_project on; the launcher re-exports it by its own name, and the one
+        # site there still reads the launcher's patchable name, when it runs.
+        source = [n.module for n in tree.body if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("scripts.")
+                  and any(a.name == "stop_project" and a.asname is None for a in n.names)]
+        check(len(source) == 1 and stops == [], f"the launcher re-exports stop_project, unaliased, and calls neither itself: {source}")
+        module = ast.parse((ROOT / f"{source[0].replace('.', '/')}.py").read_text(encoding="utf-8"))
+        stop = next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == "stop_project")
+        there = [ast.unparse(n.func) for n in ast.walk(stop)
+                 if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == "stop_role_sessions"]
+        check(there == ["launcher.stop_role_sessions"],
+              f"stop_project calls stop_role_sessions at its one baseline site, by the launcher's patchable name: {there}")
     moved = ast.parse((ROOT / "scripts" / "role_sessions.py").read_text(encoding="utf-8"))
     bare = sorted({n.id for n in ast.walk(moved) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                    and n.id in ("_start_role_sessions_without_a_window", "stop_role_sessions")})

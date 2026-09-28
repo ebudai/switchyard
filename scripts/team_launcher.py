@@ -1282,6 +1282,11 @@ from scripts.residual_processes import (
     process_systemd_unit,
     residual_project_processes,
 )
+from scripts.tenant_runtime import (
+    TENANT_RUNTIME_STATES,
+    TenantRuntime,
+    describe_tenant_runtime,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -6497,58 +6502,6 @@ def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str
         "board_service_traversal": True,
         "operation_allowed_roles": [],
     }
-
-
-#: What a tenant's runtime can be, as `status` and `list` report it. A
-#: suspension is reversible and keeps every byte of restart state; a teardown
-#: removes provisioned state and is a different verb (SYRD-193).
-TENANT_RUNTIME_STATES = (
-    "running",              # board, listener, sessions and a window
-    "presentation-closed",  # the window is gone, everything else still runs
-    "partially-stopped",    # some of it is down and some is not
-    "suspended",            # nothing runs, everything is preserved
-    "unregistered",         # no registration: torn down, or never provisioned
-)
-
-
-@dataclass(frozen=True)
-class TenantRuntime:
-    """What is actually up for one tenant, each part asked of its own manager."""
-
-    project: str
-    board_active: bool
-    listener_active: bool
-    live_sessions: tuple[str, ...]
-    presentation_open: bool
-    residual: tuple[int, ...] = ()
-    unknown: tuple[str, ...] = ()
-
-    @property
-    def state(self) -> str:
-        running = [self.board_active, self.listener_active, bool(self.live_sessions)]
-        if all(running) and self.presentation_open:
-            return "running"
-        if all(running) and not self.presentation_open:
-            return "presentation-closed"
-        if not any(running) and not self.presentation_open and not self.residual:
-            return "suspended"
-        return "partially-stopped"
-
-
-def describe_tenant_runtime(runtime: TenantRuntime) -> str:
-    """One line a person can act on, naming what is still up."""
-    parts = [
-        f"board {'up' if runtime.board_active else 'down'}",
-        f"listener {'up' if runtime.listener_active else 'down'}",
-        f"sessions {len(runtime.live_sessions)}",
-        f"window {'open' if runtime.presentation_open else 'closed'}",
-    ]
-    if runtime.residual:
-        parts.append(f"escaped processes {len(runtime.residual)}")
-    line = f"{runtime.project}: {runtime.state} ({', '.join(parts)})"
-    if runtime.unknown:
-        line += " -- not proved: " + "; ".join(runtime.unknown)
-    return line
 
 
 def suspend_tenant(

@@ -12879,3 +12879,96 @@ and **not implemented**:
   -   884 lines   30 defs  release selection, install and upgrade
 
 **SYRD-272 is not complete.** The launcher is still 8,944 lines.
+
+### SYRD-404 (slice 19r): the tenant runtime state and description
+
+Measured on `11139cb`. The design was posted **before** any edit.
+
+| file | before (`11139cb`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 8,944 | 8,897 |
+| `scripts/tenant_runtime.py` | - | 72 |
+| `tests/tenant_runtime_boundary_test.py` | - | 298 |
+
+**Moved:** `TENANT_RUNTIME_STATES` (with its three-line rationale and the
+inline comment on each of the five states), the frozen `TenantRuntime`
+record with its `state` property, and `describe_tenant_runtime`, contiguous
+and in order, into the new `scripts/tenant_runtime.py`.
+- **Neighbours:** `_plan_data_from_config` above stays, and `suspend_tenant`
+  below stays node for node.
+- **Re-export:** one explicit, unaliased import of all three, above every
+  definition.
+- **No seams at all:** the three read nothing of the launcher (0 sites, as
+  measured), so the module imports nothing of Switchyard's -- not even at
+  call time. `TenantRuntime` in the description's annotation is now the
+  module's own class, the same object the launcher re-exports. The record's
+  decorator is bound when it is defined, from the module's own `dataclass`.
+- **Nothing in production calls them** besides the launcher's re-export; the
+  suspension suite's status cases construct the record there.
+
+**No guard needed to follow the move.** `residual_processes_boundary_test`
+(SYRD-402) names `TENANT_RUNTIME_STATES` in a neighbour check that already
+accepts a re-export.
+
+**Proof.** The independent proof (`equiv404.py`) holds. 17 of 17
+planted faults are caught, among them:
+- a state dropped, or an inline comment dropped;
+- the record not frozen, or a default changed;
+- suspended decided before running, or residual processes ignored;
+- the escaped count or the unproved suffix changed;
+- a launcher read added;
+- `suspend_tenant` changed.
+
+**Evidence.**
+- **New boundary test:** `tests/tenant_runtime_boundary_test.py`, 161
+  checks, pure, each run gated on its screen.
+  - The state and the line are compared for 144 combinations of board,
+    listener, sessions (none, one, several), window, escaped processes and
+    unproved reasons (none, one, several), produced by the BASELINE launcher's
+    own record and description, not typed.
+  - It also compares the five-state tuple, the fields, order and defaults, the
+    frozen refusal, and `suspend_tenant` node for node.
+  - Its 2 behaviour cases also pass against the baseline's own
+    definitions (150 checks).
+- **Mutations:** 26 of 26 are killed by assertions with zero guard
+  refusals, each mutant bounded by a timeout. The behaviour tests alone kill
+  22; the 4 left are the module's placement and re-export:
+  the launcher imported at load, a name not re-exported, re-export aliased, the launcher redefines one.
+- **Comparison, both trees, guarded,** with every selected case screened
+  first (0 hits on either tree):
+  - 2 suites whole (the new test on the candidate only);
+  - the 2 status cases of `team_launcher_tenant_suspension_test`
+    that construct the record, identical: 2 pass, 0 pass with
+    a tolerated refusal, 0 stop at the guard, and 0 fail
+    otherwise.
+  - The suite's other cases do not touch the three names; they were compared
+    in SYRD-402.
+- **What the comparison exercised (call profiler, functions only):** 2 of 4 passing runs execute a moved function: the new test and the suite's vocabulary case.
+- **Containment:** pure -- no status collected, tenant suspended or started,
+  service, signal or database touched (live snapshot identical before and
+  after). Both entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: suspending a tenant and resuming it -- 2 definitions, 102 lines (lines 6507-6610, not contiguous):
+  -   6507   47  suspend_tenant  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  -   6556   55  resume_tenant  launcher callers outside: ['switchyard_main']; production readers outside the launcher: -
+  - launcher names it reads (through the launcher once moved): 2: ['ProjectConfig', 'stop_project']
+  - launcher callers outside the closure: 1: ['switchyard_main']
+  - production modules reading it through the launcher: 0: []
+  - test files naming any of them: 5 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (a bounded piece of the tenant lifecycle: the reversible stop that keeps every byte of restart state, and the start that undoes it)
+  - it also reads 10 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_board_system_unit (scripts.board_services)', '_board_system_unit_action (scripts.board_services)', '_listener_user_unit (scripts.board_services)', 'board_system_unit_is_active (scripts.board_services)', 'capture_listener_state (scripts.board_services)', 'close_presentation_window (scripts.presentation_windows)', 'contain_residual_project_processes (scripts.residual_processes)', 'ensure_staged_role_tooling (scripts.staged_role_tooling)', 'start_owner_listener (scripts.board_services)', 'stop_owner_listener (scripts.board_services)']
+  - alternatives measured the same way:
+  -   - detaching a role from its slot (alternative): 4 definitions, 62 lines; launcher callers outside: ['main']; production readers: 1
+  -   - the upgrade preview's finish (alternative): 1 definitions, 71 lines; launcher callers outside: -; production readers: 1
+- Largest remaining launcher domains (`domains.py`):
+  -  2140 lines  209 defs  general helpers (unclassified)
+  -  1803 lines   73 defs  provisioning (new/register/teardown/owner accounts)
+  -  1066 lines   40 defs  project config and registry
+  -  1013 lines   10 defs  CLI parsers and dispatch
+  -   884 lines   30 defs  release selection, install and upgrade
+
+**SYRD-272 is not complete.** The launcher is still 8,897 lines.

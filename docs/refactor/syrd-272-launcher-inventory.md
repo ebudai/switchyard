@@ -22406,6 +22406,7 @@ exact worktree and public-main files by SHA-256, respectively.
 
 SYRD-272 remains open.
 
+
 ### SYRD-487 (notify_listener slice 5): queued notification eligibility
 
 The Director approved this exact boundary before editing, on public main
@@ -22467,5 +22468,76 @@ The remaining listener class and delivery pass still exceed the soft limit;
 this slice accepts no exception. A later SYRD-272 child must measure them
 separately. No live tenant runtime, service, provider, pane, notification
 queue, database, account or release changed.
+
+SYRD-272 remains open.
+
+### SYRD-490 (notify_listener slice 7): first-handoff session clear
+
+The Director approved this bounded extraction before the ticket worktree was
+edited, on public main `4f5220da312c0821e1e9c72d523fdc87e74a83a8`.
+`NotificationSessionClear` now owns `_session_clear_is_due`,
+`_record_session_clear`, and `_clear_role_session`, with the command table,
+handoff-kind set, two failure strings, and settle default. The existing names
+are reexported by `notify_listener.py`. The delivery pass calls the new owner
+at the same point, after both activity gates and all currency rechecks and
+before the notification send. The pass itself remains 481 lines.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `notify_listener.py` | 1,973 lines | 1,818 lines |
+| `TicketBoardNotifyListener` | 1,304 lines, 45 methods | 1,173 lines, 42 methods |
+| `notification_session_clear.py` | absent | 200 lines, 160-line class |
+
+The collaborator receives the logger and existing `NotificationLedger`,
+call-time providers for role runtimes, ephemeral roles, sender and settle
+seconds, the eligibility owner's queue-identity function, the existing
+failure classifier, and the sleeper. It owns no mutable in-memory state. A
+workflow refresh or a rebound sender is therefore visible when the clear is
+attempted. The listener still owns call-time targets, workflow, activity
+gate, the prior-turn hold map, delivered count, and the send/receipt sequence.
+`NotificationEligibility` still owns notice currency and supersession; the
+ledger still owns traces, backoff, and terminal dispositions.
+
+The durable first-handoff rule is unchanged: kind, ephemeral role and queue
+announcement are checked before reading
+`role_session_clear_pending(ticket_id, target_role)` on the same autocommit
+connection as the claim. A clear command is sent only after all delivery
+gates and rechecks. Only a successful send is followed by
+`record_role_session_clear(ticket_id, target_role)`, then a trace and optional
+settle before the ticket message. A failed send never records a clear; it
+traces and requeues, or dead-letters when the tmux target is missing. An
+unknown runtime also traces and requeues. The board's pair record preserves
+idempotency across listener restarts. SQL text, parameters, logging, and
+statement order remain the baseline's. The only direct private-method test
+callers, two sites in `ephemeral_role_sessions_test.py`, now call through
+`listener.session_clear`. The installed wrapper still imports
+`ticket_board.notify_listener.main`.
+
+The six pane-activity integration methods examined in SYRD-488 remain in the
+listener with the activity and prior-turn hold decisions. Moving just those
+methods would create reverse dependencies on listener-owned `ActivityTrace`,
+`ComposerSnapshot` and `WORK_EVIDENCE_REASONS` without transferring state or
+an independent decision boundary. This slice adds no such dependency. It
+does not accept a soft-limit exception for the remaining 481-line delivery
+pass or 1,818-line file. The unrelated SYRD-482 early-return behavior is
+preserved for its own ticket.
+
+**Verification.** The exact worktree source matches the approved guarded
+scratch prototype byte for byte. After normalizing only the explicit provider
+renames, the three moved method ASTs equal the baseline; all 40 unaffected
+listener method ASTs and the moved board SQL literals are exact. The retained
+pass changes only its two session-clear call names. The same guarded cases
+pass on baseline and worktree: 13 session-clear cases, 21 surrounding
+delivery cases, 13 receipt-witness cases, and the 56-case eligibility golden.
+They cover before-send ordering, once-per-pair and restart behavior,
+busy/idle/unknown pane states,
+the second gate, stale/current/terminal notices, clear failure and retry,
+unknown runtime, send success/failure and dead letter. The surrounding old
+listener tests use identical synthetic target-existence and hook-witness
+inputs on each tree. The guard refuses spawns, signals, socket connections,
+and host paths. The installed wrapper's `--help` and synthetic offline
+pane-state authority checks agree on both trees; neither runs a live pane or
+database. No tenant runtime, service, provider, pane, board queue, account or
+release was changed.
 
 SYRD-272 remains open.

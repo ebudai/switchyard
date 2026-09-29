@@ -371,7 +371,7 @@ def test_the_directors_escalation_about_somebody_else_never_clears() -> None:
     listener.ephemeral_roles = {"ops", "director"}
     for kind in ("escalation", "nudge", "idle_reminder", "ticket_update", "triage", "publication_request"):
         payload = json.dumps({"kind": kind, "id": "PGU-506", "target_role": "director"})
-        assert listener._session_clear_is_due(conn, "PGU-506", "director", kind, payload) is False, kind
+        assert listener.session_clear._session_clear_is_due(conn, "PGU-506", "director", kind, payload) is False, kind
     assert conn.clear_reads == [], conn.clear_reads
     assert SESSION_CLEAR_KINDS == {"transition", "awaiting_role"}
 
@@ -507,7 +507,7 @@ def test_a_runtime_with_no_clear_command_holds_the_ticket_instead_of_delivering(
     )
     listener.ephemeral_roles = {"ops"}
     listener.role_runtimes = {"ops": "some-new-cli"}
-    proceed = listener._clear_role_session(
+    proceed = listener.session_clear._clear_role_session(
         conn,
         notification_id=30,
         ticket_id="PGU-530",

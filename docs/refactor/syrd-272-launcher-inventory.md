@@ -22950,3 +22950,62 @@ GUI window, service or release was changed.
 
 The controller remains above the 1,250-line soft limit. SYRD-272 remains open
 for its remaining slices and final cross-file comparison.
+
+### SYRD-497 (presentation_controller slice 5): viewer construction and observer sizing
+
+The Director approved the exact viewer boundary before the ticket worktree
+was edited, from audited public main
+`69e8df2348862871187c07dba891e5cd67038f67`.
+`presentation_viewer.py` owns nine existing functions:
+`_session_pane_ttys`, `_exact_target_args`, `_clients_by_tty`,
+`_client_table`, `_viewer_observer_attach`, `_viewer_frame_commands`,
+`_reconcile_viewer_observers`, `reconcile_viewer_observer_flags`, and
+`_launch_viewer`, plus `VIEWER_OBSERVER_CLIENT_FLAGS`. The controller imports
+and reexports all ten exact objects, including the TTY probe shared with
+visibility and reporting. Both direct and package controller imports keep
+those aliases; `switchyard-viewer-layout --observers` still imports the
+controller entry point. No callback or reverse import was added.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `presentation_controller.py` | 1,576 lines, 44 functions | 1,334 lines, 35 functions |
+| `presentation_viewer.py` | absent | 275 lines, 9 functions |
+| Total of these two files | 1,576 lines | 1,609 lines |
+
+The owner takes config, display state, viewer name and an injected owner-routed
+tmux runner. It returns exact target argv, TTY/client evidence, frame commands
+or None, and raises the same `SystemExit` failures while replacing/building
+the viewer. Its mutable effects are only the external tmux session, panes,
+hooks, labels and per-client sizing flags. It pins size before splitting,
+releases it after relayout setup, installs observer hooks and refreshes only
+clients whose flags disagree with real-window evidence. Window visibility,
+status/report, recovery, state mutation, desktop handoff and CLI dispatch
+remain in the controller. Installed releases archive the whole `scripts` tree.
+
+For a representative SYRD-221 observer-sizing issue, `_launch_viewer` (84
+lines), `_reconcile_viewer_observers` (19),
+`reconcile_viewer_observer_flags` (36), `_viewer_observer_attach` (28),
+`_client_table` (20) and `_session_pane_ttys` (18) were 205 method lines
+spread across controller lines 271-1135. They now sit at owner lines 28-275
+in a 275-line file, while `_apply_mapping` (26) and targeted recovery (110)
+remain callers in the controller. Moving only `_launch_viewer` (84) would
+strand the dynamic sizing and hook policy. Moving window/TTY visibility and
+attachment diagnostics as well would cross into separate window proof and
+state coordination. The 33-line combined increase is the module header,
+imports and alias boundary. The controller remains 84 lines above the
+1,250-line soft limit; no exception is claimed. SYRD-272 remains open.
+
+**Verification.** Under a guard refusing process spawns, signals, socket
+connections and host-path opens, baseline and candidate each passed the
+current viewer-frame and hidden/missing-role report cases and the 74-check
+operator display-recovery suite. The new four-case owner test checks pin,
+split, layout and hook order, exact targets and labels, minimal observer
+refresh with external-window proof, early creation/pinning/population failures,
+and all ten aliases. All nine moved and 35 retained function ASTs match.
+A synthetic viewer build, observer sizing and external-client trace is
+byte-identical after normalizing only temporary and checkout paths (SHA-256
+`7188f7749cbacee0fe62e63df58755880b94d43b4dd910c4847ba098d06dc0b3`).
+The guarded offline `team-launcher present --help` digest matches baseline
+(`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
+All session/client evidence was synthetic; no live tenant, tmux, desktop,
+GUI window, service or release was changed.

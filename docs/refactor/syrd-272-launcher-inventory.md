@@ -19799,3 +19799,175 @@ as every slice):
   `write_client.py`, each with the same rooted inventory before any edit.
 - The SQL schema and migrations and the two shell scripts are candidates for
   their own exception decision.
+
+### SYRD-463 (project_provision slice 1): the owner GitHub SSH identity
+
+Measured on `cd18475`. The first child after the launcher checkpoint moves to
+the next oversized file, `scripts/ticket_board/project_provision.py`. Before any
+edit its responsibilities, public boundaries and seams were inventoried, one
+slice was measured in a scratch archive, and the Director approved it with one
+narrow guard adaptation.
+
+**The file, by responsibility** (every top-level function and class in exactly
+one group; `ppgroups463.py`):
+
+| lines | defs | responsibility |
+|---:|---:|---|
+| 799 | 28 | workflow projection, workflow SQL and the workflow record |
+| 593 | 23 | path containment, repository and worktree confinement |
+| 525 | 6 | operator command script, artifact writing and the CLI |
+| 399 | 12 | owner GitHub SSH identity (this slice) |
+| 377 | 13 | role tooling staging and system-unit proofs |
+| 373 | 22 | sudoers, tenant control and publication grants |
+| 369 | 13 | plan model and building |
+| 272 | 10 | role accounts and role runtime commands |
+| 260 | 11 | systemd units, tmpfiles, polkit and database SQL |
+| 113 | 2 | root-executable trust |
+| 45 | 9 | shell, SQL and service primitives |
+
+**Public boundaries:**
+- **CLI:** the `ticket-board-provision-project` wrapper imports `main` from the
+  package.
+- **Direct script execution:** `project_provision.py` itself is run as a
+  script (its `try/except ImportError` block serves both modes).
+- **Readers:** 30 production modules read 83 of its names, mostly by
+  imports inside functions.
+- **Test patches:** tests patch 17 names on it.
+
+**The slice:**
+- **The closure:** fifteen names, `GITHUB_IDENTITY_BEGIN`,
+  `GITHUB_IDENTITY_END`, `DEFAULT_GITHUB_HOST` and the twelve definitions of
+  the owner's managed `~/.ssh/config` block: the key path, the block, composing
+  it, reading it back, the owner's key pairs, resolving the identity, the
+  operator commands that write, select or remove it, and the publication-host
+  test.
+- **Where they went:** a new `scripts/ticket_board/provision_github_identity.py`.
+- **Constants:** the three constants are used only by the twelve, and
+  `DEFAULT_GITHUB_HOST` is a definition-time default, so they move with them.
+- **Kept on `project_provision`:** `shell_quote`, `_refuse_unnormalized`,
+  `PathContainmentError` and the one caller, `render_operator_commands`.
+- **The guards, measured empirically:** the move was made in a scratch archive
+  under /tmp. Every boundary suite, every file naming the slice and every file
+  naming `project_provision` (90) were run on both scratch trees
+  (126 whole, 678 cases). One guard changed.
+- **The one approved guard adaptation:**
+  `tests/new_project_artifacts_boundary_test.py` pins the modules loaded when
+  `new_project_artifacts` is imported alone, and `project_provision` now also
+  loads the new module. Its `PROVISION_MODULES` gains that one name; one line
+  changed. Applied to the scratch move, the whole suite passed. Every later
+  slice that `project_provision` re-exports at load will need the same kind of
+  one-line addition.
+
+| file | before (`cd18475`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 4,741 | 4,344 |
+| `scripts/ticket_board/provision_github_identity.py` | - | 499 |
+| `tests/provision_github_identity_boundary_test.py` | - | 656 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all fifteen at the end of
+  both branches of `project_provision`'s existing import block, the package
+  branch and the direct-script branch.
+- **Call-time reads:** each moved function that reads `project_provision`
+  imports it first thing when it runs, with the same fallback:
+  `from . import project_provision as provision`, else
+  `import project_provision as provision`.
+- **Seams:** all 57 call-time reads of 12 names are `provision.X`, so the
+  measured patch seams (`owner_github_key_path` and
+  `resolve_owner_github_identity`, patched on `project_provision` by
+  `tenant_publication_boundary_boundary_test`) still reach the moved code.
+- **Imports:** the module's own imports are `dataclass` and `Path`, and at load
+  it loads only its package.
+- **Defaults:** every `host` default is the very `DEFAULT_GITHUB_HOST` object,
+  bound at definition time, as before.
+- **Readers:** the 4 production modules that import names from the slice do
+  so from `project_provision` inside functions, and are byte-identical.
+- **Direct script execution:** the fallback imports `project_provision` as a
+  second module object beside `__main__`. The code is the same, and nothing in
+  it catches `PathContainmentError` by identity.
+
+**Proof.** The independent proof (`equiv463.py`, 15 clauses) holds.
+- **Whole nodes:** it compares every whole node after dropping the one
+  call-time import block and reading `provision.X` as X. It also compares
+  `project_provision` as AST (its import block less exactly the re-export) and
+  as text.
+- **Rules:** its rules clause fixes, in order, the key path and its refusal,
+  the block's markers and stanzas, composing, reading a block, the key pairs,
+  resolving, every operator command and refusal, and the publication host.
+- **Tests:** its clauses 6b and 6c require that the only changed tests are the
+  new one and the approved guard, and that the guard is its baseline text with
+  exactly that name added.
+- **Planted faults:** 18 of 18 are caught, including a dropped
+  direct-script fallback and a re-export in only one branch.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_github_identity_boundary_test.py`,
+  175 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 45 cases produced by the BASELINE module's own
+    definitions (`gold463.py`) over synthetic owner homes in a test-owned
+    directory.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds and
+    with another TMPDIR and locale.
+  - It also renders one synthetic packet through the direct script and
+    through the package, with a synthetic named key given to `build_plan` the
+    way `switchyard new` gives it, and requires the two to be byte-identical.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (117 checks).
+- **Fixes before relying on a result:**
+  - My pre-edit report said the provisioning smoke exercised the owner's
+    managed key. It did not: the CLI takes no GitHub key, so a fresh packet
+    renders the default `id_ed25519`. The named key is now given to
+    `build_plan`, in the test and in the smoke.
+  - Four mutants survived my first cases. One was an equivalent mutant of my
+    own, now replaced; the other three were gaps, now covered: a recorded host,
+    a `~host:` remote, and a `file://host/` remote.
+- **Mutations:** 34 of 34 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 31; the structure checks kill the
+  rest (the direct-script fallback dropped, the launcher imported at load, re-export aliased).
+- **Provisioning smoke on the exact trees** (`smoke463.sh`, synthetic owner
+  home, source and output under /tmp, under the guard):
+  - A default packet through the direct script and the installed wrapper.
+  - A named-key packet through the script-mode fallback and through the
+    package.
+  - Every artifact and stdout is byte-identical between baseline and
+    candidate, and between modes.
+- **Comparison, both trees, guarded:** all 212 files accounted for.
+  - 127 suites whole, 108 passing on the candidate (the new test only
+    there; the adapted guard passes on the candidate, its original on the
+    baseline). Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 678 cases, per case, identical: 476 pass, 198 stop at the same
+    guard refusal, 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`), baseline
+    defects already reported.
+  - Two cases of `release_bootstrap_rollback_test` passed in the pre-edit
+    scratch run and stop at the guard in this final run, on both trees alike.
+    They run `git init` in their own temporary directory, and the guard allows
+    `git` only when the working directory is under /tmp. The scratch trees were
+    under /tmp and the worktrees are not.
+  - Excluded 260: 22 drive an upgrade, 233 execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 36 of 584 passing runs execute one of the
+    eleven functions, in 18 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and no real home or
+  key was read. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; sizes at `cd18475`):
+
+- workflow projection, workflow SQL and the workflow record (799 lines)
+- path containment, repository and worktree confinement (593 lines)
+- role tooling staging and system-unit proofs (377 lines)
+- sudoers, tenant control and publication grants (373 lines)
+- role accounts and role runtime commands (272 lines)
+- systemd units, tmpfiles, polkit and database SQL (260 lines)
+- root-executable trust (113 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the operator
+command script, artifact writing and the CLI stay as `project_provision`'s
+compatibility surface. `project_provision.py` is 4,344 lines after this slice;
+SYRD-272 is not complete.

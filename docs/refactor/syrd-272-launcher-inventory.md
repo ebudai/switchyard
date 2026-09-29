@@ -20306,3 +20306,136 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 3,596 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-466 (project_provision slice 4): workflow SQL rendering
+
+Measured on `67f87c5`. Before any edit, the six workflow SQL renderers left by
+SYRD-465 were inventoried by AST and moved in a scratch archive; the Director
+approved all six, with the `PROVISION_MODULES` line and an exact adaptation of
+the SYRD-465 test.
+
+**The slice:** six functions into a new
+`scripts/ticket_board/provision_workflow_sql.py`:
+- `render_workflow_sql` -- a tenant's workflow seed SQL: the projected stages
+  and transitions, a declared workflow applied as its canonical document, or
+  nothing for pgu and for an unverified declaration;
+- `render_project_role_constraint_sql` -- the role and state constraints every
+  renderer installs;
+- `render_add_role_sql` and `render_vcs_close_role_sql` -- the migrations for a
+  board already provisioned -- and the two row renderers they share.
+- **Kept on `project_provision`:** the SQL primitives (`sql_literal`,
+  `sql_text_array`), `_validate_role`, `UNVERIFIED_DECLARED_WORKFLOW`, the
+  projection (re-exported there from SYRD-465's module) and the workflow
+  record, all read by the renderers through `project_provision` when they run.
+- **The two approved guard adaptations:** `PROVISION_MODULES` in
+  `tests/new_project_artifacts_boundary_test.py` gains the new module, one
+  line; and `tests/provision_workflow_projection_boundary_test.py`, whose
+  `KEPT` and `DISPATCH` checks named the renderers as `project_provision`
+  definitions, now accepts a name re-exported there unaliased and counts the
+  renderers' reads of the projection wherever they live -- both checks still
+  exact equalities (a changed read fails it; measured).
+
+| file | before (`67f87c5`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 3,596 | 3,174 |
+| `scripts/ticket_board/provision_workflow_sql.py` | - | 492 |
+| `tests/provision_workflow_sql_boundary_test.py` | - | 639 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+| `tests/provision_workflow_projection_boundary_test.py` | 787 | 794 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all six at the end of both
+  branches of `project_provision`'s import block, after the projection import.
+- **Call-time reads:** all 42 reads of 10 names in 6 functions are
+  `provision.X` behind the same call-time import and direct-script fallback as
+  the earlier slices. Nothing is bound at definition time; the only defaults
+  are `None` for the schema text. The module's own imports are `json` and
+  `Sequence`; importing it alone loads only its package.
+- **Readers:** `team_launcher` imports `render_add_role_sql` and
+  `render_vcs_close_role_sql` from `project_provision` at module level and
+  reaches the same objects in every import order; `write_artifacts` and `main`
+  call `render_workflow_sql` as before. No test patched a renderer on
+  `project_provision` (the role-change tests patch `team_launcher`).
+
+**Proof.** The independent proof (`equiv466.py`, 16 clauses) holds: every
+whole node after dropping the one call-time import and reading `provision.X` as
+X; the rules in order (the constraint, the declared, unverified, pgu and
+projected branches, the row spelling, add-role's and the VCS migration's
+checks); `project_provision` as AST and text; and the tests -- the new one, the
+`PROVISION_MODULES` line, and the SYRD-465 test equal to its baseline text with
+exactly the approved hunk. 19 of 19 planted faults are caught, among
+them that hunk weakened and `team_launcher` edited.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_workflow_sql_boundary_test.py`,
+  150 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 43 cases produced by the BASELINE module's own
+    definitions (`gold466.py`) for default, shaped, lean, pgu, declared and
+    unverified plans built by `build_plan` for a synthetic owner under /p466,
+    the role-change migrations and every refusal; a rendering is recorded by
+    its length, digest, first lines and feature counts.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds and
+    with another TMPDIR and locale.
+  - It checks that `team_launcher`'s imports are the module's objects, that
+    the direct script renders every renderer's bytes as the package does, and
+    that the default, shaped and lean packets are byte-identical through both.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (110 checks).
+- **Fixes before relying on a result:** three mutants survived the first
+  cases, all gaps in the cases: no plan had two close roles or a close role
+  outside the project, and the given-schema case passed the real schema.sql
+  text, so ignoring it changed nothing. Plans with two close roles and with a
+  stranger closing, and a synthetic schema for every renderer, now cover them.
+- **Mutations:** 31 of 31 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 26; the structure checks kill the
+  rest (the direct-script fallback dropped, a sibling read bare, project_provision imported at load, re-export aliased, re-export dropped from the script branch).
+- **Every renderer, byte for byte, on the exact trees** (`probe466.py`):
+  50 renderings -- the six functions for six plans, add-role for an
+  implementer, an auditor and a role the plan lacks, an invalid role -- have one
+  digest on baseline and candidate, in the package and as the direct script.
+- **Provisioning smoke on the exact trees** (`smoke466.sh`): the default,
+  shaped, lean and named-key packets through the direct script and the
+  wrapper; every artifact, `workflow.sql` included, and stdout byte-identical
+  between baseline and candidate, and between modes.
+- **Comparison, both trees, guarded:** all 215 files accounted for.
+  - 130 suites whole, 111 passing on the candidate (the new test only
+    there; the two adapted guards pass on the candidate, their originals on the
+    baseline). Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 678 cases, per case, identical: 476 pass, 198 stop at the same
+    guard refusal, 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`), baseline
+    defects already reported.
+  - Excluded 260: 22 drive an upgrade, 233 execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 18 of 587 passing runs execute one of the six
+    functions, in 10 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and no real home was
+  read. The live snapshot is identical before and after.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The workflow SQL a reader opens is now a 492-line module,
+instead of a slice of the 3,596-line `project_provision.py`. The four
+`project_provision` slices so far are `provision_github_identity.py` (499
+lines), `provision_path_confinement.py` (555),
+`provision_workflow_projection.py` (447) and `provision_workflow_sql.py`
+(492), 1,993 lines between them.
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups466.py`):
+
+- role tooling staging and system-unit proofs (13 definitions, 377 lines)
+- sudoers, tenant control and publication grants (22 definitions, 373 lines)
+- role accounts and role runtime commands (10 definitions, 272 lines)
+- systemd units, tmpfiles, polkit and database SQL (11 definitions, 260 lines)
+- repository group, boundary statements and plan paths (left from the confinement group) (9 definitions, 142 lines)
+- root-executable trust (2 definitions, 113 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+3,174 lines after this slice; SYRD-272 is not complete.

@@ -605,14 +605,21 @@ def test_project_provision_reexports_them_and_its_readers_reach_them_there() -> 
     check(guard.lineno < min(n.lineno for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign))),
           "at the top, above every definition and constant that could read them")
     defined = {top_name(n) for n in tree.body} - {None}
-    check(not defined & set(MOVED) and set(KEPT) <= defined, "project_provision defines none of them, and keeps what they read and the SQL renderers that name them")
+    # A name stays reachable on project_provision: defined there, or -- once a later slice moves it on -- re-exported there,
+    # unaliased; and the definitions that name them are counted wherever they now live, a later slice's read through
+    # project_provision (provision.X) counting as the name.
+    exported = {a.name for n in ast.walk(guard) if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("provision_") and n.level == 1 for a in n.names if a.asname is None}
+    check(not defined & set(MOVED) and set(KEPT) <= defined | exported, "project_provision defines none of them, and keeps what they read and the SQL renderers that name them, its own or re-exported")
+    later = [ast.parse((ROOT / "scripts" / "ticket_board" / f"{n.module}.py").read_text(encoding="utf-8")) for n in guard.body
+             if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("provision_") and n.level == 1 and n.module != "provision_workflow_projection"]
     uses: dict = {}
-    for fn in tree.body:
+    for fn in [*tree.body, *(n for later_tree in later for n in later_tree.body)]:
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
-                if isinstance(x, ast.Name) and x.id in MOVED:
-                    uses.setdefault(fn.name, {}).setdefault(x.id, 0)
-                    uses[fn.name][x.id] += 1
+                name = x.id if isinstance(x, ast.Name) else x.attr if isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name) and x.value.id == "provision" else None
+                if name in MOVED:
+                    uses.setdefault(fn.name, {}).setdefault(name, 0)
+                    uses[fn.name][name] += 1
     check(uses == DISPATCH, f"project_provision's own definitions name them exactly as often as before, by the re-exported names: {uses}")
     loose = sorted({x.id for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom, ast.Try)) for x in ast.walk(n)
                     if isinstance(x, ast.Name) and x.id in MOVED})

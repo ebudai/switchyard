@@ -23562,3 +23562,76 @@ final `env_widening` check (line 2191, whose child cannot import
 `temporary_cluster`); it fails at the same line on both trees and is not
 claimed as a success.
 No live board, database or socket was touched.
+
+### SYRD-506 (ticket_board/server.py slice 4): build identity
+
+The Director approved the build-identity boundary before the ticket worktree
+was edited, from audited public main
+`58a1979eac83f5faa32bf7d0c295d314e8a8782d`, with one required correction.
+`ticket_board/build_identity.py` now owns which release of the board is
+running: `REPO_ROOT`, `RELEASE_SHA_RE`, `build_id_from_release_path`,
+`build_id_from_file` and `board_build_id`, moved verbatim.
+`board_build_id`'s `module_path` default is the one textual change, as the
+Director directed: it is `Path(__file__).with_name("server.py")`, with a
+comment, so the default is still the sibling `server.py` path it had in the
+server. `environ` is still the `os.environ` object and `repo_root` is still
+the same `REPO_ROOT` value. The signature and every body are unchanged; the
+other four statements are AST-identical.
+
+`server.py` imports the five names back as identical aliases, so both
+server constructors still call the server-global `board_build_id` that
+tests patch. It keeps `import subprocess`, with a comment, because existing
+suites patch `server.subprocess.run` to reach the SYRD-504 notifier. It drops
+only the now-unused `re` and `Mapping`. There is no forwarding method, mixin,
+callback or reverse import.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/server.py` | 1,261 lines, 7 top-level definitions | 1,209 lines, 4 top-level definitions |
+| `ticket_board/build_identity.py` | absent | 74 lines, 3 functions |
+| Total of these two files | 1,261 lines | 1,283 lines |
+
+The server keeps both server classes' construction, the handler and all
+authority; its four retained definitions are AST-identical. For a
+representative build-identity or refresh-required issue, the seam was at
+server lines 65 and 92-148. It is now at owner lines 17-74. The handler
+starts at server line 98 instead of 150, and `require_operation_allowed`
+moved from 410 to 358. `server.py` is now 41 lines under the 1,250-line soft
+limit, which closes the remainder SYRD-505 returned. SYRD-272 remains open
+for the other oversized files and the final measured comparison.
+
+**Verification.** The new `ticket_board_build_identity_test.py` passes five
+checks with a faked `subprocess.run` and temporary layouts:
+- identical aliases and the `server.subprocess` seam;
+- `inspect.signature` defaults equal to the parent's: keyword-only,
+  `environ` is `os.environ`, `repo_root` is `REPO_ROOT`, and `module_path`
+  equals `Path(server.__file__)`;
+- the fallback order: explicit neutral, then legacy (with no Git run), then
+  Git success with the exact argv, then a release segment on empty or failed
+  Git, then a marker file, then "unknown";
+- the release-segment rules: case, length, non-hex, nested, a final SHA
+  component, the last component excluded, and an installed `current`
+  symlink;
+- marker files: order, nearness, empty and blank-led markers, a directory
+  named BUILD, undecodable bytes;
+- two installed-style copies imported as `ticket_board` in fresh children
+  with the real defaults, resolving a `releases/<sha>` path and a BUILD
+  marker with the literal `server.py` default.
+All twenty-five seeded owner and server mutants fail it, and no Git process
+ran. Under a guard that refuses spawns, signals, sockets and host-path opens,
+an 87-record trace including the exact signature is byte-identical on
+baseline and candidate (SHA-256
+`671d5d4a3de2f469c21b096beff95958853d6156fe6956475ed4e6781cb8519a`). It
+covers the defaults, 13 layouts through both helpers and three Git outcomes,
+explicit IDs, "unknown" and the Git argv. `ticket-board.py --help` is
+identical (SHA-256
+`14794e90b174c6ec779a0e47f27c0077affbf46ea60c4779ad4c42660e1dca3d`, same
+temporary HOME on both trees). Seventeen existing and new suites pass on the candidate with
+`TICKET_BOARD_DIRECTORCTL` pointed at a recording stub, and there were zero
+directorctl invocations. They include `build_id`, `board_notifications`,
+`board_director_notification`, `backend_default`, `deploy_import_path`,
+`keepalive_body_drain`, `thumbnail_cache`, `verify_resume` and `live_sync`;
+the pre-existing ones also pass on baseline. `ticket_board_write_api_test`
+remains baseline red at its final `env_widening` check (line 2191) on both
+trees and is not claimed as a success. No live service, socket, database or
+host repository was written.

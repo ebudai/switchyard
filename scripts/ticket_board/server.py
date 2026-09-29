@@ -7,11 +7,12 @@ import logging
 import mimetypes
 import os
 import queue
-import re
 import secrets
 import socket
 import socketserver
-import subprocess
+# The server runs no process itself; suites patch server.subprocess.run to reach
+# board_notifications' directorctl send (SYRD-504).
+import subprocess  # noqa: F401
 import threading
 import time
 import urllib.parse
@@ -20,7 +21,6 @@ from hashlib import sha256
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Mapping
 
 from PIL import Image
 
@@ -32,6 +32,13 @@ from .board_notifications import (
     TicketBoardEventHub,
     director_target,
     send_director_message,
+)
+from .build_identity import (
+    REPO_ROOT,
+    RELEASE_SHA_RE,
+    board_build_id,
+    build_id_from_file,
+    build_id_from_release_path,
 )
 from .frontend import render_html
 from .local_peer_authority import (
@@ -62,7 +69,6 @@ from .peer_identity import SessionIdentity
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
-REPO_ROOT = Path(__file__).resolve().parents[2]
 CALLER_ROLE_HEADER = "X-Ticket-Board-Caller-Role"
 WRITE_TOKEN_HEADER = "X-Ticket-Board-Write-Token"
 REPORT_TOKEN_HEADER = "X-Ticket-Board-Report-Token"
@@ -88,64 +94,6 @@ EDIT_FIELD_NAMES = {
     "inspector_signoff",
     "user_signoff",
 }
-
-RELEASE_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
-
-
-def build_id_from_release_path(module_path: Path) -> str:
-    parts = module_path.resolve().parts
-    for index, part in enumerate(parts[:-1]):
-        if part != "releases":
-            continue
-        candidate = parts[index + 1].strip()
-        if RELEASE_SHA_RE.fullmatch(candidate):
-            return candidate.lower()
-    return ""
-
-
-def build_id_from_file(module_path: Path) -> str:
-    for parent in module_path.resolve().parents:
-        for name in ("BUILD", "BUILD_ID", "VERSION", ".build-id"):
-            candidate_path = parent / name
-            if not candidate_path.is_file():
-                continue
-            try:
-                lines = candidate_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-            except OSError:
-                continue
-            candidate = lines[0].strip() if lines else ""
-            if candidate:
-                return candidate
-    return ""
-
-
-def board_build_id(
-    *,
-    environ: Mapping[str, str] = os.environ,
-    repo_root: Path = REPO_ROOT,
-    module_path: Path = Path(__file__),
-) -> str:
-    explicit = (
-        environ.get("TICKET_BOARD_BUILD_ID", "").strip()
-        or environ.get("PGU_TICKET_BOARD_BUILD_ID", "").strip()
-    )
-    if explicit:
-        return explicit
-    proc = subprocess.run(
-        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    value = proc.stdout.strip()
-    if proc.returncode == 0 and value:
-        return value
-    release_id = build_id_from_release_path(module_path)
-    if release_id:
-        return release_id
-    file_id = build_id_from_file(module_path)
-    return file_id or "unknown"
-
 
 class TicketBoardHandler(BaseHTTPRequestHandler):
     server_version = "PGUTicketBoard/0.1"

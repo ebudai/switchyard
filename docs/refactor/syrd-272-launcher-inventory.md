@@ -21988,3 +21988,173 @@ would take the module-level helpers around it -- transition parsing and
 messages, the `directorctl` sender and delivery-error parsing, pane-state
 authority and the hook-state store -- or propose a justified exception for the
 class. SYRD-272 is not complete.
+
+### SYRD-479 (notify_listener slice 2): pane-state authority and hook storage
+
+Measured on `531f41a`. Before any edit, the rest of `notify_listener` was
+inventoried for one bounded responsibility besides the listener class: where
+each pane's hook state is kept, and whether the listener reads the place the
+hooks write. The Director approved the exact 13-name extraction, no
+existing-test change, leaving the listener class alone, and leaving the
+SYRD-264 comment where it is.
+
+**The slice:** 13 names into a new `scripts/ticket_board/pane_state.py`:
+- **Hook storage:** `PaneHookStateStore` (one JSON record per pane),
+  `PaneHookState`, `DEFAULT_PANE_STATE_DIR`, and the turn-start carry
+  (`hook_turn_started_at`, `TURN_START_EVENTS`; SYRD-268).
+- **The authority report:** `PaneStateAuthority` and `pane_state_authority`
+  (SYRD-95).
+- **Which registered roles are live, and the offline check:**
+  `registered_pane_targets`, `live_pane_targets`, `assignment_process_gone`,
+  `_pid_exists`, `load_runtime_assignments` and `verify_pane_state_authority`
+  (the `--verify-pane-state-authority` path `main` dispatches to).
+- **Kept in `notify_listener`:** the listener class, the traces, the composer
+  snapshot type, the delivery helpers and the CLI. `notify_listener`'s own
+  `PROC_ROOT` and `read_process` imports stay, because the moved code reads
+  them through it. `Iterable`, `Path`, `Sequence` and `hashlib` are unused by
+  its own definitions now, and are left unchanged as the Director approved.
+
+| file | before (`531f41a`) | after |
+|---|---|---|
+| `scripts/ticket_board/notify_listener.py` | 3,121 | 2,797 |
+| `scripts/ticket_board/pane_state.py` | - | 391 |
+| `tests/pane_state_boundary_test.py` | - | 742 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all 13 in its sorted place
+  among `notify_listener`'s relative imports, between the pane activity gate's
+  and `peer_identity`'s.
+- **Call-time reads:** 11 reads in 7 of the 15 functions and
+  methods, behind `from . import notify_listener as listener` first thing in
+  each. So a patch on `notify_listener` reaches this code; the installed
+  `ticket_board` package and the tests' `scripts.ticket_board` package each
+  resolve it to their own copy.
+- **Definition time:** the store's directory default, the two liveness
+  readers' `proc_root` and `pid_exists` defaults and the two frozen dataclass
+  decorators bind the objects they bound before. `PROC_ROOT` comes from
+  `peer_identity`, which imports only the standard library, so the module
+  imports that one name at load, for the defaults alone. Bodies read it
+  through `notify_listener`.
+- **Readers:** `role_runtime` and `role_pane_entry` import `PaneHookStateStore`
+  from `notify_listener` inside a function, when it runs. The pane activity
+  gate reads the store and the turn-start events through `notify_listener`.
+  `ticket-board-pane-idle-hook` keeps its own copy of the turn-start events.
+  All four are byte-identical.
+- **A comment left where it was:** the `(SYRD-264)` block that explains
+  `RUNTIME_ASSIGNMENT_UNRESOLVED` was run together with `TURN_START_EVENTS`'s own
+  comment in the baseline. SYRD-268 had inserted the turn-start events between
+  that block and its constant. The mover takes `TURN_START_EVENTS`'s comment
+  from its own first line, so the SYRD-264 block stays in `notify_listener`
+  unchanged. It now runs into the next constant's comment; putting it back
+  above its constant would be a separate change.
+
+**Proof.** The independent proof (`equiv479.py`, 16 clauses) holds. It
+checks:
+- every whole node, the store's and the authority's every method included,
+  after dropping the call-time import and reading `listener.X` as X;
+- the constants, decorators and defaults, and that the only Switchyard import
+  at load is `PROC_ROOT` from `peer_identity`;
+- that the SYRD-264 block stays word for word;
+- the carry, authority, liveness, store and offline-check rules, in order;
+- `notify_listener` as AST and as text;
+- the tests: only the new one.
+
+It catches 21 of 21 planted faults, among them:
+- `PROC_ROOT` read bare in a body;
+- a function's call-time import dropped;
+- the `pid_exists` default changed;
+- a second Switchyard import at load;
+- the SYRD-264 block carried off;
+- `notify_listener`'s own `read_process` import removed.
+
+**Evidence.**
+- **New boundary test:** `tests/pane_state_boundary_test.py`, 211
+  checks, gated on its screen and passing both under `env -i` and in this role
+  pane.
+  - It replays 57 cases produced by the BASELINE module's own
+    definitions (`gold479.py`):
+    - the turn-start carry;
+    - the store writing, normalising, refusing and reading back malformed
+      records;
+    - the authority report;
+    - liveness against a fake `/proc`;
+    - `_pid_exists` over an `os` whose `kill` only records;
+    - live and registered targets;
+    - the offline check;
+    - nine names rebound on `notify_listener`, each reached.
+  - No case reads the real `/proc` or signals a process.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER, COLUMNS, TMPDIR, project and pane-state directory, under
+    umask 077 and under three hash seeds.
+  - It checks the defaults by identity, both import forms (the installed one
+    reading its own `notify_listener`), the readers, and the entry point's
+    `--help` and offline check.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (139 checks).
+- **Fixes before relying on a result:**
+  - The host-path recorder used by the earlier slices wrapped only `stat`,
+    `lstat`, `open` and `access`; a `/proc/self/stat` `read_text` control
+    passed it uncaught. It now also wraps `io.open`, `os.open`, `os.listdir` and
+    `os.scandir`, records `/proc`, and has a positive control per prefix.
+  - The fake `/proc` stat line first had one field too few, so the reused-pid
+    case read nothing.
+  - A test draft's entry-point probe gave its assignments a process id, so the
+    offline check read the real `/proc` (three reads recorded). Once, outside
+    the guard, it may have called `kill(4242, 0)`, a signal-0 existence check
+    that delivers nothing. The probe uses no process id now.
+  - The mover first left two blank lines after four call-time imports, where
+    the baseline body already began after a blank line; it was fixed and
+    re-run before the commit.
+  - Five mutants first survived: an `ESRCH` read as unknown, a directory not
+    expanded, a recorded target ignored, a state written unnormalised, and a
+    non-record inspected. The last is equivalent (a non-record becomes an
+    empty record, pid 0, the same `""`). Each of the others has its own case
+    now, a non-equivalent sibling of the last is killed, and the gold was
+    retaken.
+- **Mutations:** 37 of 38 are killed by assertions, with zero guard
+  refusals. The survivor is the equivalent one above. The behaviour tests
+  alone kill 33. The structure checks kill the rest (the proc-root default replaced, the store read bare in the offline check, notify_listener imported at load, re-export aliased),
+  none of which changes an answer the cases observe.
+- **Pane-state authority and hook storage on the exact trees**
+  (`probe479.py`): 60 cases give one digest on baseline and candidate,
+  through the package and through the installed wrapper's import. The
+  widened recorder logged 0 host paths and 0 `/proc` accesses, and caught
+  both positive controls.
+- **Entry point on the exact trees** (`smoke479.sh`): `--help` and the offline
+  check, through the wrapper and the package, are byte-identical between
+  baseline and candidate.
+- **Comparison, both trees, guarded:** all 212 files accounted for.
+  - 145 suites whole, 120 passing on the candidate.
+    The new test runs only there. 14 suites start a throwaway
+    PostgreSQL cluster, which the guard refuses; they stop there identically.
+    Other identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused).
+  - 787 cases, per case, identical: 572 pass, 212 stop at the
+    same guard refusal, and 3 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `ticket_board_notify_listener_test::test_final_review_handoff_exemption_does_not_broaden_manual_holds`).
+  - Excluded 239: 229 execution screen, 5
+    accumulators, 5 drive an upgrade or `switchyard_main`.
+  - Not run: team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv); ticket_board_held_review_handoff_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 128 of 692 passing runs execute a moved
+    function or method, in 11 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and tmux was never
+  run. Apart from the test draft's reads disclosed above, nothing I wrote read
+  or wrote a real home, account, /etc, /var or /opt path, or the real /proc.
+  The live snapshot differs only in this pane's own board-notification listener log and this account's daily `arch-update.timer` check, whose files carry the time `arch-update.service` exited; every suite runs with HOME at a scratch directory.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**What remains of `notify_listener`:** 2,797 lines after this slice.
+`TicketBoardNotifyListener` (2,106 lines, 57 methods) is most of it; around it
+are the configuration constants and reason tables, transition parsing and
+messages, the `directorctl` sender and delivery-error parsing, the role-aware
+tmux runner and role accounts, the trace and composer snapshot types, and the
+CLI. Moving all of those would still leave the file above 2,100 lines, so
+helper slices cannot bring it under the soft limit.
+
+Two routes remain, each needing its own decision:
+- **A designed decomposition** of the class into collaborators it delegates
+  to. That changes the class and needs its own tests.
+- **A justified exception** for the listener as one state machine, taken
+  after the module-level helpers are separated.
+
+SYRD-272 is not complete.

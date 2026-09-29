@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import time
 from io import BytesIO
 from datetime import datetime, timezone
@@ -14,6 +13,8 @@ from typing import Any
 
 from PIL import Image
 
+from . import commit_cache
+from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (
     IMAGE_EXTENSIONS,
@@ -66,24 +67,6 @@ def _role_list_from_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         if role not in roles:
             roles.append(role)
     return tuple(roles) or default
-
-
-#: Where a publication proves itself (SYRD-118). The privileged publisher writes
-#: this namespace into the tenant's trusted commit cache only after it has
-#: pushed and read the exact commit back from the public remote, so a ref here
-#: is the board's own sight of a completed publication. `refs/heads/<ref>` in
-#: the same repository is not: `switchyard-request-publication` creates that
-#: locally when the ask is filed, and accepting it would prove only that
-#: somebody asked.
-PUBLISHED_REF_NAMESPACE = "refs/remotes/origin"
-#: How long the board will wait for its own copy of the repository to catch up
-#: with a commit somebody has just published. Short enough that a submission
-#: does not hang on an unreachable forge, long enough for an ordinary fetch.
-COMMIT_REFRESH_TIMEOUT_SECONDS = 30
-#: Branch names this will hand to git. The board already refuses anything else
-#: when the ask is filed; asked again here so no ref shape can become an
-#: argument to the command that is supposed to be reading it.
-PUBLISHABLE_REF = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*")
 
 
 ASSIGNEES = _role_list_from_env("TICKET_BOARD_ASSIGNEES", DEFAULT_ASSIGNEES)
@@ -836,7 +819,7 @@ WHERE (r.definition->>'active')::boolean
                 "Nothing was recorded and the request is still open: publish the commit that "
                 "was asked for, or reject the request with a reason."
             )
-        if not self._readable_commit_repos():
+        if not commit_cache.readable_commit_repos(self.commit_git_dirs):
             # A tenant whose cache is missing proves nothing either way, and
             # saying "not published" here would blame the publisher for a
             # misconfigured board. Still a refusal: unproven is unproven.
@@ -847,30 +830,10 @@ WHERE (r.definition->>'active')::boolean
                 "open."
             )
         raise ValueError(
-            f"{ref} is not published: {self._published_ref_absence(ref, commit)} "
+            f"{ref} is not published: {commit_cache.published_ref_absence(self.commit_git_dirs, ref, commit)} "
             "Nothing was recorded and the request is still open -- publish the ref and record "
             "the outcome again, or reject the request with a reason."
         )
-
-    def _readable_commit_repos(self) -> bool:
-        for commit_git_dir in self.commit_git_dirs:
-            try:
-                self._commit_repo_git_args(commit_git_dir)
-            except ValueError:
-                continue
-            return True
-        return False
-
-    def _published_ref_absence(self, ref: str, commit: str) -> str:
-        """Why the proof is missing, said precisely enough to act on."""
-        local = self._cache_ref_commit(f"refs/heads/{ref}")
-        if local == commit:
-            return (
-                f"the trusted commit cache has no {PUBLISHED_REF_NAMESPACE}/{ref}. Its local "
-                f"refs/heads/{ref} is at {commit[:12]}, but that branch is what filing the "
-                "request creates, not evidence that anything reached the remote."
-            )
-        return f"the trusted commit cache has no {PUBLISHED_REF_NAMESPACE}/{ref}."
 
     def published_ref_commit(self, ref: str) -> str:
         """Resolve one published ref in the tenant's trusted commit cache.
@@ -879,27 +842,7 @@ WHERE (r.definition->>'active')::boolean
         remote is named, contacted, or taken at its word, so this stays safe to
         re-run and cannot be pointed at a remote of the caller's choosing.
         """
-        return self._cache_ref_commit(f"{PUBLISHED_REF_NAMESPACE}/{ref}")
-
-    def _cache_ref_commit(self, refname: str) -> str:
-        candidate = refname.strip()
-        if not PUBLISHABLE_REF.fullmatch(candidate) or ".." in candidate:
-            return ""
-        for commit_git_dir in self.commit_git_dirs:
-            try:
-                git_args = self._commit_repo_git_args(commit_git_dir)
-            except ValueError:
-                continue
-            resolved = subprocess.run(
-                [*git_args, "rev-parse", "--verify", "--quiet", "--end-of-options",
-                 f"{candidate}^{{commit}}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if resolved.returncode == 0 and resolved.stdout.strip():
-                return resolved.stdout.strip().lower()
-        return ""
+        return commit_cache.published_ref_commit(self.commit_git_dirs, ref)
 
     def publication_requests(
         self,
@@ -1780,7 +1723,7 @@ SELECT EXISTS (
         # for work that has just been published rather than a sign of anything
         # wrong. The cache is refreshed once, from its own configured remote,
         # and the question is asked again.
-        if self._refresh_commit_repos():
+        if commit_cache.refresh_commit_repos(self.commit_git_dirs):
             resolved, missing_repos = self._resolve_known_commit(value)
             if resolved:
                 return resolved
@@ -1794,67 +1737,12 @@ SELECT EXISTS (
         )
 
     def _resolve_known_commit(self, value: str) -> tuple[str, list[Path]]:
-        """The commit as this board's own copies of the repository resolve it."""
-        missing_repos: list[Path] = []
-        for commit_git_dir in self.commit_git_dirs:
-            try:
-                git_args = self._commit_repo_git_args(commit_git_dir)
-            except ValueError:
-                missing_repos.append(commit_git_dir)
-                continue
-            proc = subprocess.run(
-                [*git_args, "cat-file", "-e", f"{value}^{{commit}}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if proc.returncode != 0:
-                continue
-            resolved = subprocess.run(
-                [*git_args, "rev-parse", "--verify", f"{value}^{{commit}}"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if resolved.returncode == 0 and resolved.stdout.strip():
-                return resolved.stdout.strip(), missing_repos
-        return "", missing_repos
+        """The commit as this board's own copies of the repository resolve it.
 
-    def _refresh_commit_repos(self) -> bool:
-        """Fetch each verification repository from its own configured remote.
-
-        Bounded and credential-free by construction: the remote is whatever that
-        repository already names -- for a tenant's cache, the project's public
-        URL -- and nothing here is told a remote by a caller, so a submission
-        cannot point this at a repository of its choosing. A fetch that fails or
-        hangs is not an error in itself; it only means the commit stays unknown,
-        which the caller is then told plainly.
+        Kept on the app (SYRD-502): tests stub it per instance so a submission
+        never reaches the host's real commit repositories.
         """
-        refreshed = False
-        for commit_git_dir in self.commit_git_dirs:
-            try:
-                git_args = self._commit_repo_git_args(commit_git_dir)
-            except ValueError:
-                continue
-            try:
-                fetched = subprocess.run(
-                    [*git_args, "fetch", "--quiet", "--prune", "origin"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=COMMIT_REFRESH_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired:
-                continue
-            refreshed = refreshed or fetched.returncode == 0
-        return refreshed
-
-    def _commit_repo_git_args(self, commit_git_dir: Path) -> list[str]:
-        if (commit_git_dir / ".git").exists():
-            return ["git", "-C", str(commit_git_dir)]
-        if not commit_git_dir.exists():
-            raise ValueError(f"commit_hash verification repository not found: {commit_git_dir}")
-        return ["git", f"--git-dir={commit_git_dir}"]
+        return commit_cache.resolve_known_commit(self.commit_git_dirs, value)
 
     def _validate_stored_screenshots(self, raw_screenshots: Any, raw_screenshot: Any) -> list[dict[str, Any]]:
         raw_items: list[Any] = []

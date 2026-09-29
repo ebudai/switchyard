@@ -23264,3 +23264,73 @@ public surface are byte-identical (SHA-256
 app module namespace gains only the seven imported function names.
 Seventy-three retained methods are AST-identical; eleven change only at
 direct call sites. No live board or database was touched.
+
+### SYRD-502 (ticket_board/app.py slice 4): trusted commit cache
+
+The Director approved the cache boundary before the ticket worktree was
+edited, from audited public main
+`7195b6c95c117f34e3a71a2c3b4beb9ad313d697`, with two required corrections.
+`ticket_board/commit_cache.py` now owns the trusted commit cache's reads and
+bounded refresh: `PUBLISHED_REF_NAMESPACE`, `COMMIT_REFRESH_TIMEOUT_SECONDS`,
+`PUBLISHABLE_REF`, and seven stateless functions that take the repositories
+on every call: `commit_repo_git_args`, `readable_commit_repos`,
+`cache_ref_commit`, `published_ref_commit`, `published_ref_absence`,
+`resolve_known_commit` and `refresh_commit_repos`. Their bodies are AST-identical
+after `self.commit_git_dirs` becomes an argument; only docstring indentation
+changed. The owner imports `re`, `subprocess` and `pathlib`, names no remote
+and holds no state.
+
+As required, the app keeps two narrow compatibility methods and nothing
+else that forwards. `TicketBoardApp.published_ref_commit(ref)` keeps the
+class's public surface. `TicketBoardApp._resolve_known_commit(value)` stays
+the per-instance seam that Postgres suites stub, so their apps never reach
+the host repositories their defaults name. `_prove_publication` and
+`_validate_commit_hash` still call those two methods and call the other owner
+functions directly with `self.commit_git_dirs`, so runtime reassignment still
+works. The app keeps the proof order, the refresh-once rule, every refusal
+text, and the publication request/resolve transactions with
+`require_publication_control`. `app.py` re-exports the three constants and
+drops its now-unused `subprocess` import.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/app.py` | 1,993 lines, 84 app methods | 1,881 lines, 79 app methods |
+| `ticket_board/commit_cache.py` | absent | 150 lines, 7 functions |
+| Total of these two files | 1,993 lines | 2,031 lines |
+
+For a representative SYRD-118/125 proof or commit-verification issue, the
+cache was at app lines 70-85, 855-903 and 1796-1857, about 900 lines apart.
+It is now at owner lines 16-150. `_prove_publication` (app 796) sits next to
+`published_ref_commit` (838), and `_validate_commit_hash` (1708) sits next to
+`_resolve_known_commit` (1739). Leaving the class intact keeps the cache
+split. Moving only the proof reads would leave git execution in both files.
+Moving the publication transactions or `_validate_commit_hash` would carry
+database authority or submission policy across owners. The 38-line combined
+increase is the new module header, imports and the two kept methods.
+`app.py` remains above the 1,250-line soft limit; SYRD-272 remains open.
+
+**Verification.** The new `ticket_board_commit_cache_test.py` passes six
+checks against temporary repositories: the surface (aliases, two kept
+methods, moved methods absent, owner imports, no URL); per-instance stubs
+reaching validation and proof with zero git calls; unsafe ref names refused
+before git and the exact `--end-of-options` argument; the `-C`/`--git-dir`
+forms and the missing text; refresh as `fetch --quiet --prune origin` with
+timeout 30, skipping hangs, failures and missing repositories; validation's
+single refresh, its format, unknown and plural-missing texts; and every proof
+text, including a local branch at the requested commit and at another
+commit, plus runtime reassignment. All twenty-two seeded owner and call-site
+mutants fail it. Under a guard that admits only git on temporary paths
+without a URL, a 58-case validation/proof trace with 59 recorded git argv is
+byte-identical on baseline and candidate (SHA-256
+`5ae343f571788b2909d41de62fce48e4cf06bb944ad5e058e654150de6d9f396`).
+`ticket-board.py --help`, the server namespace and the `TicketBoardApp`
+public surface are byte-identical; the app module swaps `subprocess` for
+`commit_cache`. Seven existing suites ran unmodified, serially, with
+temporary Postgres clusters, under a PATH git wrapper that refuses any
+`/data/git` argument. There were zero host-repository calls on either tree.
+publication_cache_refresh, signoff_follows_commit, reason_only_blocker,
+operator_wait and lifecycle_reservation pass on both. publication_proof
+(final upgrade case, missing migration tail) and commit_verification
+(predates refresh-on-miss) are red on baseline at the same lines. Seventy-five
+retained methods are AST-identical. No live board, network, service,
+database or host repository was touched.

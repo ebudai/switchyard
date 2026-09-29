@@ -19626,3 +19626,176 @@ and **not implemented**:
   -    78 lines    6 defs  onboarding docs, prompts and skills
 
 **SYRD-272 is not complete.** The launcher is still 2,685 lines.
+
+### SYRD-462 (checkpoint): the last launcher extraction and the proposed facade exception
+
+Measured on `97e74fa`. This checkpoint inventoried what remains in the
+launcher, measured whether a substantial cohesive block could still move, and
+reported to the Director before any edit. The Director chose to move the one
+block found (the new-project role and runtime selection) and to have the
+remaining explicit facade assessed as a proposed soft-limit exception.
+
+#### The extraction: new-project role and runtime selection
+
+- **The closure:** eighteen names:
+  - the five constants `SUPPORTED_NEW_PROJECT_CLIS`,
+    `NEW_PROJECT_ROLE_CLI_DEFAULTS`, `SWITCHYARD_PROMPT_MAX_ATTEMPTS`,
+    `NEW_PROJECT_RESERVED_ROLE_NAMES` and
+    `NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES` (each used in the launcher only
+    by this group);
+  - the three validators, the default pairs, owner and dedupe;
+  - the line prompts and the runtime picker;
+  - `RoleSelection`.
+- **Kept on the launcher:** the two path helpers `_new_project_session_dir` and
+  `_new_project_worktree_base`.
+- **The guards, measured empirically:** the move was made in a scratch archive
+  of the baseline under /tmp, and every screen-clean boundary suite plus the
+  16 files naming any of the eighteen were run on both scratch trees
+  (116 whole, 276 cases). Nothing differed, so no test guard needed
+  adapting and none changed, as the Director required.
+
+| file | before (`97e74fa`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 2,685 | 2,542 |
+| `scripts/new_project_selection.py` | - | 205 |
+| `tests/new_project_selection_boundary_test.py` | - | 617 |
+
+- **Placement:** one explicit, unaliased import of all eighteen, right after
+  the `owner_files` import. No launcher definition outside the eighteen names
+  them. The 15 production modules that read them do so through the
+  launcher when they run, or name `RoleSelection` only in annotations, and are
+  byte-identical. `RoleSelection` is one class, so only its `__module__`
+  changes.
+- **Seams:** all 23 call-time reads of 16 names are now `launcher.X`:
+  the siblings, `ROLE_RE`, the runtime catalog, the prompt schema and the
+  terminal picker. `Choice` and `Field` are imported under TYPE_CHECKING only;
+  the module loads no Switchyard module.
+- **Proof.** The independent proof (`equiv462.py`, 14 clauses) holds. It
+  compares every whole node (each constant's literal and the dataclass
+  included) and the launcher remainder as AST and text. Its rules clause fixes
+  each validation and message, the pair order, every prompt text, the yes/no
+  answers and attempt loop, the runtime choices and field, and the picker and
+  its cancel. Its clause 6b requires that no existing test changed.
+  20 of 20 planted faults are caught.
+- **New boundary test:** `tests/new_project_selection_boundary_test.py`,
+  194 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 49 cases produced by the BASELINE launcher's own
+    definitions (`gold462.py`).
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER, COLUMNS and LINES, under umask 077, under three hash
+    seeds and with another TERM, width and locale.
+  - Nothing reads a terminal: prompts go to injected input and print functions,
+    and the real picker runs with them.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (125 checks).
+  - **Fix before relying on a result:** my first frozenness case called
+    `hash()` directly, so a not-frozen mutant crashed the behaviour tests
+    instead of failing an assertion. Hashability is now recorded safely.
+- **Mutations:** 36 of 36 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 34; the structure checks kill the
+  rest (the launcher imported at load, re-export aliased).
+- **Comparison, both trees, guarded:** all 147 files accounted for.
+  - 117 suites whole, 105 passing on the candidate (the new test only
+    there). Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused).
+  - 276 cases, per case, identical: 256 pass, 18 stop at the same
+    guard refusal, 2 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects
+    already reported.
+  - One case, `board_skill_test::test_a_checkout_only_claims_a_commit_that_carries_this_body`,
+    passed in the pre-edit scratch run and stops at the guard in this final
+    run, on both trees alike. The guard allows `git` only when the working
+    directory is under /tmp. The scratch trees were under /tmp and the
+    worktrees are not, and the case runs `git` on its own temporary repository.
+  - Excluded 92: 0 drive an upgrade, 87 execution screen, 5 accumulators.
+  - Not run: none.
+  - Call profiler: 10 of 361 passing runs execute one of the
+    thirteen functions, in 8 files.
+- **Containment:** the live snapshot is identical before and after, and both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+#### The remaining launcher: a proposed soft-limit exception
+
+**Proposed, not accepted:** independent Audit assesses this evidence on the
+exact commit before the Director decides.
+
+**What is left** (2,542 lines after this checkpoint; 2,685 before):
+
+| part | before | after |
+|---|---:|---:|
+| explicit imports and re-exports | 1,467 (182 statements) | 1,487 (183 statements) |
+| functions | 661 (85) | 541 (73) |
+| assignments (constants) | 91 (46) | 82 (41) |
+| classes | 43 (4) | 35 (3) |
+| TYPE_CHECKING block and docstring | 3 | 3 |
+| comments and blank lines between nodes | 420 | 394 |
+
+- **The facade:** 1,212 imported names, 1,174 of
+  them from 152 Switchyard modules.
+- **The rest:** small helpers. The 73 functions have a
+  median of 5 lines and a maximum of 30. Most are leaves read by
+  several modules; this checkpoint found no other cohesive block to propose.
+
+**Which exported names are required** (pattern scans over the tree, the same
+as every slice):
+- **Installed entry points:** `scripts/team-launcher` needs `main`; `switchyard` needs `switchyard_main`; `scripts/switchyard` needs `switchyard_main`; `scripts/switchyard-viewer-layout` needs `viewer_layout_string`; `deploy/SYRD-87-recover-syrd-runtime.sh` needs `load_project_config`, `record_release_phase_from_status`, `tenant_release_deploy_command`, `tenant_release_listener_command`, `tenant_release_status`, `tenant_release_unit_install_command`.
+- **Consumers:** 1,048 of the 1,174 Switchyard re-exports
+  have at least one measured consumer.
+  - 873 are read through the launcher by production modules
+    (the moved modules' call-time `launcher.X` reads among them, which are what
+    make a patch on the launcher reach moved code).
+  - 377 are rebound or patched on the launcher by tests.
+  - 743 are read through the launcher by tests.
+  - 24 are used by the launcher's own code.
+- **No consumer by pattern:** 126. Only 6 of them appear in no test at all
+  (`DIRECTOR_ONBOARDING_MIGRATION`, `_codex_hook_current_hash`, `_codex_hook_event_key`, `_codex_hook_timeout`, `_codex_trusted_hashes`, `render_canary_unit`).
+  - Removing a re-export is a compatibility change, not an extraction, and
+    none is proposed. It would save at most 126 lines.
+
+**Why the explicit facade stays, and above 1,250 lines:**
+- **The limit cannot be met without breaking the contract:** the re-export
+  block alone is 1,487 lines. Packing every import to 120
+  columns would cut it to 619 lines, and the launcher would
+  still be 1,674. Reaching 1,250 would also mean moving
+  most of the remaining helpers one or two at a time.
+- **The one-name-per-line block is the launcher's public contract.** Every name
+  a caller or test relies on, its source module and its patch seam are
+  greppable and reviewable. A diff that adds or drops one is one visible line.
+  Packed imports would hide that in long lines and churn whole statements on
+  every change.
+- **A generic forwarding proxy is ruled out:** `__getattr__` or star imports
+  would make the public surface implicit. They would also break the explicit
+  patch interception that 377 test seams rely on.
+
+**Navigation and review effort against the exclusive baseline:**
+- **The launcher then:** 38,527 lines with 1,143 top-level functions and classes.
+- **Now:** 2,542 lines with 76.
+- **The names that moved out:** 1,098, into 143 modules. The file a reader opens
+  to read one used to be the whole launcher; now it is a median of
+  381 lines, a 90th percentile of 765 and a maximum of 1,099
+  (`scripts.agent_cli_promotion`). None of those modules is over the soft limit.
+
+**SYRD-272 is not complete.** Still over 1,250 lines at this candidate:
+
+- `scripts/ticket_board/schema.sql` 12,019
+- `scripts/ticket_board/project_provision.py` 4,741
+- `scripts/ticket_board/notify_listener.py` 4,057
+- `scripts/presentation_controller.py` 2,632
+- `scripts/team_launcher.py` 2,542
+- `scripts/ticket_board/app.py` 2,417
+- `scripts/ticket_board/server.py` 1,900
+- `scripts/ticket_board/migrations/pgu921_syrd11_declarative_workflow.sql` 1,773
+- `scripts/ticket_board/frontend_script_core.py` 1,761
+- `scripts/ticket_board/write_client.py` 1,608
+- `scripts/ticket-board-service.sh` 1,517
+- `scripts/ticket_board/migrations/pgu528_workflow_rbac_config_authoritative.sql` 1,442
+- `scripts/ticket_board/migrations/pgu589_depersonalize_user_role.sql` 1,299
+- `deploy/SYRD-87-recover-syrd-runtime.sh` 1,292
+
+**Next:**
+- The Director sequences the other oversized Python modules, beginning with
+  `scripts/ticket_board/project_provision.py`, then
+  `scripts/ticket_board/notify_listener.py`, `scripts/presentation_controller.py`
+  and the board's `app.py`, `server.py`, `frontend_script_core.py` and
+  `write_client.py`, each with the same rooted inventory before any edit.
+- The SQL schema and migrations and the two shell scripts are candidates for
+  their own exception decision.

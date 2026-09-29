@@ -1595,6 +1595,26 @@ from scripts.owner_files import (
     chown_owner_file_args,
     ensure_owner_file,
 )
+from scripts.new_project_selection import (
+    NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES,
+    NEW_PROJECT_RESERVED_ROLE_NAMES,
+    NEW_PROJECT_ROLE_CLI_DEFAULTS,
+    RoleSelection,
+    SUPPORTED_NEW_PROJECT_CLIS,
+    SWITCHYARD_PROMPT_MAX_ATTEMPTS,
+    _dedupe_role_names,
+    _default_new_project_owner,
+    _default_role_cli_pairs,
+    _prompt_bool,
+    _prompt_cli,
+    _prompt_text,
+    _read_prompt,
+    _runtime_choices,
+    _runtime_field,
+    _validate_new_project_audit_role,
+    _validate_new_project_cli,
+    _validate_new_project_implementer_role,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1699,15 +1719,6 @@ PROJECT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
 # A credential-source user name is joined onto a home base to locate a token, so it is
 # constrained to a plain useradd-style name: no separators, no traversal.
 OWNER_USER_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
-SUPPORTED_NEW_PROJECT_CLIS = ("claude", "codex", "agy", "hermes")
-NEW_PROJECT_ROLE_CLI_DEFAULTS = {
-    "designer": "claude",
-    "director": "claude",
-    "audit": "claude",
-}
-SWITCHYARD_PROMPT_MAX_ATTEMPTS = 5
-NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
-NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "user", "unassigned"})
 
 
 @dataclass(frozen=True)
@@ -1812,56 +1823,6 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise SystemExit(f"{path} must contain a JSON object")
     return parsed
-
-
-def _validate_new_project_cli(value: str, *, context: str = "CLI") -> str:
-    cli = value.strip().lower()
-    if cli not in SUPPORTED_NEW_PROJECT_CLIS:
-        raise SystemExit(f"{context} must be one of {', '.join(SUPPORTED_NEW_PROJECT_CLIS)}")
-    return cli
-
-
-def _validate_new_project_implementer_role(value: str, *, context: str = "role") -> str:
-    role = value.strip().lower()
-    if not ROLE_RE.fullmatch(role):
-        raise SystemExit(f"{context} must match ^[a-z][a-z0-9_-]{{0,63}}$")
-    if role in NEW_PROJECT_RESERVED_ROLE_NAMES:
-        raise SystemExit(f"{context} {role!r} is reserved")
-    return role
-
-
-def _validate_new_project_audit_role(value: str, *, context: str = "audit role") -> str:
-    role = value.strip().lower()
-    if not ROLE_RE.fullmatch(role):
-        raise SystemExit(f"{context} must match ^[a-z][a-z0-9_-]{{0,63}}$")
-    if role in NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES:
-        raise SystemExit(f"{context} {role!r} is reserved")
-    return role
-
-
-def _dedupe_role_names(roles: Sequence[str]) -> tuple[str, ...]:
-    result: list[str] = []
-    for role in roles:
-        if role not in result:
-            result.append(role)
-    return tuple(result)
-
-
-def _default_role_cli_pairs(
-    implementer_roles: Sequence[str],
-    *,
-    include_designer: bool,
-    include_audit: bool = True,
-    audit_roles: Sequence[str] | None = None,
-) -> tuple[tuple[str, str], ...]:
-    pairs: list[tuple[str, str]] = []
-    resolved_audit_roles = tuple(audit_roles) if audit_roles is not None else (("audit",) if include_audit else ())
-    if include_designer:
-        pairs.append(("designer", NEW_PROJECT_ROLE_CLI_DEFAULTS["designer"]))
-    pairs.append(("director", NEW_PROJECT_ROLE_CLI_DEFAULTS["director"]))
-    pairs.extend((role, NEW_PROJECT_ROLE_CLI_DEFAULTS["audit"]) for role in resolved_audit_roles)
-    pairs.extend((role, "codex") for role in implementer_roles)
-    return tuple(pairs)
 
 
 def _resolve_launcher_project_config(
@@ -2110,110 +2071,6 @@ def _privileged_upgrade_check_command(project: str, deploy_ref: str | None) -> s
     """The boundary command that runs this upgrade's checks as root, read-only."""
     commit = deploy_ref if deploy_ref and re.fullmatch(r"[0-9a-f]{40}", deploy_ref) else "<release commit>"
     return f"switchyard privileged-action {project} preview-upgrade commit={commit}"
-
-
-def _default_new_project_owner(project: str) -> str:
-    return f"{project}-agent"
-
-
-def _read_prompt(
-    prompt: str,
-    *,
-    input_func: Callable[[str], str] = input,
-) -> str:
-    try:
-        return input_func(prompt)
-    except EOFError:
-        raise SystemExit("switchyard: no input available") from None
-
-
-def _prompt_text(
-    label: str,
-    *,
-    default: str = "",
-    input_func: Callable[[str], str] = input,
-) -> str:
-    suffix = f" [{default}]" if default else ""
-    value = _read_prompt(f"{label}{suffix}: ", input_func=input_func).strip()
-    return value or default
-
-
-def _prompt_bool(
-    label: str,
-    *,
-    default: bool,
-    input_func: Callable[[str], str] = input,
-) -> bool:
-    default_text = "Y/n" if default else "y/N"
-    for _attempt in range(SWITCHYARD_PROMPT_MAX_ATTEMPTS):
-        raw = _read_prompt(f"{label} [{default_text}]: ", input_func=input_func).strip().lower()
-        if not raw:
-            return default
-        if raw in {"y", "yes", "true", "1"}:
-            return True
-        if raw in {"n", "no", "false", "0"}:
-            return False
-        print("answer yes or no")
-    raise SystemExit(f"switchyard: too many invalid answers for {label}")
-
-
-def _runtime_choices() -> tuple[Choice, ...]:
-    """The runtimes, in the order `switchyard new` offers them.
-
-    Taken from the catalog and narrowed to what `switchyard new` supports, so
-    the list an operator sees cannot drift from the list the validator accepts.
-    """
-    described = {choice.value: choice for choice in runtime_catalog.RUNTIMES}
-    return tuple(
-        described.get(name, Choice(name)) for name in SUPPORTED_NEW_PROJECT_CLIS
-    )
-
-
-def _runtime_field(role: str, *, default: str, configured: str = "") -> Field:
-    choices = _runtime_choices()
-    if configured:
-        choices = with_existing_value(choices, configured)
-    return Field(
-        name="runtime",
-        kind=KIND_SINGLE,
-        title=f"{role} runtime",
-        choices=choices,
-        default=configured or default,
-    )
-
-
-def _prompt_cli(
-    role: str,
-    *,
-    default: str,
-    input_func: Callable[[str], str] = input,
-    print_func: Callable[[str], None] = print,
-) -> str:
-    """Choose a role's runtime from the list, rather than recall one.
-
-    This used to render the alternatives into the prompt text -- `director CLI
-    (claude/codex/agy/hermes)` -- and read back whatever was typed. The set was
-    always finite and always known; it just was not shown as a set (SYRD-115).
-    """
-    default_cli = _validate_new_project_cli(default, context=f"default CLI for {role}")
-    try:
-        return terminal_select.select_one(
-            _runtime_field(role, default=default_cli),
-            input_func=input_func,
-            print_func=print_func,
-        )
-    except terminal_select.Cancelled:
-        raise SystemExit(f"switchyard: too many invalid answers for {role} CLI") from None
-
-
-@dataclass(frozen=True)
-class RoleSelection:
-    """One role, fully chosen: what runs it, on which model, at what effort."""
-
-    role: str
-    cli: str
-    model: str = ""
-    effort: str = ""
 
 
 def _new_project_session_dir(project: str, owner_user: str) -> str:

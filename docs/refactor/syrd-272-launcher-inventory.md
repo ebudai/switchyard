@@ -21839,3 +21839,152 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, artifact writing and the CLI stay as `project_provision`'s
 compatibility surface. `project_provision.py` is 1,242 lines after this
 slice, under the soft limit; SYRD-272 is not complete.
+
+## notify_listener
+
+`scripts/ticket_board/notify_listener.py` was 4,057 lines at `80bf7bf`: the
+listener's configuration constants, small dataclasses and the process-table
+helpers, transition parsing and messages, the `directorctl` sender, pane-state
+authority and the hook-state store, `PaneActivityGate` (710 lines),
+`TicketBoardNotifyListener` (2,106 lines), and the CLI. The installed entry
+point `scripts/ticket-board-notify-listener` imports
+`ticket_board.notify_listener.main`; the module has no direct-script mode.
+
+### SYRD-475 (notify_listener slice 1): the pane activity gate
+
+Measured on `80bf7bf`. Before any edit, the gate was inventoried as the one
+bounded responsibility in the file: whether a role's pane may be typed into
+now. The Director approved the exact 25-name extraction, no existing-test
+change, and leaving `notify_listener`'s `Sequence` and `hashlib` imports
+unchanged.
+
+**The slice:** 25 names into a new `scripts/ticket_board/pane_activity_gate.py`:
+- **The gate:** `PaneActivityGate`.
+- **The evidence it reads and nothing else in the file reads:**
+  `read_process_table`, `_boot_time_epoch_seconds`, `descendant_work_sample`,
+  `ChildWorkSample`, `ChildWorkMemory`, `WorkingProbe`, `pane_content_digest`
+  and `composer_snapshot_from_pane_text`.
+- **Its tuning constants:** eleven, `IDLE_TURN_END_SOURCES` and
+  `TRUSTED_IDLE_SOURCES` among them.
+- **Five shared constants its defaults bind when the class is defined:**
+  `DEFAULT_PROJECT`, `ROLE_TO_TARGET`, `DEFAULT_BUSY_REQUEUE_SECONDS`,
+  `DEFAULT_DIRECTOR_COMPOSING_TIMEOUT_SECONDS` and
+  `DEFAULT_IDLE_WORKING_TIMER_SAMPLE_DELAY_SECONDS`. Left in `notify_listener`,
+  they would have forced an import cycle; moved and re-exported, the listener,
+  its parser and `main` name the same objects. This is the seam's one cost:
+  the role-to-pane map and three listener-wide timing defaults live with the
+  gate.
+- **Kept in `notify_listener`,** read by the gate through it when it runs: the
+  hook-state store, the traces, the composer snapshot type, the logger and the
+  reason tables.
+
+| file | before (`80bf7bf`) | after |
+|---|---|---|
+| `scripts/ticket_board/notify_listener.py` | 4,057 | 3,121 |
+| `scripts/ticket_board/pane_activity_gate.py` | - | 1,058 |
+| `tests/pane_activity_gate_boundary_test.py` | - | 775 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all 25 in its sorted place
+  among `notify_listener`'s relative imports.
+- **Call-time reads:** 55 reads in 21 of the 48 functions and
+  methods, behind `from . import notify_listener as listener` first thing in
+  each. The mover and the proof were extended to a class's methods. So a patch
+  on `notify_listener` reaches the gate, `DEFAULT_PROJECT` included; the
+  installed `ticket_board` package and the tests' `scripts.ticket_board`
+  package each resolve it to their own copy.
+- **Definition time:** every default and dataclass decorator binds the object
+  it bound before (`subprocess.run`, `read_process_table`, `time.monotonic`,
+  the director's pane from `ROLE_TO_TARGET`). The module imports only the
+  standard library, and importing it alone loads only its package.
+- **Readers:** `role_runtime` and `role_pane_entry` import the gate from
+  `notify_listener` inside a function, when it runs, and are byte-identical.
+
+**Proof.** The independent proof (`equiv475.py`, 15 clauses) holds. It
+checks:
+- every whole node, the gate's every method included, after dropping the one
+  call-time import from each function and method that reads `notify_listener`
+  and reading `listener.X` as X;
+- the constants, decorators and defaults, and no Switchyard import at load;
+- that the store, traces, listener, CLI and `notify_listener`'s own imports stay;
+- the process-table, child-work, composer and gate rules, in order;
+- `notify_listener` as AST and as text;
+- the tests: only the new one.
+
+It catches 18 of 18 planted faults, among them:
+- a method's call-time import dropped;
+- a dataclass no longer frozen;
+- the director default changed;
+- the re-export below the `peer_identity` import;
+- `notify_listener`'s own `hashlib` import removed.
+
+**Evidence.**
+- **New boundary test:** `tests/pane_activity_gate_boundary_test.py`, 284
+  checks, gated on its screen and passing both under `env -i` and in this role
+  pane.
+  - It replays 42 cases produced by the BASELINE module's own
+    definitions (`gold475.py`):
+    - the composer snapshot and digest of six kinds of pane, the child-work
+      sample of four process trees, and the boot time and process table of a
+      fake `/proc` and a missing one;
+    - fifteen gate scenarios through twelve public methods, with stand-in tmux
+      runners, a stand-in process table, a hook-state directory under /tmp and
+      deterministic clocks;
+    - six names rebound on `notify_listener`, each changing what the gate
+      answers.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER, COLUMNS, TMPDIR, project and pane-state directory, under
+    umask 077 and under three hash seeds.
+  - It checks the defaults by identity, both import forms (the installed one
+    reading its own `notify_listener`), the readers, and the entry point's
+    `--help` and offline pane-state authority check.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (116 checks).
+- **Fixes before relying on a result:**
+  - The first probe called every pane busy: its stand-in cursor was away from
+    the composer's home, which the gate reads as a person typing.
+  - The `DEFAULT_PROJECT` rebind first reached nothing: the gate reads it only
+    for a pane outside the role map. A case with such a pane pins it.
+  - Before the mutation run, a review found that no case used a
+    permission-prompt source, so no permission wait was ever seen.
+  - Two mutants first survived: reporting a blocked hook as busy, because no
+    case read the trace `is_busy` records; and ignoring the configured role
+    map, because every pane's name also said its role.
+  - Each has its own case now, and the gold was retaken each time.
+- **Mutations:** 30 of 30 are killed by assertions, with zero guard
+  refusals. The behaviour tests alone kill 25. The structure checks kill the
+  rest (the process-table default replaced, a runner default replaced, notify_listener imported at load, re-export aliased, one name no longer re-exported), none of which changes an answer the cases observe.
+- **The gate and its evidence on the exact trees** (`probe475.py`): 193
+  cases give one digest on baseline and candidate, through the package and
+  through the installed wrapper's import, with 0 host paths looked at
+  (positive control caught).
+- **Entry point on the exact trees** (`smoke475.sh`): `--help` and the offline
+  pane-state authority check, through the wrapper and the package, are
+  byte-identical between baseline and candidate.
+- **Comparison, both trees, guarded:** all 197 files accounted for.
+  - 144 suites whole, 119 passing on the candidate.
+    The new test runs only there. 14 suites start a throwaway
+    PostgreSQL cluster, which the guard refuses; they stop there identically.
+    Other identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused).
+  - 610 cases, per case, identical: 491 pass, 116 stop at the
+    same guard refusal, and 3 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `ticket_board_notify_listener_test::test_final_review_handoff_exemption_does_not_broaden_manual_holds`).
+  - Excluded 159: 154 execution screen, 5
+    accumulators.
+  - Not run: ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv); ticket_board_held_review_handoff_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 125 of 610 passing runs execute a moved
+    function or gate method, in 8 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and tmux was never
+  run. Nothing I wrote read or wrote a real home, account, /etc, /var or /opt
+  path, or the real /proc. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**The remaining `notify_listener` sequence** (each slice with the same rooted
+inventory and a pre-edit decision): `notify_listener.py` is 3,121 lines
+after this slice, and `TicketBoardNotifyListener` (2,106 lines) is most of it.
+Its methods cannot move without changing the class itself, so a further slice
+would take the module-level helpers around it -- transition parsing and
+messages, the `directorctl` sender and delivery-error parsing, pane-state
+authority and the hook-state store -- or propose a justified exception for the
+class. SYRD-272 is not complete.

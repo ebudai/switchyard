@@ -42,6 +42,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 
 EXPORTED = ("replace_presentation_window_command",)
@@ -195,7 +197,7 @@ def test_the_layout_default_is_the_leafs() -> None:
 def test_the_calls_the_seams_and_the_functions_own_names() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     for name, count in LAUNCHER_CALLS.items():
-        calls = [n for n in ast.walk(launcher_tree)
+        calls = [n for n in ast.walk(ast.Module(body=launcher_body(ROOT, launcher_tree), type_ignores=[]))
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
         check(len(calls) == count and all(isinstance(n.func, ast.Name) for n in calls),
               f"the launcher calls {name} at its {count} baseline site, by its own name")

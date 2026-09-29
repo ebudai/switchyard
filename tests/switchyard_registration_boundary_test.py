@@ -53,6 +53,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import switchyard_registration as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('_registered_project_collision', '_check_switchyard_registration_available', '_register_switchyard_project', 'switchyard_register_command')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -418,7 +420,7 @@ def test_the_launcher_reexports_the_four_and_its_readers_reach_them_there() -> N
     check(not defined & set(MOVED) and seams | {"switchyard_main", "_switchyard_entries", "_build_switchyard_register_parser", "switchyard_registry_dir"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and every seam they read, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

@@ -43,6 +43,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("_role_named", "set_project_role_runtime_command")
 OWN = ("subprocess", "sys", "Path", "Any", "Callable")
@@ -130,7 +132,7 @@ def test_the_seams_the_local_import_and_the_dispatch() -> None:
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     check(not {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)} & set(MOVED)
           and "_owner_catalog_args" in {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)}
-          and len([n for n in ast.walk(launcher) if isinstance(n, ast.Call) and ast.unparse(n.func) == "set_project_role_runtime_command"]) == 1,
+          and len([n for n in ast.walk(ast.Module(body=launcher_body(ROOT, launcher), type_ignores=[])) if isinstance(n, ast.Call) and ast.unparse(n.func) == "set_project_role_runtime_command"]) == 1,
           "the launcher defines neither, keeps the shared catalog prefix, and dispatches by its own name")
 
 

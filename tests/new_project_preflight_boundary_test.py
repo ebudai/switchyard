@@ -41,6 +41,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402
 from scripts import new_project_phases as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 #: Measured on the baseline command's nine P1 statements.
 SEAMS = {"_parse_agent_cli_sources": 1, "_precheck_project_path_before_mutating": 1, "_repo_root": 1,
@@ -203,7 +205,7 @@ def command_def() -> ast.FunctionDef:
         check(any(isinstance(n, ast.ImportFrom) and n.module == "scripts.switchyard_new_command"
                   and any(a.name == "switchyard_new_command" and a.asname is None for a in n.names) for n in launcher_tree.body),
               "the launcher re-exports it, unaliased")
-        main = next(n for n in launcher_tree.body if isinstance(n, ast.FunctionDef) and n.name == "switchyard_main")
+        main = next(n for n in launcher_body(ROOT, launcher_tree) if isinstance(n, ast.FunctionDef) and n.name == "switchyard_main")
         check(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "switchyard_new_command" for n in ast.walk(main)),
               "and switchyard_main still dispatches `new` to the launcher's name")
         check(ast.unparse(command.body[0]) == "from scripts import team_launcher as launcher",

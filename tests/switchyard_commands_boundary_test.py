@@ -53,6 +53,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import switchyard_commands as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('SWITCHYARD_COMMANDS', 'SWITCHYARD_UNPRIVILEGED_COMMANDS', 'SWITCHYARD_PRIVILEGED_COMMANDS', 'switchyard_help_text', 'switchyard_invocation_requires_root')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -371,7 +373,7 @@ def test_the_launcher_reexports_the_five_and_its_readers_reach_them_there() -> N
                                                   "_project_config_path_owner_user"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and every seam they read, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

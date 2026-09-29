@@ -52,6 +52,8 @@ from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import tenant_suspension as m  # noqa: E402
 from scripts import board_services, presentation_windows, residual_processes, staged_role_tooling  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("suspend_tenant", "resume_tenant")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals.
@@ -430,7 +432,7 @@ def test_the_launcher_reexports_the_two_and_dispatches_through_them() -> None:
     check(not defined & set(MOVED) and {"_plan_data_from_config", "stop_project", "switchyard_main"} <= defined | exported,
           "the launcher defines neither, and keeps its neighbours and its dispatcher, its own or re-exported")
     calls: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, ast.FunctionDef):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:

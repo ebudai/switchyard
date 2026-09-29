@@ -48,6 +48,8 @@ from scripts import host_boundary_install as m  # noqa: E402
 from scripts.ticket_board import privileged_actions, privileged_install  # noqa: E402
 from scripts.ticket_board import shared_release_activation as sra  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("install_host_privileged_boundary", "switchyard_install_shared_release_command")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals.
@@ -386,7 +388,7 @@ def test_the_launcher_reexports_both_above_every_reader() -> None:
     check(not defined & set(MOVED) and {"role_control_accounts", "running_launcher_release", "_build_switchyard_install_shared_release_parser",
                                         "_build_switchyard_privileged_action_parser", "switchyard_main"} <= defined | exported,
           "the launcher defines neither, and keeps its neighbours and the dispatch, its own or re-exported")
-    main = next(n for n in tree.body if getattr(n, "name", None) == "switchyard_main")
+    main = next(n for n in launcher_body(ROOT, tree) if getattr(n, "name", None) == "switchyard_main")
     check([ast.unparse(x.func) for x in ast.walk(main) if isinstance(x, ast.Call) and ast.unparse(x.func).endswith("switchyard_install_shared_release_command")]
           == ["switchyard_install_shared_release_command"], "switchyard_main dispatches the command through its launcher global")
     pin = ast.parse((ROOT / "scripts" / "trusted_upgrade_release.py").read_text(encoding="utf-8"))

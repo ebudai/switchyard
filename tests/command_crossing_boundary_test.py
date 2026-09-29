@@ -56,6 +56,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import command_crossing as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('_switchyard_command_display', '_switchyard_user_can_prompt_for_sudo', 'ensure_staged_role_bundle_before_crossing', '_switchyard_exec_through_tenant_control', '_switchyard_exec_with_root', '_configured_role_account_caller', '_switchyard_command_is_unprivileged', '_switchyard_cross_account', '_require_switchyard_owner_hint_or_root', '_require_switchyard_project_owner_or_root', '_load_switchyard_project_config_for_command')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -534,7 +536,7 @@ def test_the_launcher_reexports_the_eleven_and_its_readers_reach_them_there() ->
                                         "_project_config_path_owner_user", "report_installed_release_version", "switchyard_main"} <= defined | exported,
           "the launcher defines none of them, and keeps every definition between them and its dispatcher, its own or re-exported")
     calls: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, ast.FunctionDef):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:

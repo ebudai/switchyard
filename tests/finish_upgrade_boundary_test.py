@@ -42,6 +42,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 #: The launcher's names the command reads when it runs, and how many times (measured on the SYRD-352 baseline).
 SEAMS = {"resolve_pinned_upgrade_source": 1, "upgrade_source_unavailable_reason": 1, "director_readable_pinned_release": 1,
@@ -222,7 +224,7 @@ def test_the_seams_the_modules_own_names_and_the_dispatch() -> None:
     bound |= {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     check(not bound & set(through_all), f"nothing the command binds is read as the launcher's: {bound & set(through_all)}")
     launcher = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
-    main = next(n for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name == "switchyard_main")
+    main = next(n for n in launcher_body(ROOT, launcher) if isinstance(n, ast.FunctionDef) and n.name == "switchyard_main")
     calls = [n for n in ast.walk(main) if isinstance(n, ast.Call) and ast.unparse(n.func) == "finish_upgrade_command"]
     check(len(calls) == 1 and not any(isinstance(n, ast.FunctionDef) and n.name == "finish_upgrade_command"
                                       for n in launcher.body),

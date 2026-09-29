@@ -57,6 +57,8 @@ from scripts import publication_status as m  # noqa: E402
 from scripts import host_accounts, privileged_provision_records  # noqa: E402
 from scripts.ticket_board import project_provision, publication_boundary  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("_build_switchyard_publication_status_parser", "publication_status_command", "_public_key_fingerprint")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -428,7 +430,7 @@ def test_the_launcher_reexports_the_three_and_dispatches_through_them() -> None:
     check(not defined & set(MOVED) and {"rollout_log_command", "_build_switchyard_cutover_roles_parser", "switchyard_main"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and its dispatcher, its own or re-exported")
     calls: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, ast.FunctionDef):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:

@@ -54,6 +54,8 @@ from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import presentation_commands as m  # noqa: E402
 from scripts import presentation_controller  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("switchyard_attach_command", "switchyard_present_command", "switchyard_recover_display_command")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -373,7 +375,7 @@ def test_the_launcher_reexports_the_three_and_dispatches_through_them() -> None:
                                         "_switchyard_exec_through_tenant_control", "switchyard_main"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and its dispatcher, its own or re-exported")
     calls: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, ast.FunctionDef):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:

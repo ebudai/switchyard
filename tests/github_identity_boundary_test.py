@@ -46,6 +46,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("GITHUB_IDENTITY_TIMEOUT_SECONDS", "github_identity_status", "write_plan_no_follow", "selected_key_problems",
          "_plan_with_selection", "clear_owner_github_identity_command", "set_owner_github_identity_command")
@@ -157,7 +159,7 @@ def test_the_seams_and_the_codes_own_names() -> None:
     defined = {n.name for n in launcher.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))} | {
         t.id for n in launcher.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
     check(not set(MOVED) & defined, "no copy of a moved name is left defined in the launcher")
-    calls = {name: [n for n in ast.walk(launcher) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    calls = {name: [n for n in ast.walk(ast.Module(body=launcher_body(ROOT, launcher), type_ignores=[])) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                     and n.func.id == name]
              for name in ("github_identity_status", "set_owner_github_identity_command",
                           "clear_owner_github_identity_command")}

@@ -51,6 +51,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import rollout_log as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('rollout_log_command',)
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals (none).
@@ -455,7 +457,7 @@ def test_the_launcher_reexports_the_command_and_its_dispatcher_reaches_it_there(
                                         "report_installed_release_version", "publication_status_command"} <= defined | exported,
           "the launcher defines none of it, and keeps its dispatcher and the dispatcher's neighbours, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

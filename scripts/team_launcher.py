@@ -1567,6 +1567,11 @@ from scripts.project_identity import (
     _validate_project_slug,
     switchyard_registry_dir,
 )
+from scripts.atomic_files import (
+    _ensure_private_dir,
+    _write_json_atomic,
+    _write_private_json_atomic,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1869,71 +1874,6 @@ def _resolve_launcher_project_config(
                 f"searched config dir {effective_config_dir} and registry dir {effective_registry_dir}"
             ) from exc
         raise
-
-
-def _write_json_atomic(
-    path: Path, payload: dict[str, Any], *, owner_user: str | None = None,
-) -> None:
-    owner = pwd.getpwnam(owner_user) if owner_user and os.geteuid() == 0 else None
-    mode = 0o600
-    if owner_user and path.exists():
-        mode = stat.S_IMODE(path.stat().st_mode) & 0o777
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    temp_path = Path(handle.name)
-    try:
-        with handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            # Publish tenant controls with the correct owner already attached;
-            # never leave a root-owned replacement for a later repair step.
-            if owner is not None:
-                os.fchown(handle.fileno(), owner.pw_uid, owner.pw_gid)
-            if owner_user:
-                os.fchmod(handle.fileno(), mode)
-        temp_path.replace(path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-def _ensure_private_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    try:
-        path.chmod(0o700)
-    except OSError:
-        pass
-
-
-def _write_private_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    _ensure_private_dir(path.parent)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        temp_path = Path(handle.name)
-    try:
-        temp_path.chmod(0o600)
-    except OSError:
-        pass
-    temp_path.replace(path)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
 
 
 def role_account_name(project: str, role: str) -> str:

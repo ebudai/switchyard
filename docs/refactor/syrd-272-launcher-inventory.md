@@ -19067,3 +19067,138 @@ and **not implemented**:
   -    81 lines   13 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 2,891 lines.
+
+### SYRD-457 (slice 19bi): launcher-owned atomic JSON writers
+
+Measured on `3d9cae2`. Before any edit, two closures were measured and the
+Director approved the smaller.
+
+- **The closure:** three definitions: `_write_json_atomic`,
+  `_ensure_private_dir` and `_write_private_json_atomic`.
+- **Kept on the launcher:** `ensure_owner_file` and `chown_owner_file_args`.
+  They do not write a file; they hand an already-written one to the owner by
+  running `chown` through a runner. Moving them too (the five-definition
+  candidate) changed one existing guard.
+- **The guards, measured empirically:** the move was made in a scratch archive
+  of the baseline under /tmp, and every screen-clean boundary suite plus the
+  24 files naming any of the five were run on both scratch trees
+  (112 whole, 293 cases). For the three, nothing differed, so no test
+  guard needed adapting and none changed, as the Director required.
+
+| file | before (`3d9cae2`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 2,891 | 2,831 |
+| `scripts/atomic_files.py` | - | 95 |
+| `tests/atomic_files_boundary_test.py` | - | 502 |
+
+**Scope: exactly the approved three definitions**, moved whole, in the
+launcher's order, into the new `scripts/atomic_files.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all three, right after the
+  `project_identity` import.
+- **Callers and readers:** no launcher definition names them. The
+  27 production modules that read them do so through the launcher
+  when they run (25 reads of `_write_json_atomic`,
+  8 of `_write_private_json_atomic`,
+  3 of `_ensure_private_dir`), and are
+  byte-identical.
+- **Seam:** the one call-time read, `_write_private_json_atomic`'s call of its
+  sibling `_ensure_private_dir`, is now `launcher._ensure_private_dir`
+  (1 site, 1 name).
+- **Imports:** `json`, `os`, `pwd`, `stat`, `tempfile`, `Path` and `Any` are
+  the module's own, the very objects the launcher holds; tests that stub
+  `os.geteuid`, `pwd.getpwnam`, `os.fchown` or `os.fchmod` patch those shared
+  modules and reach the moved code as before. The module loads no Switchyard
+  module.
+
+**Proof.** The independent proof (`equiv457.py`, 14 clauses) holds.
+- It compares every whole node and the launcher remainder as AST and text.
+- Its rules clause fixes, in order with `find`: the owner looked up only as
+  root; the existing mode (else 0600) only for an owner; the parents made; the
+  temporary file beside the target; the sorted, two-space JSON and its
+  newline; `fchown` then `fchmod` on the open file; the replace and the
+  unconditional cleanup; the private directory and its best-effort 0700; and
+  the private writer's best-effort 0600 on the temporary file and the target.
+- Its clause 6b requires that no existing test changed.
+- 18 of 18 planted faults are caught, each parsed first, and the plant
+  run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/atomic_files_boundary_test.py`,
+  118 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment.
+  - It replays 21 cases produced by the BASELINE launcher's own
+    definitions (`gold457.py`) over the very case text the test embeds, not
+    typed.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds
+    and with another TMPDIR.
+  - **Isolation:** every case writes into a fresh synthetic tree in a
+    test-owned temporary directory. Ownership is never changed: the effective
+    uid is stood in, `pwd.getpwnam` answers a synthetic account, and
+    `os.fchown` is a recorder. No real tenant path is written.
+- **Baseline behaviour pinned, not changed:**
+  - `_write_private_json_atomic` leaves its temporary file beside the target
+    when the payload cannot be written; `_write_json_atomic` removes it.
+  - A symlinked target is replaced by a regular file and its link target is
+    untouched; for an owner, the kept mode is read through the link.
+  - An unknown owner, as root, is refused (`KeyError`) before anything is
+    written.
+- **Fixes before relying on a result, none touching production behaviour or
+  an existing test:** the new module's docstring first said a failure before
+  the replace removes the temporary file, for both writers. The golden record
+  showed the private writer does not, so the docstring now says so. My design
+  comment's test plan said the temporary file is gone after a failed dump; for
+  the private writer the test pins the baseline, which leaves it.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (70 checks).
+- **Mutations:** 27 of 27 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 25. The rest are structural, and the structure checks kill
+  them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 145 files are accounted for: every boundary suite and
+  the 24 naming any of the five (the 19 naming the three
+  among them).
+  - 113 suites whole: 101 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 293 cases, per case, identical on both sides: 277 pass,
+    14 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (110):** 0 that drive an upgrade
+    or `switchyard_main`, 105 whose own execution screen hits, and
+    5 accumulators;
+  - **Not run:** team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits.
+- **What the comparison exercised (call profiler, the three functions):**
+  8 of 378 passing runs execute one, in 8
+  files.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, repository or release was touched, and no real
+  tenant record was read. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff457.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the owner's systemctl runner -- 1 definitions, 25 lines (lines 2716-2740):
+  -   2716   25  _owner_user_systemctl  launcher callers outside: -; production readers outside the launcher: ['scripts/board_services.py']
+  - launcher names it reads (through the launcher once moved): 3: ['current_user_name', '_owner_command_env_args', '_tenant_owner_home']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/board_services.py']
+  - test files naming any of them: 3 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: running systemctl --user as the project owner)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['ProjectConfig (scripts.project_identity)']
+  - alternatives measured the same way:
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: -; production readers: 1
+  -   - the owner-file helpers the Director kept on the launcher this slice (ensure_owner_file, chown_owner_file_args): 2 definitions, 16 lines; launcher callers outside: -; production readers: 9
+- Largest remaining launcher domains (`domains.py`):
+  -  1820 lines  210 defs  general helpers (unclassified)
+  -   380 lines   40 defs  provisioning (new/register/teardown/owner accounts)
+  -   141 lines   16 defs  project config and registry
+  -   100 lines   10 defs  board service, listener and status
+  -    81 lines   13 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 2,831 lines.

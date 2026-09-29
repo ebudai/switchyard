@@ -23708,3 +23708,77 @@ Playwright-dependent tests (`audit_signoff_comment_frontend_test`,
 `resolved_blockers_hidden_frontend_test`) are unavailable here without a
 browser and fail identically on baseline and candidate; they are not
 reported as passing. No live board or browser session was used.
+
+### SYRD-508 (ticket_board/frontend_script_core.py slice 2): refresh and scroll restoration
+
+The Director approved the refresh boundary before the ticket worktree was
+edited, from audited public main
+`a3947f18afa049230aabc2c20d0944ffef1b62d4`.
+`ticket_board/frontend_script_refresh.py` now holds the refresh-on-new-build
+and scroll-restoration JavaScript as `SCRIPT_REFRESH`. That is exactly the
+sixteen contiguous functions that were `SCRIPT_CORE` lines 114-278, from
+`normalizeBuildId` through `updateRefreshRequired`, moved verbatim. They
+cover the idle delay (`TICKET_BOARD_REFRESH_IDLE_MS`, then the legacy
+`PGU_...`, then 2500), the unsafe-refresh reasons, the banner, the retry
+timers, the smart reload, and sessionStorage scroll save and restore with the
+legacy PGU key fallback.
+
+`frontend_script_core` splices it back at the original position with the
+SYRD-507 idiom, so the public `SCRIPT_CORE` value, the rendered page,
+declaration order, the shared script scope and the storage keys are
+byte-for-byte unchanged. SCRIPT_CORE keeps the shared state initialisers, the
+DOM lookups and the storage namespaces, and SCRIPT_APP keeps the event
+wiring. There is no runtime module or wrapper. As the Director approved,
+SYRD-507's attachments test was narrowed so it survives more splices. It now
+asserts that `SCRIPT_CORE` is literals and names only, and that
+`SCRIPT_ATTACHMENTS` appears once, between literals, between `buildOption` and
+`renderCreatePreview`; its gallery behaviour checks are unchanged.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/frontend_script_core.py` | 1,490 lines | 1,325 lines |
+| `ticket_board/frontend_script_refresh.py` | absent | 183 lines, 16 JavaScript functions |
+| Total of these two files | 1,490 lines | 1,508 lines |
+
+For a representative refresh-required or scroll-restore issue, the policy
+was at core lines 114-278 and is now at owner lines 17-183. `stateLabel`
+moved from 280 to 115, the attachments splice from 1048 to 883, and
+`renderCard` from 1412 to 1247. A stronger seam would have to take the shared
+state literal, the DOM block or SCRIPT_APP's wiring. The 18-line combined
+increase is the module docstring, the import and the splice. The core
+remains above the advisory limit; SYRD-272 remains open.
+
+**Verification.** The new `ticket_board_frontend_refresh_test.py` passes two
+checks.
+- Composition: the owner holds exactly the sixteen functions in order and
+  `SCRIPT_CORE` contains it once, after `setCreateStatus` and before
+  `stateLabel`. It defines none of them itself; the shared state, banner
+  lookup and namespaces stay in core; the splice is between literals, ahead
+  of the labels splice; and the owner has no other statements.
+- Behaviour: the owner runs in Node with a controllable clock, manual
+  timers, a recorded reload and scrollTo, working, throwing and read-only
+  storage, and draft, detail and preview toggles. It asserts concrete values
+  for build-ID normalisation, nine idle settings and the storage keys. It
+  checks new, blank and already-handled builds, and an unloaded page; the
+  unsafe-reason order, including priority when several hold; the exact idle
+  boundary; the banner, including when no refresh is required; and the 300,
+  500, 100-minimum and 250 ms timers with the clear. It checks the smart
+  reload saving scroll under the server build, `maybeAutoRefresh` without a
+  pending build, and legacy and non-legacy restore with coercion, malformed
+  JSON and a missing board. It also compares the whole matrix with a
+  recorded snapshot.
+All thirty seeded JavaScript and splice mutants fail the refresh or
+attachments test. Under a guard that refuses spawns, signals, sockets and
+host-path opens, `SCRIPT_CORE`, `SCRIPT_DETAIL`, `SCRIPT_APP`, `HTML` and four
+`render_html` identities are byte-identical on baseline and candidate
+(SHA-256 `6a9852344b36660035d0f2ae240764956c01aeab267c72a6d015bbbaf6f8de03`).
+The Node matrix over each tree's chunk is identical (SHA-256
+`f598681c2d3a3e7749c5456a4ea9a42411c0e58854719b7c575def874d09e9d8`).
+`ticket-board.py --help` and the app and server surfaces are identical (help
+SHA-256 `57a238de95884e538e86640ee120dd42d60fef721829da041fe36e1c5ebc20e5`). The new test plus twenty of twenty-four frontend and
+entry tests pass, including the adapted attachments test. The four
+Playwright-dependent tests (`ticket_board_ui_audit_test`,
+`audit_signoff_comment_frontend_test`, `cancel_ticket_frontend_action_test`,
+`resolved_blockers_hidden_frontend_test`) are unavailable without a browser
+and fail identically on baseline and candidate; they are not reported as
+passing. No live board or browser session was used.

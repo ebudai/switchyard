@@ -40,7 +40,8 @@ def test_script_core_splices_the_gallery_in_place() -> None:
         assert f"function {name}(" not in before + after, name
     assert "function cropMetadataCaption(entry)" in before and "function cropMetadataCaption" not in text
     assert frontend.HTML.count(core.SCRIPT_CORE) == 1 and frontend.render_html().count(text) == 1
-    # The source keeps one SCRIPT_CORE expression: literal, labels, literal, gallery, literal.
+    # The source keeps one SCRIPT_CORE expression of literals and spliced names, with the
+    # gallery spliced once between two literals (later slices may splice other owners).
     tree = ast.parse(Path(core.__file__).read_text(encoding="utf-8"))
     value = next(n.value for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "SCRIPT_CORE")
     parts: list[ast.expr] = []
@@ -48,9 +49,11 @@ def test_script_core_splices_the_gallery_in_place() -> None:
         parts.insert(0, value.right)
         value = value.left
     parts.insert(0, value)
-    assert [type(p).__name__ if isinstance(p, ast.Constant) else p.id for p in parts] == [
-        "Constant", "DEFAULT_STATE_LABELS_JSON", "Constant", "SCRIPT_ATTACHMENTS", "Constant",
-    ]
+    names = [type(p).__name__ if isinstance(p, ast.Constant) else p.id for p in parts]
+    assert all(isinstance(p, (ast.Constant, ast.Name)) for p in parts), names
+    assert names.count("SCRIPT_ATTACHMENTS") == 1, names
+    at = names.index("SCRIPT_ATTACHMENTS")
+    assert names[at - 1] == names[at + 1] == "Constant", names
     owner_tree = ast.parse(Path(owner.__file__).read_text(encoding="utf-8"))
     assert [type(n).__name__ for n in owner_tree.body] == ["Expr", "ImportFrom", "Assign"]
 

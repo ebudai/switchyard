@@ -15,6 +15,21 @@ from typing import Any
 from PIL import Image
 
 from .commit_repos import commit_git_dirs_for_project
+from .image_asset_policy import (
+    IMAGE_EXTENSIONS,
+    crop_filename_slug,
+    dedupe_asset_path,
+    format_timestamp,
+    image_save_format,
+    next_feedback_number,
+    normalize_crop_rect,
+    normalize_image_path,
+    path_in_allowed_image_dirs,
+    path_in_asset_dir,
+    upload_filename_prefix,
+    upload_set_slug,
+    uploaded_filename_slug,
+)
 from .ticket_read_query import select_ticket_rows
 
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
@@ -75,7 +90,6 @@ STATES = (
     "cancelled",
 )
 TERMINAL_STATES = {"done", "cancelled"}
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 TICKET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 TICKET_NUMBER_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-([0-9]+)$")
 # SYRD-270: a blocker on another board, `<project>:<PREFIX>-<n>`. It never
@@ -141,39 +155,12 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def format_timestamp(path: Path) -> str:
-    return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-
-
 def ticket_number(ticket_id: str) -> int:
     value = str(ticket_id).strip().upper()
     match = TICKET_NUMBER_PATTERN.fullmatch(value)
     if not match:
         return 0
     return int(match.group(1))
-
-
-def upload_set_slug(raw: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(raw or "").strip().lower()).strip("-")
-    return slug[:80]
-
-
-def uploaded_filename_slug(raw: str) -> str:
-    name = Path(str(raw or "").replace("\\", "/")).name
-    suffix = Path(name).suffix.lower()
-    stem = name[: -len(suffix)] if suffix else name
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", stem.strip().lower()).strip("-")[:120]
-    if not slug:
-        return ""
-    if suffix not in IMAGE_EXTENSIONS:
-        suffix = ".png"
-    return f"{slug}{suffix}"
-
-
-def crop_filename_slug(raw: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "-", str(raw or "").strip().lower()).strip("-")
-    return slug[:80] or "render"
-
 
 
 #: What this board last published at the same ref. The publisher leases a
@@ -442,7 +429,7 @@ WHERE (r.definition->>'active')::boolean
 
     def resolve_image(self, raw_path: str) -> Path:
         path = Path(raw_path).expanduser().resolve()
-        if not self._path_in_allowed_image_dirs(path):
+        if not path_in_allowed_image_dirs(path, self.frame_dir, self.asset_dir):
             raise FileNotFoundError(f"screenshot path escapes allowed asset roots: {path}")
         if not path.is_file():
             raise FileNotFoundError(f"screenshot not found: {path}")
@@ -462,14 +449,14 @@ WHERE (r.definition->>'active')::boolean
         if not raw_bytes:
             raise ValueError("uploaded image is empty")
         self.asset_dir.mkdir(parents=True, exist_ok=True)
-        prefix = self._upload_filename_prefix(upload_set, set_label, attempt_number)
+        prefix = upload_filename_prefix(upload_set, set_label, attempt_number)
         base_name = uploaded_filename_slug(original_filename) or f"upload_{time.time_ns()}.png"
         if prefix:
             base_name = f"{prefix}__{base_name}"
-        path = self._dedupe_asset_path(base_name)
+        path = dedupe_asset_path(self.asset_dir, base_name)
         with Image.open(BytesIO(raw_bytes)) as image:
             image.load()
-            output_format = self._image_save_format(path.suffix)
+            output_format = image_save_format(path.suffix)
             if output_format == "JPEG" and image.mode not in ("RGB", "L"):
                 output = image.convert("RGB")
             else:
@@ -502,7 +489,7 @@ WHERE (r.definition->>'active')::boolean
         with Image.open(source) as image:
             image.load()
             source_width, source_height = image.size
-            crop_rect = self._normalize_crop_rect(rect, source_width, source_height)
+            crop_rect = normalize_crop_rect(rect, source_width, source_height)
             cropped = image.crop(
                 (
                     crop_rect["x"],
@@ -513,7 +500,7 @@ WHERE (r.definition->>'active')::boolean
             )
             if cropped.mode not in ("RGB", "RGBA", "L", "LA", "P"):
                 cropped = cropped.convert("RGBA")
-            feedback = feedback_number or self._next_feedback_number(ticket)
+            feedback = feedback_number or next_feedback_number(ticket)
             if feedback <= 0 or feedback > 999:
                 raise ValueError("feedback crop requires feedback number 1-999")
             label_slug = upload_set_slug(set_label)
@@ -522,7 +509,7 @@ WHERE (r.definition->>'active')::boolean
                 prefix = f"{prefix}-{label_slug}"
             source_slug = crop_filename_slug(source.stem)
             crop_suffix = f"x{crop_rect['x']}-y{crop_rect['y']}-w{crop_rect['w']}-h{crop_rect['h']}"
-            destination = self._dedupe_asset_path(f"{prefix}__crop-of-{source_slug}-{crop_suffix}.png")
+            destination = dedupe_asset_path(self.asset_dir, f"{prefix}__crop-of-{source_slug}-{crop_suffix}.png")
             cropped.save(destination, format="PNG")
 
         metadata = {
@@ -545,84 +532,6 @@ WHERE (r.definition->>'active')::boolean
                 (ticket_id, str(destination.resolve()), json.dumps(metadata)),
             )
             return self._pg_get_ticket(ticket_id, conn)
-
-    def _normalize_crop_rect(self, raw: dict[str, Any], image_width: int, image_height: int) -> dict[str, int]:
-        def number(name: str) -> int:
-            try:
-                return int(round(float(raw.get(name))))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"crop rect requires numeric {name}") from exc
-
-        x = number("x")
-        y = number("y")
-        w = number("w")
-        h = number("h")
-        if w <= 0 or h <= 0:
-            raise ValueError("crop width and height must be positive")
-        x = max(0, min(x, image_width - 1))
-        y = max(0, min(y, image_height - 1))
-        w = max(1, min(w, image_width - x))
-        h = max(1, min(h, image_height - y))
-        return {"x": x, "y": y, "w": w, "h": h}
-
-    def _next_feedback_number(self, ticket: dict[str, Any]) -> int:
-        highest = 0
-        for path in ticket.get("screenshots", []) or []:
-            match = re.search(r"(?:^|/)feedback-(\d+)", str(path))
-            if match:
-                highest = max(highest, int(match.group(1)))
-        return min(highest + 1, 999)
-
-    def _dedupe_asset_path(self, filename: str) -> Path:
-        candidate = self.asset_dir / filename
-        if not candidate.exists():
-            return candidate
-        suffix = candidate.suffix
-        stem = candidate.stem
-        for index in range(2, 10000):
-            candidate = self.asset_dir / f"{stem}-{index}{suffix}"
-            if not candidate.exists():
-                return candidate
-        raise ValueError(f"could not allocate unique upload filename for {filename}")
-
-    def _image_save_format(self, suffix: str) -> str:
-        normalized = suffix.lower()
-        if normalized in {".jpg", ".jpeg"}:
-            return "JPEG"
-        if normalized == ".webp":
-            return "WEBP"
-        return "PNG"
-
-    def _upload_filename_prefix(self, upload_set: str, set_label: str, attempt_number: str) -> str:
-        normalized_set = upload_set_slug(upload_set)
-        label_slug = upload_set_slug(set_label)
-        if normalized_set in {"", "ungrouped"}:
-            return ""
-        if normalized_set == "target":
-            return "target"
-        if normalized_set == "attempt":
-            try:
-                attempt = int(str(attempt_number).strip())
-            except ValueError as exc:
-                raise ValueError("attempt upload set requires an attempt number") from exc
-            if attempt <= 0 or attempt > 999:
-                raise ValueError("attempt upload set requires attempt number 1-999")
-            prefix = f"attempt-{attempt:03d}"
-            if label_slug:
-                prefix = f"{prefix}-{label_slug}"
-            return prefix
-        if normalized_set == "feedback":
-            try:
-                feedback = int(str(attempt_number).strip())
-            except ValueError as exc:
-                raise ValueError("feedback upload set requires a feedback number") from exc
-            if feedback <= 0 or feedback > 999:
-                raise ValueError("feedback upload set requires feedback number 1-999")
-            prefix = f"feedback-{feedback:03d}"
-            if label_slug:
-                prefix = f"{prefix}-{label_slug}"
-            return prefix
-        return label_slug or normalized_set
 
     def create_ticket(
         self,
@@ -2021,12 +1930,6 @@ SELECT EXISTS (
             raise ValueError(f"commit_hash verification repository not found: {commit_git_dir}")
         return ["git", f"--git-dir={commit_git_dir}"]
 
-    def _path_in_allowed_image_dirs(self, path: Path) -> bool:
-        return self.frame_dir in path.parents or self.asset_dir in path.parents
-
-    def _path_in_asset_dir(self, path: Path) -> bool:
-        return self.asset_dir == path or self.asset_dir in path.parents
-
     def _validate_stored_screenshots(self, raw_screenshots: Any, raw_screenshot: Any) -> list[dict[str, Any]]:
         raw_items: list[Any] = []
         if raw_screenshots not in (None, "", "null"):
@@ -2041,11 +1944,11 @@ SELECT EXISTS (
         for item in raw_items:
             if not isinstance(item, str):
                 raise ValueError("screenshot entries must be path strings")
-            normalized = self._normalize_image_path(item)
+            normalized = normalize_image_path(item)
             if normalized in seen:
                 continue
             path = Path(normalized)
-            if not self._path_in_allowed_image_dirs(path):
+            if not path_in_allowed_image_dirs(path, self.frame_dir, self.asset_dir):
                 raise ValueError(f"screenshot path escapes allowed asset roots: {path}")
             if path.suffix.lower() not in IMAGE_EXTENSIONS:
                 raise ValueError(f"unsupported image type: {path.name}")
@@ -2065,7 +1968,7 @@ SELECT EXISTS (
             raise ValueError("screenshots must be a path string, list of paths, or null")
 
         normalized_current = {
-            self._normalize_image_path(path): path
+            normalize_image_path(path): path
             for path in (current_paths or [])
             if isinstance(path, str) and path
         }
@@ -2074,13 +1977,13 @@ SELECT EXISTS (
         for item in raw_items:
             if not isinstance(item, str):
                 raise ValueError("screenshot entries must be path strings")
-            normalized = self._normalize_image_path(item)
+            normalized = normalize_image_path(item)
             if normalized in seen:
                 continue
             path = Path(normalized)
-            if normalized in normalized_current and self._path_in_asset_dir(Path(normalized_current[normalized])):
+            if normalized in normalized_current and path_in_asset_dir(Path(normalized_current[normalized]), self.asset_dir):
                 screenshot_paths.append(normalized_current[normalized])
-            elif self._path_in_asset_dir(path):
+            elif path_in_asset_dir(path, self.asset_dir):
                 self.resolve_image(normalized)
                 screenshot_paths.append(normalized)
             else:
@@ -2133,9 +2036,6 @@ SELECT EXISTS (
         else:
             ticket["screenshot"] = None
             ticket["screenshot_available"] = False
-
-    def _normalize_image_path(self, raw: str) -> str:
-        return str(Path(raw).expanduser().resolve())
 
     def _validate_state(self, state: str) -> str:
         if state not in self._workflow_state_names():

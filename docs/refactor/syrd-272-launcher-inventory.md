@@ -23122,3 +23122,72 @@ the two query call sites differ. Guarded service/CLI import and `--help`
 output match baseline (SHA-256
 `50dd6acff1ba200bc3051c34570ee3bc1cf7bb160754df4b75e58328cb3b2f80`).
 No live board or database write was made.
+
+### SYRD-500 (ticket_board/app.py slice 2): image asset policy
+
+The Director approved the policy boundary before the ticket worktree was
+edited, from audited public main
+`35e117f873e7889b1a7385f844726a417d9d26bd`. `ticket_board/image_asset_policy.py`
+now owns image filename, geometry, format and path-containment policy:
+`IMAGE_EXTENSIONS`, the four module functions `format_timestamp`,
+`upload_set_slug`, `uploaded_filename_slug` and `crop_filename_slug`, and eight
+former private app methods as stateless functions `normalize_crop_rect`,
+`next_feedback_number`, `dedupe_asset_path(asset_dir, filename)`,
+`image_save_format`, `upload_filename_prefix`,
+`path_in_allowed_image_dirs(path, frame_dir, asset_dir)`,
+`path_in_asset_dir(path, asset_dir)` and `normalize_image_path`. Only the
+unused `self` and the explicit directory arguments changed; every moved body
+AST is otherwise identical. `app.py` imports them directly and re-exports the
+five public objects as identical aliases; there is no forwarding method,
+mixin, callback or reverse import. The owner only reads path existence/stat and
+computes names, rectangles and containment; it creates no directory or file.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/app.py` | 2,186 lines, 99 app methods | 2,086 lines, 91 app methods |
+| `ticket_board/image_asset_policy.py` | absent | 135 lines, 12 functions |
+| Total of these two files | 2,186 lines | 2,221 lines |
+
+The app still owns the asset and frame directories, `list_screenshots`,
+`resolve_image`, `save_uploaded_image`, `crop_attachment`, stored-screenshot
+validation, materialization, copy and unlink. Crop still proves the source is
+attached before the PIL crop and save, then opens the connection, sets the
+caller role, appends attachment metadata and reads back, in that order.
+Paths are resolved before containment checks, so symlink and `..` escapes
+stay refused.
+
+For a representative SYRD-531 crop or path-confinement issue, the policy was
+split between app lines 144-176 (module slugs), 549-625 (crop, feedback,
+dedupe, format and prefix helpers) and 2024-2028/2137-2138 (containment and
+normalization), across the 2,186-line class. It now sits in owner lines
+14-135. The public upload/crop methods are adjacent at app lines 430-534,
+and materialization is at 1933-2003, with their side effects in view.
+Leaving the class intact keeps that policy scattered. Moving only the slugs
+would be cosmetic. Moving the public resolve/upload/crop or materialization
+methods would need forwarding methods or callbacks, and would split
+attached-source proof, file writes and transaction order across owners. The
+35-line combined increase is the new module header and import. `app.py`
+remains above the 1,250-line soft limit; SYRD-272 remains open for later
+slices and final comparison.
+
+**Verification.** The new `ticket_board_image_asset_policy_test.py` passes
+eight checks with temporary assets and a fake connection: identical public
+aliases, no moved private methods left on the app, and stdlib-only owner
+imports; prefix, slug, format, feedback-number and crop-rect clamping and
+refusals; dedupe and containment without creating paths; symlink and `..`
+escapes refused by `resolve_image`, stored-screenshot validation and
+materialization; upload conversion (RGBA to JPEG RGB, WEBP) and `-2`
+deduplication; frame materialization copying once; crop refusing an
+unattached source before any write or connection, then
+`get, begin, caller, append, readback, end` with the crop file present
+before the append. All fourteen seeded policy and call-site mutants fail it.
+Under a guard that refuses process spawns, signals, sockets and host-path
+opens, the pre-edit upload/crop/materialize/refusal trace is byte-identical
+on baseline and candidate (SHA-256
+`6faf0d2c3b6ea04e96df279b2a9e2d327ced974b2256691aae94447f93bcc0e0`).
+`ticket-board.py --help`, the server namespace and the `TicketBoardApp`
+public surface are byte-identical (SHA-256
+`4786d50c30103e306f98e4f83c2a3285647997736969516cf7ef35c53c36e56a`); the
+app module namespace gains only the eight imported helper names.
+Eighty-six retained methods are AST-identical; only five call sites differ.
+No live board, database or asset path was touched.

@@ -1578,6 +1578,16 @@ from scripts.owner_commands import (
     _owner_user_systemctl,
     _tenant_owner_home,
 )
+from scripts.env_composition import (
+    TERMINAL_PRESENTATION_ENV_KEYS,
+    _env_prefix,
+    _env_unset_prefix,
+    _owner_home_bin_dirs,
+    _pane_identity_scrubbed_env,
+    _prepend_path,
+    _prepend_paths,
+    _terminal_presentation_env,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1744,14 +1754,6 @@ def default_user_bin_dirs(user_name: str = "") -> list[str]:
     return [str(home / "bin"), str(home / ".local" / "bin")]
 
 
-def _owner_home_bin_dirs(owner_home: Path) -> list[str]:
-    configured = _env_first(USER_BIN_ENV, LEGACY_USER_BIN_ENV)
-    if configured:
-        return [str(Path(configured).expanduser())]
-    home = owner_home.expanduser()
-    return [str(home / "bin"), str(home / ".local" / "bin")]
-
-
 def default_pane_base_path(user_name: str = "") -> str:
     user = user_name.strip()
     if user and current_user_name() != user:
@@ -1910,13 +1912,6 @@ def _quote_command(args: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(arg)) for arg in args)
 
 
-def _env_prefix(env: dict[str, str]) -> list[str]:
-    return [
-        f"{key}={value}"
-        for key, value in sorted(env.items(), key=lambda item: (item[0] != "TICKET_BOARD_PANE_TARGET", item[0]))
-    ]
-
-
 PANE_TARGET_ENV_KEYS = (
     "PGU_PANE_SESSION_ID",
     "TICKET_BOARD_PANE_SESSION_ID",
@@ -1929,25 +1924,6 @@ PANE_TARGET_ENV_KEYS = (
     "TICKET_BOARD_CALLER_ROLE",
 )
 PROBE_IDENTITY_ENV_KEYS = ("TMUX", "TMUX_PANE", *PANE_TARGET_ENV_KEYS)
-
-
-def _env_unset_prefix(keys: Sequence[str]) -> list[str]:
-    result: list[str] = []
-    for key in keys:
-        result.extend(["-u", key])
-    return result
-
-
-def _prepend_path(path_value: str, directory: str) -> str:
-    return _prepend_paths(path_value, [directory])
-
-
-def _prepend_paths(path_value: str, directories: Sequence[str]) -> str:
-    parts = [part for part in path_value.split(":") if part]
-    for directory in reversed([item for item in directories if item]):
-        parts = [part for part in parts if part != directory]
-        parts.insert(0, directory)
-    return ":".join(parts)
 
 
 def _command_name(value: str) -> str:
@@ -2465,29 +2441,6 @@ def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
     if config.pane_launcher is not None:
         owned_roots.extend([config.pane_launcher.parent, config.pane_launcher])
     return owned_roots
-
-
-#: What a terminal needs to keep looking like itself across the owner boundary.
-#: `sudo` resets the environment, and a CLI that cannot see TERM or COLORTERM
-#: draws its first run in monochrome -- which is what the User was shown
-#: (SYRD-191).
-TERMINAL_PRESENTATION_ENV_KEYS = ("TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION")
-
-
-def _terminal_presentation_env(source: Mapping[str, str] | None = None) -> list[str]:
-    environ = os.environ if source is None else source
-    return [
-        f"{key}={environ[key]}"
-        for key in TERMINAL_PRESENTATION_ENV_KEYS
-        if str(environ.get(key) or "").strip()
-    ]
-
-
-def _pane_identity_scrubbed_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    env = dict(os.environ if source is None else source)
-    for key in PROBE_IDENTITY_ENV_KEYS:
-        env.pop(key, None)
-    return env
 
 
 def _role_cli_name(role: RoleConfig) -> str:

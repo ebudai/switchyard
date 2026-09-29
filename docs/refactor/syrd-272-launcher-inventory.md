@@ -23405,3 +23405,74 @@ existing suites pass on both trees. `ticket_board_write_api_test` is red on
 baseline at its final check, whose child cannot import `temporary_cluster`,
 and fails at the same line on both. No live socket, service, account or
 database was touched.
+
+### SYRD-504 (ticket_board/server.py slice 2): board notifications
+
+The Director approved the notification boundary before the ticket worktree
+was edited, from audited public main
+`6e49499d168ef4210f69dddb024932b2b861d869`.
+`ticket_board/board_notifications.py` now owns who the board tells when it
+changes, its director and its open browsers: `DEFAULT_DIRECTORCTL`,
+`DIRECTOR_NOTIFICATION_BATCH_WINDOW_SECONDS`, `director_target`,
+`send_director_message`, `DirectorNotifier` and `TicketBoardEventHub`, moved
+verbatim; every definition's AST is identical. The owner imports stdlib,
+`project_slug`, `directorctl_path`, and `TicketBoardApp` under
+`TYPE_CHECKING`. It logs under the server's logger name in both import
+modes. `directorctl_path(__file__)` resolves the same release root from the
+sibling module, so the default helper path is unchanged. `server.py` imports
+all six names back as identical aliases and keeps `import subprocess`, so
+suites that patch `server_module.subprocess.run` still reach the sender. It
+drops only the now-unused `directorctl_path`, `project_slug` and `Callable`.
+There is no forwarding method, mixin, callback or reverse import.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/server.py` | 1,575 lines, 15 top-level definitions | 1,410 lines, 11 top-level definitions |
+| `ticket_board/board_notifications.py` | absent | 197 lines, 4 definitions |
+| Total of these two files | 1,575 lines | 1,607 lines |
+
+The server keeps the handler's after-write `notify_change` and
+`notify_ticket_created` calls, `serve_events` and `_write_sync_health`, and
+both server classes' construction, ownership flags and `server_close` order
+(hub before notifier, closed in the same order). All eleven retained
+definitions are AST-identical.
+
+For a representative SYRD-75 batching or SYRD-72 degraded-sync issue, the
+workers were at server lines 47-48 and 294-463. They are now at owner lines
+26-197. The handler starts at server line 299 instead of 464; `serve_events`
+moved from 1407 to 1242 and `_write_sync_health` from 1433 to 1268. Leaving
+them in the server keeps 170 lines of worker lifecycle ahead of the handler.
+Two modules would give two thin owners for one server-owned lifecycle.
+Moving the stream handlers or the server classes would take handler I/O or
+socket lifecycle with them. The 32-line combined increase is the new module
+header, imports and the logger line. `server.py` remains above the
+1,250-line soft limit; SYRD-272 remains open.
+
+**Verification.** The new `ticket_board_board_notifications_test.py` passes
+seven checks with fake timers, threads and commands:
+- identical aliases, the owner's imports, the shared subprocess seam, and the
+  logger name and default helper path in both import modes;
+- target selection, including blank and whitespace-only projects;
+- the exact directorctl argv and kwargs, and a failing send raising;
+- batching (daemon timer at 0.35, one timer per batch), flushing on the timer
+  or on close (join timeout 0.85), and a raising sender logged at ERROR while
+  the notifier keeps batching;
+- the hub's degraded start, versions, one-slot latest-only queues (bounded
+  to one) and unregister;
+- a scripted watch loop degrading on exactly the third failure with the
+  fixed reason while the raw error is logged, then recovering and notifying
+  a change;
+- the shutdown joins;
+- `TicketBoardServer` constructing and closing hub, notifier and socket in
+  order, and leaving injected workers open.
+All thirty-one seeded owner and server mutants fail it. Under a guard that
+refuses spawns, signals, sockets and host-path opens, a 25-record lifecycle
+trace with fake command, timer, thread and app is byte-identical on baseline
+and candidate (SHA-256
+`5272542937af13bb5dde7784382105fd03e755b6c7a4211cbc9a72c10ae8f9b3`).
+`ticket-board.py --help` is identical (SHA-256
+`ceb85d08082c2c84043e7ca57c492dd19604787be99926491ff091b8d76defd8`). Fifteen
+existing suites pass on both trees with `TICKET_BOARD_DIRECTORCTL` pointed at
+a recording stub, and there were zero directorctl invocations.
+`backend_default` ran without the override because it asserts the default
+path. No live message, socket, service or database was touched.

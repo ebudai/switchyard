@@ -22656,7 +22656,7 @@ methods meant 487 + 201 = 688 method lines in that one file, with the policy
 split between lines 2,004-2,121 and 2,358-2,457 and the pass at
 3,365-3,851. Immediately before this slice the same route was 340 + 201 =
 541 method lines in the 1,455-line listener, with the pane gate already in
-`pane_activity_gate.py`. Now the 340-line pass is in the 1,211-line listener
+`pane_activity_gate.py`. Now the 340-line pass is in the 1,202-line listener
 and the 201 policy method lines are in the 308-line owner: one extra file
 jump, but the state and rules have one owner. Moving only top-level role
 account helpers (85 method lines) or transition helpers/types (about 80)

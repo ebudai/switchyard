@@ -413,7 +413,7 @@ def launcher_reads(fn: ast.AST, *, moved: bool) -> list[str]:
 # --- structure -----------------------------------------------------------------------------------------------------
 
 
-PROVISION_MODULES = "['scripts.ticket_board', 'scripts.ticket_board.board_skill', 'scripts.ticket_board.commit_repos', 'scripts.ticket_board.privileged_actions', 'scripts.ticket_board.privileged_install', 'scripts.ticket_board.project_provision', 'scripts.ticket_board.provision_github_identity', 'scripts.ticket_board.provision_path_confinement']"
+PROVISION_MODULES = "['scripts.ticket_board', 'scripts.ticket_board.board_skill', 'scripts.ticket_board.commit_repos', 'scripts.ticket_board.privileged_actions', 'scripts.ticket_board.privileged_install', 'scripts.ticket_board.project_provision', 'scripts.ticket_board.provision_github_identity', 'scripts.ticket_board.provision_path_confinement', 'scripts.ticket_board.provision_workflow_projection']"
 
 
 def test_the_module_loads_only_the_provision_modules_at_import() -> None:

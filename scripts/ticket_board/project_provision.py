@@ -56,6 +56,30 @@ try:
         tenant_source_confinement_commands,
         tenant_worktree_confinement_commands,
     )
+    from .provision_workflow_projection import (
+        SCHEMA_SQL_PATH,
+        TENANT_WORKFLOW_EXCLUDED_ACTIONS,
+        TENANT_WORKFLOW_EXCLUDED_STAGES,
+        WorkflowStageSeed,
+        WorkflowTransitionSeed,
+        _insert_values_block,
+        _parse_sql_bool,
+        _parse_sql_nullable_string,
+        _parse_sql_string,
+        _parse_sql_text_array,
+        _project_implementation_owner_roles,
+        _project_workflow_allowed_roles,
+        _project_workflow_owner_roles,
+        _rank_project_stages,
+        _schema_sql_text,
+        _split_sql_fields,
+        _split_sql_tuple_rows,
+        project_workflow_stages,
+        project_workflow_state_names,
+        project_workflow_transitions,
+        schema_workflow_stages,
+        schema_workflow_transitions,
+    )
 except ImportError:  # pragma: no cover - supports direct script execution
     import privileged_install
     from board_skill import RELEASE_MARKER_NAME, SKILLS_DIR_NAME
@@ -95,6 +119,30 @@ except ImportError:  # pragma: no cover - supports direct script execution
         tenant_source_confinement_commands,
         tenant_worktree_confinement_commands,
     )
+    from provision_workflow_projection import (
+        SCHEMA_SQL_PATH,
+        TENANT_WORKFLOW_EXCLUDED_ACTIONS,
+        TENANT_WORKFLOW_EXCLUDED_STAGES,
+        WorkflowStageSeed,
+        WorkflowTransitionSeed,
+        _insert_values_block,
+        _parse_sql_bool,
+        _parse_sql_nullable_string,
+        _parse_sql_string,
+        _parse_sql_text_array,
+        _project_implementation_owner_roles,
+        _project_workflow_allowed_roles,
+        _project_workflow_owner_roles,
+        _rank_project_stages,
+        _schema_sql_text,
+        _split_sql_fields,
+        _split_sql_tuple_rows,
+        project_workflow_stages,
+        project_workflow_state_names,
+        project_workflow_transitions,
+        schema_workflow_stages,
+        schema_workflow_transitions,
+    )
 
 
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,39}$")
@@ -107,21 +155,12 @@ DEFAULT_PROJECT_SUPPORT_ROLES: tuple[str, ...] = ()
 DEFAULT_PROJECT_IMPLEMENTER_ROLES = ("app", "main")
 DEFAULT_PGU_ASSIGNEES = ("unassigned", "main", "app", "perf", "ops", "audit", "inspector", "agent", "director", "research", "user")
 DEFAULT_PGU_CALLER_ROLES = ("director", "main", "app", "ops", "perf", "audit", "inspector", "research", "user")
-SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
 # The pinned shared install every tenant's tooling is staged from.
 SHARED_RELEASE_CURRENT = "/opt/switchyard/current"
 DEFAULT_SHARED_PYTHON = "/opt/switchyard/venv/bin/python"
 # The account the board service itself runs as.
 DEFAULT_SERVICE_USER = "boardsvc"
 DEFAULT_PG_IDENT_MAP = "pgu_ticket_board_service"
-
-# Tenant boards intentionally expose a smaller workflow surface than the pgu
-# operations board. Keep this as a projection policy over schema.sql, not as a
-# separately maintained transition table.
-TENANT_WORKFLOW_EXCLUDED_STAGES = frozenset({"backlog", "inspection"})
-TENANT_WORKFLOW_EXCLUDED_ACTIONS = frozenset(
-    {"defer", "request_commit_exempt", "start_task", "submit_to_inspection"}
-)
 
 
 @dataclass(frozen=True)
@@ -301,28 +340,6 @@ def migrate_plan_document(
             continue
         added.append(name)
     return document, tuple(added), tuple(unresolved)
-
-
-@dataclass(frozen=True)
-class WorkflowStageSeed:
-    name: str
-    display_label: str
-    rank: int
-    owner_roles: tuple[str, ...]
-    entry_gate_field: str | None
-    gate_skip_to: str | None
-    exit_signoff_field: str | None
-    is_terminal: bool
-
-
-@dataclass(frozen=True)
-class WorkflowTransitionSeed:
-    from_stage: str
-    to_stage: str
-    action_name: str
-    allowed_roles: tuple[str, ...]
-    owner_scoped: bool
-    director_override: bool
 
 
 def _validate_project(value: str) -> str:
@@ -2205,331 +2222,6 @@ def sql_text_array(values: Sequence[str]) -> str:
     return "ARRAY[" + ", ".join(sql_literal(value) for value in values) + "]::text[]"
 
 
-def _schema_sql_text(schema_sql: str | None = None) -> str:
-    if schema_sql is not None:
-        return schema_sql
-    return SCHEMA_SQL_PATH.read_text(encoding="utf-8")
-
-
-def _insert_values_block(schema_sql: str, table: str) -> str:
-    match = re.search(
-        rf"INSERT INTO ticket_board\.{re.escape(table)}\s*\([^;]+?\)\s*VALUES\s*(.*?)\nON CONFLICT",
-        schema_sql,
-        flags=re.DOTALL,
-    )
-    if not match:
-        raise ValueError(f"could not find ticket_board.{table} seed INSERT in schema.sql")
-    return match.group(1)
-
-
-def _split_sql_tuple_rows(values_sql: str) -> tuple[str, ...]:
-    rows: list[str] = []
-    depth = 0
-    start: int | None = None
-    in_quote = False
-    index = 0
-    while index < len(values_sql):
-        char = values_sql[index]
-        if char == "'":
-            if in_quote and index + 1 < len(values_sql) and values_sql[index + 1] == "'":
-                index += 2
-                continue
-            in_quote = not in_quote
-        elif not in_quote:
-            if char == "(":
-                if depth == 0:
-                    start = index + 1
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    if start is None:
-                        raise ValueError("malformed SQL tuple row")
-                    rows.append(values_sql[start:index].strip())
-                    start = None
-        index += 1
-    if depth != 0 or in_quote:
-        raise ValueError("unterminated SQL values block")
-    return tuple(rows)
-
-
-def _split_sql_fields(row_sql: str) -> tuple[str, ...]:
-    fields: list[str] = []
-    start = 0
-    bracket_depth = 0
-    in_quote = False
-    index = 0
-    while index < len(row_sql):
-        char = row_sql[index]
-        if char == "'":
-            if in_quote and index + 1 < len(row_sql) and row_sql[index + 1] == "'":
-                index += 2
-                continue
-            in_quote = not in_quote
-        elif not in_quote:
-            if char == "[":
-                bracket_depth += 1
-            elif char == "]":
-                bracket_depth -= 1
-            elif char == "," and bracket_depth == 0:
-                fields.append(row_sql[start:index].strip())
-                start = index + 1
-        index += 1
-    fields.append(row_sql[start:].strip())
-    return tuple(fields)
-
-
-def _parse_sql_string(token: str) -> str:
-    stripped = token.strip()
-    if not (stripped.startswith("'") and stripped.endswith("'")):
-        raise ValueError(f"expected SQL string literal, got {token!r}")
-    return stripped[1:-1].replace("''", "'")
-
-
-def _parse_sql_nullable_string(token: str) -> str | None:
-    stripped = token.strip()
-    if stripped.upper() == "NULL":
-        return None
-    return _parse_sql_string(stripped)
-
-
-def _parse_sql_bool(token: str) -> bool:
-    stripped = token.strip().lower()
-    if stripped == "true":
-        return True
-    if stripped == "false":
-        return False
-    raise ValueError(f"expected SQL boolean, got {token!r}")
-
-
-def _parse_sql_text_array(token: str) -> tuple[str, ...]:
-    stripped = token.strip()
-    match = re.fullmatch(r"ARRAY\[(.*)\]::text\[]", stripped, flags=re.DOTALL)
-    if not match:
-        raise ValueError(f"expected SQL text array, got {token!r}")
-    inner = match.group(1).strip()
-    if not inner:
-        return ()
-    return tuple(_parse_sql_string(field) for field in _split_sql_fields(inner))
-
-
-def schema_workflow_stages(schema_sql: str | None = None) -> tuple[WorkflowStageSeed, ...]:
-    rows = _split_sql_tuple_rows(_insert_values_block(_schema_sql_text(schema_sql), "workflow_stages"))
-    stages: list[WorkflowStageSeed] = []
-    for row in rows:
-        fields = _split_sql_fields(row)
-        if len(fields) != 8:
-            raise ValueError(f"workflow_stages seed row has {len(fields)} fields, expected 8: {row}")
-        stages.append(
-            WorkflowStageSeed(
-                name=_parse_sql_string(fields[0]),
-                display_label=_parse_sql_string(fields[1]),
-                rank=int(fields[2]),
-                owner_roles=_parse_sql_text_array(fields[3]),
-                entry_gate_field=_parse_sql_nullable_string(fields[4]),
-                gate_skip_to=_parse_sql_nullable_string(fields[5]),
-                exit_signoff_field=_parse_sql_nullable_string(fields[6]),
-                is_terminal=_parse_sql_bool(fields[7]),
-            )
-        )
-    return tuple(stages)
-
-
-def schema_workflow_transitions(schema_sql: str | None = None) -> tuple[WorkflowTransitionSeed, ...]:
-    rows = _split_sql_tuple_rows(_insert_values_block(_schema_sql_text(schema_sql), "workflow_transitions"))
-    transitions: list[WorkflowTransitionSeed] = []
-    for row in rows:
-        fields = _split_sql_fields(row)
-        if len(fields) != 6:
-            raise ValueError(f"workflow_transitions seed row has {len(fields)} fields, expected 6: {row}")
-        transitions.append(
-            WorkflowTransitionSeed(
-                from_stage=_parse_sql_string(fields[0]),
-                to_stage=_parse_sql_string(fields[1]),
-                action_name=_parse_sql_string(fields[2]),
-                allowed_roles=_parse_sql_text_array(fields[3]),
-                owner_scoped=_parse_sql_bool(fields[4]),
-                director_override=_parse_sql_bool(fields[5]),
-            )
-        )
-    return tuple(transitions)
-
-
-def _project_implementation_owner_roles(plan: ProjectBoardProvision) -> tuple[str, ...]:
-    return (
-        ("main", *(role for role in plan.implementer_roles if role != "main"))
-        if "main" in plan.implementer_roles
-        else plan.implementer_roles
-    )
-
-
-def _project_workflow_owner_roles(stage: WorkflowStageSeed, plan: ProjectBoardProvision) -> tuple[str, ...]:
-    if plan.workflow_seed == "pgu-full":
-        return stage.owner_roles
-    if stage.name == "draft":
-        return plan.draft_roles
-    if stage.name == "in_progress":
-        return _project_implementation_owner_roles(plan)
-    if stage.name == "audit":
-        return plan.audit_roles
-    return stage.owner_roles
-
-
-def _project_workflow_allowed_roles(roles: Sequence[str], plan: ProjectBoardProvision) -> tuple[str, ...]:
-    if plan.workflow_seed == "pgu-full":
-        return tuple(roles)
-    result: list[str] = []
-    inserted_implementers = False
-    for role in roles:
-        if role in DEFAULT_IMPLEMENTER_ROLES:
-            if not inserted_implementers:
-                result.extend(plan.implementer_roles)
-                inserted_implementers = True
-            continue
-        if role == "audit":
-            result.extend(plan.audit_roles)
-            continue
-        result.append(role)
-    return _dedupe(result)
-
-
-def _rank_project_stages(stages: Sequence[WorkflowStageSeed]) -> tuple[WorkflowStageSeed, ...]:
-    result: list[WorkflowStageSeed] = []
-    next_rank = 0
-    terminal_rank_offset = 1 if any(stage.name == "vcs" for stage in stages) else 0
-    for stage in stages:
-        if stage.is_terminal:
-            result.append(
-                WorkflowStageSeed(
-                    name=stage.name,
-                    display_label=stage.display_label,
-                    rank=stage.rank + terminal_rank_offset,
-                    owner_roles=stage.owner_roles,
-                    entry_gate_field=stage.entry_gate_field,
-                    gate_skip_to=stage.gate_skip_to,
-                    exit_signoff_field=stage.exit_signoff_field,
-                    is_terminal=stage.is_terminal,
-                )
-            )
-            continue
-        result.append(
-            WorkflowStageSeed(
-                name=stage.name,
-                display_label=stage.display_label,
-                rank=next_rank,
-                owner_roles=stage.owner_roles,
-                entry_gate_field=stage.entry_gate_field,
-                gate_skip_to=stage.gate_skip_to,
-                exit_signoff_field=stage.exit_signoff_field,
-                is_terminal=stage.is_terminal,
-            )
-        )
-        next_rank += 1
-    return tuple(result)
-
-
-def project_workflow_stages(
-    plan: ProjectBoardProvision, *, schema_sql: str | None = None
-) -> tuple[WorkflowStageSeed, ...]:
-    source_stages = schema_workflow_stages(schema_sql)
-    if plan.workflow_seed == "pgu-full":
-        return source_stages
-
-    excluded_stages = set(TENANT_WORKFLOW_EXCLUDED_STAGES)
-    if not plan.audit_roles:
-        excluded_stages.update({"audit", "dat", "user_review"})
-
-    has_vcs_close = bool(dict(plan.operation_allowed_roles).get("mark_done"))
-    vcs_close_role = dict(plan.operation_allowed_roles).get("mark_done", ("",))[0] if has_vcs_close else ""
-    projected: list[WorkflowStageSeed] = []
-    for stage in source_stages:
-        if stage.name in excluded_stages:
-            continue
-        if has_vcs_close and stage.name == "done":
-            projected.append(
-                WorkflowStageSeed(
-                    name="vcs",
-                    display_label="VCS",
-                    rank=stage.rank,
-                    owner_roles=(vcs_close_role,),
-                    entry_gate_field=None,
-                    gate_skip_to=None,
-                    exit_signoff_field=None,
-                    is_terminal=False,
-                )
-            )
-        projected.append(
-            WorkflowStageSeed(
-                name=stage.name,
-                display_label=stage.display_label,
-                rank=stage.rank,
-                owner_roles=_project_workflow_owner_roles(stage, plan),
-                entry_gate_field=stage.entry_gate_field,
-                gate_skip_to=None if stage.gate_skip_to in excluded_stages else stage.gate_skip_to,
-                exit_signoff_field=stage.exit_signoff_field,
-                is_terminal=stage.is_terminal,
-            )
-        )
-    return _rank_project_stages(projected)
-
-
-def project_workflow_transitions(
-    plan: ProjectBoardProvision, *, schema_sql: str | None = None
-) -> tuple[WorkflowTransitionSeed, ...]:
-    if plan.workflow_seed == "pgu-full":
-        return schema_workflow_transitions(schema_sql)
-
-    stage_names = {stage.name for stage in project_workflow_stages(plan, schema_sql=schema_sql)}
-    include_audit = bool(plan.audit_roles)
-    mark_done_roles = dict(plan.operation_allowed_roles).get("mark_done", ())
-    has_vcs_close = bool(mark_done_roles)
-    transitions: list[WorkflowTransitionSeed] = []
-    for transition in schema_workflow_transitions(schema_sql):
-        if transition.action_name in TENANT_WORKFLOW_EXCLUDED_ACTIONS:
-            continue
-        from_stage = transition.from_stage
-        to_stage = transition.to_stage
-        if (
-            not include_audit
-            and transition.from_stage == "in_progress"
-            and transition.to_stage == "audit"
-            and transition.action_name == "submit_to_audit"
-        ):
-            to_stage = "director_review"
-        if has_vcs_close and (from_stage, to_stage, transition.action_name) == (
-            "director_review",
-            "done",
-            "mark_done",
-        ):
-            continue
-        if from_stage not in stage_names or to_stage not in stage_names:
-            continue
-        allowed_roles = _project_workflow_allowed_roles(transition.allowed_roles, plan)
-        owner_scoped = transition.owner_scoped
-        if from_stage == "audit" and transition.action_name in {"audit_sign_off", "audit_kick_back"}:
-            owner_scoped = True
-        if transition.action_name == "release_draft":
-            allowed_roles = _dedupe((*plan.draft_roles, *allowed_roles))
-        transitions.append(
-            WorkflowTransitionSeed(
-                from_stage=from_stage,
-                to_stage=to_stage,
-                action_name=transition.action_name,
-                allowed_roles=allowed_roles,
-                owner_scoped=owner_scoped,
-                director_override=transition.director_override,
-            )
-        )
-    if has_vcs_close:
-        transitions.extend(
-            [
-                WorkflowTransitionSeed("director_review", "vcs", "route", ("director",), False, False),
-                WorkflowTransitionSeed("vcs", "done", "mark_done", mark_done_roles, False, False),
-            ]
-        )
-    return tuple(transitions)
-
-
 def env_list(values: Sequence[str]) -> str:
     return ",".join(values)
 
@@ -2821,10 +2513,6 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '{plan.database}')\\
 
 COMMENT ON DATABASE {db_ident} IS 'ticket board database for project {plan.project}';
 """
-
-
-def project_workflow_state_names(plan: ProjectBoardProvision) -> tuple[str, ...]:
-    return tuple(stage.name for stage in project_workflow_stages(plan))
 
 
 def render_project_role_constraint_sql(plan: ProjectBoardProvision) -> str:

@@ -20145,3 +20145,164 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 3,908 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-465 (project_provision slice 3): workflow seed parsing and tenant projection
+
+Measured on `93fb51a`. Before any edit, the workflow group from the SYRD-463
+inventory (28 definitions, 799 lines) was split into its layers by
+AST -- seed parsing, the tenant projection, SQL rendering and the workflow
+record -- and the first two, which the others read, were moved in a scratch
+archive and measured. The Director approved them with one guard line.
+
+**The slice:** twenty-two names into a new
+`scripts/ticket_board/provision_workflow_projection.py`:
+- **Seed parsing:** `WorkflowStageSeed` and `WorkflowTransitionSeed`; reading
+  schema.sql's `workflow_stages` and `workflow_transitions` INSERT rows back
+  (`schema_workflow_stages`, `schema_workflow_transitions`, `_schema_sql_text`,
+  `_insert_values_block`, the row and field splitters and the SQL literal
+  parsers); and `SCHEMA_SQL_PATH`.
+- **The tenant projection:** `project_workflow_stages`,
+  `project_workflow_transitions`, `project_workflow_state_names`, the owner,
+  allowed-role and rank helpers, and the projection policy
+  `TENANT_WORKFLOW_EXCLUDED_STAGES` / `TENANT_WORKFLOW_EXCLUDED_ACTIONS` with
+  its comment.
+- **Kept on `project_provision`:** the SQL rendered from the projection, the
+  workflow record, `_dedupe` and `DEFAULT_IMPLEMENTER_ROLES` (also read by
+  `build_plan`), all read by the moved code through `project_provision` when it
+  runs.
+- **The one approved guard adaptation:** `PROVISION_MODULES` in
+  `tests/new_project_artifacts_boundary_test.py` gains the new module, one line.
+
+| file | before (`93fb51a`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 3,908 | 3,596 |
+| `scripts/ticket_board/provision_workflow_projection.py` | - | 447 |
+| `tests/provision_workflow_projection_boundary_test.py` | - | 787 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all twenty-two at the end
+  of both branches of `project_provision`'s import block, after the path
+  confinement import. The mover also took the blank line before the moved
+  constants' comment, so `project_provision` keeps two blank lines there.
+- **Call-time reads:** all 48 reads of 22 names in 11 functions are
+  `provision.X` behind the same call-time import and direct-script fallback as
+  the earlier slices; the siblings, the constants, the seed classes, `_dedupe`
+  and `DEFAULT_IMPLEMENTER_ROLES`.
+- **Definition time:** `SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")`
+  now uses the new module's `__file__`, in the same directory, so it is the same
+  schema.sql beside `project_provision`; the new test pins that, in the package
+  and as a direct script. The two seed classes keep their frozen dataclass
+  decorators. The module's own imports are `re`, `dataclass`, `Path` and
+  `Sequence`; importing it alone loads only its package.
+- **Readers:** 2 production modules import names from the slice through
+  `project_provision` (`scripts/ticket_board/frontend_script_core.py`: `WorkflowStageSeed`, `schema_workflow_stages`; `scripts/workflow_adoption.py`: `project_workflow_stages`, `project_workflow_transitions`), and are byte-identical.
+  `frontend_script_core` imports the seed class at load, and reaches the same
+  object in every import order. No test patched a moved name.
+
+**The known effect: the seed classes' `__module__`.** `WorkflowStageSeed` and
+`WorkflowTransitionSeed` are now defined in the new module, so their
+`__module__` is `scripts.ticket_board.provision_workflow_projection` (as a
+direct script, `provision_workflow_projection`), where the baseline reported
+`scripts.ticket_board.project_provision` (as a direct script, `__main__`). This
+is the approved effect of moving their definitions and is not masked; the new
+test pins it (`SEED_CLASS_MODULE`). Each is still one class object: through
+`project_provision`, through `frontend_script_core`, and as a direct script in
+the script itself, in the module and in the fallback's second
+`project_provision`. The dataclass repr uses only the class name, equality
+compares the class object, and nothing in `scripts/` pickles.
+
+**Proof.** The independent proof (`equiv465.py`, 15 clauses) holds.
+- **Whole nodes:** every whole node, the seed classes and constants included,
+  after dropping the one call-time import block and reading `provision.X` as X;
+  `project_provision` as AST (its import block less exactly the re-export) and
+  as text, the one blank line before the moved constants' comment stated
+  independently.
+- **Rules:** its rules clause fixes, in order, the schema text, the INSERT
+  block, row and field splitting, every literal parser and refusal, the field
+  counts, owners, allowed roles, ranks, the tenant exclusions, the audit-less
+  reroute and the VCS stage.
+- **Tests:** only the new test and the approved guard changed, and the guard is
+  its baseline text with exactly the new module added.
+- **Planted faults:** 24 of 24 are caught, among them a seed class
+  redefined in `project_provision`, the schema path made absolute, a seed class
+  not frozen, schema.sql edited and the blank line before the constants kept.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_workflow_projection_boundary_test.py`,
+  265 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 80 cases produced by the BASELINE module's own
+    definitions (`gold465.py`): the parsers over synthetic schema text, the
+    real schema.sql's eleven stages and fifty-nine transitions, and the
+    projection for default, shaped, lean, implementers-without-main and pgu
+    plans built by `build_plan` for a synthetic owner under /p465.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds and
+    with another TMPDIR and locale.
+  - It renders the default, shaped and lean packets through the direct script
+    and through the package and requires each pair to be byte-identical, and
+    the three workflows to differ as the plans shape them.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (189 checks).
+- **Fixes before relying on a result:**
+  - One rebind case first used a plan whose answer was the same with or
+    without the rebind; it now uses the shaped plan, where excluding an action
+    removes a transition.
+  - The seam check named the seed classes as rebindable seams that no case
+    rebound; two cases now rebind each on `project_provision`.
+  - Two mutants survived the first cases, and both were gaps in the cases, not
+    in the code. Inserting the implementers at every default role is invisible
+    while `_dedupe` runs, so a case now passes values through a rebound
+    `_dedupe`. The real schema.sql has no kept stage whose gate skips into an
+    excluded one, so a synthetic schema now does, with and without auditors.
+- **Mutations:** 44 of 44 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 36; the structure checks kill the
+  rest (the direct-script fallback dropped, a constant read bare, project_provision imported at load, the seed class's module masked, the schema path relative to the working directory, the seed class redefined in project_provision, re-export aliased, re-export dropped from the script branch).
+- **Provisioning smoke on the exact trees** (`smoke465.sh`, synthetic owner
+  home, source and output under /tmp, under the guard): the default packet and
+  the `shaped` and `lean` workflow packets through the direct script and the
+  wrapper, and a named-key packet through the script-mode fallback and the
+  package. Every artifact, the three `workflow.sql` files included, and stdout
+  is byte-identical between baseline and candidate, and between modes.
+- **Comparison, both trees, guarded:** all 214 files accounted for.
+  - 129 suites whole, 110 passing on the candidate (the new test only
+    there; the adapted guard passes on the candidate, its original on the
+    baseline). Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 678 cases, per case, identical: 476 pass, 198 stop at the same
+    guard refusal, 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`), baseline
+    defects already reported.
+  - Excluded 260: 22 drive an upgrade, 233 execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 37 of 586 passing runs execute one of the
+    seventeen functions, in 20 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and no real home was
+  read. The live snapshot is identical before and after.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The workflow seed parser and tenant projection a reader opens
+is now a 447-line module, instead of a slice of the 3,908-line
+`project_provision.py`. The three `project_provision` slices so far are
+`provision_github_identity.py` (499 lines), `provision_path_confinement.py`
+(555) and `provision_workflow_projection.py` (447), 1,501 lines
+between them.
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups465.py`):
+
+- workflow SQL rendering (left from the workflow group) (6 definitions, 426 lines)
+- role tooling staging and system-unit proofs (13 definitions, 377 lines)
+- sudoers, tenant control and publication grants (22 definitions, 373 lines)
+- role accounts and role runtime commands (10 definitions, 272 lines)
+- systemd units, tmpfiles, polkit and database SQL (11 definitions, 260 lines)
+- repository group, boundary statements and plan paths (left from the confinement group) (9 definitions, 142 lines)
+- root-executable trust (2 definitions, 113 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+3,596 lines after this slice; SYRD-272 is not complete.

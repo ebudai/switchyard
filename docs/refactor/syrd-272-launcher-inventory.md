@@ -22682,3 +22682,74 @@ database, board queue, or release was changed.
 
 This closes the `notify_listener.py` assessment. SYRD-272 remains open for
 other oversized files and the final cross-file comparison.
+
+### SYRD-493 (presentation_controller slice 1): presentation state document ownership
+
+The Director approved one disk-state boundary before the ticket worktree was
+edited, from audited public main `55d4e03c652c862af3e5430509c014bbf05ad303`.
+`presentation_state_document.py` owns the presentation state path, default
+schema, mapping and document validation, state read with role-projection growth
+and safe contraction, the state-file lock, and atomic state write with owner
+file enforcement. Exactly two constants (`PRESENTATION_SCHEMA` and
+`PRESENTATION_HISTORY_LIMIT`) and nine functions moved:
+`presentation_state_path`, `_configured_presentation`,
+`default_presentation_document`, `_complete_mapping`, `_validated_mapping`,
+`validate_presentation_document`, `_read_state`, `_locked_state`, and
+`_write_state`. The controller reexports the same eleven objects for package
+and direct-script imports; the new owner never imports the controller.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `presentation_controller.py` | 2,632 lines, 80 functions | 2,404 lines, 71 functions |
+| `presentation_state_document.py` | absent | 253 lines, 9 functions |
+| Total of these two files | 2,632 lines | 2,657 lines |
+
+The combined increase is the explicit module header/import boundary. The
+owner takes a `ProjectConfig`, config/state paths and an already injectable
+file runner; it adds no callback or in-memory copy of the state. The durable
+mutable state is still `presentation.json` and its `.lock` file. The
+controller still orders lock, read, transform, live mapping apply, rollback
+and write in `_mutate`. Recovery still probes only the live display sessions
+showing the role, proves worker attachment and window visibility, then writes
+history. Display-slot reconciliation, tmux/session ownership, viewer
+configuration, Konsole launch, desktop handoff and all CLI arguments and
+service launch paths remain in the controller. No generated artifact changed.
+Installed releases archive the whole commit's `scripts` tree, so the new
+module is included without a packaging list change.
+
+The 2,632-line baseline mixed runtime-assignment checks (lines 48-244),
+configuration and document rules (278-442), state read/lock (597-666), tmux
+session and viewer policy (669-1461), recovery/report (1470-1843), launch and
+desktop handoff (1846-2214), and public command dispatch (2217-2632). For a
+representative SYRD-262 slot-contraction ticket, navigation followed
+`_read_state` (51 lines) to default projection (50), mapping validation (32),
+and document validation (48): 181 relevant method lines split between
+292-429 and 597-647 inside the 2,632-line file, then back to the launch
+caller. Those 181 lines now sit together in the 253-line document owner;
+`launch_presentation` remains a 44-line caller in the 2,404-line controller.
+This adds one file jump while giving the persistent document a single owner.
+Extracting only the stateless live runtime-assignment cluster would leave
+that scattered disk-state boundary in the oversized controller. Leaving the
+controller intact would keep every state ticket navigating the whole file.
+
+**Verification.** A guarded baseline-versus-exact-worktree comparison passed
+all 22 existing slot-contraction checks, including fake-runner launch from a
+stale six-slot state, and three operator display-recovery cases covering
+successful operator recovery, a window that never became visible, and a dead
+slot. Synthetic state-document probes gave identical default/read/write
+results under the actual lock and identical four schema/project/focus/duplicate
+role refusals. A transaction probe gave identical failed-apply rollback,
+unchanged on-disk state, subsequent successful revision/history write and
+mapping-call order. The focused boundary test passes three cases for
+lock/read/write and rollback, validation refusal, and both import aliases.
+All nine moved and 71 retained functions have identical ASTs. The guarded
+`team-launcher present --help` output is byte-identical on baseline and
+worktree (SHA-256
+`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
+The execution guard forbids process spawns, signals, socket connections and
+host-path opens; all paths, runners and desktop evidence were synthetic.
+No live tenant, display session, GUI window, account, service or release was
+changed.
+
+The controller remains above the 1,250-line soft limit. SYRD-272 remains open
+for its remaining slices and final cross-file comparison.

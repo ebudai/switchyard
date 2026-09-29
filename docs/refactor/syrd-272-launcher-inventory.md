@@ -22405,3 +22405,67 @@ exact worktree and public-main files by SHA-256, respectively.
   service, provider, pane, board, database, account or release was touched.
 
 SYRD-272 remains open.
+
+### SYRD-487 (notify_listener slice 5): queued notification eligibility
+
+The Director approved this exact boundary before editing, on public main
+`08c066bf69a542fa9f97c298181ec82cf7325d4e`. SYRD-482 remains unchanged.
+`NotificationEligibility` owns all ten methods in the 404-line currency,
+supersession and serial-work decision group: `_current_ticket_state`,
+`_current_target_role`, `_superseding_awaiting_role`,
+`_drop_superseded_notification`, `_queue_identity_key`,
+`_announced_queue_identity`, `_superseded_queue_notice`,
+`_notification_is_current`, `_serial_gate_stage`, and
+`_finish_current_blocker`. It also owns their nine rule constants. The
+listener reexports those constants with their existing names and values.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `notify_listener.py` | 2,405 lines | 1,973 lines |
+| `TicketBoardNotifyListener` | 1,712 lines, 55 methods | 1,304 lines, 45 methods |
+| `notification_eligibility.py` | absent | 469 lines |
+
+The collaborator receives the existing logger and `NotificationLedger`, a
+call-time provider for the listener's workflow, and a call-time decoder. It
+imports no listener module. The listener's three external caller methods now
+ask the collaborator at their original sites: 11 calls in
+`process_due_notifications`, one in `_session_clear_is_due`, and one in
+`_release_prior_turn_hold`. Inside the group, queue identity, current ticket
+state, target role, and serial stage still call each other in the same order.
+No other production module or test patches these private methods or rule
+constants. The workflow and decoder remain late-bound after construction.
+
+The ten moved methods have identical ASTs to the baseline after normalizing
+only the decoder callback name. Of the 38 retained distinct listener method
+names, 34 have identical ASTs. Only `__init__`, `_session_clear_is_due`,
+`_release_prior_turn_hold`, and `process_due_notifications` change to wire or
+call the collaborator. The board SELECTs and their parameters are unchanged.
+A superseded notice still logs, writes two traces, discards through the
+ledger, then forgets its in-memory deferral mark, in that order. It keeps the
+listener's autocommit connection and the board functions' idempotency.
+
+**Verification.** `tests/notification_eligibility_boundary_test.py` asserts
+56 cases generated on the baseline. They cover all ten methods and capture
+status/currency/supersession decisions, exact SQL and parameters, ledger
+calls, logs, declared and legacy workflows, dict/tuple/missing rows, late
+workflow and decoder changes, and both drop reasons. The package and installed
+import forms both pass with the same baseline digest,
+`99e4b2b1dc1cbda96745f5a4d603b326ba4993c37a1b1a1fc8bdb1612dc120be`.
+The execution guard refuses spawns, signals, account/group lookups and socket
+connections; its host-path recorder catches a positive control and records
+zero accesses during the cases. Seven focused mutations were killed: inactive
+wait accepted, wrong ticket accepted, same queue discarded, superseded notice
+acked, nonserial role blocked, blocked handoff accepted, and discard trace
+mislabeled. Nine listener cases pass on both exact trees under the guard. A
+further 14 relevant isolated cases give identical outcomes on both: 11 pass
+and three raise the same baseline `AssertionError`. The installed wrapper's
+`--help` and synthetic offline pane-state authority check are identical after
+normalizing the checkout path (SHA-256
+`9d1fae95a1d3f1a3bb732a8191742593d751a6724d3744478077ba040e2fe601`).
+
+The remaining listener class and delivery pass still exceed the soft limit;
+this slice accepts no exception. A later SYRD-272 child must measure them
+separately. No live tenant runtime, service, provider, pane, notification
+queue, database, account or release changed.
+
+SYRD-272 remains open.

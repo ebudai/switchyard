@@ -22158,3 +22158,178 @@ Two routes remain, each needing its own decision:
   after the module-level helpers are separated.
 
 SYRD-272 is not complete.
+
+### SYRD-480 (notify_listener slice 3): the listener's reminder generators, a collaborator
+
+Measured on `07eb7fd`. Before any edit, the listener class (2,106 lines,
+57 methods) was inventoried by responsibility and by the in-memory state
+each method writes. The Director approved one collaborator, `IdleNudges`, as
+the class's first real decomposition, with exactly four existing-test lines.
+
+**What the inventory found:**
+- **No transactions across statements.** The listener connects with
+  autocommit. Every claim, ack, requeue, dead-letter and reminder is one
+  statement calling a board function, and that function owns the idempotency.
+  The groups share in-memory state, not transactions.
+- **One group owns its state outright.** Only the reminder generators write
+  state nothing else in the class touches: three dedupe maps. The delivery
+  pipeline, the currency and supersession checks and the pane-activity
+  decisions all write one shared set, `_traced_gate_defer_notifications`.
+
+**The collaborator:** `IdleNudges`, in a new `scripts/ticket_board/idle_nudges.py`.
+- **What it is:** the per-pass reminder generators the listener runs before
+  delivering due notifications. That covers:
+  - the turn-end and idle-stall nudges;
+  - the unresolved-turn guard (SYRD-194/203/207);
+  - the permission-prompt wait (SYRD-234);
+  - the serial-focus wake-ups (SYRD-109).
+- **What it owns:**
+  - the twelve methods (334 lines), moved whole;
+  - the three dedupe maps;
+  - the five timings the generators pass to the board.
+- **Its inputs:**
+  - the activity gate and the role targets, through two providers it calls
+    when a pass runs, because the listener rebinds both;
+  - the logger;
+  - the connection passed into each pass.
+- **It owns no transaction.** Each generator is still one statement on the
+  listener's autocommit connection.
+- **The listener keeps:**
+  - its three public passes, as one-line delegations;
+  - the five timings, as properties over the collaborator's, so a caller that
+    sets one after construction reaches the generator;
+  - the loop, and its order.
+- **Existing tests:** four lines in `claude_permission_hook_test` point its
+  unbound private call and its source-text check at the collaborator, and
+  give its stand-in the gate provider. No other existing test changed:
+```
++        self._activity_gate = lambda: self.activity_gate
+-        enqueued = notify_listener.TicketBoardNotifyListener._process_permission_prompt_waits(
++        enqueued = notify_listener.IdleNudges._process_permission_prompt_waits(
+-        enqueued = notify_listener.TicketBoardNotifyListener._process_permission_prompt_waits(
++        enqueued = notify_listener.IdleNudges._process_permission_prompt_waits(
+-    source = (ROOT / "scripts" / "ticket_board" / "notify_listener.py").read_text(encoding="utf-8")
++    source = (ROOT / "scripts" / "ticket_board" / "idle_nudges.py").read_text(encoding="utf-8")
+```
+
+| file | before (`07eb7fd`) | after |
+|---|---|---|
+| `scripts/ticket_board/notify_listener.py` | 2,797 | 2,506 |
+| `scripts/ticket_board/idle_nudges.py` | - | 396 |
+| `tests/idle_nudges_boundary_test.py` | - | 714 |
+
+`TicketBoardNotifyListener`: 2,106 lines and 57 methods -> 1,814
+lines and 58 methods (the three delegations and five property pairs
+count as methods).
+
+**Proof.** The independent proof (`equiv480.py`, 15 clauses) holds. It
+checks:
+- each moved method equals its baseline method, reading the two providers as
+  the listener's attributes and `listener.X` as X;
+- the collaborator's constructor;
+- the listener's other methods, unchanged AST for AST;
+- the delegations and the properties;
+- the constructor wiring, down to each timing's exact expression;
+- that the maps appear nowhere outside the collaborator;
+- the module level as AST and as text, and the comments;
+- the files: only the new test and the four approved lines under `tests/`.
+
+It catches 21 of 21 planted faults, among them:
+- a copy of the targets read;
+- a map left on the listener;
+- the gate captured instead of provided;
+- a timing setter that does nothing;
+- a delegation to the wrong pass.
+
+**Evidence.**
+- **New boundary test:** `tests/idle_nudges_boundary_test.py`, 86
+  checks, gated on its screen and passing both under `env -i` and in this role
+  pane.
+  - It replays 16 cases produced by the BASELINE listener
+    (`gold480.py`) through its public passes, with a stand-in gate and a
+    connection that records every statement. The cases cover:
+    - turn-end dedupe, and a boundary that disappears and comes back;
+    - present idle, and work observed (only a busy pane with a work reason);
+    - permission-prompt waits;
+    - every answer the board can give, and unreadable hook state;
+    - the gate and targets rebound;
+    - every timing set after construction;
+    - the graces from the environment;
+    - the loop order.
+  - Each case also counts how often each of the twelve methods ran, wherever
+    they are defined.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER, COLUMNS, TMPDIR, project and grace environment, under
+    umask 077 and under three hash seeds.
+  - It also checks:
+    - that the state and timings are the collaborator's;
+    - its providers, and that it reaches the listener only through them;
+    - both import forms, under the host-path recorder;
+    - that a collaborator alone answers as the listener does;
+    - the entry point.
+  - Its 4 behaviour cases also pass against the baseline listener
+    (42 checks).
+- **Fixes before relying on a result:**
+  - The build first placed the three delegations in the loop's order; they now
+    stand in the baseline's definition order.
+  - Every case clears the two grace variables, which a listener reads from the
+    environment when built.
+  - Two mutants first survived. One forgot a stale boundary, and no case had a
+    boundary leave and come back. The other counted any busy trace as work,
+    and the only other busy reason in the cases was itself work evidence. Each
+    has a case now, and the gold was retaken.
+- **Mutations:** 30 of 30 are killed by assertions, with zero guard
+  refusals. The behaviour tests alone kill 26. The structure checks kill the
+  rest (notify_listener imported at load, the import aliased, a map left on the listener, a delegation that does more).
+- **The generators on the exact trees** (`probe480.py`): 11 cases give
+  one digest on baseline and candidate, through the package and through the
+  installed wrapper's import. The widened recorder logged 0 host-path and 0
+  `/proc` accesses, and caught both positive controls.
+- **Entry point on the exact trees** (`smoke480.sh`): `--help` and the offline
+  check are byte-identical between baseline and candidate.
+- **Comparison, both trees, guarded:** all 218 files accounted for.
+  - 147 suites whole, 121 passing on the candidate.
+    The new test runs only there. 14 suites start a throwaway
+    PostgreSQL cluster, which the guard refuses; they stop there identically.
+    Other identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_schema_test.py` (AssertionError: enforce_declared_ticket_update); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused).
+  - 812 cases, per case, identical: 584 pass, 225 stop at the
+    same guard refusal, and 3 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `ticket_board_notify_listener_test::test_final_review_handoff_exemption_does_not_broaden_manual_holds`).
+  - Excluded 295: 256 execution screen, 5
+    accumulators, 34 drive an upgrade or `switchyard_main`.
+  - Not run: team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare, uses __file__); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv); ticket_board_held_review_handoff_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 73 of 705 passing runs execute one of the
+    twelve, in 11 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and tmux was never
+  run. Nothing I wrote read or wrote a real home, account, /etc, /var or /opt
+  path, or the real /proc.
+  The live snapshot differs only in this pane's own board-notification listener log; every suite runs with HOME at a scratch directory.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Found in the baseline, reported and left as it is:**
+`process_idle_turn_end_nudges` returns early when the turn-end reminder
+statement raises, returns no row, or returns a non-integer. On such a pass,
+with a turn freshly ended, the unresolved-turn guard and the permission-prompt
+generator do not run, although the comment above them says they run whether
+or not a reminder was enqueued. The next pass runs the guard with an empty map
+and no continuation lease for that boundary. The move preserves this, the new
+test pins it as the baseline has it, and the Director filed it separately as
+SYRD-482.
+
+**What remains of the class:** `TicketBoardNotifyListener` is 1,814 lines
+and `notify_listener.py` 2,506. Most of the rest is the delivery
+pipeline (812 lines;
+`process_due_notifications` alone is 487),
+with the currency and supersession checks
+(404), the pane-activity
+decisions (113) and session clearing
+(139).
+
+The first three share `_traced_gate_defer_notifications`. A further
+decomposition needs that set given one owner first, then a designed split of
+the delivery pass, each with its own decision. The alternative is a justified
+exception for the delivery state machine, recorded once the smaller groups are
+measured.
+
+SYRD-272 is not complete.

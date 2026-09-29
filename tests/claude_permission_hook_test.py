@@ -576,6 +576,7 @@ class _FakeSelf:
 
     def __init__(self, gate, grace=120):
         self.activity_gate = gate.is_working
+        self._activity_gate = lambda: self.activity_gate
         self.permission_prompt_grace_seconds = grace
         self.logged: list[str] = []
 
@@ -648,7 +649,7 @@ def test_the_director_is_told_with_the_role_and_how_long_it_has_waited() -> None
         _blocked_pane(state_dir, "syrd-main:0.0", state="blocked",
                       source="claude.Notification.permission_prompt")
         fake = _FakeSelf(_real_gate(state_dir, {"main": "syrd-main:0.0"}))
-        enqueued = notify_listener.TicketBoardNotifyListener._process_permission_prompt_waits(
+        enqueued = notify_listener.IdleNudges._process_permission_prompt_waits(
             fake, _Conn()
         )
 
@@ -676,7 +677,7 @@ def test_nothing_is_said_when_no_pane_is_waiting() -> None:
         state_dir = Path(raw)
         _blocked_pane(state_dir, "syrd-main:0.0", state="idle", source="claude.Stop")
         fake = _FakeSelf(_real_gate(state_dir, {"main": "syrd-main:0.0"}))
-        enqueued = notify_listener.TicketBoardNotifyListener._process_permission_prompt_waits(
+        enqueued = notify_listener.IdleNudges._process_permission_prompt_waits(
             fake, _Conn()
         )
     check(enqueued == 0, "a quiet board is left alone")
@@ -688,7 +689,7 @@ def test_the_generator_runs_on_a_pass_where_no_turn_ended() -> None:
     If this ran only after a turn end, the one case it exists for -- a role
     that has stopped entirely -- would never reach it.
     """
-    source = (ROOT / "scripts" / "ticket_board" / "notify_listener.py").read_text(encoding="utf-8")
+    source = (ROOT / "scripts" / "ticket_board" / "idle_nudges.py").read_text(encoding="utf-8")
     early = source.index("self._process_unresolved_turn_end(conn, {})")
     following = source[early:early + 400]
     check(

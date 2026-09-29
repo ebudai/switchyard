@@ -23009,3 +23009,61 @@ The guarded offline `team-launcher present --help` digest matches baseline
 (`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
 All session/client evidence was synthetic; no live tenant, tmux, desktop,
 GUI window, service or release was changed.
+
+### SYRD-498 (presentation_controller slice 6): window visibility proof
+
+The Director approved this boundary before the ticket worktree was edited,
+from audited public main `4d2331f689a9aa1148d0635e69a4491f41de85ef`.
+`presentation_window_visibility.py` owns seven existing functions:
+`_presentation_client_ttys`, `_session_client_ttys`,
+`external_presentation_clients`, `await_presentation_window`,
+`unmapped_presentation_message`, `_detach_headless_presentation` and
+`_slot_visible`, plus `WINDOW_ATTACH_TIMEOUT_SECONDS` and
+`WINDOW_ATTACH_POLL_SECONDS`. The controller imports and reexports all nine
+exact objects, with no wrapper or reverse import. Its
+`presentation_window_attached` keeps the state-path, slot-count and
+owner-routed runner adapter used by presentation reconnect. Direct and
+package controller imports resolve the same owner objects.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `presentation_controller.py` | 1,334 lines, 35 functions | 1,175 lines, 28 functions |
+| `presentation_window_visibility.py` | absent | 186 lines, 7 functions |
+| Total of these two files | 1,334 lines | 1,361 lines |
+
+The owner takes config/session, slot count, injected runner and, for waiting,
+injected monotonic clock and sleep. Its probes return own or external TTY sets,
+per-slot visibility, a bounded wait result or the same diagnostic text. Only
+headless teardown mutates tmux, killing the viewer at an exact target when it
+exists. It has no mutable module state. The controller still owns state
+mutation, targeted role recovery, desktop window-process proof, report and
+CLI dispatch. Installed releases archive the whole `scripts` tree.
+
+For a representative SYRD-65 headless bootstrap or SYRD-239 unseen-slot
+recovery, 150 relevant method lines sat at controller lines 279-430 and
+567-588. They now sit together in the 186-line owner at lines 25-186.
+`presentation_window_attached` remains a 12-line controller adapter and
+targeted recovery remains a 110-line caller. Leaving the seven functions in
+the controller would keep their proof policy interleaved with state and
+recovery. Moving only the 53 lines of external-client and TTY probes would
+split the wait, diagnostic, detach and slot-visibility decisions from their
+evidence source. Moving the adapter or recovery would pull state-path/runner
+resolution or state mutation into this owner. The 27-line combined increase
+is the module header, imports and alias boundary. The controller is below
+the 1,250-line soft limit, so no exception is needed for this file.
+SYRD-272 remains open for the other files and final comparison.
+
+**Verification.** Under a guard refusing process spawns, signals, socket
+connections and host-path opens, baseline and candidate each passed four
+current attachment/refusal cases and the 74-check operator recovery suite.
+The four-case owner test checks own versus external TTYs, viewer and separate
+slot visibility, delayed and timed-out attachment, exact-target headless
+teardown and diagnostics, and all nine import aliases. All seven moved and
+28 retained function ASTs are unchanged. A synthetic headless report,
+delayed attachment, visibility and detach trace is byte-identical after
+normalizing only temporary and checkout paths (SHA-256
+`17c950f43688d7537da2bab716cddd0ad09858a26e00479b751a3dffcaf0fb22`).
+The guarded offline `team-launcher present --help` digest matches baseline
+(`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
+All session/client evidence was synthetic; no live tmux, desktop, tenant,
+GUI window, service or release was changed.

@@ -1558,6 +1558,15 @@ from scripts.project_resolution import (
     _switchyard_entries,
     partial_provision_record,
 )
+from scripts.project_identity import (
+    ProjectConfig,
+    RoleConfig,
+    SwitchyardProjectEntry,
+    _legacy_dash_slug_from_project_name,
+    _slug_from_project_name,
+    _validate_project_slug,
+    switchyard_registry_dir,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1589,9 +1598,6 @@ DEFAULT_SWITCHYARD_REGISTRY_DIR = Path("/etc/switchyard/projects")
 SWITCHYARD_REGISTRY_DIR_ENV = "SWITCHYARD_PROJECT_REGISTRY_DIR"
 
 
-def switchyard_registry_dir() -> Path:
-    configured = os.environ.get(SWITCHYARD_REGISTRY_DIR_ENV, "").strip()
-    return Path(configured).expanduser() if configured else DEFAULT_SWITCHYARD_REGISTRY_DIR
 SWITCHYARD_REGISTRY_SCHEMA = "switchyard.project-registry.v1"
 #: The agent CLIs a registered tenant's roles are configured with. Optional, so
 #: a record written before it existed still reads; absent means "not recorded",
@@ -1674,69 +1680,6 @@ NEW_PROJECT_ROLE_CLI_DEFAULTS = {
 SWITCHYARD_PROMPT_MAX_ATTEMPTS = 5
 NEW_PROJECT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "audit", "user", "unassigned"})
 NEW_PROJECT_NON_AUDIT_RESERVED_ROLE_NAMES = frozenset({"designer", "director", "user", "unassigned"})
-
-
-@dataclass(frozen=True)
-class RoleConfig:
-    role: str
-    slot: int | None
-    detached: bool
-    tmux_session: str
-    target: str
-    workdir: str
-    cli: list[str]
-    model: str
-    model_arg: str
-    effort: str
-    yolo: bool
-    extra_args: list[str]
-    resume_mode: str
-    resume_flag: str
-    resume_subcommand: str
-    fresh_session_per_ticket: bool
-    live_commands: list[str]
-    env: dict[str, str]
-    # Read only for upgrade compatibility. SYRD-69 runs every role as the
-    # project account; authority is the registered live process, not this UID.
-    run_as_user: str = ""
-    unset_env: tuple[str, ...] = ()
-    # SYRD-135: declared on the role, projected from the workflow document, and
-    # acted on by the notify listener rather than here -- the reset happens at
-    # the ticket boundary in a running pane, not at launch. It is carried in the
-    # generated config so the two descriptions of a role cannot disagree.
-    ephemeral: bool = False
-    # SYRD-141: what this role's presentation pane is called. Projected from
-    # the workflow document, where the implementer default and any per-role
-    # override are decided; empty here means a config generated before that
-    # existed, and the role's own name is the answer it had then.
-    presentation_label: str = ""
-
-
-@dataclass(frozen=True)
-class ProjectConfig:
-    project: str
-    project_name: str
-    ticket_prefix: str
-    layout: Path
-    session_dir: Path
-    board_url: str
-    board_socket: str
-    upstream_report_url: str
-    upstream_report_token_file: str
-    run_as_user: str
-    pane_launcher: Path | None
-    repository: Path | None
-    control_repository: Path | None
-    worktree_base: Path | None
-    worktree_remote: str
-    worktree_branch: str
-    roles: list[RoleConfig]
-    desktop_access: dict[str, Any] | None = None
-    role_state_isolation: bool = False
-    #: A pool of interchangeable workers this project may run, declared once
-    #: rather than written out as N roles. None means the project has none,
-    #: which is every project that has not asked for one (SYRD-37).
-    worker_pool: "WorkerPool | None" = None
 
 
 @dataclass(frozen=True)
@@ -2417,13 +2360,6 @@ def _usable_switchyard_entry_for_project(
 
 
 @dataclass(frozen=True)
-class SwitchyardProjectEntry:
-    slug: str
-    name: str
-    config_path: Path
-
-
-@dataclass(frozen=True)
 class GithubIdentityStatus:
     """Whether the project owner can actually publish, and what is missing.
 
@@ -2536,39 +2472,6 @@ def _owner_user_cli_reminder(owner_user: str = "") -> str:
         "copy, let switchyard promote that executable to a root-owned host-wide copy when it "
         "offers, which every later project reuses."
     )
-
-
-def _slug_from_project_name(name: str) -> str:
-    raw = unicodedata.normalize("NFKD", name.strip())
-    pieces: list[str] = []
-    for ch in raw:
-        if ch.isascii() and ch.isalnum():
-            pieces.append(ch.lower())
-        elif unicodedata.category(ch).startswith("M"):
-            continue
-        else:
-            pieces.append("_")
-    slug = "_".join(part for part in "".join(pieces).split("_") if part)
-    if len(slug) > 40:
-        slug = slug[:40].rstrip("_")
-    if not slug:
-        raise SystemExit("switchyard: project slug cannot be empty")
-    return _validate_project_slug(slug)
-
-
-def _legacy_dash_slug_from_project_name(name: str) -> str:
-    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name.strip())
-    slug = "-".join(part for part in slug.split("-") if part)
-    if not slug:
-        raise SystemExit("switchyard: project slug cannot be empty")
-    return slug
-
-
-def _validate_project_slug(value: str) -> str:
-    slug = value.strip().lower()
-    if not PROJECT_SLUG_RE.fullmatch(slug):
-        raise SystemExit("switchyard: project slug must match ^[a-z0-9][a-z0-9_]{0,39}$")
-    return slug
 
 
 def _is_valid_owner_user_name(value: str) -> bool:

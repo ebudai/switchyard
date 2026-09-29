@@ -18926,3 +18926,144 @@ and **not implemented**:
   -    81 lines   13 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 2,988 lines.
+
+### SYRD-456 (slice 19bh): project identity and config primitives
+
+Measured on `d9475b2`. Before any edit, two closures were measured and the
+Director approved the smaller.
+
+- **The closure:** seven definitions:
+  - the three config types, `RoleConfig`, `ProjectConfig` and
+    `SwitchyardProjectEntry`;
+  - the slug rules, `_validate_project_slug`, `_slug_from_project_name` and
+    `_legacy_dash_slug_from_project_name`;
+  - `switchyard_registry_dir`.
+- **Kept on the launcher:** `_resolve_launcher_project_config`. It is
+  resolution, not identity, and moving it (the eight-definition candidate)
+  changed one existing guard.
+- **The guards, measured empirically:** the move was made in a scratch archive
+  of the baseline under /tmp, and every screen-clean boundary suite plus the
+  67 files naming any of the eight were run on both scratch trees
+  (111 whole, 435 cases). For the seven, nothing differed, so no test
+  guard needed adapting and none changed, as the Director required.
+
+| file | before (`d9475b2`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 2,988 | 2,891 |
+| `scripts/project_identity.py` | - | 141 |
+| `tests/project_identity_boundary_test.py` | - | 532 |
+
+**Scope: exactly the approved seven definitions**, moved whole, in the
+launcher's order, into the new `scripts/project_identity.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all seven, right after the
+  `project_resolution` import.
+- **Class identity:** each class is one object, so every annotation,
+  construction and comparison reaches the same class. Only `__module__`
+  changes, to `scripts.project_identity`.
+  - No production module reads `__module__` or `__qualname__`, pickles, or
+    calls `get_type_hints`.
+  - There is no `isinstance` check against these classes.
+  - All 89 imports of them from the launcher are under TYPE_CHECKING.
+  - The four construction sites already build them through the launcher.
+  - The comparison found no test that saw the change.
+- **The config types are unchanged:** frozen, the same fields in the same
+  order, with the same types and literal defaults; defining them reads
+  nothing, so there is no eager import cycle.
+- **Callers and readers:** the launcher's own 25 definitions that
+  name them (annotations included) reach the re-exported objects. The
+  19 production modules that read them do so through the launcher
+  when they run, or name the config types only in annotations, and are
+  byte-identical.
+- **Seams:** all 4 call-time reads of 4 names are now
+  `launcher.X`: the slug pattern, the registry directory and its variable, and
+  the slug validator (`_slug_from_project_name`'s sibling read).
+- **Imports:** `os`, `unicodedata`, `dataclass`, `Path` and `Any` are the
+  module's own. `WorkerPool` is under TYPE_CHECKING, for `ProjectConfig`'s
+  string annotation. The module loads no Switchyard module.
+
+**Proof.** The independent proof (`equiv456.py`, 14 clauses) holds.
+- It compares every whole node (each class's decorator, fields, types,
+  defaults and order included) and the launcher remainder as AST and text.
+- Its rules clause fixes, in order with `find`: the registry lookup, a name's
+  slug (accents dropped, underscores, cut to forty, refused when empty, then
+  validated), the legacy dashed slug, and the validation and its refusal.
+- Its clause 6b requires that no existing test changed.
+- 21 of 21 planted faults are caught, each parsed first, and the plant
+  run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/project_identity_boundary_test.py`,
+  143 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment.
+  - It replays 35 cases produced by the BASELINE launcher's own
+    definitions (`gold456.py`) over the very case text the test embeds, not
+    typed.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds
+    and with a stray registry variable.
+  - **Isolation:** the registry variable is set per case, and the default
+    registry directory is a test-owned one; no real registry or tenant record
+    is read.
+- **Baseline behaviour pinned, not changed:** the legacy dashed slug keeps any
+  letter (`straße-456`) and is never cut; the underscore slug drops accents,
+  turns `ß` into a separator and is cut to forty.
+- **Fixes before relying on a result, none touching production code or an
+  existing test:**
+  - My first case harness recorded direct calls on the launcher but not on the
+    module; direct calls now use each definition's own function on both sides.
+  - Two expectations I wrote were corrected against the baseline: how
+    `ast.unparse` writes an empty string, and the recorded call format.
+  - The reach profiler counts the four functions only, since a class body runs
+    at import under its own name.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (93 checks).
+- **Mutations:** 30 of 30 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 28. The rest are structural, and the structure checks kill
+  them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 166 files are accounted for: every boundary suite and
+  the 67 naming any of the eight.
+  - 112 suites whole: 100 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 435 cases, per case, identical on both sides: 325 pass,
+    108 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (236):** 21 that drive an upgrade
+    or `switchyard_main`, 210 whose own execution screen hits, and
+    5 accumulators;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, the four functions):**
+  38 of 425 passing runs execute one, in 26
+  files.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, repository or release was touched, and no real
+  tenant record was read. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff456.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the owner's systemctl runner -- 1 definitions, 25 lines (lines 2776-2800):
+  -   2776   25  _owner_user_systemctl  launcher callers outside: -; production readers outside the launcher: ['scripts/board_services.py']
+  - launcher names it reads (through the launcher once moved): 3: ['current_user_name', '_owner_command_env_args', '_tenant_owner_home']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/board_services.py']
+  - test files naming any of them: 3 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: running systemctl --user as the project owner)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['ProjectConfig (scripts.project_identity)']
+  - alternatives measured the same way:
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: -; production readers: 1
+  -   - the atomic JSON writer, _write_json_atomic (now among the largest remaining definitions): 1 definitions, 31 lines; launcher callers outside: -; production readers: 20
+- Largest remaining launcher domains (`domains.py`):
+  -  1847 lines  211 defs  general helpers (unclassified)
+  -   380 lines   40 defs  provisioning (new/register/teardown/owner accounts)
+  -   174 lines   17 defs  project config and registry
+  -   100 lines   10 defs  board service, listener and status
+  -    81 lines   13 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 2,891 lines.

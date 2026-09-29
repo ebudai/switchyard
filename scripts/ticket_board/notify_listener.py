@@ -48,6 +48,7 @@ from .pane_activity_gate import (
     read_process_table,
 )
 from .idle_nudges import IdleNudges
+from .notification_ledger import NotificationLedger
 from .pane_state import (
     DEFAULT_PANE_STATE_DIR,
     PaneHookState,
@@ -656,8 +657,6 @@ class TicketBoardNotifyListener:
         self.connector = connector
         self.reconnect_seconds = reconnect_seconds
         self.poll_seconds = poll_seconds
-        self.requeue_base_seconds = requeue_base_seconds
-        self.requeue_max_seconds = requeue_max_seconds
         self.busy_requeue_seconds = busy_requeue_seconds
         self.prior_turn_hold_max_seconds = max(0.0, prior_turn_hold_max_seconds)
         self.monotonic = monotonic
@@ -681,7 +680,13 @@ class TicketBoardNotifyListener:
         self.logger = logger
         self.target_exists = target_exists or tmux_target_exists
         self.delivered_count = 0
-        self._traced_gate_defer_notifications: set[int] = set()
+        # What the listener writes to the board about each notification, and
+        # which deferrals it has already traced (SYRD-484).
+        self.ledger = NotificationLedger(
+            logger=logger,
+            requeue_base_seconds=requeue_base_seconds,
+            requeue_max_seconds=requeue_max_seconds,
+        )
         # The per-pass reminder generators, and the turn boundaries they have
         # already acted on (SYRD-480). They read the gate and the role targets
         # through this listener when a pass runs, because both are rebound.
@@ -749,6 +754,22 @@ class TicketBoardNotifyListener:
     def permission_prompt_grace_seconds(self, value: int) -> None:
         self.idle_nudges.permission_prompt_grace_seconds = value
 
+    @property
+    def requeue_base_seconds(self) -> float:
+        return self.ledger.requeue_base_seconds
+
+    @requeue_base_seconds.setter
+    def requeue_base_seconds(self, value: float) -> None:
+        self.ledger.requeue_base_seconds = value
+
+    @property
+    def requeue_max_seconds(self) -> float:
+        return self.ledger.requeue_max_seconds
+
+    @requeue_max_seconds.setter
+    def requeue_max_seconds(self, value: float) -> None:
+        self.ledger.requeue_max_seconds = value
+
     def _connector_kwargs(self) -> dict[str, int | bool]:
         return {
             "autocommit": True,
@@ -758,10 +779,6 @@ class TicketBoardNotifyListener:
             "keepalives_interval": DEFAULT_KEEPALIVES_INTERVAL_SECONDS,
             "keepalives_count": DEFAULT_KEEPALIVES_COUNT,
         }
-
-    def _backoff_seconds(self, attempts: int) -> float:
-        exponent = max(attempts - 1, 0)
-        return min(self.requeue_max_seconds, self.requeue_base_seconds * (2**exponent))
 
     def deliver_payload(self, payload: str) -> bool:
         transition = parse_transition_payload(payload)
@@ -818,12 +835,6 @@ FROM ticket_board.claim_notification()
         if not isinstance(parsed, dict):
             return ""
         return str(parsed.get("kind") or "").strip().lower()
-
-    def _safe_json_payload(self, payload: str) -> Any:
-        try:
-            return json.loads(payload)
-        except json.JSONDecodeError:
-            return payload
 
     def _activity_trace(self, target: str, pane_busy: bool) -> ActivityTrace:
         gate_owner = getattr(self.activity_gate, "__self__", None)
@@ -907,7 +918,7 @@ FROM ticket_board.claim_notification()
             target,
             activity_trace.reason,
         )
-        self._trace_notification(
+        self.ledger.trace(
             conn,
             notification_id=notification_id,
             ticket_id=ticket_id,
@@ -930,7 +941,7 @@ FROM ticket_board.claim_notification()
                 "phase": phase,
             },
         )
-        self._trace_notification(
+        self.ledger.trace(
             conn,
             notification_id=notification_id,
             ticket_id=ticket_id,
@@ -941,8 +952,8 @@ FROM ticket_board.claim_notification()
         )
         # Never ack here: this reminder was suppressed, not delivered, and
         # ack_notification would credit it as a completed reminder round.
-        self._discard_notification(conn, notification_id, "stale_reminder_work_observed")
-        self._traced_gate_defer_notifications.discard(notification_id)
+        self.ledger.discard(conn, notification_id, "stale_reminder_work_observed")
+        self.ledger.forget(notification_id)
 
     def _delivery_diagnostic_detail(
         self,
@@ -988,51 +999,6 @@ FROM ticket_board.claim_notification()
             "suspected_clobber": suspected_clobber,
             "directorctl": directorctl_diagnostic or {},
         }
-
-    def _trace_notification(
-        self,
-        conn: Any,
-        *,
-        notification_id: int,
-        ticket_id: str,
-        target_role: str,
-        kind: str,
-        event: str,
-        pane_busy: bool | None = None,
-        busy_reason: str | None = None,
-        region_digest: str | None = None,
-        detail: dict[str, Any] | None = None,
-    ) -> None:
-        pane_state = None if pane_busy is None else ("busy" if pane_busy else "idle")
-        try:
-            conn.execute(
-                """
-SELECT ticket_board.record_notification_trace(
-    %s::text,
-    %s::bigint,
-    %s::text,
-    %s::text,
-    %s::text,
-    %s::text,
-    %s::text,
-    %s::text,
-    %s::jsonb
-)
-""",
-                (
-                    ticket_id,
-                    notification_id,
-                    target_role,
-                    kind,
-                    event,
-                    pane_state,
-                    busy_reason,
-                    region_digest,
-                    json.dumps(detail or {}, sort_keys=True),
-                ),
-            )
-        except Exception as exc:  # Trace failures must not wedge delivery.
-            self.logger.warning("Failed to record notification trace for %s/%s: %s", notification_id, event, exc)
 
     def _session_clear_is_due(self, conn: Any, ticket_id: str, target_role: str, kind: str, payload: str) -> bool:
         """Whether this delivery is the first handoff of this ticket to an ephemeral role.
@@ -1104,7 +1070,7 @@ SELECT ticket_board.record_notification_trace(
                 "Holding notification %s for %s: no clear command is known for runtime %r of ephemeral role %s",
                 notification_id, ticket_id, runtime, target_role,
             )
-            self._trace_notification(
+            self.ledger.trace(
                 conn,
                 notification_id=notification_id,
                 ticket_id=ticket_id,
@@ -1114,7 +1080,7 @@ SELECT ticket_board.record_notification_trace(
                 busy_reason=SESSION_CLEAR_UNSUPPORTED_RUNTIME_ERROR,
                 detail={"target": target, "runtime": runtime, "attempts": attempts},
             )
-            self._requeue_notification(
+            self.ledger.requeue(
                 conn, notification_id, attempts, SESSION_CLEAR_UNSUPPORTED_RUNTIME_ERROR
             )
             return False
@@ -1126,7 +1092,7 @@ SELECT ticket_board.record_notification_trace(
                 "Failed to clear the session of ephemeral role %s before %s: %s",
                 target_role, ticket_id, exc,
             )
-            self._trace_notification(
+            self.ledger.trace(
                 conn,
                 notification_id=notification_id,
                 ticket_id=ticket_id,
@@ -1142,7 +1108,7 @@ SELECT ticket_board.record_notification_trace(
                 },
             )
             if failure_reason == "tmux_target_missing":
-                self._dead_letter_notification(
+                self.ledger.dead_letter(
                     conn,
                     notification_id,
                     failure_reason,
@@ -1152,12 +1118,12 @@ SELECT ticket_board.record_notification_trace(
                     payload="",
                 )
             else:
-                self._requeue_notification(
+                self.ledger.requeue(
                     conn, notification_id, attempts, f"{SESSION_CLEAR_FAILED_ERROR}: {failure_reason}"
                 )
             return False
         recorded = self._record_session_clear(conn, ticket_id, target_role)
-        self._trace_notification(
+        self.ledger.trace(
             conn,
             notification_id=notification_id,
             ticket_id=ticket_id,
@@ -1175,9 +1141,6 @@ SELECT ticket_board.record_notification_trace(
         if self.session_clear_settle_seconds > 0:
             self.sleeper(self.session_clear_settle_seconds)
         return True
-
-    def _ack_notification(self, conn: Any, notification_id: int) -> None:
-        conn.execute("SELECT ticket_board.ack_notification(%s::bigint)", (notification_id,))
 
     def _release_prior_turn_hold(
         self,
@@ -1234,7 +1197,7 @@ SELECT ticket_board.record_notification_trace(
             "Delivering notification %s for %s past a finished turn's %s held %.0fs",
             notification_id, ticket_id, activity_trace.reason, held,
         )
-        self._trace_notification(
+        self.ledger.trace(
             conn,
             notification_id=notification_id,
             ticket_id=ticket_id,
@@ -1279,64 +1242,6 @@ WHERE trace.ticket_id = %s
             return ""
         value = row["last_sent_at"] if isinstance(row, dict) else row[0]
         return self._decode_text(value).strip()
-
-    def _discard_notification(self, conn: Any, notification_id: int, reason: str) -> None:
-        """Remove a queued notification that was never delivered.
-
-        Not an ack: ack_notification records delivery accounting, and for an
-        idle_reminder that means incrementing idle_reminder_count, which turns
-        the next idle wave into an escalation to the director (SYRD-32).
-        """
-        conn.execute(
-            "SELECT ticket_board.discard_notification(%s::bigint, %s::text)",
-            (notification_id, reason),
-        )
-
-    def _requeue_notification(
-        self,
-        conn: Any,
-        notification_id: int,
-        attempts: int,
-        error: str,
-        *,
-        delay_seconds: float | None = None,
-    ) -> None:
-        delay_seconds = self._backoff_seconds(attempts) if delay_seconds is None else delay_seconds
-        conn.execute(
-            "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
-            (notification_id, f"{delay_seconds:g} seconds", error[:500]),
-        )
-
-    def _dead_letter_notification(
-        self,
-        conn: Any,
-        notification_id: int,
-        reason: str,
-        *,
-        target: str,
-        message: str,
-        attempts: int,
-        payload: str,
-        error_output: str = "",
-    ) -> None:
-        conn.execute(
-            "SELECT ticket_board.dead_letter_notification(%s::bigint, %s::text, %s::jsonb)",
-            (
-                notification_id,
-                reason[:500],
-                json.dumps(
-                    {
-                        "target": target,
-                        "message": message,
-                        "attempts": attempts,
-                        "payload": self._safe_json_payload(payload),
-                        **({"error_output": error_output[-1000:]} if error_output else {}),
-                    },
-                    sort_keys=True,
-                ),
-            ),
-        )
-        self._traced_gate_defer_notifications.discard(notification_id)
 
     def _next_notification_attempt_at(self, conn: Any) -> datetime | None:
         try:
@@ -1529,7 +1434,7 @@ WHERE q.id = %s AND q.ticket_id = %s
             kind, notification_id, ticket_id, reason,
             ", ".join(f"{key}={value}" for key, value in sorted(detail.items())),
         )
-        self._trace_notification(
+        self.ledger.trace(
             conn,
             notification_id=notification_id,
             ticket_id=ticket_id,
@@ -1539,7 +1444,7 @@ WHERE q.id = %s AND q.ticket_id = %s
             busy_reason=reason,
             detail={**detail, "phase": phase},
         )
-        self._trace_notification(
+        self.ledger.trace(
             conn,
             notification_id=notification_id,
             ticket_id=ticket_id,
@@ -1554,8 +1459,8 @@ WHERE q.id = %s AND q.ticket_id = %s
         # idle wave reads as "already reminded" and turns into an escalation to
         # the Director (SYRD-32). Acking here would answer one false escalation
         # by scheduling the next one.
-        self._discard_notification(conn, notification_id, reason)
-        self._traced_gate_defer_notifications.discard(notification_id)
+        self.ledger.discard(conn, notification_id, reason)
+        self.ledger.forget(notification_id)
 
     @staticmethod
     def _queue_identity_key(queued_for: str, reserved_by: str) -> tuple[str, str]:
@@ -1860,14 +1765,14 @@ WHERE (r.definition->>'active')::boolean
                 break
             notification_id, ticket_id, target_role, message, payload, attempts = row
             kind = self._payload_kind(payload)
-            self._trace_notification(
+            self.ledger.trace(
                 conn,
                 notification_id=notification_id,
                 ticket_id=ticket_id,
                 target_role=target_role,
                 kind=kind,
                 event="listener_claim",
-                detail={"attempts": attempts, "payload": self._safe_json_payload(payload)},
+                detail={"attempts": attempts, "payload": self.ledger.safe_json_payload(payload)},
             )
             target = self.role_targets.get(target_role)
             if self.stop_event.is_set():
@@ -1884,12 +1789,12 @@ WHERE (r.definition->>'active')::boolean
                         "Requeueing notification %s: active role %s has no live runtime assignment",
                         notification_id, target_role,
                     )
-                    self._requeue_notification(
+                    self.ledger.requeue(
                         conn, notification_id, attempts, "role_runtime_unassigned"
                     )
                     continue
                 self.logger.warning("Acking notification %s with unknown target role %s", notification_id, target_role)
-                self._trace_notification(
+                self.ledger.trace(
                     conn,
                     notification_id=notification_id,
                     ticket_id=ticket_id,
@@ -1897,9 +1802,9 @@ WHERE (r.definition->>'active')::boolean
                     kind=kind,
                     event="drop",
                     busy_reason="unknown_target_role",
-                    detail={"payload": self._safe_json_payload(payload)},
+                    detail={"payload": self.ledger.safe_json_payload(payload)},
                 )
-                self._trace_notification(
+                self.ledger.trace(
                     conn,
                     notification_id=notification_id,
                     ticket_id=ticket_id,
@@ -1908,8 +1813,8 @@ WHERE (r.definition->>'active')::boolean
                     event="listener_ack",
                     detail={"reason": "unknown_target_role"},
                 )
-                self._ack_notification(conn, notification_id)
-                self._traced_gate_defer_notifications.discard(notification_id)
+                self.ledger.ack(conn, notification_id)
+                self.ledger.forget(notification_id)
                 continue
             superseded_queue = self._superseded_queue_notice(conn, ticket_id, payload)
             if superseded_queue is not None:
@@ -1921,7 +1826,7 @@ WHERE (r.definition->>'active')::boolean
                 continue
             if not self._notification_is_current(conn, ticket_id, target_role, payload):
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
-                self._trace_notification(
+                self.ledger.trace(
                     conn,
                     notification_id=notification_id,
                     ticket_id=ticket_id,
@@ -1929,9 +1834,9 @@ WHERE (r.definition->>'active')::boolean
                     kind=kind,
                     event="drop",
                     busy_reason="stale_notification",
-                    detail={"payload": self._safe_json_payload(payload)},
+                    detail={"payload": self.ledger.safe_json_payload(payload)},
                 )
-                self._trace_notification(
+                self.ledger.trace(
                     conn,
                     notification_id=notification_id,
                     ticket_id=ticket_id,
@@ -1940,8 +1845,8 @@ WHERE (r.definition->>'active')::boolean
                     event="listener_ack",
                     detail={"reason": "stale_notification"},
                 )
-                self._ack_notification(conn, notification_id)
-                self._traced_gate_defer_notifications.discard(notification_id)
+                self.ledger.ack(conn, notification_id)
+                self.ledger.forget(notification_id)
                 continue
             superseded = self._superseding_awaiting_role(conn, notification_id, ticket_id, kind)
             if superseded is not None:
@@ -1962,7 +1867,7 @@ WHERE (r.definition->>'active')::boolean
                     ticket_id,
                     target,
                 )
-                self._dead_letter_notification(
+                self.ledger.dead_letter(
                     conn,
                     notification_id,
                     "tmux_target_missing",
@@ -1981,20 +1886,18 @@ WHERE (r.definition->>'active')::boolean
                     finish_current_ticket,
                     target_role,
                 )
-                if notification_id not in self._traced_gate_defer_notifications:
-                    self._trace_notification(
-                        conn,
-                        notification_id=notification_id,
-                        ticket_id=ticket_id,
-                        target_role=target_role,
-                        kind=kind,
-                        event="finish_current_defer",
-                        pane_busy=True,
-                        busy_reason="finish_current",
-                        detail={"current_ticket_id": finish_current_ticket, "attempts": attempts},
-                    )
-                    self._traced_gate_defer_notifications.add(notification_id)
-                self._requeue_notification(
+                self.ledger.trace_deferral_once(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="finish_current_defer",
+                    pane_busy=True,
+                    busy_reason="finish_current",
+                    detail=lambda: {"current_ticket_id": finish_current_ticket, "attempts": attempts},
+                )
+                self.ledger.requeue(
                     conn,
                     notification_id,
                     attempts,
@@ -2039,29 +1942,27 @@ WHERE (r.definition->>'active')::boolean
                     )
                     continue
                 self.logger.info("Pane %s is active; requeueing notification %s for %s", target, notification_id, ticket_id)
-                if notification_id not in self._traced_gate_defer_notifications:
-                    self._trace_notification(
-                        conn,
-                        notification_id=notification_id,
-                        ticket_id=ticket_id,
-                        target_role=target_role,
-                        kind=kind,
-                        event="gate_defer",
-                        pane_busy=True,
-                        busy_reason=activity_trace.reason,
-                        region_digest=activity_trace.region_digest,
-                        detail=self._delivery_diagnostic_detail(
-                            target=target,
-                            message=message,
-                            attempts=attempts,
-                            activity_trace=activity_trace,
-                            before=composer_before,
-                            decision="defer",
-                            reason=activity_trace.reason,
-                        ),
-                    )
-                    self._traced_gate_defer_notifications.add(notification_id)
-                self._requeue_notification(
+                self.ledger.trace_deferral_once(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="gate_defer",
+                    pane_busy=True,
+                    busy_reason=activity_trace.reason,
+                    region_digest=activity_trace.region_digest,
+                    detail=lambda: self._delivery_diagnostic_detail(
+                        target=target,
+                        message=message,
+                        attempts=attempts,
+                        activity_trace=activity_trace,
+                        before=composer_before,
+                        decision="defer",
+                        reason=activity_trace.reason,
+                    ),
+                )
+                self.ledger.requeue(
                     conn,
                     notification_id,
                     attempts,
@@ -2102,32 +2003,30 @@ WHERE (r.definition->>'active')::boolean
                     notification_id,
                     ticket_id,
                 )
-                if notification_id not in self._traced_gate_defer_notifications:
-                    self._trace_notification(
-                        conn,
-                        notification_id=notification_id,
-                        ticket_id=ticket_id,
-                        target_role=target_role,
-                        kind=kind,
-                        event="gate_defer",
-                        pane_busy=True,
-                        busy_reason=activity_trace.reason,
-                        region_digest=activity_trace.region_digest,
-                        detail={
-                            **self._delivery_diagnostic_detail(
-                                target=target,
-                                message=message,
-                                attempts=attempts,
-                                activity_trace=activity_trace,
-                                before=composer_before,
-                                decision="defer",
-                                reason=activity_trace.reason,
-                            ),
-                            "phase": "pre_send_recheck",
-                        },
-                    )
-                    self._traced_gate_defer_notifications.add(notification_id)
-                self._requeue_notification(
+                self.ledger.trace_deferral_once(
+                    conn,
+                    notification_id=notification_id,
+                    ticket_id=ticket_id,
+                    target_role=target_role,
+                    kind=kind,
+                    event="gate_defer",
+                    pane_busy=True,
+                    busy_reason=activity_trace.reason,
+                    region_digest=activity_trace.region_digest,
+                    detail=lambda: {
+                        **self._delivery_diagnostic_detail(
+                            target=target,
+                            message=message,
+                            attempts=attempts,
+                            activity_trace=activity_trace,
+                            before=composer_before,
+                            decision="defer",
+                            reason=activity_trace.reason,
+                        ),
+                        "phase": "pre_send_recheck",
+                    },
+                )
+                self.ledger.requeue(
                     conn,
                     notification_id,
                     attempts,
@@ -2161,12 +2060,12 @@ WHERE (r.definition->>'active')::boolean
             # Recheck handoffs too, so a resolution during that probe suppresses
             # this delivery.
             if kind == "awaiting_role" and not self._notification_is_current(conn, ticket_id, target_role, payload):
-                self._trace_notification(
+                self.ledger.trace(
                     conn, notification_id=notification_id, ticket_id=ticket_id,
                     target_role=target_role, kind=kind, event="drop",
                     busy_reason="stale_notification", detail={"phase": "pre_send_recheck"},
                 )
-                self._ack_notification(conn, notification_id)
+                self.ledger.ack(conn, notification_id)
                 continue
             # Last, deliberately: every gate above decides whether this role is
             # free to be handed this ticket at all, and a clear is only allowed
@@ -2207,7 +2106,7 @@ WHERE (r.definition->>'active')::boolean
                 else:
                     self.logger.warning("Failed to deliver queued ticket notification through directorctl: %s", exc)
                 composer_after = self._composer_snapshot(target)
-                self._trace_notification(
+                self.ledger.trace(
                     conn,
                     notification_id=notification_id,
                     ticket_id=ticket_id,
@@ -2231,7 +2130,7 @@ WHERE (r.definition->>'active')::boolean
                     ),
                 )
                 if failure_reason == "tmux_target_missing":
-                    self._dead_letter_notification(
+                    self.ledger.dead_letter(
                         conn,
                         notification_id,
                         failure_reason,
@@ -2245,7 +2144,7 @@ WHERE (r.definition->>'active')::boolean
                     # Including runtime_assignment_unresolved: the board's
                     # routing for this role will return, and the notice is
                     # delivered then rather than lost now (SYRD-264).
-                    self._requeue_notification(conn, notification_id, attempts, failure_reason)
+                    self.ledger.requeue(conn, notification_id, attempts, failure_reason)
                 continue
             composer_after = self._composer_snapshot(target)
             # directorctl returning 0 is not delivery: its check is what the
@@ -2278,7 +2177,7 @@ WHERE (r.definition->>'active')::boolean
                     "waited_seconds": self.submission_confirm_seconds,
                     "since": send_started_at,
                 }
-                self._trace_notification(
+                self.ledger.trace(
                     conn,
                     notification_id=notification_id,
                     ticket_id=ticket_id,
@@ -2293,10 +2192,10 @@ WHERE (r.definition->>'active')::boolean
                 # Not re-sent automatically: the text may be sitting in the
                 # composer, and typing it again would put it there twice. The
                 # board reports it unconfirmed; the owner of the stage decides.
-                self._ack_notification(conn, notification_id)
-                self._traced_gate_defer_notifications.discard(notification_id)
+                self.ledger.ack(conn, notification_id)
+                self.ledger.forget(notification_id)
                 continue
-            self._trace_notification(
+            self.ledger.trace(
                 conn,
                 notification_id=notification_id,
                 ticket_id=ticket_id,
@@ -2318,7 +2217,7 @@ WHERE (r.definition->>'active')::boolean
                     directorctl_diagnostic=directorctl_diagnostic,
                 ) | {"submission": {"witnessed": submission, "since": send_started_at}},
             )
-            self._trace_notification(
+            self.ledger.trace(
                 conn,
                 notification_id=notification_id,
                 ticket_id=ticket_id,
@@ -2330,8 +2229,8 @@ WHERE (r.definition->>'active')::boolean
                 region_digest=activity_trace.region_digest,
                 detail={"target": target},
             )
-            self._ack_notification(conn, notification_id)
-            self._traced_gate_defer_notifications.discard(notification_id)
+            self.ledger.ack(conn, notification_id)
+            self.ledger.forget(notification_id)
             self.delivered_count += 1
             delivered += 1
             self.logger.info("Delivered queued notification %s for %s to %s: %s", notification_id, ticket_id, target, payload)

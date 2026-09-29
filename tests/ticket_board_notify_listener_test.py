@@ -1234,7 +1234,7 @@ def test_hook_busy_requeues_with_exponential_backoff() -> None:
 def test_backoff_sequence_is_pinned_to_five_minute_cap() -> None:
     listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
 
-    assert [listener._backoff_seconds(attempts) for attempts in range(1, 9)] == [
+    assert [listener.ledger.backoff_seconds(attempts) for attempts in range(1, 9)] == [
         5.0,
         10.0,
         20.0,
@@ -1252,7 +1252,7 @@ def test_busy_backoff_attempts_stay_below_ten_in_five_minutes() -> None:
     listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
     while elapsed < 5 * 60:
         attempts += 1
-        elapsed += listener._backoff_seconds(attempts)
+        elapsed += listener.ledger.backoff_seconds(attempts)
 
     assert attempts < 10
 
@@ -1263,7 +1263,7 @@ def test_finish_current_backoff_attempts_stay_below_ten_in_five_minutes() -> Non
     listener = TicketBoardNotifyListener(conninfo="", poll_seconds=0)
     while elapsed < 5 * 60:
         attempts += 1
-        elapsed += listener._backoff_seconds(attempts)
+        elapsed += listener.ledger.backoff_seconds(attempts)
 
     assert attempts < 10
 

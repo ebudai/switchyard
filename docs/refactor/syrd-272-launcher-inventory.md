@@ -19972,6 +19972,7 @@ command script, artifact writing and the CLI stay as `project_provision`'s
 compatibility surface. `project_provision.py` is 4,344 lines after this slice;
 SYRD-272 is not complete.
 
+
 ### SYRD-464 (project_provision slice 2): path containment and confinement commands
 
 Measured on `104bf2c`. Before any edit, the "path containment, repository and
@@ -22333,3 +22334,74 @@ exception for the delivery state machine, recorded once the smaller groups are
 measured.
 
 SYRD-272 is not complete.
+
+### SYRD-484 (notify_listener slice 4): notification ledger ownership
+
+The Director approved this boundary on public main
+`7b5a1ebde129e2e5c44fe833cc4aaac20f49a4da` before the edit. The source
+remains a direct child of that commit. This slice does not address the separate
+SYRD-482 early return and does not accept a soft-limit exception for the
+remaining delivery state machine.
+
+`NotificationLedger` now owns the seven notification write/backoff/payload
+methods, the deferral-trace set, and both requeue timings. The listener gives
+it only the logger and timings at construction, and the existing autocommit
+connection on each call. The three repeated trace-once blocks become
+`trace_deferral_once`, with diagnostic detail passed as a function so it is
+only made on the first deferral. The listener calls `forget` at the same
+terminal dispositions as the baseline. A failed trace is still logged and
+then marked as attempted; it cannot wedge delivery. The seven board statement
+texts, parameters, order and idempotency functions are unchanged.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `notify_listener.py` | 2,506 lines | 2,405 lines |
+| `TicketBoardNotifyListener` | 1,814 lines, 58 methods | 1,712 lines, 55 methods |
+| `notification_ledger.py` | absent | 154 lines |
+
+The caller seam is the listener alone. No other production module names the
+moved methods or the set; only three test lines called `_backoff_seconds`, and
+those now call `listener.ledger.backoff_seconds`. Both requeue timing setters
+remain on the listener as properties over the ledger. The listener keeps its
+public entry points, loop and CLI. The next measured separation is the 404-line
+currency and supersession group: its only shared listener state was the
+deferral set, which the ledger now owns. The 113-line pane-activity decisions
+have the same property. The roughly 700-line delivery pass still owns its
+prior-turn hold map and delivered count; a later slice needs its own design
+decision.
+
+**Equivalence and focused evidence.** The seven moved methods have identical
+ASTs to the baseline after the approved renames and `forget` substitution.
+Of the 46 retained distinct listener method names, 40 have identical ASTs;
+the other six are `__init__`, `_clear_role_session`,
+`_drop_stale_reminder`, `_drop_superseded_notification`,
+`_release_prior_turn_hold`, and `process_due_notifications`. The
+remaining changed lines in those methods are the ledger calls and three
+trace-once blocks. Each block retains its original fields and the baseline's
+lazy diagnostic detail. No statement, transaction boundary or loop order
+changed. The candidate and baseline files in the scratch archives match the
+exact worktree and public-main files by SHA-256, respectively.
+
+- `tests/notification_ledger_boundary_test.py`: four cases pass with a
+  recording connection. They pin the statement text and parameters, failed
+  trace handling, marking a failed attempt, lazy detail, terminal forget,
+  backoff and late timing setters. The ledger cannot import the listener or
+  reach its state. Five source mutations were killed: no deferral mark, eager
+  detail, no terminal forget, wrong exponential backoff and fatal trace
+  failure.
+- Nine relevant listener tests pass under spawn, signal and socket refusal on
+  each exact tree: the three approved backoff adaptations, busy deferral,
+  trace-once, finish-current, dead letter, stale ack and busy-then-idle
+  delivery. This includes the SYRD-482 baseline unchanged. The pre-edit
+  guarded comparison covered 812 cases in 219 files, with only the three
+  pre-approved test seam differences; its unmasked 106-case listener file
+  comparison was identical. The post-edit focused comparison verifies the
+  present worktree against those same exact source files.
+- The installed wrapper's `--help` and offline pane-state authority check
+  produce identical normalized output on baseline and candidate (SHA-256
+  `9d1fae95a1d3f1a3bb732a8191742593d751a6724d3744478077ba040e2fe601`).
+  The offline check uses one synthetic assignment and hook record; the guard
+  refuses process spawns, signals and socket connections. No live tenant,
+  service, provider, pane, board, database, account or release was touched.
+
+SYRD-272 remains open.

@@ -21476,3 +21476,183 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 1,758 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-473 (project_provision slice 11): the root-executable trust checks
+
+Measured on `f73d64c`. Before any edit, the "root-executable trust" group was
+inspected at this baseline. It is one responsibility:
+`untrusted_root_executable_reasons` says why root must not execute a file, and
+`acl_write_grants`, its only helper, reads the write grants in a file's access
+control list through `getfacl` (SYRD-62). Nothing else in `project_provision`
+calls either, and they call nothing of it but each other. The Director
+approved the exact two-name extraction, with the one `PROVISION_MODULES` line,
+and asked for `project_provision`'s own imports to be left unchanged.
+
+**The slice:** two names into a new `scripts/ticket_board/provision_root_trust.py`.
+Kept on `project_provision`: the shell and service primitives above them, the
+refusal and its normal-form check below, and its own `os`, `stat`,
+`subprocess`, `Path` and `Callable` imports (no longer used there, and read by
+nothing, but left as the Director decided).
+
+| file | before (`f73d64c`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 1,758 | 1,649 |
+| `scripts/ticket_board/provision_root_trust.py` | - | 147 |
+| `tests/provision_root_trust_boundary_test.py` | - | 753 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of both at the end of both
+  branches of `project_provision`'s import block, after the repository-boundary
+  import.
+- **Call-time reads:** 1 read of 1 name in 1 function -- the
+  trust check's call to its sibling `acl_write_grants`, read as
+  `provision.acl_write_grants` behind the same call-time import and
+  direct-script fallback as the earlier slices. A patch of `acl_write_grants`
+  on `project_provision` still reaches the check.
+- **Definition time:** both take `runner=subprocess.run`, bound when the
+  function is defined. The module imports `subprocess` itself, so the default
+  is the same `subprocess.run` object. Its imports are the standard library
+  only, and importing it alone loads only its package.
+- **Callers inside `project_provision`:** none, before or after.
+- **Readers:** 4 production modules import the trust check from
+  `project_provision` and are byte-identical: `team_launcher` and
+  `switchyard-install-authority` at load (the latter with a staged-copy
+  fallback; no staging list names provision modules one by one),
+  `trusted_bootstrap` and `trusted_upgrade_release` inside a function, when it
+  runs. `agent_cli_promotion`, `desktop_presentation`, `role_account_migration`
+  and `tenant_control_helper` read `launcher.untrusted_root_executable_reasons`.
+- **Patch seams:** 3 tests patch the trust check on
+  `project_provision` (`tenant_control_helper_boundary_test.py`, `trusted_bootstrap_boundary_test.py`, `trusted_upgrade_release_boundary_test.py`). Its call-time
+  readers look it up there when they run, so the patches still reach them.
+- **Mover:** no new rule was needed. Every kept node keeps the blank lines it
+  had before it on the baseline, and the only lines added to
+  `project_provision` are the two re-export statements.
+
+**Proof.** The independent proof (`equiv473.py`, 16 clauses) holds. It
+checks:
+- every whole node, after dropping the one call-time import and reading
+  `provision.X` as X;
+- the defaults (`subprocess.run`, bound when each function is defined), no
+  constant, and no Switchyard import at load;
+- that the neighbours and `project_provision`'s own imports stay;
+- the ACL-list and path rules, in order;
+- `project_provision` as AST and as text;
+- the tests: only the new one and the `PROVISION_MODULES` line changed.
+
+It catches 23 of 23 planted faults, among them:
+- the mask treated as a grant;
+- a symlinked step looked into;
+- the writable mask narrowed;
+- a default runner changed;
+- `project_provision`'s own `subprocess` import removed.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_root_trust_boundary_test.py`,
+  149 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 43 cases (21 for `acl_write_grants`,
+    22 for the trust check) produced by the BASELINE module's
+    own definitions (`gold473.py`):
+    - every kind of access control entry: named user and group grants,
+      entries without write, writable mask and base entries, `default:other`
+      and default named entries, comments and `#effective`, short and unknown
+      fields;
+    - a list that cannot be read: a non-zero exit with and without stderr, a
+      runner that raises, a result without attributes;
+    - on synthetic trees under /tmp, bounded there: every step's owner, mode
+      and kind, a missing step, symlinks on the way, paths not in normal form,
+      boundaries at, above and beside the file, grants on a directory, and
+      every fault at once;
+    - `acl_write_grants` rebound on `project_provision`, reached once per step.
+  - Every case is given a stand-in runner that records each argv and keyword;
+    none runs the real tool.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER, COLUMNS and TMPDIR, under umask 077 and under three
+    hash seeds.
+  - It checks:
+    - that the shipped default runner, `subprocess.run` itself, asks the ACL
+      tool with its three flags, pipes and text mode, and reads its answer --
+      against a `Popen` stand-in, so nothing is spawned;
+    - the call-time readers' patch seam, and that `team_launcher` holds the
+      module's own object;
+    - that the direct script answers what the package answers, with no host
+      path looked at;
+    - that the default, shaped, lean and roles packets are byte-identical
+      through both.
+    Its caller count spans the re-exported modules.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (113 checks).
+- **Fixes before relying on a result:**
+  - The rules and one stand-in first spelled the ACL tool's name. The
+    execution screen refused to run the test, and I did not override it. The
+    checks now compare the flags and path, and take the tool's name from what
+    the baseline asked for (`GOLDEN`) or from the argv the function passed.
+  - Two stand-ins first reported the random name of their temp directory, so
+    the golden output and the direct-script digest were not stable. Both now
+    report the normalized path.
+- **Mutations:** 41 of 42 are killed by assertions, with zero guard
+  refusals. The one survivor, "the mask a grant", is equivalent: an entry of
+  kind `mask` is never a named user or group entry nor `default:other`, so the
+  next check skips it anyway, and no input can tell the two apart. The
+  behaviour tests alone kill 35. The structure checks kill the rest
+  (the direct-script fallback dropped, project_provision imported at load, the grants' default runner replaced, the check's default runner replaced, re-export aliased, re-export dropped from the script branch), none of which changes an answer the cases observe.
+- **Both functions on the exact trees** (`probe473.py`): 35 cases give
+  one digest on baseline and candidate, in the package and as the direct
+  script, every per-case digest identical, with 0 host paths looked at
+  (positive control caught).
+- **The shipped default runner on the exact trees** (`default473.sh`): no
+  runner given, a stand-in `getfacl` first on PATH, logging every argv. It was
+  reached 11 times in each run, and the answers are identical on
+  baseline and candidate, in the package and as the direct script, with 0 host
+  paths looked at.
+- **Provisioning smoke on the exact trees** (`smoke473.sh`, board Python
+  pinned): the default, shaped, lean, named-key, control and roles packets.
+  Every artifact and stdout is byte-identical between baseline and candidate,
+  and between modes.
+- **Comparison, both trees, guarded:** all 241 files accounted for.
+  - 137 suites whole, 118 passing on the candidate.
+    The new test runs only there. Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 851 cases, per case, identical: 536 pass, 310 stop at the
+    same guard refusal, and 5 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`; `tenant_control_helper_repair_test::test_the_repair_touches_no_other_tenant`).
+    These are baseline defects already reported.
+  - Excluded 377: 65 drive an upgrade, 307
+    execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare, uses __file__); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare, uses __file__); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare, uses __file__); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare, uses __file__); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare, uses __file__); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare, uses __file__); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 4 of 654 passing runs execute one of the
+    two functions, in 3 files. The existing cases among them
+    reach the real functions with the guard refusing each ACL-tool spawn,
+    which the check reports as a list it could not read; the refusals are
+    identical on both trees.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched. Nothing I wrote read
+  or wrote a real home, account, /etc, /var or /opt path. The live snapshot differs only in this pane's own board-notification listener log and this Claude Code session's own `~/.claude.json`, which the running CLI rewrote; every suite runs with HOME at a scratch directory.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The root-executable trust checks are now a 147-line module,
+instead of a slice of the 1,758-line `project_provision.py`. The eleven
+`project_provision` slices so far, 4,117 lines between them, are:
+- `provision_github_identity.py` (499 lines);
+- `provision_path_confinement.py` (555);
+- `provision_workflow_projection.py` (447);
+- `provision_workflow_sql.py` (492);
+- `provision_role_tooling.py` (548);
+- `provision_publication_grants.py` (198);
+- `provision_tenant_control.py` (261);
+- `provision_role_accounts.py` (461);
+- `provision_board_service.py` (343);
+- `provision_repository_boundary.py` (166);
+- `provision_root_trust.py` (147).
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups473.py`):
+
+- repository group and plan-path helpers (left from the confinement group) (5 definitions, 62 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+1,649 lines after this slice; SYRD-272 is not complete.

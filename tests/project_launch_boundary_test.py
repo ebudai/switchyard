@@ -51,6 +51,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import project_launch as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('launch_project',)
 #: Measured on the baseline launcher: the moved body's call-time reads of launcher globals.
@@ -512,7 +514,7 @@ def test_the_launcher_reexports_it_and_its_callers_reach_it_there() -> None:
                                                   "resume_tenant", "run_switchyard_launch_first_run_auth"} <= defined | exported,
           "the launcher defines none of it, and keeps its neighbours and every seam and default it reads, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

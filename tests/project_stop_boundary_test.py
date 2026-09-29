@@ -52,6 +52,8 @@ from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import project_stop as m  # noqa: E402
 from scripts import presentation_controller, role_sessions  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("stop_project",)
 #: Measured on the baseline launcher: the body's call-time reads of launcher globals.
@@ -329,7 +331,7 @@ def test_the_launcher_reexports_it_and_its_callers_reach_it_there() -> None:
     check(not defined & set(MOVED) and {"_plan_data_from_config", "_layout_slot_count", "main"} <= defined | exported,
           "the launcher does not define it, and keeps its neighbours and its dispatcher, its own or re-exported")
     calls: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, ast.FunctionDef):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:

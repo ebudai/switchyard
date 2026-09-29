@@ -53,6 +53,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import generated_layout_upgrade as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('_generated_project_durable_session_dir', 'upgrade_generated_project_config', 'upgrade_generated_project_layout')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -445,7 +447,7 @@ def launcher_with_launch_project() -> ast.Module:
               and any(a.name == "launch_project" and a.asname is None for a in n.names) for n in launcher.body),
           "the launcher re-exports it, unaliased")
     dispatch = {n.name: sum(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "launch_project" for c in ast.walk(n))
-                for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name in ("main", "switchyard_main")}
+                for n in launcher_body(ROOT, launcher) if isinstance(n, ast.FunctionDef) and n.name in ("main", "switchyard_main")}
     past = [n for n in ast.walk(launcher) if isinstance(n, ast.Attribute) and n.attr == "launch_project"]
     check(dispatch == {"main": 1, "switchyard_main": 2} and past == [],
           f"main and switchyard_main still call it by the launcher's name, as often as before, and nothing reaches past it: {dispatch}")

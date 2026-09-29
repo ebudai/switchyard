@@ -35,6 +35,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 
 EXPORTED = {
@@ -160,7 +162,7 @@ def test_the_patched_entry_points_are_called_by_the_launchers_name() -> None:
     launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
     phases = ast.parse((ROOT / "scripts" / "launch_phases.py").read_text(encoding="utf-8"))
     for name in PATCHED_ENTRY_POINTS:
-        calls = [n for n in ast.walk(launcher_tree)
+        calls = [n for n in ast.walk(ast.Module(body=launcher_body(ROOT, launcher_tree), type_ignores=[]))
                  if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]
         phase_calls = [n for n in ast.walk(phases)
                        if isinstance(n, ast.Call) and getattr(n.func, "id", getattr(n.func, "attr", "")) == name]

@@ -55,6 +55,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import new_project_command as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('recorded_provisioning_command', '_new_project_artifact_dir', 'new_project_command')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -537,7 +539,7 @@ def test_the_launcher_reexports_the_three_and_its_readers_reach_them_there() -> 
                                         "write_new_project_launcher_artifacts"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and every seam and default they read, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

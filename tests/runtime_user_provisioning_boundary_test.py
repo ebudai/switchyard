@@ -55,6 +55,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import runtime_user_provisioning as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('RUNTIME_READY_ATTEMPTS', 'RUNTIME_READY_POLL_SECONDS', 'loginctl_enable_linger_args', 'ensure_user_linger_runtime', 'ensure_configured_runtime_user', 'provision_runtime_command')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -419,7 +421,7 @@ def test_the_launcher_reexports_the_six_and_its_callers_reach_them_there() -> No
     check(not defined & set(MOVED) and seams | {"main", "default_user_bin", "role_isolation_gaps", "DETACHED_SESSION_STABILITY_SECONDS", "NO_LAUNCHER_SELF_DEPLOY_ENV"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and every seam they read, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

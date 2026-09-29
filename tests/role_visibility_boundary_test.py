@@ -56,6 +56,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import role_visibility as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("tmux_detach_clients_args", "_raw_role_for_update", "_write_role_visibility", "detach_role_from_slot")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -434,7 +436,7 @@ def test_the_launcher_reexports_the_four_and_its_readers_reach_them_there() -> N
     check(not defined & set(MOVED) and {"role_pane_declaration", "tmux_pane_pid_args", "_layout_slot_count", "_role_by_name", "main"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and its dispatcher, its own or re-exported")
     calls: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, ast.FunctionDef):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Call) and ast.unparse(x.func).split(".")[-1] in MOVED:

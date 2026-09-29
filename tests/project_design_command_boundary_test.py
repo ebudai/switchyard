@@ -53,6 +53,8 @@ if str(ROOT) not in sys.path:
 from scripts import team_launcher as t  # noqa: E402,I001
 from scripts import project_design_command as m  # noqa: E402
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ('_comma_list', '_default_project_artifact_path', '_default_project_design_document_path', 'design_project_command')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
@@ -458,7 +460,7 @@ def test_the_launcher_reexports_the_four_and_main_reaches_them_there() -> None:
                                         "Choice", "Field", "KIND_SINGLE", "terminal_select", "load_project_design_artifact"} <= defined | exported,
           "the launcher defines none of them, and keeps its neighbours and every seam they read, its own or re-exported")
     uses: dict = {}
-    for fn in tree.body:
+    for fn in launcher_body(ROOT, tree):
         if isinstance(fn, (ast.FunctionDef, ast.ClassDef)):
             for x in ast.walk(fn):
                 if isinstance(x, ast.Name) and x.id in MOVED:

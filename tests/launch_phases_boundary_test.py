@@ -66,6 +66,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 EXPORTED = ("LaunchSetup", "_launch_runners_and_paths", "LaunchPreparation", "_prepare_launch",
             "_write_layout_and_plan", "WorkerStartup", "_start_workers_and_present", "_report_launch")
@@ -111,7 +113,7 @@ def launcher_with_launch_project() -> ast.Module:
               and any(a.name == "launch_project" and a.asname is None for a in n.names) for n in launcher.body),
           "the launcher re-exports it, unaliased")
     dispatch = {n.name: sum(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "launch_project" for c in ast.walk(n))
-                for n in launcher.body if isinstance(n, ast.FunctionDef) and n.name in ("main", "switchyard_main")}
+                for n in launcher_body(ROOT, launcher) if isinstance(n, ast.FunctionDef) and n.name in ("main", "switchyard_main")}
     past = [n for n in ast.walk(launcher) if isinstance(n, ast.Attribute) and n.attr == "launch_project"]
     check(dispatch == {"main": 1, "switchyard_main": 2} and past == [],
           f"main and switchyard_main still call it by the launcher's name, as often as before, and nothing reaches past it: {dispatch}")

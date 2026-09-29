@@ -45,6 +45,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from launcher_main_view import launcher_body  # noqa: E402
+
 CHECKS = 0
 MOVED = ("_project_plan_for_vcs_close_role", "_write_vcs_close_role_artifacts", "_apply_vcs_close_role_board_sql",
          "set_project_vcs_close_role_command")
@@ -137,7 +139,8 @@ def test_the_seams_the_modules_own_names_and_the_callers() -> None:
     bound |= {(a.asname or a.name) for n in launcher.body if isinstance(n, ast.ImportFrom) for a in n.names}
     check(not {n.name for n in launcher.body if isinstance(n, ast.FunctionDef)} & set(MOVED) and bound >= set(SHARED),
           "the launcher defines none of them, and keeps every shared facility bound")
-    dispatch = [n for n in ast.walk(launcher) if isinstance(n, ast.Call) and ast.unparse(n.func) == "set_project_vcs_close_role_command"]
+    dispatch = [n for n in ast.walk(ast.Module(body=launcher_body(ROOT, launcher), type_ignores=[]))
+                if isinstance(n, ast.Call) and ast.unparse(n.func) == "set_project_vcs_close_role_command"]
     check(len(dispatch) == 2, "`main` and `switchyard_main` still call it by the launcher's own name")
 
 

@@ -18781,3 +18781,148 @@ and **not implemented**:
   -    81 lines   13 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 3,126 lines.
+
+### SYRD-454 (slice 19bg): project discovery and resolution
+
+Measured on `000732d`. Before any edit, the rooted closure was verified, and
+the Director approved it.
+
+- **The closure:** the ticket's six candidates, plus
+  `_project_name_selector_slugs`. Its only caller is the resolver, and no
+  production module or test reads it. `_resolve_launcher_project_config` stays
+  on the launcher, as a seam: it depends on the group, but the group does not
+  depend on it.
+- **The guards, measured empirically:** the move was made in a scratch archive
+  of the baseline under /tmp, and every screen-clean boundary suite plus the
+  15 files naming the seven were run on both scratch trees
+  (110 whole, 293 cases).
+- **Result:** nothing differed, so no test guard needed adapting, and none
+  changed, as the Director required. Every existing stay check already accepts
+  a re-export, and no guard counts what the seven call.
+
+| file | before (`000732d`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 3,126 | 2,988 |
+| `scripts/project_resolution.py` | - | 196 |
+| `tests/project_resolution_boundary_test.py` | - | 549 |
+
+**Scope: exactly the approved seven definitions**, moved whole, in the
+launcher's order, into the new `scripts/project_resolution.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all seven, right after the
+  `switchyard_dispatch` import.
+- **Callers and readers:** the launcher's own callers
+  (`_resolve_launcher_project_config`, `_usable_switchyard_entry_for_project`,
+  `switchyard_menu_command` and `switchyard_validate_models_command`) name the
+  re-exported objects as before. The 11 production modules that
+  read them do so through the launcher when they run, and are byte-identical.
+- **Seams:** all 18 call-time reads of 15 names are now
+  `launcher.X`, the siblings' reads of each other included. 8 are the
+  launcher's own and 1 is its import from another module (the
+  privileged baseline plan path).
+- **Safety checks, moved verbatim:**
+  - the partial-provision record is `os.stat(..., follow_symlinks=False)` and
+    a regular file only;
+  - registry records need the exact schema, a valid slug and a config path;
+  - a bad or missing slug is skipped with a warning on stderr.
+- **Defaults and imports:** every default is `None`. `json`, `os`, `stat`,
+  `sys` and `Path` are the module's own imports. `SwitchyardProjectEntry` is
+  under TYPE_CHECKING and built through the launcher. The module loads no
+  Switchyard module.
+
+**Proof.** The independent proof (`equiv454.py`, 14 clauses) holds.
+- It compares every whole node and default, and the launcher remainder as AST
+  and text.
+- Its rules clause fixes, in order with `find`: what each definition reads,
+  skips and warns about; the merge keeping the first entry per slug and its
+  sort; the no-follow regular-file record; the hint; and every refusal of the
+  resolution.
+- Its clause 6b requires that no existing test changed.
+- 19 of 19 planted faults are caught, each parsed first, and the plant
+  run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/project_resolution_boundary_test.py`,
+  139 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment.
+  - It replays 35 cases produced by the BASELINE launcher's own
+    definitions (`gold454.py`) over the very case text the test embeds, not
+    typed.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds
+    and with a stray `SWITCHYARD_REGISTRY_DIR`.
+  - **Isolation:** every config and registration record is synthetic, in a
+    test-owned tree that is also `$HOME`. The config directory, registry
+    directory and privileged plan path are stand-ins on the launcher; no real
+    tenant record is read.
+- **Baseline behaviour pinned, not changed:**
+  - A launcher config wins over a registration record of the same slug:
+    configs are read first, and the merge keeps the first entry.
+  - Selector slugs are casefolded, not only lower-cased: the legacy dashed
+    slug of `Straße 454` matches `strasse-454`.
+- **Fixes before relying on a result, none touching production code or an
+  existing test:**
+  - **My first module docstring was wrong on two points,** corrected before
+    the comparison: it said a registration record wins the merge, and that the
+    resolver's refusal names the known projects.
+  - **Cases added:** the resolution cases first read the empty default
+    directories, and now pass the case's own. The first mutation run then left
+    two survivors, and I added a case for each and re-ran the whole set: a
+    name whose casefolded slug differs from its lower-cased one, and entries
+    whose name order differs from their slug order.
+  - **A rule corrected:** a registration record with no slug is also warned
+    about.
+  - **A process mistake, disclosed on the ticket:** I rebuilt the scratch copy
+    while the first comparison was reading it. I stopped that run and
+    restarted it; every result here is from the restarted run.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (94 checks).
+- **Mutations:** 34 of 34 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 32. The rest are structural, and the structure checks kill
+  them: the launcher imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 143 files are accounted for: every boundary suite and
+  the 15 naming the seven.
+  - 111 suites whole: 99 pass on the candidate
+    (the new test only there). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 293 cases, per case, identical on both sides: 269 pass,
+    22 stop at the same guard refusal, and 2 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (101):** 4 that drive an upgrade
+    or `switchyard_main`, 92 whose own execution screen hits, and
+    5 accumulators;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, real functions only):**
+  13 of 368 passing runs execute a moved function, in
+  4 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, repository or release was touched, and no real
+  tenant record was read. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff454.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the owner's systemctl runner -- 1 definitions, 25 lines (lines 2873-2897):
+  -   2873   25  _owner_user_systemctl  launcher callers outside: -; production readers outside the launcher: ['scripts/board_services.py']
+  - launcher names it reads (through the launcher once moved): 4: ['ProjectConfig', 'current_user_name', '_owner_command_env_args', '_tenant_owner_home']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 1: ['scripts/board_services.py']
+  - test files naming any of them: 2 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: running systemctl --user as the project owner)
+  - it also reads 0 names the launcher imports from other Switchyard modules (read through the launcher once moved): []
+  - alternatives measured the same way:
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: -; production readers: 1
+  -   - the atomic JSON writer, _write_json_atomic (now among the largest remaining definitions): 1 definitions, 31 lines; launcher callers outside: -; production readers: 20
+- Largest remaining launcher domains (`domains.py`):
+  -  1838 lines  210 defs  general helpers (unclassified)
+  -   380 lines   40 defs  provisioning (new/register/teardown/owner accounts)
+  -   280 lines   24 defs  project config and registry
+  -   100 lines   10 defs  board service, listener and status
+  -    81 lines   13 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 2,988 lines.

@@ -1549,6 +1549,15 @@ from scripts.launcher_dispatch import (
 from scripts.switchyard_dispatch import (
     switchyard_main,
 )
+from scripts.project_resolution import (
+    _project_entries,
+    _project_name_selector_slugs,
+    _registry_project_entries,
+    _resolve_switchyard_project,
+    _resume_provision_hint,
+    _switchyard_entries,
+    partial_provision_record,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2555,16 +2564,6 @@ def _legacy_dash_slug_from_project_name(name: str) -> str:
     return slug
 
 
-def _project_name_selector_slugs(name: str) -> set[str]:
-    selectors: set[str] = set()
-    for derive in (_slug_from_project_name, _legacy_dash_slug_from_project_name):
-        try:
-            selectors.add(derive(name).casefold())
-        except SystemExit:
-            continue
-    return selectors
-
-
 def _validate_project_slug(value: str) -> str:
     slug = value.strip().lower()
     if not PROJECT_SLUG_RE.fullmatch(slug):
@@ -2711,97 +2710,6 @@ def _uid_for_user(user_name: str) -> int | None:
         return None
 
 
-def _project_entries(config_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
-    config_dir = config_dir or DEFAULT_CONFIG_DIR
-    entries: list[SwitchyardProjectEntry] = []
-    try:
-        paths = sorted(path for path in config_dir.iterdir() if path.is_file() and path.suffix == ".json")
-    except OSError:
-        return []
-    for path in paths:
-        try:
-            raw = _load_json(path)
-        except (OSError, json.JSONDecodeError, SystemExit):
-            continue
-        roles_raw = raw.get("roles")
-        if not isinstance(roles_raw, list) or not roles_raw:
-            continue
-        try:
-            slug = _validate_project_slug(str(raw.get("project") or path.stem))
-        except SystemExit as exc:
-            print(f"warning: switchyard: skipping {path}: {exc}", file=sys.stderr)
-            continue
-        name = str(raw.get("project_name") or raw.get("name") or slug).strip() or slug
-        entries.append(SwitchyardProjectEntry(slug=slug, name=name, config_path=path))
-    return entries
-
-
-def _registry_project_entries(registry_dir: Path | None = None) -> list[SwitchyardProjectEntry]:
-    registry_dir = registry_dir or switchyard_registry_dir()
-    entries: list[SwitchyardProjectEntry] = []
-    try:
-        paths = sorted(path for path in registry_dir.iterdir() if path.is_file() and path.suffix == ".json")
-    except OSError:
-        return []
-    for path in paths:
-        try:
-            raw = _load_json(path)
-        except (OSError, json.JSONDecodeError, SystemExit):
-            continue
-        if str(raw.get("schema") or "") != SWITCHYARD_REGISTRY_SCHEMA:
-            continue
-        try:
-            slug = _validate_project_slug(str(raw.get("slug") or ""))
-        except SystemExit as exc:
-            print(f"warning: switchyard: skipping {path}: {exc}", file=sys.stderr)
-            continue
-        name = str(raw.get("name") or slug).strip() or slug
-        config_path_raw = str(raw.get("config_path") or "").strip()
-        if not slug or not config_path_raw:
-            continue
-        entries.append(SwitchyardProjectEntry(slug=slug, name=name, config_path=Path(config_path_raw).expanduser()))
-    return entries
-
-
-def _switchyard_entries(
-    *,
-    config_dir: Path | None = None,
-    registry_dir: Path | None = None,
-) -> list[SwitchyardProjectEntry]:
-    entries: dict[str, SwitchyardProjectEntry] = {}
-    for entry in [*_project_entries(config_dir), *_registry_project_entries(registry_dir)]:
-        key = entry.slug.casefold()
-        entries.setdefault(key, entry)
-    return sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.slug.casefold()))
-
-
-def partial_provision_record(slug: str) -> Path | None:
-    """Root's own record of a project whose provisioning did not finish.
-
-    The one place a partial installation can be recognised from. The tenant's
-    own directory cannot answer this -- it is writable by the account every
-    role runs as, and a project that never reached registration has no registry
-    entry to check either (SYRD-147).
-    """
-    baseline = privileged_baseline_plan_path(slug)
-    try:
-        info = os.stat(baseline, follow_symlinks=False)
-    except OSError:
-        return None
-    return baseline if stat.S_ISREG(info.st_mode) else None
-
-
-def _resume_provision_hint(slug: str) -> str:
-    """What to say about a project that is not registered but was started."""
-    if partial_provision_record(slug) is None:
-        return ""
-    return (
-        f"switchyard: {slug!r} is not registered, but root holds a provisioning record for it: "
-        f"its `switchyard new` stopped before registration. Resume it with "
-        f"`sudo switchyard resume-provision {slug}`."
-    )
-
-
 # ---------------------------------------------------------------------------
 # Finishing a provision whose privileged packet has already run (SYRD-155).
 #
@@ -2861,52 +2769,6 @@ def switchyard_validate_models_command(
     )
     report_first_run_auth_warnings(report, print_func=print_func)
     return 1 if report.model_validation_failures else 0
-
-
-def _resolve_switchyard_project(
-    selection: str,
-    *,
-    config_dir: Path | None = None,
-    registry_dir: Path | None = None,
-) -> SwitchyardProjectEntry:
-    wanted = selection.strip().casefold()
-    if not wanted:
-        raise SystemExit("switchyard: project name cannot be empty")
-    entries = _switchyard_entries(config_dir=config_dir, registry_dir=registry_dir)
-    exact = [
-        entry
-        for entry in entries
-        if entry.name.casefold() == wanted or entry.slug.casefold() == wanted
-    ]
-    if len(exact) == 1:
-        return exact[0]
-    if len(exact) > 1:
-        raise SystemExit(f"switchyard: project selector {selection!r} is ambiguous")
-    fallback = [entry for entry in entries if wanted in _project_name_selector_slugs(entry.name)]
-    if len(fallback) == 1:
-        return fallback[0]
-    words = selection.split()
-    if len(words) > 1:
-        first = words[0].casefold()
-        first_matches = [
-            entry
-            for entry in entries
-            if entry.slug.casefold() == first or entry.name.casefold() == first
-        ]
-        if len(first_matches) == 1:
-            raise SystemExit(
-                f"switchyard: {words[0]!r} is a project; did you mean `switchyard {first_matches[0].slug}`? "
-                "A bare project name starts or attaches it."
-            )
-    # A project that never reached registration is unknown to every ordinary
-    # command, and the installation is still there: the account, its
-    # repository, its journal and its exported release. Saying only "unknown"
-    # sent a live recovery looking for a workaround, so the one supported way
-    # back is named here, where the failure is (SYRD-147).
-    hint = _resume_provision_hint(selection.strip())
-    if hint:
-        raise SystemExit(hint)
-    raise SystemExit(f"switchyard: unknown project {selection!r}")
 
 
 def role_isolation_gaps(config: ProjectConfig) -> list[str]:

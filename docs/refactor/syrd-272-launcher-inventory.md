@@ -22885,3 +22885,68 @@ presentation session, GUI window, account, service or release was changed.
 
 The controller remains above the 1,250-line soft limit. SYRD-272 remains open
 for its remaining slices and final cross-file comparison.
+
+### SYRD-496 (presentation_controller slice 4): desktop window launch
+
+The Director approved the exact window boundary before the ticket worktree
+was edited, from audited public main
+`decb0108a52b7acc13f990129c6e0b0399eadad7`.
+`presentation_window_launch.py` owns five existing functions:
+`display_attach_args`, `display_attach_args_for`,
+`presentation_layout_payload`, `_hand_off_desktop_half`, and
+`_launch_separate`, plus `VIEWER_ATTACH_TARGET`. The controller imports and
+reexports all six exact objects, with no wrapper or reverse import. The
+desktop bridge still dynamically reads the controller's attach, viewer-target
+and layout aliases; role recovery still reads its attach alias. Both direct
+and package controller import forms resolve those same owner objects.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `presentation_controller.py` | 1,819 lines, 49 functions | 1,576 lines, 44 functions |
+| `presentation_window_launch.py` | absent | 268 lines, 5 functions |
+| Total of these two files | 1,819 lines | 1,844 lines |
+
+The owner takes config/project, slot or viewer target, desktop user, slot
+count, optional output path, injected runner/process launcher and an optional
+handoff FD supplied in the environment. It returns attach argv or a layout
+payload, writes handoff facts to that FD, or preflights, writes and launches a
+separate window with the same failure text and order. Its mutable effects are
+the supplied FD, desktop layout file and terminal launch through existing
+`team_launcher` functions; it has no module-global mutable state. The
+controller still chooses layout, keeps the state transaction and owner-routed
+tmux runner, builds the tmux viewer, reconciles observer geometry, proves a
+window attached and dispatches CLI actions. Installed releases archive the
+whole `scripts` tree.
+
+For a representative SYRD-90/233 handoff or window-preflight ticket,
+`_launch_separate` (102 lines), `_hand_off_desktop_half` (38),
+`presentation_layout_payload` (49) and `display_attach_args_for` (27) were
+216 relevant method lines at controller lines 1157-1378 in an 1,819-line
+coordinator. They now sit in the 268-line window owner; launch and action
+remain callers in the 1,576-line controller. Leaving them together kept
+desktop permission, payload and failure policy amid state and tmux code.
+The competing `_launch_viewer` closure is nine functions and 232 method
+lines, but includes pane/client enumeration also used by report and
+visibility; moving only viewer creation would split its observer-sizing
+policy. The chosen window closure needs no callbacks. Its new module header
+and imports account for the combined 25-line increase. The controller is
+still above the 1,250-line soft limit; no exception is claimed.
+
+**Verification.** Under a guard refusing spawns, signals, socket connections
+and host-path opens, baseline and candidate each passed three current desktop
+layout-path cases (ordinary output location, bootstrap/ordinary parity and
+owner/caller payload parity), two title/handoff cases (FD facts and hidden
+slot titles), and the narrow display-bridge attach case (direct exact target
+and privileged helper). The focused five-case owner test checks slot/viewer
+argv, separate/viewer payloads, good and bad handoff descriptors, preflight
+before write, layout-write and window-launch failures, and all six aliases.
+All five moved and 44 retained function ASTs are unchanged. The guarded
+offline `team-launcher present --help` digest is byte-identical to baseline
+(SHA-256
+`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
+Ordinary launch tests ran with this role pane's inherited handoff FD unset.
+All window and bridge effects were synthetic; no live tenant, tmux, desktop,
+GUI window, service or release was changed.
+
+The controller remains above the 1,250-line soft limit. SYRD-272 remains open
+for its remaining slices and final cross-file comparison.

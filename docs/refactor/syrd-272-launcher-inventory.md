@@ -23067,3 +23067,58 @@ The guarded offline `team-launcher present --help` digest matches baseline
 (`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
 All session/client evidence was synthetic; no live tmux, desktop, tenant,
 GUI window, service or release was changed.
+
+### SYRD-499 (ticket_board/app.py slice 1): ticket read query
+
+The Director approved the query boundary before the ticket worktree was
+edited, from audited public main
+`818d23867957ac5d52de812f2c12f981415f9c42`. The complete
+`_pg_select_ticket_rows` body moved to
+`ticket_board/ticket_read_query.py` as
+`select_ticket_rows(conn, ticket_id=None)`, dropping only its unused `self`
+argument and private method name. Its SQL string and body AST are unchanged.
+`TicketBoardApp._pg_list_tickets` and `_pg_get_ticket` call it directly; no
+forwarding method, callback, reverse import or second mutable authority was
+added. Public app imports and API, CLI and service entry points remain in
+`app.py`; installed releases archive the whole `scripts` tree.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/app.py` | 2,417 lines, 100 app methods | 2,186 lines, 99 app methods |
+| `ticket_board/ticket_read_query.py` | absent | 243 lines, 1 function |
+| Total of these two files | 2,417 lines | 2,429 lines |
+
+The app owns connection creation/reuse, project and prefix scoping, caller
+role, write transactions, row validation and workflow/publication expansion.
+The query receives that connection and an optional ticket ID, reads workflow
+configuration and ticket rows in the same transaction, and returns dictionaries.
+It has no mutable state, opens no connection and performs no write. The query
+keeps configured and legacy stage scope, safe literal quoting of configured
+stage names, current-work ranking, delivery evidence and ticket attachments
+within one SQL statement.
+
+For a representative SYRD-72/264 current-work or delivery-evidence issue, the
+232-line query was at app lines 1175-1406, between connection setup and row
+conversion. It is now at owner lines 12-243. The list and detail adapters are
+adjacent at app lines 1177-1219; `_pg_update_ticket` begins at line 1462,
+about 231 lines earlier than before. Leaving the query in app would keep
+this whole read projection between those adapters and the write path.
+Extracting CTE fragments would split one SQL statement. Moving the broader
+read model would pull validation, attachments and publication lookups across
+the transaction boundary. The 12-line combined increase is the new module
+header and import. `app.py` remains above the 1,250-line soft limit;
+SYRD-272 remains open for later slices and final comparison.
+
+**Verification.** A guarded read-only fake connection exercises configured
+and legacy workflow modes through `TicketBoardApp.list_tickets` and
+`get_ticket`, including apostrophe quoting, selected and missing IDs, caller
+connection reuse and zero writes. The baseline and candidate SQL, parameters,
+list/detail JSON and missing-ticket text are byte-identical (SHA-256
+`d449116d58c28b9118749b786ce232e2285fa2898f3c855207a2e22bc0338c98`).
+The focused three-case boundary test checks the two baseline SQL hashes,
+query parameterization and transaction identity. The moved function body AST
+matches after dropping `self`; 97 retained methods are unchanged and only
+the two query call sites differ. Guarded service/CLI import and `--help`
+output match baseline (SHA-256
+`50dd6acff1ba200bc3051c34570ee3bc1cf7bb160754df4b75e58328cb3b2f80`).
+No live board or database write was made.

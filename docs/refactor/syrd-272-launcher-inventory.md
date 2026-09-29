@@ -21656,3 +21656,186 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 1,649 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-474 (project_provision slice 12): the operator packet renderer
+
+Measured on `cad2981`. Before any edit, `render_operator_commands` -- which
+renders the one root-run packet for a plan -- was inspected at this baseline as
+a responsibility of its own. Its only callers are `write_artifacts` and `main`;
+no production module imports it and no test patches it. It composes the packet
+from every earlier slice's commands and the shared plan-path helpers, which it
+reads through `project_provision`. Five small helpers beside it were used by it
+and nothing else. The Director approved the exact seven-name extraction, the
+three test adaptations below, and leaving `project_provision`'s `os` import
+unchanged.
+
+**The slice:** seven names into a new
+`scripts/ticket_board/provision_operator_packet.py`:
+- **The renderer:** `render_operator_commands`.
+- **A file beside the packet, addressed from it** (SYRD-149):
+  `PACKET_PROVISION_DIR` and `packet_companion`.
+- **Commands only the packet writes:** `postgres_sql_file_command`,
+  `service_user_command`, `peer_auth_command` and `owned_directory_command`.
+- **Kept on `project_provision`:** the shared helpers other modules read (the
+  repository group, the plan paths, `WRITABLE_REPOSITORY_COPY_MODE`,
+  `TENANT_CONTROL_ROOT`, `DEFAULT_PG_IDENT_MAP`, `_dedupe`, the quoting and
+  the SQL primitives), the packet's writers, and its own `os` import (no
+  longer used there; left as the Director decided).
+
+| file | before (`cad2981`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 1,649 | 1,242 |
+| `scripts/ticket_board/provision_operator_packet.py` | - | 481 |
+| `tests/provision_operator_packet_boundary_test.py` | - | 668 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+| `tests/provision_github_identity_boundary_test.py` | 656 | 663 |
+| `tests/tenant_deploy_identity_test.py` | 531 | 533 |
+
+`project_provision.py` is now under the 1,250-line soft limit.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all seven at the end of both
+  branches of `project_provision`'s import block, after the root-trust import.
+- **Call-time reads:** 95 reads of 33 names in 6 functions --
+  the siblings, the shared helpers, the boundary markers and every earlier
+  slice's commands -- read as `provision.X` behind the same call-time import
+  and direct-script fallback as the earlier slices, so a patch of any of them
+  on `project_provision` still reaches the packet.
+- **Definition time:** nothing is bound from `project_provision`; the defaults
+  are literals. Its imports are `os` and `Sequence`, and importing it alone
+  loads only its package.
+- **Callers inside `project_provision`:** `write_artifacts` and `main` (its
+  `--render commands`) render the packet by the re-exported name, as often as
+  before; a patch of the renderer on `project_provision` is what both use.
+- **Readers:** no production module imports the seven from `project_provision`.
+- **Mover:** no new rule was needed. Every kept node keeps the blank lines it
+  had before it on the baseline, and the only lines added to
+  `project_provision` are the two re-export statements.
+
+**The approved test adaptations** (the comparison below measured them before
+the edit):
+1. `PROVISION_MODULES` in `tests/new_project_artifacts_boundary_test.py`
+   gains the new module in its sorted place.
+2. The SYRD-463 boundary test accepts its caller, `render_operator_commands`,
+   re-exported on `project_provision`, and counts its callers in
+   `project_provision` and the later re-exported modules, with `provision.X`
+   counting as the name -- the SYRD-470 pattern. `DISPATCH` is unchanged.
+3. `tenant_deploy_identity_test` looks for the deploy line in
+   `inspect.getsource(project_provision.render_operator_commands)` instead of
+   `project_provision.py`'s text. That case is excluded from every comparison
+   (it calls `tenant_release_deploy_command`), so its condition was evaluated
+   directly on both trees, with a negative control.
+
+**Proof.** The independent proof (`equiv474.py`, 18 clauses) holds. It
+checks:
+- every whole node, after dropping the one call-time import and reading
+  `provision.X` as X;
+- the one constant, the literal defaults, and no Switchyard import at load;
+- that the shared helpers, the packet's writers and the `os` import stay;
+- the companion, psql, service-user, peer-auth, owned-directory and packet
+  rules, in order;
+- `project_provision` as AST and as text;
+- the tests: only the new one and the three approved adaptations, each exactly.
+
+It catches 25 of 25 planted faults, among them:
+- the companion refusal dropped;
+- psql no longer stopping on error;
+- the linger default changed;
+- `project_provision`'s own `os` import removed;
+- each test adapted beyond its approval.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_operator_packet_boundary_test.py`,
+  171 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 45 cases produced by the BASELINE module's own
+    definitions (`gold474.py`):
+    - the packet for twelve synthetic plans (default, shaped, lean, no
+      traversal, control user, named key, project repository, two commit
+      stores outside the home, three stores two of them under it, pgu, roles,
+      roles with worktrees and control) and without linger, each by length,
+      lines, digest and how many of its lines each helper wrote;
+    - every helper directly, both refusals included;
+    - the packet with thirteen names rebound on `project_provision` (each
+      changes it).
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER, COLUMNS and TMPDIR and a leaked board Python, shared
+    Python and tenant-control root, under umask 077 and under three hash seeds.
+  - It checks:
+    - that `write_artifacts` and `main --render commands` use the renderer
+      `project_provision` holds when they run;
+    - that the direct script answers what the package answers (fourteen
+      answers, seven rebinds on every copy), with no host path looked at;
+    - that the default, shaped, lean and roles packets are byte-identical
+      through both.
+    Its caller count spans the re-exported modules.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (126 checks).
+- **Fixes before relying on a result:**
+  - One mutant first survived: granting only the first commit store. Both
+    stores in the two-store plan sat outside the owner's home, where the packet
+    grants nothing, so no case could see it. A plan with two stores under the
+    home and one outside now pins it.
+  - The writers check first compared the whole of `main`'s output; `main` also
+    prints the output directory, now checked on its own line.
+- **Mutations:** 37 of 37 are killed by assertions, with zero guard
+  refusals. The behaviour tests alone kill 33. The structure checks kill the
+  rest (the direct-script fallback dropped, project_provision imported at load, re-export aliased, re-export dropped from the script branch), none of which changes an answer the cases
+  observe.
+- **The packet and every helper on the exact trees** (`probe474.py`):
+  38 cases -- eleven plans, both refusals and seven rebinds on every
+  copy of `project_provision` -- give one digest on baseline and candidate, in
+  the package and as the direct script, every per-case digest identical, with
+  0 host paths looked at (positive control caught).
+- **The test adaptations on the exact trees:** the deploy-line condition finds
+  its line on the baseline and the candidate and none when the line is altered;
+  the SYRD-463 test fails when the renderer names its identity command once
+  more than before.
+- **Provisioning smoke on the exact trees** (`smoke474.sh`, board Python
+  pinned): the default, shaped, lean, named-key, control and roles packets.
+  Every artifact and stdout is byte-identical between baseline and candidate,
+  and between modes.
+- **Comparison, both trees, guarded:** all 243 files accounted for.
+  - 138 suites whole, 119 passing on the candidate.
+    The new test runs only there. Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 852 cases, per case, identical: 537 pass, 310 stop at the
+    same guard refusal, and 5 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`; `tenant_control_helper_repair_test::test_the_repair_touches_no_other_tenant`).
+    These are baseline defects already reported.
+  - Excluded 377: 65 drive an upgrade, `switchyard_main` or a deploy, 307
+    execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare, uses __file__); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare, uses __file__); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare, uses __file__); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare, uses __file__); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare, uses __file__); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare, uses __file__); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 28 of 656 passing runs execute one of the
+    six functions, in 18 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched. Nothing I wrote read
+  or wrote a real home, account, /etc, /var or /opt path. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The operator packet is now a 481-line module, instead of a
+slice of the 1,649-line `project_provision.py`. The twelve
+`project_provision` slices so far, 4,598 lines between them, are:
+- `provision_github_identity.py` (499 lines);
+- `provision_path_confinement.py` (555);
+- `provision_workflow_projection.py` (447);
+- `provision_workflow_sql.py` (492);
+- `provision_role_tooling.py` (548);
+- `provision_publication_grants.py` (198);
+- `provision_tenant_control.py` (261);
+- `provision_role_accounts.py` (461);
+- `provision_board_service.py` (343);
+- `provision_repository_boundary.py` (166);
+- `provision_root_trust.py` (147);
+- `provision_operator_packet.py` (481).
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups474.py`):
+
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+- repository group and plan-path helpers (left from the confinement group) (4 definitions, 53 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, artifact writing and the CLI stay as `project_provision`'s
+compatibility surface. `project_provision.py` is 1,242 lines after this
+slice, under the soft limit; SYRD-272 is not complete.

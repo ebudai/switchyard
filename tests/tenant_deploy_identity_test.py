@@ -297,13 +297,15 @@ def test_a_tenant_writable_unit_is_never_handed_to_root() -> None:
 
 def test_provisioning_and_upgrade_agree_on_who_runs_the_deploy() -> None:
     """Fresh provisioning was already right; the upgrade had drifted from it."""
+    import inspect
+
     from scripts.ticket_board import project_provision
 
     rendered = tl.tenant_release_deploy_command(status(), "porter")
     assert "ticket-board-service.sh" in rendered
     # Provisioning names the owner on the deploy line, unconditionally, and has
     # since it was written. That is the semantics the upgrade now matches.
-    source = (ROOT / "scripts" / "ticket_board" / "project_provision.py").read_text(encoding="utf-8")
+    source = inspect.getsource(project_provision.render_operator_commands)
     deploy_line = [
         line for line in source.splitlines()
         if "q_deploy_script" in line and "sudo -u" in line

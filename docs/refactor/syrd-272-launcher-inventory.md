@@ -22541,3 +22541,71 @@ database. No tenant runtime, service, provider, pane, board queue, account or
 release was changed.
 
 SYRD-272 remains open.
+
+### SYRD-491 (notify_listener slice 8): outbound notification dispatch
+
+The Director approved this boundary before the ticket worktree was edited,
+from public main `4fa6d0f4dc7b5527904c9b5969011dc4f64855a7`.
+`NotificationDispatch` now owns the post-gate send, sender failure
+classification, composer diagnostics, bounded hook receipt check, and the
+resulting ledger disposition. The listener still claims and checks currency,
+probes the target, applies both pane gates and prior-turn hold rules, rechecks
+supersession, clears ephemeral sessions, and checks stop before dispatch.
+`dispatch.send` returns true only after the witnessed send has been traced,
+acked and forgotten; the listener then increments its delivered count.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `notify_listener.py` | 1,818 lines | 1,455 lines |
+| `TicketBoardNotifyListener` | 1,173 lines, 42 methods | 961 lines, 39 methods |
+| `process_due_notifications` | 481 lines | 340 lines |
+| `notification_dispatch.py` | absent | 436 lines, 261-line class |
+
+The new module also holds `ComposerSnapshot`, `DirectorctlSender`, the
+message-display and directorctl diagnostic helpers, delivery error and failure
+classification, the tmux target probe, and their outbound constants. The
+listener reexports every existing public name, so its callers and the
+installed `scripts/ticket-board-notify-listener` entry point keep their
+imports. The seven moved top-level definitions have identical ASTs to the
+baseline. Of the six pane-activity integration methods examined in SYRD-488,
+only `_composer_snapshot` moves: it captures the composer before and after
+send for delivery diagnostics. The five activity and stale-reminder decisions
+remain with the gate and hold logic. `ActivityTrace` and its work-evidence
+rules remain listener-owned; the dispatch module imports no listener type or
+rule.
+
+The dispatch constructor receives the existing logger and
+`NotificationLedger`, call-time providers for sender, activity gate,
+submission witness and confirm/poll timing, and the already injectable wall
+and monotonic clocks and sleeper. These providers preserve rebinding after
+listener construction. Dispatch owns no mutable in-memory state; the
+listener retains the prior-turn hold map and delivered count. The same
+autocommit connection and ledger are passed to send. No transaction or claim
+is added. The send-start clock precedes the sender call; the composer is
+sampled after either sender outcome; the hook witness is consulted only after
+a successful sender return. Failure traces then requeue or dead-letter,
+unconfirmed sends trace then ack and forget without an automatic resend, and
+witnessed sends trace `send`, trace `listener_ack`, ack and forget before the
+caller increments its count. The ledger call and event sequence is unchanged.
+
+**Verification.** On the exact baseline and worktree, a guarded comparison
+passes 13 session-clear cases, 21 delivery cases, 13 receipt-witness cases
+and the 56-case eligibility golden. A new focused
+`notification_dispatch_boundary_test.py` checks four direct outcomes and
+call-time rebound providers. Separate guarded stop and rebind probes give
+identical results and trace/disposition order on both trees. The guard
+refuses spawns, signals, socket connections and host-path opens; all board,
+pane and sender inputs are synthetic. Static proof finds seven moved public
+definitions AST-identical, the three moved methods identical after only the
+provider renames, 36 retained listener methods unchanged, unchanged
+send ledger call/event order and unchanged pass SQL literals. The installed
+wrapper's `--help` digest is identical
+(`965c2ece18b91418da2d1ee9e8c5c98e41c2ece9a67a70081a01f54e2aad45d3`),
+and the offline authority check gives the same outcomes for synthetic populated
+and empty hook-state directories. No live tenant runtime, service, provider,
+pane, board queue, database, account or release was changed. The unrelated
+SYRD-482 early-return behavior is unchanged.
+
+The remaining 1,455-line file is still above the 1,250-line soft limit. This
+slice accepts no exception; a later decision must address its cohesive
+gate/hold state machine. SYRD-272 remains open.

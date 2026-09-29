@@ -22609,3 +22609,76 @@ SYRD-482 early-return behavior is unchanged.
 The remaining 1,455-line file is still above the 1,250-line soft limit. This
 slice accepts no exception; a later decision must address its cohesive
 gate/hold state machine. SYRD-272 remains open.
+
+### SYRD-492 (notify_listener slice 9): activity gate and finished-turn hold
+
+The Director approved this boundary before the ticket worktree was edited,
+from audited public main `749a2a728557c6bfafc3977b6fb8f80b5346f914`.
+`NotificationActivityHold` owns the seven remaining activity and hold methods:
+`_activity_trace`, `_activity_state_for_notification`,
+`_should_defer_for_activity`, `_reminder_is_stale_for_activity`,
+`_drop_stale_reminder`, `_release_prior_turn_hold`, and
+`_owner_already_notified_at`. It also owns `ActivityTrace`, the self-reminder
+and finished-turn hold rules, the hold threshold and clock, and the sole
+`_prior_turn_hold_started_at` map keyed by notification ID. The original
+rule and incident comments moved with their definitions. The listener
+reexports the existing public type and rules. `WORK_EVIDENCE_REASONS` remains
+on the listener because pane-activity and idle-nudge readers observe a rebound
+value there; the owner receives its current value through a provider. A second
+provider resolves the live activity gate after listener construction. The owner
+imports no listener and the listener gains no facade methods.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `notify_listener.py` | 1,455 lines | 1,202 lines |
+| `TicketBoardNotifyListener` | 961 lines | 754 lines |
+| `process_due_notifications` | 340 lines | 340 lines |
+| `notification_activity_hold.py` | absent | 308 lines, 239-line class |
+| Total of these two files | 1,455 lines | 1,510 lines |
+
+The larger combined line count comes from explicit imports and construction,
+with the moved explanatory comments retained. The useful boundary is that the
+listener falls below the 1,250-line soft limit and no longer owns gate/hold
+policy or its mutable timer. Its 340-line pass still coordinates claim, target
+and currency checks, first activity gate, finished-turn release, stop and
+second gate, supersession rechecks, session clear, and dispatch in the same
+order. The same autocommit connection and ledger flow through the owner. A
+stale self-reminder is traced and discarded without ack; a held handoff is
+requeued until its bound, then either discarded if the owner already received
+it or traced for release. SQL text and parameters, one-time deferral tracing,
+and send/ack accounting remain as before. The unrelated SYRD-482 behavior is
+unchanged.
+
+The audited original at `80bf7bf` was a 4,057-line file with a 2,106-line
+listener class and 710-line pane gate class. For a representative SYRD-212
+finished-turn handoff, following the delivery pass through the seven policy
+methods meant 487 + 201 = 688 method lines in that one file, with the policy
+split between lines 2,004-2,121 and 2,358-2,457 and the pass at
+3,365-3,851. Immediately before this slice the same route was 340 + 201 =
+541 method lines in the 1,455-line listener, with the pane gate already in
+`pane_activity_gate.py`. Now the 340-line pass is in the 1,211-line listener
+and the 201 policy method lines are in the 308-line owner: one extra file
+jump, but the state and rules have one owner. Moving only top-level role
+account helpers (85 method lines) or transition helpers/types (about 80)
+would leave the listener near 1,370 lines and the gate/hold timer in it. A
+1,455-line exception would avoid the extra jump but leave that coherent
+mutable boundary inside the oversized coordinator.
+
+**Verification.** Under a guard that refused process spawning, signals,
+socket connections, and host-path opens, the audited baseline and exact
+worktree produced identical outcomes and ordered SQL operation fingerprints
+for eleven synthetic queue cases: idle send, busy requeue, unknown activity,
+inconclusive target probe, pre-send busy recheck, stale self-reminder discard,
+current self-reminder requeue, stale transition ack, terminal transition send,
+stop after the first gate, and repeated busy deferral (one trace, two
+requeues). Six existing SYRD-212 finished-turn cases passed on both trees,
+including bound expiry, current-turn work remaining unbounded, and an
+already-answered handoff being discarded. The focused boundary test verifies
+late-bound gate and work-evidence providers, per-notification timer ownership,
+current-turn reset, public aliases, and the absence of listener backreferences
+or facade methods. The installed import form and offline entry checks use
+synthetic state only. No live tenant service, provider, pane, account,
+database, board queue, or release was changed.
+
+This closes the `notify_listener.py` assessment. SYRD-272 remains open for
+other oversized files and the final cross-file comparison.

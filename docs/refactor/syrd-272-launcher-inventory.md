@@ -20588,3 +20588,153 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 2,747 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-468 (project_provision slice 6): the publication grants
+
+Measured on `cc942b3`. Before any edit, the "sudoers, tenant control and
+publication grants" group from the SYRD-463 inventory was inspected at this
+baseline. It holds three responsibilities, not one: the publication grants,
+the tenant control grant and sudoers, and the role-control sudoers. The
+publication grants were moved in a scratch archive and proposed first, because
+they are closed: their only definition-time dependencies are their own
+constants. The Director approved exactly that, with the one `PROVISION_MODULES`
+line.
+
+**The slice:** twelve names into a new
+`scripts/ticket_board/provision_publication_grants.py`:
+- **The sudoers rule for the two root-owned publication programs:**
+  `publish_sudoers_path` and `publish_sudoers_document`.
+- **Where root keeps the grant, key, pinned hosts and staging:**
+  `publish_grant_root` and `publish_staging_root` (each with its environment
+  override), `DEFAULT_PUBLISH_GRANT_ROOT`, `DEFAULT_PUBLISH_STAGING_ROOT`,
+  `PUBLISH_GRANT_ROOT`, `PUBLISH_STAGING_ROOT` and `PUBLISH_GRANT_SCHEMA`.
+- **The credential:** `publish_grant_path`, `publish_identity_path` and
+  `publish_grant_commands`.
+- **Kept on `project_provision`:** `TENANT_CONTROL_ROOT`, `shell_quote`, the
+  tenant control grant and sudoers, and the role-control sudoers. The moved
+  code reads the first two through `project_provision` when it runs.
+- **The one approved guard adaptation:** `PROVISION_MODULES` in
+  `tests/new_project_artifacts_boundary_test.py` gains the new module in its
+  sorted place, one line.
+
+| file | before (`cc942b3`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 2,747 | 2,631 |
+| `scripts/ticket_board/provision_publication_grants.py` | - | 198 |
+| `tests/provision_publication_grants_boundary_test.py` | - | 601 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all twelve at the end of both
+  branches of `project_provision`'s import block, after the role tooling
+  import.
+- **Call-time reads:** all 23 reads of 10 names in 6 functions are
+  `provision.X`, behind the same call-time import and direct-script fallback as
+  the earlier slices. They cover the siblings, the constants, `shell_quote` and
+  `TENANT_CONTROL_ROOT`. Tests patch two of the names on `project_provision`
+  (`publish_sudoers_document`, `publish_sudoers_path`), and
+  `tenant_publication_boundary` imports both from there when it runs, so those
+  patches still reach it.
+- **Definition time:** `PUBLISH_GRANT_ROOT` and `PUBLISH_STAGING_ROOT` are bound
+  to the defaults when the module loads, and are the very same objects.
+  `publish_grant_commands` reads the bound `PUBLISH_GRANT_ROOT` for its
+  directory and known hosts, while the key and grant paths follow
+  `publish_grant_root()` when it runs, as on the baseline. The module's own
+  import is `Path`, and importing it alone loads only its package.
+  `publish_sudoers_path`, `publish_grant_root` and `publish_staging_root` keep
+  their own `import os as _os`.
+- **Callers inside `project_provision`:** none.
+- **Readers:** 4 production modules import names from the slice
+  through `project_provision` (`scripts/publication_status.py`: `publish_identity_path`; `scripts/switchyard-install-authority`: `publish_sudoers_document`, `publish_sudoers_path`; `scripts/tenant_publication_boundary.py`: `publish_sudoers_document`, `publish_sudoers_path`; `scripts/ticket_board/publication_boundary.py`: `PUBLISH_GRANT_SCHEMA`, `publish_grant_path`, `publish_grant_root`, `publish_identity_path`, `publish_staging_root`), and are byte-identical.
+
+**Proof.** The independent proof (`equiv468.py`, 15 clauses) holds. It
+checks:
+- every whole node, after dropping the one call-time import and reading
+  `provision.X` as X;
+- the constants and the one default;
+- the override, path and grant-command rules, in order;
+- `project_provision` as AST and as text;
+- the tests: only the new one and the `PROVISION_MODULES` line changed.
+
+It catches 20 of 20 planted faults, among them the grant root no
+longer bound to the default, `TENANT_CONTROL_ROOT` defined in the module, the
+quoting read bare, and `tenant_publication_boundary` edited.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_publication_grants_boundary_test.py`,
+  136 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 32 cases produced by the BASELINE module's own
+    definitions (`gold468.py`). They cover every path and root with the three
+    environment overrides unset, set and blank; given roots; the sudoers
+    document; and the grant commands for plans built by `build_plan` for a
+    synthetic owner. They also rebind, on `project_provision`, the control
+    root, the defaults, the bound roots and schema, the grant root and paths,
+    and the quoting.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds,
+    and with another TMPDIR, locale and overrides in the environment.
+  - It checks the bound defaults' identity, that a patch on `project_provision`
+    reaches `tenant_publication_boundary`, and that the direct script answers
+    what the package answers. It also checks that the default, shaped and lean
+    packets are byte-identical through both.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (88 checks).
+- **Mutations:** 31 of 31 are killed by assertions, with zero guard
+  refusals. The behaviour tests alone kill 26. The structure checks kill the
+  rest (the grant root no longer the default bound at definition, the direct-script fallback dropped, project_provision imported at load, re-export aliased, re-export dropped from the script branch); those change no answer, only an object's identity,
+  an import form or a re-export.
+- **Every function on the exact trees** (`probe468.py`): 23 cases give
+  one digest on baseline and candidate, in the package and as the direct
+  script. They cover every path and root, with each override set, unset and
+  blank, plus the sudoers document, the grant commands and the constants.
+- **Provisioning smoke on the exact trees** (`smoke468.sh`): the default,
+  shaped, lean and named-key packets, through the direct script and the
+  wrapper. Every artifact, the operator commands included, and stdout are
+  byte-identical between baseline and candidate, and between modes.
+- **Comparison, both trees, guarded:** all 219 files accounted for.
+  - 133 suites whole, 113 passing on the candidate.
+    The new test runs only there; the adapted guard passes on the candidate,
+    and its original on the baseline. Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `publication_handoff_end_to_end_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 700 cases, per case, identical: 478 pass, 218 stop at the
+    same guard refusal, and 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`).
+    These are baseline defects already reported.
+  - Excluded 260: 22 drive an upgrade, 233
+    execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 5 of 591 passing runs execute one of the
+    seven functions, in 4 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and no real home, /etc
+  or /var path was read or written. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The publication grants a reader opens are now a 198-line
+module, instead of a slice of the 2,747-line `project_provision.py`. The
+six `project_provision` slices so far, 2,739 lines between them, are:
+- `provision_github_identity.py` (499 lines);
+- `provision_path_confinement.py` (555);
+- `provision_workflow_projection.py` (447);
+- `provision_workflow_sql.py` (492);
+- `provision_role_tooling.py` (548);
+- `provision_publication_grants.py` (198).
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups468.py`):
+
+- role accounts and role runtime commands (10 definitions, 272 lines)
+- systemd units, tmpfiles, polkit and database SQL (11 definitions, 260 lines)
+- tenant control grant and sudoers (left from the sudoers group) (12 definitions, 171 lines)
+- repository group, boundary statements and plan paths (left from the confinement group) (9 definitions, 142 lines)
+- root-executable trust (2 definitions, 113 lines)
+- role-control sudoers (left from the sudoers group) (3 definitions, 80 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The tenant control grant's `TENANT_CONTROL_LAUNCHER` is built at definition
+time from `SHARED_RELEASE_CURRENT`, which stays; its slice needs that decided.
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+2,631 lines after this slice; SYRD-272 is not complete.

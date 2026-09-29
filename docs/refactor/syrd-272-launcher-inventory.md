@@ -20919,3 +20919,200 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 2,465 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-470 (project_provision slice 8): the role accounts and the role-control sudoers
+
+Measured on `41aa825`. Before any edit, the role accounts with their runtime
+commands and the role-control sudoers were inspected at this baseline. They
+are one role-identity and role-control responsibility:
+- adding a role (`role_account_commands`) renders and installs the control
+  rule itself;
+- the control rule is computed from the role-account set;
+- `role_account_migration` imports both halves side by side.
+
+The three options were each moved in a scratch archive: both together, the
+control rule alone (a 126-line module) and the role accounts alone (which
+would read their own control rule back through `project_provision`). The
+Director approved both together, with the one `PROVISION_MODULES` line and
+three adaptations of earlier boundary tests.
+
+**The slice:** sixteen names into a new
+`scripts/ticket_board/provision_role_accounts.py`:
+- **Who the role accounts are:** `NON_PROCESS_ROLES`, `role_account_name`,
+  `roles_group_name`, `role_account_table`, `role_accounts_env` and
+  `role_account_home`.
+- **The commands that create them and give each its runtime:**
+  `role_accounts_command`, `role_runtime_command`, `role_runtime_commands`,
+  `role_account_commands`, `ROLE_ACCOUNT_MIGRATION_SUFFIX` and
+  `role_account_migration_name`.
+- **The control rule and its install:** `render_role_control_sudoers`,
+  `role_control_sudoers`, `ROLE_CONTROL_SUDOERS_HEREDOC` and
+  `role_control_sudoers_install_commands`.
+- **Kept on `project_provision`:** `shell_quote`, `SHARED_RELEASE_CURRENT` and
+  the repository group. The role tooling staging, path confinement and tenant
+  control stay re-exported there, and the moved code reads all of these
+  through `project_provision` when it runs.
+
+| file | before (`41aa825`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 2,465 | 2,112 |
+| `scripts/ticket_board/provision_role_accounts.py` | - | 461 |
+| `tests/provision_role_accounts_boundary_test.py` | - | 706 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+| `tests/provision_path_confinement_boundary_test.py` | 795 | 802 |
+| `tests/provision_role_tooling_boundary_test.py` | 747 | 752 |
+| `tests/provision_tenant_control_boundary_test.py` | 725 | 730 |
+
+**The approved test adaptations.** The SYRD-464, SYRD-467 and SYRD-469
+boundary tests counted `project_provision`'s callers of their slices' names in
+`project_provision` alone. This slice moves some of those callers on:
+`role_account_commands` and `role_runtime_command`.
+- **The change:** each test now counts callers in `project_provision` and the
+  later re-exported `provision_*` modules, a `provision.X` read counting as
+  the name, against its unchanged expected table. This is the pattern the
+  Director approved for the SYRD-465 test in SYRD-466. The path confinement
+  test also keeps a name that is re-exported, unaliased.
+- **Both layouts pass:** each adapted test passes on the candidate and on the
+  unmoved baseline.
+- **The count is still exact:** each adapted test fails when a caller read is
+  deliberately altered, whether in the new module or in `project_provision`
+  (6 of 6).
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all sixteen at the end of
+  both branches of `project_provision`'s import block, after the tenant control
+  import.
+- **Call-time reads:** all 47 reads of 18 names in 9 functions
+  are `provision.X`, behind the same call-time import and direct-script
+  fallback as the earlier slices.
+- **Patch seams:** the names tests patch on `project_provision` are
+  `role_account_commands` and `roles_group_name`. `project_role_add` and
+  `recovery_readiness` import them from `project_provision` when they run, so
+  the patches still reach them.
+- **Definition time:** the module's own imports are `PurePosixPath` and
+  `Sequence`, and importing it alone loads only its package.
+- **Callers inside `project_provision`:** `render_board_unit`,
+  `render_listener_unit`, `render_operator_commands`, `write_artifacts` and
+  `main` name them as often as before, now the re-exported names.
+- **Readers:** 4 production modules import names from the slice
+  through `project_provision` (`scripts/project_role_add.py`: `role_account_commands`; `scripts/recovery_readiness.py`: `roles_group_name`; `scripts/role_account_migration.py`: `render_role_control_sudoers`, `role_control_sudoers_install_commands`, `role_runtime_commands`, `roles_group_name`; `scripts/team_launcher.py`: `NON_PROCESS_ROLES`, `role_account_migration_name`, `role_account_name`), and are byte-identical.
+  `team_launcher`'s two module-level imports reach the module's objects, and
+  its `role_account_name` stays its own wrapper.
+- **Layout:** every kept node keeps the blank lines it had before it on the
+  baseline.
+
+**Proof.** The independent proof (`equiv470.py`, 17 clauses) holds. It
+checks:
+- every whole node, after dropping the one call-time import and reading
+  `provision.X` as X;
+- the constants and the defaults;
+- what the moved code reads staying on `project_provision`;
+- the account, runtime, add-role and control-rule rules, in order;
+- `project_provision` as AST and as text;
+- the tests: the new one, the `PROVISION_MODULES` line and the three approved
+  adaptations, each exactly its baseline text plus the approved change, with
+  its expected table unchanged.
+
+It catches 21 of 21 planted faults, among them:
+- an adapted test's caller table changed;
+- an adapted test counting its own module;
+- `SHARED_RELEASE_CURRENT` defined in the module;
+- the director's reach to the owner dropped.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_role_accounts_boundary_test.py`,
+  185 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 44 cases produced by the BASELINE module's own
+    definitions (`gold470.py`). They cover the names, table, homes and role
+    map. They cover the account and runtime commands and the control rule for
+    plans with and without role accounts, a group and a director, and the
+    install commands. They cover adding a role with and without a control
+    repository and a recorded human. They also rebind, on
+    `project_provision`, the constants, the release, the siblings, the helpers
+    and the quoting.
+  - No account is looked up: each case stands in `pwd.getpwuid` and
+    `os.getuid`. The tenant-control grant that adding a role looks for lives
+    under a TENANT_CONTROL_ROOT the case creates.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds,
+    and with another TMPDIR, locale, SUDO_UID and staging override in the
+    environment.
+  - It checks:
+    - `team_launcher`'s imports;
+    - the two patch seams;
+    - that the direct script answers what the package answers;
+    - that the default, shaped, lean and roles packets are byte-identical
+      through both;
+    - that the roles packet's role-control sudoers and operator commands name
+      the role accounts.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (113 checks).
+- **Fixes before relying on a result:**
+  - The golden record first changed with a leaked
+    `SWITCHYARD_TENANT_CONTROL_ROOT`, the staging override. Each case now
+    clears it and restores it after.
+  - The direct-script probe hashed its own temporary control root, which the
+    staging directory is built from. That path is now read as `CONTROL`.
+  - One mutant first survived: the default board release `role_account_commands`
+    passes on. `role_runtime_commands` takes `board_current` but never uses
+    it, so no command text can show that default. This is baseline behaviour,
+    unchanged. The case that stands in for `role_runtime_commands` now records
+    the runtime arguments it is given.
+- **Mutations:** 35 of 35 are killed by assertions, with zero guard
+  refusals. The behaviour tests alone kill 31. The structure checks kill the
+  rest (the direct-script fallback dropped, project_provision imported at load, re-export aliased, re-export dropped from the script branch), none of which changes an answer the cases observe.
+- **Every function on the exact trees** (`probe470.py`): 28 cases give
+  one digest on baseline and candidate, in the package and as the direct
+  script. A recorder that refuses any `stat`, `lstat` or `open` under
+  /usr/local/lib/switchyard, /etc or /var, checked with a positive control,
+  logged 0 accesses in either mode.
+- **Provisioning smoke on the exact trees** (`smoke470.sh`): the default,
+  shaped, lean, named-key and control packets, and a roles packet with role
+  accounts and a group. Its role-control sudoers and operator commands name
+  the accounts. Every artifact and stdout is byte-identical between baseline
+  and candidate, and between modes.
+- **Comparison, both trees, guarded:** all 219 files accounted for.
+  - 134 suites whole, 115 passing on the candidate.
+    The new test runs only there; the adapted tests pass on the candidate, and
+    their originals on the baseline. Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 678 cases, per case, identical: 476 pass, 198 stop at the
+    same guard refusal, and 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`).
+    These are baseline defects already reported.
+  - Excluded 260: 22 drive an upgrade, 233
+    execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 43 of 591 passing runs execute one of the
+    thirteen functions, in 23 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched. No real home, account,
+  grant, /etc or /var path was read or written. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The role accounts and their control rule are now a
+461-line module, instead of a slice of the 2,465-line
+`project_provision.py`. The eight `project_provision` slices so far,
+3,461 lines between them, are:
+- `provision_github_identity.py` (499 lines);
+- `provision_path_confinement.py` (555);
+- `provision_workflow_projection.py` (447);
+- `provision_workflow_sql.py` (492);
+- `provision_role_tooling.py` (548);
+- `provision_publication_grants.py` (198);
+- `provision_tenant_control.py` (261);
+- `provision_role_accounts.py` (461).
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups470.py`):
+
+- systemd units, tmpfiles, polkit and database SQL (11 definitions, 260 lines)
+- repository group, boundary statements and plan paths (left from the confinement group) (9 definitions, 142 lines)
+- root-executable trust (2 definitions, 113 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+2,112 lines after this slice; SYRD-272 is not complete.

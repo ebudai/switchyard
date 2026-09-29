@@ -1588,6 +1588,13 @@ from scripts.env_composition import (
     _prepend_paths,
     _terminal_presentation_env,
 )
+from scripts.owner_files import (
+    _chown_project_file,
+    _path_owner_ids,
+    _path_owner_label,
+    chown_owner_file_args,
+    ensure_owner_file,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -1975,30 +1982,6 @@ def _env_truthy_any(*names: str) -> bool:
     return any(_env_truthy(name) for name in names)
 
 
-def _path_owner_label(path: Path) -> str:
-    try:
-        info = path.lstat()
-    except OSError as exc:
-        return f"unreadable ({exc})"
-    try:
-        user = pwd.getpwuid(info.st_uid).pw_name
-    except KeyError:
-        user = f"uid {info.st_uid}"
-    try:
-        group = grp.getgrgid(info.st_gid).gr_name
-    except KeyError:
-        group = f"gid {info.st_gid}"
-    return f"{user}:{group}"
-
-
-def _path_owner_ids(path: Path) -> tuple[int, int] | None:
-    try:
-        info = path.lstat()
-    except OSError:
-        return None
-    return info.st_uid, info.st_gid
-
-
 def _layout_leaves(node: Any) -> list[dict[str, Any]]:
     leaves: list[dict[str, Any]] = []
     if isinstance(node, dict):
@@ -2073,26 +2056,6 @@ def pane_window_program(script_path: Path) -> Path:
 
 def _owner_state_layout_output_path(project: str, *, owner_home: Path) -> Path:
     return owner_home / ".local" / "state" / "switchyard" / "projects" / project / f"{project}-team-layout.json"
-
-
-def chown_owner_file_args(config: ProjectConfig, path: Path) -> list[str]:
-    if not config.run_as_user:
-        raise ValueError("file ownership repair requires run_as_user")
-    return ["chown", f"{config.run_as_user}:{config.run_as_user}", str(path)]
-
-
-def ensure_owner_file(
-    config: ProjectConfig,
-    path: Path,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    if not config.run_as_user or current_user_name() == config.run_as_user or os.geteuid() != 0:
-        return
-    result = runner(chown_owner_file_args(config, path))
-    if result.returncode != 0:
-        reason = _proc_failure_reason(result, f"chown failed with exit {result.returncode}")
-        raise SystemExit(f"team-launcher: failed to assign generated file {path} to {config.run_as_user}: {reason}")
 
 
 def _is_generated_project_layout_template(config: ProjectConfig, *, config_path: Path) -> bool:
@@ -2415,17 +2378,6 @@ def _project_dir_from_generated_config_path(config_path: Path) -> Path | None:
     if resolved.parent.name != "provision" or resolved.parent.parent.name != SWITCHYARD_PROJECT_DIR_NAME:
         return None
     return resolved.parent.parent.parent
-
-
-def _chown_project_file(
-    *,
-    owner_user: str,
-    path: Path,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> None:
-    result = runner(["chown", f"{owner_user}:{owner_user}", str(path)])
-    if result.returncode != 0:
-        raise SystemExit(f"switchyard: failed to assign {path} to {owner_user}")
 
 
 def _owner_git_args(owner_user: str, project_dir: Path, *git_args: str) -> list[str]:

@@ -23635,3 +23635,76 @@ the pre-existing ones also pass on baseline. `ticket_board_write_api_test`
 remains baseline red at its final `env_widening` check (line 2191) on both
 trees and is not claimed as a success. No live service, socket, database or
 host repository was written.
+
+### SYRD-507 (ticket_board/frontend_script_core.py slice 1): attachment gallery
+
+The Director approved the gallery boundary before the ticket worktree was
+edited, from audited public main
+`a4d7f8881a60fb27b22a8a2d3ac8b10a5a5cdd6e`.
+`ticket_board/frontend_script_attachments.py` now holds the attachment
+gallery's JavaScript as `SCRIPT_ATTACHMENTS`. That is exactly the twelve
+contiguous functions that were `SCRIPT_CORE` lines 1047-1318:
+- `previewUrlFor` and `thumbnailUrlFor`;
+- `ticketScreenshotEntries`, `ticketScreenshotPaths`, `uniquePaths`,
+  `screenshotLabelFor` and `screenshotEntriesForPaths`;
+- `attachmentSetLabelSlug`, `parseAttachmentSet` and
+  `groupAttachmentEntries`;
+- `renderAttachmentGallery` and `renderAttachmentSetGroups`.
+They moved verbatim. `frontend_script_core` imports the text and splices it
+back at the original position with the idiom `SCRIPT_CORE` already used for
+`DEFAULT_STATE_LABELS_JSON`. The public `SCRIPT_CORE` value, the rendered
+page, declaration order and the single shared script scope are therefore
+byte-for-byte unchanged. The gallery still reads the shared `state` and
+calls `cropMetadataCaption`, which stays with the image lightbox in
+`SCRIPT_CORE`. There is no runtime JavaScript module, forwarding wrapper or
+second split.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/frontend_script_core.py` | 1,761 lines | 1,490 lines |
+| `ticket_board/frontend_script_attachments.py` | absent | 285 lines, 12 JavaScript functions |
+| Total of these two files | 1,761 lines | 1,775 lines |
+
+For a representative attachment-set, thumbnail or crop-provenance issue, the
+gallery was at core lines 1047-1318 of 1,761 and is now at owner lines
+13-285. In core, `renderCreatePreview` moved from 1319 to 1048,
+`populateCreateForm` from 1337 to 1066, and `renderCard` from 1683 to
+1412. Leaving the gallery in core keeps 272 lines between the blocker helpers
+and the create form. The lightbox and crop editor would be a larger seam, but
+it is stateful modal UI tied to the detail overlay. The 14-line combined
+increase is the module docstring, the import and the splice.
+`frontend_script_core.py` remains above the 1,250-line soft limit; SYRD-272
+remains open.
+
+**Verification.** The new `ticket_board_frontend_attachments_test.py`
+passes two checks.
+- Composition: the owner holds exactly the twelve functions in order;
+  `SCRIPT_CORE` contains it once, between `buildOption` and
+  `renderCreatePreview`, and defines none of them itself; `cropMetadataCaption`
+  stays in core; `HTML` and `render_html` contain it once; the
+  `SCRIPT_CORE` expression is literal, labels, literal, gallery, literal; and
+  the owner has no other statements.
+- Behaviour: the gallery runs in Node against a fake DOM (it prints that it
+  was not checked if Node is absent). It asserts concrete values for URL
+  encoding, entry fallbacks, unique paths, labels, slugs and nine set parses.
+  It checks group ordering and the open flag for four sets, case-folded named
+  keys, and both orderings of each adjacent type pair. It checks the card's
+  role, aria, remove button, thumbnail attributes, crop provenance and the
+  unavailable placeholder, and a bare card. It checks that click, Enter and
+  Space open and that other keys and bubbled events are ignored, that remove
+  prevents and stops the event, and the set-group summaries.
+All twenty-eight seeded JavaScript and splice mutants fail it. Under a guard
+that refuses spawns, signals, sockets and host-path opens, `SCRIPT_CORE`,
+`SCRIPT_DETAIL`, `SCRIPT_APP`, `HTML` and four `render_html` identities
+are byte-identical on baseline and candidate (SHA-256
+`6a9852344b36660035d0f2ae240764956c01aeab267c72a6d015bbbaf6f8de03`). A
+Node behaviour matrix over each tree's gallery chunk is identical (SHA-256
+`dcca89a9724aca94abaca4d4c281cc0d314dc231813f8dcaae106c136b9f4ba6`).
+`ticket-board.py --help` and the app and server surfaces are identical (help
+SHA-256 `525cd6b10af0131491becfb2fdd8bd73fda24e27a948c83643ee6badf60732cc`). The new test plus
+nineteen of twenty-two frontend and entry tests pass. The three
+Playwright-dependent tests (`audit_signoff_comment_frontend_test`,
+`cancel_ticket_frontend_action_test`,
+`resolved_blockers_hidden_frontend_test`) are unavailable here without a
+browser and fail identically on baseline and candidate; they are not
+reported as passing. No live board or browser session was used.

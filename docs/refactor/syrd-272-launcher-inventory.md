@@ -22753,3 +22753,67 @@ changed.
 
 The controller remains above the 1,250-line soft limit. SYRD-272 remains open
 for its remaining slices and final cross-file comparison.
+
+### SYRD-494 (presentation_controller slice 2): live runtime assignments
+
+The Director approved the exact four-definition boundary before the ticket
+worktree was edited, from audited public main
+`836c3c0918a6704c549b84fcbf2a92f4e9140658`.
+`presentation_runtime_assignments.py` owns `runtime_assignment_config`,
+`_resolved_runtime_assignments`, `runtime_divergence_refusal`, and the shared
+`_exact_tmux_target` guard. It reads the board's atomic assignment row,
+validates project, process authority, target and CLI runtime, waits boundedly
+for just-started workers, and reports only a verified disagreement between a
+declared runtime and the process in its exact declared pane. It takes a
+`ProjectConfig` and injected HTTP opener, clock/sleep/printer, tmux runner or
+proc root where needed; it returns a resolved config, the same `SystemExit`
+refusal, or a diagnostic string/empty string. It owns no mutable module state
+and writes no runtime state. The controller imports and reexports the exact
+four function objects; its `runtime_assignment_config` module-global patch
+seam remains available to callers and tests. The owner never imports the
+controller, and the controller retains display, viewer, recovery and CLI
+orchestration. Both direct-script and package imports still expose the aliases.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `presentation_controller.py` | 2,404 lines, 71 functions | 2,204 lines, 67 functions |
+| `presentation_runtime_assignments.py` | absent | 218 lines, 4 functions |
+| Total of these two files | 2,404 lines | 2,422 lines |
+
+For a representative SYRD-239 divergence refusal, the 49-line board reader,
+90-line divergence check and 3-line exact-target guard were spread through
+the first 262 lines of the 2,404-line controller; `presentation_action` then
+called back into that cluster near line 2,100. Those 142 behavior lines now
+sit in the 218-line owner, while the caller stays in the shorter controller.
+For SYRD-162 registration timing, the 54-line bounded wait and 49-line board
+reading are adjacent there as well. Leaving them in the controller would keep
+assignment evidence among unrelated display mechanics. A larger display or
+recovery extraction could remove more lines, but it crosses document
+mutation, tmux attachment, viewer policy and window evidence; this slice
+keeps one read/diagnosis authority without new callbacks. The combined 18-line
+increase is the explicit new module header and imports. Installed releases
+archive the whole `scripts` tree, so the owner needs no packaging list change.
+
+**Verification.** Under a guard that refused process spawning, signals,
+socket connections and host-path opens, the audited baseline and candidate
+both passed three existing assignment-resolver cases: delayed registration,
+immediate missing-role refusal and foreign-target refusal without a retry.
+Both passed the 74-check operator recovery suite, including declared/live
+divergence, no-probe refusal and exact recovery-target cases. The new focused
+four-case owner test passes recovery-target resolution and bounded wait, four
+immediate refusal classes, exact declared-pane divergence, both controller
+import aliases, and exact-target use from the owner and controller tmux paths.
+Both trees also passed the guarded registered-role attach case, which rebinds
+the controller's `runtime_assignment_config` name and follows the resolved
+recovery target.
+The four moved and 67 retained function ASTs are unchanged. The guarded
+offline `team-launcher present --help` output is byte-identical to the
+baseline (SHA-256
+`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
+The broader runtime-registration test file has an unrelated recovery-readiness
+case that calls a real subprocess runner, so only its three resolver cases
+were used under the guard. No live tenant, runtime, presentation session,
+GUI window, account, service or release was changed.
+
+The controller remains above the 1,250-line soft limit. SYRD-272 remains open
+for its remaining slices and final cross-file comparison.

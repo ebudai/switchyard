@@ -23782,3 +23782,85 @@ Playwright-dependent tests (`ticket_board_ui_audit_test`,
 `resolved_blockers_hidden_frontend_test`) are unavailable without a browser
 and fail identically on baseline and candidate; they are not reported as
 passing. No live board or browser session was used.
+
+### SYRD-509 (ticket_board/frontend_script_core.py slice 3): ticket references and linked tickets
+
+The Director approved the linked-ticket boundary before the ticket worktree
+was edited, from audited public main
+`8103472813f72da44ea2d9f0dc8ed745f678cfc3`.
+`ticket_board/frontend_script_ticket_links.py` now holds the ticket-reference
+and linked-ticket rendering JavaScript as `SCRIPT_TICKET_LINKS`. That is
+exactly the seven contiguous functions that were `SCRIPT_CORE` lines
+918-1042, moved verbatim: `ticketById`, `buildTicketReference`,
+`buildChildTicketList`, `appendLinkedTicketText`, `linkedTextBlock`,
+`linkedPreview` and `linkedTicketRow`.
+
+`frontend_script_core` splices it back at the original position with the
+SYRD-507/508 idiom, so the public `SCRIPT_CORE` value, the rendered page,
+declaration order and the shared script scope are byte-for-byte unchanged.
+`TICKET_REF_PATTERN` (SCRIPT_CORE's first statement), `openDetail` and
+`stateLabel` stay in core as named dependencies. Board ordering, column
+filtering and card rendering are untouched. There is no runtime module or
+wrapper, and no existing test needed adapting.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/frontend_script_core.py` | 1,325 lines | 1,200 lines |
+| `ticket_board/frontend_script_ticket_links.py` | absent | 141 lines, 7 JavaScript functions |
+| Total of these two files | 1,325 lines | 1,341 lines |
+
+For a representative ticket-reference, linked-children or blocked-by-links
+issue, the rendering was at core lines 918-1042 and is now at owner lines
+15-141. `ticketNumber` moved from 1044 to 920 and `renderCard` from 1247 to
+1122. `frontend_script_core.py` is now 50 lines under the 1,250-line
+advisory limit. The 16-line combined increase is the module docstring, the
+import and the splice.
+
+One behaviour is recorded here and deliberately unchanged: a qualified
+foreign reference such as `other:PGU-1` renders as a live reference to the
+local PGU-1 whenever that ID exists here, because only the unqualified ID is
+looked up.
+
+As the user directed through the Director, SYRD-272 is held after this
+slice for a pending reboot, and no successor child is routed. The parent
+stays open for the remaining oversized files and the final measured
+comparison.
+
+**Verification.** The new `ticket_board_frontend_ticket_links_test.py`
+passes two checks.
+- Composition: the owner holds exactly the seven functions in order;
+  `SCRIPT_CORE` contains it once, after `badge` and before `ticketNumber`, and
+  defines none of them itself; `TICKET_REF_PATTERN` is still `SCRIPT_CORE`'s
+  first statement; `openDetail` and `stateLabel` are defined in core and only
+  called by the owner; the splice is between literals, after the attachments
+  splice; and the owner has no other statements.
+- Behaviour: the owner runs in Node with the real `TICKET_REF_PATTERN`
+  statement from `SCRIPT_CORE`, a fake DOM, a board snapshot and recorded
+  `openDetail` calls. It asserts concrete values for lookups by case and for
+  missing IDs; found references (the label kept as written, clicks
+  preventing and stopping the event and opening the upper-cased ID); missing
+  references (disabled, class, exact title, no listener); and linked text
+  with mixed case, the qualified foreign reference, CRLF and blank lines, an
+  unbounded "PGU-1PGU-2", repeated calls, a stale shared `lastIndex` and
+  null. It also covers linked blocks and previews with their empty texts,
+  linked-ticket rows, and child lists (plural and compact singular heads,
+  the selected row, state-chip labels, click handling). It also compares the
+  whole matrix with a recorded snapshot.
+All twenty-six seeded JavaScript and splice mutants fail the ticket-links,
+refresh or attachments test. Under a guard that refuses spawns, signals,
+sockets and host-path opens, `SCRIPT_CORE`, `SCRIPT_DETAIL`, `SCRIPT_APP`,
+`HTML` and four `render_html` identities are byte-identical on baseline and
+candidate (SHA-256
+`6a9852344b36660035d0f2ae240764956c01aeab267c72a6d015bbbaf6f8de03`). The
+Node matrix over each tree's chunk is identical (SHA-256
+`c05bb4a28f4a98d8b9b15122f0a9e8f672f356025cda087c74b0a0f8827d0a18`).
+`ticket-board.py --help` and the app and server surfaces are identical (help
+SHA-256 `90635d79568268bdb74dc375054b2114f9c195b1d249144f9f1b3b1e78eee1d8`). The new test plus twenty-two of twenty-eight frontend
+and entry tests pass, including `ticket_reference_links_test`,
+`blocked_by_frontend_test` and the unchanged SYRD-507 and SYRD-508 tests. The
+six Playwright-dependent tests (`ticket_board_ui_audit_test`,
+`audit_signoff_comment_frontend_test`, `cancel_ticket_frontend_action_test`,
+`resolved_blockers_hidden_frontend_test`, `linked_ticket_grouping_test`,
+`mobile_collapsible_sections_test`) are unavailable without a browser and
+were not run; they fail identically on baseline and candidate and are not
+reported as passing. No live board or browser session was used.

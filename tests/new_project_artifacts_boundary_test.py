@@ -413,7 +413,7 @@ def launcher_reads(fn: ast.AST, *, moved: bool) -> list[str]:
 # --- structure -----------------------------------------------------------------------------------------------------
 
 
-PROVISION_MODULES = "['scripts.ticket_board', 'scripts.ticket_board.board_skill', 'scripts.ticket_board.commit_repos', 'scripts.ticket_board.privileged_actions', 'scripts.ticket_board.privileged_install', 'scripts.ticket_board.project_provision', 'scripts.ticket_board.provision_github_identity', 'scripts.ticket_board.provision_path_confinement', 'scripts.ticket_board.provision_publication_grants', 'scripts.ticket_board.provision_role_accounts', 'scripts.ticket_board.provision_role_tooling', 'scripts.ticket_board.provision_tenant_control', 'scripts.ticket_board.provision_workflow_projection', 'scripts.ticket_board.provision_workflow_sql']"
+PROVISION_MODULES = "['scripts.ticket_board', 'scripts.ticket_board.board_skill', 'scripts.ticket_board.commit_repos', 'scripts.ticket_board.privileged_actions', 'scripts.ticket_board.privileged_install', 'scripts.ticket_board.project_provision', 'scripts.ticket_board.provision_board_service', 'scripts.ticket_board.provision_github_identity', 'scripts.ticket_board.provision_path_confinement', 'scripts.ticket_board.provision_publication_grants', 'scripts.ticket_board.provision_role_accounts', 'scripts.ticket_board.provision_role_tooling', 'scripts.ticket_board.provision_tenant_control', 'scripts.ticket_board.provision_workflow_projection', 'scripts.ticket_board.provision_workflow_sql']"
 
 
 def test_the_module_loads_only_the_provision_modules_at_import() -> None:

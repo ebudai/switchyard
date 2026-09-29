@@ -22817,3 +22817,71 @@ GUI window, account, service or release was changed.
 
 The controller remains above the 1,250-line soft limit. SYRD-272 remains open
 for its remaining slices and final cross-file comparison.
+
+### SYRD-495 (presentation_controller slice 3): display-session construction
+
+The Director approved this exact closure before the ticket worktree was edited,
+from audited public main `60e60b1ecf00eb96b5f7968022de3b5a0b304279`.
+`presentation_display_session.py` owns 18 functions:
+`display_session_name`, `_role_by_name`, `_session_exists`, `_role_status`,
+`_worker_has_independent_client`, `display_lock_options`,
+`display_lock_commands`, `_proxy_client_flags`, `worker_attach_argv`,
+`_proxy_crosses_account`, `_proxy_command`, `_recovery_instruction`,
+`_status_script`, `_status_command`, `_recovery_hook_index`,
+`_configure_recovery_hook`, `display_slot_terminal_title_commands`, and
+`_configure_display_session`. It also owns the existing `DIRECTOR_ROLE` and
+`DISPLAY_KEY_TABLE` constants. The controller imports and reexports all 20
+objects with no facade or reverse import. Both package and direct-script
+controller imports expose the same owner objects.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `presentation_controller.py` | 2,204 lines, 67 functions | 1,819 lines, 49 functions |
+| `presentation_display_session.py` | absent | 425 lines, 18 functions |
+| Total of these two files | 2,204 lines | 2,244 lines |
+
+The owner takes `ProjectConfig`, slot/role, optional presentation tty set and
+an injected runner already routed to the account that owns each tmux session.
+It probes the worker, selects sizing policy, locks cross-account worker
+transport, builds a nested attach or inert status pane, creates or respawns
+the owner display slot with exact targets, sets title/status/identity options,
+and installs or removes its recovery hook. Its mutable effects are those tmux
+session, transport and hook changes; it has no mutable module state. The
+controller still owns `_session_owner_map` and `_tmux_runner`, passes the
+correctly routed runner, and orders `_apply_mapping`, targeted live recovery,
+viewer mapping, persistent state mutation, desktop handoff and CLI dispatch.
+The installed release archives the whole `scripts` tree.
+
+For a representative SYRD-66 cross-account proxy issue, the 90-line session
+constructor, 6-line lock command builder, 20-line lock policy, 36-line worker
+attach builder and 6-line account-boundary check were 158 behavior lines
+spread across controller lines 368-819. `_apply_mapping` called back into
+that cluster at lines 966-991. Those 158 lines now sit in the 425-line owner,
+with its lock/attach path at lines 114-225 and constructor at 336-425;
+`_apply_mapping` remains a 26-line caller in the 1,819-line controller.
+Leaving them together kept slot security policy among state and viewer work.
+Moving only the constructor would require callbacks to its status, proxy,
+lock, title and hook dependencies. A larger desktop launch extraction would
+cross GUI process creation, bridge payload and window evidence; this slice
+stops at the owner-side slot construction boundary. The combined 40-line
+increase is the new module header, imports and alias boundary.
+
+**Verification.** Under a guard refusing process spawns, signals, socket
+connections and host-path opens, baseline and candidate both passed four
+existing cross-account cases for privileged proxy argv, transport locking,
+early refusal and the shared-account direct path. Both passed the 74-check
+operator display-recovery suite. A synthetic first-build and hidden-slot
+respawn trace, including title and lock commands, is byte-identical on both
+trees after normalizing only temporary paths (SHA-256
+`261989e446cf947714dffbd57e10663dd375fff1aa8c003dd1a3a7894c62bcc5`).
+The new five-case boundary test checks lock/label/hook order, cross-account
+worker locks before display mutation, hidden-slot respawn, failure before
+label/hook mutation, and all 20 import aliases. All
+18 moved and 49 retained function ASTs are identical. The guarded offline
+`team-launcher present --help` output is byte-identical to baseline (SHA-256
+`e4480a11e7058c0f2518db6ae2f23b6a24ace8becc421a9f5077db61a27d631c`).
+All tmux and configuration evidence was synthetic. No live tenant, runtime,
+presentation session, GUI window, account, service or release was changed.
+
+The controller remains above the 1,250-line soft limit. SYRD-272 remains open
+for its remaining slices and final cross-file comparison.

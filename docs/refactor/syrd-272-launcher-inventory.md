@@ -23191,3 +23191,76 @@ public surface are byte-identical (SHA-256
 app module namespace gains only the eight imported helper names.
 Eighty-six retained methods are AST-identical; only five call sites differ.
 No live board, database or asset path was touched.
+
+### SYRD-501 (ticket_board/app.py slice 3): ticket input policy
+
+The Director approved the validation boundary before the ticket worktree was
+edited, from audited public main
+`61f37680fb7d4b0b0fa22d9ad94a70f3ba2336bc`. `ticket_board/ticket_input_policy.py`
+now owns ticket input validation and blocker reference policy:
+`TICKET_ID_PATTERN`, `EXTERNAL_BLOCKER_PATTERN`, the unchanged module
+functions `valid_ticket_id`, `normalize_blocker_ref` and
+`is_external_blocker`, and seven former private app methods as stateless
+functions `require_text`, `require_body`, `require_plain_string`,
+`validate_comments`, `validate_blocked_by(raw, ticket_id, ticket_prefix)`,
+`validate_blockers(raw, ticket_id, ticket_prefix)` and
+`enforce_blocked_reason_rule`. Only `self` changed: `self.ticket_prefix` is now
+the explicit `ticket_prefix` argument, and inner `self._` calls are direct.
+Every moved body AST is otherwise identical. The owner imports only `re` and
+`typing` and holds no connection, cache, role or state. `app.py` imports the
+functions directly, passes `self.ticket_prefix`, and re-exports the five
+public names as identical aliases; there is no forwarding method, mixin,
+callback or reverse import.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/app.py` | 2,086 lines, 91 app methods | 1,993 lines, 84 app methods |
+| `ticket_board/ticket_input_policy.py` | absent | 126 lines, 10 functions |
+| Total of these two files | 2,086 lines | 2,119 lines |
+
+The app still owns `_validate_blocker_ticket_states` (the blocker-state
+SELECT inside the caller's transaction), caller roles, workflow state and
+assignee decisions, commit verification, ticket writes and attachments.
+Create still validates comments, blockers and the reason rule before
+connecting, then sets the caller role, checks blocker states and writes.
+Update still sets the role, reads current, validates, checks blocker states
+and calls `set_blockers`. The own-board external check still compares only
+the prefix, so `other:SYRD-5` is refused on SYRD, and stored rows are
+revalidated with it on read.
+
+For a representative SYRD-270/273 blocker or comment issue, the rules were at
+app lines 93-98, 131-147, 1775-1837 and 2069-2086. They are now at owner
+lines 13-126. The database check (app line 1748) sits beside commit
+verification (1765), and the create/update callers (1243, 1361) keep their
+transaction order in view. Leaving the class intact keeps one policy split
+across the file. Moving only the three blocker methods would need a reverse
+import or leave `require_text` behind. Moving create/update, the state check
+or commit verification would carry a connection, caller role, workflow cache
+or git state across owners. The 33-line combined increase is the new module
+header and import. `app.py` remains above the 1,250-line soft limit;
+SYRD-272 remains open for later slices and final comparison.
+
+**Verification.** The new `ticket_board_input_policy_test.py` passes nine
+database-free checks: identical public aliases, no moved methods left on the
+app, kept DB/workflow/commit validators still present, and stdlib-only owner
+imports; local, external and operator normalization; blocked_by dedupe and
+every refusal text (type, empty, invalid, operator ticket, own-board external
+under two project names, self); blockers dedupe and resolved flags; comment,
+text and reason-rule refusals. With a fake connection, it checks that create
+refuses before connecting, then runs `caller, states (local only), create,
+comment author, add_comment, readback`, with terminal/missing blockers refused
+after the state SELECT. It checks update's `caller, read, states,
+set_blockers` and its pre-write refusals, read revalidation with the app's
+own prefix, and reason/note/key/report refusals before connecting. It also
+checks release normalizing its ref. All twenty-six seeded policy and
+call-site mutants fail it. Under a guard that refuses process spawns,
+signals, sockets and host-path opens, a 69-record fake-database trace
+(30 refusals) across row reads, create, update and the reason verbs is
+byte-identical on baseline and candidate (SHA-256
+`cb9442c8730919252f0942f315d8b6a0c84aea5f73fa04cf6d2e06334b6be363`).
+`ticket-board.py --help`, the server namespace and the `TicketBoardApp`
+public surface are byte-identical (SHA-256
+`4786d50c30103e306f98e4f83c2a3285647997736969516cf7ef35c53c36e56a`); the
+app module namespace gains only the seven imported function names.
+Seventy-three retained methods are AST-identical; eleven change only at
+direct call sites. No live board or database was touched.

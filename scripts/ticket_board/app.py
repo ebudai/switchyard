@@ -31,6 +31,20 @@ from .image_asset_policy import (
     uploaded_filename_slug,
 )
 from .ticket_read_query import select_ticket_rows
+from .ticket_input_policy import (
+    EXTERNAL_BLOCKER_PATTERN,
+    TICKET_ID_PATTERN,
+    enforce_blocked_reason_rule,
+    is_external_blocker,
+    normalize_blocker_ref,
+    require_body,
+    require_plain_string,
+    require_text,
+    valid_ticket_id,
+    validate_blocked_by,
+    validate_blockers,
+    validate_comments,
+)
 
 ASSET_DIR_DEFAULT = Path("~/.claude/pgu-tickets-assets").expanduser()
 FRAME_DIR_DEFAULT = Path("/tmp/pgu-frames")
@@ -90,12 +104,7 @@ STATES = (
     "cancelled",
 )
 TERMINAL_STATES = {"done", "cancelled"}
-TICKET_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-[0-9]+$")
 TICKET_NUMBER_PATTERN = re.compile(r"^[A-Z][A-Z0-9]*-([0-9]+)$")
-# SYRD-270: a blocker on another board, `<project>:<PREFIX>-<n>`. It never
-# resolves by itself; only release_external_blocker removes it.
-# SYRD-273: or a person, `operator:<name>`; `operator` is never a project.
-EXTERNAL_BLOCKER_PATTERN = re.compile(r"^((?!operator:)[a-z][a-z0-9_]*:[A-Z][A-Z0-9]*-[0-9]+|operator:[a-z][a-z0-9_]*)$")
 
 
 def project_slug(environ: dict[str, str] | os._Environ[str] = os.environ) -> str:
@@ -126,25 +135,6 @@ def normalize_ticket_prefix(raw: str) -> str:
     if normalized[0].isdigit():
         normalized = f"T{normalized}"
     return normalized
-
-
-def valid_ticket_id(ticket_id: str) -> bool:
-    return bool(TICKET_ID_PATTERN.fullmatch(str(ticket_id).strip().upper()))
-
-
-def normalize_blocker_ref(raw: str) -> str:
-    """A local id upper case; a qualified reference as `project:PREFIX-N` (as ticket_board.normalize_blocker_ref)."""
-    value = str(raw).strip()
-    if ":" in value and value.split(":", 1)[0].strip().lower() == "operator":
-        return value.lower()
-    if ":" in value:
-        project, _, ticket = value.partition(":")
-        return f"{project.strip().lower()}:{ticket.strip().upper()}"
-    return value.upper()
-
-
-def is_external_blocker(ref: str) -> bool:
-    return bool(EXTERNAL_BLOCKER_PATTERN.fullmatch(str(ref)))
 
 
 def ticket_id_sentinel(prefix: str) -> str:
@@ -1139,20 +1129,20 @@ ORDER BY rank;
             screenshots = json.loads(screenshots)
         ticket = {
             "id": str(row["id"]),
-            "title": self._require_text(row["title"], "title"),
-            "body": self._require_body(row["body"]),
+            "title": require_text(row["title"], "title"),
+            "body": require_body(row["body"]),
             "assignee": self._validate_assignee(str(row["assignee"])),
             "state": self._validate_state(str(row["state"])),
-            "blocked_by": self._validate_blocked_by(list(row["blocked_by"] or []), str(row["id"])),
-            "blockers": self._validate_blockers(blockers, str(row["id"])),
+            "blocked_by": validate_blocked_by(list(row["blocked_by"] or []), str(row["id"]), self.ticket_prefix),
+            "blockers": validate_blockers(blockers, str(row["id"]), self.ticket_prefix),
             "parent_id": str(row["parent_id"] or ""),
-            "origin_project": self._require_plain_string(row["origin_project"], "origin_project"),
-            "external_source_ref": self._require_plain_string(row["external_source_ref"], "external_source_ref"),
-            "blocked_reason": self._require_plain_string(row["blocked_reason"], "blocked_reason"),
-            "queued_for_assignee": self._require_plain_string(row["queued_for_assignee"], "queued_for_assignee"),
-            "queued_behind_ticket": self._require_plain_string(row["queued_behind_ticket"], "queued_behind_ticket"),
-            "implementation": self._require_plain_string(row["implementation"], "implementation"),
-            "audit_prompt": self._require_plain_string(row["audit_prompt"], "audit_prompt"),
+            "origin_project": require_plain_string(row["origin_project"], "origin_project"),
+            "external_source_ref": require_plain_string(row["external_source_ref"], "external_source_ref"),
+            "blocked_reason": require_plain_string(row["blocked_reason"], "blocked_reason"),
+            "queued_for_assignee": require_plain_string(row["queued_for_assignee"], "queued_for_assignee"),
+            "queued_behind_ticket": require_plain_string(row["queued_behind_ticket"], "queued_behind_ticket"),
+            "implementation": require_plain_string(row["implementation"], "implementation"),
+            "audit_prompt": require_plain_string(row["audit_prompt"], "audit_prompt"),
             "audit_signoff": bool(row["audit_signoff"]),
             "needs_audit": bool(row["needs_audit"]),
             "needs_inspection": bool(row["needs_inspection"]),
@@ -1164,8 +1154,8 @@ ORDER BY rank;
             "commit_hash": str(row["commit_hash"] or ""),
             "commit_exempt": bool(row["commit_exempt"]),
             "workflow_flags": dict(row.get("workflow_flags") or {}),
-            "created": self._require_text(row["created_text"], "created"),
-            "updated": self._require_text(row["updated_text"], "updated"),
+            "created": require_text(row["created_text"], "created"),
+            "updated": require_text(row["updated_text"], "updated"),
             "active_work_highlight": bool(row["active_work_highlight"]),
             "active_work_owner_role": str(row["active_work_owner_role"] or ""),
             "active_work_notified_at": self._format_optional_datetime(row["active_work_notified_at"]),
@@ -1183,7 +1173,7 @@ ORDER BY rank;
             # needs_director() is the only queue consumer, so awaiting_role at
             # any other role still only suppresses nudges.
             "awaiting_role": str(row["awaiting_role"] or "").strip().lower(),
-            "comments": self._validate_comments(comments),
+            "comments": validate_comments(comments),
         }
         self._set_screenshot_fields(ticket, self._build_screenshot_entries(list(screenshots)))
         return ticket
@@ -1279,7 +1269,7 @@ ORDER BY rank;
         notification_source_role: str | None = None,
         caller_role: str | None = None,
     ) -> dict[str, Any]:
-        title = self._require_text(title, "title").strip()
+        title = require_text(title, "title").strip()
         assignee = self._validate_assignee(assignee)
         state = self._validate_state(state)
         create_state = self._validate_create_state(state)
@@ -1290,18 +1280,18 @@ ORDER BY rank;
             attachment_patch["screenshots"] = screenshots
         elif screenshot not in (None, "", "null"):
             attachment_patch["screenshot"] = screenshot
-        implementation = self._require_plain_string(implementation, "implementation")
-        audit_prompt = self._require_plain_string(audit_prompt, "audit_prompt")
+        implementation = require_plain_string(implementation, "implementation")
+        audit_prompt = require_plain_string(audit_prompt, "audit_prompt")
         if audit_prompt.strip():
             raise ValueError("postgres function API does not support audit_prompt writes yet")
         if audit_signoff or inspector_signoff or user_signoff:
             raise ValueError("postgres function API does not support initial signoff fields yet")
         if commit_hash or commit_exempt:
             raise ValueError("postgres function API does not support initial commit fields yet")
-        normalized_comments = self._validate_comments(comments)
-        blocked_by = self._validate_blocked_by(blocked_by or [], ticket_id_sentinel(self.ticket_prefix))
-        blocked_reason = self._require_plain_string(blocked_reason, "blocked_reason")
-        self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
+        normalized_comments = validate_comments(comments)
+        blocked_by = validate_blocked_by(blocked_by or [], ticket_id_sentinel(self.ticket_prefix), self.ticket_prefix)
+        blocked_reason = require_plain_string(blocked_reason, "blocked_reason")
+        enforce_blocked_reason_rule(blocked_by, blocked_reason)
 
         with self._pg_connect() as conn:
             with conn.transaction():
@@ -1355,10 +1345,10 @@ ORDER BY rank;
         origin_project: str,
         external_source_ref: str = "",
     ) -> dict[str, Any]:
-        title = self._require_text(title, "title").strip()
+        title = require_text(title, "title").strip()
         body = str(body or "")
-        origin_project = self._require_plain_string(origin_project, "origin_project").strip()
-        external_source_ref = self._require_plain_string(external_source_ref, "external_source_ref").strip()
+        origin_project = require_plain_string(origin_project, "origin_project").strip()
+        external_source_ref = require_plain_string(external_source_ref, "external_source_ref").strip()
         with self._pg_connect() as conn:
             with conn.transaction():
                 ticket_id = self._pg_call_scalar(
@@ -1389,12 +1379,12 @@ ORDER BY rank;
                         (ticket_id, bool(patch["manually_controlled"])),
                     )
                 if "blocked_by" in patch or "blocked_reason" in patch:
-                    blocked_by = self._validate_blocked_by(patch.get("blocked_by", current["blocked_by"]), ticket_id)
-                    blocked_reason = self._require_plain_string(
+                    blocked_by = validate_blocked_by(patch.get("blocked_by", current["blocked_by"]), ticket_id, self.ticket_prefix)
+                    blocked_reason = require_plain_string(
                         patch.get("blocked_reason", current["blocked_reason"]),
                         "blocked_reason",
                     )
-                    self._enforce_blocked_reason_rule(blocked_by, blocked_reason)
+                    enforce_blocked_reason_rule(blocked_by, blocked_reason)
                     self._validate_blocker_ticket_states(conn, blocked_by)
                     self._pg_call(conn, "SELECT ticket_board.set_blockers(%s, %s, %s);", (ticket_id, blocked_by, blocked_reason))
 
@@ -1507,7 +1497,7 @@ ORDER BY rank;
 
     def submit_to_audit_without_commit(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
-        reason = self._require_text(reason, "reason").strip()
+        reason = require_text(reason, "reason").strip()
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_set_caller_role(conn, caller_role)
@@ -1520,7 +1510,7 @@ ORDER BY rank;
 
     def request_commit_exempt(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
-        reason = self._require_text(reason, "reason").strip()
+        reason = require_text(reason, "reason").strip()
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_set_caller_role(conn, caller_role)
@@ -1529,7 +1519,7 @@ ORDER BY rank;
 
     def implementer_kick_back(self, ticket_id: str, reason: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
-        reason = self._require_text(reason, "reason").strip()
+        reason = require_text(reason, "reason").strip()
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_set_caller_role(conn, caller_role)
@@ -1538,7 +1528,7 @@ ORDER BY rank;
 
     def start_task(self, ticket_id: str, note: str = "", *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
-        note = self._require_plain_string(note, "note").strip()
+        note = require_plain_string(note, "note").strip()
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_set_caller_role(conn, caller_role)
@@ -1547,7 +1537,7 @@ ORDER BY rank;
 
     def complete_task(self, ticket_id: str, completion_note: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
-        completion_note = self._require_text(completion_note, "completion_note").strip()
+        completion_note = require_text(completion_note, "completion_note").strip()
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_set_caller_role(conn, caller_role)
@@ -1627,7 +1617,7 @@ ORDER BY rank;
 
     def set_awaiting_role(self, ticket_id: str, awaiting_role: str, *, caller_role: str) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
-        awaiting_role = self._require_text(awaiting_role, "awaiting_role").strip().lower()
+        awaiting_role = require_text(awaiting_role, "awaiting_role").strip().lower()
         with self._pg_connect() as conn:
             with conn.transaction():
                 self._pg_set_caller_role(conn, caller_role)
@@ -1660,8 +1650,8 @@ ORDER BY rank;
         reason: str = "",
         caller_role: str,
     ) -> dict[str, Any]:
-        ticket_id = self._require_text(ticket_id, "ticket_id").strip().upper()
-        target_role = self._require_text(target_role, "target_role").strip().lower()
+        ticket_id = require_text(ticket_id, "ticket_id").strip().upper()
+        target_role = require_text(target_role, "target_role").strip().lower()
         kind = str(kind or "transition").strip().lower() or "transition"
         with self._pg_connect() as conn:
             with conn.transaction():
@@ -1755,66 +1745,6 @@ SELECT EXISTS (
             edit_fields["screenshots"] = paths
             edit_fields["screenshot"] = paths[0] if paths else ""
 
-    def _validate_comments(self, raw: Any) -> list[dict[str, Any]]:
-        if not isinstance(raw, list):
-            raise ValueError("comments must be a list")
-        comments: list[dict[str, Any]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                raise ValueError("comment entries must be objects")
-            comments.append(
-                {
-                    "who": self._require_text(item.get("who"), "comment.who"),
-                    "text": self._require_text(item.get("text"), "comment.text"),
-                    "ts": self._require_text(item.get("ts"), "comment.ts"),
-                    "urgent": bool(item.get("urgent", False)),
-                }
-            )
-        return comments
-
-    def _validate_blocked_by(self, raw: Any, ticket_id: str) -> list[str]:
-        if raw in (None, "", "null"):
-            return []
-        if not isinstance(raw, list):
-            raise ValueError("blocked_by must be a list of ticket IDs")
-        blocked_by: list[str] = []
-        for item in raw:
-            if not isinstance(item, str):
-                raise ValueError("blocked_by entries must be strings")
-            blocker_id = normalize_blocker_ref(item)
-            if not blocker_id:
-                raise ValueError("blocked_by entries must not be empty")
-            if not (valid_ticket_id(blocker_id) or is_external_blocker(blocker_id)):
-                raise ValueError(f"invalid blocked_by ticket id: {item}")
-            if is_external_blocker(blocker_id) and blocker_id.split(":", 1)[1].rsplit("-", 1)[0] == self.ticket_prefix:
-                local_id = blocker_id.split(":", 1)[1]
-                raise ValueError(
-                    f"external blocker {blocker_id} names a ticket on this board; block on {local_id} instead"
-                )
-            if blocker_id == ticket_id:
-                raise ValueError("ticket cannot be blocked_by itself")
-            if blocker_id not in blocked_by:
-                blocked_by.append(blocker_id)
-        return blocked_by
-
-    def _validate_blockers(self, raw: Any, ticket_id: str) -> list[dict[str, Any]]:
-        if raw in (None, "", "null"):
-            return []
-        if not isinstance(raw, list):
-            raise ValueError("blockers must be a list")
-        blockers: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in raw:
-            if not isinstance(item, dict):
-                raise ValueError("blockers entries must be objects")
-            blocker_id = str(item.get("id", "")).strip().upper()
-            normalized_id = self._validate_blocked_by([blocker_id], ticket_id)[0]
-            if normalized_id in seen:
-                continue
-            seen.add(normalized_id)
-            blockers.append({"id": normalized_id, "resolved": bool(item.get("resolved"))})
-        return blockers
-
     def _validate_blocker_ticket_states(self, conn: Any, blocked_by: list[str]) -> None:
         if not blocked_by:
             return
@@ -1831,10 +1761,6 @@ SELECT EXISTS (
                 raise ValueError(f"blocker ticket not found: {blocker_id}")
             if blocker_state in TERMINAL_STATES:
                 raise ValueError(f"terminal tickets cannot block other tickets: {blocker_id} is {blocker_state}")
-
-    def _enforce_blocked_reason_rule(self, blocked_by: list[str], blocked_reason: str) -> None:
-        if blocked_by and not blocked_reason.strip():
-            raise ValueError("blocked_reason must be non-empty when blocked_by is set")
 
     def _validate_commit_hash(self, raw: Any) -> str:
         if raw in (None, ""):
@@ -2065,22 +1991,3 @@ SELECT EXISTS (
         if assignee not in ASSIGNEES and assignee not in {r["name"] for r in (self.workflow_configuration() or {}).get("roles", [])}:
             raise ValueError(f"invalid assignee: {assignee}")
         return assignee
-
-    def _require_text(self, raw: Any, field: str) -> str:
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError(f"{field} must be a non-empty string")
-        return raw
-
-    def _require_body(self, raw: Any) -> str:
-        if raw is None:
-            return ""
-        if not isinstance(raw, str):
-            raise ValueError("body must be a string")
-        return raw
-
-    def _require_plain_string(self, raw: Any, field: str) -> str:
-        if raw is None:
-            return ""
-        if not isinstance(raw, str):
-            raise ValueError(f"{field} must be a string")
-        return raw

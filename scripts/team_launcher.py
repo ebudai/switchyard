@@ -1572,6 +1572,12 @@ from scripts.atomic_files import (
     _write_json_atomic,
     _write_private_json_atomic,
 )
+from scripts.owner_commands import (
+    _owner_command_args,
+    _owner_command_env_args,
+    _owner_user_systemctl,
+    _tenant_owner_home,
+)
 from scripts.new_project_phases import (
     NewProjectAccounts,
     NewProjectBoard,
@@ -2461,12 +2467,6 @@ def _control_repository_owned_roots(config: ProjectConfig) -> list[Path]:
     return owned_roots
 
 
-def _owner_command_args(owner_user: str, command: Sequence[str]) -> list[str]:
-    if owner_user == current_user_name():
-        return list(command)
-    return ["sudo", "-u", owner_user, *command]
-
-
 #: What a terminal needs to keep looking like itself across the owner boundary.
 #: `sudo` resets the environment, and a CLI that cannot see TERM or COLORTERM
 #: draws its first run in monochrome -- which is what the User was shown
@@ -2481,20 +2481,6 @@ def _terminal_presentation_env(source: Mapping[str, str] | None = None) -> list[
         for key in TERMINAL_PRESENTATION_ENV_KEYS
         if str(environ.get(key) or "").strip()
     ]
-
-
-def _owner_command_env_args(owner_user: str, owner_home: Path, command: Sequence[str]) -> list[str]:
-    path = _prepend_paths(DEFAULT_PANE_BASE_PATH, _owner_home_bin_dirs(owner_home))
-    return _owner_command_args(
-        owner_user,
-        [
-            "env",
-            f"HOME={owner_home}",
-            f"PATH={path}",
-            *_terminal_presentation_env(),
-            *command,
-        ],
-    )
 
 
 def _pane_identity_scrubbed_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -2701,43 +2687,6 @@ SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
 def _installed_unit_path(unit: str) -> Path:
     return SYSTEMD_UNIT_DIR / unit
-
-
-def _tenant_owner_home(config: ProjectConfig, config_path: Path | None) -> Path:
-    """The owner home this tenant actually records, not merely the passwd one."""
-    owner = config.run_as_user or current_user_name()
-    if config_path is not None:
-        recorded = str(_plan_data_from_config(config, config_path).get("owner_home") or "").strip()
-        if recorded:
-            return Path(recorded)
-    return home_dir_for_user(owner) or Path("/home") / owner
-
-
-def _owner_user_systemctl(
-    config: ProjectConfig, action: str, unit: str, *, config_path: Path | None = None
-) -> list[str]:
-    """Drive the owner's user manager the way the rest of the launcher does."""
-    owner = config.run_as_user or current_user_name()
-    home = _tenant_owner_home(config, config_path)
-    # Some questions are asked of the manager itself rather than of a unit.
-    operation = f"systemctl --user {action}"
-    if unit:
-        operation = f"{operation} {shlex.quote(unit)}"
-    if action in {"start", "restart"}:
-        operation = f"systemctl --user daemon-reload && {operation}"
-    # Exported rather than prefixed. A prefix binds to one command, and every
-    # action that needs a reload is two: `... systemctl --user daemon-reload &&
-    # systemctl --user restart <unit>` ran the restart with no XDG_RUNTIME_DIR
-    # and no bus address at all, so it could not reach the manager it had just
-    # reloaded and exited 1. That is the "could not start the notify listener"
-    # a rollback reported while the same unit started immediately by hand with
-    # the owner's runtime directory set (SYRD-61).
-    script = (
-        'runtime="/run/user/$(id -u)"; '
-        'export XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"; '
-        + operation
-    )
-    return _owner_command_env_args(owner, home, ["sh", "-c", script])
 
 
 def capture_installed_units(

@@ -19202,3 +19202,155 @@ and **not implemented**:
   -    81 lines   13 defs  desktop, presentation windows and display bridge
 
 **SYRD-272 is not complete.** The launcher is still 2,831 lines.
+
+### SYRD-459 (slice 19bj): owner command and user-manager execution helpers
+
+Measured on `8090a85`. Before any edit, two closures were measured, and the
+Director approved the larger with one narrow guard adaptation.
+
+- **The closure:** four definitions: `_owner_command_args`,
+  `_owner_command_env_args`, `_tenant_owner_home` and `_owner_user_systemctl`.
+  Together they run a command as the project owner, find the owner's home, and
+  build the owner's `systemctl --user` script.
+- **Kept on the launcher:** `current_user_name` (the process's own identity,
+  read by 54 production modules and called by 6 other launcher
+  definitions) and `capture_installed_units` (it reads installed unit files and
+  runs no command).
+- **The guards, measured empirically:** the move was made in scratch archives
+  of the baseline under /tmp, and every screen-clean boundary suite plus the
+  12 files naming any of the four were run on each scratch tree
+  (113 whole, 371 cases). For the four, exactly one guard changed; for the
+  two-definition alternative (`_owner_command_args`, `_owner_command_env_args`),
+  none did.
+- **The one approved guard adaptation:** `tests/project_identity_boundary_test.py`
+  (SYRD-456) pins which launcher definitions name the config types.
+  `_tenant_owner_home` and `_owner_user_systemctl` name `ProjectConfig` and now
+  live in the new module, so their two `DISPATCH` entries are removed. That is
+  one changed line; every other assertion and count is unchanged. With it
+  applied to the scratch move, the whole suite passed, so no second failure was
+  hiding behind the first.
+
+| file | before (`8090a85`) | after |
+|---|---|---|
+| `scripts/team_launcher.py` | 2,831 | 2,780 |
+| `scripts/owner_commands.py` | - | 93 |
+| `tests/owner_commands_boundary_test.py` | - | 556 |
+| `tests/project_identity_boundary_test.py` | 532 | 532 |
+
+**Scope: exactly the approved four definitions**, moved whole, in the
+launcher's order, into the new `scripts/owner_commands.py`.
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all four, right after the
+  `atomic_files` import.
+- **Callers and readers:** the launcher's one caller (`_owner_catalog_args`)
+  reaches the re-exported name. The 8 production modules that read them
+  do so through the launcher when they run (6 reads of
+  `_owner_command_env_args`, 1 of `_owner_command_args`, 2 of
+  `_tenant_owner_home`, 1 of `_owner_user_systemctl`), and are
+  byte-identical. Every test that patches one of them patches it on
+  `team_launcher`, so the patch still takes effect.
+- **Seams:** all 12 call-time reads of 10 names are now `launcher.X`:
+  the siblings, the current user, the PATH helpers, the terminal presentation
+  variables, the plan record and the account home lookup.
+- **Imports:** `shlex`, `Path` and `Sequence` are the module's own;
+  `ProjectConfig` is imported under TYPE_CHECKING only. The module loads no
+  Switchyard module.
+
+**Proof.** The independent proof (`equiv459.py`, 15 clauses) holds.
+- It compares every whole node and the launcher remainder as AST and text.
+- Its rules clause fixes, in order with `find`: the owner comparison and the
+  `sudo -u` prefix; the `env` HOME, the owner's bin directories ahead of the
+  default path, the presentation variables and the command; the recorded,
+  stripped home, else the account's, else `/home/<owner>`; and the
+  `systemctl --user` action, the quoted unit, `daemon-reload` before start and
+  restart only, and the exported runtime directory and bus under `sh -c`.
+- Its clauses 6b and 6c require that the only changed tests are the new one and
+  the approved guard, and that the guard is its baseline text with exactly the
+  two entries removed.
+- 18 of 18 planted faults are caught, each parsed first, and the plant
+  run first requires the proof to hold on the untouched tree.
+
+**Evidence.**
+- **New boundary test:** `tests/owner_commands_boundary_test.py`,
+  131 checks. Each run is gated on its screen and passes both under
+  `env -i` and in this role pane's normal environment.
+  - It replays 37 cases produced by the BASELINE launcher's own
+    definitions (`gold459.py`) over the very case text the test embeds, not
+    typed.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds
+    and with stray terminal and user-bin variables.
+  - **Isolation:** argv only; nothing is run. The current user, the account
+    home lookup and the plan record are stand-ins on the launcher, with
+    synthetic users, homes and units. No user manager, service or tenant is
+    touched.
+- **Baseline behaviour pinned, not changed:** an empty owner is not special
+  (`sudo -u ""` when the caller has a name); `daemon-reload` is added only for
+  exactly `start` and `restart` (not `Start`); an error reading the plan
+  propagates.
+- **Fixes before relying on a result, none touching production code:**
+  - The execution screen flagged the literal `sudo` in the rules test's
+    expected argv. The expected prefix is now a module-level constant, like the
+    golden record, which holds the same strings; the screen was not overridden.
+  - The structure check first required the launcher import as the very first
+    statement; two of the four have docstrings, and the mover places it after
+    them, so the check now allows for that.
+  - Two index slips in my own expectations were corrected against the record.
+- **On the baseline:** its 3 behaviour cases also pass against the
+  baseline's own definitions in both environments (98 checks).
+- **Mutations:** 29 of 29 are killed by assertions with zero guard
+  refusals, each compiled first and bounded by a timeout. The behaviour tests
+  alone kill 26. The rest are structural, and the structure checks kill
+  them: the launcher imported at load, the config type imported at load, re-export aliased.
+- **Comparison, both trees, guarded,** with every selected run screened first
+  (0 hits). All 146 files are accounted for: every boundary suite and
+  the 12 naming any of the four.
+  - 114 suites whole: 102 pass on the candidate
+    (the new test only there; the adapted guard passes on the candidate, its
+    original on the baseline). Identical non-passes on both trees:
+    `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused);
+  - 371 cases, per case, identical on both sides: 307 pass,
+    52 stop at the same guard refusal, and 12 fail
+    identically on both (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `first_run_setup_completion_test::test_the_provider_is_given_the_window_the_person_is_looking_at`; `first_run_setup_completion_test::test_the_provider_follows_the_window_when_it_is_resized`; `first_run_setup_completion_test::test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode`; `first_run_setup_completion_test::test_switchyard_speaks_in_its_own_mode_down_the_other_branch_too`; `first_run_setup_completion_test::test_a_resize_reaches_the_provider_as_a_signal`; `first_run_setup_completion_test::test_the_terminal_is_given_back_even_when_switchyard_is_killed`; `first_run_setup_completion_test::test_a_keystroke_does_not_wait_for_the_next_tick`; `first_run_setup_completion_test::test_test9_the_answer_reaches_the_question_before_anything_is_typed`; `first_run_setup_completion_test::test_test8_the_sign_in_survives_the_browser_on_a_real_terminal`; `first_run_setup_completion_test::test_test8_nothing_is_echoed_when_the_person_comes_back`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`), baseline defects already reported,
+    not changed here;
+  - **Excluded (115):** 8 that drive an upgrade
+    or `switchyard_main`, 102 whose own execution screen hits, and
+    5 accumulators;
+  - **Not run:** none.
+- **What the comparison exercised (call profiler, the four functions):**
+  1 of 409 passing runs execute one: the new test. The passing
+  suites that name the four stand them in. The other 12 runs that reach
+  one, in 2 files, all stop at the guard's refusal of a real account
+  lookup (the current user), identically on both trees.
+- **Containment:** no project, tenant, service, provider, pane, desktop,
+  board, database, account, repository or release was touched, and no real
+  tenant record was read. The live snapshot differs only in this pane's own board-notification listener log (its size and mtime), which the board writes when it notifies this role and which no suite writes, since every suite runs with a scratch HOME (`livediff459.py`). Both entry points' help is identical (36
+  `switchyard` invocations plus `team-launcher --help`, 163 lines).
+
+**Next bounded slice, for a Director decision,** measured on this candidate
+and **not implemented**:
+
+- Next closure, measured on this candidate and NOT implemented: the owner PATH and terminal-presentation environment helpers -- 5 definitions, 22 lines (lines 1747-2483, not contiguous):
+  -   1747    6  _owner_home_bin_dirs  launcher callers outside: -; production readers outside the launcher: ['scripts/owner_commands.py', 'scripts/tenant_release_report.py']
+  -   1941    2  _prepend_path  launcher callers outside: -; production readers outside the launcher: -
+  -   1945    6  _prepend_paths  launcher callers outside: -; production readers outside the launcher: ['scripts/owner_commands.py', 'scripts/role_command.py', 'scripts/tenant_release_report.py']
+  -   2474    1  TERMINAL_PRESENTATION_ENV_KEYS  (absorbed: only the closure calls it)  launcher callers outside: -; production readers outside the launcher: -
+  -   2477    7  _terminal_presentation_env  launcher callers outside: -; production readers outside the launcher: ['scripts/owner_commands.py']
+  - launcher names it reads (through the launcher once moved): 2: ['USER_BIN_ENV', 'LEGACY_USER_BIN_ENV']
+  - launcher callers outside the closure: 0: -
+  - production modules reading it through the launcher: 3: ['scripts/owner_commands.py', 'scripts/role_command.py', 'scripts/tenant_release_report.py']
+  - test files naming any of them: 5 (a rooted reader/patch/guard scan comes first, as for every slice)
+  - (one cohesive responsibility: the PATH and presentation environment a role or owner command runs with)
+  - it also reads 1 names the launcher imports from other Switchyard modules (read through the launcher once moved): ['_env_first (scripts.launcher_env)']
+  - alternatives measured the same way:
+  -   - the launcher project-config resolution (alternative): 1 definitions, 25 lines; launcher callers outside: -; production readers: 1
+  -   - the owner-file helpers (ensure_owner_file, chown_owner_file_args): 2 definitions, 16 lines; launcher callers outside: -; production readers: 9
+- Largest remaining launcher domains (`domains.py`):
+  -  1826 lines  211 defs  general helpers (unclassified)
+  -   323 lines   36 defs  provisioning (new/register/teardown/owner accounts)
+  -   141 lines   16 defs  project config and registry
+  -   100 lines   10 defs  board service, listener and status
+  -    81 lines   13 defs  desktop, presentation windows and display bridge
+
+**SYRD-272 is not complete.** The launcher is still 2,780 lines.

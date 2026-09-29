@@ -23476,3 +23476,89 @@ existing suites pass on both trees with `TICKET_BOARD_DIRECTORCTL` pointed at
 a recording stub, and there were zero directorctl invocations.
 `backend_default` ran without the override because it asserts the default
 path. No live message, socket, service or database was touched.
+
+### SYRD-505 (ticket_board/server.py slice 3): operation-role policy
+
+The Director approved the policy boundary before the ticket worktree was
+edited, from audited public main
+`afd5f2028c0e907d90397f880aff72901a63475c`.
+`ticket_board/operation_role_policy.py` now holds the legacy,
+pre-declarative operation-role table. That is the 14 import-time statements
+from `CALLER_ROLES` through `OPERATION_ALLOWED_ROLES`, including the role-set
+and operation-map parsers and the override, composed-operation and
+publication sets with their rationale comments, moved verbatim; every
+statement's AST is identical. The owner imports `json`, `os`, `re`,
+`Mapping` and the app's caller roles, and nothing from the server. It still
+reads `TICKET_BOARD_IMPLEMENTER_ROLES`, `TICKET_BOARD_DRAFT_ROLES` and
+`TICKET_BOARD_OPERATION_ALLOWED_ROLES` once, when the server's import first
+loads it. `server.py` imports the ten public names back as the same objects,
+so in-place changes to the table still reach the handler, which reads its
+own module globals. It drops only the unused `APP_CALLER_ROLES` import and
+the four private helper names. There is no forwarding method, mixin,
+callback or reverse import.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/server.py` | 1,410 lines, 11 top-level definitions | 1,261 lines, 7 top-level definitions |
+| `ticket_board/operation_role_policy.py` | absent | 178 lines, 4 functions |
+| Total of these two files | 1,410 lines | 1,439 lines |
+
+The server keeps `TicketBoardHandler.require_operation_allowed` with both
+branches. The declared-workflow branch checks the active actor, then
+transitions, capabilities, the control override by identifying capabilities
+and composed operations. The legacy branch refuses publication, then unknown
+operations, then applies the role table and assignee scoping. The server
+also keeps `EDIT_FIELD_NAMES` and all database authority. All seven retained
+definitions are AST-identical.
+
+For a representative SYRD-133/180/194 admission issue, the table was at
+server lines 58-217, ahead of the build-id helpers. It is now at owner lines
+19-178. The handler starts at server line 150 instead of 299,
+`require_operation_allowed` moved from 559 to 410, and `EDIT_FIELD_NAMES`
+from 223 to 74. Leaving the table in the server keeps 160 import-time lines
+ahead of the handler. Moving `require_operation_allowed` would take handler,
+app and workflow-configuration access across owners. `EDIT_FIELD_NAMES` is a
+different, field-level policy. The 29-line combined increase is the new
+module header and imports.
+
+`server.py` is now 11 lines over the 1,250-line soft limit. As the Director
+directed, no coherent boundary was split to shave those lines; the
+remainder is returned for explicit later review or exception. SYRD-272
+remains open.
+
+**Verification.** The new `ticket_board_operation_role_policy_test.py`
+passes six checks, under `env -i` and in the normal pane environment:
+- alias identity, private names absent from the server, the owner's
+  imports, and the live table owning sets distinct from the defaults;
+- fresh-interpreter imports for defaults (39 operations, no publication
+  entries), role lists with case, spaces and empty items, blank fallbacks,
+  custom caller roles, list and JSON overrides with padding, a leading
+  `;`, newline separators and a trailing `;`;
+- every import refusal text, including the unknown operation "x", JSON
+  values that are not strings or lists, unknown roles, an entry without `=`,
+  `request_publication` not configurable, and malformed JSON;
+- in-place table mutation reaching `require_operation_allowed`;
+- the legacy publication and unknown-operation refusals and assignee
+  scoping;
+- declared-workflow control override, composed `request_dependency` and
+  `release_external_blocker`, and inactive or unknown actors.
+All twenty seeded owner and server mutants fail it. One finding: the parser's
+"must be a JSON object" branch is unreachable, because any value starting
+with `{` decodes to a dict or fails as JSON; `["mark_done"]` is refused as
+a malformed list entry. Behaviour was left unchanged. Under a guard that
+refuses spawns, signals, sockets and host-path opens, sixteen environment
+settings each ran in a fresh interpreter, dumping the policy and the
+handler's legacy and declared admission matrix. They are byte-identical on
+baseline and candidate (SHA-256
+`5797ca5f5a2f31d7fa89a32f2429ade0e2b8ff4595ebfcf1234e07bcaa472153`).
+`ticket-board.py --help` is identical (SHA-256
+`18bc18151ab4da50e14f03ef984e7bde79bcf36438ecb924947b5f7231f805f3`).
+Fifteen existing and new suites pass on this candidate with `TICKET_BOARD_DIRECTORCTL`
+pointed at a recording stub, and there were zero directorctl invocations. They include
+`write_client`, `project_provision`, `declarative_workflow`, the
+2,178-triple `workflow_transition_matrix` and `live_sync`; the same suites
+pass on baseline. `ticket_board_write_api_test` remains baseline red at its
+final `env_widening` check (line 2191, whose child cannot import
+`temporary_cluster`); it fails at the same line on both trees and is not
+claimed as a success.
+No live board, database or socket was touched.

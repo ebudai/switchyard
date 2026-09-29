@@ -21307,3 +21307,172 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 1,857 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-472 (project_provision slice 10): the repository-boundary phase reader
+
+Measured on `b2fd06d`. Before any edit, the "repository group, boundary
+statements and plan paths" group was inspected at this baseline. It is three
+responsibilities with different callers and readers, none calling another:
+- **The repository-boundary phase reader** (SYRD-175): its only reader is
+  `repository_boundary_repair`.
+- **The repository group:** read by `role_account_migration` and the role
+  accounts.
+- **Plan-path helpers:** read by `recovery_readiness` and the operator script.
+
+The reader was proposed as the one closed seam. The Director approved it, with
+the one `PROVISION_MODULES` line.
+
+**The slice:** ten names into a new
+`scripts/ticket_board/provision_repository_boundary.py`:
+- **The fence:** `REPOSITORY_BOUNDARY_BEGIN` and `REPOSITORY_BOUNDARY_END`.
+- **What a line inside it may be:** `REPOSITORY_BOUNDARY_ALLOWED`,
+  `REPOSITORY_BOUNDARY_GUARDS` with `_QUOTED`, `_SHELL_METACHARACTERS`,
+  `_outside_quotes` and `_is_boundary_line`.
+- **The two readers the repair uses:** `repository_boundary_phase` and
+  `repository_boundary_statements`.
+- **Kept on `project_provision`:** `WRITABLE_REPOSITORY_COPY_MODE`, the
+  repository group, the plan-path helpers, and the operator script that writes
+  the fence with the same two markers, now the re-exported names.
+
+| file | before (`b2fd06d`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 1,857 | 1,758 |
+| `scripts/ticket_board/provision_repository_boundary.py` | - | 166 |
+| `tests/provision_repository_boundary_boundary_test.py` | - | 670 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all ten at the end of both
+  branches of `project_provision`'s import block, after the board service
+  import.
+- **Call-time reads:** all 8 reads of 7 names in 3 functions
+  are the slice's own siblings and constants, read as `provision.X` behind the
+  same call-time import and direct-script fallback as the earlier slices.
+- **Patch seams:** `repository_boundary_repair` imports the phase and
+  statements from `project_provision` inside a function, when it runs. So the
+  patches its boundary test makes there still reach it; the new test checks
+  that directly.
+- **Definition time:** `REPOSITORY_BOUNDARY_GUARDS` is compiled when the module
+  loads, from its own `_QUOTED` and its own `re`. That is its only load-time
+  import, and importing it alone loads only its package.
+- **Callers inside `project_provision`:** `render_operator_commands`, writing
+  the fence, reads the re-exported markers as often as before.
+- **Readers:** 1 production module imports names from the slice
+  through `project_provision` (`scripts/repository_boundary_repair.py`: `repository_boundary_phase`, `repository_boundary_statements`), and is byte-identical.
+- **Mover fix:** the phase sat between `WRITABLE_REPOSITORY_COPY_MODE` (with a
+  blank line after it) and `tenant_worktree_base`. The mover took the blank
+  lines after the moved run and left the one above it, so
+  `tenant_worktree_base` would have had one blank line instead of two. A moved
+  run below a kept blank line that takes its trailing blank lines now keeps
+  those and gives up the ones above it. Every kept node keeps the blank lines
+  it had before it on the baseline. The proof states the same rule on the
+  baseline's own lines, and fails without it.
+
+**Proof.** The independent proof (`equiv472.py`, 16 clauses) holds. It
+checks:
+- every whole node, after dropping the one call-time import and reading
+  `provision.X` as X;
+- the six constants, with the guards compiled from `_QUOTED`;
+- that the copy mode, repository group and plan paths stay;
+- the quoting, line, statement and phase rules, in order;
+- `project_provision` as AST and as text;
+- the tests: only the new one and the `PROVISION_MODULES` line changed.
+
+It catches 20 of 20 planted faults, among them:
+- a deploy prefix allowed;
+- a metacharacter dropped;
+- an unbalanced quote accepted;
+- one blank line left above `tenant_worktree_base`.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_repository_boundary_boundary_test.py`,
+  183 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 59 cases produced by the BASELINE module's own
+    definitions (`gold472.py`):
+    - the quoting scan on quoted, unquoted and unbalanced lines;
+    - every kind of line the checker must accept or refuse;
+    - the statements of flat, guarded, nested, unclosed and empty phases;
+    - every packet shape: no fence, a clean phase, a deploy or a second
+      command inside it, the end before the begin, an empty fence and two
+      fences;
+    - the phase of the operator script `project_provision` renders for a
+      synthetic plan, with the board Python pinned.
+  - They also rebind, on `project_provision`, the markers, prefixes, guards,
+    metacharacters and both siblings.
+  - An audited run of the generator under a host-path recorder (positive
+    control caught) logged 0 accesses. The golden output is byte-identical
+    under `env -i`, in the pane, with another HOME, USER and COLUMNS, under
+    umask 077, under three hash seeds, and with another TMPDIR, locale and
+    board Python in the environment.
+  - It checks:
+    - the repair's patch seam;
+    - that the direct script answers what the package answers, with no host
+      path looked at;
+    - that the default, shaped, lean and roles packets are byte-identical
+      through both;
+    - that each packet carries one fenced phase the reader lifts and accepts.
+    Its caller count spans the re-exported modules.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (142 checks).
+- **Fixes before relying on a result:**
+  - Three of the rules I wrote spelled a `setfacl` line or prefix. The
+    execution screen refused to run the test, and I did not override it. The
+    rules now state the same checks from the case text.
+  - One mutant first survived: matching the guards with `search` instead of
+    `match`. With the real, anchored guards it changes nothing. A case with an
+    unanchored guard rebound on `project_provision` now pins that a guard is
+    matched from the start of the line.
+- **Mutations:** 29 of 29 are killed by assertions, with zero guard
+  refusals. The behaviour tests alone kill 25. The structure checks kill the
+  rest (the direct-script fallback dropped, project_provision imported at load, re-export aliased, re-export dropped from the script branch), none of which changes an answer the cases observe.
+- **Every function on the exact trees** (`probe472.py`): 50 cases give
+  one digest on baseline and candidate, in the package and as the direct
+  script, with 0 host paths looked at.
+- **Provisioning smoke on the exact trees** (`smoke472.sh`, board Python
+  pinned): the default, shaped, lean, named-key, control and roles packets,
+  each with the fence. Every artifact and stdout is byte-identical between
+  baseline and candidate, and between modes.
+- **Comparison, both trees, guarded:** all 221 files accounted for.
+  - 136 suites whole, 117 passing on the candidate.
+    The new test runs only there. Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 678 cases, per case, identical: 476 pass, 198 stop at the
+    same guard refusal, and 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`).
+    These are baseline defects already reported.
+  - Excluded 260: 22 drive an upgrade, 233
+    execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 4 of 593 passing runs execute one of the
+    four functions, in 2 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched. Nothing I wrote read
+  or wrote a real home, account, /etc, /var or /opt path. The live snapshot is identical before and after.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The repository-boundary reader is now a 166-line module,
+instead of a slice of the 1,857-line `project_provision.py`. The ten
+`project_provision` slices so far, 3,970 lines between them, are:
+- `provision_github_identity.py` (499 lines);
+- `provision_path_confinement.py` (555);
+- `provision_workflow_projection.py` (447);
+- `provision_workflow_sql.py` (492);
+- `provision_role_tooling.py` (548);
+- `provision_publication_grants.py` (198);
+- `provision_tenant_control.py` (261);
+- `provision_role_accounts.py` (461);
+- `provision_board_service.py` (343);
+- `provision_repository_boundary.py` (166).
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups472.py`):
+
+- root-executable trust (2 definitions, 113 lines)
+- repository group and plan-path helpers (left from the confinement group) (5 definitions, 62 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+1,758 lines after this slice; SYRD-272 is not complete.

@@ -20439,3 +20439,152 @@ The plan model and `build_plan`, the shell and SQL primitives, the refusal and
 its check, the operator command script, artifact writing and the CLI stay as
 `project_provision`'s compatibility surface. `project_provision.py` is
 3,174 lines after this slice; SYRD-272 is not complete.
+
+### SYRD-467 (project_provision slice 5): role tooling staging and system-unit proofs
+
+Measured on `7195730`. Before any edit, the role tooling group from the
+SYRD-463 inventory was inspected at this baseline -- one responsibility, turning
+on the shared staging directory -- and moved in a scratch archive; the Director
+approved it whole, with the one `PROVISION_MODULES` line.
+
+**The slice:** seventeen names into a new
+`scripts/ticket_board/provision_role_tooling.py`:
+- **The staging directory:** `tenant_control_root` (with its override,
+  `TENANT_CONTROL_ROOT_ENV`) and `role_tooling_staging_dir`.
+- **What is staged there:** `ROLE_STAGED_EXECUTABLES` and
+  `RETIRED_STAGED_EXECUTABLES`, the companion modules they import
+  (`entry_point_module_dependencies` with `_script_sibling_modules` and
+  `_imported_names`), the Git template (`GIT_TEMPLATE_DIR_NAME`,
+  `git_template_files`), the commands that stage it
+  (`role_tooling_staging_commands`, `git_template_staging_commands`), and the
+  check of what was staged (`staged_role_tooling_problems`,
+  `_release_marker_commit`).
+- **The system-unit proofs:** `readable_system_unit_path`,
+  `system_unit_proof_commands` and `system_unit_proof_chain`.
+- **Kept on `project_provision`:** `TENANT_CONTROL_ROOT` (the sudoers and
+  publication-grant code builds paths from it), `shell_quote`,
+  `RELEASE_MARKER_NAME`, `SKILLS_DIR_NAME`, `privileged_install` and the callers,
+  all read by the moved code through `project_provision` when it runs.
+- **The one approved guard adaptation:** `PROVISION_MODULES` in
+  `tests/new_project_artifacts_boundary_test.py` gains the new module in its
+  sorted place, one line.
+
+| file | before (`7195730`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 3,174 | 2,747 |
+| `scripts/ticket_board/provision_role_tooling.py` | - | 548 |
+| `tests/provision_role_tooling_boundary_test.py` | - | 747 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all seventeen at the end of
+  both branches of `project_provision`'s import block, after the workflow SQL
+  import.
+- **Call-time reads:** all 69 reads of 19 names in 10 functions are
+  `provision.X` behind the same call-time import and direct-script fallback as
+  the earlier slices -- among them the three names tests patch there
+  (`role_tooling_staging_commands`, `role_tooling_staging_dir`,
+  `staged_role_tooling_problems`), and `entry_point_module_dependencies`' read of
+  `__file__`, now `provision.__file__`, so the dependency scan stays rooted at
+  the scripts directory beside `project_provision` in both modes.
+- **Definition time:** `entry_point_module_dependencies` binds
+  `ROLE_STAGED_EXECUTABLES` as its default; the constant moved with it and the
+  default is the very same object. The module's own imports are `ast`, `json`,
+  `os`, `stat`, `Path` and `Sequence`; importing it alone loads only its
+  package. `tenant_control_root` and `git_template_files` keep their own nested
+  imports.
+- **Readers:** 6 production modules import names from the slice through
+  `project_provision` (`scripts/board_services.py`: `readable_system_unit_path`; `scripts/project_config_json.py`: `GIT_TEMPLATE_DIR_NAME`; `scripts/role_account_migration.py`: `role_tooling_staging_commands`; `scripts/switchyard-install-authority`: `role_tooling_staging_dir`; `scripts/team_launcher.py`: `ROLE_STAGED_EXECUTABLES`, `role_tooling_staging_commands`, `role_tooling_staging_dir`, `staged_role_tooling_problems`; `scripts/tenant_release_report.py`: `readable_system_unit_path`, `system_unit_proof_chain`), and are byte-identical; `team_launcher`'s
+  four module-level imports reach the module's objects.
+- **Mover fix:** a moved constant followed by a moved one with a comment above
+  it now takes the blank lines between them (the mover located the next node at
+  its assignment line, not its comment); `project_provision` keeps its
+  two-blank-line layout, and the proof states the rule independently.
+
+**Proof.** The independent proof (`equiv467.py`, 15 clauses) holds: every
+whole node after dropping the one call-time import and reading `provision.X` as
+X, `__file__` included; the default bound at definition; the staging, proof
+and staged-bundle rules in order; `project_provision` as AST and text; and the
+tests -- only the new one and the `PROVISION_MODULES` line. 20 of 20
+planted faults are caught, among them the scan rooted at the module's own file,
+`TENANT_CONTROL_ROOT` defined in the module and `switchyard-install-authority`
+edited.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_role_tooling_boundary_test.py`,
+  200 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 53 cases produced by the BASELINE module's own
+    definitions (`gold467.py`): the control-root override, the staging and
+    proof commands, imports and dependencies over a synthetic scripts tree,
+    the release marker, the Git template, and the staged-bundle check against
+    a synthetic release and staging directory, complete and with each defect
+    it reports.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds and
+    with another TMPDIR, locale and control root in the environment.
+  - It checks `team_launcher`'s four imports, the default's identity and the
+    scan root, that the direct script stages what the package stages, and
+    that the default, shaped and lean packets are byte-identical through both.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (131 checks).
+- **Fixes before relying on a result:**
+  - The first staged-bundle cases barely exercised the check; a synthetic
+    release and staging directory now cover the complete bundle and each
+    defect it reports.
+  - An owner-mismatch message carried this account's uid; the recorder
+    normalizes it, so the record is the same for any user.
+  - Two mutants survived the first cases, both gaps: no relative import with a
+    module name and no dotted import in the synthetic tree. Both are now in
+    it.
+- **Mutations:** 37 of 37 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 33; the structure checks kill the
+  rest (the direct-script fallback dropped, project_provision imported at load, re-export aliased, re-export dropped from the script branch).
+- **Every function on the exact trees** (`probe467.py`): 26 cases -- the
+  staging and proof commands, the staged-bundle check, the dependencies, the
+  template, the release marker and the control-root override -- have one digest
+  on baseline and candidate, in the package and as the direct script.
+- **Provisioning smoke on the exact trees** (`smoke467.sh`): the default,
+  shaped, lean and named-key packets through the direct script and the
+  wrapper; every artifact, the staging commands included, and stdout byte-identical
+  between baseline and candidate, and between modes.
+- **Comparison, both trees, guarded:** all 217 files accounted for.
+  - 131 suites whole, 112 passing on the candidate (the new test only
+    there; the adapted guard passes on the candidate, its original on the
+    baseline). Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 701 cases, per case, identical: 486 pass, 211 stop at the same
+    guard refusal, 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`), baseline
+    defects already reported.
+  - Excluded 266: 22 drive an upgrade, 239 execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 94 of 598 passing runs execute one of the
+    thirteen functions, in 32 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and no real home was
+  read. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The role tooling a reader opens is now a 548-line module,
+instead of a slice of the 3,174-line `project_provision.py`. The five
+`project_provision` slices so far are `provision_github_identity.py` (499
+lines), `provision_path_confinement.py` (555),
+`provision_workflow_projection.py` (447), `provision_workflow_sql.py`
+(492) and `provision_role_tooling.py` (548), 2,541 lines between
+them.
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups467.py`):
+
+- sudoers, tenant control and publication grants (22 definitions, 373 lines)
+- role accounts and role runtime commands (10 definitions, 272 lines)
+- systemd units, tmpfiles, polkit and database SQL (11 definitions, 260 lines)
+- repository group, boundary statements and plan paths (left from the confinement group) (9 definitions, 142 lines)
+- root-executable trust (2 definitions, 113 lines)
+- the workflow record (left from the workflow group) (3 definitions, 60 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+2,747 lines after this slice; SYRD-272 is not complete.

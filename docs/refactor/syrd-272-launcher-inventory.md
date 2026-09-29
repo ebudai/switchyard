@@ -19971,3 +19971,177 @@ The plan model and `build_plan`, the shell and SQL primitives, the operator
 command script, artifact writing and the CLI stay as `project_provision`'s
 compatibility surface. `project_provision.py` is 4,344 lines after this slice;
 SYRD-272 is not complete.
+
+### SYRD-464 (project_provision slice 2): path containment and confinement commands
+
+Measured on `104bf2c`. Before any edit, the "path containment, repository and
+worktree confinement" group from the SYRD-463 inventory was inspected at the
+new baseline, two closures were measured in scratch archives, and the Director
+approved the narrower one (option B) with one guard line.
+
+**The group was not one responsibility.** Of its 27 top-level names, 9 read
+none of the confinement code: the repository group, the boundary-statement
+parser, the plan path resolvers and a plan-driven directory command. They stay.
+The rest is one closed responsibility, and sixteen of its names moved:
+- **The containment checks:** `_is_within` (by path components, not by string
+  prefix), `_refuse_prefix_coincidence` and `_interior_directories`.
+- **The confinement commands built on them:** the owner-home traversal, the
+  source tree, the commit store, repository copies, worktrees, the retired
+  socket group, role worktrees and the director's control directory.
+- **Their four modes:** `TENANT_SOURCE_MODE`, `INHERITED_WORKTREE_CLOSURE`,
+  `REPOSITORY_COPY_MODE` and `INTERIOR_DIRECTORY_MODE`.
+- **`owned_ancestor_dirs`.**
+- **Where they went:** a new `scripts/ticket_board/provision_path_confinement.py`.
+- **Kept on `project_provision` (option B):** the refusal
+  (`PathContainmentError`) and its normal-form check (`_refuse_unnormalized`).
+  The GitHub identity module reads both there, `role_account_migration` catches
+  the refusal and `runtime_artifact_refresh` imports it, so the refusal keeps
+  its module (`scripts.ticket_board.project_provision`) and SYRD-463's test is
+  unchanged. Also kept: `shell_quote` and the two callers,
+  `render_operator_commands` and `role_account_commands`.
+- **The one approved guard adaptation:** `PROVISION_MODULES` in
+  `tests/new_project_artifacts_boundary_test.py` gains the new module, one line,
+  as SYRD-463 said every re-exporting slice would need. Option A (all eighteen)
+  would also have changed SYRD-463's test and the refusal's module; it was not
+  taken.
+
+| file | before (`104bf2c`) | after |
+|---|---|---|
+| `scripts/ticket_board/project_provision.py` | 4,344 | 3,908 |
+| `scripts/ticket_board/provision_path_confinement.py` | - | 555 |
+| `tests/provision_path_confinement_boundary_test.py` | - | 795 |
+| `tests/new_project_artifacts_boundary_test.py` | 567 | 567 |
+
+**Placement:**
+- **Re-export:** one explicit, unaliased import of all sixteen at the end of
+  both branches of `project_provision`'s import block, after the GitHub identity
+  import.
+- **Call-time reads:** all 79 reads of 12 names in 10 functions are
+  `provision.X`, behind the same call-time import and direct-script fallback as
+  SYRD-463. That covers the siblings, the four modes, `shell_quote`, the refusal
+  and its check. The module's own imports are `PurePosixPath` and `Sequence`;
+  importing it alone loads only its package. No default is a name.
+- **Readers:** 2 production modules import names from the slice through
+  `project_provision` inside functions (`scripts/owner_preparation.py`: `TENANT_SOURCE_MODE`, `owned_ancestor_dirs`; `scripts/role_account_migration.py`: `commit_store_read_commands`, `director_control_access_commands`, `repository_copy_confinement_commands`, `role_worktree_access_commands`, `tenant_source_confinement_commands`), and are byte-identical.
+  No test patched a moved name there.
+
+**A refusal keeps its class, message and exit status.** Measured on the exact
+candidate with `refusal464.sh`, driving the provisioning CLI into a refusal,
+under the guard:
+
+| input | mode | baseline | candidate |
+|---|---|---|---|
+| home | direct script | `project_provision.PathContainmentError` | `project_provision.PathContainmentError` |
+| home | wrapper | `scripts.ticket_board.project_provision.PathContainmentError` | `scripts.ticket_board.project_provision.PathContainmentError` |
+| store | direct script | `PathContainmentError` | `project_provision.PathContainmentError` |
+| store | wrapper | `scripts.ticket_board.project_provision.PathContainmentError` | `scripts.ticket_board.project_provision.PathContainmentError` |
+
+- **Package (the installed wrapper):** unchanged. The moved code raises
+  `project_provision`'s own class, and the new test pins its identity.
+- **Direct script:** the message and the exit status are unchanged. The class
+  name printed on the last traceback line is now qualified,
+  `project_provision.PathContainmentError`, where the baseline printed
+  `PathContainmentError`. The moved code reaches `project_provision` through
+  the fallback import, a second module object beside `__main__`. The new test
+  pins both printed names (`REFUSAL_PRINTED`).
+- **Nothing reads the printed name:** no production code runs the script or
+  the wrapper by path, nothing in `project_provision` catches the refusal by
+  identity (`main` and the others catch `ValueError`, its base), and no file in
+  `scripts/` or `tests/` contains `PathContainmentError:`.
+- **Correction to SYRD-463:** the GitHub identity refusals already print the
+  qualified name in direct-script mode (the `home` row). The same probe on
+  SYRD-463's baseline `cd18475` printed `PathContainmentError`, so SYRD-463 changed
+  it; its packet did not measure this.
+
+**Proof.** The independent proof (`equiv464.py`, 15 clauses) holds.
+- **Whole nodes:** it compares every whole node after dropping the one
+  call-time import block and reading `provision.X` as X. It also compares
+  `project_provision` as AST (its import block less exactly the re-export) and
+  as text.
+- **Rules:** its rules clause fixes, in order, containment and its
+  `ValueError`, the prefix refusal, the interior directories, and every
+  confinement command, grant, mode and guard.
+- **Tests:** its clauses 6b and 6c require that the only changed tests are the
+  new one and the approved guard, and that the guard is its baseline text with
+  exactly that name added.
+- **Planted faults:** 22 of 22 are caught. They include a dropped
+  direct-script fallback, a re-export in only one branch, the refusal class
+  redefined in the module and SYRD-463's test touched.
+
+**Evidence.**
+- **New boundary test:** `tests/provision_path_confinement_boundary_test.py`,
+  255 checks, gated on its screen and passing both under `env -i` and in
+  this role pane.
+  - It replays 83 cases produced by the BASELINE module's own
+    definitions (`gold464.py`) over synthetic POSIX paths; nothing is created,
+    read or run.
+  - The golden output is byte-identical under `env -i`, in the pane, with
+    another HOME, USER and COLUMNS, under umask 077, under three hash seeds and
+    with another TMPDIR and locale.
+  - It renders one synthetic packet through the direct script and through
+    the package, and requires the two to be byte-identical and to carry the
+    moved confinement lines.
+  - It drives both programs into a refusal, as above.
+  - Its 3 behaviour cases also pass against the baseline's own
+    definitions (195 checks).
+- **Fixes before relying on a result:**
+  - One case label claimed a refusal that the baseline does not make: a
+    trailing-slash root does not share its prefix with a sibling path, so
+    nothing is refused. The label was corrected before the golden record was
+    regenerated.
+  - The execution screen flagged literal ACL commands in two test bodies. The
+    expected text now comes from module-level constants (`ACL`,
+    `PACKET_CONFINEMENT`); the screen was not changed.
+  - One mutant was equivalent: turning `_is_within`'s `except ValueError`
+    answer to True. On this Python (3.14) `is_relative_to` never raises
+    `ValueError`, so that branch cannot run. It was replaced by a real mutant
+    (a path not inside itself), which is killed. The `except` itself is the
+    baseline's and is unchanged.
+- **Mutations:** 44 of 44 are killed by assertions with zero guard
+  refusals. The behaviour tests alone kill 39; the structure checks kill the
+  rest (the direct-script fallback dropped, a mode read bare, project_provision imported at load, re-export aliased, re-export dropped from the script branch).
+- **Provisioning smoke on the exact trees** (`smoke464.sh`, synthetic owner
+  home, source and output under /tmp, under the guard):
+  - A default packet through the direct script and the wrapper.
+  - A named-key packet through the script-mode fallback and the package.
+  - Every artifact and stdout is byte-identical between baseline and
+    candidate, and between modes.
+- **Comparison, both trees, guarded:** all 213 files accounted for.
+  - 128 suites whole, 109 passing on the candidate (the new test only
+    there; the adapted guard passes on the candidate, its original on the
+    baseline). Identical non-passes: `desktop_policy_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `director_upgrade_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `first_run_setup_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `legacy_presentation_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `legacy_workflow_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `no_code_mark_done_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `presentation_layout_files_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `project_desktop_boundary_test.py` (AssertionError: prepare_project_desktop is called at its 6 baseline sites: by the launcher); `project_worktrees_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_account_migration_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwnam refused); `role_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `ticket_board_deploy_smoke_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['/usr/sbin/python3', '<R>/scripts/t); `ticket_board_project_workflow_provision_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_resumed_workflow_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_signoff_field_boundary_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `ticket_board_tenant_identity_browser_test.py` (Refused: [Errno 1] execution guard: spawn of ['git', '-C'] refused); `ticket_board_workflow_config_equivalence_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused); `worker_pool_command_boundary_test.py` (Refused: [Errno 1] execution guard: pwd.getpwuid refused); `workflow_seed_replay_test.py` (Refused: [Errno 1] execution guard: spawn of ['initdb', '-D'] refused).
+  - 678 cases, per case, identical: 476 pass, 198 stop at the same
+    guard refusal, 4 fail identically (`desktop_presentation_boundary_test::test_the_patched_seams_are_reached_through_the_launcher`; `presentation_windows_boundary_test::test_the_entry_points_are_reached_through_the_launcher`; `role_control_sudoers_install_test::test_fresh_provisioning_grants_a_shared_account_project_nothing`; `single_owner_staged_tooling_test::test_the_new_flow_checks_before_it_opens_any_window`), baseline
+    defects already reported.
+  - Excluded 260: 22 drive an upgrade, 233 execution screen, 5 accumulators.
+  - Not run: legacy_release_root_repair_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); legacy_root_owned_provision_upgrade_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); migrate_workflow_installed_release_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv, unshare); privileged_plan_read_no_follow_test.py: a main()-style suite whose whole-suite execution screen hits (unshare); publication_boundary_upgrade_privileged.py: a main()-style suite whose whole-suite execution screen hits (/proc, sudo); team_launcher_adopt_registry_config_test.py: a main()-style suite whose whole-suite execution screen hits (privileged-child, unshare); team_launcher_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (konsole, unshare); tenant_control_bridge_e2e_test.py: a case-style suite (12 case_* functions driven by its main()) whose whole-suite execution screen hits (unshare); ticket_board_declarative_workflow_test.py: a main()-style suite whose whole-suite execution screen hits (tmux argv).
+  - Call profiler: 39 of 585 passing runs execute one of the
+    twelve functions, in 18 files.
+- **Containment:** no project, tenant, service, provider, pane, desktop, board,
+  database, account, repository or release was touched, and no real home was
+  read. The live snapshot differs only in this pane's own board-notification listener log.
+  Both launcher entry points' help is identical (36 `switchyard`
+  invocations plus `team-launcher --help`, 163 lines).
+
+**Navigation.** The confinement code a reader opens is now a 555-line module,
+instead of a slice of the 4,344-line `project_provision.py`. The two
+`project_provision` slices so far are `provision_github_identity.py` (499
+lines) and `provision_path_confinement.py` (555), 1,054 lines
+between them.
+
+**The remaining `project_provision` sequence** (each slice with the same rooted
+inventory and a pre-edit decision; definition sizes at this candidate,
+`ppgroups464.py`):
+
+- workflow projection, workflow SQL and the workflow record (28 definitions, 799 lines)
+- role tooling staging and system-unit proofs (13 definitions, 377 lines)
+- sudoers, tenant control and publication grants (22 definitions, 373 lines)
+- role accounts and role runtime commands (10 definitions, 272 lines)
+- systemd units, tmpfiles, polkit and database SQL (11 definitions, 260 lines)
+- repository group, boundary statements and plan paths (left from the confinement group) (9 definitions, 142 lines)
+- root-executable trust (2 definitions, 113 lines)
+
+The plan model and `build_plan`, the shell and SQL primitives, the refusal and
+its check, the operator command script, artifact writing and the CLI stay as
+`project_provision`'s compatibility surface. `project_provision.py` is
+3,908 lines after this slice; SYRD-272 is not complete.

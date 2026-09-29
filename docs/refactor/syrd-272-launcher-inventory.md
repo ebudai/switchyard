@@ -23334,3 +23334,74 @@ operator_wait and lifecycle_reservation pass on both. publication_proof
 (predates refresh-on-miss) are red on baseline at the same lines. Seventy-five
 retained methods are AST-identical. No live board, network, service,
 database or host repository was touched.
+
+### SYRD-503 (ticket_board/server.py slice 1): local peer authority
+
+The Director approved the peer-authority boundary before the ticket worktree
+was edited, from audited public main
+`cbc0a7df9b59fce6d3e5b51d7e3a9511450b7cb2`.
+`ticket_board/local_peer_authority.py` now owns the Unix socket's local peer
+identity and role authority. That is `SO_PEERCRED_FORMAT`, `PANE_SOCKET_MODE`,
+`PeerCredentials`, `RoleAccount`, `CallerIdentityError`,
+`ProcessRoleAuthority`, `LocalRoleAuthority`, `peer_credentials`,
+`restrict_socket_to_tenant` and `allowed_peer_uids`, moved verbatim; every
+definition's AST is identical. The owner imports stdlib and `peer_identity`,
+and names `TicketBoardApp` only under `TYPE_CHECKING`. It logs under the
+server's logger name, `scripts.ticket_board.server` in the repository and
+`ticket_board.server` in an installed release, where operators and tests have
+always found these refusals. `server.py` imports all ten names back as
+identical aliases and drops its unused `grp`, `pwd`, `struct` and `dataclass`
+imports. There is no forwarding method, mixin, callback or reverse import.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/server.py` | 1,900 lines, 23 top-level definitions | 1,575 lines, 15 top-level definitions |
+| `ticket_board/local_peer_authority.py` | absent | 360 lines, 8 definitions |
+| Total of these two files | 1,900 lines | 1,935 lines |
+
+The server keeps every decision about when these checks run: the handler's
+`setup` and `require_allowed_peer` (credentials first, then allowed uids
+joined with the authority's uids, then the refusal), `caller_role`,
+`handle_register_caller`, token and operation checks, and
+`TicketBoardUnixServer`'s authority choice, `chmod` and
+`restrict_socket_to_tenant` order. All fifteen retained definitions are
+AST-identical.
+
+For a representative SYRD-39/93 caller-identity issue, the authority block
+was at server lines 47-51 and 291-617, between the build-id helpers and the
+notifier. It is now at owner lines 28-360. The handler now starts at server
+line 464: `require_allowed_peer` moved from 804 to 479, and
+`handle_register_caller` from 992 to 667. Leaving the server intact keeps 327
+lines of identity policy ahead of the handler. Splitting socket ownership
+from the role tables would leave `require_allowed_peer` reading two thin
+owners. Moving the handler's request, token and action code would need a
+mixin or callbacks over request and server state. The 35-line combined
+increase is the new module header, imports and the logger line. `server.py`
+remains above the 1,250-line soft limit; SYRD-272 remains open.
+
+**Verification.** The new `ticket_board_local_peer_authority_test.py` passes
+seven checks with temporary paths, a socketpair and fake accounts:
+- identical aliases, the owner's imports, and the logger name in both the
+  repository and installed-package import modes;
+- fail-closed tables for shared, unresolved and malformed accounts, with
+  their log lines;
+- process authority refusing another uid, a missing or dead session and an
+  unassigned pane, asking the database only for a live pane;
+- kernel `SO_PEERCRED`;
+- tenant-group socket modes, unset and unknown groups, per-target chown
+  failures and a not-yet-created socket;
+- allowed uids;
+- `require_allowed_peer` checking credentials before reading allowed uids.
+Of twenty-six seeded mutants, twenty-four fail it. The two survivors remove
+redundant normalizations: a lowercase that `__init__` repeats, and a pop that
+unique role names never reach. Under a guard that refuses spawns, signals,
+socket connect/bind and host-path opens, a 35-case trace (11 refusals, 41 log
+records with logger names) is byte-identical on baseline and candidate
+(SHA-256 `0cdd1a8fd504e674d0c628d461d40212a2da8eca9ac8f8ca43b344113c63cc18`).
+`ticket-board.py --help` is identical (SHA-256
+`00e2961c3bd25bd21dc25aa78a8fb7189b4f1d8ddba44fd4fba2f34336cf5da7`). The app
+surface is identical; the server namespace drops only unused imports. Nine
+existing suites pass on both trees. `ticket_board_write_api_test` is red on
+baseline at its final check, whose child cannot import `temporary_cluster`,
+and fails at the same line on both. No live socket, service, account or
+database was touched.

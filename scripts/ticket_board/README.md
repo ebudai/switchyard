@@ -62,6 +62,14 @@ Pane write API:
   launcher exports this variable for each role, so `pgu-main`, `pgu-app`, and
   `pgu-ops` write as `main`, `app`, and `ops` by default. Pass `--caller-role`
   when deliberately acting as a different board role.
+- `write_client.py` owns the client: endpoint resolution, the test-process
+  write guard, transport, commit-provenance checks and one method per board
+  action. `write_cli.py` owns the `ticket-board-write` command line: its
+  parser, the `--<name>-file` / `--<name> -` free-text forms, and the dispatch
+  from a subcommand to one client call. `write_client.main` forwards to it, so
+  the installed wrapper and `python write_client.py` are unchanged. The CLI
+  reads everything it takes from the client through the `write_client` module
+  at call time, so a patch on `write_client` is still observed.
 - Tenant projects may file cross-cutting defects or feature requests upstream
   through the report-only HTTP action `POST /api/tickets/actions/file_report`
   using `X-Ticket-Board-Report-Token`. `ticket-board-write file-report` sends

@@ -34,6 +34,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
 from scripts.ticket_board import write_client as wc
+from scripts.ticket_board import write_cli
 from temporary_cluster import temporary_cluster
 
 #: Everything that has ever gone wrong in a shell, in one comment body. The
@@ -70,20 +71,20 @@ def resolve(argv: list[str]):
     what SYRD-196 changed, and then writes through a client pinned to the
     disposable board with the socket path explicitly disabled.
     """
-    parser = wc._build_parser()
+    parser = write_cli._build_parser()
     args = parser.parse_args(argv)
-    wc.resolve_free_text_arguments(args, parser)
+    write_cli.resolve_free_text_arguments(args, parser)
     return args
 
 
 def resolve_error(argv: list[str]) -> str:
     """The message argparse would print, without exiting the test."""
-    parser = wc._build_parser()
+    parser = write_cli._build_parser()
     buffer = io.StringIO()
     try:
         with contextlib.redirect_stderr(buffer):
             args = parser.parse_args(argv)
-            wc.resolve_free_text_arguments(args, parser)
+            write_cli.resolve_free_text_arguments(args, parser)
     except SystemExit:
         return buffer.getvalue()
     return ""
@@ -223,7 +224,7 @@ def main() -> int:
                 checks += 5
 
                 # 8. Every free-text option registered by the helper has both forms.
-                parser = wc._build_parser()
+                parser = write_cli._build_parser()
                 registered = 0
                 for action in parser._subparsers._group_actions[0].choices.values():
                     for flag, dest, _req, _default in getattr(action, "_free_text_fields", ()):

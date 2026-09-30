@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.ticket_board import write_cli
 from scripts.ticket_board import write_client as write_client_module
 from scripts.ticket_board.server import (
     CALLER_ROLE_HEADER,
@@ -180,7 +181,7 @@ def request_pairs(requests: list[tuple[str, str | None, str | None, dict[str, ob
 
 
 def cli_subcommands() -> set[str]:
-    parser = write_client_module._build_parser()
+    parser = write_cli._build_parser()
     for action in parser._actions:
         choices = getattr(action, "choices", None)
         if choices:

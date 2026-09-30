@@ -23864,3 +23864,95 @@ six Playwright-dependent tests (`ticket_board_ui_audit_test`,
 `mobile_collapsible_sections_test`) are unavailable without a browser and
 were not run; they fail identically on baseline and candidate and are not
 reported as passing. No live board or browser session was used.
+
+### SYRD-515 (ticket_board/write_client.py slice 1): the `ticket-board-write` command line
+
+The Director approved the CLI boundary before the ticket worktree was edited,
+from audited public main `6a3ea3891646631fd9d4b0e632210d73bcf40267`, and
+chose the compatibility options listed below. `ticket_board/write_cli.py` now
+owns the command line: `_ticket_from_response`, the free-text forms
+(`FREE_TEXT_STDIN`, `add_free_text_argument`, `_read_text_stream`,
+`_read_free_text`, `resolve_free_text_arguments`), `_build_parser` with its 44
+subcommands, and the `main` dispatch. These were `write_client.py` lines
+1026-1604 and are now `write_cli.py` lines 22-600, moved verbatim. The only
+edit is 14 references rewritten to `write_client.<name>`. The CLI takes 10
+names from the client (`TicketBoardWriteClient`, `TicketBoardWriteError`,
+`resolve_endpoint`, `default_caller_role` and six `DEFAULT_*` values) and
+reads each through the module at call time, so rebinding them on either
+package name (`ticket_board.write_client`, `scripts.ticket_board.write_client`)
+still reaches `main()` and `--help`. The client defines nothing the CLI owns.
+
+Two other seams were measured and rejected. Endpoint, transport and test
+guard (lines 18-415) are the names tests rebind on `write_client`, and moving
+them would either create an import cycle or break patch observation. Splitting
+the action methods would turn the client class into a method bag.
+
+Compatibility: `write_client` keeps only an 8-line lazy `main(argv)` that
+forwards to `write_cli.main`. Importing `write_client` does not load
+`write_cli`. The installed wrapper `scripts/ticket-board-write` is
+byte-identical, and `python scripts/ticket_board/write_client.py` still works
+through the `except ImportError` fallback that `legacy_workflow.py` uses. No
+private CLI helper is re-exported, so six test sites in
+`write_client_free_text_test.py` and `ticket_board_write_client_test.py` now
+import `write_cli`, with their assertions unchanged. Role tooling stages
+`scripts/ticket_board` with `cp -a` of the whole directory, so `write_cli.py`
+ships with it. `entry_point_module_dependencies` is `('board_skill_cli',)` on
+both trees. Endpoint, transport, authority, payloads and token handling are
+untouched.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/write_client.py` | 1,608 lines | 1,035 lines |
+| `ticket_board/write_cli.py` | absent | 600 lines |
+| Total of these two files | 1,608 lines | 1,635 lines |
+
+The 27-line increase is the new module's docstring and imports plus the
+forwarder. `write_client.py` is now 215 lines under the 1,250-line advisory
+limit.
+
+Navigation:
+- For `--body-file` / `--body -` handling, the code moved from client lines
+  1051-1138, inside the 1,608-line client, to `write_cli.py` 44-134.
+- For what `submit-to-audit` sends, the dispatch moved from line 1525 to
+  `write_cli.py` 521. It then calls `write_client.py` 838 (`submit_to_audit`)
+  and 603 (the push check).
+- Endpoint choice stays with the class that uses it: `resolve_endpoint` is at
+  `write_client.py` 151 and `_default_socket_path` at 100.
+
+**Verification.**
+- **Pre-edit matrix.** Everything ran offline behind a guard that records
+  `urlopen`, refuses sockets, fakes git only and refuses `Popen`. It covered
+  120 cases across 3 entry points (the wrapper, the package-imported `main`,
+  and direct `write_client.py`), which is 360 runs per tree, and all 360 were
+  identical: exit code, stdout, stderr, and the ordered records of 153 HTTP
+  requests, 18 git calls and 9 socket attempts. Two planted faults produced
+  exactly their 6 differences.
+- **New test.** `tests/write_cli_entry_points_test.py` drives four entry
+  points against a local recording board over an explicit 127.0.0.1
+  `--board-url`: the wrapper, direct execution, a staged copy of the wrapper
+  beside a copy of `ticket_board/`, and package `main`. It asserts exact
+  requests for free text from a file and from stdin, override-move, typed
+  director-edit values and merge output. It also asserts exact refusals for a
+  missing caller role, a malformed `--set` or `--json` and empty required
+  text, and that the four entries agree up to argparse's program name. A
+  second check rebinds client names under both package names: the original
+  client's post methods raise, the rebound names must be observed, the
+  library's exception class must be caught, and `write_cli` must not load
+  early. Its 36 entry-point cases also pass on the baseline; the rebinding
+  check fails there, because `write_cli` does not exist yet.
+- **Mutants.** All 16 seeded mutants are killed: import-time binding of the
+  class, write token, caller-role default or resolver; an eager or
+  argv-dropping forwarder; either script fallback removed; the wrong
+  exception caught; stripped file or stdin text; inverted notify; unwrapped
+  merge output; a socket never disabled; a role required for file-report;
+  and director-edit booleans left as text.
+- **Existing suites.** Under `env -i`, these pass on baseline and candidate
+  with identical counts: `ticket_board_write_client_test`,
+  `write_client_free_text_test` (37), `endpoint_authority_test` (54; run with
+  its live-tenant GETs refused and logged, so it saw no tenant),
+  `external_blocker_test` (33), `ticket_board_director_reassign_test`, and
+  `ticket_board_held_review_reconcile_postgres_test` (45, including the direct
+  `write_client.py --help`). The suite runner lists the new test in the
+  board-adjacent group.
+
+No live tenant, board, socket, service or release was used or changed.

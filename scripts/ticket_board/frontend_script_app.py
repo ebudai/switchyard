@@ -268,7 +268,6 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       const payload = {
         title: titleInput.value,
         body: bodyInput.value,
-        assignee: assigneeInput.value,
         initial_state: createDraftInput.checked ? 'draft' : (createBacklogInput.checked ? 'backlog' : 'analysis'),
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
@@ -277,6 +276,10 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         needs_audit: needsAuditInput.checked,
         regression: createRegressionInput.checked,
       };
+      // A draft takes no assignee: the board places it (SYRD-521).
+      if (!createDraftInput.checked) {
+        payload.assignee = assigneeInput.value;
+      }
       const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
       titleInput.value = '';
       bodyInput.value = '';

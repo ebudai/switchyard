@@ -286,7 +286,9 @@ def test_the_way_back_is_written_down_before_anything_is_replaced() -> None:
             json.dumps({"commit": "a" * 40}), encoding="utf-8"
         )
         os.symlink(previous, install_root / "current")
-        staged = root / "staged"
+        # Where the upgrade reads it: <staging root>/<project>. Named "staged"
+        # it was never read, and the note's staged commit was always empty.
+        staged = root / "demo"
         staged.mkdir()
         (staged / team_launcher.SWITCHYARD_RELEASE_MARKER_NAME).write_text(
             json.dumps({"commit": "a" * 40}), encoding="utf-8"
@@ -334,10 +336,12 @@ def test_the_way_back_is_written_down_before_anything_is_replaced() -> None:
         again = json.loads(team_launcher.release_rollback_path("demo").read_text())
         assert again["previous_release_commit"] == "a" * 40, again
 
-        # And it renders the exact way back, through the reviewed upgrade path.
+        # And it renders the tenant's way back: its own earlier release, through
+        # the admin-authenticated action -- never the host's shared pointer,
+        # which a tenant upgrade does not move (SYRD-528).
         commands = team_launcher.release_rollback_commands("demo", publish_remote="git@host:repo")
-        assert any(str(previous) in line and "ln -sfn" in line for line in commands), commands
-        assert any("switchyard upgrade demo" in line and "a" * 40 in line for line in commands), commands
+        assert not any("ln -sfn" in line for line in commands), commands
+        assert f"switchyard privileged-action demo select-shared-release commit={'a' * 40}" in commands, commands
 
 
 def test_nothing_in_the_path_gives_the_shared_key_write_authority_back() -> None:

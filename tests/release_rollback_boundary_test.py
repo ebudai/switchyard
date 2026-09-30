@@ -60,11 +60,15 @@ MOVED = ("RELEASE_ROLLBACK_SCHEMA", "release_rollback_path", "record_release_rol
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
     'release_rollback_path': {'privileged_provision_dir': 1, 'switchyard_privileged_provision_root': 1},
-    'record_release_rollback': {'RELEASE_ROLLBACK_SCHEMA': 1, 'SWITCHYARD_RELEASE_MARKER_NAME': 1, '_staged_tooling_dir': 1, '_write_private_json_atomic': 1, 'ensure_privileged_provision_dir': 1, 'privileged_artifact_mode': 1, 'release_rollback_path': 1, 'shared_switchyard_release_for_path': 1, 'switchyard_shared_install_root': 1},
+    'record_release_rollback': {'RELEASE_ROLLBACK_SCHEMA': 1, 'SWITCHYARD_RELEASE_MARKER_NAME': 1, '_staged_tooling_dir': 1, '_write_private_json_atomic': 1, 'ensure_privileged_provision_dir': 1, 'privileged_artifact_mode': 1, 'release_rollback_path': 1, 'shared_switchyard_release_for_path': 1, 'switchyard_shared_install_root': 1,
+                                # SYRD-528: the tenant's deployed board build, read through the launcher.
+                                '_tenant_board_root_from_config_or_plan': 1, '_current_tenant_release': 1},
     'record_publication_remote': {'_write_publication_remote': 1, 'switchyard_privileged_provision_root': 1},
     '_write_publication_remote': {'ensure_privileged_provision_dir': 1},
     'restore_publication_remote': {'_write_publication_remote': 1, 'switchyard_privileged_provision_root': 1},
-    'release_rollback_commands': {'RELEASE_ROLLBACK_SCHEMA': 1, 'release_rollback_path': 1, 'switchyard_shared_install_root': 1},
+    # SYRD-528: the way back is the tenant's own release, named only when root holds it.
+    'release_rollback_commands': {'RELEASE_ROLLBACK_SCHEMA': 1, 'release_rollback_path': 1, 'switchyard_shared_install_root': 1,
+                                  '_read_switchyard_release_marker': 1},
 }
 #: Every seam name a stand-in on the launcher has been shown to reach; checked last.
 REACHED: set[str] = set()
@@ -261,6 +265,8 @@ class Host:
             _write_private_json_atomic=seam("_write_private_json_atomic", self.write),
             privileged_artifact_mode=seam("privileged_artifact_mode", lambda name: 0o640),
             RELEASE_ROLLBACK_SCHEMA="syrd378.rollback",
+            _tenant_board_root_from_config_or_plan=seam("_tenant_board_root_from_config_or_plan", lambda config: self.base / "board"),
+            _current_tenant_release=seam("_current_tenant_release", lambda root: (root / "releases" / "b1", "board-old")),
         )
         values.update(over)
         return values
@@ -284,7 +290,8 @@ def test_the_way_back_is_written_before_anything_is_replaced() -> None:
         note = json.loads(host.note.read_text())
         check(result == [] and {k: v for k, v in note.items() if k != "recorded_at"} == {
             "schema": "syrd378.rollback", "project": "p378", "upgrading_to": "new", "previous_release_root": str(host.opt / "releases" / "old"),
-            "previous_release_commit": "commit-of-old", "previous_staged_commit": "staged-old"}, f"what the host was whole on: {note}")
+            "previous_release_commit": "commit-of-old", "previous_staged_commit": "staged-old",
+            "previous_board_commit": "board-old"}, f"what the host was whole on: {note}")
         at = datetime.fromisoformat(note["recorded_at"])
         check(at.utcoffset() == timezone.utc.utcoffset(None), "stamped in UTC")
         check(stat.S_IMODE(host.note.stat().st_mode) == 0o640 and said == [f"switchyard: recorded the way back for p378 in {host.note}: commit-of-old"],
@@ -448,23 +455,43 @@ def test_the_pin_is_put_back_as_it_was() -> None:
 
 
 def test_the_way_back_as_commands() -> None:
+    old, new, host = "a" * 40, "c" * 40, "b" * 40
     with tempfile.TemporaryDirectory() as tmp:
         note = Path(tmp) / "release-rollback.json"
-        with patched(t, release_rollback_path=lambda project: note, switchyard_shared_install_root=lambda: Path(tmp) / "opt dir",
+        opt = Path(tmp) / "opt dir"
+        held: dict[str, str] = {}
+        with patched(t, release_rollback_path=lambda project: note,
+                     switchyard_shared_install_root=seam("switchyard_shared_install_root", lambda: opt),
+                     _read_switchyard_release_marker=seam(
+                         "_read_switchyard_release_marker",
+                         lambda path: SimpleNamespace(marker_commit=held[path.name]) if path.name in held else None),
                      RELEASE_ROLLBACK_SCHEMA="syrd378.rollback"):
             check(m.release_rollback_commands("p378") == [], "no note: nothing to say")
-            for bad in ("{", json.dumps({"schema": "other", "previous_release_root": "/r", "previous_release_commit": "c"}),
-                        json.dumps({"schema": "syrd378.rollback", "previous_release_root": "", "previous_release_commit": "c"}),
-                        json.dumps({"schema": "syrd378.rollback", "previous_release_root": "/r", "previous_release_commit": ""})):
+            for bad in ("{", json.dumps({"schema": "other", "previous_staged_commit": old})):
                 note.write_text(bad)
                 check(m.release_rollback_commands("p378") == [], f"{bad}: nothing to say")
-            note.write_text(json.dumps({"schema": "syrd378.rollback", "previous_release_root": "/opt/switchyard/releases/o ld", "previous_release_commit": "abc"}))
-            pointer = shlex.quote(str(Path(tmp) / "opt dir" / "current"))
-            check(m.release_rollback_commands("my proj") == [
-                f"sudo ln -sfn '/opt/switchyard/releases/o ld' {pointer}",
-                "sudo switchyard upgrade 'my proj' --source-repo '/opt/switchyard/releases/o ld' --deploy-ref abc --publish-remote '<url>'"],
-                "the pointer back, and the reviewed upgrade pointed backwards, every argument quoted, the remote left to fill in")
-            check(m.release_rollback_commands("p378", publish_remote="git@host:a b")[1].endswith("--publish-remote 'git@host:a b'"), "a given remote, quoted")
+
+            def way_back(**record) -> list[str]:
+                note.write_text(json.dumps({"schema": "syrd378.rollback", "upgrading_to": new, **record}))
+                return m.release_rollback_commands("my proj")
+
+            held[old] = old
+            lines = way_back(previous_release_commit=host, previous_staged_commit=old, previous_board_commit="board-old")
+            action = f"switchyard privileged-action 'my proj' select-shared-release commit={old}"
+            check([l for l in lines if not l.startswith("#")] == [f"{action} --dry-run", action],
+                  f"the tenant's own release, through the admin action, dry run first, the project quoted: {lines}")
+            check(not any("ln -sfn" in l or "/current" in l for l in lines) and any(f"({host})" in l and "did not move it" in l for l in lines),
+                  f"never the host's pointer, which is named as not part of it: {lines}")
+            check(any("it was on board-old" in l and "not reversed" in l for l in lines), f"what the board goes back to, said plainly: {lines}")
+            check([l for l in way_back(previous_staged_commit="b0" * 20) if not l.startswith("#")] == [],
+                  "a release root does not hold: no command")
+            held["e" * 40] = "f" * 40
+            check([l for l in way_back(previous_staged_commit="e" * 40) if not l.startswith("#")] == [],
+                  "a release whose marker names another commit: no command")
+            check(any("no way back can be named" in l for l in way_back(previous_staged_commit="")), "nothing recorded: said so")
+            check(any("nothing to go back to" in l for l in way_back(previous_staged_commit=new)), "already on it: said so")
+            check(m.release_rollback_commands("p378", publish_remote="git@host:a b") == m.release_rollback_commands("p378"),
+                  "the remote a caller passes changes nothing: the admin action keeps the recorded one")
     REACHED.update({"RELEASE_ROLLBACK_SCHEMA"})
 
 

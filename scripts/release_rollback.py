@@ -94,6 +94,16 @@ def record_release_rollback(
             )
     except (OSError, ValueError):
         staged_commit = ""
+    # The tenant's deployed board build, apart from the host's shared release
+    # and the tenant's staged tooling: three different things an operator has
+    # to tell apart on the way back (SYRD-528). Unreadable is "", never a guess.
+    board_commit = ""
+    try:
+        board_root = launcher._tenant_board_root_from_config_or_plan(config)
+        if board_root is not None:
+            board_commit = launcher._current_tenant_release(board_root)[1]
+    except Exception:  # noqa: BLE001 -- a note that cannot name the build still names the rest
+        board_commit = ""
     record = {
         "schema": launcher.RELEASE_ROLLBACK_SCHEMA,
         "project": config.project,
@@ -102,6 +112,7 @@ def record_release_rollback(
         "previous_release_root": previous_root,
         "previous_release_commit": previous.marker_commit if previous else "",
         "previous_staged_commit": staged_commit,
+        "previous_board_commit": board_commit,
     }
     path = launcher.release_rollback_path(config.project)
     if path.is_file():
@@ -220,7 +231,22 @@ def restore_publication_remote(project: str, previous: str) -> str:
 
 
 def release_rollback_commands(project: str, *, publish_remote: str = "") -> list[str]:
-    """The exact way back, from root's own note. Empty when there is nothing to say."""
+    """The way back from root's own note, as the tenant's -- never the host's. Empty when there is no note.
+
+    An upgrade restages the TENANT: its tooling, its grant, its board. It never
+    moves the host's shared release, so the way back never does either: the old
+    first line, `ln -sfn <previous shared> /opt/switchyard/current`, repointed
+    every tenant on the host, and when the operator had installed the shared
+    release before the upgrade (the supported order) it named the release being
+    left (SYRD-528). The tenant returns to the release its staged tooling was
+    from, through the admin-authenticated `select-shared-release`, which only
+    takes a commit root already holds -- and only when root holds it. Lines
+    beginning `#` are what an operator must know, not commands; a way back that
+    cannot be named is said, not replaced by one that runs.
+
+    `publish_remote` is accepted for the callers that pass it; the catalogued
+    action keeps the tenant's recorded publication remote itself.
+    """
     from scripts import team_launcher as launcher
 
     path = launcher.release_rollback_path(project)
@@ -230,18 +256,45 @@ def release_rollback_commands(project: str, *, publish_remote: str = "") -> list
         return []
     if str(record.get("schema") or "") != launcher.RELEASE_ROLLBACK_SCHEMA:
         return []
-    previous_root = str(record.get("previous_release_root") or "")
-    previous_commit = str(record.get("previous_release_commit") or "")
-    if not previous_root or not previous_commit:
-        return []
-    install_root = launcher.switchyard_shared_install_root()
-    pointer = shlex.quote(str(install_root / "current"))
-    remote = publish_remote or "<url>"
-    return [
-        f"sudo ln -sfn {shlex.quote(previous_root)} {pointer}",
-        # The same reviewed path the upgrade took, pointed backwards: it
-        # restages the tenant's tooling and rewrites its grant from the release
-        # being returned to, rather than leaving the two halves disagreeing.
-        f"sudo switchyard upgrade {shlex.quote(project)} --source-repo {shlex.quote(previous_root)} "
-        f"--deploy-ref {shlex.quote(previous_commit)} --publish-remote {shlex.quote(remote)}",
-    ]
+    upgraded_to = str(record.get("upgrading_to") or "").strip()
+    host_commit = str(record.get("previous_release_commit") or "").strip()
+    tenant_commit = str(record.get("previous_staged_commit") or "").strip()
+    board_commit = str(record.get("previous_board_commit") or "").strip()
+    lines: list[str] = []
+    if host_commit:
+        lines.append(
+            f"# the host's shared release ({host_commit}) is every tenant's and this upgrade did not move it; "
+            "it is not part of this way back (an operator's own activation is undone with "
+            "`switchyard install-shared-release --rollback`)"
+        )
+    exact = len(tenant_commit) == 40 and all(char in "0123456789abcdef" for char in tenant_commit)
+    if not exact:
+        lines.append(
+            f"# no earlier release of {project} was recorded before this upgrade"
+            + (f" to {upgraded_to}" if upgraded_to else "")
+            + ", so no way back can be named: returning it is an operator's decision, from its release-status"
+        )
+        return lines
+    if tenant_commit == upgraded_to:
+        lines.append(f"# {project} was already on {tenant_commit} before this upgrade: there is nothing to go back to")
+        return lines
+    release_root = launcher.switchyard_shared_install_root() / "releases" / tenant_commit
+    held = launcher._read_switchyard_release_marker(release_root)
+    if held is None or held.marker_commit != tenant_commit:
+        lines.append(
+            f"# {project} ran {tenant_commit} before this upgrade, but this host holds no installed release of it "
+            f"({release_root}): an operator installs that release first; until then there is no way back to name"
+        )
+        return lines
+    board = (
+        f"it was on {board_commit}" if board_commit and board_commit != tenant_commit
+        else "it was on the same release" if board_commit else "its earlier build was not recorded"
+    )
+    lines.append(
+        f"# this redeploys {project}'s board at {tenant_commit} ({board}). Database migrations the newer "
+        "release applied are not reversed, and running the older board against them is not verified: "
+        "confirm before applying"
+    )
+    action = f"switchyard privileged-action {shlex.quote(project)} select-shared-release commit={tenant_commit}"
+    lines.extend([f"{action} --dry-run", action])
+    return lines

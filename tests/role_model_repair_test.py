@@ -52,6 +52,21 @@ OWNER_LISTS = ["gemini-3.7-pro", "gemini-3.5-flash"]
 OWNER = "syrd250-owner"
 
 
+def _agreeing_board() -> FakeBoard:
+    """The board as production keeps it: declaring audit on agy, as its config does.
+
+    FakeBoard's default document declares audit as claude. Since SYRD-525 a
+    switch counts the board's declaration too, so that default would make
+    every "already on agy" case here a runtime change -- the split this suite
+    does not mean to model.
+    """
+    board = FakeBoard()
+    for role in board.document["roles"]:
+        if role["name"] == "audit":
+            role["runtime"] = "agy"
+    return board
+
+
 def check(condition: object, what: str) -> None:
     global CHECKS
     if not condition:
@@ -176,7 +191,7 @@ def test_a_model_only_change_is_no_longer_mistaken_for_no_change() -> None:
         _idle_state(config_path, "porter-audit:0.0")
         role_runtime._readiness_blockers = _ready
         config = team_launcher.load_project_config("porter", config_path)
-        board = FakeBoard()
+        board = _agreeing_board()
 
         same_runtime_new_model, _doc = role_runtime.preflight(
             config, config_path=config_path, role_name="audit",
@@ -217,7 +232,7 @@ def test_the_repair_actually_changes_the_model_and_restarts_the_role() -> None:
         config_path = _write_tenant(root)
         _idle_state(config_path, "porter-audit:0.0")
         role_runtime._readiness_blockers = _ready
-        board, runner = FakeBoard(), OwnerRunner()
+        board, runner = _agreeing_board(), OwnerRunner()
 
         rc = _repair(
             config_path, board=board, runner=runner,
@@ -244,7 +259,7 @@ def test_a_model_the_owner_does_not_offer_is_refused_not_written() -> None:
         refusal = ""
         try:
             _repair(
-                config_path, board=FakeBoard(), runner=runner,
+                config_path, board=_agreeing_board(), runner=runner,
                 runtime="agy", model="gemini-9-imaginary",
                 interactive=False, print_func=lambda _l: None,
             )
@@ -273,7 +288,7 @@ def test_with_nobody_to_ask_the_refusal_names_a_command_that_runs() -> None:
         refusal = ""
         try:
             _repair(
-                config_path, board=FakeBoard(), runner=OwnerRunner(),
+                config_path, board=_agreeing_board(), runner=OwnerRunner(),
                 runtime="agy", interactive=False, print_func=said.append,
             )
         except SystemExit as exc:
@@ -311,7 +326,7 @@ def test_the_suggested_command_is_the_one_that_repairs_it() -> None:
         refusal = ""
         try:
             _repair(
-                config_path, board=FakeBoard(), runner=OwnerRunner(),
+                config_path, board=_agreeing_board(), runner=OwnerRunner(),
                 runtime="agy", interactive=False, print_func=lambda _l: None,
             )
         except SystemExit as exc:
@@ -321,7 +336,7 @@ def test_the_suggested_command_is_the_one_that_repairs_it() -> None:
             refusal.split("`")[1].split()[2:]
         )
         rc = _repair(
-            config_path, board=FakeBoard(), runner=OwnerRunner(),
+            config_path, board=_agreeing_board(), runner=OwnerRunner(),
             runtime=args.cli, model=args.model,
             interactive=False, print_func=lambda _l: None,
         )
@@ -343,7 +358,7 @@ def test_at_a_terminal_the_owners_list_is_offered_for_the_same_runtime() -> None
         shown: list[str] = []
 
         rc = _repair(
-            config_path, board=FakeBoard(), runner=runner,
+            config_path, board=_agreeing_board(), runner=runner,
             runtime="agy", interactive=True,
             input_func=lambda _p: "",  # the default, whatever the list offers first
             print_func=shown.append,
@@ -369,7 +384,7 @@ def test_a_model_the_owner_does_offer_is_left_alone_and_nothing_is_asked() -> No
         runner = OwnerRunner()
 
         rc = _repair(
-            config_path, board=FakeBoard(), runner=runner,
+            config_path, board=_agreeing_board(), runner=runner,
             runtime="agy", interactive=True,
             input_func=lambda _p: (_ for _ in ()).throw(
                 AssertionError("nothing should have been asked")
@@ -394,7 +409,7 @@ def test_a_busy_role_is_not_restarted_for_a_model_change_either() -> None:
         _idle_state(config_path, "porter-audit:0.0")
         role_runtime._readiness_blockers = _ready
         config = team_launcher.load_project_config("porter", config_path)
-        board = FakeBoard()
+        board = _agreeing_board()
 
         busy_model_change, _doc = role_runtime.preflight(
             config, config_path=config_path, role_name="audit",

@@ -78,7 +78,8 @@ SEAMS = {
     'director_phase_required': {'declared_workflow_presence': 1},
     'record_release_phase_from_status': {'_format_release_sha': 1, 'record_upgrade_phase': 1},
     'upgrade_phase_report': {'UPGRADE_PHASES': 1, 'declared_workflow_presence': 1, 'director_phase_required': 1, 'upgrade_phase_state': 1},
-    'outstanding_release_phase_report': {'upgrade_phase_state': 1},
+    # SYRD-531: root's pin, to name the Director's deploy for an exact prepared release.
+    'outstanding_release_phase_report': {'upgrade_phase_state': 1, 'read_upgrade_source': 1},
 }
 #: Every seam name a stand-in on the launcher has been shown to reach; checked last.
 REACHED: set[str] = set()
@@ -688,11 +689,17 @@ def test_the_outstanding_release_phase() -> None:
     check(done == ["switchyard: p376's release phase is closed; artifacts are prepared and the board is deployed."], f"{done}")
     check(m.outstanding_release_phase_report(CONFIG, config_path=Path("/c"), journal={"phases": {"release": {"state": "not required"}}}) == [],
           "not required: nothing owed")
-    owed = m.outstanding_release_phase_report(CONFIG, config_path=Path("/c"), journal={})
+    with patched(t, read_upgrade_source=seam("read_upgrade_source", lambda config: {"deploy_ref": "origin/main"})):
+        owed = m.outstanding_release_phase_report(CONFIG, config_path=Path("/c"), journal={})
     check(len(owed) == 2 and "Its release phase is pending and is an operator's" in owed[0]
           and "`pkexec switchyard release-status p376 --close`" in owed[0] and owed[1].startswith("switchyard: `switchyard release-status p376`"),
           f"pending: what exit 0 means, and the command that closes it: {owed}")
-    with patched(t, upgrade_phase_state=seam("upgrade_phase_state", lambda journal, phase: "syrd376-ready")):
+    with patched(t, read_upgrade_source=lambda config: {"deploy_ref": "e" * 40}):
+        prepared = m.outstanding_release_phase_report(CONFIG, config_path=Path("/c"), journal={})
+    check(len(prepared) == 3 and f"`switchyard privileged-action p376 deploy-release commit={'e' * 40}`" in prepared[2],
+          f"SYRD-531: a tenant prepared for an exact release is told the Director's deploy for it: {prepared}")
+    with patched(t, read_upgrade_source=lambda config: {},
+                 upgrade_phase_state=seam("upgrade_phase_state", lambda journal, phase: "syrd376-ready")):
         check("Its release phase is syrd376-ready" in m.outstanding_release_phase_report(CONFIG, config_path=Path("/c"), journal={})[0],
               "the launcher's reader decides")
 

@@ -648,4 +648,17 @@ def outstanding_release_phase_report(
         "build before recording anything.",
         f"switchyard: `switchyard release-status {config.project}` compares the shared release, "
         "the deployed board, the live build and both journals at any time, and changes nothing.",
-    ]
+    ] + (
+        # The Director's own way to deploy the release it prepared, when it
+        # prepared an exact one. `upgrade-tenant-release` prepares; before
+        # SYRD-531 nothing a Director could run deployed, and the catalogued
+        # `deploy-release` ran the same preparation again and exited 0.
+        [
+            f"switchyard: or, from the Director's pane, `switchyard privileged-action {config.project} "
+            f"deploy-release commit={pinned}` runs that sequence as root for the prepared release and "
+            "closes the phase by the same re-proof."
+        ]
+        if len(pinned := str(launcher.read_upgrade_source(config).get("deploy_ref") or "")) == 40
+        and all(char in "0123456789abcdef" for char in pinned)
+        else []
+    )

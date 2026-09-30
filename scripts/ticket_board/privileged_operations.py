@@ -50,10 +50,11 @@ TRUSTED_OWNER_UID = 0
 
 
 def _deploy_release(values: Mapping[str, str]) -> list[str]:
-    # `--deploy-ref` takes the validated 40-character commit, so the release
-    # that runs is the release that was approved rather than whatever a branch
-    # points at by the time root reads it.
-    return [LAUNCHER, "upgrade", values["project"], "--deploy-ref", values["commit"]]
+    # The board deploy itself, for a tenant already prepared for exactly this
+    # commit. It used to be `upgrade --deploy-ref`, the same preparation
+    # `upgrade-tenant-release` runs, so the action said "deploy" and exited 0
+    # with the board unmoved (SYRD-531).
+    return [LAUNCHER, "deploy-release", values["project"], "--commit", values["commit"]]
 
 
 def _upgrade_tenant(values: Mapping[str, str]) -> list[str]:

@@ -525,7 +525,9 @@ def test_every_operation_runs_the_pinned_launcher_and_nothing_else() -> None:
                         element in values.values()
                         or element.startswith("--")
                         or element in {"upgrade", "repair-boundary", "--apply",
-                                       "install-shared-release"}
+                                       "install-shared-release",
+                                       # SYRD-531: the deploy the catalogue names.
+                                       "deploy-release"}
                         or element.startswith(releases),
                         f"{action.name} passes {element!r}, which is neither a literal "
                         "from the operations table nor a validated value",

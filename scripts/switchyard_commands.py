@@ -84,6 +84,9 @@ SWITCHYARD_COMMANDS = (
     # the deployment from the running board -- closes the release phase. Its
     # only write is root's own journal entry (SYRD-117).
     "release-status",
+    # Deploys a prepared tenant's board to its pinned release and closes the
+    # release phase by re-proof; the catalogued `deploy-release` (SYRD-531).
+    "deploy-release",
     "add-role",
     # Reports what a declared pool of interchangeable workers would change, and
     # what would stop it. Reads only (SYRD-37).

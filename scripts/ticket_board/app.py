@@ -298,6 +298,27 @@ WHERE (r.definition->>'active')::boolean
             ).fetchall()
             return {str(row["role"]): dict(row) for row in rows}
 
+    def serial_reservations(self) -> dict[str, dict[str, str] | None]:
+        """Which ticket holds each implementer's one serial slot, None for a free one.
+
+        The routing gate's own answer, read rather than recomputed: which stages
+        hold depends on the reservation policy and on the kind each tenant gave
+        its stages, and a report that worked it out separately could disagree
+        with the gate that acts on it (SYRD-476).
+        """
+        with self._pg_connect() as conn:
+            rows = conn.execute(
+                "SELECT implementer, ticket_id, state, assignee FROM ticket_board.serial_reservations()"
+            ).fetchall()
+        return {
+            str(row["implementer"]): (
+                {"ticket": str(row["ticket_id"]), "state": str(row["state"]), "assignee": str(row["assignee"])}
+                if row["ticket_id"]
+                else None
+            )
+            for row in rows
+        }
+
     def apply_workflow(self, document: Any, *, expected_revision: int, dry_run: bool, caller_role: str) -> dict[str, Any]:
         from .workflow_config import validate
         if caller_role != "director":

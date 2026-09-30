@@ -960,6 +960,15 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/workflow":
             self.send_json(self.app.workflow_document())
             return
+        if parsed.path == "/api/reservations":
+            # Each implementer's serial slot as the routing gate sees it, so a
+            # worker's capacity is read from the board rather than guessed from
+            # its queue (SYRD-476). Absent on a board older than this route.
+            self.send_json({
+                "project": getattr(self.app, "project", "pgu"),
+                "reservations": self.app.serial_reservations(),
+            })
+            return
         if parsed.path == "/api/runtime-assignments":
             self.send_json({
                 "project": getattr(self.app, "project", "pgu"),

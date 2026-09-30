@@ -502,8 +502,17 @@ def switchyard_worker_pool_command(
             return 1
         running = sum(1 for state in readiness if state.session)
         ready = sum(1 for state in readiness if state.ready)
+        # Capacity is its own fact: a ready, running worker whose slot a ticket
+        # at User UAT holds takes nothing routed to it (SYRD-476).
+        # A slot the board did not report is not counted as free, nor as held.
+        if not all(state.reservation_known for state in readiness):
+            capacity = "capacity unknown: the board did not report every worker's serial slot"
+        else:
+            free = sum(1 for state in readiness if state.can_take_work)
+            held = sum(1 for state in readiness if state.reserved_by)
+            capacity = f"{free} can take a ticket now, {held} held by a ticket"
         print_func(
-            f"switchyard: {pool.name}: {len(readiness)} worker(s), {ready} ready, {running} running"
+            f"switchyard: {pool.name}: {len(readiness)} worker(s), {ready} ready, {running} running; {capacity}"
         )
         for state in readiness:
             print_func(f"  {state.describe()}")
@@ -643,26 +652,45 @@ def _worker_pool_readiness(
     from scripts import worker_pool as pool_module
 
     read_snapshot = board_snapshot_reader or _read_board_snapshot
+    board = read_snapshot(config)
+    # The board's own answer about each worker's serial slot rides with its
+    # snapshot; a board that gave none leaves the slot unknown, never free.
+    reservations = (board or {}).get("reservations") if isinstance(board, Mapping) else None
     return pool_module.worker_readiness(
-        config, pool, document=document, board=read_snapshot(config), runner=runner
+        config, pool, document=document, board=board,
+        reservations=reservations if isinstance(reservations, Mapping) else None, runner=runner,
     )
 
 
 def _read_board_snapshot(config: ProjectConfig) -> Mapping[str, Any] | None:
-    """What the board says its tickets are, so a worker's holdings can be read."""
-    import urllib.request
+    """What the board says its tickets are, and which ticket holds each worker's serial slot.
 
+    The reservations come from the board's own gate (GET /api/reservations,
+    SYRD-476) under "reservations"; a board without that route -- one older
+    than it -- leaves the key out, and every slot then reads as not reported.
+    """
     url = str(config.board_url or "").strip()
     if not url:
         return None
+    payload = _board_get_json(f"{url.rstrip('/')}/api/board")
+    if not isinstance(payload, dict):
+        return None
+    reported = _board_get_json(f"{url.rstrip('/')}/api/reservations")
+    if isinstance(reported, dict) and isinstance(reported.get("reservations"), dict):
+        payload = {**payload, "reservations": reported["reservations"]}
+    return payload
+
+
+def _board_get_json(url: str) -> Any:
+    import urllib.request
+
     try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/api/board", timeout=10) as response:
+        with urllib.request.urlopen(url, timeout=10) as response:
             if response.status != 200:
                 return None
-            payload = json.loads(response.read().decode("utf-8"))
+            return json.loads(response.read().decode("utf-8"))
     except Exception:
         return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _apply_worker_pool_document(

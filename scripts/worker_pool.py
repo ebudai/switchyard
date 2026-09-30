@@ -589,6 +589,18 @@ class WorkerReadiness:
     trusted: bool = True
     session: bool = False
     holding: tuple[str, ...] = ()
+    #: The worker's one serial slot, as the board's routing gate decides it:
+    #: the ticket holding it ("" when free), where that ticket is, and whether
+    #: the board reported it at all. A ticket at User UAT is assigned to the
+    #: user, so it is in no worker's queue, and can still hold one (SYRD-476).
+    reserved_by: str = ""
+    reserved_where: str = ""
+    reservation_known: bool = False
+    #: What an older board does publish: tickets the gate diverted because
+    #: this worker was taken, each as (ticket, the ticket it waits behind).
+    queued_behind: tuple[tuple[str, str], ...] = ()
+    #: Why the slot is not known, when it is not.
+    unreported: str = "this board does not report serial reservations"
 
     @property
     def blockers(self) -> tuple[str, ...]:
@@ -615,12 +627,28 @@ class WorkerReadiness:
     def ready(self) -> bool:
         return not self.blockers
 
+    @property
+    def can_take_work(self) -> bool | None:
+        """Whether routing a ticket to it now would start work: None when the board did not say."""
+        if not (self.ready and self.session):
+            return False
+        return None if not self.reservation_known else not self.reserved_by
+
+    def slot(self) -> str:
+        """The serial slot, said apart from readiness: ready and running is not free."""
+        if self.reservation_known:
+            if not self.reserved_by:
+                return "serial slot free"
+            return f"serial slot held by {self.reserved_by} ({self.reserved_where})"
+        waiting = "; ".join(f"{ticket} is queued for it behind {behind}" for ticket, behind in self.queued_behind)
+        return f"serial slot unknown: {self.unreported}" + (f" ({waiting})" if waiting else "")
+
     def describe(self) -> str:
         state = "running" if self.session else "stopped"
         held = f", holding {', '.join(self.holding)}" if self.holding else ""
         if self.ready:
-            return f"{self.role} ({self.target}): ready, {state}{held}"
-        return f"{self.role} ({self.target}): not ready, {state}{held} -- {'; '.join(self.blockers)}"
+            return f"{self.role} ({self.target}): ready, {state}{held}; {self.slot()}"
+        return f"{self.role} ({self.target}): not ready, {state}{held}; {self.slot()} -- {'; '.join(self.blockers)}"
 
 
 def worker_readiness(
@@ -629,6 +657,7 @@ def worker_readiness(
     *,
     document: Mapping[str, Any] | None,
     board: Mapping[str, Any] | None = None,
+    reservations: Mapping[str, Mapping[str, Any] | None] | None = None,
     owner_home: Path | None = None,
     members: Sequence[str] | None = None,
     runner=None,
@@ -707,9 +736,41 @@ def worker_readiness(
                 ),
                 session=session_alive,
                 holding=tuple(str(ticket.get("id") or "") for ticket in queues.get(name, [])),
+                **_reservation_of(name, reservations, board),
             )
         )
     return readiness
+
+
+def _reservation_of(
+    name: str, reservations: Mapping[str, Mapping[str, Any] | None] | None, board: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """One worker's serial slot from the board's report, or what the board shows without one.
+
+    `reservations` is the board's own answer (GET /api/reservations), or None
+    when the board did not give one -- an older board, or none reachable. Then
+    the slot is not known, and the one reservation fact every board publishes
+    is kept as evidence: tickets diverted behind another for this worker.
+    """
+    queued = tuple(
+        (str(ticket.get("id") or ""), str(ticket.get("queued_behind_ticket") or ""))
+        for ticket in (board or {}).get("tickets") or []
+        if str(ticket.get("queued_for_assignee") or "") == name and str(ticket.get("queued_behind_ticket") or "")
+    )
+    if reservations is None:
+        return {"reservation_known": False, "queued_behind": queued}
+    if name not in reservations:
+        return {"reservation_known": False, "queued_behind": queued,
+                "unreported": "the board does not count it as an implementer"}
+    held = reservations[name]
+    if not held:
+        return {"reservation_known": True, "queued_behind": queued}
+    return {
+        "reservation_known": True,
+        "reserved_by": str(held.get("ticket") or ""),
+        "reserved_where": f"{held.get('state') or 'unknown stage'}, assigned to {held.get('assignee') or 'nobody'}",
+        "queued_behind": queued,
+    }
 
 
 # --------------------------------------------------------------------------

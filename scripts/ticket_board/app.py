@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, commit_cache
+from . import attachment_store, commit_cache, new_asset_files
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -472,23 +474,28 @@ WHERE (r.definition->>'active')::boolean
         if normalized_source not in attached_paths:
             raise ValueError("crop source must already be attached to the ticket")
 
-        destination, metadata = attachment_store.write_crop(
-            source,
-            self.asset_dir,
-            ticket,
-            rect,
-            feedback_number=feedback_number,
-            set_label=set_label,
-            normalized_source=normalized_source,
-        )
-        with self._pg_connect() as conn:
-            self._pg_set_caller_role(conn, caller_role or "director")
-            self._pg_call(
-                conn,
-                "SELECT ticket_board.append_ticket_attachment(%s, %s, %s::jsonb);",
-                (ticket_id, str(destination.resolve()), json.dumps(metadata)),
+        # SYRD-520: the crop is kept only if the connection's exit commits it
+        # (psycopg commits there, then closes without raising); a refusal or a
+        # failed commit removes it.
+        with new_asset_files.discarded_on_failure() as new_files:
+            destination, metadata = attachment_store.write_crop(
+                source,
+                self.asset_dir,
+                ticket,
+                rect,
+                feedback_number=feedback_number,
+                set_label=set_label,
+                normalized_source=normalized_source,
+                new_files=new_files,
             )
-            return self._pg_get_ticket(ticket_id, conn)
+            with self._pg_connect() as conn:
+                self._pg_set_caller_role(conn, caller_role or "director")
+                self._pg_call(
+                    conn,
+                    "SELECT ticket_board.append_ticket_attachment(%s, %s, %s::jsonb);",
+                    (ticket_id, str(destination.resolve()), json.dumps(metadata)),
+                )
+                return self._pg_get_ticket(ticket_id, conn)
 
     def create_ticket(
         self,
@@ -913,6 +920,19 @@ WHERE (r.definition->>'active')::boolean
             ) from exc
         return psycopg, dict_row, Jsonb
 
+    @contextlib.contextmanager
+    def _attachment_transaction(self, conn: Any) -> Iterator[new_asset_files.NewAssetFiles]:
+        """`conn.transaction()` for operations that write attachment files (SYRD-520).
+
+        Files the operation creates in the asset directory are kept only if the
+        transaction commits; if anything raises first -- a refusal, a failed
+        copy, the commit itself -- exactly those files are removed. Nothing
+        after the commit can remove them.
+        """
+        with new_asset_files.discarded_on_failure() as new_files:
+            with conn.transaction():
+                yield new_files
+
     def _pg_connect(self) -> Any:
         psycopg, dict_row, _ = self._pg_imports()
         conn = psycopg.connect(self.database_url or "", row_factory=dict_row)
@@ -1221,7 +1241,7 @@ ORDER BY rank;
         enforce_blocked_reason_rule(blocked_by, blocked_reason)
 
         with self._pg_connect() as conn:
-            with conn.transaction():
+            with self._attachment_transaction(conn) as new_files:
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
                 if notification_source_role:
@@ -1257,7 +1277,7 @@ ORDER BY rank;
                     raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
                 if attachment_patch:
                     current = self._pg_get_ticket(ticket_id, conn)
-                    attachment_store.materialize_edit_field_attachments(attachment_patch, ticket_id, current, self.frame_dir, self.asset_dir)
+                    attachment_store.materialize_edit_field_attachments(attachment_patch, ticket_id, current, self.frame_dir, self.asset_dir, new_files)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(attachment_patch)))
                 for comment in normalized_comments:
                     self._pg_set_caller_role(conn, comment["who"])
@@ -1288,14 +1308,14 @@ ORDER BY rank;
     def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         ticket_id = str(ticket_id).strip().upper()
         with self._pg_connect() as conn:
-            with conn.transaction():
+            with self._attachment_transaction(conn) as new_files:
                 if caller_role:
                     self._pg_set_caller_role(conn, caller_role)
                 current = self._pg_get_ticket(ticket_id, conn)
                 edit_fields = self._pg_edit_field_patch(patch)
                 patch = {key: value for key, value in patch.items() if key not in edit_fields}
                 if edit_fields:
-                    attachment_store.materialize_edit_field_attachments(edit_fields, ticket_id, current, self.frame_dir, self.asset_dir)
+                    attachment_store.materialize_edit_field_attachments(edit_fields, ticket_id, current, self.frame_dir, self.asset_dir, new_files)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(edit_fields)))
                 if "commit_hash" in patch and "state" not in patch:
                     raise ValueError("commit_hash must be written with submit_to_audit or mark_done, not edit_fields")

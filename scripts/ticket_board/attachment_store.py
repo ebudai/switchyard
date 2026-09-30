@@ -100,8 +100,13 @@ def write_crop(
     feedback_number: int | None,
     set_label: str,
     normalized_source: str,
+    new_files: Any = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Crop an attached image into the asset store; return the file and its metadata."""
+    """Crop an attached image into the asset store; return the file and its metadata.
+
+    With `new_files` (a `new_asset_files.NewAssetFiles`), the crop is created
+    through it: exclusively, and recorded for removal if the operation fails.
+    """
     with Image.open(source) as image:
         image.load()
         source_width, source_height = image.size
@@ -126,7 +131,20 @@ def write_crop(
         source_slug = crop_filename_slug(source.stem)
         crop_suffix = f"x{crop_rect['x']}-y{crop_rect['y']}-w{crop_rect['w']}-h{crop_rect['h']}"
         destination = dedupe_asset_path(asset_dir, f"{prefix}__crop-of-{source_slug}-{crop_suffix}.png")
-        cropped.save(destination, format="PNG")
+        if new_files is None:
+            cropped.save(destination, format="PNG")
+        else:
+            for _attempt in range(100):
+                try:
+                    handle = new_files.create(asset_dir, destination.name)
+                except FileExistsError:
+                    destination = dedupe_asset_path(asset_dir, destination.name)
+                    continue
+                with handle:
+                    cropped.save(handle, format="PNG")
+                break
+            else:
+                raise ValueError(f"could not allocate a unique crop filename in {asset_dir}")
 
     metadata = {
         "kind": "crop",
@@ -144,7 +162,12 @@ def write_crop(
 
 
 def materialize_edit_field_attachments(
-    edit_fields: dict[str, Any], ticket_id: str, current: dict[str, Any], frame_dir: Path, asset_dir: Path
+    edit_fields: dict[str, Any],
+    ticket_id: str,
+    current: dict[str, Any],
+    frame_dir: Path,
+    asset_dir: Path,
+    new_files: Any = None,
 ) -> None:
     if "screenshots" in edit_fields:
         edit_fields["screenshots"] = materialize_attachments(
@@ -153,6 +176,7 @@ def materialize_edit_field_attachments(
             current_paths=current.get("screenshots", []),
         frame_dir=frame_dir,
         asset_dir=asset_dir,
+        new_files=new_files,
         )
         edit_fields["screenshot"] = edit_fields["screenshots"][0] if edit_fields["screenshots"] else ""
     elif "screenshot" in edit_fields:
@@ -162,6 +186,7 @@ def materialize_edit_field_attachments(
             current_paths=current.get("screenshots", []),
         frame_dir=frame_dir,
         asset_dir=asset_dir,
+        new_files=new_files,
         )
         edit_fields["screenshots"] = paths
         edit_fields["screenshot"] = paths[0] if paths else ""
@@ -203,6 +228,7 @@ def materialize_attachments(
     *,
     frame_dir: Path,
     asset_dir: Path,
+    new_files: Any = None,
 ) -> list[str]:
     if raw in (None, "", "null"):
         return []
@@ -234,20 +260,43 @@ def materialize_attachments(
             resolve_image(normalized, frame_dir, asset_dir)
             screenshot_paths.append(normalized)
         else:
-            screenshot_paths.append(copy_attachment(normalized, ticket_id, frame_dir, asset_dir))
+            screenshot_paths.append(copy_attachment(normalized, ticket_id, frame_dir, asset_dir, new_files))
         seen.add(normalized)
     return screenshot_paths
 
 
-def copy_attachment(raw: str, ticket_id: str, frame_dir: Path, asset_dir: Path) -> str:
+def copy_attachment(raw: str, ticket_id: str, frame_dir: Path, asset_dir: Path, new_files: Any = None) -> str:
+    """Copy a frame into the asset store as a ticket attachment; return its path.
+
+    With `new_files` (a `new_asset_files.NewAssetFiles`), the copy is created
+    through it -- exclusively, never over an existing file, and recorded for
+    removal if the operation fails -- and a consumed upload is removed only
+    once the operation is kept (SYRD-520).
+    """
     source = resolve_image(raw, frame_dir, asset_dir)
     destination = asset_dir / f"{ticket_id}-{time.time_ns()}.png"
     with Image.open(source) as image:
         image.load()
         output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
-        output.save(destination, format="PNG")
+        if new_files is None:
+            output.save(destination, format="PNG")
+        else:
+            for _attempt in range(100):
+                try:
+                    handle = new_files.create(asset_dir, destination.name)
+                except FileExistsError:
+                    destination = asset_dir / f"{ticket_id}-{time.time_ns()}.png"
+                    continue
+                with handle:
+                    output.save(handle, format="PNG")
+                break
+            else:
+                raise ValueError(f"could not allocate a unique attachment filename in {asset_dir}")
     if source.parent == asset_dir and source.name.startswith("upload_"):
-        source.unlink(missing_ok=True)
+        if new_files is None:
+            source.unlink(missing_ok=True)
+        else:
+            new_files.consume_on_keep(source)
     return str(destination.resolve())
 
 

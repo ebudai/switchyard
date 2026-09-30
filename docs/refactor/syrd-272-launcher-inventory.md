@@ -1,5 +1,19 @@
 # SYRD-272: source size inventory and launcher extraction plan
 
+> **Status (SYRD-272 final report, from reviewed main
+> `98d454806374513a1506647ff25ee429b51693cc`):**
+> - Every one of the nine original targets has been extracted, or kept under
+>   a reviewed exception: the `team_launcher.py` facade (SYRD-462) and the
+>   `app.py` transaction and authority core (SYRD-518).
+> - The before/after inventory, the consolidated exceptions, the navigation
+>   comparison and the preservation record are in
+>   [`syrd-272-final-report.md`](syrd-272-final-report.md).
+> - Status lines inside the slice log below record the state at each slice,
+>   and are kept as historical evidence. That includes "SYRD-272 is not
+>   complete" and the reboot hold after SYRD-509. This note supersedes them,
+>   and so do the plan's "Next" entries in section 3.
+> - Closing the parent and the exclusive window is the Director's decision.
+
 This document serves the SYRD-272 parent. Each extraction child updates it:
 the before/after table, the slice log, and the plan's next entry. SYRD-286 was
 the first slice, SYRD-287 the second, SYRD-288 the third, SYRD-289
@@ -24202,12 +24216,23 @@ refusing recorders over systemctl, sudo, pkexec, loginctl and related tools.
 
 #### Reviewed soft-limit exception: `ticket_board/app.py` at 1,685 lines
 
-After this slice, `TicketBoardApp` is the board's PostgreSQL front and
-nothing else. Every public method does the same four things:
-1. opens one connection and, where it writes, one transaction
-2. sets the RBAC caller role first
-3. lets a `ticket_board.*` SQL function decide authority
-4. reads the ticket back in the same connection
+After this slice, `TicketBoardApp` is the board's PostgreSQL front.
+*Corrected in the SYRD-272 final report commit:* not every public method
+connects, sets a role and transacts. Of its 46 public methods, measured from
+the AST:
+- **27 write with the caller's role set first:** they set the RBAC caller
+  role, then write through a transaction or a `ticket_board.*` function that
+  decides authority, and read back in the same connection. `crop_attachment`
+  is one of them.
+- **2 write without a caller role:** `file_report` (tenant report path) and
+  `register_runtime_assignment` (launcher registration, decided by
+  `ticket_board.register_role_runtime`).
+- **13 read without setting a role.**
+- **4 never touch the database:** the file-only attachment adapters
+  `list_screenshots`, `resolve_image` and `save_uploaded_image`, and
+  `published_ref_commit`.
+
+See `syrd-272-final-report.md`, section 3.
 
 These are the remaining responsibilities, as measured method lines at the
 SYRD-518 baseline:

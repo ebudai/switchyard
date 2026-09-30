@@ -6925,6 +6925,7 @@ DECLARE
     changed_fields text[] := ARRAY[]::text[];
     seen text[];
     screenshot_value text;
+    existing_metadata jsonb;
 BEGIN
     actor := ticket_board.require_actor(
         ARRAY['director', 'user', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
@@ -7050,16 +7051,20 @@ BEGIN
         IF jsonb_typeof(patch->'screenshots') <> 'array' THEN
             RAISE EXCEPTION 'screenshots must be an array';
         END IF;
-        WITH existing AS (
-            SELECT path, metadata
-            FROM ticket_board.ticket_attachments
-            WHERE ticket_id = edit_fields.id
-        ),
-        deleted AS (
-            DELETE FROM ticket_board.ticket_attachments
-            WHERE ticket_id = edit_fields.id
-        ),
-        requested AS (
+        -- SYRD-519: three statements, not one. As sibling CTEs the DELETE ran
+        -- after the INSERT (PostgreSQL finishes an unreferenced data-modifying
+        -- CTE last), so replacing any existing attachment hit the old
+        -- (ticket_id, position) key. The function is still one transaction: a
+        -- failed insert undoes the delete with it.
+        SELECT coalesce(jsonb_object_agg(path, metadata), '{}'::jsonb)
+        INTO existing_metadata
+        FROM ticket_board.ticket_attachments
+        WHERE ticket_id = edit_fields.id;
+
+        DELETE FROM ticket_board.ticket_attachments
+        WHERE ticket_id = edit_fields.id;
+
+        WITH requested AS (
             SELECT btrim(path) AS path, ord::integer - 1 AS position
             FROM jsonb_array_elements_text(patch->'screenshots') WITH ORDINALITY AS item(path, ord)
             WHERE btrim(path) <> ''
@@ -7070,9 +7075,8 @@ BEGIN
                requested.path,
                requested.position = 0,
                'screenshots',
-               coalesce(existing.metadata, '{}'::jsonb)
+               coalesce(existing_metadata -> requested.path, '{}'::jsonb)
         FROM requested
-        LEFT JOIN existing ON existing.path = requested.path
         ORDER BY requested.position;
 
         SELECT path

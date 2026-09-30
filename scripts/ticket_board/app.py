@@ -5,29 +5,17 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
-from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
-
-from . import commit_cache
+from . import attachment_store, commit_cache
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
-from .image_asset_policy import (
+from .image_asset_policy import (  # re-exported: callers import these from the app
     IMAGE_EXTENSIONS,
     crop_filename_slug,
-    dedupe_asset_path,
     format_timestamp,
-    image_save_format,
-    next_feedback_number,
-    normalize_crop_rect,
-    normalize_image_path,
-    path_in_allowed_image_dirs,
-    path_in_asset_dir,
-    upload_filename_prefix,
     upload_set_slug,
     uploaded_filename_slug,
 )
@@ -387,28 +375,10 @@ WHERE (r.definition->>'active')::boolean
         return self._pg_workflow_columns()
 
     def list_screenshots(self) -> list[dict[str, str]]:
-        if not self.frame_dir.is_dir():
-            return []
-        items: list[dict[str, str]] = []
-        for path in sorted(self.frame_dir.glob("*.png"), key=lambda item: item.stat().st_mtime, reverse=True):
-            items.append(
-                {
-                    "path": str(path.resolve()),
-                    "name": path.name,
-                    "modified": format_timestamp(path),
-                }
-            )
-        return items
+        return attachment_store.list_frames(self.frame_dir)
 
     def resolve_image(self, raw_path: str) -> Path:
-        path = Path(raw_path).expanduser().resolve()
-        if not path_in_allowed_image_dirs(path, self.frame_dir, self.asset_dir):
-            raise FileNotFoundError(f"screenshot path escapes allowed asset roots: {path}")
-        if not path.is_file():
-            raise FileNotFoundError(f"screenshot not found: {path}")
-        if path.suffix.lower() not in IMAGE_EXTENSIONS:
-            raise FileNotFoundError(f"unsupported image type: {path.name}")
-        return path
+        return attachment_store.resolve_image(raw_path, self.frame_dir, self.asset_dir)
 
     def save_uploaded_image(
         self,
@@ -419,27 +389,14 @@ WHERE (r.definition->>'active')::boolean
         attempt_number: str = "",
         original_filename: str = "",
     ) -> dict[str, str]:
-        if not raw_bytes:
-            raise ValueError("uploaded image is empty")
-        self.asset_dir.mkdir(parents=True, exist_ok=True)
-        prefix = upload_filename_prefix(upload_set, set_label, attempt_number)
-        base_name = uploaded_filename_slug(original_filename) or f"upload_{time.time_ns()}.png"
-        if prefix:
-            base_name = f"{prefix}__{base_name}"
-        path = dedupe_asset_path(self.asset_dir, base_name)
-        with Image.open(BytesIO(raw_bytes)) as image:
-            image.load()
-            output_format = image_save_format(path.suffix)
-            if output_format == "JPEG" and image.mode not in ("RGB", "L"):
-                output = image.convert("RGB")
-            else:
-                output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
-            output.save(path, format=output_format)
-        return {
-            "path": str(path.resolve()),
-            "name": path.name,
-            "modified": format_timestamp(path),
-        }
+        return attachment_store.save_uploaded_image(
+            self.asset_dir,
+            raw_bytes,
+            upload_set=upload_set,
+            set_label=set_label,
+            attempt_number=attempt_number,
+            original_filename=original_filename,
+        )
 
     def crop_attachment(
         self,
@@ -459,44 +416,15 @@ WHERE (r.definition->>'active')::boolean
         if normalized_source not in attached_paths:
             raise ValueError("crop source must already be attached to the ticket")
 
-        with Image.open(source) as image:
-            image.load()
-            source_width, source_height = image.size
-            crop_rect = normalize_crop_rect(rect, source_width, source_height)
-            cropped = image.crop(
-                (
-                    crop_rect["x"],
-                    crop_rect["y"],
-                    crop_rect["x"] + crop_rect["w"],
-                    crop_rect["y"] + crop_rect["h"],
-                )
-            )
-            if cropped.mode not in ("RGB", "RGBA", "L", "LA", "P"):
-                cropped = cropped.convert("RGBA")
-            feedback = feedback_number or next_feedback_number(ticket)
-            if feedback <= 0 or feedback > 999:
-                raise ValueError("feedback crop requires feedback number 1-999")
-            label_slug = upload_set_slug(set_label)
-            prefix = f"feedback-{feedback:03d}"
-            if label_slug:
-                prefix = f"{prefix}-{label_slug}"
-            source_slug = crop_filename_slug(source.stem)
-            crop_suffix = f"x{crop_rect['x']}-y{crop_rect['y']}-w{crop_rect['w']}-h{crop_rect['h']}"
-            destination = dedupe_asset_path(self.asset_dir, f"{prefix}__crop-of-{source_slug}-{crop_suffix}.png")
-            cropped.save(destination, format="PNG")
-
-        metadata = {
-            "kind": "crop",
-            "source_path": normalized_source,
-            "source_name": source.name,
-            "rect": crop_rect,
-            "source_size": {"w": source_width, "h": source_height},
-            "feedback_number": feedback,
-            "caption": (
-                f"crop of {source.name} @ "
-                f"{crop_rect['x']},{crop_rect['y']},{crop_rect['w']},{crop_rect['h']}"
-            ),
-        }
+        destination, metadata = attachment_store.write_crop(
+            source,
+            self.asset_dir,
+            ticket,
+            rect,
+            feedback_number=feedback_number,
+            set_label=set_label,
+            normalized_source=normalized_source,
+        )
         with self._pg_connect() as conn:
             self._pg_set_caller_role(conn, caller_role or "director")
             self._pg_call(
@@ -1118,7 +1046,7 @@ ORDER BY rank;
             "awaiting_role": str(row["awaiting_role"] or "").strip().lower(),
             "comments": validate_comments(comments),
         }
-        self._set_screenshot_fields(ticket, self._build_screenshot_entries(list(screenshots)))
+        attachment_store.set_screenshot_fields(ticket, attachment_store.screenshot_entries(list(screenshots)))
         return ticket
 
     def _active_work_delivery(self, row: Any) -> dict[str, Any]:
@@ -1273,7 +1201,7 @@ ORDER BY rank;
                     raise ValueError(f"invalid create state: {state}; allowed: draft, analysis, backlog")
                 if attachment_patch:
                     current = self._pg_get_ticket(ticket_id, conn)
-                    self._materialize_edit_field_attachments(attachment_patch, ticket_id, current)
+                    attachment_store.materialize_edit_field_attachments(attachment_patch, ticket_id, current, self.frame_dir, self.asset_dir)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(attachment_patch)))
                 for comment in normalized_comments:
                     self._pg_set_caller_role(conn, comment["who"])
@@ -1311,7 +1239,7 @@ ORDER BY rank;
                 edit_fields = self._pg_edit_field_patch(patch)
                 patch = {key: value for key, value in patch.items() if key not in edit_fields}
                 if edit_fields:
-                    self._materialize_edit_field_attachments(edit_fields, ticket_id, current)
+                    attachment_store.materialize_edit_field_attachments(edit_fields, ticket_id, current, self.frame_dir, self.asset_dir)
                     self._pg_call(conn, "SELECT ticket_board.edit_fields(%s, %s::jsonb);", (ticket_id, json.dumps(edit_fields)))
                 if "commit_hash" in patch and "state" not in patch:
                     raise ValueError("commit_hash must be written with submit_to_audit or mark_done, not edit_fields")
@@ -1671,23 +1599,6 @@ SELECT EXISTS (
             editable = set(editable)
         return {field: patch[field] for field in editable if field in patch}
 
-    def _materialize_edit_field_attachments(self, edit_fields: dict[str, Any], ticket_id: str, current: dict[str, Any]) -> None:
-        if "screenshots" in edit_fields:
-            edit_fields["screenshots"] = self._materialize_attachments(
-                edit_fields["screenshots"],
-                ticket_id,
-                current_paths=current.get("screenshots", []),
-            )
-            edit_fields["screenshot"] = edit_fields["screenshots"][0] if edit_fields["screenshots"] else ""
-        elif "screenshot" in edit_fields:
-            paths = self._materialize_attachments(
-                edit_fields["screenshot"],
-                ticket_id,
-                current_paths=current.get("screenshots", []),
-            )
-            edit_fields["screenshots"] = paths
-            edit_fields["screenshot"] = paths[0] if paths else ""
-
     def _validate_blocker_ticket_states(self, conn: Any, blocked_by: list[str]) -> None:
         if not blocked_by:
             return
@@ -1743,113 +1654,6 @@ SELECT EXISTS (
         never reaches the host's real commit repositories.
         """
         return commit_cache.resolve_known_commit(self.commit_git_dirs, value)
-
-    def _validate_stored_screenshots(self, raw_screenshots: Any, raw_screenshot: Any) -> list[dict[str, Any]]:
-        raw_items: list[Any] = []
-        if raw_screenshots not in (None, "", "null"):
-            if not isinstance(raw_screenshots, list):
-                raise ValueError("screenshots must be a list of paths")
-            raw_items.extend(raw_screenshots)
-        elif raw_screenshot not in (None, "", "null"):
-            raw_items.append(raw_screenshot)
-
-        entries: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in raw_items:
-            if not isinstance(item, str):
-                raise ValueError("screenshot entries must be path strings")
-            normalized = normalize_image_path(item)
-            if normalized in seen:
-                continue
-            path = Path(normalized)
-            if not path_in_allowed_image_dirs(path, self.frame_dir, self.asset_dir):
-                raise ValueError(f"screenshot path escapes allowed asset roots: {path}")
-            if path.suffix.lower() not in IMAGE_EXTENSIONS:
-                raise ValueError(f"unsupported image type: {path.name}")
-            entries.append({"path": normalized, "available": path.is_file()})
-            seen.add(normalized)
-        return entries
-
-    def _materialize_attachments(self, raw: Any, ticket_id: str, current_paths: list[str] | None = None) -> list[str]:
-        if raw in (None, "", "null"):
-            return []
-
-        if isinstance(raw, str):
-            raw_items = [raw]
-        elif isinstance(raw, list):
-            raw_items = raw
-        else:
-            raise ValueError("screenshots must be a path string, list of paths, or null")
-
-        normalized_current = {
-            normalize_image_path(path): path
-            for path in (current_paths or [])
-            if isinstance(path, str) and path
-        }
-        screenshot_paths: list[str] = []
-        seen: set[str] = set()
-        for item in raw_items:
-            if not isinstance(item, str):
-                raise ValueError("screenshot entries must be path strings")
-            normalized = normalize_image_path(item)
-            if normalized in seen:
-                continue
-            path = Path(normalized)
-            if normalized in normalized_current and path_in_asset_dir(Path(normalized_current[normalized]), self.asset_dir):
-                screenshot_paths.append(normalized_current[normalized])
-            elif path_in_asset_dir(path, self.asset_dir):
-                self.resolve_image(normalized)
-                screenshot_paths.append(normalized)
-            else:
-                screenshot_paths.append(self._copy_attachment(normalized, ticket_id))
-            seen.add(normalized)
-        return screenshot_paths
-
-    def _copy_attachment(self, raw: str, ticket_id: str) -> str:
-        source = self.resolve_image(raw)
-        destination = self.asset_dir / f"{ticket_id}-{time.time_ns()}.png"
-        with Image.open(source) as image:
-            image.load()
-            output = image if image.mode in ("RGB", "RGBA", "L", "LA", "P") else image.convert("RGBA")
-            output.save(destination, format="PNG")
-        if source.parent == self.asset_dir and source.name.startswith("upload_"):
-            source.unlink(missing_ok=True)
-        return str(destination.resolve())
-
-    def _build_screenshot_entries(self, paths: list[Any]) -> list[dict[str, Any]]:
-        entries: list[dict[str, Any]] = []
-        for item in paths:
-            if isinstance(item, dict):
-                path = str(item.get("path", ""))
-                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            else:
-                path = str(item)
-                metadata = {}
-            entry: dict[str, Any] = {"path": path, "available": Path(path).is_file()}
-            if metadata:
-                entry["metadata"] = metadata
-            entries.append(entry)
-        return entries
-
-    def _unique_paths(self, paths: list[str]) -> list[str]:
-        unique: list[str] = []
-        seen: set[str] = set()
-        for path in paths:
-            if not path or path in seen:
-                continue
-            unique.append(path)
-            seen.add(path)
-        return unique
-
-    def _set_screenshot_fields(self, ticket: dict[str, Any], entries: list[dict[str, Any]]) -> None:
-        ticket["screenshots"] = [entry["path"] for entry in entries]
-        ticket["screenshots_info"] = entries
-        if entries:
-            ticket["screenshot"] = entries[0]["path"]
-            ticket["screenshot_available"] = entries[0]["available"]
-        else:
-            ticket["screenshot"] = None
-            ticket["screenshot_available"] = False
 
     def _validate_state(self, state: str) -> str:
         if state not in self._workflow_state_names():

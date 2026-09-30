@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.ticket_board import app as app_module  # noqa: E402
+from scripts.ticket_board import attachment_store  # noqa: E402
 from scripts.ticket_board import image_asset_policy as policy  # noqa: E402
 from scripts.ticket_board.app import TicketBoardApp  # noqa: E402
 
@@ -135,8 +136,9 @@ def test_app_refuses_symlink_and_dotdot_escapes() -> None:
         expected = f"screenshot path escapes allowed asset roots: {escaped}"
         for raw in (str(app.asset_dir / "link.png"), f"{app.asset_dir}/../outside/escape.png"):
             assert refusal(lambda: app.resolve_image(raw)) == expected
-            assert refusal(lambda: app._validate_stored_screenshots([raw], None)) == expected
-            assert refusal(lambda: app._materialize_attachments([raw], "SYRD-1")) == expected
+            assert refusal(lambda: attachment_store.validate_stored_screenshots([raw], None, app.frame_dir, app.asset_dir)) == expected
+            assert refusal(lambda: attachment_store.materialize_attachments(
+                [raw], "SYRD-1", frame_dir=app.frame_dir, asset_dir=app.asset_dir)) == expected
         inside = app.asset_dir / "in.png"
         inside.write_bytes(png_bytes())
         assert app.resolve_image(str(inside)) == inside
@@ -150,7 +152,8 @@ def test_materialize_keeps_assets_and_copies_frames_once() -> None:
         frame.write_bytes(png_bytes())
         kept = app.asset_dir / "kept.png"
         kept.write_bytes(png_bytes())
-        paths = app._materialize_attachments([str(frame), str(frame), str(kept)], "SYRD-1")
+        paths = attachment_store.materialize_attachments(
+            [str(frame), str(frame), str(kept)], "SYRD-1", frame_dir=app.frame_dir, asset_dir=app.asset_dir)
         assert len(paths) == 2 and paths[1] == str(kept), paths
         copied = Path(paths[0])
         assert copied.parent == app.asset_dir and copied.name.startswith("SYRD-1-") and copied.suffix == ".png"

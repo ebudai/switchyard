@@ -24084,3 +24084,191 @@ three also check the service-to-health link:
   canary's temporary directory is left behind. Both trees do this.
 
 No live host, tenant, board, service or release was used or changed.
+
+### SYRD-518 (ticket_board/app.py slice 5): the attachment file store, and the app's soft-limit exception
+
+The Director approved the boundary before the ticket worktree was edited,
+from audited public main `dc29665032eabb44b91657a448c6b8fd1cdbef04`.
+
+**The extraction.** `ticket_board/attachment_store.py` owns the board's
+attachment files: frames, uploads, crops and the copies a ticket takes. It has
+eleven stateless functions:
+- `list_frames`, `resolve_image`, `save_uploaded_image`
+- `write_crop`: the image block and the metadata of `crop_attachment`
+- `materialize_edit_field_attachments`, `validate_stored_screenshots`,
+  `materialize_attachments`, `copy_attachment`
+- `screenshot_entries`, `unique_paths` (unused, moved verbatim with its
+  responsibility), `set_screenshot_fields`
+
+Each takes the frame and asset directories on every call. Each body is the
+old method body with only `self.<x>` rewritten. The module imports PIL,
+`time`, `BytesIO` and `image_asset_policy`, and nothing from the app or the
+database.
+
+This revises SYRD-500's boundary, which kept file writes in the app. The
+filename, geometry and path policy stays pure in `image_asset_policy`, and
+its effects now have their own owner.
+
+**What the app keeps.** `TicketBoardApp` keeps `list_screenshots`,
+`resolve_image`, `save_uploaded_image` and `crop_attachment` with their
+signatures; server.py calls all four, and tests stub `list_screenshots`.
+- The first three are single calls into the owner.
+- `crop_attachment` keeps its ticket read, the attached-source check, the
+  caller role, and the append/readback transaction in the same order.
+- The create and update transactions call
+  `attachment_store.materialize_edit_field_attachments(..., self.frame_dir, self.asset_dir)`,
+  so rebound directories are read at call time.
+
+Seven private methods left the class (79 → 72 methods). The app still
+re-exports the five policy names callers import from it, and no longer
+imports PIL, `time` or `BytesIO`.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `ticket_board/app.py` | 1,881 lines, 79 methods | 1,685 lines, 72 methods |
+| `ticket_board/attachment_store.py` | absent | 289 lines, 11 functions |
+| Total of these two files | 1,881 lines | 1,974 lines |
+
+The 93-line combined increase is the new module's docstring, imports and
+signatures, plus the app's four kept methods. For an upload, crop or
+attachment-copy issue, the file code was at app lines 389-507 and 1674-1852,
+about 1,300 lines apart and interleaved with transactions. It is now at owner
+lines 36-289, and the four API methods are at app 377-435.
+
+**Test adaptation.** `ticket_board_image_asset_policy_test.py` has three
+call sites that used the removed private methods. They now call the owner's
+functions with `app.frame_dir` and `app.asset_dir`, and their assertions are
+unchanged.
+
+**Verification.** Checks ran offline. Hosts were refused: sockets and
+subprocess in the traces, and a bwrap sandbox for everything else, with the
+host filesystem read-only, a private network, empty `/run` and `/tmp`, and
+refusing recorders over systemctl, sudo, pkexec, loginctl and related tools.
+- **File trace, 58 behaviours, byte-identical on baseline and candidate.**
+  It used a fixed clock and temporary frame, asset and outside directories.
+  - Listing and resolve refusals.
+  - Ten uploads, with their files' names, bytes, modes and sizes.
+  - Eight crops, with every recorded SQL statement and parameter.
+  - Eleven materializations, four edit-field cases, seven stored-screenshot
+    validations, and direct copies including `upload_` consumption.
+  - Screenshot fields from the real `_pg_row_to_ticket`.
+  Three planted faults changed 6 behaviours and each fault was caught.
+- **Database trace, 17 scenarios, byte-identical on both trees.** It ran
+  against a disposable cluster with `schema.sql`, RBAC, every migration
+  through `ticket-board-migrate`, then RBAC again, as the service role. It
+  recorded statement order, parameters, commit/rollback and readback:
+  - create with attachments
+  - a successful screenshot update on a ticket that had none
+  - title updates
+  - an outside path refused before any write, on create and on update
+  - a wrong role, and a failure after the files were copied
+  - a real crop, and a crop of an unattached image
+- **Public surface.** All 46 public methods and signatures, the constructor,
+  the 72-name server namespace, `server.TicketBoardApp` identity and
+  `ticket-board.py --help` are identical.
+- **New test.** `ticket_board_attachment_store_test.py` passes 4 cases in the
+  sandbox and in the pane env:
+  1. the owner's functions and imports, the app's kept surface and
+     re-exports, and no PIL in the app
+  2. directories read at call time on every public path, including crop's
+     append
+  3. create and update materializing into the rebound directories, with a
+     refused path stopping before `edit_fields`, rolling back and writing no
+     file
+  4. five moved behaviours the older suites left unpinned
+- **Mutants.** All 18 seeded mutants in the owner and the app's call sites
+  are killed, run in the sandbox with timeouts. Five first survived, which is
+  why case 4 exists.
+- **Passing on both trees:** ticket_board_image_asset_policy (8),
+  ticket_board_postgres_backend, ticket_board_signoff_field_boundary,
+  ticket_board_input_policy (9), ticket_board_read_query_boundary (3),
+  ticket_board_backend_default, ticket_board_commit_cache (6),
+  ticket_board_frontend_attachments (2) and ticket_board_write_client.
+- **Red on main, with identical normalised output on both trees:**
+  - ticket_board_postgres_triggers, at the listener's `listen_once`.
+  - ticket_board_schema, at `enforce_declared_ticket_update`.
+  - ticket_board_write_api: its env-widening case gives the child
+    `PYTHONPATH` without `tests/`, so it cannot import `temporary_cluster`.
+    Its remaining cases, including `exercise_postgres_backend`, were run
+    directly and pass on both trees.
+- **Unavailable:** attachment_crop_browser and file_attach_frontend_browser
+  need Playwright and a browser.
+- **Pre-existing behaviours, recorded and not fixed:**
+  - `ticket_board.edit_fields` (production definition after migrations)
+    fails with a `ticket_attachments_pkey` unique violation when it replaces
+    the screenshots of a ticket that already has attachments.
+  - An update refused after materializing leaves its copied files in the
+    asset directory.
+
+#### Reviewed soft-limit exception: `ticket_board/app.py` at 1,685 lines
+
+After this slice, `TicketBoardApp` is the board's PostgreSQL front and
+nothing else. Every public method does the same four things:
+1. opens one connection and, where it writes, one transaction
+2. sets the RBAC caller role first
+3. lets a `ticket_board.*` SQL function decide authority
+4. reads the ticket back in the same connection
+
+These are the remaining responsibilities, as measured method lines at the
+SYRD-518 baseline:
+
+| responsibility | method lines |
+| --- | ---: |
+| create/update transaction core (validation, edit patch, transition, blockers, commit verification, state and assignee names) | 466 |
+| lifecycle action commands | 156 |
+| reads (snapshot, list, get, persisted check, file report, columns) | 134 |
+| ticket representation (row to JSON, active-work delivery) | 120 |
+| workflow configuration and runtime-assignment authority | 116 |
+| staff moves (route, reassign, draft, force, director edit, merge) | 111 |
+| publication transactions | 100 |
+| store-signature query | 75 |
+| publication proof | 41 |
+| connection helpers | 34 |
+
+**Alternatives measured and rejected:**
+1. **Move the ticket representation into a view module (−120).** The row
+   conversion calls the DB-backed `_validate_assignee` and
+   `_validate_state`. Tests stub `_pg_row_to_ticket` and
+   `_active_work_delivery` on instances and expect the stubbed delivery to be
+   observed. The owner would have to call back into the app, which is
+   reverse delegation.
+2. **Move the publication proof (−41), and the store-signature SELECT into
+   `ticket_read_query` (−75).** Both are cohesive, but together they reach
+   only about 1,570 lines. SYRD-502 placed the proof next to its
+   commit-cache seams on purpose.
+3. **Move the lifecycle commands and staff moves (−267), or workflow and
+   runtime (−116).** Every method is a public server API entry point with the
+   same shape: connect, set role, call one SQL function, read back. Mixins
+   would split one class's methods across files by count, which is a method
+   bag. Module functions would need an app wrapper for each, about 6 lines
+   apiece, which only hides size.
+4. **Move the create/update transaction core (−466).** It uses about twelve
+   app members. Moving it means an object holding the app, and splits the one
+   path that owns commit and rollback order.
+
+Only the mixins in (3), or (4), would reach 1,250 lines, and each harms
+authority review.
+
+**Navigation inside the exception.** The class spans lines 173-1685, and
+its 72 methods sit in contiguous stages (ranges measured from the AST):
+
+| stage | lines |
+| --- | --- |
+| constructor | 174-204 |
+| workflow and runtime authority | 206-330 |
+| reads and the attachment API | 332-435 |
+| create and staff moves | 437-652 |
+| publication | 654-798 |
+| merge, get and the persisted check | 800-847 |
+| connection and read helpers | 849-1112 |
+| create/update core | 1114-1367 |
+| lifecycle commands | 1369-1535 |
+| SQL call helpers and validation | 1537-1685 |
+
+**Rule going forward.** New responsibilities that are not database
+authority, such as file effects, formatting, policy or external processes,
+belong in separate owners like `attachment_store`, `commit_cache`,
+`image_asset_policy`, `ticket_input_policy` and `ticket_read_query`, not in
+this class. The exception is subject to independent Audit and final Director
+review. It does not close SYRD-272: the parent still requires the final
+before/after inventory and the navigation comparison.

@@ -1034,6 +1034,38 @@ def _pin_upgrade_source(
         )
         if refused is not None:
             return refused
+    # An installed release as the source and an exact commit chosen for it must
+    # agree before anything is written: the artifacts phase refuses the same
+    # disagreement, but only after this step has recorded the mismatched pin --
+    # which every later unpinned upgrade would then recover (SYRD-529). Only
+    # that comparison moves earlier; the release's other checks stay where
+    # they are, before staging.
+    chosen = (deploy_ref or "").strip()
+    if (
+        not dry_run
+        and source_repo is not None
+        and deploy_ref_chosen
+        and len(chosen) == 40
+        and all(char in "0123456789abcdef" for char in chosen)
+    ):
+        source_release = launcher._read_switchyard_release_marker(source_repo)
+        if source_release is not None and source_release.marker_commit and source_release.marker_commit != chosen:
+            print_func(
+                f"switchyard: {source_repo} is the installed release for {source_release.marker_commit}, "
+                f"but this upgrade is pinned at {chosen}."
+            )
+            running = launcher.running_launcher_release()
+            if running is not None and running.marker_commit and running.marker_commit != chosen:
+                print_func(
+                    f"switchyard: this host runs {running.marker_commit}; a chosen commit replaces "
+                    f"{config.project}'s recorded release only when it is that one. Another commit "
+                    "needs an operator to install and activate its release first."
+                )
+            print_func(
+                f"switchyard: refusing to upgrade {config.project} before recording anything: "
+                "its source and the commit it is pinned to disagree. Nothing was changed."
+            )
+            return 1
     if pinned_explicitly and not dry_run and os.geteuid() != 0:
         print_func(
             f"switchyard: this upgrade is not root, so {config.project}'s pinned release is not "

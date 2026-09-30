@@ -66,7 +66,11 @@ SEAMS = {
     'record_upgrade_source': {'UPGRADE_SOURCE_SCHEMA': 1, '_write_privileged_json': 1, 'privileged_upgrade_source_path': 1, 'read_upgrade_source': 1, 'resolved_source_selection': 1},
     'read_upgrade_source': {'UPGRADE_SOURCE_SCHEMA': 1, 'privileged_upgrade_source_path': 1},
     'upgrade_source_unavailable_reason': {'current_user_name': 1, 'privileged_upgrade_source_path': 1},
-    'resolve_pinned_upgrade_source': {'DEFAULT_TENANT_RELEASE_DEPLOY_REF': 2, 'read_upgrade_source': 1},
+    # SYRD-529 adds the recorded source's release marker and the running release, read
+    # through the launcher like the rest: a chosen commit that is the host's release
+    # replaces a recorded installed release for another commit.
+    'resolve_pinned_upgrade_source': {'DEFAULT_TENANT_RELEASE_DEPLOY_REF': 2, 'read_upgrade_source': 1,
+                                      '_read_switchyard_release_marker': 1, 'running_launcher_release': 1},
     'record_upgrade_phase': {'UPGRADE_PHASE_OWNERS': 1, '_record_upgrade_observation': 1, 'ensure_privileged_provision_dir': 1, 'privileged_artifact_mode': 1, 'privileged_upgrade_journal_path': 1, 'publish_tenant_journal_projection': 1, 'read_upgrade_journal': 1},
     'publish_tenant_journal_projection': {'UPGRADE_JOURNAL_OBSERVATIONS': 2, 'UPGRADE_JOURNAL_SCHEMA': 1, 'publish_tenant_artifact': 1, 'read_upgrade_journal': 1, 'upgrade_journal_path': 1},
     '_record_upgrade_observation': {'UPGRADE_JOURNAL_OBSERVATIONS': 1, 'current_user_name': 1, 'read_upgrade_journal': 1, 'upgrade_journal_path': 1},
@@ -473,6 +477,21 @@ def test_an_unpinned_invocation_is_filled_from_roots_record() -> None:
         with patched(t, read_upgrade_source=lambda config: {"source_repo": "", "commit_git_dir": "", "deploy_ref": ""}):
             check(m.resolve_pinned_upgrade_source(CONFIG, source_repo=None, commit_git_dir=None, deploy_ref=None)
                   == (None, None, "syrd376/default", ""), "an empty record fills nothing")
+        # SYRD-529: an exact commit chosen over a recorded installed release for
+        # another commit takes the host's running release -- only when it IS that commit.
+        old, host = "a" * 40, "b" * 40
+        installed = {"source_repo": "/opt/r/" + old, "commit_git_dir": "/rec/cache", "deploy_ref": old}
+        release = lambda root, commit: t.SharedSwitchyardRelease(root=Path(root), marker_commit=commit)
+        with patched(t, read_upgrade_source=lambda config: installed,
+                     _read_switchyard_release_marker=seam("_read_switchyard_release_marker", lambda path: release(path, old)),
+                     running_launcher_release=seam("running_launcher_release", lambda root=None: release("/opt/r/" + host, host))):
+            source, cache, ref, used = m.resolve_pinned_upgrade_source(CONFIG, source_repo=None, commit_git_dir=None, deploy_ref=host)
+            check((source, cache, ref) == (Path("/opt/r/" + host), "/rec/cache", host) and "in place of the recorded /opt/r/" in used,
+                  f"the host's release for the chosen commit, the recorded cache kept: {(source, cache, ref, used)}")
+            check(m.resolve_pinned_upgrade_source(CONFIG, source_repo=None, commit_git_dir=None, deploy_ref="c" * 40)[0]
+                  == Path("/opt/r/" + old), "a commit the host does not run keeps the recorded source")
+            check(m.resolve_pinned_upgrade_source(CONFIG, source_repo=Path("/mine"), commit_git_dir=None, deploy_ref=host)[0]
+                  == Path("/mine"), "an explicit source still wins")
     REACHED.add("DEFAULT_TENANT_RELEASE_DEPLOY_REF")
 
 

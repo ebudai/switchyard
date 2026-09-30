@@ -300,7 +300,32 @@ def resolve_pinned_upgrade_source(
     used: list[str] = []
     if source_repo is None and recorded["source_repo"]:
         source_repo = Path(recorded["source_repo"])
-        used.append(f"source {source_repo}")
+        # An exact commit chosen now, over a recorded source that is an installed
+        # release for a DIFFERENT commit: that release cannot supply it, and
+        # keeping it made the pinned preview/upgrade the host names (SYRD-284)
+        # stage the old tree against the new ref and refuse (SYRD-529). The
+        # source becomes the release this launcher is running -- the one an
+        # operator activated for the host -- and only when it IS that commit.
+        # Any other commit keeps the recorded source and its mismatch refusal:
+        # no caller path, and no release the operator did not activate.
+        chosen = (deploy_ref or "").strip()
+        exact = len(chosen) == 40 and all(char in "0123456789abcdef" for char in chosen)
+        recorded_release = launcher._read_switchyard_release_marker(source_repo) if exact else None
+        running = launcher.running_launcher_release() if recorded_release is not None else None
+        if (
+            recorded_release is not None
+            and recorded_release.marker_commit
+            and recorded_release.marker_commit != chosen
+            and running is not None
+            and running.marker_commit == chosen
+        ):
+            used.append(
+                f"source {running.root}, the release this host runs and the commit chosen here, "
+                f"in place of the recorded {source_repo} (the release for {recorded_release.marker_commit})"
+            )
+            source_repo = running.root
+        else:
+            used.append(f"source {source_repo}")
     if commit_git_dir is None and recorded["commit_git_dir"]:
         commit_git_dir = recorded["commit_git_dir"]
         used.append(f"commit cache {commit_git_dir}")

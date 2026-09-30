@@ -9852,6 +9852,29 @@ RETURNS text LANGUAGE sql STABLE AS $$
  ORDER BY t.ticket_number LIMIT 1) END;
 $$;
 
+CREATE OR REPLACE FUNCTION ticket_board.serial_reservations()
+RETURNS TABLE(implementer text, ticket_id text, state text, assignee text)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    -- Which ticket holds each implementer's one serial slot, answered by the
+    -- same function the routing gate asks, so a report can never disagree with
+    -- what the gate will do -- under either reservation policy, and whatever
+    -- kind the tenant declared its UAT stage (SYRD-476). A free implementer is
+    -- a row with no ticket. Read-only.
+    SELECT roles.name, t.id, t.state, t.assignee
+    FROM (
+        SELECT DISTINCT btrim(lower(role)) AS name
+        FROM ticket_board.workflow_stages AS ws, unnest(ws.owner_roles) AS role
+    ) AS roles
+    LEFT JOIN ticket_board.tickets AS t
+      ON t.id = ticket_board.ticket_current_reserved_ticket(roles.name)
+    WHERE ticket_board.ticket_is_implementer_assignee(roles.name)
+    ORDER BY roles.name;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.enforce_ticket_workflow_insert()
 RETURNS trigger
 LANGUAGE plpgsql

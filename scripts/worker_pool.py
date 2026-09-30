@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import re
+import shlex
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -997,6 +998,58 @@ def prepare_role_command(config_path: Path | str, member: str) -> str:
     return shlex.join([str(program), "prepare-role", "--config", str(config_path), "--role", member])
 
 
+def observe_worker(config, member: str, *, runner=None) -> tuple[str, str]:
+    """What one worker is doing now: running, stopped, not its runtime, or unknown.
+
+    "running" is the launcher's own meaning -- a live session whose process tree
+    runs a command the role declares -- the one `status` and restart use for
+    project roles. A live session running something else is not a worker, and
+    a probe that could not be made is not an answer (SYRD-477).
+    """
+    import subprocess
+
+    from scripts import team_launcher as launcher
+
+    runner = runner or subprocess.run
+    role = None
+    try:
+        role, role_runner = _worker_tmux(config, member, runner=runner)
+        probe = role_runner(
+            launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if probe.returncode != 0:
+            return "stopped", f"it has no live session {role.tmux_session}"
+        if launcher.live_command_matches_role(role, runner=role_runner):
+            return "running", f"its session is live at {role.target}"
+    except Exception as exc:  # noqa: BLE001 - an unreadable worker is reported, not guessed at
+        return "unknown", f"its state could not be read ({type(exc).__name__}: {exc})"
+    from scripts.tmux_session_argv import expected_live_commands
+
+    expected = ", ".join(sorted(expected_live_commands(role))) or "its runtime"
+    return "not its runtime", f"session {role.tmux_session} is live but not running {expected}"
+
+
+def _worker_tmux(config, member: str, *, runner):
+    """A worker's role, and the runner that reaches the tmux server it runs on."""
+    from scripts import team_launcher as launcher
+
+    role = launcher._role_by_name(config, member)
+    return role, launcher.role_process_runner_for(config, role, runner=runner)
+
+
+def _as_now(state: str, seen: str) -> str:
+    return f"it is {state}: {seen}" if state in ("running", "stopped", "unknown") else seen
+
+
+def _way_back(config, member: str, state: str) -> str:
+    """The one supported next step for a worker left in `state`, as a command."""
+    verb = {"stopped": "start", "not its runtime": "restart", "running": "status"}.get(state, "status")
+    command = shlex.join(["switchyard", "worker-pool", config.project, verb] + ([member] if verb != "status" else []))
+    if verb == "status":
+        return f"Read it again with `{command}` before acting."
+    return f"Run `{command}` to bring it up, then `switchyard worker-pool {config.project} status` to confirm."
+
+
 def start_worker(
     config,
     pool,
@@ -1031,8 +1084,14 @@ def start_worker(
             # Preparation is its own supported step; start does not do it.
             detail += f". Prepare it first, then start it again: {prepare_role_command(config_path, member)}"
         return WorkerAction(member, "not started", detail)
-    if state.session:
-        return WorkerAction(member, "already running", f"its session is live at {state.target}")
+    # Asked now, not taken from the readiness read: a restart reads readiness
+    # before its stop, and "already running" from that read started nothing
+    # while the worker was down (SYRD-477).
+    before, seen = observe_worker(config, member, runner=runner)
+    if before == "running":
+        return WorkerAction(member, "already running", seen)
+    if before != "stopped":
+        return WorkerAction(member, "not started", f"{seen}. {_way_back(config, member, before)}")
     role = launcher._role_by_name(config, member)
     pane_user = launcher.role_run_as_user(config, role)
     args = launcher.pane_command_args(
@@ -1047,10 +1106,23 @@ def start_worker(
         run_as_user=pane_user,
     )
     result = runner(args)
+    # The pane command's exit status is not a worker: a resume it could not
+    # verify in time exits 0, and so does a runtime that exits straight after.
+    # Only what is running now answers "started".
+    after, seen = observe_worker(config, member, runner=runner)
     if result.returncode != 0:
-        return WorkerAction(member, "failed to start", f"the pane command exited {result.returncode}")
+        return WorkerAction(
+            member, "failed to start",
+            f"the pane command exited {result.returncode}, and {_as_now(after, seen)}. "
+            f"{_way_back(config, member, after)}",
+        )
+    if after != "running":
+        return WorkerAction(
+            member, "failed to start",
+            f"the pane command exited 0, but {_as_now(after, seen)}. {_way_back(config, member, after)}",
+        )
     forced = " (forced past its blockers)" if state.blockers else ""
-    return WorkerAction(member, "started", f"session {role.tmux_session}{forced}")
+    return WorkerAction(member, "started", f"session {role.tmux_session}, observed live{forced}")
 
 
 def stop_worker(config, member: str, *, runner=None) -> WorkerAction:
@@ -1065,8 +1137,7 @@ def stop_worker(config, member: str, *, runner=None) -> WorkerAction:
     from scripts import team_launcher as launcher
 
     runner = runner or subprocess.run
-    role = launcher._role_by_name(config, member)
-    role_runner = launcher.role_process_runner_for(config, role, runner=runner)
+    role, role_runner = _worker_tmux(config, member, runner=runner)
     probe = role_runner(
         launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
@@ -1089,5 +1160,13 @@ def restart_worker(config, pool, member: str, **kwargs) -> list[WorkerAction]:
     """
     runner = kwargs.get("runner")
     stopped = stop_worker(config, member, runner=runner)
+    if not stopped.succeeded:
+        # Nothing is started over a worker that was not stopped: the start
+        # would find it and answer "already running" about the old one.
+        state, seen = observe_worker(config, member, runner=runner)
+        return [stopped, WorkerAction(
+            member, "not restarted",
+            f"its stop failed, so nothing was started; {_as_now(state, seen)}. {_way_back(config, member, state)}",
+        )]
     started = start_worker(config, pool, member, **kwargs)
     return [stopped, started]

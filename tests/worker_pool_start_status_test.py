@@ -90,8 +90,17 @@ class Host:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/hermes\n")
         if "config" in command and "check" in command:
             return subprocess.CompletedProcess(command, 0, stdout="\N{CHECK MARK} OPENROUTER_API_KEY\n")
-        # Anything else is the pane start itself.
+        if "display-message" in command:
+            # A running session shows its runtime. With no pane pid to walk, the
+            # launcher's live-worker check reads the pane's current command.
+            session = command[command.index("-t") + 1].lstrip("=").split(":", 1)[0]
+            shows = command[-1] == "#{pane_current_command}" and session in self.running
+            return subprocess.CompletedProcess(command, 0 if shows else 1, stdout="hermes\n" if shows else "")
+        # Anything else is the pane start itself, and a start that worked
+        # leaves the worker's session running.
         self.started.append(command)
+        if self.pane_exit == 0:
+            self.running.add(f"{PROJECT}-{command[command.index('pane') + 2]}")
         return subprocess.CompletedProcess(command, self.pane_exit)
 
     def run(self, action: str, member: str = "") -> tuple[int, str]:

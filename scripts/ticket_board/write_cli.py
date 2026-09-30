@@ -206,7 +206,7 @@ def _build_parser() -> argparse.ArgumentParser:
     create = subparsers.add_parser("create-ticket")
     create.add_argument("--title", required=True)
     add_free_text_argument(create, "--body", required=True)
-    create.add_argument("--assignee", default="unassigned")
+    create.add_argument("--assignee", default=None, help="omit to let the board place the ticket")
     create.add_argument("--state", default="analysis")
     create.add_argument("--parent-id", default="")
     create.add_argument("--draft", action="store_true")

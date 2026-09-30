@@ -637,7 +637,7 @@ class TicketBoardWriteClient:
         body: str,
         screenshot: str | None = None,
         screenshots: list[str] | None = None,
-        assignee: str = "unassigned",
+        assignee: str | None = None,
         state: str = "analysis",
         parent_id: str = "",
         blocked_by: list[str] | None = None,
@@ -655,7 +655,6 @@ class TicketBoardWriteClient:
             "body": body,
             "screenshot": screenshot,
             "screenshots": screenshots or [],
-            "assignee": assignee,
             "state": state,
             "parent_id": parent_id,
             "blocked_by": blocked_by or [],
@@ -666,6 +665,10 @@ class TicketBoardWriteClient:
             "needs_audit": needs_audit,
             "needs_user_signoff": needs_user_signoff,
         }
+        # Only an assignee the caller chose is sent: an omitted one lets the
+        # board place the ticket, an explicit one is a request (SYRD-521).
+        if assignee is not None:
+            payload["assignee"] = assignee
         if comment_text:
             payload["comment_text"] = comment_text
         return self._post("/actions/create_ticket", payload, caller_role=caller_role)

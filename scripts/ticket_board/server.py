@@ -428,6 +428,27 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 bool(payload.get("user_signoff", False)),
             )
         )
+        # SYRD-521: a declared stage of kind draft with one owner gives every new
+        # ticket to that owner (the insert trigger), and a stage that notifies
+        # its assignee then tells them at once. So an EXPLICIT request for an
+        # unassigned ticket there cannot be honoured: MEFP's importer asked for
+        # inert Draft intake and got a Draft owned by -- and acted on by -- the
+        # designer. Refused before anything is written or sent, with where
+        # inert intake does work. Leaving the assignee out still means "the
+        # stage's owner", which is ordinary Draft ownership.
+        if "assignee" in payload and str(payload.get("assignee") or "").strip().lower() == "unassigned":
+            cfg = getattr(self.app, "workflow_configuration", lambda: None)()
+            stage = next((s for s in (cfg or {}).get("stages", []) if s.get("name") == state), None)
+            if stage and stage.get("kind") == "draft" and len(stage.get("owners") or []) == 1:
+                from .workflow_config import parking_stage_names
+
+                owner = stage["owners"][0]
+                inert = " or ".join(sorted(parking_stage_names(cfg))) or "a stage nobody owns"
+                raise ValueError(
+                    f"an explicitly unassigned {state} ticket would not stay unassigned: this workflow gives "
+                    f"every new {state} ticket to its owner, {owner}. For inert intake create it in {inert} "
+                    f"(owned by nobody, notifies nobody); to hand it to {owner}, leave the assignee out"
+                )
         if advanced_create and caller_role is None:
             raise ValueError("advanced create fields require /api/tickets/actions/create_ticket")
         if bool(payload.get("needs_inspection", False)) and caller_role != "director":

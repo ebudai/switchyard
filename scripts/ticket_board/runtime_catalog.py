@@ -34,6 +34,7 @@ why, which is honest; inventing plausible identifiers would not be.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Sequence
@@ -272,6 +273,67 @@ def model_absent_from(catalog: Catalog | None, model: str) -> Catalog | None:
     if any(choice.value == wanted for choice in catalog.choices):
         return None
     return catalog
+
+
+#: Codex keeps, per model, the effort levels it accepts in the account's own
+#: model cache; reading it is a local file read, no request (SYRD-534). Pinned
+#: to the owner's home, which the owner prefix sets as HOME: the caller's
+#: CODEX_HOME passes through that prefix and would read the caller's cache.
+CODEX_MODEL_CACHE_READ = ("sh", "-c", 'cat -- "$HOME/.codex/models_cache.json"')
+
+
+def codex_model_efforts(cache_text: str, model: str) -> tuple[str, ...] | None:
+    """The effort levels Codex's model cache lists for `model`, or None when it says nothing about it."""
+    try:
+        document = json.loads(cache_text)
+    except ValueError:
+        return None
+    models = document.get("models") if isinstance(document, dict) else None
+    if not isinstance(models, list):
+        return None
+    for entry in models:
+        if isinstance(entry, dict) and entry.get("slug") == model:
+            levels = entry.get("supported_reasoning_levels")
+            if not isinstance(levels, list):
+                return None
+            found = tuple(
+                str(level.get("effort")) for level in levels if isinstance(level, dict) and level.get("effort")
+            )
+            return found or None
+    return None
+
+
+def owner_effort_catalog(
+    runtime: str,
+    model: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+    owner_args: Sequence[str] = (),
+) -> Catalog:
+    """The effort levels `runtime` accepts for `model`, as the owner's account knows them.
+
+    Codex: the levels its own model cache lists for that model, read in the
+    owner's account. Anything else, or Codex when the cache says nothing about
+    the model: the recorded levels, with where they came from.
+    """
+    if runtime == "codex" and model and runner is not None:
+        try:
+            proc = runner([*owner_args, *CODEX_MODEL_CACHE_READ], capture_output=True, text=True, check=False)
+        except OSError:
+            proc = None
+        if proc is not None and getattr(proc, "returncode", 1) == 0:
+            levels = codex_model_efforts(str(getattr(proc, "stdout", "") or ""), model)
+            if levels:
+                return Catalog(
+                    tuple(Choice(level) for level in levels),
+                    PROVENANCE_LIVE,
+                    detail=f"the levels the owner's Codex model cache lists for {model}",
+                )
+    recorded = effort_catalog(runtime)
+    if runtime == "codex" and recorded.choices:
+        return Catalog(recorded.choices, recorded.provenance,
+                       detail=f"switchyard's recorded levels; the owner's Codex model cache says nothing about {model or 'this model'}")
+    return recorded
 
 
 def effort_catalog(runtime: str) -> Catalog:

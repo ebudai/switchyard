@@ -476,6 +476,16 @@ def _build_switchyard_set_role_runtime_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--effort",
+        default=None,
+        help=(
+            "reasoning effort the role should run at, checked against what the runtime accepts for "
+            "its model in the project owner's account; it replaces any effort setting left in the "
+            "role's arguments. Pass an empty value to take the runtime's default; omit it to keep "
+            "the role's effort"
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="switch even though the role is mid-turn; requires --reason",

@@ -371,6 +371,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             role_name=args.role,
             runtime=args.cli,
             model=args.model,
+            effort=args.effort,
             force=args.force,
             reason=args.reason,
             dry_run=args.dry_run,

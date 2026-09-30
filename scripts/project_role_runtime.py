@@ -49,6 +49,9 @@ def set_project_role_runtime_command(
     #: `None` means "keep whatever is configured, unless the owner does not
     #: offer it"; `""` drops the model; anything else is an explicit choice.
     model: str | None = None,
+    #: `None` keeps the role's effort; `""` clears it (the runtime's default);
+    #: anything else is an explicit level, checked against the account (SYRD-534).
+    effort: str | None = None,
     force: bool = False,
     reason: str = "",
     dry_run: bool = False,
@@ -169,12 +172,44 @@ def set_project_role_runtime_command(
                 print_func=print_func,
             )
 
+    chosen_effort = None if effort is None else effort.strip()
+    if chosen_effort:
+        # Checked before anything is written, against the model the role will
+        # run: the one chosen now, or the one it keeps.
+        effective_model = chosen_model if chosen_model is not None else configured_model
+        if not launcher.runtime_catalog.runtime_takes_effort(runtime):
+            print_func(
+                f"switchyard: {runtime} does not take an effort level, so --effort {chosen_effort} would be "
+                "dropped before the command line. Nothing was changed."
+            )
+            return 1
+        efforts = launcher.runtime_catalog.owner_effort_catalog(
+            runtime, effective_model, runner=runner, owner_args=owner_args
+        )
+        offered = [choice.value for choice in efforts.choices]
+        if chosen_effort not in offered:
+            if efforts.enumerable:
+                print_func(
+                    f"switchyard: {runtime} does not accept effort {chosen_effort!r} for "
+                    f"{effective_model or 'its default model'}; {efforts.detail}: {', '.join(offered)}. "
+                    "Nothing was changed."
+                )
+                return 1
+            # A recorded table describes a vendor, not this account, and nothing
+            # may be refused on its strength (SYRD-250): said, and carried out.
+            print_func(
+                f"switchyard: effort {chosen_effort!r} is not among {', '.join(offered)} ({efforts.detail or 'recorded'}); "
+                "it could not be checked against the account, so the start will tell"
+            )
+
     result = role_runtime.switch_role_runtime(
         config,
         config_path=config_path,
         role_name=role_name,
         runtime=runtime,
         model=chosen_model,
+        # Only when chosen, so a switch without one is called exactly as before.
+        **({} if chosen_effort is None else {"effort": chosen_effort}),
         force=force,
         reason=reason,
         dry_run=dry_run,
@@ -186,7 +221,7 @@ def set_project_role_runtime_command(
         # Read as optional: a result that does not say it is a repair is a move.
         if getattr(result, "argument_repair", False):
             print_func(
-                f"switchyard: would keep {result.role} on {result.runtime} and repair its arguments as listed; "
+                f"switchyard: would keep {result.role} on {result.runtime} and update its effort and arguments as listed; "
                 "every check passed and nothing was changed"
             )
             return 0

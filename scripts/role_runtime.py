@@ -146,11 +146,14 @@ class RuntimeSwitchResult:
     previous_board_runtime: str = ""
     #: What happened to the role's stored arguments (SYRD-533).
     argument_changes: tuple[str, ...] = ()
+    #: Whether the model changes too; such a switch is described as the move it
+    #: always was, not as an argument repair (SYRD-534).
+    model_changed: bool = False
 
     @property
     def argument_repair(self) -> bool:
-        """The runtime stays; only arguments another runtime left behind change."""
-        return bool(self.argument_changes) and self.previous_runtime == self.runtime and (
+        """The runtime and model stay; only the effort and stored arguments change."""
+        return bool(self.argument_changes) and not self.model_changed and self.previous_runtime == self.runtime and (
             not self.previous_board_runtime or self.previous_board_runtime == self.runtime
         )
 
@@ -176,8 +179,8 @@ class RuntimeSwitchResult:
         )
         if self.argument_repair:
             return (
-                f"switchyard: {self.role} still runs {self.runtime}, with the arguments another runtime "
-                f"left behind translated or dropped; {live}; {slots}"
+                f"switchyard: {self.role} still runs {self.runtime}, with its effort and arguments updated "
+                f"as listed; {live}; {slots}"
             )
         return (
             f"switchyard: {self.role} now runs {self.runtime} (was {self.was}); "
@@ -317,8 +320,14 @@ def _is_busy(
     return PaneActivityGate(state_store=PaneHookStateStore(pane_state_dir)).is_busy(role.target)
 
 
+def _effort_kwargs(effort: str | None) -> dict[str, str]:
+    """`effort` for the projection only when one was chosen, so a caller's own
+    projection that predates the choice is still called as it always was."""
+    return {} if effort is None else {"effort": effort}
+
+
 def _verifiable_projection_blockers(
-    config_path: Path, role_name: str, runtime: str, *, model: str | None
+    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None
 ) -> list[str]:
     """Refuse, before anything stops, a switch its own start check could not confirm.
 
@@ -340,7 +349,7 @@ def _verifiable_projection_blockers(
         return [f"{config_path} has no role {role_name!r}"]
     projected = copy.deepcopy(entry)
     try:
-        project_role_runtime(projected, runtime=runtime, model=model)
+        project_role_runtime(projected, runtime=runtime, model=model, **_effort_kwargs(effort))
     except RoleRuntimeRefusal as exc:
         return [str(exc).removeprefix("switchyard: ")]
     accepted = projected_live_commands(projected)
@@ -354,7 +363,7 @@ def _verifiable_projection_blockers(
 
 
 def _argument_changes(
-    config_path: Path, role_name: str, runtime: str, *, model: str | None
+    config_path: Path, role_name: str, runtime: str, *, model: str | None, effort: str | None = None
 ) -> tuple[list[str], str]:
     """What the switch would do to the role's stored arguments, on a copy: (changes, refusal)."""
     try:
@@ -368,7 +377,7 @@ def _argument_changes(
     if entry is None:
         return [], ""
     try:
-        return list(project_role_runtime(copy.deepcopy(entry), runtime=runtime, model=model) or []), ""
+        return list(project_role_runtime(copy.deepcopy(entry), runtime=runtime, model=model, **_effort_kwargs(effort)) or []), ""
     except RoleRuntimeRefusal as exc:
         return [], str(exc)
 
@@ -382,6 +391,9 @@ def preflight(
     #: The model the role should run. `None` leaves whatever is configured and
     #: keeps this a runtime-only decision.
     model: str | None = None,
+    #: The effort level the role should run at. `None` keeps whatever it has;
+    #: an explicit level is a change even on the same runtime and model (SYRD-534).
+    effort: str | None = None,
     pane_state_dir: Path | None = None,
     board_url: str = "",
     force: bool = False,
@@ -413,7 +425,7 @@ def preflight(
 
     current_model = str(getattr(role, "model", "") or "")
     board_runtime = _declared_runtime(document, role_name)
-    argument_changes, argument_refusal = _argument_changes(config_path, role_name, runtime, model=model)
+    argument_changes, argument_refusal = _argument_changes(config_path, role_name, runtime, model=model, effort=effort)
     # A model-only change restarts the role exactly as a runtime change does,
     # so it earns the same readiness and busy checks. Asking "is the runtime
     # changing" skipped both for the one repair this ticket exists to enable.
@@ -430,7 +442,7 @@ def preflight(
     blockers: list[str] = []
     if changing:
         blockers.extend(_readiness_blockers(config, role, runtime, runner=runner))
-        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model))
+        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model, effort=effort))
         if busy and not force:
             blockers.append(
                 f"{role.target} is busy; wait for an idle checkpoint, or pass --force with --reason "
@@ -466,7 +478,9 @@ def _declared_runtime(document: Mapping[str, Any] | None, role_name: str) -> str
     return str(declared) if declared else None
 
 
-def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | None = None) -> list[str]:
+def project_role_runtime(
+    entry: dict[str, Any], *, runtime: str, model: str | None = None, effort: str | None = None
+) -> list[str]:
     """Rewrite one role's launcher entry, in place, for a new runtime.
 
     Every field that belongs to the runtime moves with it; everything else
@@ -481,7 +495,7 @@ def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | No
         team_launcher._command_name(str(previous[0])) if isinstance(previous, list) and previous else ""
     )
     try:
-        notes = runtime_arguments.reconcile(entry, runtime=runtime, previous_runtime=previous_runtime)
+        notes = runtime_arguments.reconcile(entry, runtime=runtime, previous_runtime=previous_runtime, effort=effort)
     except runtime_arguments.ArgumentRefusal as exc:
         raise RoleRuntimeRefusal(f"switchyard: {exc}") from exc
     # `cli` is a list so a role can carry flags; only the program changes.
@@ -550,6 +564,7 @@ def _write_runtime_projection(
     runtime: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     model: str | None = None,
+    effort: str | None = None,
 ) -> team_launcher.ProjectConfig:
     """Point the launcher config at the new runtime, leaving everything else."""
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -559,7 +574,7 @@ def _write_runtime_projection(
     for entry in roles:
         if not isinstance(entry, dict) or entry.get("role") != role_name:
             continue
-        project_role_runtime(entry, runtime=runtime, model=model)
+        project_role_runtime(entry, runtime=runtime, model=model, **_effort_kwargs(effort))
         break
     else:
         raise RoleRuntimeRefusal(f"switchyard: {config_path} has no role {role_name!r}")
@@ -928,6 +943,8 @@ def switch_role_runtime(
     #: is configured; "" drops it, which is what a move between runtimes means
     #: for a model name that belonged to the one being left (SYRD-115).
     model: str | None = None,
+    #: The effort level to run at; None keeps the role's own (SYRD-534).
+    effort: str | None = None,
     force: bool = False,
     reason: str = "",
     dry_run: bool = False,
@@ -952,6 +969,7 @@ def switch_role_runtime(
         role_name=role_name,
         runtime=runtime,
         model=model,
+        effort=effort,
         pane_state_dir=pane_state_dir,
         force=force,
         environ=environ,
@@ -1005,6 +1023,7 @@ def switch_role_runtime(
             forced=force,
             reason=reason,
             argument_changes=checks.argument_changes,
+            model_changed=not (checks.requested_model is None or checks.requested_model == checks.current_model),
         )
 
     state_dir = pane_state_dir or team_launcher.default_pane_state_dir_for_user(
@@ -1034,7 +1053,7 @@ def switch_role_runtime(
 
         updated = _write_runtime_projection(
             config, config_path=config_path, role_name=role_name, runtime=runtime,
-            runner=runner, model=model,
+            runner=runner, model=model, effort=effort,
         )
         journal.record("projection")
         journal.write(journal_path)
@@ -1103,4 +1122,5 @@ def switch_role_runtime(
         reason=reason,
         journal_path=str(journal_path),
         argument_changes=checks.argument_changes,
+        model_changed=not (checks.requested_model is None or checks.requested_model == checks.current_model),
     )

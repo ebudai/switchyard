@@ -135,6 +135,7 @@ def infer_tests(files: list[str], worktree: Path) -> list[str]:
             "scripts/ticket-board-write",  # pragma: no cover - literal table entry.
             "scripts/ticket-board-migrate",  # pragma: no cover - literal table entry.
             "scripts/ticket-board-service.sh",  # pragma: no cover - literal table entry.
+            "scripts/ticket-board-service-health.sh",  # pragma: no cover - literal table entry.
             "scripts/ticket-board-notify-listener",  # pragma: no cover - literal table entry.
         }:  # pragma: no cover - literal table close.
             selected.update(ticket_board_tests)

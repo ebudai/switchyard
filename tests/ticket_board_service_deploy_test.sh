@@ -371,7 +371,12 @@ grep -q 'smoke_check_http' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
     echo "FAIL: service script lacks a post-start smoke check" >&2
     exit 1
 }
-grep -q 'urllib.request.urlopen(url, timeout=1.0)' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+# The smoke check lives in the board-health file the service script sources (SYRD-516).
+grep -qxF 'source "$(dirname "${BASH_SOURCE[0]}")/ticket-board-service-health.sh"' "$REPO_ROOT/scripts/ticket-board-service.sh" || {
+    echo "FAIL: service script does not source its board-health checks" >&2
+    exit 1
+}
+grep -q 'urllib.request.urlopen(url, timeout=1.0)' "$REPO_ROOT/scripts/ticket-board-service-health.sh" || {
     echo "FAIL: service smoke check does not perform an HTTP request" >&2
     exit 1
 }

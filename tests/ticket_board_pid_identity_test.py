@@ -561,11 +561,17 @@ def assert_deploy_probe_requires_process_bound_authority() -> None:
     # The probe is its own program now rather than a heredoc scraped out of the
     # deploy script. Read it from where the release ships it, and check the
     # deploy script really runs that file, so this cannot drift into testing a
-    # copy nothing executes (SYRD-136).
+    # copy nothing executes (SYRD-136). The call lives in the board-health file
+    # the deploy script sources (SYRD-516), so check both links: the health
+    # file runs the probe, and the deploy script sources that health file.
     probe_path = ROOT / "scripts" / "ticket-board-socket-smoke"
-    service = (ROOT / "scripts" / "ticket-board-service.sh").read_text(encoding="utf-8")
-    assert "scripts/ticket-board-socket-smoke" in service, (
+    health = (ROOT / "scripts" / "ticket-board-service-health.sh").read_text(encoding="utf-8")
+    assert "scripts/ticket-board-socket-smoke" in health, (
         "the deploy script no longer runs the probe this case exercises"
+    )
+    service = (ROOT / "scripts" / "ticket-board-service.sh").read_text(encoding="utf-8")
+    assert 'source "$(dirname "${BASH_SOURCE[0]}")/ticket-board-service-health.sh"' in service.splitlines(), (
+        "the deploy script no longer sources the board-health file that runs the probe"
     )
     probe = probe_path.read_text(encoding="utf-8")
 

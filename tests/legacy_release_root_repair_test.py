@@ -138,6 +138,10 @@ class Tenant:
             script.parent.mkdir(mode=0o755)
             shutil.copyfile(ROOT / "scripts" / "ticket-board-service.sh", script)
             script.chmod(0o755)
+            # The board-health file it sources, beside it as in a release (SYRD-516).
+            health = script.parent / "ticket-board-service-health.sh"
+            shutil.copyfile(ROOT / "scripts" / "ticket-board-service-health.sh", health)
+            health.chmod(0o644)
         env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "HOME": str(self.home),

@@ -23956,3 +23956,131 @@ Navigation:
   board-adjacent group.
 
 No live tenant, board, socket, service or release was used or changed.
+
+### SYRD-516 (ticket-board-service.sh slice 1): board health and the release canary
+
+The Director approved the boundary before the ticket worktree was edited,
+from audited public main `58448943d76e1c74282bdc32b9bca5082afd3280`.
+`scripts/ticket-board-service-health.sh` is a sourced library (mode 0644, no
+shebang) that owns proving a board answers correctly. That covers the release
+canary's whole lifecycle: a direct process or the fixed `-canary.service`
+unit, its environment file, its temporary directory and their cleanup. It
+also covers the probes of the restarted live service: HTTP smoke, build id,
+commit repositories, the socket smoke (which runs
+`scripts/ticket-board-socket-smoke`) and the write-token requirement. These
+are the fifteen contiguous functions that were service-script lines
+794-1168, moved verbatim under a 16-line header.
+
+`ticket-board-service.sh` keeps the configuration, the plumbing
+(`die`/`log`, `systemctl_system` and its polkit guard, scope and unit
+resolution) and every decision about when a check runs and what a failure
+does: migrations, canary, activation, restart, the live checks each followed
+by rollback, the listener, and the system runtime checks. It sources the
+health file at the original position with
+`source "$(dirname "${BASH_SOURCE[0]}")/ticket-board-service-health.sh"`.
+Functions resolve when called, so a caller that sources the service script
+and redefines a function in either file still replaces it. The service
+script's `set -euo pipefail` covers the health file too, and a copy missing
+its sibling fails at load, before any command runs.
+
+Alternatives were measured and rejected. Moving release export and activation
+(373-666) would have left 1,227 lines, carried a top-level `readonly`, and
+touched the most-sourced domain. Moving unit rendering and drift (1170-1341)
+would still have left 1,345 lines.
+
+| measure | before | after |
+| --- | ---: | ---: |
+| `scripts/ticket-board-service.sh` | 1,517 lines | 1,146 lines |
+| `scripts/ticket-board-service-health.sh` | absent | 391 lines, 15 functions |
+| Total of these two files | 1,517 lines | 1,537 lines |
+
+The 20-line increase is the library header and the 4-line source block.
+The service script is now 104 lines under the advisory limit.
+
+Navigation:
+- `run_release_canary` moved from line 1115 to health 338.
+- `verify_live_build_id` moved from 829 to health 52.
+- `verify_local_socket_available` moved from 955 to health 178.
+- In the service script, `deploy_restart_service` moved from 1368 to 997,
+  `rollback_live_service` from 1434 to 1063, `render_unit` from 1170 to 799
+  and `main` from 1452 to 1081. `deploy_export_release` stays at 597.
+
+**Compatibility and staging.** The service script's mode, entry and sourcing
+guard are unchanged. Releases and deploy trees are always whole: a git
+archive of the candidate commit carries the file, and `deploy_export_release`
+from a clean clone published it at 0644, where the published release's
+service script ran `render-unit` and defined `run_release_canary` when
+sourced. `new_project_precheck` is deliberately unchanged, because older
+reviewed release trees do not have the sibling.
+
+**Test and fixture adaptations.** Each keeps its assertion, and the first
+three also check the service-to-health link:
+1. `ticket_board_pid_identity_test` reads the socket-smoke call from the
+   health file and requires the exact source line in the service script.
+2. The smoke HTTP-request grep in `ticket_board_service_deploy_test.sh` is
+   pointed at the health file, and an exact source-line grep is added. My
+   pre-edit screen missed this guard; the Director approved it separately.
+3. The `legacy_release_root_repair_test` fixture copies the health file
+   beside the service script.
+4. `merge-gate-helper` lists the health file in its board-suite table.
+
+**Verification.**
+- **Sandboxes.** Checks ran in one of two sandboxes.
+  - bwrap: host filesystem read-only, private network, empty `/run` and
+    `/tmp`, and refusing recorders over systemctl, sudo, pkexec, loginctl,
+    systemd-run, journalctl, busctl, runuser, su, machinectl and setpriv.
+  - For ACL suites: a `--map-auto` user namespace. Namespace root set up a
+    private network with only loopback, fresh `/run` and `/tmp`, and the
+    same recorders; the suite then ran as an inner non-root uid that cannot
+    write host files.
+  Each sandbox's walls were probed before use.
+- **Pre-edit matrix.** 49 scenarios were identical on both trees, and a
+  positive control with 3 planted faults produced 7 differences.
+- **New test.** `tests/ticket_board_service_health_owner_test.py` passes
+  5 cases in the sandbox and in the pane env, with no boundary calls.
+  - Ownership: exactly the fifteen functions, sourced once between
+    `ensure_database_roles` and `render_unit` and before the main guard;
+    both files pass `bash -n`.
+  - A lone copy fails before any command for render-unit, deploy-restart
+    and start.
+  - Canary lifecycle: pass, fail and skip, with no leftovers and the
+    canary's port closed afterwards.
+  - Redefinitions after sourcing: `systemctl_system`, called from the
+    health file, is observed with the exact
+    stop/start/status/stop sequence, and so is a redefined
+    `smoke_check_url`. Shell options are unchanged.
+  - Deploy order, using the real health functions and a fake board: pass,
+    rollback on a wrong build, rollback with the live board down, and a
+    canary failure that stops before activation.
+  - Its three behaviour cases also pass on the baseline.
+- **Mutants.** All 17 seeded mutants were killed, each run in bwrap with a
+  private pid namespace and `--die-with-parent`, and no processes were left
+  behind. They covered: the source line resolving from `$0`; a missing
+  sibling tolerated; sourcing after the main guard; errexit relaxed; plumbing
+  captured at source time; canary kept on success and on failure; a direct
+  canary never stopped; no stop before a unit start; no status on failure;
+  the canary log not shown; an env file at 0600; a changed build-id message;
+  the canary after activation; no rollback on a build-id failure; the wrong
+  smoke path; and the skip switch ignored.
+- **Passing on both trees.** board_env_file_commit_cache (7),
+  readable_system_unit_proof (10), ticket_board_pid_identity,
+  team_launcher_authority_before_deploy, tenant_deploy_identity (12),
+  syrd_87_deploy_probe_target, tenant_release_report_boundary (116),
+  new_project_precheck_boundary (184), ticket_board_service_roles_install and
+  board_release_service_acl (6, in the namespace sandbox).
+- **Red on main and matching on both trees.** Each has identical normalised
+  output: ticket_board_service_deploy_test (after the adaptation, at the
+  listener's missing `TICKET_BOARD_PANE_STATE_DIR`),
+  ticket_board_service_health_gate_test, ticket_board_service_polkit_guard_test
+  and ticket_board_migration_runner_test.
+  ticket_board_listener_pane_state_authority_test passes 19 of 19 per case;
+  its red is its Postgres `listen_once` section. merge_gate_helper_test
+  passes 12 of 13 per case on both trees, with the same case red.
+- **Unavailable.** legacy_release_root_repair_test needs root and a nested
+  `--map-auto` namespace. ticket_board_release_mode_test skips for the same
+  nested-namespace reason.
+- **A pre-existing behaviour, recorded and not fixed.** When
+  `start_canary_systemd` refuses a BOARD_CANARY_USER other than boardsvc, the
+  canary's temporary directory is left behind. Both trees do this.
+
+No live host, tenant, board, service or release was used or changed.

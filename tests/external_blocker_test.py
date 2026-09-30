@@ -47,7 +47,7 @@ import ticket_board_director_defer_backlog_test as defer_suite  # noqa: E402
 import ticket_board_write_api_test as t  # noqa: E402
 from scripts.ticket_board import write_client  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
-from schema_function_drift import schema_before  # noqa: E402
+from schema_function_drift import migrations_from, schema_before  # noqa: E402
 
 CHECKS = 0
 REF = "syrd:SYRD-269"
@@ -307,7 +307,24 @@ def run_upgrade(cluster) -> None:
     t.psql(admin, before)
     for _ in range(2):
         t.psql(admin, MIGRATION.read_text())
+    # Then every later migration, as the runner would, before current rbac.sql:
+    # that grants on functions they create (SYRD-526).
+    tail = migrations_from(MIGRATION)
+    check(tail[0] == MIGRATION and len(tail) > 1, f"the tail starts at this migration: {[p.name for p in tail[:2]]}")
+    for later in tail[1:]:
+        t.psql(admin, later.read_text())
+    # Named in the ACL, not merely executable: until rbac.sql revokes PUBLIC, a
+    # new function is executable by anyone, so has_function_privilege alone
+    # would pass without the migration's grant.
+    explicit_grant = ("SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = "
+                      "'ticket_board.serial_reservations()'::regprocedure AND a.privilege_type = 'EXECUTE' "
+                      "AND a.grantee = 'ticket_board_service'::regrole)::text;")
+    check(t.psql(admin, explicit_grant).strip() == "true",
+          "a deploy, which runs migrations and not rbac.sql, already grants the service serial_reservations")
     t.psql(admin, t.RBAC_PATH.read_text())
+    check(t.psql(admin, explicit_grant).strip() == "true", "and current rbac.sql keeps that grant")
+    check(t.psql(admin, "SELECT has_function_privilege('ticket_board_service', 'ticket_board.serial_reservations()', "
+                        "'EXECUTE')::text;").strip() == "true", "so the service can call it")
     t.seed_postgres_ticket(admin, "PGU-4", title="Preserve provisioning", state="in_progress", assignee="ops")
     service = t.conninfo(cluster.socket_dir, cluster.port, db, t.SERVICE_ROLE)
     t.psql(service, """

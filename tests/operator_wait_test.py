@@ -45,7 +45,7 @@ import ticket_board_write_api_test as t  # noqa: E402
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 from workflow_document_eras import before_relaying  # noqa: E402
-from schema_function_drift import schema_before  # noqa: E402
+from schema_function_drift import migrations_from, rbac_before, schema_before  # noqa: E402
 
 CHECKS = 0
 COMMIT = "4f9fd175593d5e804cadad77549b649a34c7d611"
@@ -64,7 +64,7 @@ def check(condition: object, detail: str) -> None:
 class Board:
     """A declared board, like MEFP's, with the real listener beside it."""
 
-    def __init__(self, cluster, db: str, schema: str) -> None:
+    def __init__(self, cluster, db: str, schema: str, rbac: str | None = None) -> None:
         self.admin = t.conninfo(cluster.socket_dir, cluster.port, db)
         self.listener_url = t.conninfo(cluster.socket_dir, cluster.port, db, "ticket_board_listener")
         t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", db])
@@ -74,7 +74,7 @@ class Board:
         except AssertionError as exc:
             if "already exists" not in str(exc):
                 raise
-        t.psql(self.admin, t.RBAC_PATH.read_text())
+        t.psql(self.admin, t.RBAC_PATH.read_text() if rbac is None else rbac)
         self.app = t.TicketBoardApp(
             cluster.root / f"frames-{db}", cluster.root / f"assets-{db}", project="cerulean", ticket_prefix="PGU",
             database_url=t.conninfo(cluster.socket_dir, cluster.port, db, t.SERVICE_ROLE),
@@ -134,7 +134,9 @@ def schema_before_this_change() -> str:
 
 def run_before(cluster) -> None:
     """MEFP-2's loop, on the board as it shipped."""
-    board = Board(cluster, "before", schema_before_this_change())
+    # That era's grants too: today's rbac.sql grants on functions this schema
+    # predates (SYRD-526).
+    board = Board(cluster, "before", schema_before_this_change(), rbac_before(MIGRATION))
     user = board.refused(lambda: board.app.set_awaiting_role(TICKET, "user", caller_role="ops"))
     check("invalid awaiting_role: user" in user, f"reproduced: a person cannot be awaited: {user!r}")
 
@@ -253,7 +255,24 @@ def run_upgrade(cluster) -> None:
     t.psql(admin, schema_before_this_change())
     for _ in range(2):
         t.psql(admin, MIGRATION.read_text())
+    # Then every later migration, as the runner would, before current rbac.sql:
+    # that grants on functions they create (SYRD-526).
+    tail = migrations_from(MIGRATION)
+    check(tail[0] == MIGRATION and len(tail) > 1, f"the tail starts at this migration: {[p.name for p in tail[:2]]}")
+    for later in tail[1:]:
+        t.psql(admin, later.read_text())
+    # Named in the ACL, not merely executable: until rbac.sql revokes PUBLIC, a
+    # new function is executable by anyone, so has_function_privilege alone
+    # would pass without the migration's grant.
+    explicit_grant = ("SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = "
+                      "'ticket_board.serial_reservations()'::regprocedure AND a.privilege_type = 'EXECUTE' "
+                      "AND a.grantee = 'ticket_board_service'::regrole)::text;")
+    check(t.psql(admin, explicit_grant).strip() == "true",
+          "a deploy, which runs migrations and not rbac.sql, already grants the service serial_reservations")
     t.psql(admin, t.RBAC_PATH.read_text())
+    check(t.psql(admin, explicit_grant).strip() == "true", "and current rbac.sql keeps that grant")
+    check(t.psql(admin, "SELECT has_function_privilege('ticket_board_service', 'ticket_board.serial_reservations()', "
+                        "'EXECUTE')::text;").strip() == "true", "so the service can call it")
     t.seed_postgres_ticket(admin, TICKET, title="Export for 4.5.1", state="in_progress", assignee="ops")
     service = t.conninfo(cluster.socket_dir, cluster.port, db, t.SERVICE_ROLE)
     t.psql(service, "SELECT set_config('ticket_board.caller_role', 'director', false); "

@@ -37,7 +37,7 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 from workflow_document_eras import before_relaying  # noqa: E402
-from schema_function_drift import schema_before  # noqa: E402
+from schema_function_drift import rbac_before, schema_before  # noqa: E402
 
 CHECKS = 0
 AUDITED = "6d4ee1aa99147e8118f59e637be02b660d62d064"
@@ -66,7 +66,7 @@ def mefp_shaped_workflow() -> dict:
 
 
 class Board:
-    def __init__(self, cluster, db: str, schema: str) -> None:
+    def __init__(self, cluster, db: str, schema: str, rbac: str | None = None) -> None:
         self.admin = t.conninfo(cluster.socket_dir, cluster.port, db)
         t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", db])
         t.psql(self.admin, schema)
@@ -75,7 +75,7 @@ class Board:
         except AssertionError as exc:
             if "already exists" not in str(exc):
                 raise
-        t.psql(self.admin, t.RBAC_PATH.read_text())
+        t.psql(self.admin, t.RBAC_PATH.read_text() if rbac is None else rbac)
         # Commits are checked against a repository; these tests are about the
         # sign-offs, so the board is told every well-formed hash is known.
         self.app = t.TicketBoardApp(
@@ -123,8 +123,10 @@ def replay(board: Board) -> dict:
 
 def run_before(cluster) -> None:
     """The defect, on the board as it shipped before this change."""
-    schema = schema_before(ROOT / "scripts/ticket_board/migrations/pgu961_syrd271_signoff_follows_commit.sql")
-    resubmitted = replay(Board(cluster, "before", schema))
+    migration = ROOT / "scripts/ticket_board/migrations/pgu961_syrd271_signoff_follows_commit.sql"
+    # That era's grants too: today's rbac.sql grants on functions this schema
+    # predates (SYRD-526).
+    resubmitted = replay(Board(cluster, "before", schema_before(migration), rbac_before(migration)))
     check((resubmitted["state"], resubmitted["audit_signoff"], resubmitted["commit_hash"])
           == ("director_review", True, CHANGED),
           f"reproduced: the changed commit skips Audit on the old sign-off: {resubmitted['state']} "

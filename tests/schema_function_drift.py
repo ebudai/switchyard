@@ -47,8 +47,8 @@ def assert_no_drift(*names: str) -> None:
         )
 
 
-def schema_before(migration: Path) -> str:
-    """schema.sql as it stood before `migration` joined the tree.
+def file_before(migration: Path, path: str) -> str:
+    """`path` as it stood before `migration` joined the tree.
 
     Not the merge-base with origin/main: that stops being "before" the moment
     the change it describes is merged, and a reproduction built on it would
@@ -62,4 +62,31 @@ def schema_before(migration: Path) -> str:
 
     adding = git("log", "--format=%H", "--diff-filter=A", "--", str(migration.relative_to(ROOT))).split()
     assert adding, f"{migration.name} is not committed; clone-based checks see only commits"
-    return git("show", f"{adding[-1]}^:scripts/ticket_board/schema.sql")
+    return git("show", f"{adding[-1]}^:{path}")
+
+
+def schema_before(migration: Path) -> str:
+    """schema.sql as it stood before `migration` joined the tree."""
+    return file_before(migration, "scripts/ticket_board/schema.sql")
+
+
+def rbac_before(migration: Path) -> str:
+    """rbac.sql from the same point as `schema_before(migration)`.
+
+    A board "as it shipped" is that schema with that era's grants. Today's
+    rbac.sql grants on functions later migrations create, so on a historical
+    schema it fails before the board exists (SYRD-526: SYRD-476's
+    serial_reservations grant).
+    """
+    return file_before(migration, "scripts/ticket_board/rbac.sql")
+
+
+def migrations_from(migration: Path) -> list[Path]:
+    """`migration` and every migration after it, in the order the runner applies them.
+
+    An upgraded board runs all of them before current rbac.sql, which may grant
+    on what a later one creates (SYRD-270, SYRD-526); applying only the
+    migration under test and then current rbac.sql is not an upgrade any board
+    takes.
+    """
+    return [path for path in sorted(MIGRATIONS.glob("*.sql")) if path.name >= migration.name]

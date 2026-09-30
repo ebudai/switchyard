@@ -579,7 +579,15 @@ def test_forcing_a_start_says_it_was_forced() -> None:
         )
 
         def record(args, **_kwargs):
-            started.append([str(part) for part in args])
+            command = [str(part) for part in args]
+            # The worker's session exists once the pane command has run, and
+            # shows its runtime -- what start observes before calling it started.
+            if command[:2] == ["tmux", "has-session"]:
+                return subprocess.CompletedProcess(args, 0 if started else 1)
+            if command[:2] == ["tmux", "display-message"]:
+                shows = bool(started) and command[-1] == "#{pane_current_command}"
+                return subprocess.CompletedProcess(args, 0 if shows else 1, stdout="hermes\n" if shows else "")
+            started.append(command)
             return subprocess.CompletedProcess(args, 0)
 
         action = worker_pool.start_worker(

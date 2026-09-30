@@ -163,7 +163,15 @@ class Probes:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/codex\n")
         if "login" in command and "status" in command:
             return subprocess.CompletedProcess(command, 0, stdout="Logged in using ChatGPT\n")
+        if "display-message" in command:
+            # A running session shows its runtime; with no pane pid to walk, the
+            # launcher's live-worker check reads the pane's current command.
+            session = command[command.index("-t") + 1].lstrip("=").split(":", 1)[0]
+            shows = command[-1] == "#{pane_current_command}" and session in self.running
+            return subprocess.CompletedProcess(command, 0 if shows else 1, stdout="codex\n" if shows else "")
         self.started.append(command)
+        if "pane" in command:
+            self.running.add(f"{PROJECT}-{command[command.index('pane') + 2]}")
         return subprocess.CompletedProcess(command, 0)
 
 

@@ -446,6 +446,8 @@ CREATE TABLE IF NOT EXISTS ticket_board.ticket_notification_state (
     current_assignee text NOT NULL,
     previous_state text,
     entered_current_state_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    -- The start of the current assignment: stage entry or same-stage reassignment (SYRD-514).
+    current_assignment_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     last_activity_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     last_transition_notified_at timestamptz,
     last_nudged_at timestamptz,
@@ -1549,6 +1551,7 @@ BEGIN
             current_assignee,
             previous_state,
             entered_current_state_at,
+            current_assignment_at,
             last_activity_at,
             last_transition_notified_at,
             last_implementer_assignee
@@ -1557,6 +1560,7 @@ BEGIN
             NEW.state,
             NEW.assignee,
             NULL,
+            activity_at,
             activity_at,
             activity_at,
             activity_at,
@@ -1570,6 +1574,7 @@ BEGIN
             current_assignee = EXCLUDED.current_assignee,
             previous_state = EXCLUDED.previous_state,
             entered_current_state_at = EXCLUDED.entered_current_state_at,
+            current_assignment_at = EXCLUDED.current_assignment_at,
             last_activity_at = EXCLUDED.last_activity_at,
             last_transition_notified_at = EXCLUDED.last_transition_notified_at,
             last_nudged_at = NULL,
@@ -1593,6 +1598,7 @@ BEGIN
         current_assignee,
         previous_state,
         entered_current_state_at,
+        current_assignment_at,
         last_activity_at,
         last_transition_notified_at,
         last_nudged_at,
@@ -1606,8 +1612,20 @@ BEGIN
             WHEN OLD.state IS DISTINCT FROM NEW.state THEN OLD.state
             ELSE NULL
         END,
+        -- SYRD-514: a real transition happens NOW. activity_at is the row's own
+        -- updated_at/row_updated_at, which the workflow actions do not touch, so
+        -- it named the last edit -- often a stage or two earlier -- as the time
+        -- the ticket entered the stage it was just moved into.
         CASE
-            WHEN OLD.state IS DISTINCT FROM NEW.state THEN activity_at
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR activation_reset THEN clock_timestamp()
+            ELSE activity_at
+        END,
+        -- The start of the current assignment: the stage entry, or a change of
+        -- assignee within the same stage. Distinct from the stage entry, which a
+        -- same-state reassignment rightly does not move.
+        CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR OLD.assignee IS DISTINCT FROM NEW.assignee OR activation_reset
+                THEN clock_timestamp()
             ELSE activity_at
         END,
         activity_at,
@@ -1630,6 +1648,11 @@ BEGIN
         entered_current_state_at = CASE
             WHEN OLD.state IS DISTINCT FROM NEW.state OR activation_reset THEN EXCLUDED.entered_current_state_at
             ELSE ticket_board.ticket_notification_state.entered_current_state_at
+        END,
+        current_assignment_at = CASE
+            WHEN OLD.state IS DISTINCT FROM NEW.state OR OLD.assignee IS DISTINCT FROM NEW.assignee OR activation_reset
+                THEN EXCLUDED.current_assignment_at
+            ELSE ticket_board.ticket_notification_state.current_assignment_at
         END,
         last_activity_at = EXCLUDED.last_activity_at,
         last_transition_notified_at = CASE
@@ -11872,8 +11895,24 @@ BEGIN
             ) AS undeliverable
         FROM prompted
         JOIN ticket_board.tickets t ON t.id = prompted.id
+        JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
         WHERE ticket_board.transition_target_role(t.state, t.assignee) IS NOT NULL
           AND NOT ticket_board.ticket_turn_is_resolved(t.id, p_now)
+          -- Only a prompt from the CURRENT assignment can escalate (SYRD-514).
+          -- A prompt from before a submission, a return or a reassignment is
+          -- about work that has since been handed on; letting its grace run out
+          -- after a Director or DAT return told the Director that the returned
+          -- owner had ended a turn without resolving it, while that owner had
+          -- ended no turn since and was working (MEFP-104, MEFP-106, SYRD-486).
+          -- The key must name the current state and assignee (a prefix compare,
+          -- no LIKE wildcards), and the prompt must be no older than the start
+          -- of the current assignment -- which a same-state A -> B -> A
+          -- reassignment moves even though the stage entry does not. A new
+          -- unresolved turn in the current assignment is prompted afresh and
+          -- escalates exactly as before.
+          AND left(prompted.repair_key, length('repair:' || ticket_board.turn_unresolved_identity(t.id, t.state, t.assignee, '')))
+              = 'repair:' || ticket_board.turn_unresolved_identity(t.id, t.state, t.assignee, '')
+          AND prompted.prompted_at >= ns.current_assignment_at
         ORDER BY prompted.id
     LOOP
         CONTINUE WHEN NOT (

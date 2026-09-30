@@ -939,7 +939,6 @@ def main() -> int:
     assert "ticket_board.awaiting_role_comment_touch" in awaiting_role_comment_touch_migration
     assert "clear_awaiting_role_from_ticket_activity" in awaiting_role_comment_touch_migration
     for function_name in (
-        "upsert_ticket_notification_state",
         "touch_ticket_notification_activity",
         "clear_awaiting_role_from_ticket_activity",
         "add_comment",
@@ -948,6 +947,17 @@ def main() -> int:
             awaiting_role_comment_touch_migration_text,
             function_name,
         )
+    # SYRD-514 redefined the notification-state trigger after pgu915 (real
+    # transition time, current_assignment_at); the fresh copy follows that
+    # migration now, and still carries pgu915's comment-touch rule.
+    current_round_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu966_syrd514_unresolved_turn_current_round.sql"
+    ).read_text(encoding="utf-8")
+    assert extract_function(schema, "upsert_ticket_notification_state") == extract_function(
+        current_round_migration_text,
+        "upsert_ticket_notification_state",
+    )
+    assert "ticket_board.awaiting_role_comment_touch" in extract_function(schema, "upsert_ticket_notification_state")
     drop_orphaned_eric_functions_migration = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu593_drop_orphaned_eric_functions.sql"
     ).read_text(encoding="utf-8").lower()

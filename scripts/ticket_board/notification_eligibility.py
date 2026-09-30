@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Callable
 
 TERMINAL_STATES = {"done", "cancelled"}
@@ -364,6 +365,29 @@ WHERE id = %s
             ).fetchone()
             if bool(resolved["resolved"] if isinstance(resolved, dict) else resolved[0]):
                 return False
+        # SYRD-514: an escalation queued in an earlier round (before a
+        # submission and return, or a reassignment away and back) matches the
+        # current state and assignee again, so the checks above keep it. The
+        # generator only escalates prompts made since the current assignment
+        # began; delivery applies the same bound to the prompt time the
+        # escalation carries.
+        if kind == "unresolved_turn":
+            try:
+                prompted_at = datetime.fromisoformat(str(parsed.get("prompted_at")))
+            except ValueError:
+                prompted_at = None
+            if prompted_at is not None and prompted_at.tzinfo is not None:
+                # to_jsonb keeps a board without the SYRD-514 column readable: no column, no bound.
+                row = conn.execute(
+                    """
+SELECT (to_jsonb(ns)->>'current_assignment_at')::timestamptz > %s AS predates
+FROM ticket_board.ticket_notification_state ns
+WHERE ns.ticket_id = %s
+""",
+                    (prompted_at, ticket_id),
+                ).fetchone()
+                if row is not None and bool(row["predates"] if isinstance(row, dict) else row[0]):
+                    return False
         if kind == "awaiting_role":
             # Wait identity, not delivery ACK or comments, controls resolution.
             # Expired windows prevent a restart from delivering a reminder burst.

@@ -171,12 +171,15 @@ def test_the_owner_prompt_no_longer_claims_the_director_knows() -> None:
     )
     assert "The Director has NOT " in effective, effective[-1200:]
 
-    migration = (
-        ROOT / "scripts" / "ticket_board" / "migrations"
-        / "pgu951_syrd207_owner_prompt_wording.sql"
-    ).read_text(encoding="utf-8")
-    assert pattern.findall(migration)[-1].strip() == effective.strip(), (
-        "pgu951 and schema.sql disagree about the guard, so a fresh install and "
+    # An upgraded board runs every migration in name order, so the newest
+    # migration that defines the guard is the one it executes (pgu951 when
+    # this was written; SYRD-514's pgu966 since).
+    migrations = sorted((ROOT / "scripts" / "ticket_board" / "migrations").glob("*.sql"))
+    defining = [path for path in migrations if pattern.findall(path.read_text(encoding="utf-8"))]
+    assert defining, "no migration defines the guard"
+    newest = defining[-1]
+    assert pattern.findall(newest.read_text(encoding="utf-8"))[-1].strip() == effective.strip(), (
+        f"{newest.name} and schema.sql disagree about the guard, so a fresh install and "
         "an upgraded board would send different prompts"
     )
 

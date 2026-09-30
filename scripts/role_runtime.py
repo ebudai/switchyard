@@ -56,6 +56,12 @@ class RuntimePreflight:
     #: pre-SYRD-250 caller behaves.
     current_model: str = ""
     requested_model: str | None = None
+    #: What the board declares the role to run, when its document names the
+    #: role. It can differ from the launcher's `current_runtime`: a switch
+    #: whose rollback could not undo its workflow write leaves exactly that
+    #: split, and a request for the launcher's runtime is then the repair, not
+    #: a no-op (SYRD-525).
+    board_runtime: str | None = None
 
     @property
     def is_noop(self) -> bool:
@@ -67,6 +73,8 @@ class RuntimePreflight:
         test2's audit role at all (SYRD-250 DAT).
         """
         if self.current_runtime != self.requested_runtime:
+            return False
+        if self.board_runtime is not None and self.board_runtime != self.requested_runtime:
             return False
         return self.requested_model is None or self.requested_model == self.current_model
 
@@ -126,6 +134,15 @@ class RuntimeSwitchResult:
     reason: str = ""
     journal_path: str = ""
     recoverable_failure: str = ""
+    #: What the board declared before, when that was not what the launcher ran.
+    previous_board_runtime: str = ""
+
+    @property
+    def was(self) -> str:
+        """What the role ran before, as both halves had it."""
+        if self.previous_board_runtime and self.previous_board_runtime != self.previous_runtime:
+            return f"{self.previous_runtime}, while the board declared {self.previous_board_runtime}"
+        return self.previous_runtime
 
     def describe(self) -> str:
         if not self.configured_changed:
@@ -141,7 +158,7 @@ class RuntimeSwitchResult:
             else "no display slot showed it"
         )
         return (
-            f"switchyard: {self.role} now runs {self.runtime} (was {self.previous_runtime}); "
+            f"switchyard: {self.role} now runs {self.runtime} (was {self.was}); "
             f"{live}; {slots}"
         )
 
@@ -350,10 +367,17 @@ def preflight(
     busy = busy_check(role, pane_state_dir=state_dir, runner=runner)
 
     current_model = str(getattr(role, "model", "") or "")
+    board_runtime = _declared_runtime(document, role_name)
     # A model-only change restarts the role exactly as a runtime change does,
     # so it earns the same readiness and busy checks. Asking "is the runtime
     # changing" skipped both for the one repair this ticket exists to enable.
-    changing = current != runtime or (model is not None and model != current_model)
+    # So does a board that declares something else: the launcher alone is not
+    # the whole of what the role runs (SYRD-525).
+    changing = (
+        current != runtime
+        or (board_runtime is not None and board_runtime != runtime)
+        or (model is not None and model != current_model)
+    )
 
     blockers: list[str] = []
     if changing:
@@ -377,9 +401,20 @@ def preflight(
             blockers=tuple(blockers),
             current_model=current_model,
             requested_model=model,
+            board_runtime=board_runtime,
         ),
         document,
     )
+
+
+def _declared_runtime(document: Mapping[str, Any] | None, role_name: str) -> str | None:
+    """The runtime the board's document declares for the role, or None when it names none."""
+    entry = next(
+        (item for item in (document or {}).get("roles") or [] if isinstance(item, Mapping) and item.get("name") == role_name),
+        None,
+    )
+    declared = (entry or {}).get("runtime")
+    return str(declared) if declared else None
 
 
 def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | None = None) -> None:
@@ -873,6 +908,7 @@ def switch_role_runtime(
             project=config.project,
             role=role_name,
             previous_runtime=checks.current_runtime,
+            previous_board_runtime=checks.board_runtime or "",
             runtime=runtime,
             configured_changed=False,
             live_session_changed=False,
@@ -886,11 +922,19 @@ def switch_role_runtime(
     # The board validates the whole document, so this rejects a change the
     # launcher would happily write and the board would then refuse.
     board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=True)
+    if checks.board_runtime is not None and checks.board_runtime != checks.current_runtime:
+        # Said before anything else, because "from codex to codex" alone reads
+        # as nothing to do: the board is the half that moves (SYRD-525).
+        print_func(
+            f"switchyard: the board declares {role_name} as {checks.board_runtime} while the launcher "
+            f"runs {checks.current_runtime}; this switch sets both to {runtime}"
+        )
     if dry_run:
         return RuntimeSwitchResult(
             project=config.project,
             role=role_name,
             previous_runtime=checks.current_runtime,
+            previous_board_runtime=checks.board_runtime or "",
             runtime=runtime,
             configured_changed=True,
             live_session_changed=False,
@@ -986,6 +1030,7 @@ def switch_role_runtime(
         project=config.project,
         role=role_name,
         previous_runtime=checks.current_runtime,
+        previous_board_runtime=checks.board_runtime or "",
         runtime=runtime,
         configured_changed=True,
         live_session_changed=live_changed,

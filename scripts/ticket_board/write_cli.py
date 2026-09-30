@@ -343,7 +343,11 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_kick = subparsers.add_parser("audit-kick-back")
     audit_kick.add_argument("ticket_id")
     add_free_text_argument(audit_kick, "--reason", required=True)
-    audit_kick.add_argument("--target-assignee", default="")
+    audit_kick.add_argument(
+        "--target-assignee",
+        default="",
+        help="optional confirmation: under a declared workflow a kick-back returns the ticket to its recorded implementer, so this must name that implementer; to hand it to someone else, the Director reassigns after the kick-back",
+    )
 
     dat_sign = subparsers.add_parser("director-dat-sign-off")
     dat_sign.add_argument("ticket_id")
@@ -352,7 +356,11 @@ def _build_parser() -> argparse.ArgumentParser:
     dat_kick = subparsers.add_parser("director-dat-kick-back")
     dat_kick.add_argument("ticket_id")
     add_free_text_argument(dat_kick, "--reason", required=True)
-    dat_kick.add_argument("--target-assignee", default="")
+    dat_kick.add_argument(
+        "--target-assignee",
+        default="",
+        help="optional confirmation: under a declared workflow a kick-back returns the ticket to its recorded implementer, so this must name that implementer; to hand it to someone else, the Director reassigns after the kick-back",
+    )
 
     for name in ("user-reopen", "cancel"):
         sub = subparsers.add_parser(name)
@@ -362,7 +370,11 @@ def _build_parser() -> argparse.ArgumentParser:
     inspector_kick = subparsers.add_parser("inspector-kick-back")
     inspector_kick.add_argument("ticket_id")
     add_free_text_argument(inspector_kick, "--recommendations", required=True)
-    inspector_kick.add_argument("--target-assignee", default="")
+    inspector_kick.add_argument(
+        "--target-assignee",
+        default="",
+        help="optional confirmation: under a declared workflow a kick-back returns the ticket to its recorded implementer, so this must name that implementer; to hand it to someone else, the Director reassigns after the kick-back",
+    )
 
     done = subparsers.add_parser("mark-done")
     done.add_argument("ticket_id")

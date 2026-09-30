@@ -319,9 +319,44 @@ WHERE (r.definition->>'active')::boolean
             return self._pg_get_ticket(ticket_id,conn)
 
     def perform_workflow_action(self, ticket_id: str, action: str, payload: dict[str, Any], *, caller_role: str) -> dict[str, Any]:
+        payload = dict(payload)
+        # SYRD-307: the kick-back commands' own keys, in the declared schema.
+        # An Inspector's recommendations are its reason.
+        if "recommendations" in payload and not str(payload.get("reason") or payload.get("text") or "").strip():
+            payload["reason"] = payload["recommendations"]
+        payload.pop("recommendations", None)
+        # A declared kick-back is a `return`: the executor sends the ticket to
+        # its recorded implementer and ignores any other request, so a target
+        # cannot be chosen -- and letting a reviewer choose one would be new
+        # authority. --target-assignee is therefore a confirmation: accepted
+        # when it names exactly where the return goes, refused before anything
+        # changes when it does not. Any other action has no target to name.
+        target = str(payload.pop("target_assignee", "") or "").strip().lower()
+        if target:
+            cfg = self.workflow_configuration()
+            ticket = self.get_ticket(ticket_id)
+            transition = next((t for t in (cfg or {}).get("transitions", [])
+                               if t["from"] == ticket["state"] and t["action"] == action), None)
+            if transition is None or transition.get("primitive") != "return":
+                raise ValueError(f"{action} takes no target assignee; the ticket goes where the workflow sends it")
+            owners = next((s.get("owners") or [] for s in cfg["stages"] if s["name"] == transition["to"]), [])
+            with self._pg_connect() as conn:
+                row = conn.execute("SELECT last_implementer_assignee FROM ticket_board.ticket_notification_state "
+                                   "WHERE ticket_id = %s", (ticket_id,)).fetchone()
+            recorded = str((row["last_implementer_assignee"] if isinstance(row, dict) else row[0]) or "") if row else ""
+            if recorded in owners:
+                returns_to = recorded
+            elif ticket["assignee"] in owners:
+                returns_to = ticket["assignee"]
+            else:
+                returns_to = owners[0] if owners else ""
+            if target != returns_to:
+                raise ValueError(
+                    f"{action} returns {ticket_id} to its recorded implementer, {returns_to or 'nobody'}; it cannot "
+                    f"send it to {target}. Kick it back without --target-assignee, then have the Director reassign it"
+                )
         if set(payload) - {"target", "assignee", "commit_hash", "text", "reason"}:
             raise ValueError("unknown workflow action payload field")
-        payload = dict(payload)
         if "commit_hash" in payload:
             payload["commit_hash"] = self._validate_commit_hash(payload["commit_hash"])
         with self._pg_connect() as conn:

@@ -91,12 +91,25 @@ def exercise(cluster, dbname: str, *, migrated: bool) -> None:
         raw = fixture.psql(admin, f"SET ROLE ticket_board_listener;\n{statement}\nRESET ROLE;")
         return "\n".join(line for line in raw.splitlines() if line.strip() not in {"SET", "RESET"}).strip()
 
+    def handovers_delivered() -> None:
+        """Every scenario here is about owners who were told about their tickets.
+
+        Since SYRD-513 a ticket whose handover notice is still queued is not its
+        owner's turn yet, so each observation first delivers (acks, as the
+        listener does) every queued transition notice.
+        """
+        for queued in sql("SELECT coalesce(string_agg(id::text, ' '), '') FROM ticket_board.ticket_notification_queue "
+                          "WHERE kind = 'transition' AND dead_lettered_at IS NULL;").split():
+            as_listener(f"SELECT ticket_board.ack_notification({queued});")
+
     def turn_ended(owner: str, turn: str) -> int:
+        handovers_delivered()
         return int(as_listener(f"SELECT ticket_board.notify_unresolved_turn_end('{json.dumps({owner: turn})}'::jsonb, "
                                "clock_timestamp(), interval '10 minutes');"))
 
     def escalated(ticket: str, offset: str) -> list[str]:
         """The Director escalations one listener pass `offset` from now adds, by identity."""
+        handovers_delivered()
         before = int(sql(f"SELECT count(*) FROM ticket_board.notification_trace WHERE ticket_id='{ticket}' "
                          "AND target_role='director' AND kind='unresolved_turn' AND event='enqueue';"))
         as_listener("SELECT ticket_board.notify_unresolved_turn_end('{}'::jsonb, "
@@ -136,6 +149,7 @@ def exercise(cluster, dbname: str, *, migrated: bool) -> None:
                               f"WHERE ticket_id='{ticket}' AND kind IN ('unresolved_turn', 'unresolved_turn_repair');"))
 
     def deliverable(ticket: str, row: dict) -> bool:
+        handovers_delivered()
         with psycopg.connect(listener_url, autocommit=True, row_factory=dict_row) as conn:
             return checker._notification_is_current(conn, ticket, row["target"], row["payload"])
 

@@ -11335,6 +11335,21 @@ AS $$
         OR ticket_board.ticket_awaiting_role_is_active(ns.awaiting_role, ns.awaiting_since_at, p_now)
         OR ticket_board.ticket_serial_focus_reservation_is_current(
                t.id, t.queued_for_assignee, t.queued_behind_ticket)
+        -- SYRD-513: not yet handed to its owner. While the owner's transition
+        -- notice for this stage is still queued -- held by serial review
+        -- admission behind the ticket the owner is working on, or waiting for
+        -- a busy pane -- the owner has never been told about this ticket, so
+        -- no turn they end is about it. A dead-lettered notice is the failure
+        -- path's to report, not this one's.
+        OR EXISTS (
+            SELECT 1
+            FROM ticket_board.ticket_notification_queue q
+            WHERE q.ticket_id = t.id
+              AND q.kind = 'transition'
+              AND q.target_role = ticket_board.transition_target_role(t.state, t.assignee)
+              AND q.payload ->> 'new_state' = t.state
+              AND q.dead_lettered_at IS NULL
+        )
         OR EXISTS (
             SELECT 1
             FROM ticket_board.ticket_blockers tb

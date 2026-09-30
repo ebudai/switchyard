@@ -824,12 +824,20 @@ def main() -> int:
     for function_name in (
         "grant_turn_continuation",
         "consume_turn_continuation",
-        "ticket_turn_is_resolved",
         "turn_unresolved_identity",
     ):
         assert extract_function(schema, function_name) == extract_function(
             unresolved_turn_migration_text, function_name
         ), function_name
+    # SYRD-513 redefined ticket_turn_is_resolved (a notice still queued to the
+    # owner means the ticket was never handed over); that migration now ships
+    # the schema's body.
+    undelivered_assignment_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql"
+    ).read_text(encoding="utf-8")
+    assert extract_function(schema, "ticket_turn_is_resolved") == extract_function(
+        undelivered_assignment_migration_text, "ticket_turn_is_resolved"
+    )
     # SYRD-180: the migration is the only way this reaches a live board, so its
     # bodies are the schema's bodies -- for the executor and the recovery command
     # as much as for the two new functions, because a partial upgrade would leave

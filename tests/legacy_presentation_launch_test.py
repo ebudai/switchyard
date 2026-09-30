@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -42,6 +43,16 @@ if str(ROOT / "tests") not in sys.path:
 
 from team_launcher_test_helpers import *  # noqa: F401,F403
 from scripts import presentation_controller as presentation  # noqa: E402
+import gui_integration  # noqa: E402
+import owned_home  # noqa: E402
+
+# The bridge context this suite's RUNNER was launched with is not the suite's. A
+# pane opened through the tenant-control bridge carries the descriptor its own
+# window goes back through, and `test_the_launch_refuses_rather_than_opening_shells`
+# handed a presentation window into it -- a write with no path for any guard to
+# see (found in the normal pane env; the same finding as SYRD-343's fixture).
+for _name in owned_home.bridge_environment():
+    os.environ.pop(_name, None)
 
 CHECKS = 0
 PROJECT = "stellar"
@@ -1413,27 +1424,88 @@ KONSOLE_TITLES = [
 ]
 
 
+def test_every_staged_title_is_quoted_the_way_both_parsers_read_it() -> None:
+    """Always runs: the staged command's own guarantees, with no Konsole involved.
+
+    The real-Konsole case below is what shows Konsole's splitter agrees; it is
+    opt-in. What is pinned here is what that agreement rests on: an apostrophe is
+    never closed and reopened -- the `'\\''` idiom Konsole leaves a stray `'`
+    from, on the last argument -- control characters never reach the line, and
+    the slot is always the last, bare word, so no residue can attach to it.
+    """
+    program = Path("/usr/local/lib/switchyard/mefp/switchyard-display-attach")
+    for slot, title in enumerate([*KONSOLE_TITLES, "tab\there", "newline\nhere"]):
+        command = team_launcher.inert_pane_command(
+            program, ["mefp", str(slot)], title=f"Slot{slot}", window_title=title,
+        )
+        check("'\\''" not in command and "'\"'\"'" not in command,
+              f"an apostrophe is escaped, not closed and reopened: {command!r}")
+        check("\t" not in command and "\n" not in command, f"no control character reaches the line: {command!r}")
+        arrived = title.replace("\t", " ").replace("\n", " ")
+        check(shlex.split(command) == [str(program), "--window-title", arrived, "--title", f"Slot{slot}", "mefp", str(slot)],
+              f"a POSIX parser reads slot {slot} ({title!r}) as staged: {shlex.split(command)!r}")
+        check(command.endswith(f" mefp {slot}"), f"the slot is the last, bare word: {command[-24:]!r}")
+    check(team_launcher.inert_pane_command(program, ["mefp", "0"], window_title=MEFP_TITLE).count("\\'") == 1,
+          "mefp's own apostrophe is escaped exactly once, with a backslash")
+
+
+class _ReachedGrant(Exception):
+    """The helper parsed its arguments and went on to read the grant."""
+
+
+def test_the_helper_takes_the_argv_konsole_delivers_and_refuses_the_residue() -> None:
+    """Always runs: the real helper's own parser, on the argv each side of the live failure.
+
+    `0'` is what four live mefp panes received, and why each exited `slot must
+    be a number or viewer`. Parsing is all this asks of it: the grant it would
+    read next is stood in for, so no host file is opened.
+    """
+    import types
+
+    helper = types.ModuleType("display_attach_parser")
+    helper.__dict__["__name__"] = "display_attach_parser"
+    source = (ROOT / "scripts" / "switchyard-display-attach").read_text(encoding="utf-8")
+    exec(compile(source, "switchyard-display-attach", "exec"), helper.__dict__)  # noqa: S102
+
+    def reached(project: str):
+        raise _ReachedGrant(project)
+
+    helper.load_grant = reached
+    for argv in (["mefp", "0"], ["mefp", "5"], ["mefp", "viewer"]):
+        try:
+            helper.main(argv)
+            outcome = "returned"
+        except _ReachedGrant:
+            outcome = "parsed"
+        except SystemExit as exc:
+            outcome = f"refused: {exc}"
+        check(outcome == "parsed", f"the helper accepts {argv}: {outcome}")
+    for argv, why in ((["mefp", "0'"], "slot must be a number or viewer"),
+                      (["mefp", "6"], "slot must be within 0..5")):
+        try:
+            helper.main(argv)
+            outcome = "accepted"
+        except _ReachedGrant:
+            outcome = "parsed"
+        except SystemExit as exc:
+            outcome = str(exc)
+        check(why in outcome, f"the helper refuses {argv} before anything else: {outcome}")
+
+
 def _run_konsole(layout: Path, sandbox: Path, expected: list[Path]) -> None:
     """Open one offscreen Konsole on `layout` and wait for every pane to report.
 
-    Offscreen and with its own XDG directories, so this never reaches a real
-    desktop or the caller's Konsole configuration.
+    Offscreen and with its own home, runtime and XDG directories, so this never
+    reaches a real desktop or the caller's Konsole configuration. Started only
+    through `gui_integration.launch`: opted into, and resolved on the very PATH
+    the child is given -- this used to gate on the caller's PATH and then run
+    `konsole` from a pinned `/usr/bin:/bin`, so a refusing stub passed the gate
+    and the real Konsole ran anyway (SYRD-338).
     """
-    env = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": str(sandbox / "home"),
-        "XDG_RUNTIME_DIR": str(sandbox / "run"),
-        "XDG_CONFIG_HOME": str(sandbox / "cfg"),
-        "XDG_DATA_HOME": str(sandbox / "data"),
-        "XDG_CACHE_HOME": str(sandbox / "cache"),
-        "QT_QPA_PLATFORM": "offscreen",
-    }
-    for key in ("home", "run", "cfg", "data", "cache"):
-        (sandbox / key).mkdir(parents=True, exist_ok=True)
-    (sandbox / "run").chmod(0o700)
-    proc = subprocess.Popen(
+    env = gui_integration.child_environment(sandbox)
+    proc = gui_integration.launch(
         ["konsole", "--nofork", "--layout", str(layout)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
     )
     try:
         deadline = time.monotonic() + 60
@@ -1455,6 +1527,7 @@ def _run_konsole(layout: Path, sandbox: Path, expected: list[Path]) -> None:
     raise AssertionError(f"panes that never reported their argv: {missing}")
 
 
+@gui_integration.gui_case("konsole")
 def test_konsole_hands_the_helper_exactly_the_arguments_we_staged() -> None:
     """The live four-pane window opened and every pane exited immediately.
 
@@ -1466,7 +1539,6 @@ def test_konsole_hands_the_helper_exactly_the_arguments_we_staged() -> None:
     `shlex.split` round-trips that string perfectly, which is exactly why every
     test before this one passed. So this one asks the installed Konsole.
     """
-    check(bool(shutil.which("konsole")), "konsole is required")
     with tempfile.TemporaryDirectory(prefix="syrd233-konsole.") as raw:
         sandbox = Path(raw)
         widgets = []
@@ -1513,6 +1585,7 @@ def test_konsole_hands_the_helper_exactly_the_arguments_we_staged() -> None:
     )
 
 
+@gui_integration.gui_case("konsole")
 def test_a_title_konsole_cannot_carry_is_reported_as_what_arrives() -> None:
     """No quoting carries a control character through Konsole's splitter.
 
@@ -1521,7 +1594,6 @@ def test_a_title_konsole_cannot_carry_is_reported_as_what_arrives() -> None:
     They are collapsed to a space, so what the helper receives is what the
     staged command says it will.
     """
-    check(bool(shutil.which("konsole")), "konsole is required")
     titles = ["tab\there", "newline\nhere"]
     with tempfile.TemporaryDirectory(prefix="syrd233-konsole-ctl.") as raw:
         sandbox = Path(raw)
@@ -1574,6 +1646,8 @@ def main() -> int:
             finally:
                 signal.alarm(0)
     print(f"legacy_presentation_launch_test: {CHECKS} checks ok")
+    if gui_integration.summary():
+        print(f"legacy_presentation_launch_test: {gui_integration.summary()}")
     return 0
 
 

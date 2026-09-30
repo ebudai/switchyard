@@ -51,6 +51,7 @@ import subprocess
 import time
 
 from team_launcher_test_helpers import *
+import gui_integration  # noqa: E402
 
 ROLE_SLOTS = ("inspector", "director", "audit", "main", "app", "ops")
 #: The six headers the User asked for, written out rather than derived, because
@@ -476,8 +477,10 @@ def _konsole_reading_once(
     # Konsole launched from here has nowhere to register and nothing to answer
     # on; and pointing it back at the live bus is exactly what that isolation
     # exists to prevent. One private daemon solves both.
-    bus = subprocess.Popen(
-        [shutil.which("dbus-daemon"), "--session", "--print-address", "--nofork"],
+    # Started only through `gui_integration.launch`: opted into, and resolved on
+    # the PATH the child runs with (SYRD-338).
+    bus = gui_integration.launch(
+        ["dbus-daemon", "--session", "--print-address", "--nofork"], dict(os.environ),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, text=True,
     )
     konsole = None
@@ -507,10 +510,9 @@ def _konsole_reading_once(
             )
             return reply.stdout
 
-        konsole = subprocess.Popen(
-            [shutil.which("konsole"), "--separate", "--layout", str(layout)],
+        konsole = gui_integration.launch(
+            ["konsole", "--separate", "--layout", str(layout)], environment,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-            env=environment,
         )
         deadline = time.time() + settle_seconds
         service = ""
@@ -585,6 +587,7 @@ def _konsole_reading_once(
             bus.wait(timeout=15)
 
 
+@gui_integration.gui_case("konsole", "dbus-send", "dbus-daemon")
 def test_a_real_konsole_shows_the_role_in_every_split_header() -> None:
     """The generated layout, a real Konsole, and the titles it actually shows.
 
@@ -595,8 +598,6 @@ def test_a_real_konsole_shows_the_role_in_every_split_header() -> None:
     panes are not this case's business; the layout, the wrapper and the title
     are the real ones.
     """
-    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon")):
-        return
     with tempfile.TemporaryDirectory(prefix="pgu-presentation-konsole.") as tmp:
         tmp_path = Path(tmp)
         # A launcher directory holding the real wrapper beside an inert client,
@@ -615,8 +616,7 @@ def test_a_real_konsole_shows_the_role_in_every_split_header() -> None:
 
         titles = _konsole_titles(layout)
 
-    if not titles or not any(titles):
-        return
+    gui_integration.require_reading("split titles", titles)
     expected = EXPECTED_HEADERS
     assert titles == expected, titles
     assert not any("Switchyard" in title for title in titles), titles
@@ -642,6 +642,7 @@ def _konsole_fixture(tmp_path: Path, *, project_name: str = "Switchyard") -> Pat
     return tmp_path / "out.json"
 
 
+@gui_integration.gui_case("konsole", "dbus-send", "dbus-daemon")
 def test_a_real_konsole_keeps_the_window_title_through_every_focus_change() -> None:
     """The reported regression, against a real Konsole, one focus at a time.
 
@@ -652,8 +653,6 @@ def test_a_real_konsole_keeps_the_window_title_through_every_focus_change() -> N
     default stops reaching Konsole, or because a future Konsole changes which
     of the two it shows.
     """
-    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon")):
-        return
     with tempfile.TemporaryDirectory(prefix="pgu-presentation-window.") as tmp:
         tmp_path = Path(tmp)
         layout = _konsole_fixture(tmp_path)
@@ -663,12 +662,12 @@ def test_a_real_konsole_keeps_the_window_title_through_every_focus_change() -> N
         assert team_launcher.write_konsole_config_defaults(defaults_dir, model=layout) == ""
         splits, windows = _konsole_reading(layout, config_dir=defaults_dir)
 
-    if not splits or not any(splits):
-        return
+    gui_integration.require_reading("split titles", splits)
     assert splits == EXPECTED_HEADERS, splits
     assert windows == ["Switchyard"] * 6, windows
 
 
+@gui_integration.gui_case("konsole", "dbus-send", "dbus-daemon")
 def test_without_the_default_konsole_does_exactly_what_was_reported() -> None:
     """Proof that the default is what holds the title, not something else.
 
@@ -677,15 +676,12 @@ def test_without_the_default_konsole_does_exactly_what_was_reported() -> None:
     as the User saw it. Without this the passing case above could be passing
     for a reason nobody has identified.
     """
-    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon")):
-        return
     with tempfile.TemporaryDirectory(prefix="pgu-presentation-nodefault.") as tmp:
         tmp_path = Path(tmp)
         layout = _konsole_fixture(tmp_path)
         splits, windows = _konsole_reading(layout, config_dir=tmp_path / "empty")
 
-    if not splits or not any(splits):
-        return
+    gui_integration.require_reading("split titles", splits)
     assert windows == splits, (windows, splits)
     assert len(set(windows)) == 6, windows
 
@@ -823,6 +819,7 @@ def test_the_slot_title_command_names_the_tenant_not_the_slot() -> None:
         assert sent == [expected] * 6, (project, project_name, sent)
 
 
+@gui_integration.gui_case("konsole", "dbus-send", "dbus-daemon", "tmux")
 def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
     """The live regression: the caption read `syrd slot 1: director`.
 
@@ -840,8 +837,6 @@ def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
     only thing standing in for production is which tmux socket the panes attach
     to, which is the isolation every other case in this suite uses.
     """
-    if not all(shutil.which(program) for program in ("konsole", "dbus-send", "dbus-daemon", "tmux")):
-        return
     server = f"syrd141-{os.getpid()}"
     _cleanup_dead_isolated_tmux_socket(server)
     with tempfile.TemporaryDirectory(prefix="pgu-presentation-tmux.") as tmp:
@@ -889,8 +884,7 @@ def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
         finally:
             _run_isolated_tmux(server, ["kill-server"], check=False, capture_output=True)
 
-    if not splits or not any(splits):
-        return
+    gui_integration.require_reading("split titles", splits)
     assert splits == EXPECTED_HEADERS, splits
     assert windows == ["Switchyard"] * 6, windows
     # The exact shape the User reported, named so a regression says so.
@@ -900,6 +894,8 @@ def test_a_focused_tmux_pane_cannot_replace_the_project_caption() -> None:
 def main() -> int:
     run_team_launcher_tests(globals(), first=())
     print("team_launcher_presentation_titles_test: ok")
+    if gui_integration.summary():
+        print(f"team_launcher_presentation_titles_test: {gui_integration.summary()}")
     return 0
 
 

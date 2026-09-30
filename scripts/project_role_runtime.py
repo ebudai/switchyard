@@ -183,6 +183,13 @@ def set_project_role_runtime_command(
         print_func=print_func,
     )
     if dry_run and result.configured_changed:
+        # Read as optional: a result that does not say it is a repair is a move.
+        if getattr(result, "argument_repair", False):
+            print_func(
+                f"switchyard: would keep {result.role} on {result.runtime} and repair its arguments as listed; "
+                "every check passed and nothing was changed"
+            )
+            return 0
         print_func(
             f"switchyard: would move {result.role} from {result.previous_runtime} to {result.runtime}; "
             "every check passed and nothing was changed"

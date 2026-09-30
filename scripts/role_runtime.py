@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts import presentation_controller, team_launcher
+from scripts import runtime_arguments
 from scripts.ticket_board import runtime_catalog
 from scripts.tmux_session_argv import tmux_current_command_args
 from scripts.ticket_board.write_client import DEFAULT_BOARD_URL, TicketBoardWriteClient
@@ -62,6 +63,11 @@ class RuntimePreflight:
     #: split, and a request for the launcher's runtime is then the repair, not
     #: a no-op (SYRD-525).
     board_runtime: str | None = None
+    #: What the switch would do to the role's stored arguments: another
+    #: runtime's effort, approval or startup flags it translates or drops.
+    #: A role already on the requested runtime with such arguments left over
+    #: is a repair, not a no-op (SYRD-533).
+    argument_changes: tuple[str, ...] = ()
 
     @property
     def is_noop(self) -> bool:
@@ -75,6 +81,8 @@ class RuntimePreflight:
         if self.current_runtime != self.requested_runtime:
             return False
         if self.board_runtime is not None and self.board_runtime != self.requested_runtime:
+            return False
+        if self.argument_changes:
             return False
         return self.requested_model is None or self.requested_model == self.current_model
 
@@ -136,6 +144,15 @@ class RuntimeSwitchResult:
     recoverable_failure: str = ""
     #: What the board declared before, when that was not what the launcher ran.
     previous_board_runtime: str = ""
+    #: What happened to the role's stored arguments (SYRD-533).
+    argument_changes: tuple[str, ...] = ()
+
+    @property
+    def argument_repair(self) -> bool:
+        """The runtime stays; only arguments another runtime left behind change."""
+        return bool(self.argument_changes) and self.previous_runtime == self.runtime and (
+            not self.previous_board_runtime or self.previous_board_runtime == self.runtime
+        )
 
     @property
     def was(self) -> str:
@@ -157,6 +174,11 @@ class RuntimeSwitchResult:
             if self.reconnected_slots
             else "no display slot showed it"
         )
+        if self.argument_repair:
+            return (
+                f"switchyard: {self.role} still runs {self.runtime}, with the arguments another runtime "
+                f"left behind translated or dropped; {live}; {slots}"
+            )
         return (
             f"switchyard: {self.role} now runs {self.runtime} (was {self.was}); "
             f"{live}; {slots}"
@@ -317,7 +339,10 @@ def _verifiable_projection_blockers(
     if entry is None:
         return [f"{config_path} has no role {role_name!r}"]
     projected = copy.deepcopy(entry)
-    project_role_runtime(projected, runtime=runtime, model=model)
+    try:
+        project_role_runtime(projected, runtime=runtime, model=model)
+    except RoleRuntimeRefusal as exc:
+        return [str(exc).removeprefix("switchyard: ")]
     accepted = projected_live_commands(projected)
     others = sorted(accepted & set(team_launcher.SUPPORTED_CONFIG_CLI_NAMES) - {runtime})
     if runtime not in accepted or others:
@@ -326,6 +351,26 @@ def _verifiable_projection_blockers(
             f"process, so a {runtime} session could not be confirmed after the switch"
         ]
     return []
+
+
+def _argument_changes(
+    config_path: Path, role_name: str, runtime: str, *, model: str | None
+) -> tuple[list[str], str]:
+    """What the switch would do to the role's stored arguments, on a copy: (changes, refusal)."""
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], ""
+    entry = next(
+        (item for item in raw.get("roles") or [] if isinstance(item, dict) and item.get("role") == role_name),
+        None,
+    )
+    if entry is None:
+        return [], ""
+    try:
+        return list(project_role_runtime(copy.deepcopy(entry), runtime=runtime, model=model) or []), ""
+    except RoleRuntimeRefusal as exc:
+        return [], str(exc)
 
 
 def preflight(
@@ -368,6 +413,7 @@ def preflight(
 
     current_model = str(getattr(role, "model", "") or "")
     board_runtime = _declared_runtime(document, role_name)
+    argument_changes, argument_refusal = _argument_changes(config_path, role_name, runtime, model=model)
     # A model-only change restarts the role exactly as a runtime change does,
     # so it earns the same readiness and busy checks. Asking "is the runtime
     # changing" skipped both for the one repair this ticket exists to enable.
@@ -377,6 +423,8 @@ def preflight(
         current != runtime
         or (board_runtime is not None and board_runtime != runtime)
         or (model is not None and model != current_model)
+        or bool(argument_changes)
+        or bool(argument_refusal)
     )
 
     blockers: list[str] = []
@@ -402,6 +450,7 @@ def preflight(
             current_model=current_model,
             requested_model=model,
             board_runtime=board_runtime,
+            argument_changes=tuple(argument_changes),
         ),
         document,
     )
@@ -417,13 +466,24 @@ def _declared_runtime(document: Mapping[str, Any] | None, role_name: str) -> str
     return str(declared) if declared else None
 
 
-def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | None = None) -> None:
+def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | None = None) -> list[str]:
     """Rewrite one role's launcher entry, in place, for a new runtime.
 
     Every field that belongs to the runtime moves with it; everything else
     stays. The switch and its preflight both call this, so what preflight
     checks is exactly what the switch will write.
     """
+    # The arguments first, while the entry still says which runtime it was:
+    # only the program changed before, so a role moved from Codex kept Codex's
+    # effort setting and Claude read its `-c` as --continue (SYRD-533).
+    previous = entry.get("cli")
+    previous_runtime = (
+        team_launcher._command_name(str(previous[0])) if isinstance(previous, list) and previous else ""
+    )
+    try:
+        notes = runtime_arguments.reconcile(entry, runtime=runtime, previous_runtime=previous_runtime)
+    except runtime_arguments.ArgumentRefusal as exc:
+        raise RoleRuntimeRefusal(f"switchyard: {exc}") from exc
     # `cli` is a list so a role can carry flags; only the program changes.
     existing = entry.get("cli")
     if isinstance(existing, list) and existing:
@@ -471,6 +531,7 @@ def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | No
         # agy drops an effort level before it reaches the command line, so
         # one recorded for the runtime being left is now noise at best.
         entry.pop("effort", None)
+    return notes
 
 
 def projected_live_commands(entry: Mapping[str, Any]) -> set[str]:
@@ -929,6 +990,8 @@ def switch_role_runtime(
             f"switchyard: the board declares {role_name} as {checks.board_runtime} while the launcher "
             f"runs {checks.current_runtime}; this switch sets both to {runtime}"
         )
+    for change in checks.argument_changes:
+        print_func(f"switchyard: {role_name} {change}")
     if dry_run:
         return RuntimeSwitchResult(
             project=config.project,
@@ -941,6 +1004,7 @@ def switch_role_runtime(
             reconnected_slots=checks.visible_slots,
             forced=force,
             reason=reason,
+            argument_changes=checks.argument_changes,
         )
 
     state_dir = pane_state_dir or team_launcher.default_pane_state_dir_for_user(
@@ -1038,4 +1102,5 @@ def switch_role_runtime(
         forced=force,
         reason=reason,
         journal_path=str(journal_path),
+        argument_changes=checks.argument_changes,
     )

@@ -559,7 +559,7 @@ def test_detached_research_resume_falls_back_when_failed_session_is_already_gone
             if args[:2] == ["tmux", "has-session"]:
                 return subprocess.CompletedProcess(args, 0 if self.fresh_live else 1)
             if args[:2] == ["tmux", "new-session"]:
-                self.fresh_live = "--resume " not in str(args[-1])
+                self.fresh_live = "--resume " not in str(tmux_first_command(args)[-1])
                 return subprocess.CompletedProcess(args, 0)
             if args[:3] == ["tmux", "display-message", "-p"]:
                 if args[-1] == "#{pane_pid}":
@@ -609,7 +609,7 @@ def test_detached_research_resume_falls_back_when_failed_session_is_already_gone
 
     assert f"team-launcher: resume failed for research using session {session_id}; falling back to fresh session" in stderr.getvalue()
     assert "team-launcher: started fresh session for research after resume fallback" in stderr.getvalue()
-    new_sessions = [call for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]]
+    new_sessions = [tmux_first_command(call) for call in runner.calls if call[:5] == ["tmux", "new-session", "-d", "-s", "pgu-research"]]
     assert len(new_sessions) == 2
     assert "--resume" in new_sessions[0][-1]
     assert "--resume" not in new_sessions[1][-1]

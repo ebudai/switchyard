@@ -319,7 +319,7 @@ def test_pane_start_from_another_pane_uses_target_session_and_clears_caller_tmux
             else:
                 os.environ[key] = value
 
-    new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
+    new_session = tmux_first_command(next(call for call in runner.calls if call[:2] == ["tmux", "new-session"]))
     assert f"claude --resume {session_id}" in new_session[-1]
     assert "director-session-id" not in new_session[-1]
     assert "TICKET_BOARD_PANE_TARGET=pgu-director:0.0" not in new_session[-1]
@@ -531,7 +531,7 @@ def test_pane_start_without_recorded_session_ignores_ambient_session_and_starts_
             else:
                 os.environ[key] = value
 
-    new_session = next(call for call in runner.calls if call[:2] == ["tmux", "new-session"])
+    new_session = tmux_first_command(next(call for call in runner.calls if call[:2] == ["tmux", "new-session"]))
     assert "director-session-id" not in new_session[-1]
     assert " resume " not in f" {new_session[-1]} "
     assert "--resume" not in new_session[-1]

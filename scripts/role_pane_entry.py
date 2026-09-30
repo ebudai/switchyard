@@ -235,6 +235,8 @@ def run_detached_role(
                 post_start_verifier=lambda: _detached_launch_verified(role, runner=runner),
                 bin_user=bin_user,
                 runner=runner,
+                # `worker-pool start` comes this way; keep what a dying command printed (SYRD-532).
+                startup_capture=True,
             )
         return 0
     raise SystemExit(f"unknown detached role mode: {mode}")

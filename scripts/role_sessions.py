@@ -62,6 +62,31 @@ def tmux_kill_session_by_name_args(session: str) -> list[str]:
     return ["tmux", "kill-session", "-t", session]
 
 
+def _disarm_startup_capture(
+    role: RoleConfig,
+    capture: Path | None,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> None:
+    """A session that stays up stops being armed; a failure to disarm never fails the start."""
+    if capture is None:
+        return
+    from scripts import startup_capture
+
+    try:
+        runner(startup_capture.disarm_args(role.tmux_session), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def _report_startup_exit(role: RoleConfig, capture: Path | None) -> None:
+    from scripts import startup_capture
+
+    line = startup_capture.report(role.role, capture)
+    if line:
+        print(line, file=sys.stderr)
+
+
 def _start_role_session(
     role: RoleConfig,
     *,
@@ -72,6 +97,7 @@ def _start_role_session(
     post_start_verifier: Callable[[], bool] | None = None,
     bin_user: str = "",
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    startup_capture: bool = False,
 ) -> int:
     from scripts import team_launcher as launcher
 
@@ -97,14 +123,24 @@ def _start_role_session(
     if not prefer_resume:
         launcher.clear_session_record_for_role(role, session_dir)
     launcher.prepare_hermes_home_for_role(role, session_dir=session_dir)
+    # SYRD-532: a command that exits during startup keeps its last lines.
+    # Asked for by the detached start `worker-pool start` runs; every other start is unchanged.
+    armed = startup_capture
+    from scripts import startup_capture as capture_module
+
+    capture_file = capture_module.capture_path(session_dir, launcher.session_file_name(role.target))
+    capture = capture_module.prepare(capture_file) if armed else None
     start_proc = runner(
-        launcher.tmux_new_session_args(
-            role,
-            session_dir=session_dir,
-            pane_state_dir=pane_state_dir,
-            resume=prefer_resume,
-            bin_user=bin_user,
-        )
+        [
+            *launcher.tmux_new_session_args(
+                role,
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                resume=prefer_resume,
+                bin_user=bin_user,
+            ),
+            *capture_module.arm_args(role.tmux_session, capture),
+        ]
     )
     if start_proc.returncode != 0:
         return int(start_proc.returncode)
@@ -115,7 +151,9 @@ def _start_role_session(
                 f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session",
                 file=sys.stderr,
             )
+            _report_startup_exit(role, capture)
             return 1
+        _disarm_startup_capture(role, capture, runner=runner)
         configure_result = launcher.configure_tmux_session_options(role.tmux_session, runner=runner)
         if configure_result != 0:
             return configure_result
@@ -124,6 +162,7 @@ def _start_role_session(
         return 0
     resume_status = launcher._resume_launch_status(role, runner=runner)
     if resume_status == launcher.RESUME_LAUNCH_VERIFIED and (post_start_verifier is None or post_start_verifier()):
+        _disarm_startup_capture(role, capture, runner=runner)
         configure_result = launcher.configure_tmux_session_options(role.tmux_session, runner=runner)
         if configure_result != 0:
             return configure_result
@@ -131,6 +170,7 @@ def _start_role_session(
         launcher.seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
         return 0
     if resume_status == launcher.RESUME_LAUNCH_TIMEOUT:
+        _disarm_startup_capture(role, capture, runner=runner)
         configure_result = launcher.configure_tmux_session_options(role.tmux_session, runner=runner)
         if configure_result != 0:
             return configure_result
@@ -145,20 +185,25 @@ def _start_role_session(
         f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",
         file=sys.stderr,
     )
+    _report_startup_exit(role, capture)
     if runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         kill_proc = runner(launcher.tmux_kill_session_args(role))
         if kill_proc.returncode != 0:
             return int(kill_proc.returncode)
     launcher.clear_session_record_for_role(role, session_dir)
     launcher.prepare_hermes_home_for_role(role, session_dir=session_dir)
+    capture = capture_module.prepare(capture_file) if armed else None
     fresh_proc = runner(
-        launcher.tmux_new_session_args(
-            role,
-            session_dir=session_dir,
-            pane_state_dir=pane_state_dir,
-            resume=False,
-            bin_user=bin_user,
-        )
+        [
+            *launcher.tmux_new_session_args(
+                role,
+                session_dir=session_dir,
+                pane_state_dir=pane_state_dir,
+                resume=False,
+                bin_user=bin_user,
+            ),
+            *capture_module.arm_args(role.tmux_session, capture),
+        ]
     )
     if fresh_proc.returncode != 0:
         return int(fresh_proc.returncode)
@@ -168,7 +213,9 @@ def _start_role_session(
             f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session after resume fallback",
             file=sys.stderr,
         )
+        _report_startup_exit(role, capture)
         return 1
+    _disarm_startup_capture(role, capture, runner=runner)
     configure_result = launcher.configure_tmux_session_options(role.tmux_session, runner=runner)
     if configure_result != 0:
         return configure_result

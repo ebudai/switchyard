@@ -180,6 +180,16 @@ class RecordingProcessLauncher:
 
         return Process()
 
+def tmux_first_command(args: list[str]) -> list[str]:
+    """The first tmux command of an argv, as tmux reads it: up to the first `;`.
+
+    A detached start chains its startup capture after `new-session`
+    (SYRD-532), so the pane's shell command is the last word of that command,
+    not of the whole argv.
+    """
+    return list(args[: args.index(";")]) if ";" in args else list(args)
+
+
 class FakeRunner:
     def __init__(
         self,
@@ -257,7 +267,7 @@ class FakeRunner:
             if inner[:2] == ["tmux", "new-session"]:
                 session = inner[inner.index("-s") + 1]
                 self.existing_sessions.add(session)
-                target, command = self._target_and_command_from_shell(str(inner[-1]))
+                target, command = self._target_and_command_from_shell(str(tmux_first_command(inner)[-1]))
                 if target and command and target not in self.current_commands:
                     self.current_commands[target] = command
                 return subprocess.CompletedProcess(args, 0)
@@ -278,7 +288,7 @@ class FakeRunner:
         if args[:2] == ["tmux", "new-session"]:
             session = args[args.index("-s") + 1]
             self.existing_sessions.add(session)
-            target, command = self._target_and_command_from_shell(str(args[-1]))
+            target, command = self._target_and_command_from_shell(str(tmux_first_command(args)[-1]))
             if target and command and target not in self.current_commands:
                 self.current_commands[target] = command
         if args[:2] == ["tmux", "kill-session"]:
@@ -326,7 +336,7 @@ class SudoAwareFakeRunner(FakeRunner):
 
 class ResumeExitFakeRunner(FakeRunner):
     def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if args[:3] == ["tmux", "new-session", "-d"] and " --resume " in f" {args[-1]} ":
+        if args[:3] == ["tmux", "new-session", "-d"] and " --resume " in f" {tmux_first_command(args)[-1]} ":
             self.calls.append(args)
             return subprocess.CompletedProcess(args, 0)
         return super().__call__(args, **kwargs)

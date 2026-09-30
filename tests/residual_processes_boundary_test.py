@@ -204,8 +204,11 @@ def check(condition: bool, detail: str) -> None:
 
 
 def python(probe: str) -> subprocess.CompletedProcess[str]:
+    # Bounded, so a probe that never returns fails this suite instead of holding
+    # whoever runs it (SYRD-403); 300s is the documented per-case bound in
+    # tests/bounded_run.py, far above this probe's normal sub-second run.
     return subprocess.run([sys.executable, "-c", probe], cwd=ROOT, capture_output=True, text=True,
-                          env={"PATH": "/usr/bin:/bin"}, check=False)
+                          env={"PATH": "/usr/bin:/bin"}, check=False, timeout=300)
 
 
 class patched:

@@ -575,6 +575,11 @@ Test coverage as a metric creates a perverse incentive for LLMs to write tests t
 
 Consider mutation testing at major milestone boundaries as an alternative signal: "can you break the code in a way no existing test catches?" This is adversarial in the same spirit as design review and harder to game.
 
+Bound every mutation or adversarial run. A mutant can turn a loop into one that never ends, and an unbounded runner then holds its implementer indefinitely: in this project one ran for over six hours before anyone noticed. Run each case and each whole run through `tests/bounded_run.py` (`run_bounded`, `run_mutation_plan`, or `python3 tests/bounded_run.py run|mutate`).
+- **Deadlines:** it gives each case a deadline and each run a total budget, 300s and 540s by default, based on measured runtimes.
+- **Cleanup:** at a deadline it stops the case's whole process group, and it sweeps any descendant that left the group.
+- **Results:** it records a timeout as *inconclusive*, never as a killed mutant or a passing test.
+
 ### Scope creep via "improvement"
 
 An implementer asked to build X will often "improve" adjacent systems Y and Z while it's in there. The work packet's "files/modules expected to change" and "non-goals" fields exist to make this visible and preventable.

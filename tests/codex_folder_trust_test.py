@@ -20,6 +20,7 @@ predicate against the installed Codex's own startup, when there is one.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -36,6 +37,7 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 from scripts import team_launcher, worker_pool  # noqa: E402
 from scripts.ticket_board import board_skill  # noqa: E402
 
+import contained_cli  # noqa: E402
 import worker_pool_lifecycle_test as lifecycle  # noqa: E402
 
 PROJECT = lifecycle.PROJECT
@@ -310,71 +312,156 @@ def test_an_already_ready_worker_is_unchanged(tmp: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def _codex_prompts(shapes_tmp: Path, codex_home: Path, cwd: Path) -> bool | None:
-    """Whether the real Codex stops at its trust prompt. None when it cannot be observed."""
-    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(shapes_tmp / "h"), "CODEX_HOME": str(codex_home),
-           "TERM": "xterm-256color", "TMUX_TMPDIR": str(shapes_tmp)}
-    (shapes_tmp / "h").mkdir(exist_ok=True)
-    # A placeholder key gets it past sign-in; nothing is ever sent with it.
-    subprocess.run(["codex", "login", "--with-api-key"], input="sk-placeholder-never-sent\n",
-                   env=env, capture_output=True, text=True, timeout=60)
-    name = f"c{abs(hash((str(codex_home), str(cwd)))) % 10**8}"
-    subprocess.run(["tmux", "new-session", "-d", "-s", name, "-x", "160", "-y", "40", "-c", str(cwd), "codex"],
+#: How long the header must stand with no trust question under it before
+#: "Codex opened without asking" is an answer.
+HEADER_SETTLE_SECONDS = 5.0
+#: How long one real Codex observation may take, sign-in included; every
+#: process it starts is stopped and reaped within its cleanup budget after.
+OBSERVE_SECONDS = 150
+
+
+def _codex_env(home: Path, codex_home: Path, tmux_dir: Path) -> dict[str, str]:
+    return {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(home), "CODEX_HOME": str(codex_home),
+            "TERM": "xterm-256color", "TMUX_TMPDIR": str(tmux_dir), "LANG": "C.UTF-8"}
+
+
+def _observe(spec: dict) -> dict:
+    """One real Codex observation. Runs as a contained child: see `_contained_codex`.
+
+    Codex daemonises an app-server and clones plugins into its home, and both
+    outlive the tmux session that started it. Nothing here tries to catch them:
+    the parent's containment stops and reaps every descendant of this process
+    before the home is removed (SYRD-524).
+    """
+    env = spec["env"]
+    Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+    # A placeholder key gets it past sign-in; nothing is ever sent with it. Its
+    # output goes to /dev/null, never a pipe a daemon could hold open.
+    subprocess.run(["codex", "login", "--with-api-key"], input="sk-placeholder-never-sent\n", env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, timeout=60)
+    name = spec["name"]
+    subprocess.run(["tmux", "new-session", "-d", "-s", name, "-x", "160", "-y", "40", "-c", spec["cwd"], "codex"],
                    env=env, check=True)
     socket = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], env=env,
                             capture_output=True, text=True).stdout.strip()
-    assert socket.startswith(str(shapes_tmp)), f"reached a live tmux server: {socket}"
-    screen = ""
+    assert socket.startswith(env["TMUX_TMPDIR"]), f"reached a live tmux server: {socket}"
+    screen, result, header_at = "", {}, None
     try:
         for _ in range(40):
             time.sleep(0.5)
             screen = subprocess.run(["tmux", "capture-pane", "-p", "-t", name], env=env,
                                     capture_output=True, text=True).stdout
-            if "Trust this folder" in screen or "OpenAI Codex (v" in screen:
+            if "Trust this folder" in screen:
                 break
+            # Codex 0.159 draws its header half a second before the question
+            # (measured, SYRD-524): "it opened" is only an answer once the
+            # header has stood for a while with no question under it.
+            if "OpenAI Codex (v" in screen and spec["mode"] == "prompt":
+                header_at = header_at if header_at is not None else time.monotonic()
+                if time.monotonic() - header_at >= HEADER_SETTLE_SECONDS:
+                    break
+        if "Sign in with ChatGPT" in screen or "Trust this folder" not in screen and "OpenAI Codex (v" not in screen:
+            return {"observed": False}  # never reached the question; this observation proves nothing
+        result = {"observed": True, "prompts": "Trust this folder" in screen}
+        if spec["mode"] == "answer" and result["prompts"]:
+            subprocess.run(["tmux", "send-keys", "-t", name, "Enter"], env=env)
+            trusted = False
+            for _ in range(20):
+                time.sleep(0.5)
+                trusted = team_launcher._workdir_is_trusted("codex", owner_home=Path(spec["owner"]),
+                                                            workdir=Path(spec["cwd"]))
+                if trusted:
+                    break
+            result["trusted"] = trusted
+        return result
     finally:
-        subprocess.run(["tmux", "kill-session", "-t", name], env=env, capture_output=True)
-    if "Sign in with ChatGPT" in screen:
-        return None  # never reached the question; this observation proves nothing
-    if "Trust this folder" in screen:
-        return True
-    return False if "OpenAI Codex (v" in screen else None
+        # A courtesy. The containment is what guarantees nothing is left.
+        subprocess.run(["tmux", "kill-server"], env=env, capture_output=True)
 
 
-@_sandbox
-def test_the_installed_codex_agrees_with_the_predicate(tmp: Path) -> None:
-    if shutil.which("codex") is None or shutil.which("tmux") is None:
+def _contained_codex(home: "contained_cli.ContainedHome", spec: dict, *, label: str) -> dict:
+    """Run one observation contained in `home`, and return what it saw.
+
+    A run that did not finish -- a timeout, a crash -- or whose descendants
+    could not all be stopped is a failure, never "not observed".
+    """
+    outcome = home.run([sys.executable, str(Path(__file__).resolve()), "--observe", json.dumps(spec)],
+                       env=spec["env"], timeout=OBSERVE_SECONDS, label=label)
+    check(outcome.status == "completed" and outcome.returncode == 0,
+          f"{label}: the observation did not finish: {outcome.reason or outcome.stderr[-800:]}")
+    check(outcome.clean, f"{label}: {outcome.reason}")
+    answers = [line for line in outcome.stdout.splitlines() if line.startswith("{")]
+    check(answers, f"{label}: the observation reported nothing: {outcome.stdout[-400:]}")
+    return json.loads(answers[-1])
+
+
+def test_an_observation_that_did_not_finish_cleanly_is_a_failure_not_a_skip() -> None:
+    """No real Codex: what `_contained_codex` makes of a run that timed out, crashed or left something."""
+    import bounded_run
+
+    def outcome(**overrides) -> bounded_run.Outcome:
+        fields = dict(label="x", status="completed", returncode=0, seconds=1.0, timeout=OBSERVE_SECONDS,
+                      stdout='{"observed": true, "prompts": true}\n', stderr="")
+        fields.update(overrides)
+        return bounded_run.Outcome(**fields)
+
+    class Home:
+        def __init__(self, result):
+            self.result = result
+
+        def run(self, argv, **_kwargs):
+            return self.result
+
+    spec = {"env": {}}
+    check(_contained_codex(Home(outcome()), spec, label="fine") == {"observed": True, "prompts": True}, "a clean run")
+    for label, bad in (("timeout", outcome(status="timeout", returncode=None, reason="no result within 150s")),
+                       ("crash", outcome(returncode=1, stdout="", stderr="Traceback ...")),
+                       ("unclean", outcome(unreaped=(4242,), reason="still present after cleanup: unreaped=[4242]"))):
+        try:
+            _contained_codex(Home(bad), spec, label=label)
+            failed = False
+        except AssertionError:
+            failed = True
+        check(failed, f"a {label} observation was accepted")
+
+
+def _real_codex_available() -> bool:
+    return shutil.which("codex") is not None and shutil.which("tmux") is not None
+
+
+def test_the_installed_codex_agrees_with_the_predicate() -> None:
+    if not _real_codex_available():
         return
-    env = {key: value for key, value in os.environ.items() if key != "TMUX"}
-    os.environ.clear()
-    os.environ.update(env)
-    shapes = Shapes(tmp)
-    observed = 0
-    for index, (label, entries, _expected) in enumerate(CASES):
-        # One file, read by both: the owner home the predicate is given, whose
-        # .codex is the CODEX_HOME the real Codex starts with.
-        owner_home = tmp / f"owner-{index}"
-        codex_home = owner_home / ".codex"
-        codex_home.mkdir(parents=True)
-        (codex_home / "config.toml").write_text(
-            "".join(f'[projects."{path}"]\ntrust_level = "trusted"\n\n' for path in entries(shapes)),
-            encoding="utf-8",
-        )
-        for shape, cwd in (("bare", shapes.bare_worktree), ("checkout", shapes.checkout_worktree)):
-            predicted = team_launcher._workdir_is_trusted("codex", owner_home=owner_home, workdir=cwd)
-            prompts = _codex_prompts(tmp, codex_home, cwd)
-            if prompts is None:
-                continue
-            observed += 1
-            check(prompts == (not predicted),
-                  (label, shape, "codex prompts" if prompts else "codex opens", "predicted trusted" if predicted else "predicted untrusted"))
-    subprocess.run(["tmux", "kill-server"], env={"PATH": "/usr/bin:/bin", "TMUX_TMPDIR": str(tmp)},
-                   capture_output=True)
-    check(observed >= 2, f"the real Codex was never observed past sign-in ({observed})")
+    with contained_cli.ContainedHome("syrd279.") as home:
+        tmp = home.root
+        shapes = Shapes(tmp)
+        observed = 0
+        for index, (label, entries, _expected) in enumerate(CASES):
+            # One file, read by both: the owner home the predicate is given, whose
+            # .codex is the CODEX_HOME the real Codex starts with.
+            owner_home = tmp / f"owner-{index}"
+            codex_home = owner_home / ".codex"
+            codex_home.mkdir(parents=True)
+            (codex_home / "config.toml").write_text(
+                "".join(f'[projects."{path}"]\ntrust_level = "trusted"\n\n' for path in entries(shapes)),
+                encoding="utf-8",
+            )
+            for shape, cwd in (("bare", shapes.bare_worktree), ("checkout", shapes.checkout_worktree)):
+                predicted = team_launcher._workdir_is_trusted("codex", owner_home=owner_home, workdir=cwd)
+                seen = _contained_codex(home, {
+                    "mode": "prompt", "name": f"c{index}{shape}", "cwd": str(cwd), "owner": str(owner_home),
+                    "env": _codex_env(tmp / f"h-{index}-{shape}", codex_home, tmp),
+                }, label=f"{label}/{shape}")
+                if not seen["observed"]:
+                    continue
+                observed += 1
+                check(seen["prompts"] == (not predicted),
+                      (label, shape, "codex prompts" if seen["prompts"] else "codex opens",
+                       "predicted trusted" if predicted else "predicted untrusted"))
+        check(observed >= 2, f"the real Codex was never observed past sign-in ({observed})")
 
 
-@_sandbox
-def test_answering_the_real_prompt_is_what_completes_the_trust_step(tmp: Path) -> None:
+def test_answering_the_real_prompt_is_what_completes_the_trust_step() -> None:
     """The step's completion check reads what Codex writes when the owner answers.
 
     The trust step waits on `_workdir_is_trusted`; this answers the installed
@@ -383,50 +470,26 @@ def test_answering_the_real_prompt_is_what_completes_the_trust_step(tmp: Path) -
     Codex records the worktree, and an ordinary checkout, where it records the
     checkout's root.
     """
-    if shutil.which("codex") is None or shutil.which("tmux") is None:
+    if not _real_codex_available():
         return
-    os.environ.pop("TMUX", None)
-    shapes = Shapes(tmp)
-    answered = 0
-    for shape, cwd in (("bare", shapes.bare_worktree), ("checkout", shapes.checkout_worktree)):
-        owner = tmp / f"answer-{shape}"
-        codex_home = owner / ".codex"
-        codex_home.mkdir(parents=True)
-        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(owner), "CODEX_HOME": str(codex_home),
-               "TERM": "xterm-256color", "TMUX_TMPDIR": str(tmp)}
-        subprocess.run(["codex", "login", "--with-api-key"], input="sk-placeholder-never-sent\n",
-                       env=env, capture_output=True, text=True, timeout=60)
-        check(not team_launcher._workdir_is_trusted("codex", owner_home=owner, workdir=cwd), (shape, "before"))
-        name = f"answer-{shape}"
-        subprocess.run(["tmux", "new-session", "-d", "-s", name, "-x", "160", "-y", "40", "-c", str(cwd), "codex"],
-                       env=env, check=True)
-        socket = subprocess.run(["tmux", "display-message", "-p", "#{socket_path}"], env=env,
-                                capture_output=True, text=True).stdout.strip()
-        assert socket.startswith(str(tmp)), f"reached a live tmux server: {socket}"
-        try:
-            screen = ""
-            for _ in range(40):
-                time.sleep(0.5)
-                screen = subprocess.run(["tmux", "capture-pane", "-p", "-t", name], env=env,
-                                        capture_output=True, text=True).stdout
-                if "Trust this folder" in screen:
-                    break
-            if "Trust this folder" not in screen:
+    with contained_cli.ContainedHome("syrd279.") as home:
+        tmp = home.root
+        shapes = Shapes(tmp)
+        answered = 0
+        for shape, cwd in (("bare", shapes.bare_worktree), ("checkout", shapes.checkout_worktree)):
+            owner = tmp / f"answer-{shape}"
+            codex_home = owner / ".codex"
+            codex_home.mkdir(parents=True)
+            check(not team_launcher._workdir_is_trusted("codex", owner_home=owner, workdir=cwd), (shape, "before"))
+            seen = _contained_codex(home, {
+                "mode": "answer", "name": f"answer-{shape}", "cwd": str(cwd), "owner": str(owner),
+                "env": _codex_env(owner, codex_home, tmp),
+            }, label=f"answer/{shape}")
+            if not seen.get("prompts"):
                 continue  # never reached the question; nothing was observed
-            subprocess.run(["tmux", "send-keys", "-t", name, "Enter"], env=env)
-            trusted = False
-            for _ in range(20):
-                time.sleep(0.5)
-                trusted = team_launcher._workdir_is_trusted("codex", owner_home=owner, workdir=cwd)
-                if trusted:
-                    break
-            check(trusted, (shape, "the owner's answer did not satisfy the completion check"))
+            check(seen.get("trusted"), (shape, "the owner's answer did not satisfy the completion check"))
             answered += 1
-        finally:
-            subprocess.run(["tmux", "kill-session", "-t", name], env=env, capture_output=True)
-    subprocess.run(["tmux", "kill-server"], env={"PATH": "/usr/bin:/bin", "TMUX_TMPDIR": str(tmp)},
-                   capture_output=True)
-    check(answered == 2, f"the real prompt was answered in both shapes ({answered})")
+        check(answered == 2, f"the real prompt was answered in both shapes ({answered})")
 
 
 def main() -> int:
@@ -438,4 +501,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--observe"]:
+        print(json.dumps(_observe(json.loads(sys.argv[2]))), flush=True)
+        raise SystemExit(0)
     raise SystemExit(main())

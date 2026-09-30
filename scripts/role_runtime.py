@@ -29,6 +29,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from scripts import presentation_controller, team_launcher
 from scripts.ticket_board import runtime_catalog
+from scripts.tmux_session_argv import tmux_current_command_args
 from scripts.ticket_board.write_client import DEFAULT_BOARD_URL, TicketBoardWriteClient
 
 DIRECTOR_ROLE = "director"
@@ -90,6 +91,18 @@ class RuntimeJournal:
     slots: tuple[int, ...] = ()
     steps_applied: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    #: The revision the forward workflow write created. Undoing that write is
+    #: an apply on top of it; using the revision read before the switch, or 0,
+    #: is refused by the board every time (SYRD-486).
+    applied_workflow_revision: int = 0
+    #: What the rollback could not undo, and the one supported way on, kept in
+    #: the journal an operator is pointed at rather than only on a terminal.
+    rollback_problems: list[str] = field(default_factory=list)
+    recovery: str = ""
+    #: What the board, the launcher config and the worker actually showed when
+    #: the rollback stopped -- read, never inferred from what was requested
+    #: (SYRD-486 Director review). A value that could not be read says so.
+    observed: dict[str, Any] = field(default_factory=dict)
 
     def record(self, step: str) -> None:
         self.steps_applied.append(step)
@@ -265,6 +278,39 @@ def _is_busy(
     return PaneActivityGate(state_store=PaneHookStateStore(pane_state_dir)).is_busy(role.target)
 
 
+def _verifiable_projection_blockers(
+    config_path: Path, role_name: str, runtime: str, *, model: str | None
+) -> list[str]:
+    """Refuse, before anything stops, a switch its own start check could not confirm.
+
+    The start verifier accepts exactly the projected entry's live commands. If
+    they would not name the new runtime -- or would still name another -- a
+    healthy new session reads as absent and the working session has already
+    been stopped for nothing (SYRD-486). Computed with the same projection the
+    switch writes, on a copy.
+    """
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"cannot read {config_path} to check the projection: {exc}"]
+    entry = next(
+        (item for item in raw.get("roles") or [] if isinstance(item, dict) and item.get("role") == role_name),
+        None,
+    )
+    if entry is None:
+        return [f"{config_path} has no role {role_name!r}"]
+    projected = copy.deepcopy(entry)
+    project_role_runtime(projected, runtime=runtime, model=model)
+    accepted = projected_live_commands(projected)
+    others = sorted(accepted & set(team_launcher.SUPPORTED_CONFIG_CLI_NAMES) - {runtime})
+    if runtime not in accepted or others:
+        return [
+            f"the launcher projection for {role_name} would accept {sorted(accepted)} as its live "
+            f"process, so a {runtime} session could not be confirmed after the switch"
+        ]
+    return []
+
+
 def preflight(
     config: team_launcher.ProjectConfig,
     *,
@@ -312,6 +358,7 @@ def preflight(
     blockers: list[str] = []
     if changing:
         blockers.extend(_readiness_blockers(config, role, runtime, runner=runner))
+        blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model))
         if busy and not force:
             blockers.append(
                 f"{role.target} is busy; wait for an idle checkpoint, or pass --force with --reason "
@@ -335,6 +382,70 @@ def preflight(
     )
 
 
+def project_role_runtime(entry: dict[str, Any], *, runtime: str, model: str | None = None) -> None:
+    """Rewrite one role's launcher entry, in place, for a new runtime.
+
+    Every field that belongs to the runtime moves with it; everything else
+    stays. The switch and its preflight both call this, so what preflight
+    checks is exactly what the switch will write.
+    """
+    # `cli` is a list so a role can carry flags; only the program changes.
+    existing = entry.get("cli")
+    if isinstance(existing, list) and existing:
+        entry["cli"] = [runtime, *existing[1:]]
+    else:
+        entry["cli"] = [runtime]
+    # The names the start verifier accepts as this role's live process. Every
+    # generator writes the runtime's own name here, and the switch never
+    # rewrote it: a role moved to Codex kept `live_commands: ["claude"]`, so
+    # the verifier called a healthy fresh Codex session absent, the switch
+    # "failed", and its rollback stranded the worker (SYRD-388, SYRD-447,
+    # SYRD-485, SYRD-486). A runtime's name is only ever the runtime's, so any
+    # supported runtime named here is replaced by the new one -- which also
+    # repairs a list a previous switch left stale -- while a custom command
+    # name is kept, and the new runtime is always accepted. No list stays no
+    # list: the verifier already derives it from `cli`.
+    live = entry.get("live_commands")
+    if isinstance(live, list) and live:
+        runtimes = set(team_launcher.SUPPORTED_CONFIG_CLI_NAMES)
+        kept = [
+            str(command) for command in live
+            if team_launcher._command_name(str(command)) not in runtimes
+        ]
+        entry["live_commands"] = list(dict.fromkeys([runtime, *kept]))
+    for key, table in (
+        ("resume_mode", team_launcher.DEFAULT_RESUME_MODE_BY_CLI),
+        ("resume_flag", team_launcher.DEFAULT_RESUME_FLAG_BY_CLI),
+        ("resume_subcommand", team_launcher.DEFAULT_RESUME_SUBCOMMAND_BY_CLI),
+    ):
+        # Resume semantics belong to the runtime, so a stale one left behind
+        # would try to resume the new CLI with the old CLI's flag.
+        entry.pop(key, None)
+        if runtime in table:
+            entry[key] = table[runtime]
+    # A model belongs to the runtime exactly as resume semantics do, and it
+    # was the one thing left behind: a role moved from Codex to Claude kept
+    # `gpt-5.5`, so the new runtime was started with the old one's model
+    # name. `model=None` means the caller had nothing to say and the value
+    # stays; `model=""` means it does not belong here any more (SYRD-115).
+    if model is not None:
+        entry.pop("model", None)
+        if model:
+            entry["model"] = model
+    if not runtime_catalog.runtime_takes_effort(runtime):
+        # agy drops an effort level before it reaches the command line, so
+        # one recorded for the runtime being left is now noise at best.
+        entry.pop("effort", None)
+
+
+def projected_live_commands(entry: Mapping[str, Any]) -> set[str]:
+    """What the start verifier will accept for this entry -- its own rule, applied."""
+    live = entry.get("live_commands")
+    cli = entry.get("cli") if isinstance(entry.get("cli"), list) else []
+    configured = [str(c) for c in live] if isinstance(live, list) and live else [str(c) for c in cli[:1]]
+    return {team_launcher._command_name(c) for c in configured if team_launcher._command_name(c)}
+
+
 def _write_runtime_projection(
     config: team_launcher.ProjectConfig,
     *,
@@ -352,35 +463,7 @@ def _write_runtime_projection(
     for entry in roles:
         if not isinstance(entry, dict) or entry.get("role") != role_name:
             continue
-        # `cli` is a list so a role can carry flags; only the program changes.
-        existing = entry.get("cli")
-        if isinstance(existing, list) and existing:
-            entry["cli"] = [runtime, *existing[1:]]
-        else:
-            entry["cli"] = [runtime]
-        for key, table in (
-            ("resume_mode", team_launcher.DEFAULT_RESUME_MODE_BY_CLI),
-            ("resume_flag", team_launcher.DEFAULT_RESUME_FLAG_BY_CLI),
-            ("resume_subcommand", team_launcher.DEFAULT_RESUME_SUBCOMMAND_BY_CLI),
-        ):
-            # Resume semantics belong to the runtime, so a stale one left behind
-            # would try to resume the new CLI with the old CLI's flag.
-            entry.pop(key, None)
-            if runtime in table:
-                entry[key] = table[runtime]
-        # A model belongs to the runtime exactly as resume semantics do, and it
-        # was the one thing left behind: a role moved from Codex to Claude kept
-        # `gpt-5.5`, so the new runtime was started with the old one's model
-        # name. `model=None` means the caller had nothing to say and the value
-        # stays; `model=""` means it does not belong here any more (SYRD-115).
-        if model is not None:
-            entry.pop("model", None)
-            if model:
-                entry["model"] = model
-        if not runtime_catalog.runtime_takes_effort(runtime):
-            # agy drops an effort level before it reaches the command line, so
-            # one recorded for the runtime being left is now noise at best.
-            entry.pop("effort", None)
+        project_role_runtime(entry, runtime=runtime, model=model)
         break
     else:
         raise RoleRuntimeRefusal(f"switchyard: {config_path} has no role {role_name!r}")
@@ -491,6 +574,141 @@ def journal_path_for(config: team_launcher.ProjectConfig, *, config_path: Path, 
     )
 
 
+def _journal_role(journal: RuntimeJournal, config_path: Path):
+    """The launcher's config and the journal's role, as the config says now."""
+    config = team_launcher.load_project_config(journal.project, config_path)
+    return config, team_launcher._role_by_name(config, journal.role)
+
+
+def _restore_projection(journal: RuntimeJournal) -> None:
+    Path(journal.config_path).write_text(journal.previous_config_bytes, encoding="utf-8")
+
+
+def _observe(
+    journal: RuntimeJournal,
+    *,
+    config_path: Path,
+    read_board: Callable[[], tuple[dict[str, Any], int]],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> dict[str, Any]:
+    """What the board, the launcher config and the worker say right now.
+
+    Read, one source at a time, so a source that cannot be read is recorded as
+    unknown and the others are still reported. Nothing here changes anything.
+    """
+    observed: dict[str, Any] = {}
+    try:
+        document, revision = read_board()
+        entry = next(
+            (item for item in (document or {}).get("roles") or [] if item.get("name") == journal.role),
+            None,
+        )
+        observed["board_revision"] = revision
+        observed["board_runtime"] = (entry or {}).get("runtime")
+    except Exception as exc:  # noqa: BLE001 - an unreadable board is a finding, not a crash
+        observed["board_error"] = f"{type(exc).__name__}: {exc}"
+    role = None
+    try:
+        raw = json.loads(Path(journal.config_path).read_text(encoding="utf-8"))
+        entry = next(item for item in raw.get("roles") or [] if item.get("role") == journal.role)
+        cli = entry.get("cli") if isinstance(entry.get("cli"), list) else []
+        observed["launcher_runtime"] = team_launcher._command_name(str(cli[0])) if cli else None
+        observed["launcher_live_commands"] = entry.get("live_commands")
+        _config, role = _journal_role(journal, config_path)
+    except Exception as exc:  # noqa: BLE001
+        observed["launcher_error"] = f"{type(exc).__name__}: {exc}"
+    if role is not None:
+        try:
+            live = _session_is_live(role, runner=runner)
+            observed["worker_live"] = live
+            if live:
+                shown = runner(
+                    tmux_current_command_args(role),
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                )
+                observed["worker_command"] = str(shown.stdout or "").strip() if shown.returncode == 0 else None
+                # The start check itself, not a name comparison: it accepts a
+                # wrapper whose process tree runs a declared command. A worker
+                # it rejects, and one nothing could be read from, are not the
+                # same finding, and neither is a healthy worker.
+                if team_launcher.live_command_matches_role(role, runner=runner):
+                    observed["worker_check"] = "passes"
+                else:
+                    observed["worker_check"] = "fails" if observed["worker_command"] else "unknown"
+        except Exception as exc:  # noqa: BLE001
+            observed["worker_error"] = f"{type(exc).__name__}: {exc}"
+    return observed
+
+
+def _recovery_for(journal: RuntimeJournal, observed: Mapping[str, Any]) -> str:
+    """Guidance consistent with what was observed, naming only commands that run."""
+    project, role = journal.project, journal.role
+    board = observed.get("board_runtime")
+    launcher = observed.get("launcher_runtime")
+    facts = []
+    facts.append(
+        f"the board declares {role} as {board} at workflow revision {observed.get('board_revision')}"
+        if "board_error" not in observed
+        else f"the board could not be read ({observed['board_error']})"
+    )
+    facts.append(
+        f"the launcher config names {launcher} (live_commands {observed.get('launcher_live_commands')})"
+        if "launcher_error" not in observed
+        else f"the launcher config could not be read ({observed['launcher_error']})"
+    )
+    check = observed.get("worker_check")
+    if observed.get("worker_live") is False:
+        facts.append("it has no live session")
+    elif observed.get("worker_live") is True:
+        shows = observed.get("worker_command") or "a command that could not be read"
+        against = f" for {launcher}" if launcher else ""
+        verdict = {
+            "passes": f"it passes the start check{against}",
+            "fails": f"it does not pass the start check{against}",
+        }.get(check, "whether it passes the start check could not be decided"
+                     + (f" ({observed['worker_error']})" if "worker_error" in observed else ""))
+        facts.append(f"its session is live and shows {shows}; {verdict}")
+    else:
+        facts.append(f"its session could not be checked ({observed.get('worker_error', 'no role to check')})")
+    stated = (
+        f"The switch from {journal.previous_runtime} to {journal.requested_runtime} did not finish, and its "
+        f"rollback stopped at the step that failed without changing anything after it. Now "
+        + "; ".join(facts) + "."
+    )
+    if "board_error" in observed or "launcher_error" in observed or not board or not launcher:
+        return stated + f" Read both before acting; the prior state is in this journal."
+    if board == launcher:
+        if observed.get("worker_live") is False:
+            return stated + f" They agree; bring the worker up with `switchyard present {project} recover {role}`."
+        if observed.get("worker_live") is True and check == "passes":
+            return stated + " They agree, and the worker passes its start check; nothing needs repairing."
+        look = f"`switchyard attach {project} {role}` shows what its session is running"
+        if observed.get("worker_live") is True and check == "fails":
+            # Recovery attaches to a live session rather than replacing it, so
+            # it is not a repair for a worker the start check rejects.
+            return stated + (
+                f" They agree, but the live session is not a healthy {launcher} worker. Look before acting: "
+                f"{look}; `switchyard present {project} recover {role}` would attach to that session, not "
+                f"replace it, so it only helps once the session has been stopped."
+            )
+        return stated + (
+            f" They agree, but the worker's health is unverified. Observe it before acting: {look}, and "
+            f"if it has no live session, bring it up with `switchyard present {project} recover {role}`."
+        )
+    # They disagree. Aligning the launcher with the board is one supported
+    # switch, and it runs because the launcher does not already name it.
+    bring_up = (
+        f" A stopped worker stays stopped; bring it up with `switchyard present {project} recover {role}`."
+        if observed.get("worker_live") is False
+        else ""
+    )
+    return stated + (
+        f" They disagree. `switchyard set-role-runtime {project} {role} --cli {board}` makes the launcher "
+        f"follow the board (it restarts the worker if one is running); to end on {launcher} instead, run "
+        f"`switchyard set-role-runtime {project} {role} --cli {launcher}` after it." + bring_up
+    )
+
+
 def _rollback(
     journal: RuntimeJournal,
     *,
@@ -500,8 +718,9 @@ def _rollback(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     start: Callable[..., int] = _default_start,
     print_func: Callable[[str], None] = print,
+    read_board: Callable[[], tuple[dict[str, Any], int]] | None = None,
 ) -> str:
-    """Undo, in reverse, exactly the steps that were applied.
+    """Undo exactly the steps that were applied: board, projection, then worker.
 
     Returns "" when the prior state is restored, or a description of what is
     still wrong. A partial rollback is reported rather than swallowed: a wrong
@@ -519,21 +738,46 @@ def _rollback(
             return False
         return True
 
-    # Durable records first, runtime second. Undoing this strictly in reverse
-    # would restart the worker while the projection still named the new runtime,
-    # bringing the role back up under the CLI that just failed to start.
-    if "projection" in applied:
-        attempt(
-            "projection",
-            lambda: Path(journal.config_path).write_text(journal.previous_config_bytes, encoding="utf-8"),
-        )
+    # The board's declaration first, then the launcher's projection, then the
+    # worker -- and each only once the one before it holds. The projection used
+    # to be restored first; when the workflow undo was then refused, the config
+    # named the old runtime while the board still declared the new one, and
+    # the old worker's restart was refused against that mismatch. MEFP Audit
+    # was left with no session at all (SYRD-485).
+    workflow_restored = True
     if "workflow" in applied:
-        attempt(
+        workflow_restored = attempt(
             "workflow",
             lambda: client.configure_workflow(
-                journal.previous_workflow_document, expected_revision=0, dry_run=False
+                journal.previous_workflow_document,
+                expected_revision=journal.applied_workflow_revision,
+                dry_run=False,
             ),
         )
+    def stop_here() -> str:
+        # Nothing after a failed step runs, and what is left is described from
+        # what the three sources actually show -- never from what was asked for.
+        # The board may have been moved by another writer, and the projection
+        # may never have been written at all.
+        journal.rollback_problems = list(problems)
+        journal.observed = (
+            _observe(journal, config_path=config_path, read_board=read_board, runner=runner)
+            if read_board is not None
+            else {"board_error": "no board reader was available"}
+        )
+        journal.recovery = _recovery_for(journal, journal.observed)
+        return "; ".join(problems)
+
+    if not workflow_restored:
+        # The board did not take the undo, so neither the projection nor the
+        # worker is rolled back: restoring either would put them against a
+        # board that may declare anything. An original worker the switch never
+        # stopped is left exactly as it is.
+        return stop_here()
+    if "projection" in applied and not attempt("projection", lambda: _restore_projection(journal)):
+        # The worker would be started from whatever the config says now, which
+        # is still the switch's projection. Stop before touching it.
+        return stop_here()
 
     restored_worker = True
     if "worker_stopped" in applied:
@@ -543,8 +787,19 @@ def _rollback(
             # Unlike the forward path, this is not "replace it if it is running":
             # the journal records that it *was* running, and bringing it back is
             # the whole point of the rollback.
-            config = team_launcher.load_project_config(journal.project, config_path)
-            role = team_launcher._role_by_name(config, journal.role)
+            config, role = _journal_role(journal, config_path)
+            # The original session was stopped by this switch, so any session
+            # under the role's name now is the attempt being undone -- live even
+            # when its check said otherwise (SYRD-447). Starting "attach or
+            # start" over it would call the old runtime restored while the new
+            # one kept the pane.
+            if _session_is_live(role, runner=runner):
+                kill = runner(team_launcher.tmux_kill_session_args(role))
+                if kill.returncode != 0:
+                    raise RuntimeError(
+                        f"could not stop the failed {journal.requested_runtime} attempt in "
+                        f"{role.tmux_session} (exit {kill.returncode})"
+                    )
             team_launcher.clear_session_record_for_role(
                 role, team_launcher.role_session_dir(config, role)
             )
@@ -664,7 +919,8 @@ def switch_role_runtime(
     live_changed = False
     reconnected: tuple[int, ...] = ()
     try:
-        board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=False)
+        applied = board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=False)
+        journal.applied_workflow_revision = int((applied or {}).get("revision") or 0)
         journal.record("workflow")
         journal.write(journal_path)
 
@@ -700,6 +956,7 @@ def switch_role_runtime(
             journal.write(journal_path)
     except Exception as exc:  # noqa: BLE001 - a half-applied switch must not look like success
         print_func(f"switchyard: {role_name} runtime switch failed: {exc}")
+        read_workflow = workflow_reader or workflow_document
         remaining = _rollback(
             journal,
             config_path=config_path,
@@ -708,10 +965,15 @@ def switch_role_runtime(
             runner=runner,
             start=start,
             print_func=print_func,
+            read_board=lambda: read_workflow(board_url=config.board_url or DEFAULT_BOARD_URL),
         )
         if remaining:
+            if not journal.rollback_problems:
+                journal.rollback_problems = remaining.split("; ")
+            journal.write(journal_path)
+            recovery = f" {journal.recovery}" if journal.recovery else ""
             raise RoleRuntimeRefusal(
-                f"switchyard: {role_name} is left between runtimes and needs an operator: {remaining}. "
+                f"switchyard: {role_name} is left between runtimes and needs an operator: {remaining}.{recovery} "
                 f"The exact prior state is in {journal_path}."
             ) from exc
         journal_path.unlink(missing_ok=True)

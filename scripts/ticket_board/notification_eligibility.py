@@ -18,6 +18,9 @@ SUPERSEDABLE_REMINDER_KINDS = frozenset({"idle_reminder", "nudge", "escalation"}
 #: stopped -- so without this the Director's copy resolves to the owner, is
 #: judged stale, and is dropped before delivery (SYRD-194).
 DIRECTOR_BOUND_KINDS = frozenset({"escalation", "unresolved_turn"})
+# The owner's "still yours" prompt and the Director's grace escalation after it.
+# Both say a turn ended unresolved, so both are only true while it still is.
+UNRESOLVED_TURN_KINDS = frozenset({"unresolved_turn_repair", "unresolved_turn"})
 #: Distinct from `stale_notification`, which means the ticket moved, and from
 #: `pane busy`, which means delivery was only postponed. This one means the
 #: reminder was answered before it could be delivered.
@@ -346,6 +349,21 @@ WHERE id = %s
                 and expected_state in terminal_states
                 and current_state == expected_state
             )
+        # SYRD-517: a turn-end prompt or grace escalation queued before the
+        # ticket was held (or blocked, or put in a wait) was still delivered
+        # after it -- MEFP-114's Director was told, turn after turn, that a
+        # deliberately held ticket was unresolved. The generator already asks
+        # ticket_turn_is_resolved before it enqueues; delivery now asks the
+        # same question, so the two cannot disagree. Dropping the stale row
+        # loses nothing: once the hold is lifted, the next unresolved turn
+        # is prompted afresh.
+        if kind in UNRESOLVED_TURN_KINDS:
+            resolved = conn.execute(
+                "SELECT ticket_board.ticket_turn_is_resolved(%s, clock_timestamp()) AS resolved",
+                (ticket_id,),
+            ).fetchone()
+            if bool(resolved["resolved"] if isinstance(resolved, dict) else resolved[0]):
+                return False
         if kind == "awaiting_role":
             # Wait identity, not delivery ACK or comments, controls resolution.
             # Expired windows prevent a restart from delivering a reminder burst.

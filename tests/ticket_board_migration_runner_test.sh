@@ -546,6 +546,14 @@ git -C "$SOURCE_REPO" config user.name Test
 git -C "$SOURCE_REPO" config user.email test@example.com
 cp "$REPO_ROOT/scripts/ticket-board-migrate" "$SOURCE_REPO/scripts/ticket-board-migrate"
 chmod +x "$SOURCE_REPO/scripts/ticket-board-migrate"
+# A release carries its grants: since SYRD-530 its database step is its
+# migrations and then its own rbac.sql. This release is a probe, so its rbac.sql
+# is one too, and records that it ran after the migration.
+cat >"$SOURCE_REPO/scripts/ticket_board/rbac.sql" <<'SQL'
+UPDATE ticket_board.migration_probe
+SET value = value || '+rbac'
+WHERE id = 1;
+SQL
 printf '#!/usr/bin/env python3\nprint("board")\n' >"$SOURCE_REPO/scripts/ticket-board.py"
 chmod +x "$SOURCE_REPO/scripts/ticket-board.py"
 cat >"$SOURCE_REPO/scripts/ticket_board/migrations/pgu404_deploy_probe.sql" <<'SQL'
@@ -553,15 +561,15 @@ UPDATE ticket_board.migration_probe
 SET value = value || '+deploy'
 WHERE id = 1;
 SQL
-git -C "$SOURCE_REPO" add scripts/ticket-board-migrate scripts/ticket-board.py scripts/ticket_board/migrations/pgu404_deploy_probe.sql
+git -C "$SOURCE_REPO" add scripts/ticket-board-migrate scripts/ticket_board/rbac.sql scripts/ticket-board.py scripts/ticket_board/migrations/pgu404_deploy_probe.sql
 git -C "$SOURCE_REPO" commit -m "seed deploy migration" >/dev/null
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_ADMIN_DATABASE_URL="$ADMIN_CONN" \
     "$REPO_ROOT/scripts/ticket-board-service.sh" deploy >/dev/null
 
 deploy_value="$(psql_test -c "SELECT value FROM ticket_board.migration_probe WHERE id = 1;")"
-[[ "$deploy_value" == "first+second+third+deploy" ]] || {
-    echo "FAIL: service deploy did not apply pending migration: $deploy_value" >&2
+[[ "$deploy_value" == "first+second+third+deploy+rbac" ]] || {
+    echo "FAIL: service deploy did not apply pending migration, then the release's rbac.sql: $deploy_value" >&2
     exit 1
 }
 

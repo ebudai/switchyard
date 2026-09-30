@@ -766,13 +766,28 @@ verify_listener_pane_state_authority() {
 apply_database_migrations_for_release() {
     local release_dir="$1"
     local migration_runner="$release_dir/scripts/ticket-board-migrate"
+    local release_rbac="$release_dir/scripts/ticket_board/rbac.sql"
+    local output
     if [[ "${TICKET_BOARD_SKIP_MIGRATIONS:-}" == "1" ]]; then
         log "skipping ticket-board migrations because TICKET_BOARD_SKIP_MIGRATIONS=1"
         return 0
     fi
     [[ -x "$migration_runner" ]] || die "missing executable migration runner after deploy: $migration_runner"
+    [[ -f "$release_rbac" ]] || die "missing ticket-board RBAC SQL in release: $release_rbac"
     TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$migration_runner"
     log "applied ticket-board database migrations using $migration_runner"
+    # SYRD-530: the release's grants belong to its database step. Only install
+    # ran rbac.sql, so a deployed board kept whatever its last install granted:
+    # functions added since stayed executable by PUBLIC, and grants rbac.sql
+    # gained since never arrived -- a board installed before SYRD-517 had a
+    # listener that could not call ticket_turn_is_resolved. rbac.sql is one
+    # transaction, so a live service never sees its grants half-applied.
+    if ! output="$(psql -X -v ON_ERROR_STOP=1 "$BOARD_ADMIN_DATABASE_URL" -f "$release_rbac" 2>&1)"; then
+        printf '[ticket-board-service] ERROR: failed to apply the release RBAC SQL using TICKET_BOARD_ADMIN_DATABASE_URL. This must connect as a PostgreSQL role with CREATEROLE (default: user=postgres); override TICKET_BOARD_ADMIN_DATABASE_URL for nonstandard clusters.\n' >&2
+        printf '%s\n' "$output" >&2
+        exit 1
+    fi
+    log "applied ticket-board database roles using $release_rbac"
 }
 
 apply_database_migrations() {

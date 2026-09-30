@@ -218,6 +218,9 @@ apply_database_migrations() {
     [[ -x "$MIGRATION_RUNNER" ]] || die "missing executable migration runner after deploy: $MIGRATION_RUNNER"
     TICKET_BOARD_ADMIN_DATABASE_URL="$BOARD_ADMIN_DATABASE_URL" "$MIGRATION_RUNNER"
     log "applied ticket-board database migrations using $MIGRATION_RUNNER"
+    # SYRD-530: the release's grants belong to its database step, or a deployed
+    # board keeps whatever its last install granted (see ticket-board-service.sh).
+    ensure_database_roles
 }
 
 ensure_database_roles() {

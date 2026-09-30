@@ -166,8 +166,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.ticket_has_unresolved_blockers(text) TO t
 -- (SYRD-99).
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_awaiting_role_is_active(text, timestamptz, timestamptz, interval) TO ticket_board_listener;
 
-COMMIT;
-
+-- SYRD-530: inside the transaction. Deploys now replay this file on a live
+-- board, and these grants, when they followed the COMMIT, left the service
+-- without transition_target_role and perform_workflow_action for a moment.
 DO $workflow_grants$ BEGIN
 IF to_regclass('ticket_board.workflow_configuration') IS NOT NULL THEN
     GRANT EXECUTE ON FUNCTION ticket_board.transition_target_role(text,text),ticket_board.legacy_transition_target_role(text,text) TO ticket_board_service;
@@ -187,3 +188,5 @@ GRANT SELECT ON ticket_board.role_runtime_assignments TO ticket_board_service,ti
 GRANT SELECT ON ticket_board.role_runtime_assignment_history TO ticket_board_service;
 END IF;
 END $workflow_grants$;
+
+COMMIT;

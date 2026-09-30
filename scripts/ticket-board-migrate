@@ -282,6 +282,50 @@ apply_migration() {
     record_migration "$filename"
 }
 
+# SYRD-530: PostgreSQL lets PUBLIC execute every function it creates. rbac.sql
+# takes that back, but only install runs rbac.sql; deploy and deploy-restart run
+# this runner alone, so every function a migration added since the last install
+# stayed executable by any role with USAGE on the schema -- the listener could
+# call service-only writers. Grants that copy "whoever can execute X" also
+# picked up PostgreSQL's predefined roles while PUBLIC still held X. Every path
+# that changes the schema comes through here, so the revocation rbac.sql makes
+# is made here too: schema-scoped, in one transaction, on success and on a
+# failed migration alike. Named grants are untouched.
+close_public_function_execute() {
+    psql_migrate <<'SQL' >/dev/null
+BEGIN;
+DO $revoke$
+DECLARE
+    predefined text;
+BEGIN
+    IF to_regnamespace('ticket_board') IS NULL THEN
+        RETURN;
+    END IF;
+    REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM PUBLIC;
+    FOR predefined IN
+        SELECT r.rolname
+        FROM pg_roles r
+        WHERE r.oid < 16384
+          AND r.rolname LIKE 'pg\_%'
+    LOOP
+        EXECUTE format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA ticket_board FROM %I', predefined);
+    END LOOP;
+END
+$revoke$;
+COMMIT;
+SQL
+}
+
+close_public_function_execute_on_exit() {
+    local status=$?
+    trap - EXIT
+    if ! close_public_function_execute; then
+        log "could not revoke PUBLIC execute on ticket_board functions; run scripts/ticket-board-service.sh ensure-roles"
+        [[ "$status" == "0" ]] && status=1
+    fi
+    exit "$status"
+}
+
 main() {
     case "${1:-}" in
         -h|--help)
@@ -300,6 +344,7 @@ main() {
     command -v psql >/dev/null 2>&1 || die "psql is required to apply ticket-board migrations"
     [[ -d "$MIGRATIONS_DIR" ]] || die "missing migrations directory: $MIGRATIONS_DIR"
     ensure_tracking_table
+    trap close_public_function_execute_on_exit EXIT
     backfill_schema_snapshot_legacy_migrations
 
     local found=0

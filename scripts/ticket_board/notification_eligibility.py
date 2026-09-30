@@ -388,6 +388,27 @@ WHERE ns.ticket_id = %s
                 ).fetchone()
                 if row is not None and bool(row["predates"] if isinstance(row, dict) else row[0]):
                     return False
+        # SYRD-527: the owner's repair prompt from an earlier round matches the
+        # current state and assignee again after a submission and return, or a
+        # reassignment away and back, exactly as the escalation above did. Its
+        # payload carries no prompt time, and none is invented: its own queue
+        # row is stamped created_at by the board when the prompt is generated
+        # -- once per turn identity, and a refresh never moves it -- so rows
+        # queued by any release have one. The same bound applies: a prompt made
+        # before the current assignment began is not about this round.
+        if kind == "unresolved_turn_repair":
+            # to_jsonb keeps a board without the SYRD-514 column readable: no column, no bound.
+            row = conn.execute(
+                """
+SELECT bool_or((to_jsonb(ns)->>'current_assignment_at')::timestamptz > q.created_at) AS predates
+FROM ticket_board.ticket_notification_queue q
+JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = q.ticket_id
+WHERE q.ticket_id = %s AND q.kind = 'unresolved_turn_repair' AND q.payload = %s::jsonb
+""",
+                (ticket_id, payload),
+            ).fetchone()
+            if row is not None and bool(row["predates"] if isinstance(row, dict) else row[0]):
+                return False
         if kind == "awaiting_role":
             # Wait identity, not delivery ACK or comments, controls resolution.
             # Expired windows prevent a restart from delivering a reminder burst.

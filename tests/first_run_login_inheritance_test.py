@@ -43,6 +43,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
+from owned_home import contained  # noqa: E402
 from team_launcher_test_helpers import (  # noqa: E402
     FirstRunAuthRunner,
     _mark_first_run_setup_complete,
@@ -83,6 +84,7 @@ def uat_config(tmp_path: Path):
     return load_project_config("otto", config_path)
 
 
+@contained
 def test_one_login_per_provider_covers_every_role_that_uses_it() -> None:
     """Acceptance 5, from declared role/provider data rather than role names."""
     with tempfile.TemporaryDirectory(prefix="syrd191-manifest.") as tmp:
@@ -118,6 +120,7 @@ def test_one_login_per_provider_covers_every_role_that_uses_it() -> None:
     )
 
 
+@contained
 def test_a_provider_that_was_already_authenticated_restarts_nobody() -> None:
     """The narrowness: this only speaks about logins THIS run performed."""
     with tempfile.TemporaryDirectory(prefix="syrd191-already.") as tmp:
@@ -141,6 +144,7 @@ def test_a_provider_that_was_already_authenticated_restarts_nobody() -> None:
     check(report.roles_awaiting_restart == (), "so no running role is disturbed")
 
 
+@contained
 def test_a_token_refresh_is_not_a_login() -> None:
     """A provider rewriting its own credential file must restart nothing.
 
@@ -171,6 +175,7 @@ def test_a_token_refresh_is_not_a_login() -> None:
     check(report.roles_awaiting_restart == (), "a refreshed credential restarts nobody")
 
 
+@contained
 def test_the_provider_first_run_is_asked_once_for_every_role_that_uses_it() -> None:
     """Acceptance: shared onboarding is collected once, not once per role.
 
@@ -203,6 +208,7 @@ def test_the_provider_first_run_is_asked_once_for_every_role_that_uses_it() -> N
     )
 
 
+@contained
 def test_an_account_that_has_already_done_it_is_asked_for_nothing() -> None:
     """Acceptance: already-complete state is skipped, and stays skipped."""
     with tempfile.TemporaryDirectory(prefix="syrd191-idempotent.") as tmp:
@@ -236,6 +242,7 @@ def test_an_account_that_has_already_done_it_is_asked_for_nothing() -> None:
           "and running it again asks for nothing either")
 
 
+@contained
 def test_a_first_run_that_did_not_complete_is_reported_not_assumed() -> None:
     """Switchyard asks the CLI to run its setup and then looks again.
 
@@ -277,6 +284,7 @@ def test_a_first_run_that_did_not_complete_is_reported_not_assumed() -> None:
     )
 
 
+@contained
 def test_roles_that_share_a_worktree_share_one_trust_action() -> None:
     """Acceptance: one trust action per distinct required worktree."""
     with tempfile.TemporaryDirectory(prefix="syrd191-shared-tree.") as tmp:
@@ -316,6 +324,7 @@ def test_roles_that_share_a_worktree_share_one_trust_action() -> None:
     )
 
 
+@contained
 def test_the_setup_step_says_it_will_ask_for_a_sign_in() -> None:
     """Measured on this host, not assumed: completing Claude's first run signs in again.
 
@@ -420,6 +429,7 @@ class MeasuredClaudeRunner(FirstRunAuthRunner):
         return super().__call__(args, **kwargs)
 
 
+@contained
 def test_the_measured_vendor_flow_is_reported_rather_than_promised_away() -> None:
     """The live failure, in the shape it really has.
 
@@ -513,6 +523,7 @@ class SessionRunner:
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 
+@contained
 def test_trust_is_read_where_the_cli_really_records_it() -> None:
     """Measured against Claude 2.1.270 on the live tenant.
 
@@ -572,6 +583,7 @@ def test_trust_is_read_where_the_cli_really_records_it() -> None:
         )
 
 
+@contained
 def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> None:
     """The second half of the live failure: the watcher waited for nothing.
 
@@ -647,6 +659,7 @@ def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> Non
     )
 
 
+@contained
 def test_the_terminal_keeps_its_presentation_across_the_owner_boundary() -> None:
     """sudo resets the environment; a CLI with no TERM draws in monochrome.
 
@@ -684,6 +697,7 @@ def reconcile(config, owner_home: Path, runner: "SessionRunner", said: list[str]
     )
 
 
+@contained
 def test_a_runtime_started_against_older_state_is_restarted_not_presented() -> None:
     """The live sequence, decided the way it has to be decided.
 
@@ -714,6 +728,7 @@ def test_a_runtime_started_against_older_state_is_restarted_not_presented() -> N
     )
 
 
+@contained
 def test_a_runtime_started_against_the_current_state_is_left_alone() -> None:
     """Exactly once: a role that has already been reconciled is not touched."""
     with tempfile.TemporaryDirectory(prefix="syrd191-once.") as tmp:
@@ -740,6 +755,7 @@ def test_a_runtime_started_against_the_current_state_is_left_alone() -> None:
     check(unreconciled == set(), "and nothing is left outstanding")
 
 
+@contained
 def test_a_token_refresh_changes_no_generation_and_restarts_nobody() -> None:
     """The trap an mtime trigger falls into, avoided by construction.
 
@@ -772,6 +788,7 @@ def test_a_token_refresh_changes_no_generation_and_restarts_nobody() -> None:
     check(len(kept) == len(config.roles), "and every pane keeps working")
 
 
+@contained
 def test_completing_setup_or_trust_changes_the_generation() -> None:
     """Any state change that a runtime cannot have seen makes it stale."""
     with tempfile.TemporaryDirectory(prefix="syrd191-generation.") as tmp:
@@ -801,6 +818,7 @@ def test_completing_setup_or_trust_changes_the_generation() -> None:
     check(after_setup != after_trust, "and so does trusting a worktree")
 
 
+@contained
 def test_a_session_that_cannot_be_ended_keeps_its_old_record() -> None:
     """Partial failure is loud, and the next launch tries again."""
     with tempfile.TemporaryDirectory(prefix="syrd191-stuck.") as tmp:
@@ -824,6 +842,7 @@ def test_a_session_that_cannot_be_ended_keeps_its_old_record() -> None:
     )
 
 
+@contained
 def test_a_tenant_with_a_desktop_policy_still_gets_bounded_steps() -> None:
     """The live path must watch and bound, on every tenant that has a pane.
 
@@ -953,6 +972,7 @@ def launchable_tenant(tmp_path: Path):
     return team_launcher.load_project_config("testing", config_path), config_path, home
 
 
+@contained
 def test_an_ordinary_launch_reconciles_running_roles_end_to_end() -> None:
     """Driven through `launch_project`, because that is where it broke.
 

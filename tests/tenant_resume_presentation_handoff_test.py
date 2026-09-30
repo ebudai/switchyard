@@ -40,6 +40,8 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from scripts import team_launcher as launcher  # noqa: E402
+import owned_home  # noqa: E402
+from owned_home import contained, plain_acl_runner, root_pinned_program  # noqa: E402
 from first_run_login_inheritance_test import uat_config  # noqa: E402
 
 CHECKS = 0
@@ -89,6 +91,7 @@ def _config(tmp: Path):
     return uat_config(tmp)
 
 
+@contained
 def test_the_owner_half_hands_the_window_back_when_it_came_through_the_bridge() -> None:
     """The half that was missing: a tenant with no `presentation` section."""
     read_fd, write_fd = os.pipe()
@@ -117,6 +120,7 @@ def test_the_owner_half_hands_the_window_back_when_it_came_through_the_bridge() 
                 pass
 
 
+@contained
 def test_the_owner_half_does_not_try_to_own_the_desktop_window() -> None:
     """Konsole started from the owner account goes nowhere; it must not be tried."""
     with tempfile.TemporaryDirectory(prefix="syrd211-nokonsole.") as tmp:
@@ -146,6 +150,7 @@ def test_the_owner_half_does_not_try_to_own_the_desktop_window() -> None:
             )
 
 
+@contained
 def test_a_desktop_tenant_with_no_handoff_is_a_failure_not_a_silent_success() -> None:
     """The caller half: the exact shape the User was given."""
     said: list[str] = []
@@ -164,6 +169,7 @@ def test_a_desktop_tenant_with_no_handoff_is_a_failure_not_a_silent_success() ->
           f"separating what worked from what did not: {said}")
 
 
+@contained
 def test_a_headless_tenant_with_no_handoff_is_still_nothing_to_open() -> None:
     """The other half: a tenant with no window must not be reported as broken."""
     said: list[str] = []
@@ -179,26 +185,66 @@ def test_a_headless_tenant_with_no_handoff_is_still_nothing_to_open() -> None:
     check(said == [], f"and says nothing about it: {said}")
 
 
-def test_desktop_access_has_three_answers_against_the_real_registry() -> None:
-    """Unknown is its own answer, and this host has one of each.
+@contained
+def test_desktop_access_has_three_answers_against_an_owned_registry() -> None:
+    """Unknown is its own answer, next to yes and no.
 
     Most tenants' configs live under their owner's home and cannot be read from
     here -- that is the boundary working. Folding that into "no window" would
     put the silent success straight back for exactly the tenants that have one.
+    The registry is this case's own, with a tenant of each shape, rather than
+    this host's real one (SYRD-343).
     """
-    check(launcher._tenant_has_desktop_access("syrd") is True,
-          "a readable config with a desktop policy answers yes")
-    check(launcher._tenant_has_desktop_access("definitely-not-a-tenant") is None,
-          "an unregistered name answers unknown, not no")
-    check(launcher._tenant_has_desktop_access("testing") is None,
-          "and so does a registered tenant whose config this account cannot read")
-    # The caller's OWN state directory is readable, and says this account has
-    # had this project's window before.
-    check(launcher._tenant_has_desktop_access(
-        "testing", caller=launcher.current_user_name()) is True,
-        "which the caller's own desktop state directory can still settle")
+    with tempfile.TemporaryDirectory(prefix="syrd343-registry.") as tmp:
+        root = Path(tmp)
+        registry = root / "registry"
+        registry.mkdir()
+
+        def register(slug: str, config: Path) -> None:
+            (registry / f"{slug}.json").write_text(json.dumps(
+                {"schema": launcher.SWITCHYARD_REGISTRY_SCHEMA, "slug": slug, "name": slug,
+                 "config_path": str(config), "agent_clis": []}), encoding="utf-8")
+
+        # A loadable tenant config, built the way the rest of this suite builds one.
+        from first_run_login_inheritance_test import UAT_ROLES, _write_first_run_auth_config
+
+        (root / "otto").mkdir()
+        readable = _write_first_run_auth_config(root / "otto", roles=UAT_ROLES)
+        raw = json.loads(readable.read_text(encoding="utf-8"))
+        raw["desktop_access"] = {"mode": "headless"}
+        raw["session_dir"] = str(root / "otto" / "state" / "pane-sessions")
+        readable.write_text(json.dumps(raw), encoding="utf-8")
+        register("otto", readable)
+        unreadable = root / "testing.json"
+        unreadable.write_text(json.dumps({"project": "testing", "desktop_access": {"mode": "grant"}}), encoding="utf-8")
+        unreadable.chmod(0)
+        register("testing", unreadable)
+        saved = os.environ.get("SWITCHYARD_PROJECT_REGISTRY_DIR")
+        os.environ["SWITCHYARD_PROJECT_REGISTRY_DIR"] = str(registry)
+        try:
+            check(launcher._tenant_has_desktop_access("otto") is True,
+                  "a readable config with a desktop policy answers yes")
+            check(launcher._tenant_has_desktop_access("definitely-not-a-tenant") is None,
+                  "an unregistered name answers unknown, not no")
+            check(launcher._tenant_has_desktop_access("testing") is None,
+                  "and so does a registered tenant whose config this account cannot read")
+            # The caller's OWN state directory -- an owned home here -- says this
+            # account has had this project's window before.
+            me = launcher.current_user_name()
+            state = launcher.desktop_state_dir("testing", me)
+            owned_home.assert_owned(state)
+            state.mkdir(parents=True)
+            check(launcher._tenant_has_desktop_access("testing", caller=me) is True,
+                  "which the caller's own desktop state directory can still settle")
+        finally:
+            unreadable.chmod(0o600)
+            if saved is None:
+                os.environ.pop("SWITCHYARD_PROJECT_REGISTRY_DIR", None)
+            else:
+                os.environ["SWITCHYARD_PROJECT_REGISTRY_DIR"] = saved
 
 
+@contained
 def test_a_readable_config_without_a_desktop_policy_answers_no() -> None:
     """The third answer, through the real parsing rather than a stub of it.
 
@@ -251,6 +297,7 @@ def test_a_readable_config_without_a_desktop_policy_answers_no() -> None:
     check(answer is True, f"and one that has a desktop policy answers yes: {answer!r}")
 
 
+@contained
 def test_an_unknown_tenant_shape_is_not_reported_as_a_fault() -> None:
     """Silence is right when this account genuinely cannot tell."""
     said: list[str] = []
@@ -266,6 +313,7 @@ def test_an_unknown_tenant_shape_is_not_reported_as_a_fault() -> None:
     check(said == [], f"and nothing is claimed about it: {said}")
 
 
+@contained
 def test_an_ordinary_unbridged_launch_does_not_hand_its_window_away() -> None:
     """The branch is for the owner half only; a desktop launch opens its own."""
     saved = os.environ.pop(launcher.TENANT_CONTROL_CALLER_ENV, None)
@@ -280,6 +328,7 @@ def test_an_ordinary_unbridged_launch_does_not_hand_its_window_away() -> None:
               "and with one, it is")
 
 
+@contained
 def test_a_deferred_hook_warning_does_not_suppress_the_window() -> None:
     """The warning the UAT saw is nonfatal, and must stay that way.
 
@@ -300,9 +349,14 @@ def test_a_deferred_hook_warning_does_not_suppress_the_window() -> None:
           f"the window does not depend on any hook result: {window_branch[:200]}")
 
 
-REAL_PINNED_HELPER = Path("/usr/local/lib/switchyard/syrd/switchyard-display-attach")
+#: The program a handoff names for every tab: root's, and on every Linux host.
+#: This release's INSTALLED display helper is a fact about one host, which the
+#: suite used to read and silently skipped without (SYRD-343); the root-pinning
+#: checks it has to pass are the same for either program.
+PINNED_PROGRAM = root_pinned_program()
 
 
+@contained
 def test_auto_layout_on_a_non_kde_desktop_resolves_to_viewer() -> None:
     """Zorin's shape, from the product's own resolver rather than an assumption."""
     check(
@@ -321,6 +375,7 @@ def test_auto_layout_on_a_non_kde_desktop_resolves_to_viewer() -> None:
     )
 
 
+@contained
 def test_the_bridged_viewer_hands_off_a_viewer_and_the_caller_opens_one_tab() -> None:
     """The missed path, end to end through the real renderer and validator.
 
@@ -329,9 +384,6 @@ def test_the_bridged_viewer_hands_off_a_viewer_and_the_caller_opens_one_tab() ->
     five errors. The payload is rendered by the product, validated by the
     product, and turned into a layout by the product.
     """
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     read_fd, write_fd = os.pipe()
     said: list[str] = []
     try:
@@ -344,7 +396,7 @@ def test_the_bridged_viewer_hands_off_a_viewer_and_the_caller_opens_one_tab() ->
                     window_title="Syrd",
                     layout=launcher.LAYOUT_MODE_VIEWER,
                     slot_titles=["Syrd"],
-                    pane_program=REAL_PINNED_HELPER,
+                    pane_program=PINNED_PROGRAM,
                     print_func=said.append,
                 )
         check(handed is True, "the viewer branch hands the display back")
@@ -357,7 +409,7 @@ def test_the_bridged_viewer_hands_off_a_viewer_and_the_caller_opens_one_tab() ->
 
     # The caller validates it again and builds its own layout from it.
     validated, problem = launcher.validated_presentation_handoff(
-        payload, project=payload["project"]
+        payload, project=payload["project"], runner=plain_acl_runner
     )
     check(not problem, f"the caller accepts it: {problem}")
     check(validated["layout"] == launcher.LAYOUT_MODE_VIEWER,
@@ -383,18 +435,16 @@ def test_the_bridged_viewer_hands_off_a_viewer_and_the_caller_opens_one_tab() ->
           f"never a per-slot display session: {command}")
 
 
+@contained
 def test_the_bridged_separate_layout_still_opens_one_tab_per_slot() -> None:
     """The audited path, unchanged: KDE keeps its per-slot window."""
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     payload = launcher.render_presentation_handoff(
-        "syrd", slot_count=5, pane_program=REAL_PINNED_HELPER,
+        "syrd", slot_count=5, pane_program=PINNED_PROGRAM,
         slot_titles=["a", "b", "c", "d", "e"], window_title="Syrd",
     )
     check(payload["layout"] == launcher.LAYOUT_MODE_SEPARATE,
           f"the default is the separate layout: {payload['layout']}")
-    validated, problem = launcher.validated_presentation_handoff(payload, project="syrd")
+    validated, problem = launcher.validated_presentation_handoff(payload, project="syrd", runner=plain_acl_runner)
     check(not problem, f"which validates: {problem}")
     from scripts import presentation_controller
 
@@ -408,25 +458,24 @@ def test_the_bridged_separate_layout_still_opens_one_tab_per_slot() -> None:
           "and still opens one tab per slot")
 
 
+@contained
 def test_a_handoff_naming_an_unknown_layout_is_refused() -> None:
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     payload = launcher.render_presentation_handoff(
-        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        "syrd", slot_count=1, pane_program=PINNED_PROGRAM,
         slot_titles=["Syrd"], window_title="Syrd",
     )
     payload["layout"] = "something-else"
-    _, problem = launcher.validated_presentation_handoff(payload, project="syrd")
+    _, problem = launcher.validated_presentation_handoff(payload, project="syrd", runner=plain_acl_runner)
     check("unknown layout" in problem, f"an unknown layout is refused: {problem}")
     # And a payload from an older owner half, with no layout at all, still works.
     payload.pop("layout")
-    validated, problem = launcher.validated_presentation_handoff(payload, project="syrd")
+    validated, problem = launcher.validated_presentation_handoff(payload, project="syrd", runner=plain_acl_runner)
     check(not problem, f"an older payload is still understood: {problem}")
     check(validated["layout"] == launcher.LAYOUT_MODE_SEPARATE,
           "and reads as the layout that predates the field")
 
 
+@contained
 def test_the_privileged_helper_accepts_the_viewer_target_and_nothing_else_new() -> None:
     """The boundary keeps validating: one more target, not a way to name sessions."""
     import types
@@ -445,6 +494,7 @@ def test_the_privileged_helper_accepts_the_viewer_target_and_nothing_else_new() 
           f"the key lock targets the viewer session exactly: {argv[:4]}")
 
 
+@contained
 def test_launch_project_on_auto_non_kde_emits_the_viewer_handoff() -> None:
     """Driven through `launch_project` itself, because the branch is the bug.
 
@@ -573,6 +623,7 @@ def _viewer_handoff_once(with_presentation: bool) -> None:
           f"opened through the privileged attach helper: {payload}")
 
 
+@contained
 def test_the_viewer_session_is_named_when_the_caller_attaches_directly() -> None:
     """Owner and desktop the same account: no helper, a direct tmux attach.
 
@@ -597,6 +648,7 @@ def test_the_viewer_session_is_named_when_the_caller_attaches_directly() -> None
           f"a slot still names its display session: {slot_args}")
 
 
+@contained
 def test_the_helper_refuses_a_target_that_is_neither_a_slot_nor_the_viewer() -> None:
     """One more validated target, not a way to name sessions."""
     import types
@@ -635,6 +687,7 @@ def _module_from(path: Path, name: str):
     return module
 
 
+@contained
 def test_the_viewer_discriminator_survives_the_real_root_reserializer() -> None:
     """Owner -> ROOT -> caller, through the shipped `publish_handoff`.
 
@@ -643,17 +696,14 @@ def test_the_viewer_discriminator_survives_the_real_root_reserializer() -> None:
     reserializes a fixed set of fields and dropped this one. This runs the real
     root function and reads what it actually wrote.
     """
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     import pwd as _pwd
 
     bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tenant_control_root")
     me = _pwd.getpwuid(os.getuid()).pw_name
     destination = (
-        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
-        / "syrd-presentation-handoff.json"
+        launcher.desktop_state_dir("syrd", me) / "syrd-presentation-handoff.json"
     )
+    owned_home.assert_owned(destination)
 
     def publish(payload: dict) -> dict | None:
         if destination.exists():
@@ -666,7 +716,7 @@ def test_the_viewer_discriminator_survives_the_real_root_reserializer() -> None:
         return written
 
     owner_payload = launcher.render_presentation_handoff(
-        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        "syrd", slot_count=1, pane_program=PINNED_PROGRAM,
         slot_titles=["Syrd"], window_title="Syrd",
         layout=launcher.LAYOUT_MODE_VIEWER,
     )
@@ -677,7 +727,7 @@ def test_the_viewer_discriminator_survives_the_real_root_reserializer() -> None:
 
     # The caller then validates root's copy -- not the owner's -- and builds
     # from it. That is the chain the live run takes.
-    validated, problem = launcher.validated_presentation_handoff(republished, project="syrd")
+    validated, problem = launcher.validated_presentation_handoff(republished, project="syrd", runner=plain_acl_runner)
     check(not problem, f"the caller accepts root's copy: {problem}")
     check(validated["layout"] == launcher.LAYOUT_MODE_VIEWER,
           "still a viewer after two validations")
@@ -708,25 +758,57 @@ def test_the_viewer_discriminator_survives_the_real_root_reserializer() -> None:
           "root publishes nothing for a layout it does not know")
 
 
+@contained
 def test_the_staged_helper_the_tenant_would_actually_run_accepts_the_viewer() -> None:
-    """The last layer: the per-tenant copy, not the release's source."""
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper)")
-        return
-    staged = _module_from(REAL_PINNED_HELPER, "staged_display_attach")
-    if not hasattr(staged, "VIEWER_TARGET"):
-        # Exactly the preserved tenant's situation. The layer is still proved,
-        # by the upgrade case below, which stages that older helper itself and
-        # then runs the upgraded file.
-        print("  (this host's staged helper predates the viewer target, as Zorin's did;"
-              " the upgrade case proves this layer)")
-        return
+    """The last layer: the per-tenant copy, not the release's source.
+
+    Staged here, into an owned staging root, by the product's own
+    `ensure_tenant_control_helper` from this release -- not read from whatever
+    this host happens to have installed, which the suite used to do and skip
+    without (SYRD-343).
+    """
+    import subprocess as _sp
+
+    with tempfile.TemporaryDirectory(prefix="syrd343-staged.") as tmp:
+        root = Path(tmp)
+        release = root / "release"
+        (release / "scripts").mkdir(parents=True)
+        for name in launcher.ROLE_STAGED_EXECUTABLES:
+            source = ROOT / "scripts" / name
+            if source.is_file():
+                (release / "scripts" / name).write_bytes(source.read_bytes())
+        staging_root = root / "staging"
+        mine = staging_root / "syrd"
+        mine.mkdir(parents=True)
+        commands: list[str] = []
+
+        def staging_runner(args, **_kwargs):
+            commands.append(" ".join(args))
+            # What the recorded staging step does: install this release's bytes.
+            for name in launcher.ROLE_STAGED_EXECUTABLES:
+                source = release / "scripts" / name
+                if source.is_file():
+                    target = mine / name
+                    target.write_bytes(source.read_bytes())
+                    target.chmod(0o755)
+            return _sp.CompletedProcess(args, 0)
+
+        launcher.ensure_tenant_control_helper(
+            "syrd",
+            grant={"project": "syrd", "authorized_user": launcher.current_user_name()},
+            release_root=str(release), root=staging_root,
+            owner_uid=os.getuid(), runner=staging_runner, print_func=lambda _l: None,
+        )
+        check(len(commands) == 1, f"the helper was staged through the recorded step: {commands}")
+        staged = _module_from(mine / "switchyard-display-attach", "staged_display_attach")
+    check(hasattr(staged, "VIEWER_TARGET"), "the staged helper knows the viewer target")
     check(staged.session_name("syrd", staged.VIEWER_TARGET) == "syrd-viewer",
           "the staged helper resolves the viewer target to this tenant's viewer session")
     check(staged.session_name("syrd", 2) == "syrd-display-2",
           "and a slot still names its display session")
 
 
+@contained
 def test_a_tenant_staged_by_an_older_release_is_restaged_before_it_is_used() -> None:
     """The preserved Zorin tenant's shape: present, correct, and out of date.
 
@@ -833,6 +915,7 @@ def test_a_tenant_staged_by_an_older_release_is_restaged_before_it_is_used() -> 
               "another tenant's staged helper is byte-for-byte what it was")
 
 
+@contained
 def test_a_hostile_staged_helper_is_refused_rather_than_restaged() -> None:
     """Out of date is repaired; the wrong shape is not."""
     with tempfile.TemporaryDirectory(prefix="syrd211-hostile-stale.") as tmp:
@@ -860,6 +943,7 @@ def test_a_hostile_staged_helper_is_refused_rather_than_restaged() -> None:
             raise AssertionError("a world-writable staged helper must stop the launch")
 
 
+@contained
 def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
     """Owner -> root -> caller -> a process, observed as a process.
 
@@ -869,17 +953,14 @@ def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
     `complete_desktop_presentation`, which is what the outer caller runs, and
     watches what it tries to start.
     """
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     import pwd as _pwd
 
     bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tenant_control_launch")
     me = _pwd.getpwuid(os.getuid()).pw_name
     handoff_file = (
-        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
-        / "syrd-presentation-handoff.json"
+        launcher.desktop_state_dir("syrd", me) / "syrd-presentation-handoff.json"
     )
+    owned_home.assert_owned(handoff_file)
     launched: list[list[str]] = []
 
     class _Started:
@@ -896,7 +977,7 @@ def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
 
     # 1. the owner half, bridged on an auto/non-KDE layout, writes the payload
     owner_payload = launcher.render_presentation_handoff(
-        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        "syrd", slot_count=1, pane_program=PINNED_PROGRAM,
         slot_titles=["Syrd"], window_title="Syrd",
         layout=launcher.LAYOUT_MODE_VIEWER,
     )
@@ -933,6 +1014,8 @@ def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
           f"it started the terminal this desktop actually has: {argv}")
     check(argv[-1] == "viewer",
           f"on the viewer target, not a per-slot session: {argv[-4:]}")
+    # The product's own per-tenant helper path, recorded by the fake process
+    # launcher above -- a string in argv, never executed.
     check("switchyard-display-attach" in " ".join(argv),
           f"through the staged privileged helper: {argv}")
     check(f"syrd-display-" not in " ".join(argv),
@@ -941,6 +1024,7 @@ def test_the_caller_actually_launches_a_window_for_a_viewer_handoff() -> None:
           f"and no Konsole layout document is involved at all: {argv}")
 
 
+@contained
 def test_a_non_kde_desktop_without_konsole_still_opens_a_window() -> None:
     """The live failure: `env: 'konsole': No such file or directory`, status 127.
 
@@ -971,6 +1055,7 @@ def test_a_non_kde_desktop_without_konsole_still_opens_a_window() -> None:
     check("--title" in args and "Test" in args, f"and carries the window title: {args}")
 
 
+@contained
 def test_each_terminal_is_given_the_flag_it_actually_takes() -> None:
     """They do not agree, and getting it wrong is a window that never opens."""
     command = ["sudo", "-n", "/usr/local/lib/switchyard/test/switchyard-display-attach",
@@ -993,6 +1078,7 @@ def test_each_terminal_is_given_the_flag_it_actually_takes() -> None:
         check(title_flag in args, f"{name}: and the title flag it takes: {args}")
 
 
+@contained
 def test_no_terminal_at_all_is_a_precise_refusal_not_an_exit_127() -> None:
     """Nothing to open it with is a prerequisite, said as one."""
     check(launcher.available_presentation_terminal(which=lambda *a, **k: None) is None,
@@ -1005,6 +1091,7 @@ def test_no_terminal_at_all_is_a_precise_refusal_not_an_exit_127() -> None:
           f"separating what works from what does not: {message}")
 
 
+@contained
 def test_the_caller_refuses_before_starting_anything_when_no_terminal_exists() -> None:
     """Through the caller itself, not only through the helpers it uses.
 
@@ -1012,19 +1099,16 @@ def test_the_caller_refuses_before_starting_anything_when_no_terminal_exists() -
     that `complete_desktop_presentation` stops there rather than handing `env` a
     program that is not installed and reporting whatever it exits with.
     """
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     import pwd as _pwd
 
     bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tc_noterminal")
     me = _pwd.getpwuid(os.getuid()).pw_name
     handoff_file = (
-        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
-        / "syrd-presentation-handoff.json"
+        launcher.desktop_state_dir("syrd", me) / "syrd-presentation-handoff.json"
     )
+    owned_home.assert_owned(handoff_file)
     payload = launcher.render_presentation_handoff(
-        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        "syrd", slot_count=1, pane_program=PINNED_PROGRAM,
         slot_titles=["Syrd"], window_title="Syrd", layout=launcher.LAYOUT_MODE_VIEWER,
     )
     if handoff_file.exists():
@@ -1058,6 +1142,7 @@ def test_the_caller_refuses_before_starting_anything_when_no_terminal_exists() -
           f"with a prerequisite said precisely: {said}")
 
 
+@contained
 def test_what_an_immediate_exit_means_depends_on_the_terminal() -> None:
     """The contradiction the DAT rejection found, in all four shapes.
 
@@ -1119,25 +1204,23 @@ def test_what_an_immediate_exit_means_depends_on_the_terminal() -> None:
     check(any("opened" in line for line in said), f"and says so: {said}")
 
 
+@contained
 def test_the_gnome_path_a_zorin_desktop_would_take_is_not_read_as_failure() -> None:
     """The live shape, end to end through the caller.
 
     A desktop with gnome-terminal and no konsole: the caller must pick it,
     start it, and treat its immediate return as the acknowledgement it is.
     """
-    if not REAL_PINNED_HELPER.is_file():
-        print("  (skipped: this host has no staged display-attach helper to pin)")
-        return
     import pwd as _pwd
 
     bridge = _module_from(ROOT / "scripts" / "switchyard-tenant-control", "tc_gnome")
     me = _pwd.getpwuid(os.getuid()).pw_name
     handoff_file = (
-        Path.home() / ".local" / "state" / "switchyard" / "projects" / "syrd"
-        / "syrd-presentation-handoff.json"
+        launcher.desktop_state_dir("syrd", me) / "syrd-presentation-handoff.json"
     )
+    owned_home.assert_owned(handoff_file)
     payload = launcher.render_presentation_handoff(
-        "syrd", slot_count=1, pane_program=REAL_PINNED_HELPER,
+        "syrd", slot_count=1, pane_program=PINNED_PROGRAM,
         slot_titles=["Syrd"], window_title="Syrd", layout=launcher.LAYOUT_MODE_VIEWER,
     )
     if handoff_file.exists():
@@ -1185,6 +1268,7 @@ def test_the_gnome_path_a_zorin_desktop_would_take_is_not_read_as_failure() -> N
           f"with no claim that the window failed: {said}")
 
 
+@contained
 def test_a_viewer_launch_that_cannot_hand_back_says_so() -> None:
     """The silence is as much the defect as the missing window.
 

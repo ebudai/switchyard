@@ -14,9 +14,53 @@ import sys
 from typing import Any
 
 try:
-    from . import write_client
+    from . import workflow_relays, write_client
 except ImportError:  # pragma: no cover - `python write_client.py` runs outside the package
+    import workflow_relays
     import write_client
+
+
+def _add_user_acceptance_relay(client: Any, *, apply: bool, expected_revision: int | None) -> dict[str, Any]:
+    """Preview, or apply, the one transition that lets the Director relay the User's acceptance (SYRD-535).
+
+    Read-only by default: the live document and revision, the transition that
+    would be added and nothing else, the digests before and after, and the
+    board's own validation of the result as a dry run. `--apply` takes the
+    revision the preview showed, so what is applied is what was reviewed; the
+    board refuses it if the workflow has moved since.
+    """
+    # One endpoint for the read, the dry run and the apply, resolved once.
+    client = client.pinned_to_resolved_endpoint()
+    current = client.read_workflow()
+    document, revision = current.get("document"), current.get("revision")
+    if not isinstance(document, dict) or type(revision) is not int:
+        raise write_client.TicketBoardWriteError("this board runs no declared workflow, so there is nothing to add a relay to")
+    result: dict[str, Any] = {
+        "endpoint": client.workflow_endpoint,
+        "revision": revision,
+        "before_digest": workflow_relays.document_digest(document),
+        "rejection": workflow_relays.rejection_relay_finding(document),
+        "applied": False,
+    }
+    updated, relay, reason = workflow_relays.with_user_acceptance_relay(document)
+    result["reason"] = reason
+    result["added"] = relay
+    if updated is None:
+        return result
+    result["after_digest"] = workflow_relays.document_digest(updated)
+    if apply:
+        if expected_revision != revision:
+            raise write_client.TicketBoardWriteError(
+                f"the workflow is at revision {revision}, not the {expected_revision} you reviewed; preview it again"
+            )
+    validated = client.configure_workflow(updated, expected_revision=revision, dry_run=True, same_endpoint=True)
+    result["validated"] = bool(validated.get("dry_run"))
+    if not apply:
+        result["apply_with"] = f"ticket-board-write add-user-acceptance-relay --apply --expected-revision {revision}"
+        return result
+    applied = client.configure_workflow(updated, expected_revision=revision, dry_run=False, same_endpoint=True)
+    result.update(applied=True, revision_after=applied.get("revision"))
+    return result
 
 
 def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
@@ -199,6 +243,15 @@ def _build_parser() -> argparse.ArgumentParser:
     workflow_action.add_argument("ticket_id")
     workflow_action.add_argument("action")
     workflow_action.add_argument("--payload-json", default="{}")
+    relay = subparsers.add_parser(
+        "add-user-acceptance-relay",
+        help=(
+            "preview (default) or apply the one transition that lets the Director relay the User's "
+            "acceptance, copied from the User's own sign-off; changes nothing else"
+        ),
+    )
+    relay.add_argument("--apply", action="store_true", help="apply it; requires --expected-revision from the preview")
+    relay.add_argument("--expected-revision", type=int, default=None, help="the revision the preview showed")
     workflow_flags = subparsers.add_parser("set-workflow-flags")
     workflow_flags.add_argument("ticket_id")
     workflow_flags.add_argument("--patch-json", required=True)
@@ -528,6 +581,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif command == "workflow_action":
             response = client.workflow_action(args.ticket_id, args.action, json.loads(args.payload_json))
+        elif command == "add_user_acceptance_relay":
+            if args.apply and args.expected_revision is None:
+                raise write_client.TicketBoardWriteError("--apply needs --expected-revision, from the preview")
+            response = _add_user_acceptance_relay(client, apply=args.apply, expected_revision=args.expected_revision)
         elif command == "set_workflow_flags":
             response = client.set_workflow_flags(args.ticket_id, json.loads(args.patch_json))
         elif command == "submit_to_audit":
@@ -605,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     except write_client.TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if command in {"merge", "dismiss_notification", "verify_caller"}:
+    if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

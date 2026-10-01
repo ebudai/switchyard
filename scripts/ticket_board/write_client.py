@@ -827,8 +827,91 @@ class TicketBoardWriteClient:
     def start_work(self, ticket_id: str, *, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "start_work", caller_role=caller_role)
 
-    def configure_workflow(self, document: dict[str, Any], *, expected_revision: int, dry_run: bool = False) -> dict[str, Any]:
-        return self._post("/actions/configure_workflow", {"document": document, "expected_revision": expected_revision, "dry_run": dry_run})
+    def pinned_to_resolved_endpoint(self) -> "TicketBoardWriteClient":
+        """This client, fixed to the endpoint it resolves to now (SYRD-535).
+
+        The ambient socket is re-resolved on every call -- it is chosen only if
+        its file exists -- so a board that went away between a read and a write
+        turned the write into an HTTP write to whatever board the URL names. A
+        workflow change resolves once: an explicit socket, which `_post` never
+        falls back from, or no socket at all.
+        """
+        socket_path = self.effective_socket_path
+        return TicketBoardWriteClient(
+            board_url=self.board_url,
+            caller_role=self.caller_role,
+            timeout=self.timeout,
+            socket_path=socket_path,
+            report_token=self.report_token,
+            write_token=self.write_token,
+            report_board_url=self.report_board_url,
+            report_token_file=self.report_token_file,
+            socket_disabled=socket_path is None,
+        )
+
+    @property
+    def workflow_endpoint(self) -> str:
+        """The one board a workflow change reads from and writes to (SYRD-535).
+
+        Where writes resolve to a Unix socket, so does the read: the preview and
+        the apply must address the same board, and a socket that cannot be read
+        is a refusal, never a quiet fall back to whatever HTTP board the URL
+        names.
+        """
+        socket_path = self.effective_socket_path
+        return f"unix:{socket_path}" if socket_path else self.board_url.rstrip("/")
+
+    def read_workflow(self) -> dict[str, Any]:
+        """The board's declared workflow and its revision, from `workflow_endpoint` (SYRD-535)."""
+        socket_path = self.effective_socket_path
+        if socket_path:
+            conn = UnixHTTPConnection(socket_path, self.timeout)
+            try:
+                conn.request("GET", "/api/workflow")
+                response = conn.getresponse()
+                body = response.read().decode("utf-8", errors="replace")
+                if response.status >= 400:
+                    raise TicketBoardWriteError(f"the board at {socket_path} refused the workflow read: {body or response.status}")
+                parsed = json.loads(body)
+            except (OSError, ValueError) as exc:
+                raise TicketBoardWriteError(
+                    f"could not read the workflow from {socket_path} ({exc}); not falling back to another board"
+                ) from exc
+            finally:
+                conn.close()
+        else:
+            root = self.board_url.rstrip("/")
+            if root.endswith("/api/tickets"):
+                root = root[: -len("/api/tickets")]
+            try:
+                with request.urlopen(f"{root}/api/workflow", timeout=self.timeout) as response:
+                    parsed = json.loads(response.read().decode("utf-8"))
+            except (OSError, ValueError) as exc:
+                raise TicketBoardWriteError(f"could not read {root}/api/workflow: {exc}") from exc
+        if not isinstance(parsed, dict):
+            raise TicketBoardWriteError("the board's workflow response was not an object")
+        return parsed
+
+    def configure_workflow(
+        self, document: dict[str, Any], *, expected_revision: int, dry_run: bool = False, same_endpoint: bool = False
+    ) -> dict[str, Any]:
+        payload = {"document": document, "expected_revision": expected_revision, "dry_run": dry_run}
+        socket_path = self.effective_socket_path
+        if same_endpoint and socket_path:
+            # The board `read_workflow` read, and no other: `_post` would fall
+            # back to TCP if the socket failed, and the URL may name another
+            # board (SYRD-535).
+            role = self.caller_role.strip().lower()
+            if not role:
+                raise ValueError("caller_role must be non-empty")
+            _refuse_production_write_under_test(self.board_url, socket_path)
+            try:
+                return self._post_unix("/actions/configure_workflow", payload, role, socket_path)
+            except OSError as exc:
+                raise TicketBoardWriteError(
+                    f"could not reach {socket_path} ({exc}); not falling back to another board"
+                ) from exc
+        return self._post("/actions/configure_workflow", payload)
 
     def workflow_action(self, ticket_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("commit_hash"):

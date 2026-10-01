@@ -281,24 +281,42 @@ asking you a question was not prepared.
 
 ### Recording what the user reports
 
-The user answers in conversation, and `user_sign_off` / `user_kick_back` are
-theirs and will refuse you. Both results have a relay, taken through
-`workflow-action` because they are declared transitions:
+The user answers in conversation, and the user's own sign-off and rejection are
+theirs and will refuse you. A relay enters what the user reported -- but only
+where this workflow declares one: read the ticket's `workflow_actions` first and
+use a relay only when it is listed with you among its actors. Relays are
+declared transitions, so they are taken through `workflow-action`:
 
 ```bash
+# acceptance of a coded ticket: name the candidate the ticket already carries
 ticket-board-write workflow-action <id> relay_user_sign_off \
   --payload-json '{"reason": "<what the user reported>", "commit_hash": "<the commit the ticket carries>"}'
+# acceptance of a no-code ticket (commit_exempt, no commit): a reason and NO commit_hash key at all --
+# an empty "commit_hash" is refused
+ticket-board-write workflow-action <id> relay_user_sign_off \
+  --payload-json '{"reason": "<what the user reported>"}'
+# rejection, only where relay_user_kick_back is listed
 ticket-board-write workflow-action <id> relay_user_kick_back \
   --payload-json '{"reason": "<what the user reported>"}'
 ```
+
+If the acceptance relay is not listed, your workflow was declared after the
+migration that grants it. `ticket-board-write add-user-acceptance-relay` previews
+the one transition that would add it -- copied from the user's own sign-off,
+nothing else changed -- with the revision, both digests and the board's dry run;
+review that, then apply it with `--apply --expected-revision <revision>`. It is
+a workflow change: say on a ticket that you made it. A rejection relay exists
+only where the user rejects by returning the work; where the user rejects by
+reopening, there is none to add -- record what the user said on the ticket, and
+giving the user a return move is a workflow decision to raise, not one to take.
 
 Use them instead of an override. An override reaches the same stage while
 naming no commit, checking no gate, and leaving nothing a later reader can tell
 apart from your own judgement -- and on an acceptance it leaves the sign-off
 unwritten on a ticket the user actually accepted. The acceptance additionally
-requires the stage gate and every earlier review to be in place, and it must
-name the candidate the ticket already carries; if it refuses, the ticket is not
-in the state you think it is. Relay what you were told, in the words you were
+requires the stage gate and every earlier review to be in place, and on a coded
+ticket it must name the candidate the ticket already carries; if it refuses, the
+ticket is not in the state you think it is. Relay what you were told, in the words you were
 told it.
 
 ## Notification recovery

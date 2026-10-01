@@ -166,14 +166,22 @@ identity instead: the role holding `merge`, `set-blockers` and
 SYRD-180).
 
 **Relay the User's UAT result, do not override it.** The User reports UAT in
-conversation and has no pane to act from, and `user_sign_off` / `user_kick_back`
-are the User's own actions and refuse you, as sign-off decisions should. Both
-results have a relay instead. They are declared transitions, so they are taken
-through `workflow-action` rather than a subcommand of their own:
+conversation and has no pane to act from, and the User's own sign-off and
+rejection refuse you, as sign-off decisions should. A relay enters the User's
+decision instead -- where the workflow declares one. Relays are declared
+transitions, so they are taken through `workflow-action` rather than a
+subcommand of their own, and they exist only where the ticket's
+`workflow_actions` lists them with you among the actors. Read that list first.
 
 ```bash
+# acceptance, coded ticket: name the candidate the ticket already carries
 ticket-board-write workflow-action <id> relay_user_sign_off \
   --payload-json '{"reason": "User completed the steps and accepted", "commit_hash": "<the commit the ticket carries>"}'
+# acceptance, no-code ticket (commit_exempt and no commit): the reason and NO commit_hash key;
+# an empty "commit_hash" is refused as an invalid commit
+ticket-board-write workflow-action <id> relay_user_sign_off \
+  --payload-json '{"reason": "User accepted the recommendation in conversation"}'
+# rejection, where relay_user_kick_back is listed
 ticket-board-write workflow-action <id> relay_user_kick_back \
   --payload-json '{"reason": "User reports <what failed>"}'
 ```
@@ -182,14 +190,39 @@ The rejection returns the ticket along the ordinary correction path, clears the
 same sign-offs the User's own rejection clears, and notifies the implementer
 once (SYRD-214). The acceptance sets `user_signoff` and stops at your own final
 review -- it cannot close a ticket, it requires the stage's gate and every
-earlier review to already be in place, and it must name the candidate the ticket
-already carries and cannot change it (SYRD-217).
+earlier review to already be in place, and on a coded ticket it must name the
+candidate the ticket already carries and cannot change it (SYRD-217).
 
 Both are recorded as the User's decision entered by you, never as your own
 review, and neither exists on an installation where the User has a board pane of
 its own. Use them instead of an override: the override reaches the same stage
 while naming no commit, checking no gate, and leaving nothing a later reader can
 tell apart from your own judgement.
+
+**When the acceptance relay is not listed.** It was granted by migration
+(pgu953) to the workflow a board had when that migration ran; a workflow
+declared afterwards never received it, and MEFP's is one. The repair is the one
+transition that migration adds, through your configure-workflow authority:
+
+```bash
+ticket-board-write add-user-acceptance-relay          # preview: changes nothing
+ticket-board-write add-user-acceptance-relay --apply --expected-revision <revision from the preview>
+```
+
+The preview reads the live workflow and prints its revision, the transition it
+would add -- copied from the User's own sign-off: same destination, same
+sign-offs cleared, granted to the one control role -- the document digests
+before and after, and the board's own dry-run validation. Nothing else in the
+document changes, and the apply is refused if the workflow moved since the
+preview. It declines, and says why, where the User has a pane, where the User's
+approval would end the ticket, where more than one role holds control, or where
+the relay already exists. Record the change on a ticket.
+
+**There may be no rejection relay to add.** A relay may only return or approve,
+and must mirror a move the User itself can make from the same stage. Where the
+User rejects by reopening (MEFP's `user_reopen`, to analysis), nothing can be
+relayed: record what the User said on the ticket, and treat giving the User a
+return move as the workflow decision it is -- raise it, do not take it.
 
 **Narrate every override.** `force-move` and `override-move` bypass the workflow;
 `edit-fields` bypasses the normal field-specific operations. Each exceptional use needs a

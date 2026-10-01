@@ -7826,6 +7826,56 @@ RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
     ELSE jsonb_set(t,'{workflow_flags}',coalesce(t->'workflow_flags','{}'::jsonb)||jsonb_build_object(flag,value)) END;
 $$;
 
+-- SYRD-536: a move out of a review stage that RETURNS the work does not need
+-- that review's sign-off -- only a move forward does. "Returns" is read from
+-- the declaration, never from a label or an action's name: the destination is
+-- where this same stage already sends work back to by its own `return` or
+-- `reopen`, it is not on the stage's declared forward path (its approvals'
+-- destinations and gate skips, transitively), and it is not terminal.
+CREATE OR REPLACE FUNCTION ticket_board.declared_review_return(cfg jsonb, source text, destination text)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE forward text[] := ARRAY[]::text[]; frontier text[];
+BEGIN
+    IF destination IS NULL OR destination = source
+       OR coalesce((SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(cfg->'stages') x
+                     WHERE x->>'name' = destination), true) THEN
+        RETURN false;
+    END IF;
+    -- Only out of a REVIEW: a stage that carries a sign-off. Anywhere else a
+    -- move is promotion or routing, and an incidental reopen that shares its
+    -- destination does not make it a return (SYRD-536 Audit: analysis ->
+    -- in_progress started blocked work).
+    IF (SELECT x->>'signoff' FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name' = source) IS NULL THEN
+        RETURN false;
+    END IF;
+    IF NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') x
+                    WHERE x->>'from' = source AND x->>'to' = destination
+                      AND x->>'primitive' IN ('return', 'reopen')) THEN
+        RETURN false;
+    END IF;
+    frontier := ARRAY(
+        SELECT DISTINCT n FROM (
+            SELECT x->>'to' AS n FROM jsonb_array_elements(cfg->'transitions') x
+             WHERE x->>'from' = source AND x->>'primitive' = 'approve'
+            UNION
+            SELECT s->>'skip_to' FROM jsonb_array_elements(cfg->'stages') s
+             WHERE s->>'name' = source) q
+         WHERE n IS NOT NULL);
+    WHILE cardinality(frontier) > 0 LOOP
+        forward := forward || frontier;
+        frontier := ARRAY(
+            SELECT DISTINCT n FROM (
+                SELECT x->>'to' AS n FROM jsonb_array_elements(cfg->'transitions') x
+                 WHERE x->>'from' = ANY(frontier) AND x->>'primitive' = 'approve'
+                UNION
+                SELECT s->>'skip_to' FROM jsonb_array_elements(cfg->'stages') s
+                 WHERE s->>'name' = ANY(frontier)) q
+             WHERE n IS NOT NULL AND NOT n = ANY(forward));
+    END LOOP;
+    RETURN NOT destination = ANY(forward);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.enforce_declared_ticket_update(previous ticket_board.tickets, proposed ticket_board.tickets)
 RETURNS ticket_board.tickets LANGUAGE plpgsql AS $$
 DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(proposed); tr jsonb; source_stage jsonb; dest jsonb;
@@ -7960,12 +8010,19 @@ BEGIN
     -- something other than `backlog` gets this for free.
     IF tr->>'primitive' NOT IN ('return','reopen')
        AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       AND NOT ticket_board.declared_review_return(cfg, previous.state, tr->>'to')
        AND ticket_board.ticket_has_unresolved_blockers(previous.id) THEN
         RAISE EXCEPTION 'unresolved blocker prevents forward promotion: %',
             ticket_board.unresolved_blocker_list(previous.id); END IF;
     IF (tr->>'require_commit')::boolean AND btrim(proposed.commit_hash)='' AND NOT proposed.commit_exempt THEN
         RAISE EXCEPTION 'commit required'; END IF;
-    IF tr->>'primitive'='approve' THEN doc:=ticket_board.set_workflow_flag(doc,source_stage->>'signoff',true);
+    -- A declared return out of review hands the work back: it needs no
+    -- verdict, and the sign-off stays exactly as it was (SYRD-536). Its own
+    -- branch, so SYRD-263's parking exemption below is unchanged.
+    IF tr->>'primitive' NOT IN ('approve','return','reopen')
+       AND ticket_board.declared_review_return(cfg, previous.state, tr->>'to') THEN
+        NULL;
+    ELSIF tr->>'primitive'='approve' THEN doc:=ticket_board.set_workflow_flag(doc,source_stage->>'signoff',true);
     -- A sign-off gates leaving a review FORWARD. Parking is not a verdict: the
     -- stage owns nobody, notifies nobody and promotes nothing, and the review's
     -- record rides along untouched -- no sign-off is granted, none is cleared,

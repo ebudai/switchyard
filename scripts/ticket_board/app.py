@@ -398,9 +398,9 @@ WHERE (r.definition->>'active')::boolean
         states = [column["key"] for column in columns] or list(STATES)
         cfg = self.workflow_configuration()
         if cfg:
-            from .workflow_config import available_transitions
+            from .workflow_config import advertised_transitions
             for ticket in tickets:
-                ticket["workflow_actions"] = available_transitions(cfg, ticket)
+                ticket["workflow_actions"] = advertised_transitions(cfg, ticket)
         return {
             "project": self.project,
             "project_name": self.project_name,
@@ -1049,10 +1049,10 @@ ORDER BY rank;
         if not rows:
             raise FileNotFoundError(f"ticket not found: {ticket_id}")
         ticket = self._pg_row_to_ticket(rows[0])
-        from .workflow_config import read_configuration, available_transitions
+        from .workflow_config import read_configuration, advertised_transitions
         cfg = read_configuration(conn)
         if cfg:
-            ticket["workflow_actions"] = available_transitions(cfg, ticket)
+            ticket["workflow_actions"] = advertised_transitions(cfg, ticket)
         # SYRD-93: what this ticket is waiting on, if it is waiting on a
         # publication. It travels with the ticket so the panel, the CLI and a
         # reader of the JSON all see the same thing without a second call.

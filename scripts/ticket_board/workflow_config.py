@@ -985,6 +985,71 @@ def available_transitions(
     ]
 
 
+def declared_review_return(cfg: dict[str, Any], source: str, destination: str) -> bool:
+    """Whether moving `source` -> `destination` hands review work back (SYRD-536).
+
+    The mirror of ticket_board.declared_review_return, and it must answer the
+    same: the destination is where this stage already sends work back by its
+    own `return` or `reopen`, it is not on the stage's declared forward path
+    (its approvals' destinations and gate skips, transitively), and it is not
+    terminal. Read from the declaration, never from a label or an action name.
+    """
+    stages = {s["name"]: s for s in cfg.get("stages", [])}
+    if not destination or destination == source or bool((stages.get(destination) or {"terminal": True})["terminal"]):
+        return False
+    # Only out of a review: a stage that carries a sign-off (SYRD-536 Audit).
+    if not (stages.get(source) or {}).get("signoff"):
+        return False
+    transitions = cfg.get("transitions", [])
+    if not any(t["from"] == source and t["to"] == destination and t["primitive"] in ("return", "reopen") for t in transitions):
+        return False
+
+    def forward_from(names: set[str]) -> set[str]:
+        nxt = {t["to"] for t in transitions if t["from"] in names and t["primitive"] == "approve"}
+        nxt |= {stages[n]["skip_to"] for n in names if n in stages and stages[n].get("skip_to")}
+        return nxt
+
+    forward: set[str] = set()
+    frontier = forward_from({source})
+    while frontier - forward:
+        forward |= frontier
+        frontier = forward_from(frontier) - forward
+    return destination not in forward
+
+
+def _ticket_flag(cfg: dict[str, Any], ticket: dict[str, Any], flag: str) -> bool:
+    """ticket_board.workflow_flag: the ticket's own field, its workflow_flags, the declared default."""
+    if ticket.get(flag) is not None:
+        return bool(ticket[flag])
+    flags = ticket.get("workflow_flags") or {}
+    if flags.get(flag) is not None:
+        return bool(flags[flag])
+    return bool((cfg.get("flags", {}).get(flag) or {}).get("default", False))
+
+
+def advertised_transitions(cfg: dict[str, Any], ticket: dict[str, Any], actor: str | None = None) -> list[dict[str, Any]]:
+    """The transitions a ticket can take now: `available_transitions` without the moves its
+    stage's missing sign-off refuses (SYRD-536).
+
+    A review stage's sign-off gates leaving it forward. A move the board would
+    refuse for want of that sign-off is not an action anyone can take, and
+    advertising it is how MEFP-233's Director was offered a route to audit the
+    board then refused. The same rule as ticket_board.enforce_declared_ticket_update.
+    """
+    stages = {s["name"]: s for s in cfg.get("stages", [])}
+    source = stages.get(ticket.get("state")) or {}
+    signoff = source.get("signoff")
+    if not signoff or _ticket_flag(cfg, ticket, signoff):
+        return available_transitions(cfg, ticket, actor)
+    parking = set(parking_stage_names(cfg))
+    return [
+        tr for tr in available_transitions(cfg, ticket, actor)
+        if tr["primitive"] in ("approve", "return", "reopen")
+        or tr["to"] in parking
+        or declared_review_return(cfg, tr["from"], tr["to"])
+    ]
+
+
 def unassigned_stage_owner(cfg: dict[str, Any], state: str, assignee: str) -> str | None:
     """Who untriaged work in this stage belongs to, or None (SYRD-120).
 

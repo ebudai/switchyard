@@ -1120,6 +1120,8 @@ ORDER BY rank;
             # needs_director() is the only queue consumer, so awaiting_role at
             # any other role still only suppresses nudges.
             "awaiting_role": str(row["awaiting_role"] or "").strip().lower(),
+            # SYRD-537: scheduling, not delivery status; null unless snoozed.
+            "reminder_snooze": row.get("reminder_snooze"),
             "comments": validate_comments(comments),
         }
         attachment_store.set_screenshot_fields(ticket, attachment_store.screenshot_entries(list(screenshots)))

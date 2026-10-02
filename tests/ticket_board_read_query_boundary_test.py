@@ -44,6 +44,9 @@ class ReadOnlyConnection:
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Result:
         assert sql.lstrip().startswith(("SELECT", "WITH")), sql
         self.calls.append((sql, tuple(params)))
+        if "to_regprocedure" in sql:
+            # SYRD-537: the reminder-snooze probe; this board has the function.
+            return Result(one={"snooze": True})
         if "to_regclass" in sql:
             relation = "ticket_board.workflow_configuration" if self.workflow else None
             return Result(one={"relation": relation})
@@ -72,9 +75,10 @@ def configured_workflow() -> dict[str, Any]:
 
 
 def test_legacy_and_configured_sql_bytes_and_parameters() -> None:
+    # SYRD-537 added the reminder_snooze column; hashes measured from the new SQL.
     expected = {
-        False: "cefdc258a3ed3aa4283ac0839ca92b78f477a2a4bc093a651d439ee3266ac60d",
-        True: "bc1206249e3ac4332b0f252240df572a5f47dc67e5f105b6abdeb1cdfc34615e",
+        False: "8d83bab312e821e9cb968a735f603e784b7b639cf2d1a939a12ecafedfcb27fb",
+        True: "adffbd48e353f936407c76633f79f30ae67eca59fd45a17a74109f736e0ef02f",
     }
     for workflow in (None, configured_workflow()):
         conn = ReadOnlyConnection(workflow)

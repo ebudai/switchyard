@@ -299,7 +299,7 @@ def exercise(cluster, dbname: str, *, migrated: bool) -> None:
 
 def exercise_upgrade(cluster) -> None:
     """The migration on a board that already has tickets: backfill, no rewrite."""
-    from schema_function_drift import schema_before
+    from schema_function_drift import rbac_before, schema_before
 
     migration = ROOT / "scripts/ticket_board/migrations/pgu966_syrd514_unresolved_turn_current_round.sql"
     dbname = "current_round_upgrade"
@@ -309,7 +309,9 @@ def exercise_upgrade(cluster) -> None:
     check("current_assignment_at" not in before, "the before-schema is really from before this change")
     fixture.psql(admin, before)
     fixture.create_roles(admin)
-    fixture.psql(admin, fixture.RBAC_PATH.read_text())
+    # The board as it shipped: that schema with that era's grants (SYRD-526);
+    # today's rbac.sql grants on functions later migrations create (SYRD-537).
+    fixture.psql(admin, rbac_before(migration))
     fixture.seed_postgres_ticket(admin, "PGU-301", title="In flight at the upgrade", state="in_progress", assignee="main",
                                  commit_exempt=True)
     stamp = "SELECT entered_current_state_at::text FROM ticket_board.ticket_notification_state WHERE ticket_id = 'PGU-301';"

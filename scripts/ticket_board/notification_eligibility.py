@@ -5,6 +5,8 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 
+from . import reminder_snooze
+
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
 #: Kinds that say "this role has not moved". A handoff established after one of
@@ -343,6 +345,10 @@ WHERE id = %s
             return False
 
         kind = str(parsed.get("kind") or "").strip().lower()
+        # A snooze batch's deadline notice is about the batch, addressed to the
+        # role that set it; the ticket it hangs on proves nothing (SYRD-537).
+        if kind == reminder_snooze.REMINDER_SNOOZE_DUE:
+            return True
         terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
         if current_state in terminal_states:
             return (

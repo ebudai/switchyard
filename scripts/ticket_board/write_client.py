@@ -1107,6 +1107,21 @@ class TicketBoardWriteClient:
             caller_role=caller_role,
         )
 
+    def snooze_reminders(
+        self, tickets: list[str], *, until: str, reason: str, apply: bool = False, caller_role: str | None = None
+    ) -> dict[str, Any]:
+        """Defer the named tickets' optional reminders until `until` (SYRD-537). A preview unless `apply`."""
+        payload = {"tickets": list(tickets), "until": until, "reason": reason, "apply": apply}
+        return self._post("/actions/snooze_reminders", payload, caller_role=caller_role)
+
+    def clear_reminder_snooze(
+        self, batch: int, *, tickets: list[str] | None = None, reason: str, apply: bool = False,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """End a snooze early, for the named tickets or the whole batch. A preview unless `apply`."""
+        payload = {"batch": batch, "tickets": list(tickets or []), "reason": reason, "apply": apply}
+        return self._post("/actions/clear_reminder_snooze", payload, caller_role=caller_role)
+
 
 def main(argv: list[str] | None = None) -> int:
     """The `ticket-board-write` command, which `write_cli` owns (SYRD-515)."""

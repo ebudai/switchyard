@@ -15,6 +15,21 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       return state.tickets.find((ticket) => ticket.id === state.selectedId) || null;
     }
 
+    // The ticket's open reminder snooze in one sentence, or '' (SYRD-537).
+    function reminderSnoozeText(snooze) {
+      if (!snooze) {
+        return '';
+      }
+      const setBy = `batch ${snooze.batch}, by ${snooze.by}: ${snooze.reason}`;
+      if (snooze.status === 'invalidated') {
+        return `Reminders: snooze no longer applies, ${(snooze.changed || []).join(', ')} changed (${setBy})`;
+      }
+      if (snooze.status === 'due') {
+        return `Reminders: snooze due at ${snooze.until}, queue-ready notice pending (${setBy})`;
+      }
+      return `Reminders: snoozed until ${snooze.until} (${setBy})`;
+    }
+
     function renderDetail() {
       const ticket = selectedTicket();
       if (!state.detailOpen || !ticket) {
@@ -529,6 +544,15 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         deliveryLine.className = 'detail-delivery';
         deliveryLine.textContent = `Notice: ${deliveryHint}`;
         meta.appendChild(deliveryLine);
+      }
+      // SYRD-537: a reminder snooze is scheduling, so it is said here and not
+      // on the card (SYRD-266), and it says nothing about delivery.
+      const snoozeText = reminderSnoozeText(ticket.reminder_snooze);
+      if (snoozeText) {
+        const snoozeLine = document.createElement('div');
+        snoozeLine.className = 'detail-reminder-snooze';
+        snoozeLine.textContent = snoozeText;
+        meta.appendChild(snoozeLine);
       }
       if (ticket.origin_project || ticket.external_source_ref) {
         const originLine = document.createElement('div');

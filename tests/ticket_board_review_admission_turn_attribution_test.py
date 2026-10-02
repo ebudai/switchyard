@@ -254,8 +254,12 @@ def main() -> int:
         with temporary_cluster(prefix="syrd513-admission.", shutdown="immediate") as cluster:
             exercise(cluster, dbname, migrated=migrated)
     # Last, so a fault in either copy is first caught by the board that runs it.
-    check(owning_migration("ticket_turn_is_resolved").name == "pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql",
-          "the SYRD-513 migration is the copy an upgraded board runs")
+    # SYRD-537 redefines it later (one added snooze condition), so the copy an
+    # upgraded board runs is the newest one: it must still carry SYRD-513's clause.
+    owner = owning_migration("ticket_turn_is_resolved")
+    check(owner.name >= "pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql"
+          and "AND q.kind = 'transition'" in owner.read_text().split("FUNCTION ticket_board.ticket_turn_is_resolved(")[-1].split("$$;")[0],
+          "the SYRD-513 rule is in the copy an upgraded board runs")
     assert_no_drift("ticket_turn_is_resolved")
     print(f"ticket_board_review_admission_turn_attribution_test: {CHECKS} checks ok")
     return 0

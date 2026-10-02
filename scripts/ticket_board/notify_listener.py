@@ -48,6 +48,7 @@ from .pane_activity_gate import (
     read_process_table,
 )
 from .idle_nudges import IdleNudges
+from . import reminder_snooze
 from .notification_ledger import NotificationLedger
 from .notification_activity_hold import (
     NotificationActivityHold, ActivityTrace, SELF_REMINDER_KINDS,
@@ -657,6 +658,9 @@ FROM ticket_board.claim_notification()
     def process_idle_stall_nudges(self, conn: Any) -> int:
         return self.idle_nudges.process_idle_stall_nudges(conn)
 
+    def process_reminder_snooze_due(self, conn: Any) -> int:
+        return reminder_snooze.emit_due(conn, self.logger)
+
 
     def refresh_workflow(self, conn: Any) -> None:
         from .workflow_config import ephemeral_roles, read_configuration, validate
@@ -787,6 +791,8 @@ WHERE (r.definition->>'active')::boolean
                     target_role=target_role, kind=kind, detail=superseded_queue,
                     phase="claim", reason=SUPERSEDED_QUEUE_NOTICE,
                 )
+                continue
+            if reminder_snooze.discard_if_snoozed(self.eligibility, conn, notification_id, ticket_id, target_role, kind, payload, "claim"):
                 continue
             if not self.eligibility._notification_is_current(conn, ticket_id, target_role, payload):
                 self.logger.info("Dropping stale notification %s for %s: %s", notification_id, ticket_id, payload)
@@ -1021,6 +1027,8 @@ WHERE (r.definition->>'active')::boolean
                     phase="pre_send_recheck", reason=SUPERSEDED_QUEUE_NOTICE,
                 )
                 continue
+            if reminder_snooze.discard_if_snoozed(self.eligibility, conn, notification_id, ticket_id, target_role, kind, payload, "pre_send_recheck"):
+                continue
             # Recheck handoffs too, so a resolution during that probe suppresses
             # this delivery.
             if kind == "awaiting_role" and not self.eligibility._notification_is_current(conn, ticket_id, target_role, payload):
@@ -1085,6 +1093,9 @@ WHERE (r.definition->>'active')::boolean
             self._log_missing_hook_state()
             while not self.stop_event.is_set():
                 self.refresh_workflow(conn)
+                # SYRD-537: a due batch's notice is written before any producer
+                # runs, so it is the oldest optional row about its members.
+                self.process_reminder_snooze_due(conn)
                 self.process_idle_turn_end_nudges(conn)
                 self.process_idle_stall_nudges(conn)
                 self.process_serial_focus_queue_wakeups(conn)

@@ -155,6 +155,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.notify_permission_prompt_waits(jsonb, tim
 GRANT EXECUTE ON FUNCTION ticket_board.consume_turn_continuation(text, text) TO ticket_board_listener;
 GRANT SELECT ON ticket_board.turn_continuation_lease TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_serial_focus_queue_wakeups(timestamptz) TO ticket_board_listener;
+-- SYRD-537: the Director's reminder snooze, its reads, and the listener's half.
+GRANT EXECUTE ON FUNCTION ticket_board.snooze_reminders(text[], timestamptz, text, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.clear_reminder_snooze(bigint, text[], text, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_reminder_snooze(text, timestamptz) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.reminder_snoozes(timestamptz) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_reminders_snoozed(text, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.emit_due_reminder_snoozes(timestamptz) TO ticket_board_listener;
 -- The delivery currency check (_notification_is_current -> _current_ticket_state)
 -- calls ticket_has_unresolved_blockers; the listener role must be able to run it,
 -- otherwise every delivery throws "permission denied for function" and no

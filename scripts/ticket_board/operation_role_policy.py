@@ -72,6 +72,9 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "set_blockers": {"director"},
     # SYRD-270: the other half of an external blocker, so the same authority.
     "release_external_blocker": {"director"},
+    # SYRD-537: deferring optional reminders is less than holding the ticket.
+    "snooze_reminders": {"director"},
+    "clear_reminder_snooze": {"director"},
     "add_comment": CALLER_ROLES,
     "edit_fields": CALLER_ROLES,
     "crop_attachment": {"director", "user"},
@@ -108,6 +111,11 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # Releasing a blocker is setting the ticket's blockers (SYRD-270); the
     # database checks set_blockers itself.
     "release_external_blocker": frozenset({"set_blockers"}),
+    # A reminder snooze silences a subset of what holding a ticket silences, for
+    # a bounded time, so it takes the hold's authority; the database checks
+    # set_manually_controlled itself (SYRD-537).
+    "snooze_reminders": frozenset({"set_manually_controlled"}),
+    "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.

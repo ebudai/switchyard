@@ -66,6 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
+from . import reminder_snooze
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -579,6 +580,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.send_json({"ticket": self.app.set_workflow_flags(ticket_id, payload, caller_role=caller)})
             return
         self.require_operation_allowed(operation, caller, ticket_id)
+        if operation in reminder_snooze.OPERATIONS and ticket_id is None:  # SYRD-537
+            self.send_json(reminder_snooze.perform(self.app, operation, payload, caller_role=caller))
+            return
 
         cfg = getattr(self.app, "workflow_configuration", lambda: None)()
         if cfg and ticket_id and any(t["action"] == operation for t in cfg["transitions"]):
@@ -968,6 +972,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 "project": getattr(self.app, "project", "pgu"),
                 "reservations": self.app.serial_reservations(),
             })
+            return
+        if parsed.path == "/api/reminder-snoozes":  # SYRD-537
+            self.send_json({"batches": reminder_snooze.batches(self.app)})
             return
         if parsed.path == "/api/runtime-assignments":
             self.send_json({

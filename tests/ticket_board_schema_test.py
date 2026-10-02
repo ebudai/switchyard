@@ -808,8 +808,13 @@ def main() -> int:
     ).read_text(encoding="utf-8")
     assert "unresolved_turn" in unresolved_turn_migration_text
     assert "turn_continuation_lease" in unresolved_turn_migration_text
+    # SYRD-537 (pgu970) redefined it last, adding one reminder-snooze condition,
+    # so the last copy is measured against that migration.
+    reminder_snooze_migration_text = (
+        ROOT / "scripts" / "ticket_board" / "migrations" / "pgu970_syrd537_reminder_snooze.sql"
+    ).read_text(encoding="utf-8")
     assert extract_last_function(schema, "notify_idle_turn_end_nudges") == extract_function(
-        unresolved_turn_migration_text,
+        reminder_snooze_migration_text,
         "notify_idle_turn_end_nudges",
     )
     # The guard, the lease and the predicates it rests on reach a live board only
@@ -835,8 +840,10 @@ def main() -> int:
     undelivered_assignment_migration_text = (
         ROOT / "scripts" / "ticket_board" / "migrations" / "pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql"
     ).read_text(encoding="utf-8")
+    assert "AND q.kind = 'transition'" in extract_function(undelivered_assignment_migration_text, "ticket_turn_is_resolved")
+    # SYRD-537 (pgu970) redefined it last, adding the reminder-snooze condition.
     assert extract_function(schema, "ticket_turn_is_resolved") == extract_function(
-        undelivered_assignment_migration_text, "ticket_turn_is_resolved"
+        reminder_snooze_migration_text, "ticket_turn_is_resolved"
     )
     # SYRD-180: the migration is the only way this reaches a live board, so its
     # bodies are the schema's bodies -- for the executor and the recovery command

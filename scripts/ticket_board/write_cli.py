@@ -374,6 +374,22 @@ def _build_parser() -> argparse.ArgumentParser:
     request_dependency.add_argument("ticket_id")
     request_dependency.add_argument("--role", required=True, help="the role this work waits on")
     add_free_text_argument(request_dependency, "--reason", required=True, help="what they have to do, in their words")
+    snooze = subparsers.add_parser(
+        "snooze-reminders",
+        help="defer the named tickets' optional reminders until a deadline; previews unless --apply (SYRD-537)",
+    )
+    snooze.add_argument("--ticket", action="append", required=True, dest="tickets", help="a ticket to snooze; repeat")
+    snooze.add_argument("--until", required=True, help="deadline, ISO 8601 with an offset, e.g. 2026-10-03T07:00:00-04:00")
+    add_free_text_argument(snooze, "--reason", required=True, help="why these reminders can wait")
+    snooze.add_argument("--apply", action="store_true", help="create the snooze; without it nothing is written")
+    clear_snooze = subparsers.add_parser(
+        "clear-reminder-snooze",
+        help="end a reminder snooze early, for named tickets or the whole batch; previews unless --apply",
+    )
+    clear_snooze.add_argument("--batch", required=True, type=int)
+    clear_snooze.add_argument("--ticket", action="append", default=[], dest="tickets", help="only this ticket; repeat")
+    add_free_text_argument(clear_snooze, "--reason", required=True, help="why ordinary reminders resume now")
+    clear_snooze.add_argument("--apply", action="store_true", help="clear it; without it nothing is written")
     release_external = subparsers.add_parser(
         "release-external-blocker",
         help="end a wait on another board's work, explicitly and with why (SYRD-270)",
@@ -607,6 +623,12 @@ def main(argv: list[str] | None = None) -> int:
             response = client.release_external_blocker(
                 args.ticket_id, ref=args.ref, reason=args.reason, commit=args.commit
             )
+        elif command == "snooze_reminders":
+            response = client.snooze_reminders(args.tickets, until=args.until, reason=args.reason, apply=args.apply)
+        elif command == "clear_reminder_snooze":
+            response = client.clear_reminder_snooze(
+                args.batch, tickets=args.tickets, reason=args.reason, apply=args.apply
+            )
         elif command == "request_dependency":
             response = client.request_dependency(
                 args.ticket_id, role=args.role, reason=args.reason
@@ -662,7 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     except write_client.TicketBoardWriteError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay"}:
+    if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
+                   "snooze_reminders", "clear_reminder_snooze"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

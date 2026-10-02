@@ -76,6 +76,9 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
     assert policy.COMPOSED_OPERATION_CAPABILITIES == {
         "request_dependency": frozenset({"add_comment", "await_role"}),
         "release_external_blocker": frozenset({"set_blockers"}),
+        # SYRD-537: a reminder snooze takes the hold's authority.
+        "snooze_reminders": frozenset({"set_manually_controlled"}),
+        "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
     }
 
 
@@ -89,7 +92,9 @@ def test_default_environment() -> None:
     assert table["release_draft"] == ["director", "user"] and table["file_bug"] == ["app", "audit", "main", "ops", "perf", "research"]
     assert table["await_role"] == [r for r in got["callers"] if r != "user"] and table["add_comment"] == got["callers"]
     assert "request_publication" not in table and "resolve_publication" not in table
-    assert len(table) == 39, len(table)
+    # SYRD-537 added snooze_reminders and clear_reminder_snooze, Director only.
+    assert table["snooze_reminders"] == ["director"] and table["clear_reminder_snooze"] == ["director"]
+    assert len(table) == 41, len(table)
 
 
 def test_role_environment_is_read_at_import() -> None:

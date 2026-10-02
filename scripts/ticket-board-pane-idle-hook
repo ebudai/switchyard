@@ -45,6 +45,13 @@ SESSION_START_ACTIVE_WORK_SOURCES = {"clear", "compact", "resume"}
 SESSION_START_HOOK_SOURCES = {"hermes.on_session_start"}
 #: Must match notify_listener.TURN_START_EVENTS (SYRD-268).
 TURN_START_EVENTS = frozenset({"UserPromptSubmit", "PreInvocation", "pre_llm_call"})
+#: Turn ends whose runtime says what is still running when the turn ends.
+#: Claude Code's Stop input carries `background_tasks`: "In-flight background
+#: work (running/pending + backgrounded) registered in this session ... Empty
+#: array when nothing is in flight" (read in the installed 2.1.284 bundle).
+#: No other runtime's turn end is known to say this, and none is assumed to.
+BACKGROUND_WORK_SOURCES = frozenset({"claude.Stop"})
+PROC_ROOT = Path("/proc")
 SESSION_START_FRESH_SOURCE = "startup"
 DIRECTOR_ROLE = "director"
 SWITCHYARD_PROJECT_DIR_NAME = ".switchyard"
@@ -144,7 +151,75 @@ def _target_path(state_dir: Path, target: str) -> Path:
     return state_dir / f"{safe}.json"
 
 
-def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "") -> Path:
+def _proc_stat(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int, str] | None:
+    """(ppid, start time in clock ticks, comm) from /proc, as peer_identity.read_process reads it."""
+    if pid <= 0:
+        return None
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        close = raw.rindex(")")
+        fields = raw[close + 2 :].split()
+        return int(fields[1]), int(fields[19]), raw[raw.index("(") + 1 : close]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pane_root_identity(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int] | None:
+    """The pane root this process runs under: the board registers exactly that process.
+
+    The same walk as peer_identity.session_identity -- the ancestor whose parent
+    is the tmux server -- so a record names the provider generation the board
+    holds, and a restarted provider or a reused pid cannot inherit it.
+    """
+    seen: set[int] = set()
+    current = pid
+    for _ in range(128):
+        if current <= 1 or current in seen:
+            return None
+        seen.add(current)
+        child = _proc_stat(current, proc_root)
+        if child is None:
+            return None
+        parent = _proc_stat(child[0], proc_root)
+        if parent is not None and parent[2].startswith("tmux"):
+            return current, child[1]
+        current = child[0]
+    return None
+
+
+def _background_work(payload: object, source: str, *, pid: int | None = None,
+                     proc_root: Path = PROC_ROOT) -> dict | None:
+    """What the runtime says is still running as its turn ends, or None (SYRD-538).
+
+    Only the runtime's own in-flight list counts -- not any live descendant --
+    and only bound to the pane root that wrote it, so the listener can tell it
+    apart from a dead or replaced provider.
+    """
+    if source not in BACKGROUND_WORK_SOURCES or not isinstance(payload, dict):
+        return None
+    raw_tasks = payload.get("background_tasks")
+    if not isinstance(raw_tasks, list):
+        return None
+    tasks = [
+        {key: str(task.get(key) or "")[:200] for key in ("id", "type", "status")}
+        for task in raw_tasks
+        if isinstance(task, dict) and str(task.get("id") or "").strip()
+    ]
+    if not tasks:
+        return None
+    identity = _pane_root_identity(os.getpid() if pid is None else pid, proc_root)
+    if identity is None:
+        return None
+    return {
+        "pane_pid": identity[0],
+        "pane_start_time": identity[1],
+        "session_id": str(payload.get("session_id") or ""),
+        "tasks": tasks[:50],
+    }
+
+
+def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "",
+                 background_work: dict | None = None) -> Path:
     normalized_state = state.strip().lower()
     if normalized_state not in {"idle", "busy", "blocked"}:
         raise ValueError("pane hook state must be idle, busy, or blocked")
@@ -171,6 +246,11 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
         payload["turn_started_at"] = written_at
     elif isinstance(previous, dict) and previous.get("turn_started_at") is not None:
         payload["turn_started_at"] = previous["turn_started_at"]
+    # Never carried: every write is a fresh statement of what is in flight, so
+    # the next hook after the work ends -- a turn start, a Stop with nothing
+    # running, a new session -- clears it (SYRD-538).
+    if background_work and normalized_state == "idle":
+        payload["background_work"] = background_work
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -684,11 +764,18 @@ def main(argv: list[str] | None = None) -> int:
     session_dir = _resolve_pane_session_dir(args.session_dir, target, os.environ)
     if state_dir is None or session_dir is None:
         return 0
-    _write_state(state_dir, target, args.state, source=args.source)
     session_path = _target_path(session_dir, target)
     existing_session_id = _session_id_from_file(session_path)
     should_wait_for_session_payload = args.record_session or not existing_session_id
-    payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
+    if args.source in BACKGROUND_WORK_SOURCES:
+        # Read first: this turn end's input says whether the session is done or
+        # paused on background work, and the state written must say which.
+        payload = _read_stdin_json(timeout=args.stdin_timeout)
+        _write_state(state_dir, target, args.state, source=args.source,
+                     background_work=_background_work(payload, args.source))
+    else:
+        _write_state(state_dir, target, args.state, source=args.source)
+        payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
     session_id = _extract_session_id(payload, os.environ, args.session_id)
     launched_session_id = args.session_id.strip() or _env_session_id(os.environ)
     resume_session_id = args.session_id.strip() or _launcher_resume_session_id(os.environ)

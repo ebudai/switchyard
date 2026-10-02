@@ -365,6 +365,11 @@ class PaneActivityGate:
         self.monotonic = monotonic
         self.wall_time = wall_time
         self.sleeper = sleeper
+        #: Each role's registered provider process, as the board holds it; a
+        #: turn end's background work counts only for that process (SYRD-538).
+        self.role_identities: dict[str, Any] = {}
+        self.background_work_limit_seconds = listener.background_work.limit_seconds()
+        self.proc_root = listener.background_work.PROC_ROOT
         self._last_trace_by_target: dict[str, ActivityTrace] = {}
         self._last_hook_state_by_target: dict[str, tuple[str, float]] = {}
         self._last_working_timer_by_target: dict[str, int] = {}
@@ -467,12 +472,31 @@ class PaneActivityGate:
         """A pane that is working has no idle clock to keep."""
         return None
 
+    def background_work_roles(self, roles: list[str] | None = None) -> set[str]:
+        """Roles whose last turn ended on background work that is still provably live (SYRD-538)."""
+        from . import notify_listener as listener
+
+        now = self.wall_time()
+        working: set[str] = set()
+        for role in roles or sorted(self.role_targets):
+            target = self.role_targets.get(role)
+            if target is None:
+                continue
+            if not listener.background_work.why_not_working(
+                self.state_store.read(target), self.role_identities.get(role),
+                now=now, limit=self.background_work_limit_seconds, proc_root=self.proc_root,
+            ):
+                working.add(role)
+        return working
+
     def idle_since_by_role(self, roles: list[str] | None = None) -> dict[str, str]:
         checked_roles = roles or sorted(self.role_targets)
         idle_since: dict[str, str] = {}
+        # Not idle: the turn ended, the work did not (SYRD-538).
+        working = self.background_work_roles(checked_roles)
         for role in checked_roles:
             target = self.role_targets.get(role)
-            if target is None:
+            if target is None or role in working:
                 continue
             if self.eligibility_busy(target):
                 self._forget_confirmed_idle(target)
@@ -490,8 +514,12 @@ class PaneActivityGate:
         from . import notify_listener as listener
 
         turn_end_idle_since: dict[str, str] = {}
-        for role, state in self._idle_hook_states_by_role(roles).items():
-            if state.source not in listener.IDLE_TURN_END_SOURCES:
+        idle_states = self._idle_hook_states_by_role(roles)
+        # A turn that ended on live background work did not end the work: it
+        # is no unresolved turn, and a later turn end will be (SYRD-538).
+        working = self.background_work_roles(sorted(idle_states))
+        for role, state in idle_states.items():
+            if state.source not in listener.IDLE_TURN_END_SOURCES or role in working:
                 continue
             target = self.role_targets.get(role)
             # A turn-end hook only reports that the previous turn finished, and

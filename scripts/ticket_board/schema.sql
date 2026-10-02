@@ -12454,7 +12454,66 @@ BEGIN
               AND tr.kind = 'unresolved_turn_repair'
               AND tr.event = 'enqueue'
               AND tr.detail ->> 'dedupe_key' = 'repair:' || identity
-        );
+        )
+        -- One prompt per unresolved EPISODE, not per turn end (SYRD-538). The
+        -- prompt wakes the owner's session, that woken turn ends with a new
+        -- turn id, and keying on the turn alone prompted again: five prompts
+        -- in four minutes on SYRD-537, each costing the owner a turn. An
+        -- episode is the grace window of the latest prompt in the current
+        -- assignment -- the same prompts and the same bound the escalation
+        -- below counts -- so its clock is untouched, and a turn that ends
+        -- unresolved after the grace starts a new episode, prompted and
+        -- escalated as before.
+            OR EXISTS (
+                SELECT 1
+                FROM ticket_board.notification_trace tr
+                JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = tr.ticket_id
+                WHERE tr.ticket_id = candidate.id
+                  AND tr.kind = 'unresolved_turn_repair'
+                  AND tr.event = 'enqueue'
+                  AND left(tr.detail ->> 'dedupe_key', length('repair:' || ticket_board.turn_unresolved_identity(
+                          candidate.id, candidate.state, candidate.assignee, '')))
+                      = 'repair:' || ticket_board.turn_unresolved_identity(
+                          candidate.id, candidate.state, candidate.assignee, '')
+                  AND tr.ts >= ns.current_assignment_at
+                  AND tr.ts > p_now - p_grace
+                  -- Only a prompt still waiting for the owner, or one that
+                  -- reached them, opens an episode: the loop is a DELIVERED
+                  -- prompt waking the session. One dropped as stale (a hold,
+                  -- SYRD-517) or removed undelivered never reached the owner,
+                  -- so the next unresolved turn is prompted afresh.
+                  AND (
+                      EXISTS (
+                          SELECT 1 FROM ticket_board.ticket_notification_queue pending
+                          WHERE pending.id = tr.notification_id
+                            AND pending.dead_lettered_at IS NULL
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM ticket_board.notification_trace sent
+                          WHERE sent.notification_id = tr.notification_id
+                            AND sent.event IN ('send', 'send_unconfirmed')
+                      )
+                  )
+                  -- Once the Director has been told, the episode is over: a
+                  -- fresh unresolved turn prompts the owner again, under the
+                  -- same rule the escalation half dedupes by (SYRD-194).
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ticket_board.notification_trace told
+                      WHERE told.ticket_id = tr.ticket_id
+                        AND told.target_role = 'director'
+                        AND told.kind IN ('escalation', 'unresolved_turn')
+                        AND told.event = 'enqueue'
+                        AND told.ts >= tr.ts
+                  )
+                  -- A continuation the owner took after the prompt is a new
+                  -- promise: once the turn it covered has passed, the next
+                  -- unresolved turn is prompted again (SYRD-194).
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ticket_board.turn_continuation_lease promised
+                      WHERE promised.ticket_id = tr.ticket_id
+                        AND promised.granted_at >= tr.ts
+                  )
+            );
         -- No combined skip here. Each audience is guarded by its own marker
         -- below, so a `CONTINUE` on both would be a third guard that can only
         -- ever agree with them -- and a guard no test can distinguish is one no

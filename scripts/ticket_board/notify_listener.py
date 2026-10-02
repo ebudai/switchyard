@@ -98,6 +98,7 @@ from .pane_state import (
     verify_pane_state_authority,
 )
 from .peer_identity import PROC_ROOT, SessionIdentity, read_process, session_is_live
+from . import background_work
 from .runtime_paths import directorctl_path
 
 CHANNEL = "ticket_board_state_transition"
@@ -360,6 +361,8 @@ def message_for_transition(transition: Transition) -> str | None:
 #: ticket still reaches the Director the User would otherwise have to notice
 #: for them (SYRD-203).
 UNRESOLVED_TURN_GRACE_SECONDS = 600
+#: How often a reminder waiting on an owner's background work is looked at again (SYRD-538).
+BACKGROUND_WORK_REQUEUE_SECONDS = 60.0
 
 
 class TicketBoardNotifyListener:
@@ -566,6 +569,17 @@ class TicketBoardNotifyListener:
             "keepalives_count": DEFAULT_KEEPALIVES_COUNT,
         }
 
+    def _defer_for_background_work(self, conn: Any, notification_id: int, attempts: int, kind: str,
+                                   target_role: str, payload: str, phase: str) -> bool:
+        """Requeue a reminder about an owner still working in the background; True if it was (SYRD-538)."""
+        owner = background_work.working_owner(getattr(self.activity_gate, "__self__", None), kind, target_role, payload)
+        if owner:
+            self.logger.info("Deferring %s notification %s at %s: %s's background work is still running",
+                             kind, notification_id, phase, owner)
+            self.ledger.requeue(conn, notification_id, attempts, f"owner_background_work ({phase})",
+                                delay_seconds=BACKGROUND_WORK_REQUEUE_SECONDS)
+        return bool(owner)
+
     def deliver_payload(self, payload: str) -> bool:
         transition = parse_transition_payload(payload)
         target = target_for_transition(transition)
@@ -716,6 +730,17 @@ WHERE (r.definition->>'active')::boolean
             gate = getattr(self.activity_gate, "__self__", None)
             if isinstance(gate, PaneActivityGate):
                 gate.role_targets = self.role_targets.copy()
+                # The registered provider generation a turn end's background
+                # work must come from (SYRD-538); no row, no identity, no
+                # suppression.
+                gate.role_identities = {
+                    self._decode_text(row["role"] if isinstance(row, dict) else row[0]): SessionIdentity(
+                        int(row["process_pid"] if isinstance(row, dict) else row[3]),
+                        int(row["process_start_time"] if isinstance(row, dict) else row[4]),
+                    )
+                    for row in rows
+                    if (row.get("process_pid") if isinstance(row, dict) else (len(row) >= 5 and row[3]))
+                }
                 gate.role_runtimes = {
                     role: HOOK_RUNTIME_NAMES.get(runtime, runtime)
                     for role, (_target, runtime) in assignments.items()
@@ -824,6 +849,11 @@ WHERE (r.definition->>'active')::boolean
                     conn, notification_id=notification_id, ticket_id=ticket_id,
                     target_role=target_role, kind=kind, detail=superseded, phase="claim",
                 )
+                continue
+            # A reminder that an owner is idle or left a turn unresolved waits for
+            # the background work that owner's turn ended on; nothing else is held
+            # (SYRD-538). Afterwards the checks above decide it exactly as before.
+            if self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "claim"):
                 continue
             # Pane hook state can outlive its tmux pane. Probe the target once per
             # claimed notification before the activity gate so stale state files
@@ -1038,6 +1068,9 @@ WHERE (r.definition->>'active')::boolean
                     busy_reason="stale_notification", detail={"phase": "pre_send_recheck"},
                 )
                 self.ledger.ack(conn, notification_id)
+                continue
+            # The owner can start background work while this waited (SYRD-538).
+            if self._defer_for_background_work(conn, notification_id, attempts, kind, target_role, payload, "pre_send_recheck"):
                 continue
             # Last, deliberately: every gate above decides whether this role is
             # free to be handed this ticket at all, and a clear is only allowed

@@ -162,6 +162,13 @@ GRANT EXECUTE ON FUNCTION ticket_board.ticket_reminder_snooze(text, timestamptz)
 GRANT EXECUTE ON FUNCTION ticket_board.reminder_snoozes(timestamptz) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_reminders_snoozed(text, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.emit_due_reminder_snoozes(timestamptz) TO ticket_board_listener;
+-- SYRD-541: size review records, the Director's exception and enablement, and the packet read.
+GRANT EXECUTE ON FUNCTION ticket_board.size_review_enabled() TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.size_ceilings(text, text[]) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.record_size_scan(text, text, text, jsonb, jsonb, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.approve_size_exception(text, text, text, boolean, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.enable_size_review(text, jsonb, jsonb, boolean) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_size_review(text) TO ticket_board_service;
 -- The delivery currency check (_notification_is_current -> _current_ticket_state)
 -- calls ticket_has_unresolved_blockers; the listener role must be able to run it,
 -- otherwise every delivery throws "permission denied for function" and no

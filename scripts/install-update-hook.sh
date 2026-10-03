@@ -105,6 +105,8 @@ write_local_pre_commit_hook() {
     LOCAL_WORKTREE_WARNING_HELPER="$hooks_dir/warn-worktree-count.py"
     install -m 0755 "$REPO_ROOT/scripts/warn_file_size_limit.py" "$LOCAL_WARNING_HELPER"
     install -m 0644 "$REPO_ROOT/scripts/report_file_size_limit.py" "$LOCAL_WARNING_SHARED"
+    # SYRD-541: the board's measurement, which the warning helper imports.
+    install -m 0644 "$REPO_ROOT/scripts/ticket_board/file_size_policy.py" "$hooks_dir/file_size_policy.py"
     install -m 0755 "$REPO_ROOT/scripts/warn_worktree_count.py" "$LOCAL_WORKTREE_WARNING_HELPER"
     cat >"$LOCAL_PRE_COMMIT_HOOK" <<EOF
 #!/usr/bin/env bash

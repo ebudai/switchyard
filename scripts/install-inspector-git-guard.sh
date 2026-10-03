@@ -31,6 +31,10 @@ write_pre_commit_hook() {
     local hook_path="$GLOBAL_HOOKS_DIR/pre-commit"
     local warning_helper="$GLOBAL_HOOKS_DIR/warn-file-size-limit.py"
     install -m 0755 "$REPO_ROOT/scripts/warn_file_size_limit.py" "$warning_helper"
+    # The modules the helper imports, beside it (report_file_size_limit was never
+    # copied here, so the warning failed on import; SYRD-541 adds its measurement).
+    install -m 0644 "$REPO_ROOT/scripts/report_file_size_limit.py" "$GLOBAL_HOOKS_DIR/report_file_size_limit.py"
+    install -m 0644 "$REPO_ROOT/scripts/ticket_board/file_size_policy.py" "$GLOBAL_HOOKS_DIR/file_size_policy.py"
     cat >"$hook_path" <<EOF
 #!/usr/bin/env bash
 set -u

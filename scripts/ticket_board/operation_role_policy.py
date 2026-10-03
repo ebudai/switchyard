@@ -75,6 +75,10 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # SYRD-537: deferring optional reminders is less than holding the ticket.
     "snooze_reminders": {"director"},
     "clear_reminder_snooze": {"director"},
+    # SYRD-541: the integrator's bounded size decisions.
+    "approve_size_exception": {"director"},
+    "enable_size_review": {"director"},
+    "measure_size": {"director"},
     "add_comment": CALLER_ROLES,
     "edit_fields": CALLER_ROLES,
     "crop_attachment": {"director", "user"},
@@ -116,6 +120,11 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # set_manually_controlled itself (SYRD-537).
     "snooze_reminders": frozenset({"set_manually_controlled"}),
     "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
+    # Approving growth into main, or turning the review on, is the integrator's
+    # decision: the capability that closes reviewed work into main (SYRD-541).
+    "approve_size_exception": frozenset({"merge"}),
+    "enable_size_review": frozenset({"merge"}),
+    "measure_size": frozenset({"merge"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.

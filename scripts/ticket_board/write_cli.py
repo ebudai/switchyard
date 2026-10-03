@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 try:
@@ -394,6 +395,31 @@ def _build_parser() -> argparse.ArgumentParser:
     clear_snooze.add_argument("--ticket", action="append", default=[], dest="tickets", help="only this ticket; repeat")
     add_free_text_argument(clear_snooze, "--reason", required=True, help="why ordinary reminders resume now")
     clear_snooze.add_argument("--apply", action="store_true", help="clear it; without it nothing is written")
+    size_exception = subparsers.add_parser(
+        "approve-size-exception",
+        help="Director: approve one open size finding at its measured size; previews unless --apply (SYRD-541)",
+    )
+    size_exception.add_argument("ticket_id")
+    size_exception.add_argument("--path", required=True, help="the file the finding is about")
+    add_free_text_argument(size_exception, "--rationale", required=True, help="why this growth is justified")
+    size_exception.add_argument("--standing", action="store_true",
+                                help="the file's allowance on later tickets too, not this ticket only")
+    size_exception.add_argument("--apply", action="store_true", help="record it; without it nothing is written")
+    measure_size = subparsers.add_parser(
+        "measure-size",
+        help="Director: measure an integration commit for a ticket before pushing main; moves nothing (SYRD-541)",
+    )
+    measure_size.add_argument("ticket_id")
+    measure_size.add_argument("--commit", required=True, help="the integration commit, published where the board sees it")
+    enable_size = subparsers.add_parser(
+        "enable-size-review",
+        help="Director: turn the size review on, recording the baseline inventory; previews unless --apply",
+    )
+    enable_size.add_argument("--baseline", default="", help="baseline commit (default: the board's main)")
+    enable_size.add_argument("--carried-file", default="",
+                             help="JSON list of reviewed exceptions to carry forward (path, ceiling, "
+                                  "reviewed_commit, reviewed_base, rationale, approved_by)")
+    enable_size.add_argument("--apply", action="store_true", help="enable it; without it nothing is written")
     release_external = subparsers.add_parser(
         "release-external-blocker",
         help="end a wait on another board's work, explicitly and with why (SYRD-270)",
@@ -635,6 +661,15 @@ def main(argv: list[str] | None = None) -> int:
             response = client.clear_reminder_snooze(
                 args.batch, tickets=args.tickets, reason=args.reason, apply=args.apply
             )
+        elif command == "approve_size_exception":
+            response = client.approve_size_exception(
+                args.ticket_id, path=args.path, rationale=args.rationale, standing=args.standing, apply=args.apply
+            )
+        elif command == "measure_size":
+            response = client.measure_size(args.ticket_id, commit=args.commit)
+        elif command == "enable_size_review":
+            carried = json.loads(Path(args.carried_file).read_text(encoding="utf-8")) if args.carried_file else []
+            response = client.enable_size_review(baseline=args.baseline, carried=carried, apply=args.apply)
         elif command == "request_dependency":
             response = client.request_dependency(
                 args.ticket_id, role=args.role, reason=args.reason
@@ -691,7 +726,8 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
-                   "snooze_reminders", "clear_reminder_snooze", "claim_next"}:
+                   "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
+                   "enable_size_review", "measure_size"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

@@ -1,0 +1,18 @@
+[
+  {
+    "path": "scripts/team_launcher.py",
+    "ceiling": 2542,
+    "reviewed_commit": "cd18475913d0dcee5abd48aa4b3863985cd906ef",
+    "reviewed_base": "97e74fac84c6cbc52415dba0fb9e9b8b6a453601",
+    "approved_by": "director",
+    "rationale": "SYRD-272 (docs/refactor/syrd-272-final-report.md section 3), accepted 2026-09-29 after Audit of SYRD-462: the compatibility facade. 1,487 lines are explicit imports and re-exports that installed entry points import and tests patch; packing, a __getattr__ proxy, removing unconsumed names and piecemeal moves were measured and rejected. Carried at the reviewed 2,542; the file measured 2,549 at enablement, and those 7 lines were never renewed."
+  },
+  {
+    "path": "scripts/ticket_board/app.py",
+    "ceiling": 1685,
+    "reviewed_commit": "98d454806374513a1506647ff25ee429b51693cc",
+    "reviewed_base": "dc29665032eabb44b91657a448c6b8fd1cdbef04",
+    "approved_by": "director",
+    "rationale": "SYRD-272 (docs/refactor/syrd-272-final-report.md section 3), accepted 2026-09-30 integrating SYRD-518: the PostgreSQL authority and transaction core; splitting it splits commit and rollback ownership, and the measured alternatives were rejected. Rule: new non-database responsibilities go to separate owners. Carried at the reviewed 1,685; the file measured 1,766 at enablement, and those 81 lines were never renewed."
+  }
+]

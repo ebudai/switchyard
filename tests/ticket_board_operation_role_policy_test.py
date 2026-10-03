@@ -79,6 +79,10 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         # SYRD-537: a reminder snooze takes the hold's authority.
         "snooze_reminders": frozenset({"set_manually_controlled"}),
         "clear_reminder_snooze": frozenset({"set_manually_controlled"}),
+        # SYRD-541: the integrator's size decisions take the integrator's capability.
+        "approve_size_exception": frozenset({"merge"}),
+        "enable_size_review": frozenset({"merge"}),
+        "measure_size": frozenset({"merge"}),
     }
 
 
@@ -94,7 +98,10 @@ def test_default_environment() -> None:
     assert "request_publication" not in table and "resolve_publication" not in table
     # SYRD-537 added snooze_reminders and clear_reminder_snooze, Director only.
     assert table["snooze_reminders"] == ["director"] and table["clear_reminder_snooze"] == ["director"]
-    assert len(table) == 41, len(table)
+    # SYRD-541 added approve_size_exception, enable_size_review and measure_size, Director only.
+    assert table["approve_size_exception"] == ["director"] and table["enable_size_review"] == ["director"]
+    assert table["measure_size"] == ["director"]
+    assert len(table) == 44, len(table)
 
 
 def test_role_environment_is_read_at_import() -> None:

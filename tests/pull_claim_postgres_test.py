@@ -64,7 +64,12 @@ def build(cluster, dbname: str, shape: str):
         check(result.returncode == 0, f"every migration applies: {result.stderr[-1500:]}")
         fixture.psql(admin, fixture.RBAC_PATH.read_text())
     if shape == "upgraded":
-        fixture.psql(admin, MIGRATION.read_text())
+        # This migration and every later one, as the runner applies them before
+        # this release's rbac.sql (SYRD-541's pgu974 granted after it); then
+        # this one replayed, which must change nothing.
+        from schema_function_drift import migrations_from
+        for migration in migrations_from(MIGRATION):
+            fixture.psql(admin, migration.read_text())
         fixture.psql(admin, MIGRATION.read_text())
         fixture.psql(admin, fixture.RBAC_PATH.read_text())
     return admin

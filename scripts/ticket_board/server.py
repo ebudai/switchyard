@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import pull_queue, reminder_snooze
+from . import extension_operations, pull_queue
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -582,8 +582,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         if operation in pull_queue.OPERATIONS and ticket_id is None:  # SYRD-539: the database authorises a self-claim
             return self.send_json(pull_queue.perform(self.app, operation, payload, caller_role=caller))
         self.require_operation_allowed(operation, caller, ticket_id)
-        if operation in reminder_snooze.OPERATIONS and ticket_id is None:  # SYRD-537
-            self.send_json(reminder_snooze.perform(self.app, operation, payload, caller_role=caller))
+        if operation in extension_operations.OPERATIONS:  # SYRD-537, SYRD-541
+            self.send_json(extension_operations.perform(self.app, operation, payload, caller_role=caller, ticket_id=ticket_id))
             return
 
         cfg = getattr(self.app, "workflow_configuration", lambda: None)()
@@ -591,6 +591,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             payload = dict(payload)
             if "state" in payload:
                 payload["target"] = payload.pop("state")
+            extension_operations.before_transition(self.app, ticket_id, operation, payload, caller_role=caller)
             ticket = self.app.perform_workflow_action(ticket_id, operation, payload, caller_role=caller)
             # Every declared transition is a committed mutation, so it pushes
             # like the per-operation handlers below. Without this an open board
@@ -977,7 +978,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             })
             return
         if parsed.path == "/api/reminder-snoozes":  # SYRD-537
-            self.send_json({"batches": reminder_snooze.batches(self.app)})
+            self.send_json({"batches": extension_operations.reminder_snoozes(self.app)})
             return
         if parsed.path == "/api/runtime-assignments":
             self.send_json({

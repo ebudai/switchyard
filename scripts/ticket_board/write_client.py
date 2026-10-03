@@ -1126,6 +1126,26 @@ class TicketBoardWriteClient:
         payload = {"batch": batch, "tickets": list(tickets or []), "reason": reason, "apply": apply}
         return self._post("/actions/clear_reminder_snooze", payload, caller_role=caller_role)
 
+    def approve_size_exception(
+        self, ticket_id: str, *, path: str, rationale: str, standing: bool = False, apply: bool = False,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """A bounded exception for one open size finding, at its measured size (SYRD-541). A preview unless `apply`."""
+        payload = {"path": path, "rationale": rationale, "standing": standing, "apply": apply}
+        return self._ticket_action(ticket_id, "approve_size_exception", payload, caller_role=caller_role)
+
+    def measure_size(self, ticket_id: str, *, commit: str, caller_role: str | None = None) -> dict[str, Any]:
+        """The Director's recheck of an integration commit before pushing main (SYRD-541). Moves nothing."""
+        return self._ticket_action(ticket_id, "measure_size", {"commit": commit}, caller_role=caller_role)
+
+    def enable_size_review(
+        self, *, baseline: str = "", carried: list[dict[str, Any]] | None = None, apply: bool = False,
+        caller_role: str | None = None,
+    ) -> dict[str, Any]:
+        """Turn the size review on, recording the baseline inventory (SYRD-541). A preview unless `apply`."""
+        payload = {"baseline": baseline, "carried": list(carried or []), "apply": apply}
+        return self._post("/actions/enable_size_review", payload, caller_role=caller_role)
+
 
 def main(argv: list[str] | None = None) -> int:
     """The `ticket-board-write` command, which `write_cli` owns (SYRD-515)."""

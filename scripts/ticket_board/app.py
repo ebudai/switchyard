@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, commit_cache, new_asset_files
+from . import attachment_store, commit_cache, extension_operations, new_asset_files
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -1123,8 +1123,8 @@ ORDER BY rank;
             # needs_director() is the only queue consumer, so awaiting_role at
             # any other role still only suppresses nudges.
             "awaiting_role": str(row["awaiting_role"] or "").strip().lower(),
-            # SYRD-537: scheduling, not delivery status; null unless snoozed.
-            "reminder_snooze": row.get("reminder_snooze"),
+            # Fields extension modules own: SYRD-537's snooze, SYRD-541's size review.
+            **extension_operations.ticket_fields(row),
             "comments": validate_comments(comments),
         }
         attachment_store.set_screenshot_fields(ticket, attachment_store.screenshot_entries(list(screenshots)))

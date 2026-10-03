@@ -73,7 +73,10 @@ def test_exactly_the_threshold_is_accepted_and_one_more_warns() -> None:
         _stage(repo, "over_limit.py", THRESHOLD + 1)
         warned = _run_hook(repo)
 
-    assert "at_limit.py" not in accepted.stderr, accepted.stderr
+    # At the limit there is no warning; since SYRD-541 a note says the file is
+    # in the 1,100-line band, with its size at HEAD.
+    assert "warning: at_limit.py" not in accepted.stderr, accepted.stderr
+    assert f"note: at_limit.py is {THRESHOLD} lines" in accepted.stderr, accepted.stderr
     assert f"over_limit.py is {THRESHOLD + 1} lines" in warned.stderr, warned.stderr
     assert f"soft limit {THRESHOLD}" in warned.stderr
 

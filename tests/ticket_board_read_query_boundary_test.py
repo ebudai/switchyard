@@ -46,7 +46,7 @@ class ReadOnlyConnection:
         self.calls.append((sql, tuple(params)))
         if "to_regprocedure" in sql:
             # SYRD-537: the reminder-snooze probe; this board has the function.
-            return Result(one={"snooze": True})
+            return Result(one={"snooze": True, "size_review": True})  # and SYRD-541's size review
         if "to_regclass" in sql:
             relation = "ticket_board.workflow_configuration" if self.workflow else None
             return Result(one={"relation": relation})
@@ -75,10 +75,10 @@ def configured_workflow() -> dict[str, Any]:
 
 
 def test_legacy_and_configured_sql_bytes_and_parameters() -> None:
-    # SYRD-537 added the reminder_snooze column; hashes measured from the new SQL.
+    # SYRD-537 added the reminder_snooze column, SYRD-541 size_review; hashes measured from the new SQL.
     expected = {
-        False: "8d83bab312e821e9cb968a735f603e784b7b639cf2d1a939a12ecafedfcb27fb",
-        True: "adffbd48e353f936407c76633f79f30ae67eca59fd45a17a74109f736e0ef02f",
+        False: "dba04e7674be8e02aa26ad6a100836a4457888a907d3ac820a417c831263d29d",
+        True: "0f3b03bac4e3a3c634e34a917e4a20f0b6153858b2709eaf007f955d8b45abb7",
     }
     for workflow in (None, configured_workflow()):
         conn = ReadOnlyConnection(workflow)

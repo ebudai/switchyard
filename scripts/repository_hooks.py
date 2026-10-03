@@ -110,6 +110,9 @@ def _preserve_existing_hook(hook: Path, *, replace_warning_only: bool = False) -
 PRE_COMMIT_HELPERS = (
     ("warn-file-size-limit.py", "warn_file_size_limit.py"),
     ("report_file_size_limit.py", "report_file_size_limit.py"),
+    # SYRD-541: the board's own measurement, so a commit is warned exactly as
+    # the board will judge it at integration.
+    ("file_size_policy.py", "ticket_board/file_size_policy.py"),
     ("warn-worktree-count.py", "warn_worktree_count.py"),
 )
 

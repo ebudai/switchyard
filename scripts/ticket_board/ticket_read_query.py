@@ -39,14 +39,17 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
         scope_sql = "scoped.state IN ('analysis', 'in_progress', 'inspection', 'audit', 'dat', 'director_review')"
     # SYRD-537: a board older than the reminder snooze has nothing to call;
     # its tickets read as never snoozed rather than not at all.
+    # SYRD-541's size review likewise.
     probe = conn.execute(
-        "SELECT to_regprocedure('ticket_board.ticket_reminder_snooze(text,timestamptz)') IS NOT NULL AS snooze"
+        "SELECT to_regprocedure('ticket_board.ticket_reminder_snooze(text,timestamptz)') IS NOT NULL AS snooze, "
+        "to_regprocedure('ticket_board.ticket_size_review(text)') IS NOT NULL AS size_review"
     ).fetchone()
+    present = (dict(probe) if isinstance(probe, dict)
+               else {"snooze": probe[0], "size_review": probe[1]} if probe is not None else {})
     snooze_sql = (
-        "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())"
-        if probe is not None and bool(probe["snooze"] if isinstance(probe, dict) else probe[0])
-        else "NULL::jsonb"
+        "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())" if present.get("snooze") else "NULL::jsonb"
     )
+    size_sql = "ticket_board.ticket_size_review(t.id)" if present.get("size_review") else "NULL::jsonb"
     return conn.execute(
         f"""
 WITH notification_scope AS (
@@ -217,6 +220,7 @@ SELECT
     COALESCE(active_work.active_work_highlight, false) AS active_work_highlight,
     COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
     {snooze_sql} AS reminder_snooze,
+    {size_sql} AS size_review,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b

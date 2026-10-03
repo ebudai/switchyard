@@ -30,6 +30,25 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       return `Reminders: snoozed until ${snooze.until} (${setBy})`;
     }
 
+    // The candidate's size evidence in one sentence, or '' (SYRD-541): what the
+    // board measured, what is unresolved, and what was approved.
+    function sizeReviewText(review) {
+      if (!review) {
+        return '';
+      }
+      const open = (review.findings || []).filter((finding) => finding.state === 'open');
+      if (open.length) {
+        return `Size review: unresolved for ${(review.candidate || '').slice(0, 12)} - ` + open.map((finding) =>
+          finding.reason === 'scan_failed'
+            ? `scan failed: ${finding.detail}`
+            : `${finding.path} ${finding.before} -> ${finding.after} lines (${finding.reason})`).join('; ');
+      }
+      const files = (review.files || []).map((file) => `${file.path} ${file.before} -> ${file.after}`);
+      const excepted = (review.findings || []).filter((finding) => finding.state === 'excepted').length;
+      return `Size review: no unresolved growth${excepted ? ` (${excepted} excepted)` : ''}` +
+        (files.length ? ` - at or over 1,100 lines: ${files.join(', ')}` : '');
+    }
+
     function renderDetail() {
       const ticket = selectedTicket();
       if (!state.detailOpen || !ticket) {
@@ -547,6 +566,13 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       }
       // SYRD-537: a reminder snooze is scheduling, so it is said here and not
       // on the card (SYRD-266), and it says nothing about delivery.
+      const sizeText = sizeReviewText(ticket.size_review);
+      if (sizeText) {
+        const sizeLine = document.createElement('div');
+        sizeLine.className = 'detail-size-review';
+        sizeLine.textContent = sizeText;
+        meta.appendChild(sizeLine);
+      }
       const snoozeText = reminderSnoozeText(ticket.reminder_snooze);
       if (snoozeText) {
         const snoozeLine = document.createElement('div');

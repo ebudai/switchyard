@@ -382,6 +382,10 @@ def _build_parser() -> argparse.ArgumentParser:
     snooze.add_argument("--until", required=True, help="deadline, ISO 8601 with an offset, e.g. 2026-10-03T07:00:00-04:00")
     add_free_text_argument(snooze, "--reason", required=True, help="why these reminders can wait")
     snooze.add_argument("--apply", action="store_true", help="create the snooze; without it nothing is written")
+    subparsers.add_parser(
+        "claim-next",
+        help="under a pull policy, claim your own next ready ticket; held work is returned instead (SYRD-539)",
+    )
     clear_snooze = subparsers.add_parser(
         "clear-reminder-snooze",
         help="end a reminder snooze early, for named tickets or the whole batch; previews unless --apply",
@@ -623,6 +627,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.release_external_blocker(
                 args.ticket_id, ref=args.ref, reason=args.reason, commit=args.commit
             )
+        elif command == "claim_next":
+            response = client.claim_next()
         elif command == "snooze_reminders":
             response = client.snooze_reminders(args.tickets, until=args.until, reason=args.reason, apply=args.apply)
         elif command == "clear_reminder_snooze":
@@ -685,7 +691,7 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
-                   "snooze_reminders", "clear_reminder_snooze"}:
+                   "snooze_reminders", "clear_reminder_snooze", "claim_next"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

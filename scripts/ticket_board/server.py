@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import reminder_snooze
+from . import pull_queue, reminder_snooze
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -579,6 +579,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             if caller != "director": raise PermissionError("only director may set gates")
             self.send_json({"ticket": self.app.set_workflow_flags(ticket_id, payload, caller_role=caller)})
             return
+        if operation in pull_queue.OPERATIONS and ticket_id is None:  # SYRD-539: the database authorises a self-claim
+            return self.send_json(pull_queue.perform(self.app, operation, payload, caller_role=caller))
         self.require_operation_allowed(operation, caller, ticket_id)
         if operation in reminder_snooze.OPERATIONS and ticket_id is None:  # SYRD-537
             self.send_json(reminder_snooze.perform(self.app, operation, payload, caller_role=caller))
@@ -971,6 +973,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.send_json({
                 "project": getattr(self.app, "project", "pgu"),
                 "reservations": self.app.serial_reservations(),
+                "pull_queue": pull_queue.status(self.app),  # SYRD-539
             })
             return
         if parsed.path == "/api/reminder-snoozes":  # SYRD-537

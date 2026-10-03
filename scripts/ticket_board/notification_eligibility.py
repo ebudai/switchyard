@@ -349,6 +349,11 @@ WHERE id = %s
         # role that set it; the ticket it hangs on proves nothing (SYRD-537).
         if kind == reminder_snooze.REMINDER_SNOOZE_DUE:
             return True
+        # A pull policy's idle-capacity alert is about the ready queue and is
+        # for the Director: current while its ticket still waits there, which
+        # the state and assignee checks above already establish (SYRD-539).
+        if kind == "pull_idle_capacity":
+            return target_role == "director"
         terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
         if current_state in terminal_states:
             return (

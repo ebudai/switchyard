@@ -470,15 +470,24 @@ def test_one_prompt_per_unresolved_episode_on_every_board_shape() -> None:
         else:
             fixture.psql(admin, fixture.SCHEMA_PATH.read_text())
         fixture.create_roles(admin)
-        fixture.psql(admin, fixture.RBAC_PATH.read_text())
+        if shape == "upgraded":
+            # The board as its release left it: that release's grants.
+            from schema_function_drift import rbac_before
+            fixture.psql(admin, rbac_before(migration))
+        else:
+            fixture.psql(admin, fixture.RBAC_PATH.read_text())
         if shape == "migrated":
             result = subprocess.run(["bash", str(ROOT / "scripts/ticket-board-migrate")], capture_output=True, text=True,
                                     env={**os.environ, "TICKET_BOARD_ADMIN_DATABASE_URL": admin}, timeout=240)
             check(result.returncode == 0, f"every migration applies: {result.stderr[-1500:]}")
             fixture.psql(admin, fixture.RBAC_PATH.read_text())
         if shape == "upgraded":
+            # Every migration from this one on, as the runner applies them,
+            # before this release's rbac.sql: it grants on what later ones create.
+            from schema_function_drift import migrations_from
             fixture.psql(admin, migration.read_text())
-            fixture.psql(admin, migration.read_text())
+            for later in migrations_from(migration):
+                fixture.psql(admin, later.read_text())
             fixture.psql(admin, fixture.RBAC_PATH.read_text())
         return admin
 

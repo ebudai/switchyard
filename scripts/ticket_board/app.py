@@ -322,14 +322,17 @@ WHERE (r.definition->>'active')::boolean
         }
 
     def apply_workflow(self, document: Any, *, expected_revision: int, dry_run: bool, caller_role: str) -> dict[str, Any]:
+        from . import pull_queue
         from .workflow_config import validate
         if caller_role != "director":
             raise PermissionError("only director may configure workflow")
         cfg = validate(document, project=self.project)
         with self._pg_connect() as conn:
             self._pg_set_caller_role(conn, caller_role)
+            held_before = pull_queue.reservations(conn)  # SYRD-539: what this document does to in-flight work
             row = conn.execute("SELECT ticket_board.apply_declared_workflow(%s::jsonb,%s) AS revision", (json.dumps(cfg), expected_revision)).fetchone()
-            result = {"revision": row["revision"], "document": cfg, "dry_run": dry_run}
+            result = {"revision": row["revision"], "document": cfg, "dry_run": dry_run,
+                      "reservation_changes": pull_queue.reservation_changes(conn, held_before)}
             if dry_run:
                 conn.rollback()
             self._workflow_states_cache = None

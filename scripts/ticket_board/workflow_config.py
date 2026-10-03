@@ -173,10 +173,15 @@ def parking_stage_names(cfg: dict[str, Any]) -> set[str]:
     the work survives -- and different from routing, which always lands on an
     owner (SYRD-92).
     """
+    # A pull policy's ready stage has the same shape but is not deferral: its
+    # work is admitted and waiting to be claimed, so it must not be parked
+    # (SYRD-539). declared_parking_stage makes the same exception.
+    ready = (cfg.get("scheduling") or {}).get("ready_stage")
     return {
         stage["name"]
         for stage in cfg["stages"]
         if not stage["terminal"] and not stage["owners"] and stage["notify"]["kind"] == "none"
+        and stage["name"] != ready
     }
 
 
@@ -281,6 +286,60 @@ def role_is_serial_in(cfg: dict[str, Any], role: str, state: str) -> bool:
     return state == IMPLEMENTATION_STAGE
 
 
+#: SYRD-539: implementers pull admitted work; absent keeps Director dispatch.
+SCHEDULING_MODES = ("pull",)
+IDLE_ALERT_SECONDS_RANGE = (60, 86400)
+
+
+def _validate_scheduling(cfg: dict[str, Any], stages: dict[str, Any], roles: dict[str, Any], need: Any) -> None:
+    """The opt-in pull policy (SYRD-539): where admitted work waits, how it is
+    claimed, and the review stage whose approval releases the author."""
+    policy = cfg["scheduling"]
+    need(isinstance(policy, dict) and set(policy) <= {"mode", "ready_stage", "release_after", "idle_alert_seconds"}
+         and {"mode", "ready_stage", "release_after"} <= set(policy), "invalid scheduling policy")
+    need(policy["mode"] in SCHEDULING_MODES, "invalid scheduling mode")
+    # One authoritative reservation policy: pull releases at release_after,
+    # lifecycle holds to the end; together they would contradict each other.
+    need(cfg.get("reservation", "review") == "review", "scheduling cannot be combined with reservation lifecycle")
+    ready = {"stage": policy["ready_stage"]}
+    need(isinstance(ready["stage"], str) and ready["stage"] in stages,
+         "scheduling ready stage must be a declared stage")
+    ready_stage = stages[ready["stage"]]
+    need(not ready_stage["terminal"] and ready_stage["kind"] not in {"implementation", "review"},
+         "scheduling ready stage must be a non-terminal holding stage")
+    # Admission is the Director's: nothing but a Director transition may put work there.
+    need(all(tr["actors"] == [DIRECTOR_ROLE] for tr in cfg["transitions"] if tr["to"] == ready["stage"]),
+         "only the director may admit work to the ready stage")
+    # ...and nothing but the Director may take it back out for reconsideration.
+    # (Also what keeps the stored-document validator, which reads the ready
+    # stage's parking shape, satisfied that it has an ordinary way back.)
+    need(any(tr["from"] == ready["stage"] and DIRECTOR_ROLE in tr["actors"] and not stages[tr["to"]]["terminal"]
+             and stages[tr["to"]]["kind"] not in {"implementation", "review"}
+             and (stages[tr["to"]]["owners"] or stages[tr["to"]]["notify"]["kind"] != "none")
+             for tr in cfg["transitions"]),
+         "the director must be able to withdraw admitted work from the ready stage")
+    implementation = next(name for name, stage in stages.items() if stage["kind"] == "implementation")
+    claims = [tr for tr in cfg["transitions"] if tr["from"] == ready["stage"] and tr["to"] == implementation
+              and tr["primitive"] == "move" and tr["actors"]
+              and all(roles[actor]["kind"] == "implementer" for actor in tr["actors"])]
+    need(len(claims) == 1, "scheduling needs exactly one implementer move from the ready stage into implementation")
+    # The claim is taken for a worker by the board itself, which has no reason
+    # to give and no owner to match (admitted work is unassigned). A claim the
+    # canonical action would refuse for either must not be declared, or the
+    # automatic claim would take what the declared transition forbids.
+    need(not claims[0]["require_reason"] and not claims[0]["owner_scoped"], "the claim transition cannot require a reason or be owner-scoped: a pulled claim has neither")
+    release = policy["release_after"]
+    need(release in stages and stages[release]["kind"] == "review", "scheduling release_after must be a review stage")
+    # Pinned rework waits where admitted work waits: a kickback diverted to a
+    # busy author lands in the ready stage, claimable by that author alone.
+    need((cfg.get("queue") or {}).get("stage") == ready["stage"], "scheduling needs the queue to be the ready stage")
+    # Checked, never filled in: a revalidated document must not change (SYRD-276).
+    seconds = policy.get("idle_alert_seconds", 900)
+    need(isinstance(seconds, int) and not isinstance(seconds, bool)
+         and IDLE_ALERT_SECONDS_RANGE[0] <= seconds <= IDLE_ALERT_SECONDS_RANGE[1],
+         "scheduling idle_alert_seconds must be an integer from 60 to 86400")
+
+
 def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     """Validate the complete desired graph. Never infer silence or actor authority."""
     cfg = copy.deepcopy(document)
@@ -307,6 +366,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "remove_stages",
             "migrations",
             "reservation",
+            "scheduling",
         },
         "unknown workflow configuration field",
     )
@@ -831,6 +891,9 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     # actions to look for: a director that cannot leave a stage has lost control
     # of every ticket sitting in it, whatever the document calls the move
     # (SYRD-82).
+    # Before the parking checks: they read the ready stage it names (SYRD-539).
+    if "scheduling" in cfg:
+        _validate_scheduling(cfg, stages, roles, need)
     director_exits: set[str] = set()
     director_reopens: set[str] = set()
     for tr in cfg["transitions"]:

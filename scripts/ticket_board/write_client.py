@@ -1114,6 +1114,10 @@ class TicketBoardWriteClient:
         payload = {"tickets": list(tickets), "until": until, "reason": reason, "apply": apply}
         return self._post("/actions/snooze_reminders", payload, caller_role=caller_role)
 
+    def claim_next(self, *, caller_role: str | None = None) -> dict[str, Any]:
+        """Claim this worker's next ready ticket under a pull policy (SYRD-539)."""
+        return self._post("/actions/claim_next", {}, caller_role=caller_role)
+
     def clear_reminder_snooze(
         self, batch: int, *, tickets: list[str] | None = None, reason: str, apply: bool = False,
         caller_role: str | None = None,

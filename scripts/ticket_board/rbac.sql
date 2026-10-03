@@ -196,4 +196,12 @@ GRANT SELECT ON ticket_board.role_runtime_assignment_history TO ticket_board_ser
 END IF;
 END $workflow_grants$;
 
+-- SYRD-539: pull scheduling.
+GRANT SELECT ON ticket_board.pull_releases, ticket_board.pull_claims TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.claim_ready_ticket(text) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_ready_for_pull(text, text) TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.declared_scheduling() TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.pull_queue_status() TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.notify_pull_idle_capacity(jsonb, timestamptz) TO ticket_board_listener;
+
 COMMIT;

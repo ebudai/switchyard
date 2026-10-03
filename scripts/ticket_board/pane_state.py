@@ -59,6 +59,10 @@ class PaneHookState:
     #: turn ended (SYRD-538), as written; read by background_work. None when
     #: nothing was, or the file predates it.
     background_work: object = None
+    #: The pane's latest SessionStart as the hook recorded it -- {session_id,
+    #: source, at} -- or None (SYRD-540); read by session_context.
+    last_session_start: object = None
+    last_checkout: object = None
 
 
 #: Hook events that mean a turn STARTED in the pane: a prompt was taken and the
@@ -327,6 +331,8 @@ class PaneHookStateStore:
             source=str(parsed.get("source") or ""),
             turn_started_at=turn_started_at,
             background_work=parsed.get("background_work") if state == "idle" else None,
+            last_session_start=parsed.get("last_session_start") if isinstance(parsed.get("last_session_start"), dict) else None,
+            last_checkout=parsed.get("last_checkout") if isinstance(parsed.get("last_checkout"), dict) else None,
         )
 
     def write(self, target: str, state: str, *, source: str = "", now: float | None = None) -> Path:

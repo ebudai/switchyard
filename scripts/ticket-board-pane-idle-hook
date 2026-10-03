@@ -218,8 +218,43 @@ def _background_work(payload: object, source: str, *, pid: int | None = None,
     }
 
 
+def _checkout(payload: object) -> dict:
+    """The worktree this conversation runs in, as git reports it: path, branch, HEAD (SYRD-540)."""
+    import subprocess
+    cwd = str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
+    cwd = cwd or os.getcwd()
+    found: dict = {"cwd": cwd}
+    for key, argv in (("branch", ["symbolic-ref", "--quiet", "--short", "HEAD"]), ("head", ["rev-parse", "HEAD"])):
+        try:
+            result = subprocess.run(["git", "-C", cwd, *argv], capture_output=True, text=True, timeout=2, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            found[key] = result.stdout.strip()[:200]
+    return found
+
+
+def _session_start_record(payload: object, *, pid: int | None = None, proc_root: Path = PROC_ROOT) -> dict | None:
+    """What a SessionStart says about the conversation now in the pane (SYRD-540), or None without an id.
+
+    Stamped with the provider process that announced it (the pane root the
+    board registers) and the checkout it runs in, so the board can tell a
+    restored conversation from one in another process or worktree.
+    """
+    session_id = _extract_payload_session_id(payload)
+    if not session_id:
+        return None
+    record = {"session_id": session_id, "source": _session_start_source(payload) or "unknown", "at": time.time(),
+              "checkout": _checkout(payload)}
+    identity = _pane_root_identity(os.getpid() if pid is None else pid, proc_root)
+    if identity is not None:
+        record["pane_pid"], record["pane_start_time"] = identity
+    return record
+
+
 def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "",
-                 background_work: dict | None = None) -> Path:
+                 background_work: dict | None = None, session_start: dict | None = None,
+                 checkout: dict | None = None) -> Path:
     normalized_state = state.strip().lower()
     if normalized_state not in {"idle", "busy", "blocked"}:
         raise ValueError("pane hook state must be idle, busy, or blocked")
@@ -251,6 +286,20 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
     # running, a new session -- clears it (SYRD-538).
     if background_work and normalized_state == "idle":
         payload["background_work"] = background_work
+    # The pane's latest SessionStart, carried across later writes like
+    # turn_started_at: the board's only evidence of which conversation a pane
+    # holds -- the session record keeps the launch session on purpose (SYRD-540).
+    if session_start:
+        payload["last_session_start"] = session_start
+    elif isinstance(previous, dict) and isinstance(previous.get("last_session_start"), dict):
+        payload["last_session_start"] = previous["last_session_start"]
+    # The checkout as the latest turn ended, carried the same way: how the board
+    # sees a returned ticket's worktree made ready again before it hands the
+    # ticket back (SYRD-540).
+    if checkout:
+        payload["last_checkout"] = checkout
+    elif isinstance(previous, dict) and isinstance(previous.get("last_checkout"), dict):
+        payload["last_checkout"] = previous["last_checkout"]
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -466,6 +515,7 @@ def _active_in_progress_ticket_for_role(
     *,
     board_url: str,
     timeout: float = 2.0,
+    unless_pull: bool = False,
 ) -> dict[str, object] | None:
     url = f"{_board_root_url(board_url)}/api/board"
     try:
@@ -483,6 +533,8 @@ def _active_in_progress_ticket_for_role(
     if not isinstance(tickets, list):
         return None
     cfg = parsed.get("workflow")
+    if unless_pull and isinstance(cfg, dict) and isinstance(cfg.get("scheduling"), dict):
+        return None
     active_states = {"in_progress"}
     if isinstance(cfg, dict):
         active_states = {stage["name"] for stage in cfg.get("stages", []) if not stage["terminal"] and stage["kind"] != "draft" and role in stage["owners"]}
@@ -709,7 +761,11 @@ def _session_start_additional_context_output(
         # removes; the runtime already advertises the skill (SYRD-106).
         return None
     board_url = _default_board_url(environ)
-    ticket = _active_in_progress_ticket_for_role(role, board_url=board_url)
+    # Under a pull policy a resumed conversation is not known to be the ticket's
+    # own until the board has matched it: the board hands the work over itself,
+    # after that proof (SYRD-540).
+    ticket = _active_in_progress_ticket_for_role(role, board_url=board_url,
+                                                 unless_pull=session_start_source == "resume")
     if ticket is None:
         return None
     return _session_start_context(
@@ -772,7 +828,13 @@ def main(argv: list[str] | None = None) -> int:
         # paused on background work, and the state written must say which.
         payload = _read_stdin_json(timeout=args.stdin_timeout)
         _write_state(state_dir, target, args.state, source=args.source,
-                     background_work=_background_work(payload, args.source))
+                     background_work=_background_work(payload, args.source),
+                     checkout={**_checkout(payload), "at": time.time()})
+    elif _is_session_start_hook_source(args.source):
+        # Read first: the conversation this SessionStart opened is recorded
+        # with the state it writes (SYRD-540).
+        payload = _read_stdin_json(timeout=args.stdin_timeout)
+        _write_state(state_dir, target, args.state, source=args.source, session_start=_session_start_record(payload))
     else:
         _write_state(state_dir, target, args.state, source=args.source)
         payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)

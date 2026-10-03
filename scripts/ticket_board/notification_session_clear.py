@@ -6,6 +6,7 @@ import logging
 import subprocess
 from typing import Any, Callable
 
+from . import session_context
 from .notification_ledger import NotificationLedger
 
 #: What each supported CLI is told, in its own composer, to start the next
@@ -48,6 +49,7 @@ class NotificationSessionClear:
         failure_reason: Callable[[BaseException, str], str],
         sleeper: Callable[[float], None],
         settle_seconds: Callable[[], float],
+        gate: Callable[[], Any] = lambda: None,
     ) -> None:
         self.logger = logger
         self.ledger = ledger
@@ -58,6 +60,8 @@ class NotificationSessionClear:
         self.failure_reason = failure_reason
         self.sleeper = sleeper
         self.settle_seconds = settle_seconds
+        #: The pane activity gate, for the hook state a ticket's conversation is proven from (SYRD-540).
+        self.gate = gate
 
     def _session_clear_is_due(self, conn: Any, ticket_id: str, target_role: str, kind: str, payload: str) -> bool:
         """Whether this delivery is the first handoff of this ticket to an ephemeral role.
@@ -75,12 +79,14 @@ class NotificationSessionClear:
         contract is that the ticket does not arrive until the clear has, and a
         failed read is not evidence that the clear already happened.
         """
-        if kind not in SESSION_CLEAR_KINDS:
-            return False
         if target_role not in self.ephemeral_roles():
             return False
         if self.announced_queue_identity(payload) is not None:
             return False
+        if kind not in SESSION_CLEAR_KINDS:
+            # Not a hand-off, so never a clear; but nothing about a pulled
+            # ticket reaches a pane that does not hold its conversation (SYRD-540).
+            return self._restore_decision(conn, ticket_id, target_role, handoff=False) != "deliver"
         result = conn.execute(
             "SELECT ticket_board.role_session_clear_pending(%s::text, %s::text)",
             (ticket_id, target_role),
@@ -89,7 +95,28 @@ class NotificationSessionClear:
         if row is None:
             return False
         pending = row["role_session_clear_pending"] if isinstance(row, dict) else row[0]
-        return bool(pending)
+        # A pulled ticket handed back to a pane that no longer holds its
+        # conversation gets it back first, or is parked (SYRD-540).
+        return bool(pending) or self._restore_decision(conn, ticket_id, target_role, handoff=True, probe=True) != "deliver"
+
+    def _first_handoff(self, conn: Any, ticket_id: str, target_role: str) -> bool:
+        row = conn.execute("SELECT ticket_board.role_session_clear_pending(%s::text, %s::text) AS p",
+                           (ticket_id, target_role)).fetchone()
+        return bool(row) and bool(row["p"] if isinstance(row, dict) else row[0])
+
+    def _context_listener(self) -> Any:
+        from types import SimpleNamespace
+        return SimpleNamespace(role_runtimes=self.role_runtimes(), sender=self.sender(), logger=self.logger)
+
+    def _restore_decision(self, conn: Any, ticket_id: str, target_role: str, *, handoff: bool, probe: bool = False) -> str:
+        """session_context.before_delivery; `probe` only reads (status), so asking whether a clear is due acts on nothing."""
+        import time
+        if probe:
+            status = session_context._status(conn, ticket_id, target_role)
+            return "act" if session_context.needs_action(status, self.gate(), target_role) else "deliver"
+        return session_context.before_delivery(self._context_listener(), conn, self.gate(), ticket_id=ticket_id,
+                                               role=target_role, now=time.time(), handoff=handoff)
+
     def _record_session_clear(self, conn: Any, ticket_id: str, target_role: str) -> bool:
         result = conn.execute(
             "SELECT ticket_board.record_role_session_clear(%s::text, %s::text)",
@@ -122,6 +149,22 @@ class NotificationSessionClear:
         """
         runtime = self.role_runtimes().get(target_role, "")
         command = SESSION_CLEAR_COMMANDS.get(runtime, "")
+        handoff = kind in SESSION_CLEAR_KINDS
+        if not handoff or not self._first_handoff(conn, ticket_id, target_role):
+            # SYRD-540: a pulled ticket whose conversation the pane does not hold.
+            # It is never cleared: restored and proven first, or parked.
+            decision = self._restore_decision(conn, ticket_id, target_role, handoff=handoff)
+            if decision == "deliver":
+                return True
+            if decision == "park":
+                self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                                  kind=kind, event="drop", busy_reason="ticket_context_parked", detail={"target": target})
+                self.ledger.discard(conn, notification_id, "ticket_context_parked")
+                return False
+            # Bounded: a restore is confirmed or parked within its own deadlines.
+            self.ledger.requeue(conn, notification_id, attempts, f"ticket_context_{decision}",
+                                delay_seconds=session_context.RESUME_WAIT_SECONDS / 3)
+            return False
         if not command:
             self.logger.error(
                 "Holding notification %s for %s: no clear command is known for runtime %r of ephemeral role %s",

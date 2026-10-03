@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import session_context
+
 
 def _claimants(workflow: dict[str, Any] | None, policy: dict[str, Any]) -> list[str]:
     """The implementers the declared claim transition names."""
@@ -101,6 +103,7 @@ def run(listener: Any, conn: Any) -> int:
             listener.logger.info("Pull pickup: %s claimed %s", role, result.get("ticket"))
         elif result and result.get("reason") == "nothing ready":
             idle[role] = "idle, nothing claimable"
+    session_context.passes(listener, conn, gate)  # SYRD-540: bind, confirm and restart-repair conversations
     try:
         conn.execute("SELECT ticket_board.notify_pull_idle_capacity(%s::jsonb, clock_timestamp())",
                      (json.dumps(idle, sort_keys=True),))

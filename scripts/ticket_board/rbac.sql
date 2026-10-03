@@ -211,4 +211,17 @@ GRANT EXECUTE ON FUNCTION ticket_board.declared_scheduling() TO ticket_board_ser
 GRANT EXECUTE ON FUNCTION ticket_board.pull_queue_status() TO ticket_board_service, ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.notify_pull_idle_capacity(jsonb, timestamptz) TO ticket_board_listener;
 
+-- SYRD-540: ticket contexts.
+GRANT SELECT ON ticket_board.ticket_role_contexts, ticket_board.ticket_context_restores TO ticket_board_service, ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.pending_ticket_contexts() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.record_ticket_context(text, text, text, text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_context_status(text, text) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.open_ticket_context_restore(text, text, text, text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.mark_ticket_context_delivered(bigint) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.resolve_ticket_context_restore(bigint, text, jsonb) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.open_ticket_context_restores() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.held_ticket_contexts() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_ticket_context_probe(bigint) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.set_ticket_context_checkout(bigint, text, jsonb) TO ticket_board_listener;
+
 COMMIT;

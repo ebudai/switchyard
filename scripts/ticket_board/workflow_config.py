@@ -327,6 +327,11 @@ def _validate_scheduling(cfg: dict[str, Any], stages: dict[str, Any], roles: dic
     # to give and no owner to match (admitted work is unassigned). A claim the
     # canonical action would refuse for either must not be declared, or the
     # automatic claim would take what the declared transition forbids.
+    # A claimed ticket gets its own conversation: the claimant's session is
+    # cleared on each new ticket, and that clear is what proves which
+    # conversation a ticket was worked in (SYRD-540).
+    need(all(roles[actor].get("ephemeral") is True for actor in claims[0]["actors"]),
+         "every role that can claim must be ephemeral, so each claimed ticket starts its own conversation")
     need(not claims[0]["require_reason"] and not claims[0]["owner_scoped"], "the claim transition cannot require a reason or be owner-scoped: a pulled claim has neither")
     release = policy["release_after"]
     need(release in stages and stages[release]["kind"] == "review", "scheduling release_after must be a review stage")

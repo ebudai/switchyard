@@ -52,6 +52,10 @@ def pull_document(**policy) -> dict:
         {**copy.deepcopy(template), "from": "ready", "to": "in_progress", "action": "director_start", "label": "Start"},
     ]
     doc["queue"] = {"stage": "ready", "assignee": "unassigned"}
+    # Claimants clear their conversation on each new ticket (SYRD-540).
+    for role in doc["roles"]:
+        if role["name"] in implementers:
+            role["ephemeral"] = True
     doc["scheduling"] = {"mode": "pull", "ready_stage": "ready", "release_after": "audit", **policy}
     return doc
 
@@ -127,6 +131,10 @@ def test_incoherent_policies_are_refused() -> None:
     doc = pull_document()
     next(t for t in doc["transitions"] if t["action"] == "director_start")["require_reason"] = True
     check(refused(doc) == "", f"a Director's own move between the same stages may require a reason: {refused(doc)!r}")
+    doc = pull_document()
+    next(r for r in doc["roles"] if r["name"] == "app")["ephemeral"] = False
+    check(refused(doc) == "every role that can claim must be ephemeral, so each claimed ticket starts its own conversation",
+          f"a claimant that keeps one conversation across tickets cannot have per-ticket context: {refused(doc)!r}")
     for field in ("require_reason", "owner_scoped"):
         doc = pull_document()
         next(t for t in doc["transitions"] if t["action"] == "claim")[field] = True

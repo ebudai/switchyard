@@ -25,14 +25,33 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
     return dict(row["result"])
 
 
+def context_restore(cfg: dict[str, Any] | None) -> dict[str, str]:
+    """What happens to each claimant's returned rework (SYRD-540), so the limit is visible before anyone relies on it."""
+    from .pull_pickup import _claimants
+    from .session_context import RESUME_COMMANDS
+    policy = (cfg or {}).get("scheduling")
+    if not isinstance(policy, dict):
+        return {}
+    runtimes = {role["name"]: role.get("runtime") for role in cfg.get("roles", [])}
+    return {role: (f"automatic: {runtimes[role]} resumes the ticket's saved conversation, handed over once proven"
+                   if runtimes.get(role) in RESUME_COMMANDS else
+                   f"not automatic: {runtimes.get(role) or 'no runtime'} has no verified in-session resume, "
+                   "so returned rework parks for the Director")
+            for role in _claimants(cfg, policy)}
+
+
 def status(app: Any) -> dict[str, Any]:
     """Ready, waiting-for-author and pulled work; {"enabled": false} without a pull policy or this release's schema."""
     try:
         with app._pg_connect() as conn:
             row = conn.execute("SELECT ticket_board.pull_queue_status() AS status").fetchone()
+            document = conn.execute("SELECT document FROM ticket_board.workflow_configuration").fetchone()
     except Exception:  # a board older than this route reports nothing rather than failing the read
         return {"enabled": False}
-    return dict(row["status"])
+    result = dict(row["status"])
+    if result.get("enabled"):
+        result["context_restore"] = context_restore(document["document"] if document else None)
+    return result
 
 
 def reservations(conn: Any) -> dict[str, Any]:
@@ -63,4 +82,10 @@ def reservation_changes(conn: Any, before: dict[str, Any]) -> dict[str, Any]:
         "holds": [{"implementer": role, "before": holds_before.get(role), "after": holds_after.get(role)}
                   for role in sorted(set(holds_before) | set(holds_after)) if holds_before.get(role) != holds_after.get(role)],
         "ready_work_left_unpulled": sorted(set(before["ready"]) - set(after["ready"])) if not after["ready"] else [],
+        "context_restore": context_restore(_applied(conn)),
     }
+
+
+def _applied(conn: Any) -> dict[str, Any] | None:
+    row = conn.execute("SELECT document FROM ticket_board.workflow_configuration").fetchone()
+    return row["document"] if row else None

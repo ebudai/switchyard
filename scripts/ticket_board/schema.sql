@@ -3215,9 +3215,21 @@ BEGIN
         FROM idle_roles i
         WHERE q.target_role = i.role
           AND q.next_attempt_at > p_now
-          -- Must match PANE_BUSY_REQUEUE_ERROR in notify_listener.py.
-          AND q.last_error = 'pane busy'
           AND q.dead_lettered_at IS NULL
+          AND (
+                -- Must match PANE_BUSY_REQUEUE_ERROR in notify_listener.py.
+                q.last_error = 'pane busy'
+                -- SYRD-542: held only because another ticket was this role's
+                -- current one (FINISH_CURRENT_REQUEUE_ERROR), and no ticket
+                -- holds it now. Its earlier holds doubled its delay to the cap,
+                -- so it would wait out a deadline nothing is holding it to; it
+                -- is due on this pass instead. A row still behind a current
+                -- ticket keeps its deadline, and delivery still checks the pane.
+             OR (q.last_error = 'finish current'
+                 AND q.kind = 'transition'
+                 AND coalesce(ticket_board.finish_current_stage_blocker(
+                         q.ticket_id, q.target_role, q.payload ->> 'new_state', p_now), '') = '')
+          )
         RETURNING q.id
     )
     SELECT count(*)::integer

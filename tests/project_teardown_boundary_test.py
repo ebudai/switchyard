@@ -59,7 +59,8 @@ OWN = ("os", "re", "shlex", "subprocess", "dataclass", "Path", "Any", "Callable"
 SEAMS = {
     "_teardown_project_context": {"_validate_project_slug": 1, "switchyard_registry_dir": 1, "_usable_switchyard_entry_for_project": 1,
                                   "_default_new_project_owner": 3, "build_plan": 2, "commit_git_dir_env_for_project": 1, "load_project_config": 1,
-                                  "_project_dir_from_generated_config_path": 1, "_project_board_provision_from_json": 1, "_port_from_board_url": 1,
+                                  # SYRD-543: a recorded plan is read by the teardown-only reader, not the upgrade parser.
+                                  "_project_dir_from_generated_config_path": 1, "_teardown_plan_from_json": 1, "_port_from_board_url": 1,
                                   "_repo_root": 1},
     "_drop_database_command": {"sql_identifier": 1},
     "owner_removal_refusal": {"TEARDOWN_PROTECTED_USERS": 1, "current_user_name": 1, "read_host_desktop_approval": 1, "TEARDOWN_MINIMUM_OWNER_UID": 2},
@@ -120,7 +121,7 @@ def refuse(label: str):
 #: Every launcher facility that could reach a host for real, refused.
 LIVE = {name: refuse(name) for name in (
     "_validate_project_slug", "switchyard_registry_dir", "_usable_switchyard_entry_for_project", "_default_new_project_owner", "build_plan",
-    "commit_git_dir_env_for_project", "load_project_config", "_project_dir_from_generated_config_path", "_project_board_provision_from_json",
+    "commit_git_dir_env_for_project", "load_project_config", "_project_dir_from_generated_config_path", "_teardown_plan_from_json",
     "_repo_root", "current_user_name", "read_host_desktop_approval", "_read_prompt")}
 #: Pure renderers the actions use, fixed so the rendered commands are this test's.
 RENDER = dict(sql_identifier=lambda name: f'"{name}"', tenant_control_helper_path=lambda project: f"/usr/local/libexec/switchyard-control-{project}")
@@ -282,7 +283,7 @@ def test_the_teardown_context() -> None:
         live = dict(seams, _usable_switchyard_entry_for_project=lambda slug, **kw: (entry, []),
                     load_project_config=lambda slug, path: loaded.append((slug, path)) or config, _repo_root=lambda: Path("/fixture/repo"),
                     _project_dir_from_generated_config_path=lambda path: Path("/structural/checkout"),
-                    _project_board_provision_from_json=lambda path: loaded.append(("plan", path)) or parsed)
+                    _teardown_plan_from_json=lambda path, **kw: loaded.append(("plan", path)) or parsed)
         with patched(t, **live):
             got = judged(t._teardown_project_context, SLUG, owner_user=None, config_dir=None, registry_dir=None, home_base=root)
         check(got[0].__dict__ == {"project": SLUG, "owner_user": "cfg-owner", "project_name": "P367", "port": 8367,

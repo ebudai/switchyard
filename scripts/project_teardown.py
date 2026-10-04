@@ -40,6 +40,7 @@ from scripts.host_accounts import uid_for_user
 
 if TYPE_CHECKING:
     from scripts.team_launcher import ProjectBoardProvision
+    from scripts.teardown_plan import TeardownPlanFields
 
 
 def _port_from_board_url(board_url: str) -> int | None:
@@ -57,7 +58,7 @@ def _teardown_project_context(
     config_dir: Path | None,
     registry_dir: Path | None,
     home_base: Path,
-) -> tuple[ProjectBoardProvision, Path, Path, bool]:
+) -> tuple["ProjectBoardProvision | TeardownPlanFields", Path, Path, bool]:  # SYRD-543
     from scripts import team_launcher as launcher
 
     project_slug = launcher._validate_project_slug(project)
@@ -94,7 +95,7 @@ def _teardown_project_context(
         project_checkout = home_base / (config.run_as_user or owner_user or launcher._default_new_project_owner(entry.slug)) / "Projects" / entry.slug
     plan_path = entry.config_path.parent / "plan.json"
     if plan_path.exists():
-        plan = launcher._project_board_provision_from_json(plan_path)
+        plan = launcher._teardown_plan_from_json(plan_path, project=entry.slug, home_base=home_base)
     else:
         resolved_owner = owner_user or config.run_as_user or launcher._default_new_project_owner(entry.slug)
         plan = launcher.build_plan(
@@ -346,7 +347,7 @@ def owner_removal_residue(
 
 
 def _switchyard_teardown_actions(
-    plan: ProjectBoardProvision,
+    plan: "ProjectBoardProvision | TeardownPlanFields",
     *,
     registry_path: Path,
     home_base: Path,

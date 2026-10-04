@@ -121,6 +121,7 @@ try:
         publish_sudoers_document,
         publish_sudoers_path,
     )
+    from .plan_role_derivation import PLAN_DERIVED_ROLE_FIELDS, role_reference, unresolved_plan_field_reason
     from .provision_tenant_control import (
         TENANT_CONTROL_GRANT_NAME,
         display_attach_helper_path,
@@ -297,6 +298,7 @@ except ImportError:  # pragma: no cover - supports direct script execution
         publish_sudoers_document,
         publish_sudoers_path,
     )
+    from plan_role_derivation import PLAN_DERIVED_ROLE_FIELDS, role_reference, unresolved_plan_field_reason
     from provision_tenant_control import (
         TENANT_CONTROL_GRANT_NAME,
         display_attach_helper_path,
@@ -495,7 +497,6 @@ PLAN_BASELINE_FIELDS = frozenset(
         "admin_database_url",
         "asset_dir",
         "assignee_roles",
-        "audit_roles",
         "board_current",
         "board_database_url",
         "board_log",
@@ -512,7 +513,6 @@ PLAN_BASELINE_FIELDS = frozenset(
         "listener_log",
         "listener_role",
         "listener_unit",
-        "operation_allowed_roles",
         "owner_user",
         "polkit_name",
         "port",
@@ -550,11 +550,18 @@ def migrate_plan_document(
     document = dict(raw)
     added: list[str] = []
     unresolved: list[str] = []
+    derived: list[ProjectBoardProvision | None] = []
     for name in plan_field_names():
         if name in document:
             continue
         if name in PLAN_BASELINE_FIELDS:
             unresolved.append(name)
+            continue
+        if name in PLAN_DERIVED_ROLE_FIELDS:  # from the recorded roles, or unresolved; never identity (SYRD-543)
+            derived = derived or [role_reference(raw, reference)[0]]
+            (added if derived[0] else unresolved).append(name)
+            if derived[0]:
+                document[name] = getattr(derived[0], name)
             continue
         if name in defaults:
             document[name] = defaults[name]

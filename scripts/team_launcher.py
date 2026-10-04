@@ -51,7 +51,7 @@ from scripts.ticket_board.project_provision import (
     NON_PROCESS_ROLES,
     TENANT_ARTIFACT_NAMES,
     build_plan,
-    migrate_plan_document,
+    migrate_plan_document, unresolved_plan_field_reason,
     plan_field_names,
     privileged_artifact_names,
     privileged_provision_dir,
@@ -1065,6 +1065,7 @@ from scripts.project_teardown import (
     owner_removal_residue,
     switchyard_teardown_command,
 )
+from scripts.teardown_plan import TEARDOWN_PLAN_FIELDS, TeardownPlanFields, _teardown_plan_from_json  # SYRD-543
 from scripts.owner_preparation import (
     ExistingOwnerUser,
     OwnerUserProvisionResult,

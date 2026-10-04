@@ -289,9 +289,8 @@ def _project_board_provision_from_json(
         if name in launcher.plan_field_names() and document.get(name) in (None, "") and value:
             document[name] = value
             from_operator.append(name)
-    fields, added, unresolved = launcher.migrate_plan_document(
-        document, reference=launcher._plan_migration_reference(document)
-    )
+    reference = launcher._plan_migration_reference(document)
+    fields, added, unresolved = launcher.migrate_plan_document(document, reference=reference)
     if "owner_home" in unresolved:
         raise SystemExit(
             f"switchyard: {path} is missing provision field 'owner_home' and it cannot be "
@@ -307,9 +306,10 @@ def _project_board_provision_from_json(
             "plan can supply: give it with `switchyard upgrade <project> --commit-git-dir <path>`"
         )
     if unresolved:
+        # The real reason, not "no reference plan can be built" when one was (SYRD-543).
         raise SystemExit(
-            f"switchyard: {path} is missing provision field {unresolved[0]!r} and no reference "
-            "plan can be built for it; re-provision the project"
+            f"switchyard: {path} is missing provision field {unresolved[0]!r}: "
+            + launcher.unresolved_plan_field_reason(unresolved[0], document, reference)
         )
     if migrated is not None:
         migrated.extend(added)

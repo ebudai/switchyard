@@ -91,10 +91,15 @@ def project_roles(raw: dict[str, Any], document: dict[str, Any]) -> dict[str, An
     return result
 
 
-def projection_files(config_path: Path, document: dict[str, Any]) -> dict[Path, str]:
+def projection_files(config_path: Path, document: dict[str, Any], *, raw: dict[str, Any] | None = None) -> dict[Path, str]:
+    """Every tenant file the declared workflow is projected into, as it should read for `document`.
+
+    `raw` is the launcher config to project from when the caller holds a newer
+    one than the file -- a runtime switch's rewritten role entry (SYRD-558).
+    """
     from scripts import team_launcher as launcher
 
-    raw = json.loads(config_path.read_text())
+    raw = copy.deepcopy(raw) if raw is not None else json.loads(config_path.read_text())
     document = validate(document, project=raw["project"])
     projected = project_roles(raw, document)
     layout = Path(projected["layout"])

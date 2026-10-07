@@ -30,6 +30,13 @@ from typing import Any, Callable, Mapping, Sequence
 from scripts import presentation_controller, team_launcher
 from scripts import runtime_arguments
 from scripts.role_command import role_registers_runtime
+from scripts.runtime_projection import (  # SYRD-558: every tenant copy of the declaration
+    declared_projection as _declared_projection,
+    restore_projection as _restore_projection,
+    runtime_projection_files,
+    stale_projection as _stale_projection,
+    write_runtime_projection as _write_runtime_projection,
+)
 from scripts.runtime_handover import (
     Holder,
     RuntimeHandover,
@@ -113,6 +120,11 @@ class RuntimeJournal:
     previous_workflow_document: dict[str, Any] = field(default_factory=dict)
     previous_config_bytes: str = ""
     config_path: str = ""
+    #: Every tenant file the runtime projection rewrites, as it was before
+    #: (None: it did not exist). A workflow-driven tenant carries the declared
+    #: workflow in several of them, and every one names the role's runtime
+    #: (SYRD-558).
+    previous_projection: dict[str, str | None] = field(default_factory=dict)
     slots: tuple[int, ...] = ()
     steps_applied: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -158,6 +170,9 @@ class RuntimeSwitchResult:
     #: Whether the model changes too; such a switch is described as the move it
     #: always was, not as an argument repair (SYRD-534).
     model_changed: bool = False
+    #: Tenant files out of line with the board's declaration, and whether they were rewritten (SYRD-558).
+    projection_repaired: tuple[str, ...] = ()
+    projection_written: bool = False
 
     @property
     def argument_repair(self) -> bool:
@@ -174,6 +189,13 @@ class RuntimeSwitchResult:
         return self.previous_runtime
 
     def describe(self) -> str:
+        if not self.configured_changed and self.projection_repaired:
+            files = ", ".join(self.projection_repaired)
+            if self.projection_written:
+                return (f"switchyard: {self.role} already runs {self.runtime}; its tenant projection did not match "
+                        f"the board's declared workflow and was brought in line: {files}")
+            return (f"switchyard: {self.role} already runs {self.runtime}, but its tenant projection does not match "
+                    f"the board's declared workflow in {files}; run without --dry-run to bring it in line")
         if not self.configured_changed:
             return f"switchyard: {self.role} already runs {self.runtime}; nothing to change"
         live = (
@@ -452,6 +474,15 @@ def preflight(
     if changing:
         blockers.extend(_readiness_blockers(config, role, runtime, runner=runner))
         blockers.extend(_verifiable_projection_blockers(config_path, role_name, runtime, model=model, effort=effort))
+        # The whole tenant projection, computed before anything stops: one that
+        # cannot be produced must not be discovered after the board moved (SYRD-558).
+        try:
+            if board_runtime is not None:
+                runtime_projection_files(config_path, role_name=role_name, runtime=runtime,
+                                         document=document_with_runtime(document, role=role_name, runtime=runtime),
+                                         model=model, effort=effort)
+        except RoleRuntimeRefusal as exc:
+            blockers.append(str(exc).removeprefix("switchyard: "))
         if busy and not force:
             blockers.append(
                 f"{role.target} is busy; wait for an idle checkpoint, or pass --force with --reason "
@@ -563,33 +594,6 @@ def projected_live_commands(entry: Mapping[str, Any]) -> set[str]:
     cli = entry.get("cli") if isinstance(entry.get("cli"), list) else []
     configured = [str(c) for c in live] if isinstance(live, list) and live else [str(c) for c in cli[:1]]
     return {team_launcher._command_name(c) for c in configured if team_launcher._command_name(c)}
-
-
-def _write_runtime_projection(
-    config: team_launcher.ProjectConfig,
-    *,
-    config_path: Path,
-    role_name: str,
-    runtime: str,
-    runner: Callable[..., subprocess.CompletedProcess[Any]],
-    model: str | None = None,
-    effort: str | None = None,
-) -> team_launcher.ProjectConfig:
-    """Point the launcher config at the new runtime, leaving everything else."""
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    roles = raw.get("roles")
-    if not isinstance(roles, list):
-        raise RoleRuntimeRefusal(f"switchyard: {config_path} must define a roles list")
-    for entry in roles:
-        if not isinstance(entry, dict) or entry.get("role") != role_name:
-            continue
-        project_role_runtime(entry, runtime=runtime, model=model, **_effort_kwargs(effort))
-        break
-    else:
-        raise RoleRuntimeRefusal(f"switchyard: {config_path} has no role {role_name!r}")
-    team_launcher._write_json_atomic(config_path, raw)
-    team_launcher.ensure_owner_file(config, config_path, runner=runner)
-    return team_launcher.load_project_config(config.project, config_path)
 
 
 def _session_is_live(
@@ -727,10 +731,6 @@ def _journal_role(journal: RuntimeJournal, config_path: Path):
     """The launcher's config and the journal's role, as the config says now."""
     config = team_launcher.load_project_config(journal.project, config_path)
     return config, team_launcher._role_by_name(config, journal.role)
-
-
-def _restore_projection(journal: RuntimeJournal) -> None:
-    Path(journal.config_path).write_text(journal.previous_config_bytes, encoding="utf-8")
 
 
 def _observe(
@@ -1051,6 +1051,17 @@ def switch_role_runtime(
             + "\n  - ".join(checks.blockers)
         )
     if checks.is_noop:
+        # The role and the board agree, yet the tenant's copies of the declared
+        # workflow can still name another runtime: an interrupted write, or a
+        # switch made before this one wrote them all (Otto, SYRD-558). The same
+        # command brings them in line with the board, with no worker restarted.
+        stale = _stale_projection(_declared_projection(config_path, document)) if checks.board_runtime is not None else {}
+        if stale and not dry_run:
+            from scripts.workflow_manage import apply_files
+
+            apply_files(stale)
+            for path in stale:
+                team_launcher.ensure_owner_file(config, path, runner=runner)
         return RuntimeSwitchResult(
             project=config.project,
             role=role_name,
@@ -1060,6 +1071,8 @@ def switch_role_runtime(
             configured_changed=False,
             live_session_changed=False,
             reconnected_slots=(),
+            projection_repaired=tuple(str(path) for path in stale),
+            projection_written=bool(stale) and not dry_run,
         )
 
     board = client or TicketBoardWriteClient(
@@ -1127,7 +1140,8 @@ def switch_role_runtime(
 
         updated = _write_runtime_projection(
             config, config_path=config_path, role_name=role_name, runtime=runtime,
-            runner=runner, model=model, effort=effort,
+            runner=runner, model=model, effort=effort, document=proposed,
+            journal=journal, journal_path=journal_path,
         )
         journal.record("projection")
         journal.write(journal_path)

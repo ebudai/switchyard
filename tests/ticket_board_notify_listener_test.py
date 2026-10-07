@@ -345,12 +345,18 @@ def sequenced_cursor_runner(*outputs: str) -> Any:
     return runner
 
 
+def composer_read(args: list[str]) -> bool:
+    """SYRD-550's composer read (no -J, so its rows line up with the cursor): it
+    sees the screen as it is now and does not use up one of a probe's samples."""
+    return "capture-pane" in args and "-J" not in args
+
+
 def sequenced_capture_runner(*outputs: str) -> Any:
     values = list(outputs)
     fallback = values[-1] if values else ""
 
     def runner(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        value = values.pop(0) if values else fallback
+        value = (values[0] if values else fallback) if composer_read(args) else values.pop(0) if values else fallback
         return subprocess.CompletedProcess(args, 0, stdout=value)
 
     return runner
@@ -364,7 +370,7 @@ def targeted_capture_runner(target: str, *outputs: str) -> Any:
         requested_target = str(args[args.index("-t") + 1]) if "-t" in args else ""
         if requested_target != target:
             return subprocess.CompletedProcess(args, 0, stdout="")
-        value = values.pop(0) if values else fallback
+        value = (values[0] if values else fallback) if composer_read(args) else values.pop(0) if values else fallback
         return subprocess.CompletedProcess(args, 0, stdout=value)
 
     return runner
@@ -379,7 +385,9 @@ def targeted_alternating_capture_runner(target: str, *prefix_outputs: str) -> An
         requested_target = str(args[args.index("-t") + 1]) if "-t" in args else ""
         if requested_target != target:
             return subprocess.CompletedProcess(args, 0, stdout="")
-        if values:
+        if composer_read(args):
+            value = values[0] if values else f"frame {index % 2}\n"
+        elif values:
             value = values.pop(0)
         else:
             value = f"frame {index % 2}\n"

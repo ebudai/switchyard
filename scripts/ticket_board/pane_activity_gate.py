@@ -653,7 +653,19 @@ class PaneActivityGate:
             return None
         if pane_height <= 0 or cursor_x < 0 or cursor_y < 0:
             return None
-        return cursor_x > self.director_composer_home_x
+        # SYRD-550: the composer's own content decides, not the cursor's column
+        # alone (pane_composer). No capture at all keeps the column rule; a
+        # capture that cannot place the cursor is unavailable, which holds.
+        from . import pane_composer
+
+        try:
+            capture = self.capture_pane_runner(
+                ["tmux", "capture-pane", "-p", "-t", target],
+                check=True, text=True, capture_output=True, timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return cursor_x > self.director_composer_home_x
+        return pane_composer.composing(capture.stdout.splitlines(), cursor_x, cursor_y, self.director_composer_home_x)
 
     def _reset_director_startup_hold(self, *, clear_released: bool = True) -> None:
         self._director_startup_hold_state_ts = None

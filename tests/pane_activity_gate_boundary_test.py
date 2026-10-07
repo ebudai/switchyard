@@ -597,6 +597,11 @@ def test_the_readers_build_their_gate_from_notify_listener_when_they_run() -> No
     check(result.stdout.strip() == "PATCHED True", f"a patch on notify_listener is what a call-time import sees; restored, it is the module's own: {result.stdout}{result.stderr[-400:]}")
 
 
+# SYRD-550: the cursor check reads the composer's content through a leaf module
+# imported when it runs. It imports nothing itself, so it can close no cycle.
+LATER_IMPORTS = {"PaneActivityGate._target_cursor_state": ["from . import pane_composer"]}
+
+
 def test_the_seams_read_through_notify_listener_and_nothing_bound() -> None:
     tree = ast.parse((ROOT / "scripts" / "ticket_board" / "pane_activity_gate.py").read_text(encoding="utf-8"))
     by_name = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
@@ -615,7 +620,7 @@ def test_the_seams_read_through_notify_listener_and_nothing_bound() -> None:
             check(ast.unparse(node.body[first]) == CALL_TIME_IMPORT and own == [CALL_TIME_IMPORT],
                   f"{label}: notify_listener imported first thing (after its docstring), and nothing else: {own}")
         else:
-            check(own == [], f"{label}: reads nothing of notify_listener and imports nothing: {own}")
+            check(own == LATER_IMPORTS.get(label, []), f"{label}: reads nothing of notify_listener and imports nothing: {own}")
         skip = set()
         for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs + [v for v in (node.args.vararg, node.args.kwarg) if v]:
             if a.annotation is not None:
@@ -626,6 +631,9 @@ def test_the_seams_read_through_notify_listener_and_nothing_bound() -> None:
         bare = sorted({x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and id(x) not in skip
                        and (x.id in expected or x.id in MOVED or x.id in ("PaneHookStateStore", "ActivityTrace", "ComposerSnapshot", "LOGGER"))})
         check(bare == [], f"{label}: none of them read past it: {bare}")
+    leaf = ast.parse((ROOT / "scripts" / "ticket_board" / "pane_composer.py").read_text(encoding="utf-8"))
+    leaf_imports = [ast.unparse(x) for x in ast.walk(leaf) if isinstance(x, (ast.Import, ast.ImportFrom))]
+    check(leaf_imports == ["from __future__ import annotations"], f"pane_composer imports nothing: {leaf_imports}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     check(top == MODULE_IMPORTS and not [n for n in tree.body if isinstance(n, (ast.If, ast.Try))], f"the standard library only, at load: {top}")
     consts = {n.targets[0].id if isinstance(n, ast.Assign) else n.target.id: (ast.unparse(n.annotation) if isinstance(n, ast.AnnAssign) else None, ast.unparse(n.value))
@@ -702,12 +710,33 @@ def test_the_entry_point_answers_as_before() -> None:
 # --- behaviour -----------------------------------------------------------------------------------------------------
 
 
+CURSOR_PROBE = "tmux display-message -p -t {} #{{cursor_x}} #{{cursor_y}} #{{pane_height}}"
+
+
+def without_composer_reads(value, dropped: list):
+    """SYRD-550 reads the composer right after each cursor probe: that one call, and only there, is set aside."""
+    if isinstance(value, dict):
+        return {k: without_composer_reads(v, dropped) for k, v in value.items()}
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            if (isinstance(item, str) and item.startswith("tmux capture-pane -p -t ") and out
+                    and out[-1] == CURSOR_PROBE.format(item.removeprefix("tmux capture-pane -p -t "))):
+                dropped.append(item)
+                continue
+            out.append(without_composer_reads(item, dropped))
+        return out
+    return value
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
+    dropped: list = []
     for label, spec in CASES.items():
         for holder in (m, t):
-            got = run(holder, spec)
+            got = without_composer_reads(run(holder, spec), dropped)
             check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {json.dumps(got)[:600]}")
+    check(len(dropped) >= 100, f"the composer reads after cursor probes were there to set aside: {len(dropped)}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

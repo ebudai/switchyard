@@ -51,6 +51,17 @@ TURN_START_EVENTS = frozenset({"UserPromptSubmit", "PreInvocation", "pre_llm_cal
 #: array when nothing is in flight" (read in the installed 2.1.284 bundle).
 #: No other runtime's turn end is known to say this, and none is assumed to.
 BACKGROUND_WORK_SOURCES = frozenset({"claude.Stop"})
+#: Hermes runs a background memory/skill review after a turn, in the same session
+#: (SYRD-556): a forked agent with the parent's session id whose own
+#: pre_llm_call, post_llm_call and on_session_end reach these hooks exactly as the
+#: foreground's do. Measured on Hermes 0.15.2, every review prompt starts with this.
+HERMES_BACKGROUND_REVIEW_PREFIX = "Review the conversation above and "
+HERMES_RUN_SOURCES = frozenset({"hermes.pre_llm_call", "hermes.post_llm_call", "hermes.on_session_end"})
+#: How long a background review counts as in flight: one that never reports its
+#: end stops counting rather than pinning the pane.
+HERMES_BACKGROUND_MAX_SECONDS = 1800.0
+#: Long enough for a whole conversation history on stdin; reading stops at EOF.
+HERMES_PAYLOAD_TIMEOUT_SECONDS = 2.0
 PROC_ROOT = Path("/proc")
 SESSION_START_FRESH_SOURCE = "startup"
 DIRECTOR_ROLE = "director"
@@ -254,7 +265,7 @@ def _session_start_record(payload: object, *, pid: int | None = None, proc_root:
 
 def _write_state(state_dir: str | Path, target: str, state: str, *, source: str = "",
                  background_work: dict | None = None, session_start: dict | None = None,
-                 checkout: dict | None = None) -> Path:
+                 checkout: dict | None = None, hermes_runs: dict | None = None) -> Path:
     normalized_state = state.strip().lower()
     if normalized_state not in {"idle", "busy", "blocked"}:
         raise ValueError("pane hook state must be idle, busy, or blocked")
@@ -300,6 +311,10 @@ def _write_state(state_dir: str | Path, target: str, state: str, *, source: str 
         payload["last_checkout"] = checkout
     elif isinstance(previous, dict) and isinstance(previous.get("last_checkout"), dict):
         payload["last_checkout"] = previous["last_checkout"]
+    # Which Hermes runs are in flight (SYRD-556). Every Hermes write passes it;
+    # any other source has no Hermes runs to record.
+    if hermes_runs is not None:
+        payload["hermes_runs"] = hermes_runs
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
@@ -811,6 +826,100 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _hermes_session_boundary(state_dir: str | Path, target: str, source: str) -> dict | None:
+    """A Hermes session starting or finalizing has no foreground turn open; reviews still running keep counting."""
+    if not source.startswith("hermes."):
+        return None
+    try:
+        previous = json.loads(_target_path(Path(state_dir).expanduser(), target).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous = None
+    return {**_hermes_runs(previous, time.time()), "foreground_open": False}
+
+
+def _hermes_run_is_background(payload: object) -> bool | None:
+    """True for the background review's run, False for a foreground one, None when the payload cannot say."""
+    extra = payload.get("extra") if isinstance(payload, dict) else None
+    message = extra.get("user_message") if isinstance(extra, dict) else None
+    if not isinstance(message, str):
+        return None
+    return message.startswith(HERMES_BACKGROUND_REVIEW_PREFIX)
+
+
+def _hermes_runs(previous: object, now: float) -> dict:
+    """The recorded Hermes runs, with review entries past HERMES_BACKGROUND_MAX_SECONDS dropped."""
+    runs = previous.get("hermes_runs") if isinstance(previous, dict) else None
+    runs = runs if isinstance(runs, dict) else {}
+
+    def live(key: str) -> list[float]:
+        stamps = runs.get(key) if isinstance(runs.get(key), list) else []
+        return [float(at) for at in stamps if isinstance(at, (int, float)) and now - float(at) < HERMES_BACKGROUND_MAX_SECONDS]
+
+    return {"foreground_open": runs.get("foreground_open") is True,
+            "background_open": live("background_open"), "background_ending": live("background_ending")}
+
+
+def _hermes_lifecycle(source: str, background: bool | None, runs: dict, now: float) -> tuple[bool, dict]:
+    """Whether a Hermes run event is the foreground's evidence, to be written as installed, and the runs after it.
+
+    The review's run is never the pane's: its start writes no busy and no turn
+    start, its end no idle. on_session_end says nothing about whose run ended, so
+    it is attributed: to a review whose post_llm_call already came; to a review
+    still in flight when a foreground turn is open too (each run ends exactly
+    once, so the next end is the foreground's); otherwise to the foreground.
+    """
+    runs = {**runs, "background_open": list(runs["background_open"]), "background_ending": list(runs["background_ending"])}
+    event = source.split(".", 1)[1]
+    if event == "pre_llm_call":
+        if background:
+            runs["background_open"].append(now)
+            return False, runs
+        runs["foreground_open"] = True
+        return True, runs
+    if event == "post_llm_call":
+        if background:
+            if runs["background_open"]:
+                runs["background_open"].pop(0)
+            runs["background_ending"].append(now)
+            return False, runs
+        runs["foreground_open"] = False
+        return True, runs
+    if runs["background_ending"]:
+        runs["background_ending"].pop(0)
+        return False, runs
+    if runs["foreground_open"] and runs["background_open"]:
+        runs["background_open"].pop(0)
+        return False, runs
+    runs["foreground_open"] = False
+    return True, runs
+
+
+def _record_hermes_run(state_dir: str | Path, target: str, state: str, source: str, payload: object) -> bool:
+    """Apply one Hermes run event under the target's lock; True when it was the foreground's and was written."""
+    import fcntl
+
+    target_dir = Path(state_dir).expanduser()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = _target_path(target_dir, target)
+    with open(path.with_name(f".{path.name}.lock"), "a+") as lock:
+        # Two Hermes threads can run these hooks at once; the ledger is read-modify-write.
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = None
+        now = time.time()
+        foreground, runs = _hermes_lifecycle(source, _hermes_run_is_background(payload), _hermes_runs(previous, now), now)
+        if foreground:
+            _write_state(target_dir, target, state, source=source, hermes_runs=runs)
+        elif isinstance(previous, dict):
+            # Only the ledger changes: the pane's state, source and times stay the foreground's.
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({**previous, "hermes_runs": runs}, sort_keys=True) + "\n", encoding="utf-8")
+            tmp.replace(path)
+    return foreground
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     target = _resolve_target(args.target.strip(), os.environ)
@@ -823,6 +932,7 @@ def main(argv: list[str] | None = None) -> int:
     session_path = _target_path(session_dir, target)
     existing_session_id = _session_id_from_file(session_path)
     should_wait_for_session_payload = args.record_session or not existing_session_id
+    foreground = True
     if args.source in BACKGROUND_WORK_SOURCES:
         # Read first: this turn end's input says whether the session is done or
         # paused on background work, and the state written must say which.
@@ -834,7 +944,16 @@ def main(argv: list[str] | None = None) -> int:
         # Read first: the conversation this SessionStart opened is recorded
         # with the state it writes (SYRD-540).
         payload = _read_stdin_json(timeout=args.stdin_timeout)
-        _write_state(state_dir, target, args.state, source=args.source, session_start=_session_start_record(payload))
+        _write_state(state_dir, target, args.state, source=args.source, session_start=_session_start_record(payload),
+                     hermes_runs=_hermes_session_boundary(state_dir, target, args.source))
+    elif args.source in HERMES_RUN_SOURCES:
+        # Read first: whose run this is decides whether it is the pane's evidence at all (SYRD-556).
+        payload = _read_stdin_json(timeout=max(args.stdin_timeout, HERMES_PAYLOAD_TIMEOUT_SECONDS))
+        foreground = _record_hermes_run(state_dir, target, args.state, args.source, payload)
+    elif args.source == "hermes.on_session_finalize":
+        _write_state(state_dir, target, args.state, source=args.source,
+                     hermes_runs=_hermes_session_boundary(state_dir, target, args.source))
+        payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
     else:
         _write_state(state_dir, target, args.state, source=args.source)
         payload = _read_stdin_json(timeout=args.stdin_timeout if should_wait_for_session_payload else 0.0)
@@ -860,7 +979,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if output is not None:
             print(json.dumps(output, sort_keys=True))
-    if args.state == "busy" and args.source == "hermes.pre_llm_call":
+    if args.state == "busy" and args.source == "hermes.pre_llm_call" and foreground:
         output = _hermes_pre_llm_context_output(target=target, environ=os.environ)
         if output is not None:
             print(json.dumps(output, sort_keys=True))

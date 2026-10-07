@@ -29,6 +29,15 @@ from typing import Any, Callable, Mapping, Sequence
 
 from scripts import presentation_controller, team_launcher
 from scripts import runtime_arguments
+from scripts.role_command import role_registers_runtime
+from scripts.runtime_handover import (
+    Holder,
+    RuntimeHandover,
+    await_holders_gone,
+    await_registration,
+    board_holder,
+    pane_holders,
+)
 from scripts.ticket_board import runtime_catalog
 from scripts.tmux_session_argv import tmux_current_command_args
 from scripts.ticket_board.write_client import DEFAULT_BOARD_URL, TicketBoardWriteClient
@@ -620,6 +629,10 @@ def _restart_worker(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     start: Callable[..., int] = _default_start,
     on_stopped: Callable[[], None] | None = None,
+    handover: RuntimeHandover | None = None,
+    recorded_holder: Holder | None = None,
+    stopped: set[Holder] | None = None,
+    print_func: Callable[[str], None] = print,
 ) -> bool:
     """Replace the role's session, if it has one, with the configured runtime.
 
@@ -640,10 +653,22 @@ def _restart_worker(
 
     Returns whether a live session was actually replaced, which is what tells a
     later reader configured state from live state.
+
+    The replacement starts only once the stopped pane's process has gone,
+    because until then the board refuses its registration (SYRD-559).
+    ``recorded_holder`` is the board's holder as read before the workflow
+    changed, when the board could still show it. ``stopped`` collects the
+    processes this stop was waiting for, so a rollback can wait for any that
+    are still there before it restarts the old runtime.
     """
+    handover = handover or RuntimeHandover()
     role = team_launcher._role_by_name(config, role_name)
     was_live = _session_is_live(role, runner=runner)
+    holders: set[Holder] = set()
     if was_live:
+        holders = pane_holders(role, runner=runner, handover=handover, recorded=recorded_holder)
+        if stopped is not None:
+            stopped.update(holders)
         kill = runner(team_launcher.tmux_kill_session_args(role))
         if kill.returncode != 0:
             raise RuntimeError(f"could not stop {role.tmux_session} (exit {kill.returncode})")
@@ -655,7 +680,14 @@ def _restart_worker(
     team_launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
     if not was_live:
         return False
-    _start_and_prove(role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start)
+    await_holders_gone(
+        holders, role=role, replacement=team_launcher._role_cli_name(role),
+        handover=handover, print_func=print_func,
+    )
+    _start_and_prove(
+        role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start,
+        handover=handover,
+    )
     return True
 
 
@@ -666,17 +698,23 @@ def _start_and_prove(
     pane_state_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     start: Callable[..., int] = _default_start,
+    handover: RuntimeHandover | None = None,
 ) -> None:
     """Start the role and confirm it is really up.
 
     A start's exit code says the launcher was happy, not that a session exists.
-    Trusting it is how a blank pane gets reported as a success.
+    Trusting it is how a blank pane gets reported as a success. A session is
+    not enough either for a pane that registers with the board: it exists from
+    the moment tmux makes it, including the 47 ms a refused pane takes to close
+    (SYRD-559), so that pane is up only once the board's row names it.
     """
     result = start(role, config=config, pane_state_dir=pane_state_dir, runner=runner)
     if result != 0:
         raise RuntimeError(f"{role.role} did not come up under {team_launcher._role_cli_name(role)} (exit {result})")
     if not _session_is_live(role, runner=runner):
         raise RuntimeError(f"{role.role} reported a successful start but left no live session")
+    if role_registers_runtime(role):
+        await_registration(config, role, runner=runner, handover=handover or RuntimeHandover())
 
 
 def journal_path_for(config: team_launcher.ProjectConfig, *, config_path: Path, role_name: str) -> Path:
@@ -830,6 +868,8 @@ def _rollback(
     start: Callable[..., int] = _default_start,
     print_func: Callable[[str], None] = print,
     read_board: Callable[[], tuple[dict[str, Any], int]] | None = None,
+    handover: RuntimeHandover | None = None,
+    stopped_holders: set[Holder] | None = None,
 ) -> str:
     """Undo exactly the steps that were applied: board, projection, then worker.
 
@@ -839,6 +879,17 @@ def _rollback(
     """
     problems: list[str] = []
     applied = set(journal.steps_applied)
+    handover = handover or RuntimeHandover()
+    # Whoever the board says holds the role now -- typically the attempt being
+    # undone -- read while the board still declares that attempt's runtime;
+    # once the workflow is put back, its row is no longer shown.
+    attempt_holder: Holder | None = None
+    if "worker_stopped" in applied:
+        try:
+            attempt_config, attempt_role = _journal_role(journal, config_path)
+            attempt_holder = board_holder(attempt_config, attempt_role, handover)
+        except Exception:  # noqa: BLE001 - the pane's own process is still waited for
+            attempt_holder = None
 
     def attempt(step: str, undo: Callable[[], None]) -> bool:
         try:
@@ -904,18 +955,32 @@ def _rollback(
             # when its check said otherwise (SYRD-447). Starting "attach or
             # start" over it would call the old runtime restored while the new
             # one kept the pane.
+            holders: set[Holder] = set()
             if _session_is_live(role, runner=runner):
+                holders = pane_holders(role, runner=runner, handover=handover, recorded=attempt_holder)
                 kill = runner(team_launcher.tmux_kill_session_args(role))
                 if kill.returncode != 0:
                     raise RuntimeError(
                         f"could not stop the failed {journal.requested_runtime} attempt in "
                         f"{role.tmux_session} (exit {kill.returncode})"
                     )
+            elif attempt_holder is not None and handover.live(attempt_holder):
+                # The attempt's session is gone but its process is not: it
+                # still holds the role, exactly as the original did (SYRD-559).
+                holders = {attempt_holder}
+            # And the original pane, if the switch failed because it would not
+            # leave: the restored runtime registers against it just the same.
+            holders |= {holder for holder in (stopped_holders or ()) if handover.live(holder)}
             team_launcher.clear_session_record_for_role(
                 role, team_launcher.role_session_dir(config, role)
             )
+            await_holders_gone(
+                holders, role=role, replacement=f"the restored {journal.previous_runtime}",
+                handover=handover, print_func=print_func,
+            )
             _start_and_prove(
-                role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start
+                role, config=config, pane_state_dir=pane_state_dir, runner=runner, start=start,
+                handover=handover,
             )
 
         restored_worker = attempt("worker", restart_previous)
@@ -956,6 +1021,9 @@ def switch_role_runtime(
     start: Callable[..., int] = _default_start,
     busy_check: Callable[..., bool] = _is_busy,
     print_func: Callable[[str], None] = print,
+    #: How the stopped pane's board registration is handed to the new one
+    #: (SYRD-559). None uses the defaults and the tenant's own board.
+    handover: RuntimeHandover | None = None,
 ) -> RuntimeSwitchResult:
     _require_director(config, environ)
     if force and not reason.strip():
@@ -1045,6 +1113,12 @@ def switch_role_runtime(
 
     live_changed = False
     reconnected: tuple[int, ...] = ()
+    handover = handover or RuntimeHandover()
+    # The board's record of who holds the role, read while it still declares
+    # the runtime that holder registered under: after the workflow changes,
+    # its row is hidden from the read but still counted by the refusal.
+    recorded_holder = board_holder(config, team_launcher._role_by_name(config, role_name), handover)
+    stopped: set[Holder] = set()
     try:
         applied = board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=False)
         journal.applied_workflow_revision = int((applied or {}).get("revision") or 0)
@@ -1069,6 +1143,10 @@ def switch_role_runtime(
             runner=runner,
             start=start,
             on_stopped=note_stopped,
+            handover=handover,
+            recorded_holder=recorded_holder,
+            stopped=stopped,
+            print_func=print_func,
         )
         journal.record("worker")
         journal.write(journal_path)
@@ -1093,6 +1171,8 @@ def switch_role_runtime(
             start=start,
             print_func=print_func,
             read_board=lambda: read_workflow(board_url=config.board_url or DEFAULT_BOARD_URL),
+            handover=handover,
+            stopped_holders=stopped,
         )
         if remaining:
             if not journal.rollback_problems:

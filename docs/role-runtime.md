@@ -45,13 +45,46 @@ Then, journalling each step so it can be undone in reverse:
    from the new runtime's defaults, because a resume flag belonging to the old
    CLI would be handed to one that cannot read it.
 7. Stop the old session, clear the resume record — it belongs to the runtime
-   being left behind — and start the replacement.
+   being left behind — wait until the stopped pane's process has really gone,
+   and start the replacement. On a board that takes runtime registrations, the
+   replacement counts as started only once the board's own record names it
+   (see below).
 8. **Only then**, reconnect every display slot mapped to that role. Reconnecting
    into the gap between stop and start attaches the proxy to nothing and parks
    it again for the same reason.
 
 A detached role, or one no slot is showing, simply skips the last step; that is
 reported as "no display slot showed it" rather than passed over in silence.
+
+## Handing the board registration over
+
+On a process-authority board, a role's pane registers itself before its CLI
+starts, and the board refuses that registration while the role's recorded
+holder is still a live process ("role main is held by a live pane"). Stopping a
+session with `tmux kill-session` only hangs the pane up; its process can take a
+few seconds to leave. Starting the replacement straight away therefore lost the
+race every time: the new pane was refused, closed about 47 ms later, and the
+command reported a switch that left the role unregistered (SYRD-559).
+
+So the switch:
+
+- notes who holds the role before it stops anything: the pane's root process,
+  which is what a pane registers as, and the board's own record of the holder,
+  read before the workflow changes (afterwards the board no longer shows a row
+  for the old runtime, though its refusal still counts it);
+- after the stop, waits up to 15 seconds for those processes to exit, then sends
+  SIGTERM and waits 5 more, then SIGKILL and 3 more. Signals go through a pidfd
+  checked against the process's start time, so a reused pid is never hit;
+- starts the replacement only once none is left. A holder that outlives all
+  three steps stops the switch with nothing new started, naming the pid;
+- after the start, waits up to 30 seconds for the board's runtime assignment to
+  name the new pane's own process. A pane that closes first is reported at once,
+  with its registrar's refusal as the place to look; a row naming any other
+  process is not accepted.
+
+Any of these failures undoes the switch like any other. The undo restarts the
+previous runtime the same way, waiting both for the attempt it stops and for an
+original pane that never left.
 
 ## A role that is not running
 
@@ -82,7 +115,7 @@ replacement starts. A stop recorded only on success is invisible to the undo if
 the start then fails, which leaves the role down while the command reports a
 clean rollback — the same class of silent failure this command exists to
 prevent. A rollback is only called clean once the previous session is proven
-live again. If the undo cannot finish, the command says so explicitly, names what is
+live again, and, where the board takes registrations, registered again. If the undo cannot finish, the command says so explicitly, names what is
 still wrong, and leaves the journal in place:
 
 ```

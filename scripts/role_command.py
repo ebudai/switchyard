@@ -138,6 +138,19 @@ def hermes_env_for_role(role: RoleConfig, *, session_dir: Path) -> dict[str, str
     return {"HERMES_HOME": str(launcher.hermes_home_for_role(role, session_dir=session_dir))}
 
 
+def role_registers_runtime(role: RoleConfig) -> bool:
+    """Whether this role's pane registers its runtime with the board before its CLI starts.
+
+    Only a process-authority board takes registrations: the pane runs
+    `ticket-board-register-runtime`, which refuses -- and the pane exits --
+    while another live process holds the role. Anything that replaces such a
+    pane has to respect that rule (SYRD-559), so it asks the same question the
+    pane's command line is built from.
+    """
+    socket_path = str(role.env.get("TICKET_BOARD_SOCKET") or "").strip()
+    return bool(socket_path) and str(role.env.get("TICKET_BOARD_PROCESS_AUTHORITY") or "") == "1"
+
+
 def cli_command_for_role(
     role: RoleConfig,
     *,
@@ -195,7 +208,7 @@ def cli_command_for_role(
     env["PATH"] = launcher._prepend_paths(env.get("PATH") or launcher.default_pane_base_path(bin_user), pane_path_dirs)
     env_prefix = ["env", *launcher._env_unset_prefix((*launcher.PANE_TARGET_ENV_KEYS, *role.unset_env)), *launcher._env_prefix(env)]
     socket_path = str(role.env.get("TICKET_BOARD_SOCKET") or "").strip()
-    if socket_path and str(role.env.get("TICKET_BOARD_PROCESS_AUTHORITY") or "") == "1":
+    if role_registers_runtime(role):
         runtime, target = launcher.role_runtime_binding(role)
         return [
             *env_prefix,

@@ -82,7 +82,7 @@ def _role_status(
             text=True,
         )
         pane_dead = proc.returncode != 0 or str(getattr(proc, "stdout", "") or "").strip() == "1"
-    resumable = bool(team_launcher.session_id_for_role(role, config.session_dir))
+    resumable = bool(team_launcher.session_id_for_role(role, team_launcher.role_session_dir(config, role)))
     state = "live" if live and not pane_dead else "dead" if live else "missing"
     return {"role": role_name, "state": state, "live": live and not pane_dead, "resumable": resumable}
 

@@ -708,7 +708,7 @@ from scripts.provider_resume import (
     _claude_project_dir_for_workdir,
     clear_unverified_resume_for_role,
     CODEX_SESSIONS_DIR_NAME,
-    hermes_home_for_role,
+    hermes_home_for_role, role_hermes_home,
     HERMES_PRIVATE_HOME_ENTRIES,
     HERMES_SHARED_HOME_ENTRIES,
     _home_from_session_dir,

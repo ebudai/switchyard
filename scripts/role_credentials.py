@@ -444,15 +444,21 @@ def _role_credential_target(
         )
     if artifact.cli == "hermes":
         # Always expressed relative to the role's home so every component is
-        # created and anchored under it, whatever base is in use.
-        session_relative = Path(".local/state") / f"{config.project}-ticket-board"
-        home_name = launcher.session_file_name(role.target).removesuffix(".json")
-        return role_home, (
-            session_relative
-            / "hermes-homes"
-            / home_name
-            / Path(artifact.relative_path).name
-        )
+        # created and anchored under it, whatever base is in use. The home is
+        # the one the role runs with -- its own store under role-state
+        # isolation -- not the project-wide tree, which no entry point reads
+        # (SYRD-563).
+        hermes_home = launcher.role_hermes_home(config, role)
+        state_root = launcher._home_from_session_dir(launcher.role_session_dir(config, role)) / ".local" / "state"
+        try:
+            # Anchored on the `.local/state` component itself: a store outside
+            # any home must not be re-rooted under the role's home by accident.
+            relative_home = Path(".local/state") / hermes_home.relative_to(state_root)
+        except ValueError:
+            # A session store outside any home: the file goes in the role's
+            # HERMES_HOME itself, never in a tree the role does not run from.
+            return hermes_home, Path(Path(artifact.relative_path).name)
+        return role_home, relative_home / Path(artifact.relative_path).name
     return role_home, Path(artifact.relative_path)
 
 

@@ -60,7 +60,7 @@ EXPORTED = (
 
 #: What other Switchyard modules read through the launcher.
 READ_ELSEWHERE = {
-    "scripts/role_credentials.py": ("session_file_name",),
+    # SYRD-563: role_credentials now takes a Hermes role's home from role_hermes_home, not a session file name.
     "scripts/role_identity_cutover.py": ("session_file_name", "session_id_for_role", "_session_record_for_role"),
     "scripts/presentation_controller.py": ("session_id_for_role",),
     "scripts/role_command.py": ("session_id_for_role",),

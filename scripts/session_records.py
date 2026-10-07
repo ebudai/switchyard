@@ -368,13 +368,15 @@ def report_launch_session_records(
     attached_roles: Sequence[RoleConfig] | None = None,
     print_func: Callable[[str], None] = print,
 ) -> list[LaunchSessionRecordStatus]:
+    from scripts import team_launcher as launcher
+
     selected_roles = tuple(roles or config.roles)
     attached_role_names = {role.role for role in attached_roles or ()}
     attached_by_role = {
         role.role: LaunchSessionRecordStatus(
             role=role.role,
             target=role.target,
-            session_id=session_id_for_role(role, config.session_dir),
+            session_id=session_id_for_role(role, launcher.role_session_dir(config, role)),
             attached_to_running=True,
         )
         for role in selected_roles

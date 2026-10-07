@@ -258,6 +258,26 @@ def revert_incomplete_role_account_cutover(
     )
 
 
+#: Hermes's SQLite database and its write-ahead files: one database, copied whole or not at all.
+_HERMES_DATABASE_FILES = ("state.db", "state.db-wal", "state.db-shm")
+
+
+def _copy_hermes_home(source: Path, target: Path, *, owner: tuple[int, int] | None = None) -> None:
+    """A Hermes home's private state, merged without replacing the target's (SYRD-563).
+
+    Entry by entry as the other providers are, except the database: a WAL
+    copied beside another database's `state.db` would corrupt it, so the three
+    files move together, and only when the target has no database yet.
+    """
+    from scripts import team_launcher as launcher
+
+    keep_target_database = (target / "state.db").exists()
+    for state_name in sorted(launcher.HERMES_PRIVATE_HOME_ENTRIES):
+        if state_name in _HERMES_DATABASE_FILES and keep_target_database:
+            continue
+        _copy_tree_without_overwrite(source / state_name, target / state_name, owner=owner)
+
+
 def _copy_tree_without_overwrite(
     source: Path, target: Path, *, owner: tuple[int, int] | None = None
 ) -> None:
@@ -510,6 +530,15 @@ def repatriate_role_runtime_state(
                         if owner_ids is not None:
                             os.chown(destination, *owner_ids)
 
+        if not config.role_state_isolation and launcher._uses_hermes(role) and not (role.run_as_user and role.run_as_user != owner):
+            # The one explicit, one-way move of a shared-account role's Hermes
+            # state into its own store: copied without overwriting, the old tree
+            # left as it was and never read again by any entry point (SYRD-563).
+            _copy_hermes_home(
+                launcher.hermes_home_for_role(role, session_dir=config.session_dir),
+                launcher.hermes_home_for_role(role, session_dir=target_session_dir),
+                owner=owner_ids,
+            )
         if role.run_as_user and role.run_as_user != owner:
             source_home = launcher.home_dir_for_user(role.run_as_user) or Path("/home") / role.run_as_user
             cli = launcher._command_name(role.cli[0]) if role.cli else ""
@@ -542,12 +571,7 @@ def repatriate_role_runtime_state(
                 target_hermes_home = launcher.hermes_home_for_role(
                     role, session_dir=target_session_dir
                 )
-                for state_name in launcher.HERMES_PRIVATE_HOME_ENTRIES:
-                    _copy_tree_without_overwrite(
-                        source_hermes_home / state_name,
-                        target_hermes_home / state_name,
-                        owner=owner_ids,
-                    )
+                _copy_hermes_home(source_hermes_home, target_hermes_home, owner=owner_ids)
         if before:
             migrated_id = launcher.session_id_for_role(role, target_session_dir)
             expected_id = before[0][1]

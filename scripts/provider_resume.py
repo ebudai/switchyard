@@ -159,6 +159,21 @@ def hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path:
     return session_dir.expanduser().parent / "hermes-homes" / role_home_name
 
 
+def role_hermes_home(config: Any, role: RoleConfig) -> Path:
+    """The one HERMES_HOME a role runs with, whichever entry point starts it (SYRD-563).
+
+    `hermes_home_for_role` follows whatever session directory its caller holds,
+    so an entry point that passed the project-wide `config.session_dir` instead
+    of the role's own store ran Hermes from a different tree: Otto's `present
+    recover` came up in `<p>-ticket-board/hermes-homes/<pane>`, with empty
+    memories, beside the live `pane-sessions/roles/hermes-homes/<pane>`. This is
+    the role's store as every launch, start and runtime path already names it.
+    """
+    from scripts import team_launcher as launcher
+
+    return hermes_home_for_role(role, session_dir=launcher.role_session_dir(config, role))
+
+
 def _same_path(left: Path, right: Path) -> bool:
     return left.expanduser().resolve(strict=False) == right.expanduser().resolve(strict=False)
 

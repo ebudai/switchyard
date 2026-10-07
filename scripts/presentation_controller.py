@@ -1027,7 +1027,9 @@ def presentation_action(
         result = team_launcher.ensure_visible_role_session_for_viewer(
             role,
             mode="attach-or-start",
-            session_dir=prepared_config.session_dir,
+            # The role's own store, as launch and start use: the project-wide
+            # one handed Hermes another home (SYRD-563).
+            session_dir=team_launcher.role_session_dir(prepared_config, role),
             pane_state_dir=team_launcher.default_pane_state_dir_for_user(
                 prepared_config.run_as_user, project=prepared_config.project
             ),

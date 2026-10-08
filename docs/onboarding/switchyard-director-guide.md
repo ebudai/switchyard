@@ -300,6 +300,27 @@ revision: if the configuration moved since you read it, your write is rejected
 rather than silently overwriting someone else's. A rollback journal is written
 alongside, exactly as for `ticket-board-workflow apply`.
 
+## Giving design work its own stage
+
+A designer's only move is `release_draft` unless you give it a stage. To route
+specification work through ownership and review, add the optional design stage:
+
+```bash
+switchyard design-stage --dry-run   # review the document it would apply
+switchyard design-stage
+```
+
+You then send a ticket to `design` with `start_design`, from draft or from
+triage. The designer submits it to your `design_review`. You `return_design` it
+with a reason, or `accept_design` it into triage and route it to implementation
+as usual. `release_draft` is unchanged: a draft that needs no design still goes
+straight to triage.
+
+A designer with no pane is not notified or reminded, so tell it when work is
+waiting. Root's recorded workflow is not refreshed by this or any workflow
+write until SYRD-561 and SYRD-562 land. Details:
+[SYRD-567](../syrd-567-design-stage.md).
+
 ## Escalating to the human
 
 Escalate **decisions**, not technical direction the team can reason out. Product choices,

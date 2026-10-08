@@ -250,12 +250,14 @@ def run_policies(cluster, tmp: Path) -> None:
         if holds:
             check(f"serial slot held by {UAT} (user_review, assigned to user)" in line, (label, line))
             check("1 held by a ticket" in summary, (label, summary))
-            check((routed["state"], routed["queued_behind_ticket"]) == ("backlog", UAT), (label, routed))
+            # SYRD-568: it waits in the worker's queue, behind the UAT ticket.
+            check((routed["state"], routed["assignee"], routed["serial_queue"]["active"], routed["serial_queue"]["active_ticket"])
+                  == ("in_progress", WORKER, False, UAT), (label, routed))
         else:
             check("serial slot free" in line, (label, line))
             check("0 held by a ticket" in summary, (label, summary))
-            check((routed["state"], routed["assignee"], routed["queued_behind_ticket"])
-                  == ("in_progress", WORKER, ""), (label, routed))
+            check((routed["state"], routed["assignee"], routed["queued_behind_ticket"], routed["serial_queue"]["active"])
+                  == ("in_progress", WORKER, "", True), (label, routed))
         # Ready and running are said apart from the slot, never instead of it.
         check("serial slot" in line and ("ready," in line or "not ready," in line), line)
 

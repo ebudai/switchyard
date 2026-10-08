@@ -46,13 +46,13 @@ class ReadOnlyConnection:
         self.calls.append((sql, tuple(params)))
         if "to_regprocedure" in sql:
             # SYRD-537: the reminder-snooze probe; this board has the function.
-            return Result(one={"snooze": True, "size_review": True})  # and SYRD-541's size review
+            return Result(one={"snooze": True, "size_review": True, "serial_queue": True})  # SYRD-541 size review, SYRD-568 queue
         if "to_regclass" in sql:
             relation = "ticket_board.workflow_configuration" if self.workflow else None
             return Result(one={"relation": relation})
         if "SELECT document FROM ticket_board.workflow_configuration" in sql:
             return Result(one={"document": self.workflow})
-        if "WITH notification_scope" in sql:
+        if "notification_scope AS (" in sql:  # SYRD-568: after the serial_queue CTE it reads
             selected = params[0] if params else None
             row = {"id": "SYRD-1", "state": "in_progress", "updated": "2026-01-01"}
             return Result(many=[row] if selected in (None, "SYRD-1") else [])
@@ -61,7 +61,7 @@ class ReadOnlyConnection:
         raise AssertionError(sql)
 
     def ticket_queries(self) -> list[tuple[str, tuple[Any, ...]]]:
-        return [(sql, params) for sql, params in self.calls if "WITH notification_scope" in sql]
+        return [(sql, params) for sql, params in self.calls if "notification_scope AS (" in sql]
 
 
 def configured_workflow() -> dict[str, Any]:
@@ -75,10 +75,11 @@ def configured_workflow() -> dict[str, Any]:
 
 
 def test_legacy_and_configured_sql_bytes_and_parameters() -> None:
-    # SYRD-537 added the reminder_snooze column, SYRD-541 size_review; hashes measured from the new SQL.
+    # SYRD-537 added the reminder_snooze column, SYRD-541 size_review, SYRD-568 the serial_queue CTE and
+    # column; hashes measured from the new SQL.
     expected = {
-        False: "dba04e7674be8e02aa26ad6a100836a4457888a907d3ac820a417c831263d29d",
-        True: "0f3b03bac4e3a3c634e34a917e4a20f0b6153858b2709eaf007f955d8b45abb7",
+        False: "93e769ffa69cd2f24c62055edabc5e41c0d7221f55a4796357f576850fba1bc0",
+        True: "7bc4595eb3790b1b04dd16463a327b95f05e0a603f23e6ad7b74a2a256783557",
     }
     for workflow in (None, configured_workflow()):
         conn = ReadOnlyConnection(workflow)

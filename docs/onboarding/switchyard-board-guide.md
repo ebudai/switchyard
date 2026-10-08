@@ -134,7 +134,7 @@ system working, not a bug to route around.
 - `route` — the general move, from almost anywhere to almost anywhere. Director-only.
 - `reassign` — a new owner in the same stage, with `--assignee` and a required `--reason`.
   Changes no stage, no gate and no sign-off. Serial focus still applies: an implementer who
-  already holds work gets the ticket queued, not handed to them.
+  already holds work gets the ticket in their queue, not handed to them.
 - `defer` — → backlog
 - `cancel` — → cancelled
 - `mark-done` — director_review → done (with `--commit-hash`)
@@ -416,9 +416,15 @@ Notifications are delivered by typing into the assignee's pane. Two consequences
 
 ## Things that surprise people
 
-**Serial focus.** An implementer holds one ticket at a time. Route a second and the board
-returns it to backlog automatically; it will be picked up when the first clears, unless
-it is parked, manually controlled or blocked. This is the design, not a failure.
+**Serial focus.** An implementer works one ticket at a time, but may have several assigned.
+Route a second ticket to a busy implementer and it stays in Implementation, assigned, waiting
+in their queue: no handoff, no highlight, no reminders, and it cannot be submitted. When the
+active ticket finishes (or is blocked, parked or reassigned), the next one becomes active and
+its owner is told, once. Order is the lowest ticket number unless you set `blocked_by`; a
+blocked ticket waits until its blockers resolve, and `parent_id` orders nothing. The ticket
+view and `ticket-board-read ticket` show each ticket's place ("Queue: #2 in app's queue,
+behind SYRD-601"). A board with a pull policy keeps work in its ready stage instead. This is
+the design, not a failure (SYRD-568).
 
 **Blocked is not deferred.** If a ticket waits on another, set a blocker and leave it in
 its owning stage. Moving it to backlog reads as abandoned.

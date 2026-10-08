@@ -20,6 +20,17 @@ Run against a real cluster with a real configured workflow, because the
 announcement is written by a trigger from a redirect the database decides. A
 fake connection would assert the shape of a query rather than which of three
 indistinguishable notifications the board still means.
+
+SYRD-568: a Director-dispatched board no longer redirects. A route at a busy
+implementer waits in that implementer's queue and announces nothing, so the
+live sequence cannot happen on a board at this release -- checked first. The
+announcements it left are still on every board that took it, so the board is
+built as the release before SYRD-568 shipped (its schema.sql and rbac.sql), the
+redirects and announcements are made there by its own code, and the board is
+then upgraded the way the runner upgrades it before the listener works the
+queue. The one identity change made after the upgrade, in the race, is a
+Director edit of the queue fields, which is how a Director still adjusts a
+carried-over hold.
 """
 
 from __future__ import annotations
@@ -54,6 +65,11 @@ SUBJECT = "PGU-9"
 #: subject is redirected rather than accepted. These are the SYRD-91/106/93 of
 #: the live reproduction.
 RESERVATIONS = (("PGU-1", "app"), ("PGU-2", "ops"), ("PGU-3", "main"))
+#: SYRD-568: subjects diverted before the upgrade for the later cases, each
+#: carrying one announcement into this release.
+HELD_THEN_DEFERRED = "PGU-10"
+RACED = "PGU-11"
+MIGRATION = ROOT / "scripts" / "ticket_board" / "migrations" / "pgu977_syrd568_assigned_implementation_queue.sql"
 
 
 class Board:
@@ -92,6 +108,11 @@ class Board:
             {"comment": {"who": who, "text": text, "urgent": True}},
             caller_role=who,
         )
+
+    def edit_queue(self, ticket_id: str, queued_for: str, behind: str) -> None:
+        """The Director's edit of a carried-over hold's queue fields (SYRD-568)."""
+        self.app.director_edit_ticket(ticket_id, {"queued_for_assignee": queued_for, "queued_behind_ticket": behind},
+                                      reason="re-point the hold", caller_role="director")
 
     def queue_identity(self, ticket_id: str = SUBJECT) -> tuple[str, str]:
         raw = t.psql(self.listener, f"""
@@ -137,6 +158,12 @@ SELECT idle_reminder_count FROM ticket_board.ticket_notification_state
 WHERE ticket_id = '{ticket_id}';
 """))
 
+    def hold_back(self, *ticket_ids: str) -> None:
+        """Keep these subjects' announcements out of a delivery round until their own case."""
+        names = ", ".join(f"'{ticket_id}'" for ticket_id in ticket_ids)
+        t.psql(self.admin, "UPDATE ticket_board.ticket_notification_queue "
+                           f"SET next_attempt_at = clock_timestamp() + interval '1 day' WHERE ticket_id IN ({names});")
+
     def end_busy_backoff(self, ticket_id: str = SUBJECT) -> None:
         """The pane went idle, so the listener returns to what it deferred."""
         t.psql(self.admin, f"""
@@ -176,24 +203,50 @@ def queue_messages(board: Board, who: str) -> list[str]:
 
 
 def main() -> int:
+    from schema_function_drift import migrations_from, rbac_before, schema_before
+
     checks = 0
     with temporary_cluster(prefix="syrd108-queue-notice-", shutdown="immediate") as cluster:
+        # SYRD-568 first: at this release the live sequence announces nothing.
+        current = "syrd108_current"
+        admin = t.conninfo(cluster.socket_dir, cluster.port, current)
+        t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", current])
+        t.psql(admin, t.SCHEMA_PATH.read_text(encoding="utf-8"))
+        t.create_roles(admin)
+        t.psql(admin, t.RBAC_PATH.read_text(encoding="utf-8"))
+        for ticket_id, owner in RESERVATIONS:
+            t.seed_postgres_ticket(admin, ticket_id, title="Reserved work", state="in_progress", assignee=owner,
+                                   commit_exempt=True)
+        t.seed_postgres_ticket(admin, SUBJECT, title="Queued subject", state="analysis", assignee="director")
+        with tempfile.TemporaryDirectory(prefix="syrd108-assets.") as tmpdir:
+            app = TicketBoardApp(Path(tmpdir) / "frames", Path(tmpdir) / "assets", project=PROJECT, ticket_prefix="PGU",
+                                 database_url=t.conninfo(cluster.socket_dir, cluster.port, current, t.SERVICE_ROLE))
+            cfg = validate(json.loads((ROOT / "examples/workflows/inspection.json").read_text()))
+            cfg["queue"] = {"stage": "analysis", "assignee": "director"}
+            app.apply_workflow(cfg, expected_revision=0, dry_run=False, caller_role="director")
+            now = Board(app, admin, t.conninfo(cluster.socket_dir, cluster.port, current, "ticket_board_listener"))
+            now.route(SUBJECT, "app")
+            assert now.stage() == "in_progress/app" and now.queue_identity() == ("", ""), now.stage()
+            assert [row for row in now.queued() if row["queued_for"]] == [], now.queued()
+            checks += 1
+
         dbname = "syrd108_queue_notice"
         admin = t.conninfo(cluster.socket_dir, cluster.port, dbname)
         service = t.conninfo(cluster.socket_dir, cluster.port, dbname, t.SERVICE_ROLE)
         listener_conninfo = t.conninfo(cluster.socket_dir, cluster.port, dbname, "ticket_board_listener")
         t.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", dbname])
-        t.psql(admin, t.SCHEMA_PATH.read_text(encoding="utf-8"))
-        t.create_roles(admin)
-        t.psql(admin, t.RBAC_PATH.read_text(encoding="utf-8"))
+        # The board as the release before SYRD-568 shipped it.
+        t.psql(admin, schema_before(MIGRATION))  # the roles are the cluster's, made above
+        t.psql(admin, rbac_before(MIGRATION))
         for ticket_id, owner in RESERVATIONS:
             t.seed_postgres_ticket(
                 admin, ticket_id, title="Reserved work", state="in_progress",
                 assignee=owner, commit_exempt=True,
             )
-        t.seed_postgres_ticket(
-            admin, SUBJECT, title="Queued subject", state="analysis", assignee="director"
-        )
+        for ticket_id in (SUBJECT, HELD_THEN_DEFERRED, RACED):
+            t.seed_postgres_ticket(
+                admin, ticket_id, title="Queued subject", state="analysis", assignee="director"
+            )
 
         with tempfile.TemporaryDirectory(prefix="syrd108-assets.") as tmpdir:
             root = Path(tmpdir)
@@ -212,8 +265,9 @@ def main() -> int:
             app.apply_workflow(cfg, expected_revision=0, dry_run=False, caller_role="director")
             board = Board(app, admin, listener_conninfo)
 
-            # THE LIVE SEQUENCE. App, then Ops, then Main, with the Director's
-            # pane busy throughout so nothing is delivered in between.
+            # THE LIVE SEQUENCE, on the old release. App, then Ops, then Main,
+            # with the Director's pane busy throughout so nothing is delivered
+            # in between.
             board.route(SUBJECT, "app")
             assert board.stage() == "analysis/director", board.stage()
             assert board.queue_identity() == ("app", "PGU-1"), board.queue_identity()
@@ -233,6 +287,22 @@ def main() -> int:
             assert [row["queued_for"] for row in announcements] == ["app", "ops", "main"], announcements
             assert board.stage() == "analysis/director", board.stage()
             assert board.queue_identity() == ("main", "PGU-3"), board.queue_identity()
+            checks += 1
+            # And two more subjects, each carrying one App announcement into the upgrade.
+            for ticket_id in (HELD_THEN_DEFERRED, RACED):
+                board.route(ticket_id, "app")
+                assert board.queue_identity(ticket_id) == ("app", "PGU-1"), board.queue_identity(ticket_id)
+
+            # The upgrade, as the runner applies it: every migration from
+            # SYRD-568's on, then this release's rbac.sql. Nothing it does moves
+            # or announces anything.
+            queued_before = board.queued() + board.queued(HELD_THEN_DEFERRED) + board.queued(RACED)
+            for migration in migrations_from(MIGRATION):
+                t.psql(admin, migration.read_text())
+            t.psql(admin, t.RBAC_PATH.read_text(encoding="utf-8"))
+            assert board.queued() + board.queued(HELD_THEN_DEFERRED) + board.queued(RACED) == queued_before
+            assert board.stage() == "analysis/director" and board.queue_identity() == ("main", "PGU-3"), board.stage()
+            board.hold_back(HELD_THEN_DEFERRED, RACED)
             checks += 1
 
             # The pane goes idle. Only the instruction the board still means
@@ -300,38 +370,43 @@ def main() -> int:
 
             # Busy retry is preserved for a notice that is still current: the
             # repair must drop superseded announcements, not deferred ones.
-            board.route(SUBJECT, "app")
+            # (RACED carried a current App announcement through the upgrade.)
+            t.psql(admin, "UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() "
+                          f"WHERE ticket_id = '{RACED}';")
             board.sent.clear()
-            assert board.deliver(busy=True) == 0, board.sent
-            still_queued = [row for row in board.queued() if row["queued_for"] == "app"]
-            assert still_queued and still_queued[0]["last_error"] == "pane busy", board.queued()
-            busy_defers = [row for row in board.trace() if row["event"] == "gate_defer"]
+            assert board.deliver(busy=True, rounds=2) == 0, board.sent
+            still_queued = [row for row in board.queued(RACED) if row["queued_for"] == "app"]
+            assert still_queued and still_queued[0]["last_error"] == "pane busy", board.queued(RACED)
+            busy_defers = [row for row in board.trace(RACED) if row["event"] == "gate_defer"]
             assert any(row["busy_reason"] == "busy" for row in busy_defers), busy_defers
             checks += 1
 
             # THE RACE. Claimed while the App identity was current, rerouted to
             # Ops during the activity probe, so only the recheck immediately
             # before the send can catch it.
-            board.end_busy_backoff()
+            # Its own arrival notice is not what this is about; only the
+            # announcement is left for the listener to claim.
+            t.psql(admin, f"DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{RACED}' AND kind = 'transition';")
+            board.end_busy_backoff(RACED)
             board.sent.clear()
             rerouted: list[str] = []
 
             def reroute_during_probe(_target: str) -> bool:
                 if not rerouted:
                     rerouted.append("ops")
-                    board.route(SUBJECT, "ops")
+                    board.edit_queue(RACED, "ops", "PGU-2")
                 return False
 
             board.deliver_with_gate(reroute_during_probe, rounds=1)
             assert rerouted == ["ops"], rerouted
             assert queue_messages(board, "app") == [], board.sent
             raced = [
-                row for row in board.trace()
+                row for row in board.trace(RACED)
                 if row["event"] == "drop"
                 and row["busy_reason"] == "superseded_serial_focus_queue"
                 and row["phase"] == "pre_send_recheck"
             ]
-            assert raced, board.trace()
+            assert raced, board.trace(RACED)
             assert raced[-1]["announced_queued_for"] == "app", raced
             assert raced[-1]["current_queued_for"] == "ops", raced
             checks += 1
@@ -364,25 +439,28 @@ def main() -> int:
             # bookkeeping -- and an announcement still waiting to say "route it
             # again once App frees up" is now describing a queue that does not
             # exist.
+            # (HELD_THEN_DEFERRED carried its App announcement through the upgrade.)
             t.psql(admin, f"DELETE FROM ticket_board.ticket_notification_queue WHERE ticket_id = '{SUBJECT}';")
-            board.route(SUBJECT, "app")
-            assert board.queue_identity() == ("app", "PGU-1"), board.queue_identity()
-            pending = [row for row in board.queued() if row["queued_for"] == "app"]
-            assert pending, board.queued()
-            board.app.perform_workflow_action(SUBJECT, "defer", {}, caller_role="director")
-            assert board.stage() == "backlog/unassigned", board.stage()
-            assert board.queue_identity() == ("", ""), board.queue_identity()
+            assert board.queue_identity(HELD_THEN_DEFERRED) == ("app", "PGU-1"), board.queue_identity(HELD_THEN_DEFERRED)
+            pending = [row for row in board.queued(HELD_THEN_DEFERRED) if row["queued_for"] == "app"]
+            assert pending, board.queued(HELD_THEN_DEFERRED)
+            board.app.perform_workflow_action(HELD_THEN_DEFERRED, "defer", {}, caller_role="director")
+            assert board.stage(HELD_THEN_DEFERRED) == "backlog/unassigned", board.stage(HELD_THEN_DEFERRED)
+            assert board.queue_identity(HELD_THEN_DEFERRED) == ("", ""), board.queue_identity(HELD_THEN_DEFERRED)
+            board.end_busy_backoff(HELD_THEN_DEFERRED)
+            t.psql(admin, "UPDATE ticket_board.ticket_notification_queue SET next_attempt_at = clock_timestamp() "
+                          f"WHERE ticket_id = '{HELD_THEN_DEFERRED}';")
             board.sent.clear()
             board.deliver(busy=False, rounds=4)
             assert queue_messages(board, "app") == [], board.sent
-            assert [row for row in board.queued() if row["queued_for"]] == [], board.queued()
+            assert [row for row in board.queued(HELD_THEN_DEFERRED) if row["queued_for"]] == [], board.queued(HELD_THEN_DEFERRED)
             ended = [
-                row for row in board.trace()
+                row for row in board.trace(HELD_THEN_DEFERRED)
                 if row["event"] == "drop"
                 and row["busy_reason"] == "superseded_serial_focus_queue"
                 and row["current_queued_for"] == ""
             ]
-            assert ended, board.trace()[-6:]
+            assert ended, board.trace(HELD_THEN_DEFERRED)[-6:]
             checks += 1
 
     print(f"ticket_board_superseded_queue_notice_postgres_test: {checks} checks ok")

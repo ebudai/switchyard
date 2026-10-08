@@ -42,17 +42,27 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
     # SYRD-541's size review likewise.
     probe = conn.execute(
         "SELECT to_regprocedure('ticket_board.ticket_reminder_snooze(text,timestamptz)') IS NOT NULL AS snooze, "
-        "to_regprocedure('ticket_board.ticket_size_review(text)') IS NOT NULL AS size_review"
+        "to_regprocedure('ticket_board.ticket_size_review(text)') IS NOT NULL AS size_review, "
+        "to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS serial_queue"
     ).fetchone()
     present = (dict(probe) if isinstance(probe, dict)
-               else {"snooze": probe[0], "size_review": probe[1]} if probe is not None else {})
+               else {"snooze": probe[0], "size_review": probe[1], "serial_queue": probe[2]} if probe is not None else {})
     snooze_sql = (
         "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())" if present.get("snooze") else "NULL::jsonb"
     )
     size_sql = "ticket_board.ticket_size_review(t.id)" if present.get("size_review") else "NULL::jsonb"
+    # SYRD-568: each implementer's queue, read once per query. A board older
+    # than the queue has none, and every ticket reads as not queued.
+    queue_sql = (
+        "SELECT DISTINCT ON (q.ticket_id) q.* FROM ticket_board.serial_queue() q ORDER BY q.ticket_id, q.active DESC"
+        if present.get("serial_queue") else
+        "SELECT NULL::text AS implementer, NULL::text AS ticket_id, NULL::text AS state, NULL::integer AS queue_position, "
+        "NULL::boolean AS active, NULL::text[] AS waiting_on, NULL::text AS active_ticket WHERE false"
+    )
     return conn.execute(
         f"""
-WITH notification_scope AS (
+WITH serial_queue AS ({queue_sql}),
+notification_scope AS (
     SELECT
         scoped.id,
         scoped.state,
@@ -62,10 +72,13 @@ WITH notification_scope AS (
         scoped.queued_behind_ticket,
         notification_state.entered_current_state_at,
         COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
-        {owner_sql} AS owner_role
+        {owner_sql} AS owner_role,
+        -- SYRD-568: waiting in an implementer's queue is not anybody's current work.
+        COALESCE(serial_queue.active, true) AS serial_active
     FROM ticket_board.tickets scoped
     LEFT JOIN ticket_board.ticket_notification_state notification_state
         ON notification_state.ticket_id = scoped.id
+    LEFT JOIN serial_queue ON serial_queue.ticket_id = scoped.id
     WHERE {scope_sql}
 ),
 notification_candidates AS (
@@ -88,6 +101,7 @@ notification_candidates AS (
             AND notification_scope.awaiting_role = ''
             AND notification_scope.queued_for_assignee = ''
             AND notification_scope.queued_behind_ticket = ''
+            AND notification_scope.serial_active
             AND NOT EXISTS (
                 SELECT FROM ticket_board.ticket_blockers blocker
                 WHERE blocker.ticket_id = notification_scope.id
@@ -245,9 +259,15 @@ SELECT
          FROM ticket_board.ticket_attachments a
          WHERE a.ticket_id = t.id),
         '[]'::jsonb
-    ) AS screenshots
+    ) AS screenshots,
+    -- SYRD-568: where the ticket stands in its implementer's queue, if it is in one.
+    CASE WHEN serial_queue.ticket_id IS NULL THEN NULL ELSE jsonb_build_object(
+        'implementer', serial_queue.implementer, 'position', serial_queue.queue_position,
+        'active', serial_queue.active, 'waiting_on', to_jsonb(serial_queue.waiting_on),
+        'active_ticket', serial_queue.active_ticket) END AS serial_queue
 FROM ticket_board.tickets t
 LEFT JOIN active_work ON active_work.id = t.id
+LEFT JOIN serial_queue ON serial_queue.ticket_id = t.id
 LEFT JOIN ticket_board.ticket_notification_state notification_state
     ON notification_state.ticket_id = t.id
 {where}

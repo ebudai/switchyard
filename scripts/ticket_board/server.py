@@ -974,7 +974,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             self.send_json({
                 "project": getattr(self.app, "project", "pgu"),
                 "reservations": self.app.serial_reservations(),
-                "pull_queue": pull_queue.status(self.app),  # SYRD-539
+                **extension_operations.reservation_fields(self.app),  # SYRD-539 pull_queue, SYRD-568 queues
             })
             return
         if parsed.path == "/api/reminder-snoozes":  # SYRD-537

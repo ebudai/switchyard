@@ -215,7 +215,9 @@ def run_board_checks(cluster) -> None:
     )
     before = ticket_row(admin, "PGU-37")
     comments_before = comment_count(admin, "PGU-37")
-    check(reserved(admin, "app") == "PGU-37", "the implementer's slot is held")
+    # SYRD-568: a blocked ticket no longer holds its implementer's slot at all,
+    # which was the cost of leaving it in place; putting it down still works.
+    check(reserved(admin, "app") == "", "a blocked ticket holds no slot")
 
     parked = app.perform_workflow_action("PGU-37", "defer", {}, caller_role="director")
     check(parked["state"] == "backlog", f"the ordinary defer is allowed: {parked['state']}")

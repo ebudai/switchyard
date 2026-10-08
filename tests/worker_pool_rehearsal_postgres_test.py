@@ -359,15 +359,14 @@ def run_rehearsal(bench: Bench, pool, document: dict, members: list[str]) -> Non
     bench.clear_queue()
     bench.add_ticket("STL-150", state="in_progress", assignee="impl-1")
     state, assignee = bench.state_of("STL-150")
-    queue = document["queue"]
+    # SYRD-568: it waits in impl-1's own queue rather than in the holding destination.
     check(
-        (state, assignee) == (queue["stage"], queue["assignee"]),
-        f"the board diverts it to the tenant's own holding destination: {state}/{assignee}",
+        (state, assignee) == ("in_progress", "impl-1"),
+        f"the board keeps it with the worker, waiting: {state}/{assignee}",
     )
     marker = psql(
         bench.admin,
-        "SELECT queued_for_assignee || ' ' || queued_behind_ticket"
-        " FROM ticket_board.tickets WHERE id='STL-150';",
+        "SELECT implementer || ' ' || active_ticket FROM ticket_board.serial_queue() WHERE ticket_id='STL-150' AND NOT active;",
     )
     check(marker == "impl-1 STL-101", f"and records who it is waiting for and behind what: {marker!r}")
     check(

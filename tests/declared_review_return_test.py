@@ -204,25 +204,27 @@ END $$;
         seen["helper owner"] = t.psql(admin, "SELECT pg_get_userbyid(proowner) FROM pg_proc WHERE proname='declared_review_return';").strip()
         # Audit's case: a stage with NO sign-off whose ordinary forward route
         # shares its destination with an incidental reopen. That is not a return
-        # out of review, and a blocker still stops it.
+        # out of review, and a blocker still stops it. (SYRD-568 lets blocked
+        # work be placed in its implementer's queue, so the forward route here
+        # is the submission out of implementation, not the route into it.)
         shadow = copy.deepcopy(cfg)
-        shadow["transitions"].append({**move("analysis", "in_progress", "analysis_reopen_shadow", ["director"]),
+        shadow["transitions"].append({**move("in_progress", "inspection", "inspection_reopen_shadow", ["director"]),
                                       "primitive": "reopen"})
         revision = int(t.psql(admin, "SELECT coalesce(max(revision), 0) FROM ticket_board.workflow_configuration;").strip())
         app.apply_workflow(shadow, expected_revision=revision, dry_run=False, caller_role="director")
-        t.seed_postgres_ticket(admin, "PGU-6", title="PGU-6", state="analysis", assignee="director")
+        t.seed_postgres_ticket(admin, "PGU-6", title="PGU-6", state="in_progress", assignee="app")
         app.update_ticket("PGU-6", {"blocked_by": ["PGU-9"], "blocked_reason": "wait"}, caller_role="director")
         try:
-            app.perform_workflow_action("PGU-6", "route", {"target": "in_progress", "assignee": "app"}, caller_role="director")
+            app.perform_workflow_action("PGU-6", "submit_to_audit_without_commit", {"reason": "done"}, caller_role="app")
             seen["shadow route"] = "ok"
         except Exception as exc:  # noqa: BLE001
             seen["shadow route"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
         seen["shadow ticket"] = app.get_ticket("PGU-6")["state"]
         try:
             live = app.workflow_configuration()
-            seen["shadow helper"] = [workflow_config.declared_review_return(live, "analysis", "in_progress"),
+            seen["shadow helper"] = [workflow_config.declared_review_return(live, "in_progress", "inspection"),
                                      t.psql(admin, "SELECT ticket_board.declared_review_return("
-                                                   "ticket_board.declared_workflow(), 'analysis', 'in_progress');").strip()]
+                                                   "ticket_board.declared_workflow(), 'in_progress', 'inspection');").strip()]
             # And no stage without a sign-off is ever a review source, in either copy.
             pairs = [(a["name"], b["name"]) for a in live["stages"] for b in live["stages"] if not a.get("signoff")]
             seen["non-review returns"] = [f"{a}->{b}" for a, b in pairs if workflow_config.declared_review_return(live, a, b)] + \
@@ -291,7 +293,7 @@ def main() -> int:
     check(now["helper grantees"] == now["helper owner"] and "PUBLIC" not in now["helper grantees"],
           f"only the owner may call the helper on a board as the runner migrates and rbac.sql grants it -- "
           f"the runner's own revoke (SYRD-530) is what this proves, not pgu969's: {now['helper grantees']} (owner {now['helper owner']})")
-    check("unresolved blocker prevents forward promotion" in now["shadow route"] and now["shadow ticket"] == "analysis",
+    check("unresolved blocker prevents forward promotion" in now["shadow route"] and now["shadow ticket"] == "in_progress",
           f"Audit's case: a blocked forward route out of a stage with no sign-off is still refused, "
           f"whatever reopen shares its destination: {now['shadow route']} ({now['shadow ticket']})")
     check(now["shadow helper"] == [False, "f"] and now["non-review returns"] == [],

@@ -49,6 +49,20 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         (files.length ? ` - at or over 1,100 lines: ${files.join(', ')}` : '');
     }
 
+    // Where the ticket stands in its implementer's queue, or '' (SYRD-568).
+    function serialQueueText(queue) {
+      if (!queue) {
+        return '';
+      }
+      if (queue.active) {
+        return `Queue: ${queue.implementer}'s active ticket`;
+      }
+      const waiting = (queue.waiting_on || []).length
+        ? `, blocked by ${queue.waiting_on.join(', ')}`
+        : '';
+      return `Queue: #${queue.position} in ${queue.implementer}'s queue, behind ${queue.active_ticket || 'nothing active'}${waiting}`;
+    }
+
     function renderDetail() {
       const ticket = selectedTicket();
       if (!state.detailOpen || !ticket) {
@@ -566,6 +580,13 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       }
       // SYRD-537: a reminder snooze is scheduling, so it is said here and not
       // on the card (SYRD-266), and it says nothing about delivery.
+      const queueText = serialQueueText(ticket.serial_queue);
+      if (queueText) {
+        const queueLine = document.createElement('div');
+        queueLine.className = 'detail-serial-queue';
+        queueLine.textContent = queueText;
+        meta.appendChild(queueLine);
+      }
       const sizeText = sizeReviewText(ticket.size_review);
       if (sizeText) {
         const sizeLine = document.createElement('div');

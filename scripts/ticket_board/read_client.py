@@ -269,6 +269,15 @@ def format_queue_hold(ticket: dict[str, Any]) -> list[str]:
     reads exactly as before. Without this the redirect is only legible in the
     comment thread, which is where it was missed.
     """
+    queue = ticket.get("serial_queue")
+    if isinstance(queue, dict):  # SYRD-568: waiting in place in an implementer's queue
+        if queue.get("active"):
+            place = f"{queue.get('implementer')}'s active ticket"
+        else:
+            blocked = ", ".join(queue.get("waiting_on") or [])
+            place = (f"#{queue.get('position')} in {queue.get('implementer')}'s queue, behind "
+                     f"{queue.get('active_ticket') or 'nothing active'}" + (f", blocked by {blocked}" if blocked else ""))
+        return ["Queue:", f"  {place}", ""]
     queued_for = str(ticket.get("queued_for_assignee", "") or "")
     if not queued_for:
         return []

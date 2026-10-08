@@ -1367,6 +1367,12 @@ BEGIN
         IF ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
             RETURN NULL;
         END IF;
+        -- SYRD-568: a ticket waiting in its implementer's queue is handed over
+        -- when it becomes that implementer's active ticket, by
+        -- settle_serial_focus, and not before.
+        IF ticket_board.ticket_serial_waiting(NEW.id) THEN
+            RETURN NULL;
+        END IF;
         message := ticket_board.transition_message(
             NEW.id,
             NEW.title,
@@ -1420,6 +1426,9 @@ BEGIN
         IF ticket_board.ticket_has_unresolved_blockers(NEW.id) THEN
             RETURN NULL;
         END IF;
+        IF ticket_board.ticket_serial_waiting(NEW.id) THEN  -- SYRD-568, as above
+            RETURN NULL;
+        END IF;
 
         IF ticket_board.transition_target_role(NEW.state, NEW.assignee) IS NOT NULL THEN
             PERFORM ticket_board.enqueue_transition_notification(
@@ -1463,6 +1472,15 @@ BEGIN
           AND NOT t.manually_controlled
           AND NOT ticket_board.ticket_has_unresolved_blockers(t.id)
           AND ticket_board.unblock_transition_target_role(t.state, t.assignee) IS NOT NULL
+          -- SYRD-568: work still waiting in its implementer's queue is not
+          -- handed over by unblocking -- telling every unblocked ticket's owner
+          -- would wake all of them -- and work that unblocking just made
+          -- active was handed over once already, in this same transaction.
+          AND NOT ticket_board.ticket_serial_waiting(t.id)
+          AND NOT EXISTS (
+              SELECT FROM ticket_board.ticket_notification_queue q
+              WHERE q.ticket_id = t.id AND q.kind = 'transition' AND q.payload ? 'serial_activation'
+                AND q.xmin = pg_current_xact_id()::xid)
         ORDER BY t.ticket_number
     LOOP
         PERFORM ticket_board.enqueue_unblock_notification(
@@ -1965,7 +1983,7 @@ CREATE OR REPLACE FUNCTION ticket_board.ticket_serial_focus_reservation_is_curre
     p_queued_behind_ticket text
 )
 RETURNS boolean
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 AS $$
     -- Whether the reservation a queued ticket names is the one still holding
@@ -1985,7 +2003,13 @@ AS $$
     -- WHERE clauses would drop exactly the tickets whose wait had just ended.
     -- The predicate that exists to stop a ticket being silenced forever would
     -- have been the thing silencing it.
-    SELECT coalesce(btrim(p_queued_for_assignee), '') <> ''
+    -- SYRD-568: a ticket waiting in place in its implementer's queue is held
+    -- by that implementer's active ticket in exactly the same sense, whatever
+    -- its (now empty) markers say; every reminder that asks this is quiet
+    -- for it until it is active. PL/pgSQL, not SQL, because schema.sql defines
+    -- this function long before ticket_serial_waiting exists.
+    BEGIN RETURN ticket_board.ticket_serial_waiting(p_ticket_id) OR (
+       coalesce(btrim(p_queued_for_assignee), '') <> ''
        AND coalesce(btrim(p_queued_behind_ticket), '') <> ''
        AND coalesce(
                ticket_board.ticket_current_reserved_ticket(
@@ -2004,7 +2028,7 @@ AS $$
            FROM ticket_board.tickets held
            WHERE held.id = p_ticket_id
              AND btrim(lower(held.assignee)) = btrim(lower(p_queued_for_assignee))
-       );
+       )); END;
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.ticket_can_auto_advance_analysis(
@@ -2698,6 +2722,20 @@ DECLARE
     blocker_ticket_id text;
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('finish_current_stage_blocker');
+
+    -- SYRD-568: in an implementation stage the board already decided whose
+    -- turn it is -- the implementer's active ticket, the only one ever handed
+    -- over (settle_serial_focus). Ordering by arrival here instead held an
+    -- active ticket's notice behind tickets queued or blocked before it.
+    IF ticket_board.declared_workflow() IS NOT NULL AND ticket_board.declared_stage_kind(p_state) = 'implementation' THEN
+        -- Manual control is the Director's own hold, never admitted behind
+        -- anything, exactly as the arrival order below never held it.
+        IF EXISTS (SELECT FROM ticket_board.tickets t WHERE t.id = p_ticket_id AND t.manually_controlled) THEN
+            RETURN '';
+        END IF;
+        blocker_ticket_id := ticket_board.ticket_current_reserved_ticket(p_target_role);
+        RETURN CASE WHEN blocker_ticket_id IS NULL OR blocker_ticket_id = p_ticket_id THEN '' ELSE blocker_ticket_id END;
+    END IF;
 
     WITH current_ticket AS (
         SELECT
@@ -5708,7 +5746,10 @@ BEGIN
     END IF;
 
     target_state := new_state;
+    -- SYRD-568: a declared workflow queues assigned implementation work in
+    -- place, so only a legacy board still diverts it.
     IF new_state = 'in_progress'
+       AND ticket_board.declared_workflow() IS NULL
        AND ticket_board.ticket_is_implementer_assignee(force_move.assignee)
        AND ticket_board.ticket_current_reserved_ticket(force_move.assignee, force_move.id) IS NOT NULL THEN
         target_state := 'backlog';
@@ -5834,7 +5875,9 @@ BEGIN
     END IF;
     -- Held or blocked work is not actionable either. It stays reassigned; the
     -- existing unblock and release paths announce it when it becomes real work.
-    IF coalesce(ticket_row.manually_controlled, false) OR ticket_board.ticket_has_unresolved_blockers(id) THEN
+    -- SYRD-568: a ticket now waiting in its new owner's queue is not theirs to act on yet.
+    IF coalesce(ticket_row.manually_controlled, false) OR ticket_board.ticket_has_unresolved_blockers(id)
+       OR ticket_board.ticket_serial_waiting(id) THEN
         RETURN;
     END IF;
     message := id
@@ -7973,8 +8016,14 @@ BEGIN
         -- reservation the queue exists to protect. Resolving it here rather
         -- than in the caller means no write path can hand an implementer
         -- reserved work by declining to ask.
+        --
+        -- SYRD-568: only a pull policy still diverts, into its ready stage
+        -- pinned to the busy author. A Director-dispatched board leaves the
+        -- ticket where it was put, assigned, waiting in that implementer's
+        -- queue; only the active ticket holds the slot.
         IF previous.assignee IS DISTINCT FROM proposed.assignee THEN
-            IF ticket_board.declared_stage_kind(proposed.state)='implementation'
+            IF ticket_board.declared_scheduling() IS NOT NULL
+               AND ticket_board.declared_stage_kind(proposed.state)='implementation'
                AND ticket_board.ticket_is_implementer_assignee(proposed.assignee)
                AND NOT proposed.manually_controlled
                AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL THEN
@@ -8023,9 +8072,25 @@ BEGIN
     IF tr->>'primitive' NOT IN ('return','reopen')
        AND NOT ticket_board.declared_parking_stage(tr->>'to')
        AND NOT ticket_board.declared_review_return(cfg, previous.state, tr->>'to')
+       -- SYRD-568: placing blocked work in its implementer's queue promotes
+       -- nothing either -- it holds no slot and is handed to nobody until its
+       -- blockers resolve and it is the active ticket. Submitting it still is.
+       -- A pull policy queues in its ready stage instead, as before.
+       AND NOT (ticket_board.declared_stage_kind(tr->>'to') = 'implementation'
+                AND ticket_board.declared_scheduling() IS NULL)
        AND ticket_board.ticket_has_unresolved_blockers(previous.id) THEN
         RAISE EXCEPTION 'unresolved blocker prevents forward promotion: %',
             ticket_board.unresolved_blocker_list(previous.id); END IF;
+    -- SYRD-568: a ticket waiting in its implementer's queue is not that
+    -- implementer's work yet, so it cannot be submitted for review. Putting it
+    -- down, routing it back or cancelling it are not submissions.
+    IF source_stage->>'kind'='implementation'
+       AND (ticket_board.declared_stage_kind(tr->>'to')='review'
+            OR coalesce((tr->>'require_commit')::boolean,false) OR coalesce((tr->>'allow_no_code')::boolean,false))
+       AND ticket_board.ticket_serial_waiting(previous.id) THEN
+        RAISE EXCEPTION '% is waiting in %''s queue behind %; it can be submitted once it is the active ticket',
+            previous.id, previous.assignee, coalesce(ticket_board.ticket_current_reserved_ticket(previous.assignee),'its blockers')
+            USING ERRCODE='42501'; END IF;
     IF (tr->>'require_commit')::boolean AND btrim(proposed.commit_hash)='' AND NOT proposed.commit_exempt THEN
         RAISE EXCEPTION 'commit required'; END IF;
     -- A declared return out of review hands the work back: it needs no
@@ -8105,7 +8170,13 @@ BEGIN
     doc:=doc||jsonb_build_object('state',target,'assignee',proposed.assignee);
     proposed:=jsonb_populate_record(proposed,doc);
     PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
-    IF dest->>'kind'='implementation' AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
+    -- SYRD-568: on a Director-dispatched board a move into an implementation
+    -- stage lands there, assigned, even when that implementer already has
+    -- active work, and waits in their queue until it is the active ticket. A
+    -- pull policy keeps its ready stage as the queue (SYRD-539): there the
+    -- move is still diverted, pinned to the busy author.
+    IF ticket_board.declared_scheduling() IS NOT NULL
+       AND dest->>'kind'='implementation' AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
         IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
         queued_for:=proposed.assignee;
         reserved_by:=ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id);
@@ -9983,7 +10054,10 @@ AS $$
 BEGIN
     IF ticket_board.declared_workflow() IS NOT NULL THEN
         IF ticket_board.declared_stage_kind(NEW.state)='draft' THEN NEW.assignee:=coalesce(ticket_board.stage_default_assignee(NEW.state),NEW.assignee); END IF;
-        IF ticket_board.declared_stage_kind(NEW.state)='implementation' AND ticket_board.ticket_current_reserved_ticket(NEW.assignee,NEW.id) IS NOT NULL AND NOT NEW.manually_controlled THEN
+        -- SYRD-568: only a pull policy still diverts a new ticket for a busy
+        -- implementer; otherwise it waits in that implementer's queue.
+        IF ticket_board.declared_scheduling() IS NOT NULL
+           AND ticket_board.declared_stage_kind(NEW.state)='implementation' AND ticket_board.ticket_current_reserved_ticket(NEW.assignee,NEW.id) IS NOT NULL AND NOT NEW.manually_controlled THEN
             IF ticket_board.declared_workflow()->'queue' IS NULL OR ticket_board.declared_workflow()->'queue'='null'::jsonb THEN RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
             NEW.state:=ticket_board.declared_workflow()->'queue'->>'stage'; NEW.assignee:=ticket_board.declared_workflow()->'queue'->>'assignee';
         END IF;
@@ -10440,7 +10514,9 @@ BEGIN
 
     -- Serial focus is an invariant of moving into an implementer's slot, not a
     -- property of the operation that moved it there.
+    -- SYRD-568: only a legacy board still diverts; a declared one queues in place.
     IF target_state = 'in_progress'
+       AND ticket_board.declared_workflow() IS NULL
        AND ticket_board.ticket_is_implementer_assignee(coalesce(target_assignee, current_ticket.assignee))
        AND ticket_board.ticket_current_reserved_ticket(
                coalesce(target_assignee, current_ticket.assignee), director_edit.id) IS NOT NULL THEN
@@ -12928,6 +13004,15 @@ DROP TRIGGER IF EXISTS tickets_z_pull_release ON ticket_board.tickets;
 CREATE TRIGGER tickets_z_pull_release AFTER UPDATE ON ticket_board.tickets
     FOR EACH ROW EXECUTE FUNCTION ticket_board.record_pull_release();
 
+-- SYRD-568: assigned implementation queues (the slot's table and reader)
+CREATE TABLE IF NOT EXISTS ticket_board.serial_focus (
+    -- SYRD-568: the ticket that holds each implementer's one slot, recorded
+    -- when it took the slot. One row per implementer, so two tickets can never
+    -- both be active for one.
+    implementer text PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    activated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
 CREATE OR REPLACE FUNCTION ticket_board.ticket_current_reserved_ticket(p_implementer text,p_excluding_ticket_id text DEFAULT NULL)
 RETURNS text LANGUAGE sql STABLE AS $$
  -- Which ticket holds an implementer's one serial slot. Under the default
@@ -12942,22 +13027,60 @@ RETURNS text LANGUAGE sql STABLE AS $$
  -- Under a pull policy (SYRD-539) a review stage holds only until the ticket's
  -- declared approval out of `release_after` is recorded; rework re-entering
  -- implementation clears that record, so it holds its author again.
+ --
+ -- SYRD-568: an implementer may have several tickets assigned in its
+ -- implementation stage, and only one of them holds the slot. A ticket with an
+ -- unresolved blocker holds nothing. Work past implementation that holds its
+ -- author (review, or lifecycle after a reopen) comes first, as it always
+ -- did; among implementation work the ticket already active
+ -- (ticket_board.serial_focus) keeps the slot while it still qualifies, so
+ -- work routed later, or unblocked later, never takes it from work under way;
+ -- otherwise the lowest ticket number, which is the queue's stated order.
  SELECT CASE WHEN ticket_board.declared_workflow() IS NULL THEN ticket_board.legacy_current_reserved_ticket(p_implementer,p_excluding_ticket_id)
- ELSE (SELECT t.id FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=t.id
+ --
+ -- The document is read once and its stages joined, and only tickets that
+ -- name the implementer are considered: the waiting check asks this for every
+ -- queued ticket, and reading the document again for every ticket on the
+ -- board made that seconds (SYRD-568). The conditions are the same.
+ ELSE (
+ WITH doc AS MATERIALIZED (SELECT ticket_board.declared_workflow() AS cfg),
+ stages AS MATERIALIZED (
+   SELECT x->>'name' AS name, x->>'kind' AS kind, coalesce((x->>'terminal')::boolean, false) AS terminal
+   FROM doc, jsonb_array_elements(doc.cfg->'stages') x)
+ SELECT t.id FROM ticket_board.tickets t
+ JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=t.id
+ JOIN stages s ON s.name=t.state
+ LEFT JOIN ticket_board.serial_focus f ON f.implementer=p_implementer AND f.ticket_id=t.id
  WHERE (p_excluding_ticket_id IS NULL OR t.id<>p_excluding_ticket_id) AND NOT t.manually_controlled
+ AND (t.assignee=p_implementer OR ns.last_implementer_assignee=p_implementer)
  AND (
-   (ticket_board.declared_stage_kind(t.state) IN ('implementation','review')
-    AND (CASE WHEN ticket_board.declared_stage_kind(t.state)='implementation' THEN t.assignee ELSE ns.last_implementer_assignee END)=p_implementer
-    AND NOT (ticket_board.declared_stage_kind(t.state)='review' AND ticket_board.declared_scheduling() IS NOT NULL
-             AND EXISTS (SELECT FROM ticket_board.pull_releases r WHERE r.ticket_id=t.id)))
-   OR (coalesce(ticket_board.declared_workflow()->>'reservation','review')='lifecycle'
-    AND ticket_board.declared_stage_kind(t.state)='system'
-    AND NOT coalesce((SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
-                      WHERE x->>'name'=t.state), false)
-    AND NOT t.parked
+   (s.kind IN ('implementation','review')
+    AND (CASE WHEN s.kind='implementation' THEN t.assignee ELSE ns.last_implementer_assignee END)=p_implementer
+    AND NOT (s.kind='review' AND ticket_board.declared_scheduling() IS NOT NULL
+             AND EXISTS (SELECT FROM ticket_board.pull_releases r WHERE r.ticket_id=t.id))
+    AND NOT (s.kind='implementation' AND ticket_board.ticket_has_unresolved_blockers(t.id)))
+   OR (coalesce((SELECT d.cfg->>'reservation' FROM doc d),'review')='lifecycle'
+    AND s.kind='system' AND NOT s.terminal AND NOT t.parked
     AND ns.last_implementer_assignee=p_implementer)
  )
- ORDER BY t.ticket_number LIMIT 1) END;
+ ORDER BY s.kind='implementation', f.ticket_id IS NULL, t.ticket_number LIMIT 1) END;
+$$;
+CREATE OR REPLACE FUNCTION ticket_board.ticket_serial_waiting(p_ticket_id text)
+RETURNS boolean LANGUAGE sql STABLE AS $$
+    -- SYRD-568: assigned to an implementer in an implementation stage, and not
+    -- the ticket holding that implementer's slot -- queued behind it, or
+    -- blocked. Visible, assigned work that nobody is asked to do yet: it gets
+    -- no handoff, no highlight and no reminder, and it cannot be submitted.
+    -- Manual control is the Director's own hold and is not a queue.
+    SELECT EXISTS (
+        SELECT FROM ticket_board.tickets t
+        WHERE t.id = p_ticket_id
+          AND ticket_board.declared_workflow() IS NOT NULL
+          AND ticket_board.declared_stage_kind(t.state) = 'implementation'
+          AND ticket_board.ticket_is_implementer_assignee(t.assignee)
+          AND NOT t.manually_controlled
+          AND ticket_board.ticket_current_reserved_ticket(t.assignee) IS DISTINCT FROM t.id
+    );
 $$;
 
 -- One assignment at a time per implementer. Every write that can put work into
@@ -13973,4 +14096,198 @@ BEGIN
        AND NOT ticket_board.ticket_context_superseded(x.ticket_id, x.role)
        AND NOT ticket_board.ticket_context_parked(x.ticket_id, x.role);
 END;
+$$;
+
+-- SYRD-568: assigned implementation queues
+CREATE OR REPLACE FUNCTION ticket_board.settle_serial_focus(p_implementer text, p_notify boolean DEFAULT true,
+                                                            p_moved text DEFAULT NULL)
+RETURNS text LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+-- SYRD-568: record which ticket holds an implementer's slot, and hand it over
+-- when that changes. Called after every change that can move the slot; the
+-- slot itself is ticket_current_reserved_ticket's answer, so this records it
+-- and never decides it. An activation is the row written here, once, in the
+-- transaction that caused it: a listener restart, or this being called again,
+-- finds the row and sends nothing more.
+DECLARE
+    v_implementer text := btrim(lower(coalesce(p_implementer, '')));
+    v_held text;
+    v_active text;
+    v_ticket ticket_board.tickets%ROWTYPE;
+    v_message text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL OR v_implementer = ''
+       OR NOT ticket_board.ticket_is_implementer_assignee(v_implementer) THEN
+        RETURN NULL;
+    END IF;
+    PERFORM pg_advisory_xact_lock(ticket_board.implementer_assignment_lock_key(v_implementer));
+    v_held := ticket_board.ticket_current_reserved_ticket(v_implementer);
+    SELECT f.ticket_id INTO v_active FROM ticket_board.serial_focus f WHERE f.implementer = v_implementer FOR UPDATE;
+    -- Nothing can hold the slot (the active ticket finished, or is blocked
+    -- with nothing behind it): the record stays. A ticket blocked and then
+    -- unblocked with nothing in between is the same work, so it has nothing
+    -- new to be handed; its unblock notice says what changed.
+    IF v_held IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF v_active IS NOT DISTINCT FROM v_held THEN
+        RETURN v_held;
+    END IF;
+    INSERT INTO ticket_board.serial_focus (implementer, ticket_id) VALUES (v_implementer, v_held)
+    ON CONFLICT (implementer) DO UPDATE SET ticket_id = EXCLUDED.ticket_id, activated_at = clock_timestamp();
+    SELECT * INTO v_ticket FROM ticket_board.tickets t WHERE t.id = v_held;
+    -- Only a change of hands caused by something else is announced. The
+    -- ticket whose own row moved (p_moved) is told by whatever moved it -- a
+    -- route's transition notice, a reassignment's, an unblock's, a released
+    -- blocker's -- and that runs after this trigger, so it cannot be seen
+    -- here. The first record for an implementer (a board that predates the
+    -- queue, or declared its workflow later) only writes down what already
+    -- holds. Work in review needs no handoff to its author, and a handoff
+    -- already queued for this stage is not repeated.
+    IF p_notify AND v_active IS NOT NULL AND v_held IS DISTINCT FROM p_moved
+       AND ticket_board.declared_stage_kind(v_ticket.state) = 'implementation'
+       AND v_ticket.assignee = v_implementer
+       AND NOT EXISTS (
+           SELECT FROM ticket_board.ticket_notification_queue q
+           WHERE q.ticket_id = v_held AND q.kind = 'transition' AND q.target_role = v_implementer
+             AND coalesce(q.payload->>'new_state', q.payload->>'state') = v_ticket.state
+             AND q.dead_lettered_at IS NULL) THEN
+        v_message := ticket_board.transition_message(
+            v_ticket.id, v_ticket.title, NULL, v_ticket.state,
+            ticket_board.ticket_state_already_announced(v_ticket.id, v_implementer, v_ticket.state))
+            || ': it was waiting in your queue and is now your active ticket';
+        PERFORM ticket_board.enqueue_notification(
+            v_ticket.id, 'transition', v_implementer, v_message,
+            jsonb_build_object(
+                'kind', 'transition', 'id', v_ticket.id, 'title', v_ticket.title,
+                'old_state', v_ticket.state, 'new_state', v_ticket.state, 'assignee', v_ticket.assignee,
+                'updated_at', v_ticket.updated_at, 'ticket_number', v_ticket.ticket_number,
+                'target_role', v_implementer, 'message', v_message, 'serial_activation', true),
+            'serial_activation:' || v_ticket.id || ':' || v_implementer || ':' || pg_current_xact_id()::text);
+    END IF;
+    RETURN v_held;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.settle_serial_focus_for_ticket()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+-- SYRD-568: a ticket's stage, owner, manual control or parking moved, so the
+-- slot of every implementer it can hold may have moved with it.
+DECLARE v_role text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN RETURN NULL; END IF;
+    IF TG_OP = 'UPDATE'
+       AND OLD.state IS NOT DISTINCT FROM NEW.state AND OLD.assignee IS NOT DISTINCT FROM NEW.assignee
+       AND OLD.manually_controlled IS NOT DISTINCT FROM NEW.manually_controlled
+       AND OLD.parked IS NOT DISTINCT FROM NEW.parked THEN
+        RETURN NULL;
+    END IF;
+    FOR v_role IN
+        SELECT DISTINCT r FROM unnest(ARRAY[
+            CASE WHEN TG_OP = 'UPDATE' THEN OLD.assignee END, NEW.assignee,
+            (SELECT ns.last_implementer_assignee FROM ticket_board.ticket_notification_state ns WHERE ns.ticket_id = NEW.id)]) r
+        WHERE coalesce(r, '') <> '' ORDER BY r
+    LOOP
+        PERFORM ticket_board.settle_serial_focus(v_role, true, NEW.id);
+    END LOOP;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.settle_serial_focus_for_blocker()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+-- SYRD-568: a blocker was added, removed or resolved, so the ticket it holds
+-- back may have started, or stopped, being able to hold its implementer.
+DECLARE v_role text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN RETURN NULL; END IF;
+    FOR v_role IN
+        SELECT DISTINCT r
+        FROM ticket_board.tickets t
+        LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id,
+             unnest(ARRAY[t.assignee, ns.last_implementer_assignee]) r
+        WHERE t.id = CASE WHEN TG_OP = 'DELETE' THEN OLD.ticket_id ELSE NEW.ticket_id END
+          AND coalesce(r, '') <> ''
+        ORDER BY r
+    LOOP
+        PERFORM ticket_board.settle_serial_focus(v_role, true, CASE WHEN TG_OP = 'DELETE' THEN OLD.ticket_id ELSE NEW.ticket_id END);
+    END LOOP;
+    RETURN NULL;
+END;
+$$;
+
+-- Named to run after every other AFTER trigger on the table, so the slot is
+-- settled against the move's final state and after the handoff it queued.
+DROP TRIGGER IF EXISTS tickets_zzzzzzz_settle_serial_focus ON ticket_board.tickets;
+CREATE TRIGGER tickets_zzzzzzz_settle_serial_focus
+AFTER INSERT OR UPDATE ON ticket_board.tickets
+FOR EACH ROW EXECUTE FUNCTION ticket_board.settle_serial_focus_for_ticket();
+DROP TRIGGER IF EXISTS ticket_blockers_zz_settle_serial_focus ON ticket_board.ticket_blockers;
+CREATE TRIGGER ticket_blockers_zz_settle_serial_focus
+AFTER INSERT OR UPDATE OR DELETE ON ticket_board.ticket_blockers
+FOR EACH ROW EXECUTE FUNCTION ticket_board.settle_serial_focus_for_blocker();
+
+CREATE OR REPLACE FUNCTION ticket_board.settle_serial_focus_for_workflow()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+-- SYRD-568: a workflow declared, or changed, over tickets already in its
+-- stages. Record what holds each slot now, so work already under way keeps it
+-- against tickets routed later, and announce nothing: the document changed,
+-- not who has the work. apply_declared_workflow projects the stages before it
+-- writes this row, so they are current here.
+DECLARE v_role text;
+BEGIN
+    FOR v_role IN
+        SELECT DISTINCT btrim(lower(role)) FROM ticket_board.workflow_stages ws, unnest(ws.owner_roles) AS role ORDER BY 1
+    LOOP
+        PERFORM ticket_board.settle_serial_focus(v_role, false);
+    END LOOP;
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workflow_configuration_zz_settle_serial_focus ON ticket_board.workflow_configuration;
+CREATE TRIGGER workflow_configuration_zz_settle_serial_focus
+AFTER INSERT OR UPDATE ON ticket_board.workflow_configuration
+FOR EACH STATEMENT EXECUTE FUNCTION ticket_board.settle_serial_focus_for_workflow();
+
+CREATE OR REPLACE FUNCTION ticket_board.serial_queue()
+RETURNS TABLE(implementer text, ticket_id text, state text, queue_position integer, active boolean,
+              waiting_on text[], active_ticket text)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    -- SYRD-568: each implementer's assigned implementation work, in the order
+    -- it will be taken: the active ticket first; then the tickets that can
+    -- start, lowest number first, which is the order settle_serial_focus
+    -- activates them in; then the blocked ones, with what they wait on. Work
+    -- already past implementation that still holds its author is listed as
+    -- that author's active ticket. Read-only, and empty on a board without a
+    -- declared workflow.
+    -- Each implementer's slot is asked for once (MATERIALIZED: inlined, it was
+    -- asked again for every ticket the join below looks at, which took the
+    -- board snapshot from milliseconds to seconds), and so are the stage kinds.
+    WITH implementation_stages AS MATERIALIZED (
+        SELECT x->>'name' AS name FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') x
+        WHERE x->>'kind' = 'implementation'
+    ), implementers AS MATERIALIZED (
+        SELECT DISTINCT btrim(lower(role)) AS name
+        FROM ticket_board.workflow_stages ws, unnest(ws.owner_roles) AS role
+        WHERE ticket_board.declared_workflow() IS NOT NULL
+          AND ticket_board.ticket_is_implementer_assignee(btrim(lower(role)))
+    ), held AS MATERIALIZED (
+        SELECT i.name, ticket_board.ticket_current_reserved_ticket(i.name) AS ticket FROM implementers i
+    ), queued AS (
+        SELECT h.name, h.ticket, t.id, t.state, t.ticket_number, t.id IS NOT DISTINCT FROM h.ticket AS active,
+               coalesce((SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
+                         FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id AND NOT b.resolved),
+                        ARRAY[]::text[]) AS waiting_on
+        FROM held h
+        JOIN ticket_board.tickets t
+          ON t.id = h.ticket
+          OR (t.assignee = h.name AND NOT t.manually_controlled
+              AND t.state IN (SELECT s.name FROM implementation_stages s))
+    )
+    SELECT q.name, q.id, q.state,
+           (row_number() OVER (PARTITION BY q.name
+                               ORDER BY q.active DESC, cardinality(q.waiting_on) > 0, q.ticket_number))::integer,
+           q.active, q.waiting_on, coalesce(q.ticket, '')
+    FROM queued q
+    ORDER BY q.name, 4;
 $$;

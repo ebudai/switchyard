@@ -129,6 +129,12 @@ END $$;
     def reserved(self, implementer: str) -> str:
         return t.psql(self.admin, f"SELECT coalesce(ticket_board.ticket_current_reserved_ticket('{implementer}'), '-');").strip()
 
+    def activations(self, ticket: str) -> list[str]:
+        """SYRD-568: B waits in its implementer's queue and is handed over when it becomes active."""
+        raw = t.psql(self.admin, f"SELECT coalesce(jsonb_agg(message ORDER BY id), '[]')::text FROM "
+                                 f"ticket_board.ticket_notification_queue WHERE ticket_id = '{ticket}';")
+        return [m for m in json.loads(raw) if "is now your active ticket" in m]
+
     def routable_notices(self, ticket: str) -> list[str]:
         t.psql(self.listener, "SELECT ticket_board.notify_serial_focus_queue_wakeups(clock_timestamp());")
         raw = t.psql(self.admin, f"SELECT coalesce(jsonb_agg(message ORDER BY id), '[]')::text FROM "
@@ -165,7 +171,9 @@ def run_default(cluster) -> None:
     board.through_uat(A, "ops")
     board.queue_b()
     board.act(A, "user_reopen", {"reason": "not what I asked for"}, "user")
-    check(board.reserved("ops") == "-", f"by default a reopen still releases, as before: {board.reserved('ops')}")
+    # SYRD-568: B waits in ops's queue rather than in backlog, so the release
+    # makes it the active ticket instead of leaving ops free.
+    check(board.reserved("ops") == B, f"by default a reopen still releases A, and B takes ops: {board.reserved('ops')}")
     stored = json.loads(t.psql(board.admin, "SELECT ticket_board.declared_workflow()::text;"))
     check("reservation" not in stored, "and a document that does not opt in is not rewritten")
     # MEFP opts in while A sits in analysis: the reservation is computed, so
@@ -179,7 +187,9 @@ def run_lifecycle(cluster) -> None:
     board.through_uat(A, "ops")
     check(board.reserved("ops") == A, "A holds ops through User UAT")
     queued = board.queue_b()
-    check((queued["state"], queued["queued_behind_ticket"]) == ("backlog", A), f"B queues behind A: {queued['state']}")
+    # SYRD-568: B waits assigned, in ops's queue behind A, not in backlog.
+    check((queued["state"], queued["assignee"], queued["serial_queue"]["active_ticket"]) == ("in_progress", "ops", A),
+          f"B queues behind A: {queued['state']} {queued.get('serial_queue')}")
 
     # The User's kickback: A leaves review for analysis, and still holds ops.
     reopened = board.act(A, "user_reopen", {"reason": "not what I asked for"}, "user")
@@ -187,8 +197,9 @@ def run_lifecycle(cluster) -> None:
           f"after the User's reopen A still holds ops: {reopened['state']} {board.reserved('ops')}")
     check(board.routable_notices(B) == [], "and nobody is told B can be routed to ops")
     still = board.app.get_ticket(B)
-    check((still["state"], still["queued_for_assignee"], still["queued_behind_ticket"]) == ("backlog", "ops", A),
-          f"B stays queued for ops behind A: {still['state']} {still['queued_for_assignee']} {still['queued_behind_ticket']}")
+    check((still["state"], still["serial_queue"]["active"], still["serial_queue"]["active_ticket"]) == ("in_progress", False, A)
+          and board.activations(B) == [],
+          f"B stays queued for ops behind A, and is not handed over: {still['state']} {still.get('serial_queue')}")
 
     # Back to the same worker, then an Audit kickback returns it to them again.
     back = board.act(A, "route", {"target": "in_progress", "assignee": "ops"}, "director")
@@ -202,10 +213,11 @@ def run_lifecycle(cluster) -> None:
     board.through_uat(A, "ops")
     board.act(A, "user_sign_off", {"text": "accepted"}, "user")
     check(board.reserved("ops") == A, "A still holds ops in the Director's final review")
-    check(board.routable_notices(B) == [], "and B is still not offered")
+    check(board.routable_notices(B) == [] and board.activations(B) == [], "and B is still not offered")
     done = board.act(A, "mark_done", {"commit_hash": COMMIT}, "director")
-    check((done["state"], board.reserved("ops")) == ("done", "-"), f"closing A frees ops: {done['state']}")
-    check(len(board.routable_notices(B)) == 1, "and only now is the Director told B can go to ops")
+    check((done["state"], board.reserved("ops")) == ("done", B), f"closing A frees ops, and B takes it: {done['state']}")
+    check(len(board.activations(B)) == 1 and board.routable_notices(B) == [],
+          "and only now is B handed to ops -- the Director no longer has to route it")
 
     # Parking is the other way out; manual control never held.
     t.seed_postgres_ticket(board.admin, "PGU-11", title="Bug C", state="in_progress", assignee="main", needs_user_signoff=True)

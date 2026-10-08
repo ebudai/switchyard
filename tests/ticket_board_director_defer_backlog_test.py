@@ -457,10 +457,13 @@ def run_fresh_board_checks(app, admin: str) -> None:
     t.seed_postgres_ticket(admin, "PGU-31", title="Second for the same hand", state="analysis", assignee="director")
     assert t.psql(admin, "SELECT ticket_board.ticket_current_reserved_ticket('app');") == "PGU-30"
 
+    # SYRD-568: a Director-dispatched board no longer diverts it at all. It
+    # waits in app's queue, assigned, and is no more put down than before.
     routed = app.perform_workflow_action("PGU-31", "route", {"assignee": "app"}, caller_role="director")
-    assert routed["state"] == "backlog", routed
+    assert (routed["state"], routed["assignee"]) == ("in_progress", "app"), routed
+    assert routed["serial_queue"]["active"] is False and routed["serial_queue"]["active_ticket"] == "PGU-30", routed
     queued = ticket_row(admin, "PGU-31")
-    assert queued["queued_for_assignee"] == "app", queued
+    assert queued["queued_for_assignee"] == "", queued
     assert queued["parked"] is False, queued
 
 

@@ -65,12 +65,16 @@ def build(cluster, dbname: str, shape: str):
         fixture.psql(admin, fixture.RBAC_PATH.read_text())
     if shape == "upgraded":
         # This migration and every later one, as the runner applies them before
-        # this release's rbac.sql (SYRD-541's pgu974 granted after it); then
-        # this one replayed, which must change nothing.
+        # this release's rbac.sql (SYRD-541's pgu974 granted after it); this
+        # one replayed straight after itself, which must change nothing. Not
+        # after the later ones: they may redefine its functions (SYRD-568's
+        # pgu976 does ticket_current_reserved_ticket), and no runner re-applies
+        # an older migration over a newer one.
         from schema_function_drift import migrations_from
         for migration in migrations_from(MIGRATION):
             fixture.psql(admin, migration.read_text())
-        fixture.psql(admin, MIGRATION.read_text())
+            if migration == MIGRATION:
+                fixture.psql(admin, MIGRATION.read_text())
         fixture.psql(admin, fixture.RBAC_PATH.read_text())
     return admin
 

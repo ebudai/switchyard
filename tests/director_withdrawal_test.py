@@ -308,9 +308,15 @@ def main() -> int:
             )
             at_user_review("PGU-3")
             held = act("PGU-3", WITHDRAW, "director", reason="defect found while main is busy")["ticket"]
-            check(held["state"] != "in_progress", f"it is not forced in: {held['state']}")
-            check(held["queued_for_assignee"] == "main", f"and says who it waits for: {held}")
-            check(held["queued_behind_ticket"] == "PGU-9", f"and behind what: {held}")
+            # SYRD-568: it returns to main's queue, waiting there behind the
+            # ticket main is on -- not diverted, and not active.
+            queue = held.get("serial_queue") or {}
+            check((held["state"], held["assignee"], queue.get("active")) == ("in_progress", "main", False),
+                  f"it is not forced in: it waits in main's queue: {held['state']} {queue}")
+            check(queue.get("implementer") == "main", f"and says who it waits for: {queue}")
+            check(queue.get("active_ticket") == "PGU-9"
+                  and sql("SELECT ticket_board.ticket_current_reserved_ticket('main');") == "PGU-9",
+                  f"and behind what, which keeps main's slot: {queue}")
             check(ticket("PGU-3")["audit_signoff"] is False, "while still clearing the sign-offs")
             sql("DELETE FROM ticket_board.tickets WHERE id IN ('PGU-3','PGU-9');")
 

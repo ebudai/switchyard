@@ -563,7 +563,16 @@ def main():
                             ).count()
                             == 0
                         )
-                        button.click()
+                        # Wait for the action's own response, which is sent after
+                        # its transaction commits. A wait_for_function on an
+                        # async predicate resolves on the returned Promise
+                        # without awaiting it, so it waited for nothing, and
+                        # the read below raced the commit (SYRD-568 measured it
+                        # returning 0.04 s into a 0.15 s POST).
+                        with page.expect_response(lambda response: "/actions/verify_accept" in response.url
+                                                  and response.request.method == "POST") as accepted:
+                            button.click()
+                        assert accepted.value.ok, accepted.value.status
                         page.wait_for_function(
                             "async () => (await (await fetch('/api/tickets/PGU-2')).json()).workflow_flags.verification_signoff === true"
                         )
@@ -713,50 +722,22 @@ def main():
             # Somewhere to defer to survives compaction; a document without it
             # is refused outright (SYRD-92).
             assert "backlog" in columns, columns
-            # SYRD-31: routing PGU-4 at a reserved implementer is redirected to
-            # the configured queue, which here is the analysis/director slot the
-            # ticket already occupied. Before this was surfaced the action
-            # returned success with a wholly unchanged ticket, so the director
-            # could not tell a queued route from a completed one.
-            unreserved_before = t.psql(
-                admin,
-                "SELECT count(*) FROM ticket_board.ticket_notification_queue "
-                "WHERE ticket_id='PGU-4' AND message LIKE '%queued for%'",
-            )
-            assert unreserved_before == "0", unreserved_before
+            # SYRD-31 diverted a route at a reserved implementer to the configured
+            # queue. SYRD-568: on a Director-dispatched board it lands where it
+            # was routed, assigned, and waits in app's queue behind the ticket
+            # app is on -- and the Director is not asked to route it again.
             queued = act("PGU-4", "route", "director", assignee="app")
-            assert (queued["state"], queued["assignee"]) == (
-                "analysis",
-                "director",
-            ), queued
-            assert queued["queued_for_assignee"] == "app", queued
-            reserving_ticket = queued["queued_behind_ticket"]
-            assert reserving_ticket and reserving_ticket != "PGU-4", queued
-            assert any(
-                "queued for app" in comment["text"] and reserving_ticket in comment["text"]
-                for comment in queued["comments"]
-            ), queued["comments"]
-            # Durable and addressed to the director, not just a comment nobody reads.
+            assert (queued["state"], queued["assignee"]) == ("in_progress", "app"), queued
+            assert queued["queued_for_assignee"] == "" and queued["queued_behind_ticket"] == "", queued
+            reserving_ticket = queued["serial_queue"]["active_ticket"]
+            assert reserving_ticket and reserving_ticket != "PGU-4" and queued["serial_queue"]["active"] is False, queued
             assert (
                 t.psql(
                     admin,
                     "SELECT count(*) FROM ticket_board.ticket_notification_queue "
-                    "WHERE ticket_id='PGU-4' AND target_role='director' "
-                    "AND message LIKE '%queued for app%'",
+                    "WHERE ticket_id='PGU-4' AND message LIKE '%queued for%'",
                 )
-                == "1"
-            )
-            # Repeating the same blocked route must not queue a second copy.
-            requeued = act("PGU-4", "route", "director", assignee="app")
-            assert requeued["queued_for_assignee"] == "app", requeued
-            assert (
-                t.psql(
-                    admin,
-                    "SELECT count(*) FROM ticket_board.ticket_notification_queue "
-                    "WHERE ticket_id='PGU-4' AND target_role='director' "
-                    "AND message LIKE '%queued for app%'",
-                )
-                == "1"
+                == "0"
             )
             t.seed_postgres_ticket(
                 admin,
@@ -766,7 +747,11 @@ def main():
                 assignee="app",
             )
             queued = app.get_ticket("PGU-5")
-            assert (queued["state"], queued["assignee"]) == ("analysis", "director")
+            assert (queued["state"], queued["assignee"], queued["serial_queue"]["active"]) == ("in_progress", "app", False), queued
+            # Back where the rest of this test had them: in analysis with the
+            # Director, so the implementation stage can be renamed below.
+            for ticket_id in ("PGU-4", "PGU-5"):
+                app.force_move_ticket(ticket_id, "analysis", "director", suppress_notification=True, caller_role="director")
             # Invalid boolean/signoff edits cannot change either kind of flag.
             rejected(
                 lambda: app.set_workflow_flags(
@@ -818,7 +803,7 @@ def main():
                     "WHERE ticket_id='PGU-4' AND target_role='director' "
                     "AND message LIKE '%queued for%'",
                 )
-                == "1"
+                == "0"
             )
             assert (
                 t.psql(

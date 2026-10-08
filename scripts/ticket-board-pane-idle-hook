@@ -559,6 +559,10 @@ def _active_in_progress_ticket_for_role(
         if isinstance(ticket, dict)
         and str(ticket.get("state", "")).strip() in active_states
         and str(ticket.get("assignee", "")).strip().lower() == role
+        # SYRD-568: a ticket waiting in this role's queue is not its work yet.
+        # A board older than the queue publishes no serial_queue, and every
+        # ticket reads as before.
+        and not (isinstance(ticket.get("serial_queue"), dict) and ticket["serial_queue"].get("active") is False)
     ]
     if not matches:
         return None

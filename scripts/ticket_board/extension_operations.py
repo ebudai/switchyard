@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import reminder_snooze, size_review
+from . import pull_queue, reminder_snooze, size_review
 
 OPERATIONS = reminder_snooze.OPERATIONS | size_review.OPERATIONS
 
@@ -32,9 +32,40 @@ def ticket_fields(row: Any) -> dict[str, Any]:
 
     reminder_snooze is scheduling, not delivery status, and null unless the
     ticket is snoozed (SYRD-537); size_review is the packet's size evidence and
-    null until a candidate is measured (SYRD-541).
+    null until a candidate is measured (SYRD-541); serial_queue is the ticket's
+    place in its implementer's queue, and null outside one (SYRD-568).
     """
-    return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review")}
+    return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review"),
+            "serial_queue": row.get("serial_queue")}
+
+
+def reservation_fields(app: Any) -> dict[str, Any]:
+    """GET /api/reservations beside each implementer's slot: the ready queue
+    (SYRD-539) and each implementer's assigned queue (SYRD-568)."""
+    return {"pull_queue": pull_queue.status(app), "queues": serial_queues(app)}
+
+
+def serial_queues(app: Any) -> dict[str, list[dict[str, Any]]]:
+    """Each implementer's assigned implementation work in the order it will be taken (SYRD-568).
+
+    The board's own order (ticket_board.serial_queue): the active ticket, then
+    the tickets that can start, then the blocked ones. Empty on a board older
+    than the queue.
+    """
+    with app._pg_connect() as conn:
+        present = conn.execute("SELECT to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS present").fetchone()
+        if not (present["present"] if isinstance(present, dict) else present[0]):
+            return {}
+        rows = conn.execute(
+            "SELECT implementer, ticket_id, state, queue_position, active, waiting_on FROM ticket_board.serial_queue()"
+        ).fetchall()
+    queues: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        queues.setdefault(str(row["implementer"]), []).append({
+            "ticket": str(row["ticket_id"]), "state": str(row["state"]), "position": int(row["queue_position"]),
+            "active": bool(row["active"]), "waiting_on": [str(t) for t in row["waiting_on"] or []],
+        })
+    return queues
 
 
 def reminder_snoozes(app: Any) -> list[dict[str, Any]]:

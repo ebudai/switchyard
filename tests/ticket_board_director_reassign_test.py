@@ -208,36 +208,35 @@ def run_checks(app, admin, base, write_token, document):
     assert reassigned["active_work_owner_role"] == "ops", reassigned
 
     # ACCEPTANCE -- a reserved target queues instead of taking a second ticket.
+    # SYRD-568: it queues in place -- assigned to app, in Implementation,
+    # behind the ticket app already has -- instead of being diverted.
     clear_queue(admin)
     queued = reassign("PGU-1", "app")
-    assert (queued["state"], queued["assignee"]) == ("backlog", "unassigned"), queued
-    assert queued["queued_for_assignee"] == "app", queued
-    assert queued["queued_behind_ticket"] == "PGU-2", queued
+    assert (queued["state"], queued["assignee"]) == ("in_progress", "app"), queued
+    assert queued["queued_for_assignee"] == "" and queued["queued_behind_ticket"] == "", queued
+    assert queued["serial_queue"] == {"implementer": "app", "position": 2, "active": False, "waiting_on": [],
+                                      "active_ticket": "PGU-2"}, queued["serial_queue"]
     assert queued["active_work_highlight"] is False, queued
-    # App is told nothing, because nothing is actionable for app yet. The
-    # director is told once, and told what is holding it.
+    # Nobody is told anything: nothing is actionable for app yet, and nothing
+    # was diverted for the Director to route.
     assert queued_messages(admin, "PGU-1", "app") == []
-    director_notice = queued_messages(admin, "PGU-1", "director")
-    assert len(director_notice) == 1, director_notice
-    assert "queued for app" in director_notice[0] and "PGU-2" in director_notice[0], director_notice
-    # The reservation still holds: app owns exactly the ticket it already had.
-    assert t.psql(
-        admin,
-        "SELECT count(*) FROM ticket_board.tickets WHERE state='in_progress' AND assignee='app';",
-    ) == "1"
+    assert queued_messages(admin, "PGU-1", "director") == []
+    # The reservation still holds: app's slot is the ticket it already had.
     assert t.psql(admin, "SELECT ticket_board.ticket_current_reserved_ticket('app');") == "PGU-2"
-    # Both the reason and the queue outcome survive, in that order.
     trail = reassignment_comments(queued)
     assert trail[-1]["text"] == f"Director reassignment in in_progress: ops -> app. Reason: {REASON}", trail
-    assert any("queued for app" in comment["text"] for comment in queued["comments"]), queued["comments"]
 
-    # ACCEPTANCE -- the marker does not outlive the reservation that set it.
-    # Backlog declares no notification, so this correctly announces nothing.
+    # ACCEPTANCE -- leaving the queue for a free owner is an ordinary handoff.
     clear_queue(admin)
     released = reassign("PGU-1", "main", reason="Parking it with Main for now.")
-    assert (released["state"], released["assignee"]) == ("backlog", "main"), released
+    assert (released["state"], released["assignee"]) == ("in_progress", "main"), released
     assert released["queued_for_assignee"] == "" and released["queued_behind_ticket"] == "", released
-    assert queued_messages(admin, "PGU-1", "main") == []
+    assert released["serial_queue"]["active"] is True, released
+    assert queued_messages(admin, "PGU-1", "main") == ["PGU-1 -- Runtime handoff is now assigned to you"], \
+        queued_messages(admin, "PGU-1", "main")
+    # Put it down again, so main is free for what follows, as it was before SYRD-568.
+    deferred = t.post_json(base, "/api/tickets/PGU-1/actions/defer", {}, caller="director")
+    assert deferred["ticket"]["state"] == "backlog", deferred
 
     # ACCEPTANCE -- a blocked ticket still changes hands, and still stays quiet.
     t.post_json(

@@ -48,7 +48,8 @@ Then, journalling each step so it can be undone in reverse:
    being left behind — wait until the stopped pane's process has really gone,
    and start the replacement. On a board that takes runtime registrations, the
    replacement counts as started only once the board's own record names it
-   (see below).
+   (see below). Then the worker is watched for 5 seconds (see "What counts as
+   running").
 8. **Only then**, reconnect every display slot mapped to that role. Reconnecting
    into the gap between stop and start attaches the proxy to nothing and parks
    it again for the same reason.
@@ -85,6 +86,32 @@ So the switch:
 Any of these failures undoes the switch like any other. The undo restarts the
 previous runtime the same way, waiting both for the attempt it stops and for an
 original pane that never left.
+
+## What counts as running
+
+A start that returned, or a tmux session that exists, says nothing about the
+worker: on otto a Hermes switch reported "restarted its session; reconnected
+slot 5" while `switchyard present otto list` showed `worker=missing`, because
+Hermes registered and then exited at once on an argument it did not accept
+(SYRD-560). So the switch is reported only once, throughout a 5-second settle
+window after the start, the worker is observed:
+
+- with its session still there and its pane not dead;
+- running the declared provider: the pane's process tree, or tmux's own
+  `#{pane_current_command}` where tmux gives no pid, names it. A pane running
+  another program is reported by what it runs ("runs codex, not claude"), and
+  one whose processes cannot be read is reported as unreadable, never as fine;
+- still holding the role's board registration, where the board takes them;
+- and, after the reconnection in step 8, shown in every reconnected slot as
+  `switchyard present <project> list` reads it: that role, `connected`, its
+  worker `live`.
+
+Anything else fails the switch, which is then undone like any other failure,
+restoring and re-verifying the previous runtime the same way. The reason names
+what was observed and how to act on it: the provider command the pane ran,
+to start by hand in the role's directory and read its own error, or, for a
+slot, the exact `switchyard present <project> show <role> --slot <n>` that puts
+the role back.
 
 ## A role that is not running
 

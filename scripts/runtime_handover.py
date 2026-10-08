@@ -21,15 +21,18 @@ replacement straight away loses that race every time.
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from scripts import team_launcher
 from scripts.role_command import role_registers_runtime
 from scripts.ticket_board.peer_identity import ProcessInfo, read_process
+from scripts.tmux_session_argv import expected_live_commands, tmux_current_command_args
 
 
 def session_is_live(
@@ -84,6 +87,11 @@ class RuntimeHandover:
     kill_grace_seconds: float = 3.0
     registration_timeout_seconds: float = 30.0
     poll_seconds: float = 0.1
+    #: How long a started worker is watched before the switch calls it running.
+    #: A provider that rejects its own arguments exits within about a second of
+    #: registering (otto's Hermes, SYRD-560); a start observed only at its first
+    #: instant cannot tell that from a worker that came up (SYRD-560).
+    settle_seconds: float = 5.0
 
     def assignments(self, config: team_launcher.ProjectConfig) -> tuple[dict[str, dict], str]:
         reader = self.read_assignments or team_launcher.read_runtime_assignment_details
@@ -243,22 +251,10 @@ def await_registration(
     """
     runtime = team_launcher._role_cli_name(role)
     deadline = handover.monotonic() + max(0.0, handover.registration_timeout_seconds)
-    last = "the board has no runtime assignment for it"
     while True:
-        rows, problem = handover.assignments(config)
-        row = rows.get(role.role)
-        holder = row_holder(row)
-        if problem:
-            last = problem
-        elif holder is None:
-            last = "the board has no runtime assignment for it"
-        elif not handover.live(holder):
-            last = f"the process the board names (pid {holder[0]}) is no longer running"
-        else:
-            root = team_launcher.pane_pid_for_role(role, runner=runner)
-            if root <= 0 or root == holder[0]:
-                return
-            last = f"the board names pid {holder[0]}, but {role.tmux_session}'s pane is pid {root}"
+        last = registration_problem(config, role, runner=runner, handover=handover)
+        if not last:
+            return
         if not session_is_live(role, runner=runner):
             raise RuntimeError(
                 f"the {runtime} pane for {role.role} closed before the board recorded its registration "
@@ -270,3 +266,150 @@ def await_registration(
                 f"{handover.registration_timeout_seconds:g}s ({last})"
             )
         handover.sleep(handover.poll_seconds)
+
+
+def registration_problem(
+    config: team_launcher.ProjectConfig,
+    role: team_launcher.RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    handover: RuntimeHandover,
+) -> str:
+    """Why the board's row for the role is not this session's live pane, or ""."""
+    rows, problem = handover.assignments(config)
+    holder = row_holder(rows.get(role.role))
+    if problem:
+        return problem
+    if holder is None:
+        return "the board has no runtime assignment for it"
+    if not handover.live(holder):
+        return f"the process the board names (pid {holder[0]}) is no longer running"
+    root = team_launcher.pane_pid_for_role(role, runner=runner)
+    if root <= 0 or root == holder[0]:
+        return ""
+    return f"the board names pid {holder[0]}, but {role.tmux_session}'s pane is pid {root}"
+
+
+def worker_problem(
+    config: team_launcher.ProjectConfig,
+    role: team_launcher.RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    handover: RuntimeHandover,
+) -> str:
+    """Why the role's worker is not its declared provider, running and registered, or "".
+
+    Each answer is a distinct finding: a session that has gone, a pane whose
+    process has exited, a process table that could not be read -- "cannot
+    say", never "fine" -- and a pane running some other program.
+    """
+    runtime = team_launcher._role_cli_name(role)
+    if not session_is_live(role, runner=runner):
+        return f"the {runtime} pane for {role.role} exited and {role.tmux_session} closed"
+    dead = runner(["tmux", "display-message", "-p", "-t", f"={role.tmux_session}:", "#{pane_dead}"],
+                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    if dead.returncode == 0 and str(dead.stdout or "").strip() == "1":
+        return f"the {runtime} pane for {role.role} exited; {role.tmux_session} shows a dead pane"
+    pane_pid = team_launcher.pane_pid_for_role(role, runner=runner)
+    if pane_pid > 0:
+        names = team_launcher.process_tree_command_names(pane_pid)
+        if not names:
+            return f"the processes in {role.tmux_session}'s pane (pid {pane_pid}) could not be read"
+    else:
+        # No pid from tmux: its own reading of the pane's command, as the
+        # launcher's start check (`live_command_matches_role`) falls back to.
+        shown = runner(tmux_current_command_args(role),
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        command = team_launcher._command_name(str(shown.stdout or "").strip()) if shown.returncode == 0 else ""
+        if not command:
+            return f"tmux reported neither a process nor a command for {role.tmux_session}, so its worker could not be read"
+        names = {command}
+    expected = expected_live_commands(role)
+    if not names & expected:
+        from scripts.ticket_board.runtime_catalog import RUNTIMES
+
+        providers = sorted(names & {choice.value for choice in RUNTIMES})
+        running = ", ".join(providers) if providers else "no supported provider"
+        return f"{role.tmux_session} runs {running}, not {runtime}"
+    if role_registers_runtime(role):
+        return registration_problem(config, role, runner=runner, handover=handover)
+    return ""
+
+
+def provider_command(config: team_launcher.ProjectConfig, role: team_launcher.RoleConfig) -> str:
+    """The provider command the pane runs, to start by hand and read its own error."""
+    try:
+        argv = team_launcher.cli_command_for_role(role, session_dir=team_launcher.role_session_dir(config, role))
+        if "--" in argv:
+            argv = argv[argv.index("--") + 1:]
+        else:
+            first = Path(str(role.cli[0])).name
+            argv = argv[next(i for i, part in enumerate(argv) if Path(str(part)).name == first):]
+    except Exception:  # noqa: BLE001 - the configured CLI is still a useful pointer
+        argv = list(role.cli)
+    return shlex.join(str(part) for part in argv)
+
+
+def prove_worker(
+    config: team_launcher.ProjectConfig,
+    role: team_launcher.RoleConfig,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+    handover: RuntimeHandover,
+) -> None:
+    """Watch the started worker through its settle window; raise on the first thing wrong."""
+    deadline = handover.monotonic() + max(0.0, handover.settle_seconds)
+    while True:
+        try:
+            problem = worker_problem(config, role, runner=runner, handover=handover)
+        except Exception as exc:  # noqa: BLE001 - an observation that fails is a finding
+            problem = f"its worker could not be observed ({type(exc).__name__}: {exc})"
+        if problem:
+            raise RuntimeError(
+                f"{problem}. To see why, run its command in {role.workdir} as the project owner: "
+                f"{provider_command(config, role)}"
+            )
+        if handover.monotonic() >= deadline:
+            return
+        handover.sleep(handover.poll_seconds)
+
+
+def slot_binding_problem(
+    config: team_launcher.ProjectConfig,
+    *,
+    config_path: Path,
+    role_name: str,
+    slots: tuple[int, ...],
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> str:
+    """Why a reconnected slot does not show the role's live worker, as `present list` reads it, or ""."""
+    if not slots:
+        return ""
+    from scripts import presentation_controller
+
+    try:
+        report = presentation_controller.presentation_report(config, config_path=config_path, runner=runner)
+    except Exception as exc:  # noqa: BLE001
+        return f"the presentation could not be read ({type(exc).__name__}: {exc})"
+    by_slot = {int(item["slot"]): item for item in report.get("slots") or []}
+    problems: list[str] = []
+    failed: list[int] = []
+    for slot in slots:
+        item = by_slot.get(int(slot))
+        worker = (item or {}).get("worker") or {}
+        if item is not None and item.get("actual_role") == role_name and item.get("client_state") == "connected" \
+                and worker.get("state") == "live":
+            continue
+        failed.append(int(slot))
+        if item is None:
+            problems.append(f"slot {slot} is not in the presentation")
+        elif item.get("actual_role") != role_name or item.get("client_state") != "connected":
+            problems.append(f"slot {slot} shows {item.get('actual_role') or 'nothing'} "
+                            f"({item.get('client_state')}), not {role_name}")
+        elif worker.get("state") != "live":
+            problems.append(f"slot {slot} shows {role_name} with worker={worker.get('state') or 'unknown'}")
+    if not problems:
+        return ""
+    remedies = "; ".join(f"`switchyard present {config.project} show {role_name} --slot {slot}`" for slot in failed)
+    return ("; ".join(problems) + f". `switchyard present {config.project} list` shows the slots, and "
+            f"{remedies} puts {role_name} back")

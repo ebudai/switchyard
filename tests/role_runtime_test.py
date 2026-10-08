@@ -135,6 +135,10 @@ class RuntimeRunner:
         self.remaining_start_failures = fail_starts
         # (session, runtime the config named when the start was attempted)
         self.starts: list[tuple[str, str]] = []
+        # What a session shows once started, so a check of the running worker
+        # and of a display slot reads what was really launched (SYRD-560).
+        self.current: dict[str, str] = {}
+        self.labels: dict[str, str] = {}
 
     def __call__(self, args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         command = [str(part) for part in args]
@@ -151,9 +155,36 @@ class RuntimeRunner:
                 return subprocess.CompletedProcess(command, 3, stderr="injected start failure")
             self.live.add(command[command.index("-s") + 1])
             return subprocess.CompletedProcess(command, 0)
+        # The presentation runs tmux as the owner: `sudo -u <owner> -H tmux ...`.
+        core = command[4:] if command[:2] == ["sudo", "-u"] and command[3:4] == ["-H"] else command
+        if core[:2] == ["tmux", "set-option"] and "@switchyard_role" in core:
+            self.labels[self._session_of(core)] = core[core.index("@switchyard_role") + 1]
+            return subprocess.CompletedProcess(command, 0)
+        if core[:2] == ["tmux", "display-message"] and self._session_of(core) in self.labels:
+            session, fmt = self._session_of(core), core[-1]
+            shown = {"#{@switchyard_role}": self.labels[session], "#{pane_tty}": f"/dev/pts/fake-{session}",
+                     "#{pane_dead}": "0"}.get(fmt, "0")
+            return subprocess.CompletedProcess(command, 0, stdout=f"{shown}\n")
+        if core[:2] == ["tmux", "list-clients"]:
+            command = core
+            worker = self._session_of(command)
+            ttys = [f"/dev/pts/fake-{display}" for display, role in self.labels.items()
+                    if worker.endswith(f"-{role}") and worker in self.live]
+            return subprocess.CompletedProcess(command, 0, stdout="".join(f"{tty}\n" for tty in ttys))
         if command[:2] == ["tmux", "display-message"]:
+            session, fmt = self._session_of(command), command[-1]
+            if fmt == "#{pane_current_command}":
+                return subprocess.CompletedProcess(command, 0, stdout=f"{self.current.get(session, '')}\n")
+            if fmt == "#{@switchyard_role}":
+                return subprocess.CompletedProcess(command, 0, stdout=f"{self.labels.get(session, '')}\n")
+            if fmt == "#{pane_tty}":
+                return subprocess.CompletedProcess(command, 0, stdout=f"/dev/pts/fake-{session}\n")
             return subprocess.CompletedProcess(command, 0, stdout="0\n")
         return subprocess.CompletedProcess(command, 0)
+
+    @staticmethod
+    def _session_of(command: list[str]) -> str:
+        return command[command.index("-t") + 1].removeprefix("=").split(":", 1)[0] if "-t" in command else ""
 
     def sessions_started(self) -> list[str]:
         return [c[c.index("-s") + 1] for c in self.calls if c[:2] == ["tmux", "new-session"] and "-s" in c]
@@ -185,7 +216,10 @@ def _fake_start(role: Any, *, config: Any, pane_state_dir: Path, runner: Any) ->
     invisible in the end state and has to be asserted here.
     """
     runner.starts.append((role.tmux_session, team_launcher._role_cli_name(role)))
-    return runner(["tmux", "new-session", "-d", "-s", role.tmux_session]).returncode
+    started = runner(["tmux", "new-session", "-d", "-s", role.tmux_session]).returncode
+    if started == 0 and hasattr(runner, "current"):
+        runner.current[role.tmux_session] = team_launcher._role_cli_name(role)
+    return started
 
 
 def _switch(config_path: Path, *, role: str, runtime: str, board: FakeBoard, runner: RuntimeRunner,

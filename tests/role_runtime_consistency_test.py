@@ -113,6 +113,9 @@ class Host:
         self.shown = dict(shown or {})
         #: Sessions that exist but whose panes answer no query.
         self.unreadable = set(unreadable)
+        # Display slots, as `present list` measures them: a labelled pane whose
+        # terminal is a client of the role's worker session (SYRD-560).
+        self.labels: dict[str, str] = {}
         self.calls: list[list[str]] = []
         #: Sessions that are not a role's -- the presentation's display
         #: sessions. They exist once created; nothing runs in them here.
@@ -177,6 +180,18 @@ class Host:
                 # What the launcher execs is what the config names right now.
                 self._launch(session, cli)
             return subprocess.CompletedProcess(command, 0)
+        if verb == "set-option" and "@switchyard_role" in command:
+            self.labels[session] = command[command.index("@switchyard_role") + 1]
+            return subprocess.CompletedProcess(command, 0)
+        if verb == "list-clients":
+            ttys = [f"/dev/pts/fake-{display}" for display, role in self.labels.items()
+                    if display in self.other_sessions and session == f"porter-{role}" and self._alive(session)]
+            return subprocess.CompletedProcess(command, 0, stdout="".join(f"{tty}\n" for tty in ttys))
+        if verb == "display-message" and session in self.labels:
+            if command[-1] == "#{@switchyard_role}":
+                return subprocess.CompletedProcess(command, 0, stdout=f"{self.labels[session]}\n")
+            if command[-1] == "#{pane_tty}":
+                return subprocess.CompletedProcess(command, 0, stdout=f"/dev/pts/fake-{session}\n")
         if verb == "display-message":
             if session in self.unreadable:
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="no such pane\n")

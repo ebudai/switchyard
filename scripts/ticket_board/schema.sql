@@ -7568,7 +7568,15 @@ BEGIN
         IF (s->>'terminal')::boolean AND tr->>'primitive'<>'reopen' THEN RAISE EXCEPTION 'terminal exit requires reopen'; END IF;
         IF tr->>'primitive'='approve' AND s->>'signoff' IS NULL THEN RAISE EXCEPTION 'approval requires signoff'; END IF;
         SELECT x INTO s FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=tr->>'to';
-        IF tr->>'primitive'='return' AND s->>'kind'<>'implementation' THEN RAISE EXCEPTION 'return must target implementation'; END IF;
+        -- SYRD-567: or a review hands work back to the non-review stage that
+        -- submits into it (a design review returning a spec to its designer).
+        -- workflow_config._review_hands_back is the same rule.
+        IF tr->>'primitive'='return' AND s->>'kind'<>'implementation'
+           AND NOT (EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=tr->>'from' AND x->>'kind'='review')
+                    AND s->>'kind'<>'review'
+                    AND EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') m
+                                WHERE m->>'from'=tr->>'to' AND m->>'to'=tr->>'from' AND m->>'primitive' IN ('move','approve')))
+        THEN RAISE EXCEPTION 'return must target implementation'; END IF;
         IF (tr->>'allow_no_code')::boolean AND ((tr->>'require_commit')::boolean OR NOT (tr->>'require_reason')::boolean OR NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=tr->>'from' AND x->>'kind'='implementation')) THEN RAISE EXCEPTION 'invalid no-code transition policy'; END IF;
         IF EXISTS (SELECT FROM jsonb_array_elements_text(tr->'clear_signoffs') x
             WHERE cfg->'flags'->x->>'kind' IS DISTINCT FROM 'signoff') THEN RAISE EXCEPTION 'invalid signoff reset'; END IF;

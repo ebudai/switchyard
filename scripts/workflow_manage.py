@@ -99,6 +99,24 @@ def _document_with_role_prompt(current: dict, args, parser: argparse.ArgumentPar
     return validate(document)
 
 
+def _document_with_design_stage(current: dict, parser: argparse.ArgumentParser) -> dict:
+    from scripts.ticket_board.design_stage import designer_unreachable, with_design_stage
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        document = with_design_stage(current["document"])
+    except ValueError as exc:
+        parser.error(str(exc))
+    if designer_unreachable(document):
+        print(
+            "workflow: the designer has no pane, so the board cannot notify or remind it; the design "
+            "stage is declared silent and the Director tells the designer when work is waiting.",
+            file=sys.stderr,
+        )
+    return document
+
+
 def _project_dir_for(config_path: Path, document: dict) -> Path | None:
     """Where this tenant's project lives, from the artifact the projection already knows."""
     project = document.get("project")
@@ -258,6 +276,7 @@ def main(argv=None):
             "set-role-prompt",
             "clear-role-prompt",
             "migrate-director-onboarding",
+            "add-design-stage",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -430,6 +449,12 @@ def main(argv=None):
         # expected_revision, the rollback journal and the atomic projection write -- is
         # the same path `apply` takes, so this cannot drift from it.
         cfg = _document_with_role_prompt(current, args, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation == "add-design-stage":
+        # The same path as set-role-prompt: the director adds a reviewed shape by
+        # command, and everything below (board dry-run, expected revision, journal,
+        # projection) is apply's own (SYRD-567).
+        cfg = _document_with_design_stage(current, parser)
         files = projection_files(args.config, cfg)
     else:
         if not args.document:

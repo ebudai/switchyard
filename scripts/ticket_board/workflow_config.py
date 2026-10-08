@@ -345,6 +345,27 @@ def _validate_scheduling(cfg: dict[str, Any], stages: dict[str, Any], roles: dic
          "scheduling idle_alert_seconds must be an integer from 60 to 86400")
 
 
+def _review_hands_back(transitions: list[Any], stages: dict[str, Any], review: str, work: str) -> bool:
+    """Whether a `return` from `review` to `work` gives work back to the stage it came from (SYRD-567).
+
+    A return goes back without a verdict and past a blocker, so it may only go
+    back: out of a review, to a stage that is not a review and that submits
+    into this review with an ordinary forward move. A design review handing a
+    spec back to its designer is one; a review "returning" work onward to a
+    later stage is not, because nothing there submits into it, and neither is
+    a terminal stage, whose only exit is a reopen.
+    """
+    return (
+        stages[review]["kind"] == "review"
+        and stages[work]["kind"] != "review"
+        and any(
+            isinstance(m, dict) and m.get("from") == work and m.get("to") == review
+            and m.get("primitive") in ("move", "approve")
+            for m in transitions
+        )
+    )
+
+
 def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
     """Validate the complete desired graph. Never infer silence or actor authority."""
     cfg = copy.deepcopy(document)
@@ -746,8 +767,9 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
             "approval requires a source-stage signoff",
         )
         need(
-            tr["primitive"] != "return" or stages[b]["kind"] == "implementation",
-            "return must target the implementation stage",
+            tr["primitive"] != "return" or stages[b]["kind"] == "implementation"
+            or _review_hands_back(cfg["transitions"], stages, a, b),
+            "return must target the implementation stage, or a stage that submits into the review it leaves",
         )
         need(
             isinstance(tr["clear_signoffs"], list)

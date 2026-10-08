@@ -102,6 +102,7 @@ SWITCHYARD_COMMANDS = (
     "agy-credential",
     "seed-role-credentials",
     "role-prompt",
+    "design-stage",
     "onboarding-readiness",
     "stop",
     # The other half of `stop`: bring a suspended tenant back in dependency
@@ -152,7 +153,7 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # this reports are world-readable by design; anything it cannot read is
     # named as unavailable instead (SYRD-241).
     {
-        "present", "attach", "board-skill", "role-prompt", "set-role-runtime",
+        "present", "attach", "board-skill", "role-prompt", "design-stage", "set-role-runtime",
         "finish-upgrade", "worker-pool", "privileged-action", "status",
     }
 )
@@ -191,6 +192,7 @@ Commands:
   set-role-runtime change an existing role's agent runtime and reconnect its panes
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
+  design-stage     add a designer-owned design stage and the Director's design review
   onboarding-readiness
                    report whether every registered tenant has migrated director onboarding
   stop             suspend a project: window, sessions, listener and board, reversibly

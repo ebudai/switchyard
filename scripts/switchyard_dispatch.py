@@ -314,29 +314,43 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import onboarding_readiness
 
         return onboarding_readiness.main(argv[1:])
-    if argv[0].casefold() == "role-prompt":
+    # `design-stage` shares this block: like role-prompt it writes the tenant's own
+    # declared workflow through workflow_manage as the caller (SYRD-567).
+    if argv[0].casefold() in ("role-prompt", "design-stage"):
+        design_stage = argv[0].casefold() == "design-stage"
         parser = argparse.ArgumentParser(
-            prog="switchyard role-prompt",
+            prog=f"switchyard {argv[0].casefold()}",
             description=(
+                "Add the optional design stage to a project's declared workflow: the designer "
+                "owns design work and submits it to the Director's design review, which returns "
+                "it or accepts it into triage. release_draft is unchanged."
+            ) if design_stage else (
                 "Show, set, or clear the onboarding prompt a role receives when its next "
                 "conversation starts fresh. A running conversation is never interrupted or "
                 "rewritten: a changed prompt is used by the next fresh session or an "
                 "explicit role restart."
             ),
         )
-        parser.add_argument("action", choices=("show", "set", "clear"))
-        parser.add_argument("role")
+        if design_stage:
+            parser.add_argument(
+                "--dry-run", action="store_true",
+                help="print the document and projection it would apply, and change nothing",
+            )
+        else:
+            parser.add_argument("action", choices=("show", "set", "clear"))
+            parser.add_argument("role")
         parser.add_argument(
             "--project",
             default=os.environ.get("TICKET_BOARD_PROJECT", ""),
             help="project name or slug; defaults to TICKET_BOARD_PROJECT in the caller's pane",
         )
-        parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
-        parser.add_argument(
-            "--prompt-file",
-            type=Path,
-            help="read the prompt from a file, or from stdin when given as -",
-        )
+        if not design_stage:
+            parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
+            parser.add_argument(
+                "--prompt-file",
+                type=Path,
+                help="read the prompt from a file, or from stdin when given as -",
+            )
         args = parser.parse_args(argv[1:])
         if not args.project.strip():
             raise SystemExit(
@@ -347,6 +361,9 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         config = launcher._load_switchyard_project_config_for_command(entry, argv)
         from scripts import workflow_manage
 
+        if design_stage:
+            forwarded = ["add-design-stage", "--board-url", config.board_url, "--config", str(entry.config_path)]
+            return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
         forwarded = [
             f"{args.action}-role-prompt",
             "--role",

@@ -101,8 +101,10 @@ def test_legacy_and_configured_sql_bytes_and_parameters() -> None:
 def test_list_and_detail_reuse_the_app_connection_without_writes() -> None:
     conn = ReadOnlyConnection(configured_workflow())
     app = TicketBoardApp.__new__(TicketBoardApp)
+    # SYRD-572: a read takes the workflow's stage names first; a running app has them cached.
+    app._workflow_states_cache = ("in_progress",)
     app._pg_connect = lambda: conn
-    app._pg_row_to_ticket = lambda row: dict(row)
+    app._pg_row_to_ticket = lambda row, *_validation: dict(row)
     assert app.list_tickets() == ([
         {"id": "SYRD-1", "state": "in_progress", "updated": "2026-01-01"}
     ], [])
@@ -123,8 +125,10 @@ def test_list_and_detail_reuse_the_app_connection_without_writes() -> None:
 def test_public_detail_normalizes_id_and_missing_id_refuses() -> None:
     conn = ReadOnlyConnection()
     app = TicketBoardApp.__new__(TicketBoardApp)
+    # SYRD-572: a read takes the workflow's stage names first; a running app has them cached.
+    app._workflow_states_cache = ("in_progress",)
     app._pg_connect = lambda: conn
-    app._pg_row_to_ticket = lambda row: dict(row)
+    app._pg_row_to_ticket = lambda row, *_validation: dict(row)
     assert app.get_ticket(" syrd-1 ")["id"] == "SYRD-1"
     try:
         app.get_ticket("syrd-2")

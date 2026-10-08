@@ -132,3 +132,67 @@ its presence means an operator is needed.
 The result distinguishes configured state from live state: whether the runtime
 changed, and whether a live session was actually replaced. A role that was not
 running is reconfigured without claiming its session was restarted.
+
+## Previews and the board's locks
+
+Step 4's preview, and every later workflow apply, runs the board's
+`apply_declared_workflow` in full and then rolls it back. That function rebuilds
+the stage graph and alters constraints on `tickets`, so even a preview takes
+`AccessExclusiveLock` on `workflow_stages` and `tickets` for the moment it runs.
+On MEFP (SYRD-572) this went wrong two ways, and nothing had a timeout to end
+either:
+
+- concurrent previews deadlocked: each read the serial reservations, holding a
+  share lock on `tickets`, before reaching the workflow's advisory lock;
+- a ticket read held `tickets` and then, on a second connection, waited for
+  `workflow_stages`, which a preview held while it queued for `tickets`.
+  PostgreSQL saw only a session idle in a transaction, and every later reader
+  queued behind the preview for fifteen minutes.
+
+So, on the board (`scripts/ticket_board/workflow_locking.py`):
+
+- an apply or preview takes the workflow advisory lock first, before anything
+  holds a share lock, and waits at most 30 seconds for another one to finish;
+  that wait blocks no reader;
+- its table locks are waited for at most 5 seconds, because readers queue behind
+  a pending exclusive request; the whole statement is bounded at 60 seconds;
+- a wait that runs out or a detected deadlock rolls back, which changes nothing,
+  and the apply is tried up to 3 times in all; then the command is refused with
+  "nothing was changed. Retry once they finish";
+- a ticket read takes `workflow_stages` before `tickets`, on its own connection
+  and transaction, so a read and an apply always lock in the same order.
+
+## If a board's ticket reads hang anyway
+
+Symptom: `/api/workflow` and `/api/runtime-assignments` answer at once while
+`/api/board` and ticket reads time out. Do not restart PostgreSQL, kill processes
+or edit tickets. As `postgres`, with your own short timeouts so your session can
+never join the queue (`SET statement_timeout='5s'; SET lock_timeout='3s';`):
+
+1. Find the wedge, read-only:
+
+   ```sql
+   SELECT pid, state, now()-state_change AS age, backend_xid, wait_event_type,
+          pg_blocking_pids(pid) AS blocked_by, left(query, 80)
+   FROM pg_stat_activity WHERE datname = '<project>_ticket_board' ORDER BY xact_start;
+   ```
+
+   The pattern is one `SELECT ticket_board.apply_declared_workflow(...)` waiting
+   on `Lock`, blocked by a `ticket_board_service` session that is `idle in
+   transaction`, with everything else waiting behind the apply.
+2. Require that blocker's `backend_xid` to be empty: it has written nothing.
+   Record before-state: the workflow revision and an `md5` of its document, the
+   role definitions, and the runtime assignments.
+3. `SELECT pg_cancel_backend(<apply pid>);`. A preview rolls back by design and a
+   real apply that has not committed changes nothing, so cancelling it discards
+   exactly that. Confirm `SELECT txid_status(<its backend_xid>)` is `aborted`.
+   Terminate it only if it still holds `AccessExclusiveLock` ten seconds later.
+4. Waiters should drop to 0 and `/api/board` should answer. The idle reader
+   usually ends by itself here (its request was waiting on the apply). If it is
+   still the same backend (same `backend_start`), still idle in a transaction
+   and still without a `backend_xid`, `SELECT pg_terminate_backend(<its pid>);`.
+5. Compare after-state with before, plus a ticket and comment count and `md5`.
+
+This is the procedure that recovered MEFP on 2026-10-07: the apply's transaction
+was aborted, the reader ended on its own, and every record matched before and
+after.

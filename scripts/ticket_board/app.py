@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, commit_cache, extension_operations, new_asset_files
+from . import attachment_store, commit_cache, extension_operations, new_asset_files, workflow_locking
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -205,10 +205,12 @@ class TicketBoardApp:
         self._workflow_states_cache: tuple[str, ...] | None = None
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
-    def workflow_configuration(self) -> dict[str, Any] | None:
+    def workflow_configuration(self, conn: Any | None = None) -> dict[str, Any] | None:
         if not self.database_url:
             return None
         from .workflow_config import read_configuration
+        if conn is not None:  # SYRD-572: inside a caller's transaction, never a second connection
+            return read_configuration(conn)
         with self._pg_connect() as conn:
             return read_configuration(conn)
 
@@ -327,16 +329,14 @@ WHERE (r.definition->>'active')::boolean
         if caller_role != "director":
             raise PermissionError("only director may configure workflow")
         cfg = validate(document, project=self.project)
-        with self._pg_connect() as conn:
-            self._pg_set_caller_role(conn, caller_role)
-            held_before = pull_queue.reservations(conn)  # SYRD-539: what this document does to in-flight work
-            row = conn.execute("SELECT ticket_board.apply_declared_workflow(%s::jsonb,%s) AS revision", (json.dumps(cfg), expected_revision)).fetchone()
-            result = {"revision": row["revision"], "document": cfg, "dry_run": dry_run,
-                      "reservation_changes": pull_queue.reservation_changes(conn, held_before)}
-            if dry_run:
-                conn.rollback()
-            self._workflow_states_cache = None
-            return result
+        # SYRD-572: serialized first, every lock wait bounded, retried, refused plainly.
+        result = workflow_locking.apply_workflow_bounded(
+            self._pg_connect, cfg, expected_revision=expected_revision, dry_run=dry_run, caller_role=caller_role,
+            set_caller_role=self._pg_set_caller_role, reservations=pull_queue.reservations,
+            reservation_changes=pull_queue.reservation_changes, attempts=workflow_locking.ATTEMPTS,
+            table_lock_wait_seconds=workflow_locking.TABLE_LOCK_WAIT_SECONDS, statement_seconds=workflow_locking.STATEMENT_SECONDS)
+        self._workflow_states_cache = None
+        return result
 
     def set_workflow_flags(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str) -> dict[str, Any]:
         with self._pg_connect() as conn:
@@ -1048,10 +1048,13 @@ ORDER BY rank;
         if conn is None:
             with self._pg_connect() as own_conn:
                 return self._pg_get_ticket(ticket_id, own_conn)
+        # SYRD-572: stages before tickets -- a workflow apply's order -- or the two wait on each other.
+        # Kept here, not re-read from the shared cache: another request may empty it meanwhile.
+        state_names = self._workflow_state_names(conn)
         rows = select_ticket_rows(conn, ticket_id=ticket_id)
         if not rows:
             raise FileNotFoundError(f"ticket not found: {ticket_id}")
-        ticket = self._pg_row_to_ticket(rows[0])
+        ticket = self._pg_row_to_ticket(rows[0], conn, state_names)
         from .workflow_config import read_configuration, advertised_transitions
         cfg = read_configuration(conn)
         if cfg:
@@ -1067,7 +1070,8 @@ ORDER BY rank;
         ticket["publication"] = _publication_row_with_history(conn, open_request)
         return ticket
 
-    def _pg_row_to_ticket(self, row: dict[str, Any]) -> dict[str, Any]:
+    def _pg_row_to_ticket(self, row: dict[str, Any], conn: Any | None = None,
+                          state_names: tuple[str, ...] | None = None) -> dict[str, Any]:
         comments = row["comments"]
         if isinstance(comments, str):
             comments = json.loads(comments)
@@ -1081,8 +1085,8 @@ ORDER BY rank;
             "id": str(row["id"]),
             "title": require_text(row["title"], "title"),
             "body": require_body(row["body"]),
-            "assignee": self._validate_assignee(str(row["assignee"])),
-            "state": self._validate_state(str(row["state"])),
+            "assignee": self._validate_assignee(str(row["assignee"]), conn),
+            "state": self._validate_state(str(row["state"]), conn, state_names),
             "blocked_by": validate_blocked_by(list(row["blocked_by"] or []), str(row["id"]), self.ticket_prefix),
             "blockers": validate_blockers(blockers, str(row["id"]), self.ticket_prefix),
             "parent_id": str(row["parent_id"] or ""),
@@ -1736,19 +1740,26 @@ SELECT EXISTS (
         """
         return commit_cache.resolve_known_commit(self.commit_git_dirs, value)
 
-    def _validate_state(self, state: str) -> str:
-        if state not in self._workflow_state_names():
+    def _validate_state(self, state: str, conn: Any | None = None, names: tuple[str, ...] | None = None) -> str:
+        names = names if names is not None else self._workflow_state_names(conn)
+        if state not in names:
             state = LEGACY_STATE_ALIASES.get(state, state)
-        if state not in self._workflow_state_names():
+        if state not in names:
             raise ValueError(f"invalid state: {state}")
         return state
 
-    def _workflow_state_names(self) -> tuple[str, ...]:
+    def _workflow_state_names(self, conn: Any | None = None) -> tuple[str, ...]:
         if self._workflow_states_cache is not None:
             return self._workflow_states_cache
+        query = "SELECT name FROM ticket_board.workflow_stages ORDER BY rank;"
         try:
-            with self._pg_connect() as conn:
-                rows = conn.execute("SELECT name FROM ticket_board.workflow_stages ORDER BY rank;").fetchall()
+            if conn is not None:
+                # SYRD-572: the caller's own transaction. A second connection here waited on a workflow
+                # preview that was itself waiting on the caller -- a cycle PostgreSQL could not see.
+                rows = conn.execute(query).fetchall()
+            else:
+                with self._pg_connect() as own:
+                    rows = own.execute(query).fetchall()
         except Exception as exc:  # noqa: BLE001
             if self.database_url:
                 raise RuntimeError("could not load configured workflow states") from exc
@@ -1757,10 +1768,10 @@ SELECT EXISTS (
         self._workflow_states_cache = states or STATES
         return self._workflow_states_cache
 
-    def _validate_assignee(self, assignee: str) -> str:
-        cfg = self.workflow_configuration() if assignee in LEGACY_ASSIGNEE_ALIASES else None
+    def _validate_assignee(self, assignee: str, conn: Any | None = None) -> str:
+        cfg = self.workflow_configuration(conn) if assignee in LEGACY_ASSIGNEE_ALIASES else None
         if not cfg or not any(r["name"] == assignee for r in cfg["roles"]):
             assignee = LEGACY_ASSIGNEE_ALIASES.get(assignee, assignee)
-        if assignee not in ASSIGNEES and assignee not in {r["name"] for r in (self.workflow_configuration() or {}).get("roles", [])}:
+        if assignee not in ASSIGNEES and assignee not in {r["name"] for r in (self.workflow_configuration(conn) or {}).get("roles", [])}:
             raise ValueError(f"invalid assignee: {assignee}")
         return assignee

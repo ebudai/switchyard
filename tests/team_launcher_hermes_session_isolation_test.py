@@ -248,6 +248,13 @@ def test_hermes_start_prepares_isolated_home_and_resumes_by_default() -> None:
             json.dumps({"target": role.target, "session_id": "previous-hermes-session"}) + "\n",
             encoding="utf-8",
         )
+        # SYRD-564: a resume is passed only for a session the role's home holds.
+        import sqlite3
+        role_home = team_launcher.hermes_home_for_role(role, session_dir=session_dir)
+        role_home.mkdir(parents=True)
+        with sqlite3.connect(role_home / "state.db") as database:
+            database.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL)")
+            database.execute("INSERT INTO sessions VALUES ('previous-hermes-session', 'cli')")
         runner = FakeRunner(existing_sessions={role.tmux_session}, current_commands={role.target: "hermes"})
         stderr = StringIO()
 

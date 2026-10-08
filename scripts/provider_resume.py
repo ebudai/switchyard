@@ -295,6 +295,8 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
                 f"is not present at {location}; starting fresh instead of passing codex resume"
             ),
         )
+    if _uses_hermes(role):
+        return _hermes_resume_preflight(role, session_id, session_dir=session_dir)
     if not _uses_agy_conversation_resume(role):
         return True, ""
     session_home = _home_from_session_dir(session_dir)
@@ -312,6 +314,55 @@ def _resume_preflight_allows_attempt(role: RoleConfig, session_id: str, *, sessi
             "is not present in the local Antigravity store; starting fresh instead of relying "
             "on agy --conversation, which silently falls back when the id is missing"
         ),
+    )
+
+
+def hermes_session_in_home(session_id: str, hermes_home: Path) -> bool | None:
+    """Whether Hermes would find `session_id` in this home: its `state.db`'s sessions table, read-only.
+
+    The same lookup `hermes --resume` makes (SessionDB.get_session: a row with
+    that exact id). False when the database or the row is missing; None when
+    the database exists but cannot be read, which is no confirmation either.
+    """
+    import sqlite3
+
+    database = hermes_home / "state.db"
+    if not database.is_file():
+        return False
+    try:
+        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+        try:
+            row = connection.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    return row is not None
+
+
+def _hermes_resume_preflight(role: RoleConfig, session_id: str, *, session_dir: Path) -> tuple[bool, str]:
+    """Pass a recorded Hermes id only if the role's own home holds that session (SYRD-564).
+
+    Otto's recovered pane was started with `--resume <Oct 4 id>` that its home's
+    state.db did not have: Hermes printed "Session not found", kept running, and
+    answered every prompt the same way, while the launcher saw the process and
+    called the resume verified. A missing or unconfirmable id now starts fresh,
+    saying where it looked -- and when the id lives only in the project-wide
+    home this role no longer runs from, saying that too.
+    """
+    home = hermes_home_for_role(role, session_dir=session_dir)
+    found = hermes_session_in_home(session_id, home)
+    if found:
+        return True, ""
+    why = f"cannot be confirmed: {home / 'state.db'} could not be read" if found is None else f"is not in {home / 'state.db'}"
+    elsewhere = ""
+    if session_dir.expanduser().parent.name == "roles":
+        legacy_home = hermes_home_for_role(role, session_dir=session_dir.expanduser().parent.parent)
+        if hermes_session_in_home(session_id, legacy_home):
+            elsewhere = f"; it exists only in the project-wide home {legacy_home}, which this role no longer runs from"
+    return False, (
+        f"team-launcher: recorded hermes session {session_id} for {role.role} {why}{elsewhere}; not passing "
+        "hermes --resume, which would answer every prompt with 'Session not found'"
     )
 
 

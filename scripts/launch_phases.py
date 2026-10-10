@@ -42,7 +42,7 @@ import json
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -123,6 +123,8 @@ class LaunchPreparation:
     running_roles: list[RoleConfig]
     reconcile_home: Path | None
     unreconciled_roles: set[str]
+    #: Stopped roles' worktrees kept rather than refreshed, and why (SYRD-555).
+    kept_worktrees: dict[str, str] = field(default_factory=dict)
 
 
 def _prepare_launch(
@@ -130,6 +132,7 @@ def _prepare_launch(
     *,
     allow_stale_launcher: bool,
     config_path: Path,
+    discard_worktree_changes: frozenset[str] = frozenset(),
     dry_run: bool,
     effective_pane_state_dir: Path,
     mode: str,
@@ -144,6 +147,7 @@ def _prepare_launch(
     from scripts import team_launcher as launcher
 
     failed_roles: dict[str, str] = {}
+    kept_worktrees: dict[str, str] = {}
     running_roles: list[RoleConfig] = []
     reconcile_home: Path | None = None
     #: Roles still carrying an older provider state than the account has,
@@ -195,11 +199,13 @@ def _prepare_launch(
                 if running_roles and config.control_repository is not None
                 else config.roles
             )
-            failed_roles = launcher._prepare_project_worktrees_for_launch(
+            prepared = launcher._prepare_project_worktrees_for_launch(
                 config,
                 running_roles=running_roles,
                 runner=worktree_runner,
-            ).failed_roles
+                discard=discard_worktree_changes,
+            )
+            failed_roles, kept_worktrees = prepared.failed_roles, prepared.kept_roles
             if worktree_roles and config.control_repository is not None and set(failed_roles) == {role.role for role in worktree_roles}:
                 reason = next(iter(failed_roles.values()), "unknown error")
                 print(f"team-launcher: failed to prepare control repository for {config.project}: {reason}", file=sys.stderr)
@@ -243,6 +249,7 @@ def _prepare_launch(
         running_roles=running_roles,
         reconcile_home=reconcile_home,
         unreconciled_roles=unreconciled_roles,
+        kept_worktrees=kept_worktrees,
     )
 
 

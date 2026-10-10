@@ -59,6 +59,9 @@ def launch_project(
     layout_environ: dict[str, str] | None = None,
     konsole_process_launcher: Callable[..., Any] | None = None,
     print_func: Callable[[str], None] = print,
+    #: Stopped roles whose uncommitted worktree changes the operator explicitly
+    #: discards so they are refreshed (`--discard-worktree-changes`, SYRD-555).
+    discard_worktree_changes: frozenset[str] = frozenset(),
 ) -> int:
     from scripts import team_launcher as launcher
 
@@ -66,6 +69,10 @@ def launch_project(
         mode = "attach-or-start"
     if mode not in {"attach", "attach-or-start", "reload"}:
         raise SystemExit(f"unknown launch mode: {mode}")
+    unknown = sorted(set(discard_worktree_changes) - {role.role for role in config.roles}) if discard_worktree_changes else []
+    if unknown:
+        raise SystemExit(f"team-launcher: {config.project} has no role {', '.join(unknown)}; "
+                         f"nothing was discarded and nothing was launched")
     if not dry_run and config.role_state_isolation:
         compatible, reason = launcher.process_authority_board_compatibility(config)
         if not compatible:
@@ -116,6 +123,7 @@ def launch_project(
         config,
         allow_stale_launcher=allow_stale_launcher,
         config_path=config_path,
+        discard_worktree_changes=discard_worktree_changes,
         dry_run=dry_run,
         effective_pane_state_dir=effective_pane_state_dir,
         mode=mode,
@@ -180,7 +188,7 @@ def launch_project(
     # A window opened by an earlier release can still be running as root, and
     # the tenant cannot signal it. Saying the project is attached while that is
     # true would be the wrong report to act on (SYRD-43).
-    return launcher._report_launch(
+    exit_code = launcher._report_launch(
         config,
         config_path=config_path,
         effective_pane_state_dir=effective_pane_state_dir,
@@ -198,3 +206,6 @@ def launch_project(
         unreconciled_roles=unreconciled_roles,
         worker_start_exit_code=worker_start_exit_code,
     )
+    # Last, where the operator reads: worktrees kept rather than refreshed (SYRD-555).
+    launcher.report_kept_worktrees(config, launch_preparation.kept_worktrees, print_func=print_func)
+    return exit_code

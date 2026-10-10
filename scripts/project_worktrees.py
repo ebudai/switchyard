@@ -7,8 +7,13 @@ project account. This module covers:
   it is not the owner's.
 - **Role worktrees and the shared checkout.** Creating, checking and resetting
   them, and cleaning them.
-- **Refresh warnings.** Before either kind of tree is refreshed, the tracked
+- **Refresh warnings.** Before the shared checkout is refreshed, the tracked
   edits and untracked files it would lose are named.
+- **Refusing a role worktree's refresh** (SYRD-555). A stopped role's worktree
+  is refreshed only when that loses nothing: no commit outside the ref, no
+  tracked change, no untracked file. Otherwise it is kept exactly as it is,
+  said so, and its role starts on it. A refresh moves HEAD, never a branch,
+  and never deletes ignored files.
 - **Fetching** a project's worktree ref.
 - **The git argv builders** for all of the above.
 
@@ -33,7 +38,7 @@ import pwd
 import stat
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -45,6 +50,10 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class WorktreeProvisionResult:
     failed_roles: dict[str, str]
+    #: Role worktrees whose refresh was refused because it would have lost
+    #: work, each with why and the remedy (SYRD-555). The tree is untouched
+    #: and its role still starts on it, so these are not failures.
+    kept_roles: dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -144,18 +153,35 @@ def git_role_worktree_status_porcelain_args(role: RoleConfig) -> list[str]:
     return ["git", "-C", role.workdir, "status", "--porcelain"]
 
 
-def git_role_worktree_reset_args(config: ProjectConfig, role: RoleConfig) -> list[str]:
+def git_role_worktree_reset_args(config: ProjectConfig, role: RoleConfig, *, discard: bool = False) -> list[str]:
+    """The refresh: HEAD detached at the ref. Never `reset --hard`, which moves the
+    checked-out branch and takes its commits with it (otto, 2026-10-04). Only an
+    explicit discard forces past tracked changes (SYRD-555)."""
     from scripts import team_launcher as launcher
 
-    return ["git", "-C", role.workdir, "reset", "--hard", launcher.worktree_ref(config)]
+    return ["git", "-C", role.workdir, "checkout", "--detach", *(["--force"] if discard else []),
+            launcher.worktree_ref(config)]
 
 
 def git_clean_role_worktree_args(role: RoleConfig) -> list[str]:
-    return ["git", "-C", role.workdir, "clean", "-fdx"]
+    """Untracked files only, and only for an explicit discard: never `-x`, so ignored
+    local configuration (`local.properties`, `.env`) and build caches stay (SYRD-555)."""
+    return ["git", "-C", role.workdir, "clean", "-fd"]
 
 
-def git_clean_role_worktree_dry_run_args(role: RoleConfig) -> list[str]:
-    return ["git", "-C", role.workdir, "clean", "-fd", "--dry-run"]
+def git_role_worktree_branch_args(role: RoleConfig) -> list[str]:
+    return ["git", "-C", role.workdir, "symbolic-ref", "--quiet", "--short", "HEAD"]
+
+
+def git_role_worktree_unmerged_count_args(config: ProjectConfig, role: RoleConfig, *, detached: bool) -> list[str]:
+    """Commits a refresh would take out of reach: a branch's commits not in the ref, or
+    a detached HEAD's commits on no branch, local or remote-tracking, and not in the ref."""
+    from scripts import team_launcher as launcher
+
+    ref = launcher.worktree_ref(config)
+    if detached:
+        return ["git", "-C", role.workdir, "rev-list", "--count", "HEAD", "--not", ref, "--branches", "--remotes"]
+    return ["git", "-C", role.workdir, "rev-list", "--count", f"{ref}..HEAD"]
 
 
 def git_clean_shared_checkout_args(config: ProjectConfig) -> list[str]:
@@ -274,56 +300,93 @@ def warn_before_shared_checkout_refresh(
     return None
 
 
-def warn_before_role_worktree_refresh(
+#: The launch flag that discards a named role's uncommitted work, printed in every
+#: refusal it would lift (SYRD-555).
+DISCARD_WORKTREE_CHANGES_FLAG = "--discard-worktree-changes"
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _listed(paths: list[str], limit: int = 5) -> str:
+    shown = ", ".join(paths[:limit])
+    return shown + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
+
+
+def role_worktree_refresh_refusal(
     config: ProjectConfig,
     role: RoleConfig,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
-) -> WorktreeProvisionResult | None:
+    discard: bool = False,
+) -> tuple[str, str]:
+    """Whether refreshing a stopped role's worktree would lose work (SYRD-555).
+
+    ("", "") to refresh; ("kept", why) to leave the worktree exactly as it is
+    and start the role on it; ("failed", why) when the worktree could not be
+    read, which refuses too. `discard` is the operator's explicit
+    `--discard-worktree-changes` for this role: it lifts the refusal for
+    tracked changes, untracked files and a branch ahead of the ref (the branch
+    keeps its commits, since the refresh only moves HEAD), never for commits a
+    detached HEAD holds alone.
+    """
     from scripts import team_launcher as launcher
 
-    status_proc = launcher.run_owner_correct_git(
-        git_role_worktree_status_porcelain_args(role),
-        runner=runner,
-        owner_rules=_config_git_owner_rules(config),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    read = {"runner": runner, "owner_rules": _config_git_owner_rules(config),
+            "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
+    ref = launcher.worktree_ref(config)
+    status_proc = launcher.run_owner_correct_git(git_role_worktree_status_porcelain_args(role), **read)
     if status_proc.returncode != 0:
-        reason = launcher._proc_failure_reason(status_proc, f"status failed with exit {status_proc.returncode}")
-        return WorktreeProvisionResult({role.role: reason})
-    clean_proc = launcher.run_owner_correct_git(
-        git_clean_role_worktree_dry_run_args(role),
-        runner=runner,
-        owner_rules=_config_git_owner_rules(config),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if clean_proc.returncode != 0:
-        reason = launcher._proc_failure_reason(clean_proc, f"clean dry-run failed with exit {clean_proc.returncode}")
-        return WorktreeProvisionResult({role.role: reason})
+        return "failed", launcher._proc_failure_reason(status_proc, f"status failed with exit {status_proc.returncode}")
+    branch_proc = launcher.run_owner_correct_git(git_role_worktree_branch_args(role), **read)
+    branch = str(branch_proc.stdout or "").strip()
+    if branch_proc.returncode not in (0, 1) or (branch_proc.returncode == 0 and not branch):
+        return "failed", launcher._proc_failure_reason(branch_proc, "could not read which branch HEAD is on")
+    detached = branch_proc.returncode == 1
+    count_proc = launcher.run_owner_correct_git(git_role_worktree_unmerged_count_args(config, role, detached=detached), **read)
+    count_text = str(count_proc.stdout or "").strip()
+    if count_proc.returncode != 0 or not count_text.isdigit():
+        return "failed", launcher._proc_failure_reason(count_proc, f"could not count commits not in {ref}")
+    unmerged = int(count_text)
+    output = str(status_proc.stdout or "")
+    tracked = _tracked_dirty_paths_from_status(output)
+    untracked = [line[3:].strip() for line in output.splitlines() if line.startswith("?? ")]
 
-    tracked_paths = _tracked_dirty_paths_from_status(str(status_proc.stdout or ""))
-    clean_paths = _clean_paths_from_dry_run(str(clean_proc.stdout or ""))
-    if not tracked_paths and not clean_paths:
-        return None
-
-    print(
-        f"warning: team-launcher will reset managed role worktree {role.workdir} "
-        f"for {role.role} to {launcher.worktree_ref(config)}",
-        file=sys.stderr,
+    held: list[str] = []
+    if unmerged and detached:
+        return "kept", (
+            f"detached HEAD has {_plural(unmerged, 'commit')} on no branch and not in {ref}; "
+            f"name it first (`git -C {role.workdir} branch <name>`), since no flag discards commits"
+        )
+    if unmerged:
+        held.append(f"branch {branch} has {_plural(unmerged, 'commit')} not in {ref}")
+    if tracked:
+        held.append(f"{_plural(len(tracked), 'tracked change')}: {_listed(tracked)}")
+    if untracked:
+        held.append(f"{_plural(len(untracked), 'untracked path')}: {_listed(untracked)}")
+    if not held or discard:
+        return "", ""
+    return "kept", (
+        "; ".join(held) + f". To refresh it to {ref}, merge or move that work, or run "
+        f"`switchyard start {config.project} {DISCARD_WORKTREE_CHANGES_FLAG} {role.role}` to discard its "
+        "tracked changes and untracked files (ignored files stay, and its branch keeps its commits)"
     )
-    if tracked_paths:
-        print("warning: tracked changes will be discarded:", file=sys.stderr)
-        for path in tracked_paths:
-            print(f"warning:   {path}", file=sys.stderr)
-    if clean_paths:
-        print("warning: untracked files will be removed:", file=sys.stderr)
-        for path in clean_paths:
-            print(f"warning:   {path}", file=sys.stderr)
-    return None
+
+
+def report_kept_worktrees(
+    config: ProjectConfig,
+    kept_roles: dict[str, str],
+    *,
+    print_func: Callable[[str], None] = print,
+) -> None:
+    """The launch's last word on worktrees it would not refresh, so it is not lost in the scroll."""
+    if not kept_roles:
+        return
+    print_func(f"team-launcher: {_plural(len(kept_roles), 'role worktree')} of {config.project} "
+               "kept as they were, not refreshed, so no work was lost:")
+    for role, why in sorted(kept_roles.items()):
+        print_func(f"team-launcher:   {role}: {why}")
 
 
 #: What is at the control repository path. Existence was taken for
@@ -599,6 +662,7 @@ def ensure_control_role_worktrees(
     *,
     refresh: bool,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    discard: frozenset[str] = frozenset(),
 ) -> WorktreeProvisionResult:
     from scripts import team_launcher as launcher
 
@@ -613,6 +677,7 @@ def ensure_control_role_worktrees(
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
 
     failed: dict[str, str] = {}
+    kept: dict[str, str] = {}
     for role in config.roles:
         role_path = Path(role.workdir)
         if not role_path.exists():
@@ -634,17 +699,23 @@ def ensure_control_role_worktrees(
         if check_proc.returncode != 0:
             failed[role.role] = launcher._proc_failure_reason(check_proc, f"worktree check failed with exit {check_proc.returncode}")
             continue
-        warning_result = warn_before_role_worktree_refresh(config, role, runner=runner)
-        if warning_result is not None:
-            failed.update(warning_result.failed_roles)
+        outcome, why = role_worktree_refresh_refusal(config, role, runner=runner, discard=role.role in discard)
+        if outcome == "failed":
+            failed[role.role] = why
+            continue
+        if outcome == "kept":
+            kept[role.role] = why
+            print(f"team-launcher: not refreshing {role.role}'s worktree {role.workdir}: {why}", file=sys.stderr)
             continue
         reset_proc = launcher.run_owner_correct_git(
-            git_role_worktree_reset_args(config, role),
+            git_role_worktree_reset_args(config, role, discard=role.role in discard),
             runner=runner,
             owner_rules=_config_git_owner_rules(config),
         )
         if reset_proc.returncode != 0:
-            failed[role.role] = launcher._proc_failure_reason(reset_proc, f"reset failed with exit {reset_proc.returncode}")
+            failed[role.role] = launcher._proc_failure_reason(reset_proc, f"refresh failed with exit {reset_proc.returncode}")
+            continue
+        if role.role not in discard:
             continue
         clean_proc = launcher.run_owner_correct_git(
             git_clean_role_worktree_args(role),
@@ -653,7 +724,7 @@ def ensure_control_role_worktrees(
         )
         if clean_proc.returncode != 0:
             failed[role.role] = launcher._proc_failure_reason(clean_proc, f"clean failed with exit {clean_proc.returncode}")
-    return WorktreeProvisionResult(failed)
+    return WorktreeProvisionResult(failed, kept)
 
 
 def ensure_project_worktrees(
@@ -661,11 +732,12 @@ def ensure_project_worktrees(
     *,
     refresh: bool,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    discard: frozenset[str] = frozenset(),
 ) -> WorktreeProvisionResult:
     from scripts import team_launcher as launcher
 
     if config.control_repository is not None:
-        return ensure_control_role_worktrees(config, refresh=refresh, runner=runner)
+        return ensure_control_role_worktrees(config, refresh=refresh, runner=runner, discard=discard)
     if config.repository is None:
         return WorktreeProvisionResult({})
     fetch_proc = launcher.run_owner_correct_git(
@@ -747,19 +819,23 @@ def _prepare_project_worktrees_for_launch(
     *,
     running_roles: list[RoleConfig],
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    discard: frozenset[str] = frozenset(),
 ) -> WorktreeProvisionResult:
     from scripts import team_launcher as launcher
 
     if not running_roles:
-        return launcher.ensure_project_worktrees(config, refresh=True, runner=runner)
+        return launcher.ensure_project_worktrees(config, refresh=True, runner=runner, discard=discard)
     running_role_names = {role.role for role in running_roles}
     if config.control_repository is not None:
         stopped_roles = [role for role in config.roles if role.role not in running_role_names]
         if not stopped_roles:
             return launcher.WorktreeProvisionResult({})
-        result = launcher.ensure_project_worktrees(replace(config, roles=stopped_roles), refresh=True, runner=runner)
+        result = launcher.ensure_project_worktrees(
+            replace(config, roles=stopped_roles), refresh=True, runner=runner, discard=discard
+        )
     else:
         result = launcher.ensure_project_worktrees(config, refresh=False, runner=runner)
     return launcher.WorktreeProvisionResult(
-        {role: reason for role, reason in result.failed_roles.items() if role not in running_role_names}
+        {role: reason for role, reason in result.failed_roles.items() if role not in running_role_names},
+        result.kept_roles,
     )

@@ -68,7 +68,6 @@ EXPORTED = (
     'fetch_project_worktree_ref',
     'git_checkout_shared_ref_args',
     'git_clean_role_worktree_args',
-    'git_clean_role_worktree_dry_run_args',
     'git_clean_shared_checkout_args',
     'git_clean_shared_checkout_dry_run_args',
     'git_clone_control_repository_args',
@@ -84,7 +83,7 @@ EXPORTED = (
     'git_shared_checkout_status_porcelain_args',
     'mkdir_p_args',
     'repair_control_repository_ownership',
-    'warn_before_role_worktree_refresh',
+    'report_kept_worktrees',  # SYRD-555: the launch's summary of worktrees kept, replacing the warn-only check
     'warn_before_shared_checkout_refresh',
 )
 
@@ -202,7 +201,7 @@ def prepare(cfg: PrepConfig, running: list, *, failed: dict[str, str] | None = N
     asked: list[tuple] = []
     runner = lambda argv, **kwargs: None  # noqa: E731 - handed on, never called here
 
-    def ensure(config: object, *, refresh: bool, runner: object):
+    def ensure(config: object, *, refresh: bool, runner: object, discard: frozenset = frozenset()):  # SYRD-555
         asked.append((config, refresh, runner))
         if error:
             raise error

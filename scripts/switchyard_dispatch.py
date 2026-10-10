@@ -467,6 +467,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             mode="start",
             script_path=Path(launcher.__file__).resolve().with_name(launcher.TEAM_LAUNCHER_NAME),
             report_session_records=True,
+            discard_worktree_changes=frozenset(args.discard_worktree_changes),
         )
     if argv[0].casefold() == "teardown":
         args = launcher._build_switchyard_teardown_parser().parse_args(argv[1:])

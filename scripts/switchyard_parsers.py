@@ -435,6 +435,11 @@ def _build_switchyard_recover_display_parser() -> argparse.ArgumentParser:
 def _build_switchyard_start_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard start")
     parser.add_argument("project", nargs="+")
+    parser.add_argument(
+        "--discard-worktree-changes", action="append", default=[], metavar="ROLE",
+        help="for this stopped role, discard tracked changes and untracked files so its worktree is refreshed; "
+             "ignored files and commits are kept (repeat for more roles)",
+    )
     return parser
 
 

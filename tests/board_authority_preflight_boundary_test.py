@@ -50,7 +50,8 @@ def check(condition: bool, detail: str) -> None:
 #: What launch_project reads through the launcher (SYRD-429).
 LAUNCH_READS = ("_launch_runners_and_paths", "_prepare_launch", "_write_layout_and_plan", "_start_workers_and_present", "_report_launch",
                 "process_authority_board_compatibility", "migrate_declarative_director_onboarding", "upgrade_generated_project_layout",
-                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config")
+                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config",
+                "report_kept_worktrees")  # SYRD-555: the launch ends with worktrees it kept
 
 
 def launcher_with_launch_project() -> ast.Module:

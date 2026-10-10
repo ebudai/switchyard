@@ -1132,6 +1132,32 @@ checkouts with no live panes; use a ticket worktree for implementation work.
 A shared checkout refresh failure blocks every role: visible panes print the
 checkout error instead of launching the CLI, while detached roles are skipped.
 
+A control-repository role worktree is refreshed only when that loses nothing
+(SYRD-555). Before it is touched, the launcher reads it, and leaves it exactly as
+it is when:
+- its checked-out branch has commits the ref does not (`git rev-list --count <ref>..HEAD`);
+- a detached HEAD has commits on no branch and not in the ref;
+- it has tracked changes or untracked files.
+
+The role still starts, on that tree. The reason is printed when worktrees are
+prepared ("branch pack/8 has 1 commit not in origin/main", with the paths), and
+again at the end of the launch. A refresh detaches HEAD at the ref
+(`git checkout --detach <ref>`), so no branch is ever moved and a branch keeps
+its commits. It never runs `reset --hard`, and never `git clean -x`: ignored
+files such as `local.properties`, `.env` and build caches stay.
+
+To discard a stopped role's uncommitted work on purpose, name it:
+`switchyard start <project> --discard-worktree-changes <role>` (repeat the flag
+for more roles). For that launch only, for that role:
+- tracked changes are discarded (`checkout --detach --force`);
+- untracked files are removed (`git clean -fd`);
+- HEAD may leave a branch that is ahead. The branch keeps its commits.
+
+Ignored files are still kept. A detached HEAD whose commits are on no branch is
+still refused: give it a branch first (`git -C <worktree> branch <name>`). A role
+the project does not have stops the launch before any worktree or role is touched. A role
+whose session is live is not refreshed at all.
+
 `attach` only attaches visible panes to existing sessions and fails if a role
 session is missing. Detached roles are checked for existence but remain
 detached.

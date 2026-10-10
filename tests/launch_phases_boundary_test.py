@@ -90,7 +90,7 @@ def check(condition: bool, detail: str) -> None:
 #: What launch_project reads through the launcher (SYRD-429).
 LAUNCH_READS = ("_launch_runners_and_paths", "_prepare_launch", "_write_layout_and_plan", "_start_workers_and_present", "_report_launch",
                 "process_authority_board_compatibility", "migrate_declarative_director_onboarding", "upgrade_generated_project_layout",
-                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config")
+                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config", "report_kept_worktrees")
 
 
 def launcher_with_launch_project() -> ast.Module:
@@ -455,7 +455,7 @@ P5_SEAMS = ("LEGACY_NO_LAUNCHER_SELF_DEPLOY_ENV", "NO_LAUNCHER_SELF_DEPLOY_ENV",
             "ensure_generated_project_pane_hooks", "ensure_launcher_checkout_current", "ensure_owner_state_dirs",
             "fetch_project_worktree_ref", "prepare_project_desktop", "role_isolation_gaps",
             "seed_default_session_dir_from_legacy_sources", "sync_reload_config_to_live_sessions")
-P5_OUTPUTS = ("exit_code", "config", "failed_roles", "running_roles", "reconcile_home", "unreconciled_roles")
+P5_OUTPUTS = ("exit_code", "config", "failed_roles", "running_roles", "reconcile_home", "unreconciled_roles", "kept_worktrees")
 PANES = Path("/nonexistent/syrd340/pane-state")
 PANE_SCRIPT = Path("/nonexistent/syrd340/pane")
 OWNER_HOME = Path("/nonexistent/syrd340/owner-home")
@@ -475,7 +475,7 @@ class Preparation:
         self.log: list[tuple] = []
         self.kept: list = []
         self.unreconciled = {"syrd340-unreconciled"}
-        self.worktree_result = SimpleNamespace(failed_roles=dict(self.failed))
+        self.worktree_result = SimpleNamespace(failed_roles=dict(self.failed), kept_roles={})  # SYRD-555: kept, not failed
         self.synced = SimpleNamespace(project="p340-synced")
         self.desktop = SimpleNamespace(project="p340-desktop")
         self.auth_home = Path("/nonexistent/syrd340/auth-home")
@@ -515,8 +515,8 @@ class Preparation:
             ensure_generated_project_board_skill=lambda cfg, *, config_path, script_path, runner, print_func: L.append(
                 ("board-skill", config_path, script_path, runner, print_func)),
             seed_default_session_dir_from_legacy_sources=lambda session_dir: L.append(("seed", session_dir)),
-            _prepare_project_worktrees_for_launch=lambda cfg, *, running_roles, runner: L.append(
-                ("worktrees", [r.role for r in running_roles], runner)) or self.worktree_result,
+            _prepare_project_worktrees_for_launch=lambda cfg, *, running_roles, runner, discard: L.append(
+                ("worktrees", [r.role for r in running_roles], runner, discard)) or self.worktree_result,
             fetch_project_worktree_ref=lambda cfg, *, runner: L.append(("fetch", runner)),
             sync_reload_config_to_live_sessions=lambda cfg, *, config_path, runner: L.append(("sync", cfg, runner))
             or self.synced,
@@ -609,10 +609,10 @@ def test_p5_attach_or_start_prepares_in_order() -> None:
           and entries["hooks"] == ("hooks", CONFIG_PATH, PANE_SCRIPT, PANES, caller_runner)
           and entries["board-skill"][1:4] == (CONFIG_PATH, PANE_SCRIPT, caller_runner)
           and entries["seed"] == ("seed", cfg.session_dir)
-          and entries["worktrees"] == ("worktrees", ["alpha"], worktree_runner),
+          and entries["worktrees"] == ("worktrees", ["alpha"], worktree_runner, frozenset()),  # SYRD-555: no discard unless named
           f"state, hooks and skill from the phase's paths; worktrees through the worktree runner: {prep.log}")
     check(result.exit_code is None and result.config is cfg and result.failed_roles is prep.worktree_result.failed_roles
-          and result.running_roles is prep.kept and result.reconcile_home is OWNER_HOME
+          and result.kept_worktrees is prep.worktree_result.kept_roles and result.running_roles is prep.kept and result.reconcile_home is OWNER_HOME
           and result.unreconciled_roles is prep.unreconciled and err == "" and printed == [],
           f"it goes on, handing back the very objects the steps made: {result}")
 
@@ -1559,9 +1559,9 @@ def test_the_report_phase_reads_its_lookups_through_the_launcher() -> None:
     launch = next(n for n in launcher_tree.body if isinstance(n, ast.FunctionDef) and n.name == "launch_project")
     sites = [n for n in ast.walk(launcher_tree) if isinstance(n, ast.Call)
              and getattr(n.func, "id", getattr(n.func, "attr", "")) == "_report_launch"]
-    check(len(sites) == 1 and isinstance(sites[0].func, ast.Name) and isinstance(launch.body[-1], ast.Return)
-          and launch.body[-1].value is sites[0],
-          "launch_project's last statement returns P9's answer, called by the launcher's own name")
+    check(len(sites) == 1 and isinstance(sites[0].func, ast.Name) and launch.body[-3].value is sites[0] and ast.unparse(launch.body[-2]).startswith(
+          "report_kept_worktrees(config, launch_preparation.kept_worktrees") and ast.unparse(launch.body[-1]) == "return exit_code",
+          "launch_project returns P9's answer, called by the launcher's own name, after the worktrees it kept (SYRD-555)")
 
 
 def test_p9_an_unsafe_window_is_reported_and_nothing_is_announced() -> None:

@@ -179,7 +179,11 @@ case "$manager" in
         ;;
     pacman)
         printf 'Not refreshing pacman package databases automatically; run %s pacman -Syu first on Arch-family systems.\n' "$SUDO_BIN"
-        run_cmd "$SUDO_BIN" pacman -S --needed \
+        # As root when already root, as the apt branch does. A second sudo here,
+        # under Arch's default use_pty, put pacman's [Y/n] on a nested pty that
+        # no keystroke reached, so a fresh install hung at its own confirmation
+        # (SYRD-235). The confirmation stays: it is the operator's consent.
+        run_root_cmd pacman -S --needed \
             python postgresql tmux git curl python-pillow python-psycopg acl polkit
         printf 'KDE/separate layout users also need Konsole: %s pacman -S --needed konsole\n' "$SUDO_BIN"
         ensure_postgres_cluster

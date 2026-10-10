@@ -16,8 +16,9 @@ Usage: sudo ./install [--dry-run] [--yes|-y]
 
 Installs Switchyard host packages, the shared Python venv, and the public
 switchyard command. --dry-run prints the commands that would run and exits
-without changing the system. --yes is accepted for compatibility; this
-installer does not prompt, so it has nothing to answer.
+without changing the system. --yes is accepted for compatibility. The
+installer asks nothing of its own; on Arch-family hosts pacman shows its
+usual installation confirmation.
 
 Switchyard does not install, download, or upgrade agent CLIs. Installing
 claude, codex, agy, or hermes is yours to do with the vendor's own installer,

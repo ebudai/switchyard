@@ -8,10 +8,12 @@ cd switchyard
 sudo ./install
 ```
 
-The installer prints each system-changing command before it runs. It is
-non-interactive: it installs host packages, creates the shared Python venv,
-and installs the public `switchyard` command, and it asks nothing. `--yes` is
-accepted for compatibility and has no prompts to answer. `--dry-run` prints
+The installer prints each system-changing command before it runs. It installs
+host packages, creates the shared Python venv, and installs the public
+`switchyard` command, and asks nothing of its own; on Arch-family hosts
+`pacman` shows its usual installation confirmation, which is yours to answer
+(SYRD-235 made it reachable: the installer no longer runs pacman under a second
+`sudo`). `--yes` is accepted for compatibility. `--dry-run` prints
 every command it would run and exits without changing the system.
 
 Switchyard does not install, download, or upgrade the agent CLIs. Installing

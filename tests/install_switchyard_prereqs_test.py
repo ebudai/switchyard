@@ -222,7 +222,11 @@ def test_pacman_path_installs_nothing_as_the_invoking_user_when_run_as_root() ->
 
     assert "sudo -u alice" not in output
     assert not any("pip" in c for c in executed_commands(output)), executed_commands(output)
-    assert "+ sudo pacman -S --needed" in output
+    # SYRD-235: already root, pacman runs directly, as apt does. The second sudo
+    # this used to add put pacman's confirmation on a nested pty (Arch's default
+    # use_pty) that no keystroke reached, so a fresh `./install` hung there.
+    assert f"+ pacman -S --needed {PACMAN_AFTER}" in output, output
+    assert not [c for c in executed_commands(output) if c.startswith("+ sudo ")], executed_commands(output)
     assert "+ /usr/bin/python3 -c" in output
 
 

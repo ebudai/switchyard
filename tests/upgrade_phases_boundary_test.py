@@ -115,7 +115,9 @@ def python(probe: str) -> subprocess.CompletedProcess[str]:
 #: The upgrade's six phases and their four continuation types: the names its wiring reads (SYRD-424).
 UPGRADE_READS = ("_pin_upgrade_source", "_recover_upgrade_state", "_refresh_upgrade_artifacts", "_stage_upgrade_tooling",
                  "_upgrade_identities_and_accounts", "_finish_upgrade", "UpgradeSourcePinned", "UpgradeStateReady",
-                 "UpgradeToolingStaged", "UpgradeIdentitiesDone")
+                 "UpgradeToolingStaged", "UpgradeIdentitiesDone",
+                 # SYRD-548: `--only upstream-report` returns this before U1.
+                 "connect_upstream_report_command")
 
 
 def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
@@ -143,6 +145,15 @@ def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
                           if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "launcher"})
         check(bare == [] and through == sorted(UPGRADE_READS),
               f"every phase and continuation is read through the launcher, none bare: {bare} {through}")
+        del upgrade.body[1]
+        # SYRD-548: `--only upstream-report` returns before U1 and runs no phase.
+        # Checked here, once, and then set aside, so the positions checked below
+        # are still the upgrade's own.
+        only = upgrade.body[1]
+        check(isinstance(only, ast.If) and ast.unparse(only.test) == "only" and not only.orelse
+              and len(only.body) == 1 and isinstance(only.body[0], ast.Return)
+              and ast.unparse(only.body[0].value.func) == "launcher.connect_upstream_report_command",
+              f"before U1, only --only's return: {ast.unparse(only)[:120]}")
         del upgrade.body[1]
 
         class AsLauncherGlobal(ast.NodeTransformer):

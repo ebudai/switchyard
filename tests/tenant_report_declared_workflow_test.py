@@ -316,20 +316,26 @@ def test_an_upgraded_board_is_repaired_by_the_migration(cluster) -> None:
 
 
 def test_a_fresh_board_and_an_upgraded_board_run_the_same_function() -> None:
-    check(owning_migration("file_report") == MIGRATION,
-          f"pgu957 owns file_report: {owning_migration('file_report').name}")
-    check(definition("file_report") in MIGRATION.read_text(),
+    # SYRD-548 took file_report over: pgu981's five-argument form carries this
+    # body (with a requested stage), and the four-argument form delegates to it.
+    owner = MIGRATIONS / "pgu981_syrd548_report_intake.sql"
+    check(owning_migration("file_report") == owner,
+          f"pgu981 owns file_report: {owning_migration('file_report').name}")
+    check(definition("file_report") in owner.read_text(),
           "schema.sql's copy is the migration's, character for character")
     names = sorted(p.name for p in MIGRATIONS.glob("*.sql"))
-    check(names.index(MIGRATION.name) > names.index(OLD_COPY.name),
-          "and it applies after the copy it replaces")
-    # Code only: the body's comments explain why require_actor is NOT called,
-    # and a substring check over them would fail on the explanation.
-    code = "\n".join(
-        line.split("--", 1)[0] for line in definition("file_report").splitlines()
-    )
-    check("require_actor" not in code, "file_report no longer resolves a role at all")
-    check("current_app_actor" not in code, "not even indirectly")
+    check(names.index(MIGRATION.name) > names.index(OLD_COPY.name) and names.index(owner.name) > names.index(MIGRATION.name),
+          "and each applies after the copy it replaces")
+    schema = SCHEMA.read_text()
+    copies = [schema[i:schema.index("$$;", i) + 3]
+              for i in range(len(schema)) if schema.startswith("CREATE OR REPLACE FUNCTION ticket_board.file_report(", i)]
+    check(len(copies) == 2, f"the five-argument form and the four-argument one: {len(copies)}")
+    for copy in copies:
+        # Code only: the body's comments explain why require_actor is NOT called,
+        # and a substring check over them would fail on the explanation.
+        code = "\n".join(line.split("--", 1)[0] for line in copy.splitlines())
+        check("require_actor" not in code, "file_report no longer resolves a role at all")
+        check("current_app_actor" not in code, "not even indirectly")
 
 
 def report_via_sql(service: str) -> str:

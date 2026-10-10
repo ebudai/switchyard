@@ -264,12 +264,19 @@ is set, `--origin-project` is optional and defaults to the current tenant slug.
 only for a project whose launcher config names the upstream board, and for a long time
 those two keys could only be supplied to `switchyard new` — so a project provisioned
 before the feature, or one whose upstream board moved, had no way to acquire them and its
-Director had to pass the URL and token path by hand every time. An upgrade records them
-now:
+Director had to pass the URL and token path by hand every time. One narrow step connects
+it now, and runs no upgrade phase at all -- no release resolution, no ownership repair, no
+workflow, identity or pane change (SYRD-548):
 
 ```bash
-sudo switchyard upgrade <project> --upstream-report-url http://127.0.0.1:23326
+sudo switchyard upgrade <project> --only upstream-report --upstream-report-url http://127.0.0.1:23326
 ```
+
+A new project is connected from its first launch with
+`switchyard new ... --upstream-report-url <board URL>`. A full `switchyard upgrade
+<project> --upstream-report-url ...` still records the link as part of an upgrade, but no
+tenant needs one for this. A pane with no report credential is refused by `file-report`
+with the narrow command, never an upgrade.
 
 That is stated once. The credential path defaults to
 `~/.config/<project>/upstream-report.env`, both are written into the tenant's config, and
@@ -283,13 +290,26 @@ credential handed out before it stops working. Nothing notices, because the thin
 would notice is a tenant trying to report that something is wrong. MEFP's copy was from
 2026-08-31 and its Director could not file at all (SYRD-238).
 
-Each upgrade resolves the upstream board from the host registry, reads that board's
+Each upgrade -- and `upgrade --only upstream-report` with no URL, which reconnects the
+recorded board -- resolves the upstream board from the host registry, reads that board's
 current report token, and writes it into the tenant's credential file atomically, 0600 and
 owned by the tenant. Only the report token is ever copied: a write token sitting beside it
 in the board's environment does not travel, and the token value is never put in the
 launcher config, which every role can read. Running it again writes nothing.
 
-An upstream report lands in `analysis`, assigned to `unassigned`. Directors identify it
+An upstream report lands in `analysis`, assigned to `unassigned`, unless it asks for Backlog
+and the board's Director allows that. `file-report --defer` asks for Backlog (deferred); the
+request is the reporter's, written on the ticket by the board service either way, and it
+is honoured only when the upstream board's Director has said so:
+
+```bash
+ticket-board-write set-report-intake --backlog-requests backlog --reason "tenant reports may wait in Backlog"
+ticket-board-write set-report-intake --backlog-requests triage  --reason "every report is triaged first"
+```
+
+With no policy set, a deferred report lands in Triage with its request shown. Only the
+role holding the Director's `director_edit` capability may set the policy, and a report
+may ask for Backlog and nothing else. Directors identify it
 by the detail metadata: `Origin: <tenant>` and, when supplied,
 `External Source: <tenant-local-ref>`. The report token can only create this report; it
 cannot set `state`, `assignee`, blockers, signoff flags, commit fields, or mutate an

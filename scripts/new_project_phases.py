@@ -646,6 +646,8 @@ def _prepare_new_project_board(
     selected_role_models: dict[str, str],
     stages: ProvisioningStages,
     provision_dir: Path,
+    upstream_report_url: str = "",
+    upstream_report_token_file: str = "",
 ) -> NewProjectBoard | int:
     from scripts import team_launcher as launcher
 
@@ -683,11 +685,52 @@ def _prepare_new_project_board(
     config = launcher.load_project_config(resolved_slug, config_path)
     config = launcher.prepare_project_desktop(config, runner=runner)
     launcher._register_switchyard_project(config_path, registry_dir=registry_dir)
+    if upstream_report_url.strip():
+        config = _connect_new_project_for_reports(
+            config, config_path=config_path, upstream_report_url=upstream_report_url,
+            upstream_report_token_file=upstream_report_token_file, registry_dir=registry_dir,
+            resolved_slug=resolved_slug, print_func=print_func,
+        )
     launcher._prepare_first_run_auth_worktrees(config, runner=runner)
     return NewProjectBoard(
         config=config,
         config_path=config_path,
     )
+
+
+def _connect_new_project_for_reports(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    upstream_report_url: str,
+    upstream_report_token_file: str,
+    registry_dir: Path | None,
+    resolved_slug: str,
+    print_func: Callable[[str], None],
+) -> ProjectConfig:
+    """`switchyard new --upstream-report-url`: connected before the first launch (SYRD-548).
+
+    Every pane can file a report from the start. Each role's pane environment
+    is computed when the configuration is loaded, so it is read again from what
+    was just written. A connection that fails does not undo the project; it
+    says which narrow step connects it later.
+    """
+    from scripts import team_launcher as launcher
+
+    _linked, problems = launcher.connect_upstream_report(
+        config, config_path=config_path, upstream_report_url=upstream_report_url,
+        upstream_report_token_file=upstream_report_token_file, registry_dir=registry_dir, print_func=print_func,
+    )
+    for problem in problems:
+        print_func(f"switchyard: {problem}")
+    if not problems:
+        return launcher.load_project_config(config.project, config_path)
+    print_func(
+        f"switchyard: {resolved_slug} is not connected for reports; once that is fixed, connect it with "
+        f"`sudo switchyard upgrade {resolved_slug} --only upstream-report --upstream-report-url "
+        f"{upstream_report_url.strip()}`, which runs no other upgrade phase."
+    )
+    return config
 
 
 @dataclass(frozen=True)

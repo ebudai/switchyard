@@ -11,7 +11,9 @@ project's). This module covers:
   (`refresh_upstream_report_credential`), written owner-only through
   `_write_owner_private_file`.
 
-`upgrade_project_command` calls the last two.
+`upgrade_project_command` calls the last two, and `connect_upstream_report`
+calls them alone, with nothing else, for `switchyard upgrade --only
+upstream-report` and `switchyard new --upstream-report-url` (SYRD-548).
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-288). `team_launcher`
 imports this module at its top and still exports every name that lived there;
@@ -272,6 +274,111 @@ def refresh_upstream_report_credential(
         f"{destination}, so its panes can file reports without being handed a token"
     )
     return []
+
+
+def connect_upstream_report(
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    upstream_report_url: str = "",
+    upstream_report_token_file: str = "",
+    dry_run: bool = False,
+    registry_dir: Path | None = None,
+    home_for_user: Callable[[str], Path | None] = home_dir_for_user,
+    print_func: Callable[[str], None] = print,
+) -> tuple[ProjectConfig, list[str]]:
+    """Connect a tenant to the board it reports to, and do nothing else (SYRD-548).
+
+    The link in its configuration (which is what puts `TICKET_BOARD_REPORT_URL`
+    and the credential's path in every pane's environment) and the report-only
+    credential, 0600 and the tenant's own. No release is resolved, no ownership
+    repaired, no workflow, identity, account or pane touched: getting report
+    access used to cost a full upgrade, and otto's could not even complete its
+    release phase.
+
+    Everything that can refuse is asked first -- which board serves the URL, and
+    whether its environment holds a report token -- so a refusal writes nothing.
+    With no URL given, the one the configuration already records is reconnected,
+    which is how a rotated token is fetched again.
+    """
+    from scripts import team_launcher as launcher
+
+    url = upstream_report_url.strip() or str(config.upstream_report_url or "").strip()
+    if not url:
+        return config, [
+            f"{config.project} records no upstream report board; name it with --upstream-report-url"
+        ]
+    upstream, board_env, problem = launcher.upstream_report_board(
+        url, registry_dir=registry_dir, home_for_user=home_for_user
+    )
+    if problem:
+        return config, [f"{config.project} cannot be connected for reports: {problem}"]
+    _token, problem = _board_env_report_token(board_env)
+    if problem:
+        return config, [f"{config.project} cannot be given {upstream}'s report credential: {problem}"]
+    linked, problems = launcher.record_upstream_report_link(
+        config,
+        config_path=config_path,
+        upstream_report_url=url,
+        upstream_report_token_file=upstream_report_token_file,
+        dry_run=dry_run,
+        home_for_user=home_for_user,
+        print_func=print_func,
+    )
+    if problems:
+        return config, problems
+    if dry_run:
+        # Nothing was recorded, so ask about the credential the link would name.
+        token_file = upstream_report_token_file.strip()
+        if url != str(config.upstream_report_url or "").strip() or token_file:
+            linked = replace(config, upstream_report_url=url, upstream_report_token_file=token_file)
+    return linked, launcher.refresh_upstream_report_credential(
+        linked, dry_run=dry_run, registry_dir=registry_dir, home_for_user=home_for_user, print_func=print_func,
+    )
+
+
+def connect_upstream_report_command(
+    only: str,
+    config: ProjectConfig,
+    *,
+    config_path: Path,
+    dry_run: bool,
+    registry_dir: Path | None,
+    upstream_report_url: str,
+    upstream_report_token_file: str,
+    print_func: Callable[[str], None],
+) -> int:
+    """`switchyard upgrade <project> --only upstream-report`: the report connection and nothing else (SYRD-548).
+
+    `upgrade_project_command` returns this before the source is pinned, so no release is resolved or repaired
+    and no phase -- artifacts, tooling, identities, workflow, panes -- runs.
+    Otto's Director could not get report access without an upgrade it had chosen
+    not to run, and its dry run could not even finish the release phase.
+    """
+    from scripts import team_launcher as launcher
+
+    if only != "upstream-report":
+        print_func(f"switchyard: --only takes upstream-report, not {only!r}. Nothing was changed.")
+        return 2
+    _connected, problems = launcher.connect_upstream_report(
+        config,
+        config_path=config_path,
+        upstream_report_url=upstream_report_url,
+        upstream_report_token_file=upstream_report_token_file,
+        dry_run=dry_run,
+        registry_dir=registry_dir,
+        print_func=print_func,
+    )
+    for problem in problems:
+        print_func(f"switchyard: {problem}")
+    if problems:
+        print_func(f"switchyard: {config.project} was not connected for reports, and no upgrade phase ran.")
+        return 1
+    print_func(
+        f"switchyard: {config.project}'s report connection is {'checked' if dry_run else 'in place'}; no upgrade "
+        "phase ran. Each pane carries it from its next launch."
+    )
+    return 0
 
 
 def _credential_is_private(path: Path, owner: str) -> bool:

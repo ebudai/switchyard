@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,32 @@ def _add_user_acceptance_relay(client: Any, *, apply: bool, expected_revision: i
     applied = client.configure_workflow(updated, expected_revision=revision, dry_run=False, same_endpoint=True)
     result.update(applied=True, revision_after=applied.get("revision"))
     return result
+
+
+def not_connected_for_reports(environ: Any) -> str:
+    """The refusal a pane with no report credential sees, naming the one narrow step (SYRD-548).
+
+    Never a full upgrade: connecting a tenant for reports writes its report URL,
+    its credential and nothing else, so the remedy must not cost it every other
+    pending upgrade phase.
+    """
+    project = str(environ.get("TICKET_BOARD_PROJECT") or "").strip() or "<project>"
+    return (
+        f"file-report: {project} is not connected to an upstream board for reports: this pane has no report "
+        "credential (TICKET_BOARD_TENANT_REPORT_TOKEN_FILE is unset). An operator connects it with one narrow "
+        f"step that runs no other upgrade phase: `sudo switchyard upgrade {project} --only upstream-report "
+        "--upstream-report-url <upstream-board-url>`; the next launch of each pane carries it. Nothing was filed."
+    )
+
+
+def _records_report_request(response: dict[str, Any]) -> bool:
+    """Whether the board wrote a report's Backlog request on the ticket it created (SYRD-548)."""
+    ticket = response.get("ticket") if isinstance(response, dict) else None
+    comments = ticket.get("comments") if isinstance(ticket, dict) else None
+    return any(
+        isinstance(c, dict) and c.get("who") == "ticket_board_service" and "requested Backlog" in str(c.get("text", ""))
+        for c in comments or []
+    )
 
 
 def _ticket_from_response(response: dict[str, Any]) -> dict[str, Any]:
@@ -286,6 +313,20 @@ def _build_parser() -> argparse.ArgumentParser:
     add_free_text_argument(file_report, "--body", required=True)
     file_report.add_argument("--origin-project", default=write_client.DEFAULT_REPORT_ORIGIN_PROJECT)
     file_report.add_argument("--external-source-ref", default="")
+    file_report.add_argument(
+        "--defer",
+        action="store_true",
+        help=(
+            "ask for the report to land in Backlog (deferred) rather than Triage. A request: the "
+            "board's report-intake policy decides, and the request is written on the ticket (SYRD-548)"
+        ),
+    )
+    report_intake = subparsers.add_parser(
+        "set-report-intake",
+        help="Director: where tenant reports that ask for Backlog land -- backlog, or triage (the default) (SYRD-548)",
+    )
+    report_intake.add_argument("--backlog-requests", required=True, choices=("backlog", "triage"))
+    add_free_text_argument(report_intake, "--reason", required=True, help="why this board takes reports this way")
 
     route = subparsers.add_parser("route")
     route.add_argument("ticket_id")
@@ -571,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
                 needs_audit=args.needs_audit,
             )
         elif command == "file_report":
+            if not (args.report_token.strip() or args.report_token_file.strip()):
+                raise write_client.TicketBoardWriteError(not_connected_for_reports(os.environ))
             if not args.origin_project.strip():
                 raise write_client.TicketBoardWriteError("file-report requires --origin-project or TICKET_BOARD_REPORT_ORIGIN_PROJECT")
             response = client.file_report(
@@ -578,7 +621,16 @@ def main(argv: list[str] | None = None) -> int:
                 body=args.body,
                 origin_project=args.origin_project,
                 external_source_ref=args.external_source_ref,
+                requested_stage="backlog" if args.defer else "",
             )
+            if args.defer and not _records_report_request(response):
+                print(
+                    "file-report: the report was filed, but this board did not record the Backlog request; "
+                    "it predates SYRD-548. It is in Triage like any report.",
+                    file=sys.stderr,
+                )
+        elif command == "set_report_intake":
+            response = client.set_report_intake(backlog_requests=args.backlog_requests, reason=args.reason)
         elif command == "route":
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
         elif command == "reassign":
@@ -727,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if command in {"merge", "dismiss_notification", "verify_caller", "add_user_acceptance_relay",
                    "snooze_reminders", "clear_reminder_snooze", "claim_next", "approve_size_exception",
-                   "enable_size_review", "measure_size"}:
+                   "enable_size_review", "measure_size", "set_report_intake"}:
         print(json.dumps(response))
     else:
         print(json.dumps(_ticket_from_response(response)))

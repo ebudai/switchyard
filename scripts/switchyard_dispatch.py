@@ -73,6 +73,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             no_agy_credential=args.no_agy_credential,
             layout_mode=args.layout,
             git_init=not args.no_git_init,
+            upstream_report_url=args.upstream_report_url,
+            upstream_report_token_file=args.upstream_report_token_file,
         )
     if argv[0].casefold() == "agy-credential":
         parser = argparse.ArgumentParser(prog="switchyard agy-credential")
@@ -211,6 +213,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             publish_remote=getattr(args, "publish_remote", ""),
             upstream_report_url=getattr(args, "upstream_report_url", "") or "",
             upstream_report_token_file=getattr(args, "upstream_report_token_file", "") or "",
+            only=args.only,
         )
     if argv[0].casefold() == "install-shared-release":
         args = launcher._build_switchyard_install_shared_release_parser().parse_args(argv[1:])

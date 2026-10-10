@@ -565,6 +565,9 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             body=str(payload.get("body", "")),
             origin_project=str(payload.get("origin_project", "")),
             external_source_ref=str(payload.get("external_source_ref", payload.get("source_ref", ""))),
+            # SYRD-548: the reporter's request, never a stage it can set; the
+            # Director's report-intake policy decides where it lands.
+            requested_stage=payload.get("requested_stage", ""),  # type: ignore[arg-type]
         )
         self.send_ticket_created(created, before_signature, notification_source_role="tenant_report")
 

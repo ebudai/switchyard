@@ -154,6 +154,8 @@ from scripts.upstream_report import (
     UPSTREAM_REPORT_TOKEN_KEY,
     _board_env_report_token,
     _write_owner_private_file,
+    connect_upstream_report,
+    connect_upstream_report_command,
     record_upstream_report_link,
     refresh_upstream_report_credential,
     upstream_report_board,

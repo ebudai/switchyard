@@ -82,6 +82,8 @@ def switchyard_new_command(
     interactive: bool | None = None,
     agent_cli_policy: str = "",
     agent_cli_sources: Sequence[str] | None = None,
+    upstream_report_url: str = "",
+    upstream_report_token_file: str = "",
 ) -> int:
     from scripts import team_launcher as launcher
 
@@ -215,6 +217,8 @@ def switchyard_new_command(
         selected_role_models=selected_role_models,
         stages=stages,
         provision_dir=provision_dir,
+        upstream_report_url=upstream_report_url,
+        upstream_report_token_file=upstream_report_token_file,
     )
     if not isinstance(new_project_board, launcher.NewProjectBoard):
         return new_project_board

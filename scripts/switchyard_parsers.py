@@ -113,6 +113,19 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--workflow-config", type=Path, help="declarative roles/stages JSON for the new project")
+    parser.add_argument(
+        "--upstream-report-url",
+        default="",
+        help=(
+            "board URL this project files reports to (a project registered on this host, such as "
+            "Switchyard's own board); its panes can file-report from their first launch (SYRD-548)"
+        ),
+    )
+    parser.add_argument(
+        "--upstream-report-token-file",
+        default="",
+        help="where the report-only credential belongs (default: ~/.config/<project>/upstream-report.env)",
+    )
     return parser
 
 
@@ -211,6 +224,15 @@ def _build_switchyard_register_parser() -> argparse.ArgumentParser:
 def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="switchyard upgrade", description="Upgrade safe generated artifacts for a Switchyard project.")
     parser.add_argument("project", help="project name or slug")
+    parser.add_argument(
+        "--only",
+        choices=["upstream-report"],
+        default="",
+        help=(
+            "run this one narrow step and no upgrade phase: upstream-report connects the project to the "
+            "board it files reports to -- its report URL, its credential and nothing else (SYRD-548)"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="report what would change without writing files")
     parser.add_argument("--deploy-ref", default=None, help="board release ref to deploy (default: the pinned release, else origin/main)")
     parser.add_argument("--source-repo", type=Path, help="Switchyard source checkout or exported release to deploy")

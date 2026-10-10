@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import pull_queue, reminder_snooze, size_review
+from . import pull_queue, reminder_snooze, report_intake, size_review
 
-OPERATIONS = reminder_snooze.OPERATIONS | size_review.OPERATIONS
+OPERATIONS = reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -19,6 +19,10 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         if ticket_id is not None:
             raise ValueError(f"{operation} names its tickets in the request, not the path")
         return reminder_snooze.perform(app, operation, payload, caller_role=caller_role)
+    if operation in report_intake.OPERATIONS:  # SYRD-548
+        if ticket_id is not None:
+            raise ValueError(f"{operation} is a board policy, not a ticket's")
+        return report_intake.perform(app, operation, payload, caller_role=caller_role)
     return size_review.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
 
 

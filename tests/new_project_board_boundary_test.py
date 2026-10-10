@@ -53,6 +53,8 @@ PARAMETERS = ("source_repo", "workflow_config", "commit_git_dir", "port", "datab
 FROM_P0 = ("artifact_path", "director_onboarding", "owner_user", "project_dir", "resolved_slug", "runner",
            "selected_role_efforts", "selected_role_models", "stages")
 FROM_P2 = ("provision_dir",)
+#: SYRD-548: the report link `switchyard new --upstream-report-url` hands P3, defaulting to none.
+FROM_COMMAND = ("upstream_report_url", "upstream_report_token_file")
 OUTPUTS = ("config", "config_path")
 OWNER = "syrd372-agent"
 
@@ -251,7 +253,9 @@ def test_the_interface_and_the_result() -> None:
     fn = phase_def()
     args = fn.args
     check(not args.args and not args.posonlyargs and not args.vararg and not args.kwarg
-          and tuple(a.arg for a in args.kwonlyargs) == PARAMETERS + FROM_P0 + FROM_P2 and all(d is None for d in args.kw_defaults),
+          and tuple(a.arg for a in args.kwonlyargs) == PARAMETERS + FROM_P0 + FROM_P2 + FROM_COMMAND
+          and all(d is None for d in args.kw_defaults[:-len(FROM_COMMAND)])
+          and [ast.literal_eval(d) for d in args.kw_defaults[-len(FROM_COMMAND):]] == ["", ""],
           f"keyword-only: the command's parameters, P0's values, P2's; no defaults: {[a.arg for a in args.kwonlyargs]}")
     theirs = {a.arg: ast.unparse(a.annotation) for a in command_def().args.kwonlyargs}
     for cls in ("NewProjectChoices", "NewProjectAccounts"):
@@ -274,7 +278,7 @@ def test_the_command_calls_it_and_returns_a_failed_status_itself() -> None:
     check(ast.unparse(body[at - 1]) == "provision_dir = new_project_accounts.provision_dir", "right after P2's read-back")
     call = body[at].value
     check(ast.unparse(call.func) == "_prepare_new_project_board" and not call.args
-          and [(k.arg, ast.unparse(k.value)) for k in call.keywords] == [(n, n) for n in PARAMETERS + FROM_P0 + FROM_P2],
+          and [(k.arg, ast.unparse(k.value)) for k in call.keywords] == [(n, n) for n in PARAMETERS + FROM_P0 + FROM_P2 + FROM_COMMAND],
           "called by the launcher's name, with the command's own values")
     check(ast.unparse(body[at + 1]) == "if not isinstance(new_project_board, NewProjectBoard):\n    return new_project_board",
           "a status is returned as it came, without comparing it again")
@@ -433,7 +437,8 @@ def test_the_command_hands_p3_its_values_and_reads_back_both() -> None:
                      **p4_fence(seen)):
             got = judged(t.switchyard_new_command, **given)
         check(isinstance(got, Fence), f"stopped at P4: {got!r}")
-        check(len(handed) == 1 and tuple(handed[0]) == PARAMETERS + FROM_P0 + FROM_P2, f"P3 called once, with its 20 values: {handed}")
+        check(len(handed) == 1 and tuple(handed[0]) == PARAMETERS + FROM_P0 + FROM_P2 + FROM_COMMAND,
+              f"P3 called once, with its 22 values: {handed}")
         wrong = ([n for n in PARAMETERS if handed[0][n] is not given[n]] + [n for n in FROM_P0 if handed[0][n] is not getattr(p0, n)]
                  + [n for n in FROM_P2 if handed[0][n] is not getattr(p2, n)])
         check(wrong == [], f"each the very value: the command's own, P0's or P2's: {wrong}")

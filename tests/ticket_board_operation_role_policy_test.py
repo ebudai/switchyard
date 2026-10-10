@@ -83,6 +83,8 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         "approve_size_exception": frozenset({"merge"}),
         "enable_size_review": frozenset({"merge"}),
         "measure_size": frozenset({"merge"}),
+        # SYRD-548: where a report asking for Backlog lands takes the Director's edit authority.
+        "set_report_intake": frozenset({"director_edit"}),
     }
 
 
@@ -101,7 +103,7 @@ def test_default_environment() -> None:
     # SYRD-541 added approve_size_exception, enable_size_review and measure_size, Director only.
     assert table["approve_size_exception"] == ["director"] and table["enable_size_review"] == ["director"]
     assert table["measure_size"] == ["director"]
-    assert len(table) == 44, len(table)
+    assert len(table) == 45, len(table)  # SYRD-548: set_report_intake
 
 
 def test_role_environment_is_read_at_import() -> None:

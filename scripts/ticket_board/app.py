@@ -1300,18 +1300,27 @@ ORDER BY rank;
         body: str,
         origin_project: str,
         external_source_ref: str = "",
+        requested_stage: str = "",
     ) -> dict[str, Any]:
+        from .report_intake import requested_stage as normalised_request
+
         title = require_text(title, "title").strip()
         body = str(body or "")
         origin_project = require_plain_string(origin_project, "origin_project").strip()
         external_source_ref = require_plain_string(external_source_ref, "external_source_ref").strip()
+        request = normalised_request(requested_stage)
+        # A report that asks for nothing uses the four-argument form, which every
+        # board has; only a request needs pgu981's (SYRD-548).
+        sql, params = (
+            ("SELECT ticket_board.file_report(%s, %s, %s, %s, %s) AS id;",
+             (title, body, origin_project, external_source_ref, request))
+            if request else
+            ("SELECT ticket_board.file_report(%s, %s, %s, %s) AS id;",
+             (title, body, origin_project, external_source_ref))
+        )
         with self._pg_connect() as conn:
             with conn.transaction():
-                ticket_id = self._pg_call_scalar(
-                    conn,
-                    "SELECT ticket_board.file_report(%s, %s, %s, %s) AS id;",
-                    (title, body, origin_project, external_source_ref),
-                )
+                ticket_id = self._pg_call_scalar(conn, sql, params)
                 return self._pg_get_ticket(ticket_id, conn)
 
     def _pg_update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:

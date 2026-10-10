@@ -75,6 +75,7 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     # SYRD-537: deferring optional reminders is less than holding the ticket.
     "snooze_reminders": {"director"},
     "clear_reminder_snooze": {"director"},
+    "set_report_intake": {"director"},
     # SYRD-541: the integrator's bounded size decisions.
     "approve_size_exception": {"director"},
     "enable_size_review": {"director"},
@@ -125,6 +126,10 @@ COMPOSED_OPERATION_CAPABILITIES = {
     "approve_size_exception": frozenset({"merge"}),
     "enable_size_review": frozenset({"merge"}),
     "measure_size": frozenset({"merge"}),
+    # Where a tenant report that asks for Backlog lands is a stage only the
+    # Director could otherwise give it: the Director's edit authority. The
+    # database checks director_edit itself (SYRD-548).
+    "set_report_intake": frozenset({"director_edit"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.

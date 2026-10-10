@@ -5340,11 +5340,74 @@ AS $$
     SELECT ticket_board.create_ticket(title, body, 'analysis');
 $$;
 
+-- SYRD-548: report intake (migration pgu981 carries the same objects).
+CREATE TABLE IF NOT EXISTS ticket_board.report_intake_policy (
+    id boolean PRIMARY KEY DEFAULT true CHECK (id),
+    backlog_requests_land_in_backlog boolean NOT NULL,
+    set_by text NOT NULL,
+    set_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    reason text NOT NULL CHECK (btrim(reason) <> '')
+);
+
+CREATE OR REPLACE FUNCTION ticket_board.report_intake()
+RETURNS jsonb
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT coalesce(
+        (SELECT jsonb_build_object(
+            'backlog_requests', CASE WHEN p.backlog_requests_land_in_backlog THEN 'backlog' ELSE 'triage' END,
+            'set_by', p.set_by,
+            'set_at', ticket_board.utc_text(p.set_at),
+            'reason', p.reason)
+         FROM ticket_board.report_intake_policy p),
+        jsonb_build_object('backlog_requests', 'triage', 'set_by', '', 'set_at', '', 'reason', '')
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.set_report_intake(
+    p_backlog_requests_land_in_backlog boolean,
+    p_reason text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    who text;
+BEGIN
+    -- Where a report lands is a stage only the Director could otherwise give it,
+    -- so this takes the Director's edit authority; on a declared board, the role
+    -- whose declared capabilities include director_edit, by whatever name.
+    PERFORM ticket_board.require_actor(ARRAY['director'], 'director_edit');
+    who := ticket_board.current_app_actor();
+    IF p_backlog_requests_land_in_backlog IS NULL THEN
+        RAISE EXCEPTION 'set_report_intake needs a decision: backlog or triage';
+    END IF;
+    IF btrim(coalesce(p_reason, '')) = '' THEN
+        RAISE EXCEPTION 'set_report_intake needs a reason';
+    END IF;
+    INSERT INTO ticket_board.report_intake_policy (id, backlog_requests_land_in_backlog, set_by, set_at, reason)
+    VALUES (true, p_backlog_requests_land_in_backlog, who, clock_timestamp(), btrim(p_reason))
+    ON CONFLICT (id) DO UPDATE
+    SET backlog_requests_land_in_backlog = EXCLUDED.backlog_requests_land_in_backlog,
+        set_by = EXCLUDED.set_by,
+        set_at = EXCLUDED.set_at,
+        reason = EXCLUDED.reason;
+    RETURN ticket_board.report_intake();
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.file_report(
     title text,
     body text,
     origin_project text,
-    external_source_ref text
+    external_source_ref text,
+    requested_stage text
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -5356,29 +5419,16 @@ DECLARE
     ticket_id text;
     normalized_origin_project text := btrim(coalesce(origin_project, ''));
     normalized_external_source_ref text := btrim(coalesce(external_source_ref, ''));
+    normalized_requested_stage text := lower(btrim(coalesce(requested_stage, '')));
+    landing_stage text := 'analysis';
     created_at_value timestamptz := clock_timestamp();
     created_text_value text := ticket_board.utc_text(created_at_value);
     actor text := ticket_board.current_actor_role();
 BEGIN
-    -- Report-only authority, deliberately NOT require_actor (SYRD-256).
-    --
-    -- A tenant report arrives on its own HTTP action, authenticated by the
-    -- report token and by nothing else: it carries no caller role, because the
-    -- whole point of that credential is that it is not one. require_actor
-    -- resolves a role. On a legacy board it tolerated a missing one; on a
-    -- declared-workflow board it asks current_app_actor(), which refuses NULL,
-    -- so every report filed against a declared board failed with
-    -- `invalid configured caller role: <NULL>` after the token had already been
-    -- accepted -- the MEFP Director's live upstream report.
-    --
-    -- Resolving a role here would be wrong in either direction. Refusing the
-    -- NULL role breaks the one caller this function has; admitting it by
-    -- borrowing some role's capabilities would hand a report token that role's
-    -- authority. So the role is not consulted at all: the database writer must
-    -- be the service, and what the function may do is fixed below -- a new
-    -- ticket in analysis, unassigned, audit required, no protected field
-    -- settable by the caller. A role that somehow reached this function would
-    -- gain nothing by carrying one.
+    -- Report-only authority, deliberately NOT require_actor (SYRD-256; the
+    -- reasoning is in migration pgu957). The database writer must be the service, and
+    -- what this may do is fixed below -- a new ticket, unassigned, audit
+    -- required, in Triage unless the Director's policy honours a Backlog request.
     IF actor IS DISTINCT FROM 'ticket_board_service' THEN
         RAISE EXCEPTION 'role % cannot call file_report; ticket_board_service is the only database writer', actor
             USING ERRCODE = '42501';
@@ -5388,6 +5438,16 @@ BEGIN
     END IF;
     IF normalized_origin_project = '' THEN
         RAISE EXCEPTION 'origin_project must be non-empty';
+    END IF;
+    -- SYRD-548: a report may ask for Backlog and for nothing else. The request
+    -- is the reporter's; whether it is honoured is the Director's policy.
+    IF normalized_requested_stage NOT IN ('', 'backlog') THEN
+        RAISE EXCEPTION 'a report may request backlog or nothing, not %', requested_stage;
+    END IF;
+    IF normalized_requested_stage = 'backlog'
+       AND coalesce((SELECT p.backlog_requests_land_in_backlog FROM ticket_board.report_intake_policy p), false)
+       AND EXISTS (SELECT 1 FROM ticket_board.workflow_stages s WHERE s.name = 'backlog') THEN
+        landing_stage := 'backlog';
     END IF;
 
     ticket_id := ticket_board.next_ticket_id();
@@ -5411,7 +5471,7 @@ BEGIN
         ticket_id,
         btrim(title),
         coalesce(body, ''),
-        'analysis',
+        landing_stage,
         'unassigned',
         '',
         normalized_origin_project,
@@ -5425,7 +5485,7 @@ BEGIN
             'id', ticket_id,
             'title', btrim(title),
             'body', coalesce(body, ''),
-            'state', 'analysis',
+            'state', landing_stage,
             'assignee', 'unassigned',
             'parent_id', '',
             'origin_project', normalized_origin_project,
@@ -5437,26 +5497,45 @@ BEGIN
         ),
         ticket_id || '.json'
     );
-    -- The export projection is rebuilt the way every writer rebuilds it, and
-    -- that is an UPDATE, which on a declared board runs
-    -- enforce_declared_ticket_update. That trigger requires a named actor
-    -- before anything else and, with none, asks current_app_actor() -- which
-    -- refuses the report path's missing role a second time.
-    --
-    -- So the actor is named, for this one statement, as REPORT_ACTOR: not a
-    -- role, and unable ever to become one, because workflow_roles.name is
-    -- CHECKed against ^[a-z][a-z0-9_-]{0,63}$ and this contains a colon. It
-    -- satisfies "some actor is named" and nothing more: it is in no
-    -- transition's actor list, it is not 'director', and so it can neither
-    -- move, reassign, nor flip a flag. Every structural check the trigger
-    -- makes still runs. It is set immediately before the refresh and cleared
-    -- immediately after, exactly as the workflow executor scopes the same
-    -- setting around its own update.
+    IF normalized_requested_stage <> '' THEN
+        PERFORM ticket_board.append_ticket_comment(
+            ticket_id,
+            'ticket_board_service',
+            CASE WHEN landing_stage = 'backlog' THEN
+                format('Report from %s requested Backlog (deferred). This board''s report-intake policy honours '
+                       'that request, so the report was created in Backlog. The Director can route it to Triage '
+                       'at any time.', normalized_origin_project)
+            ELSE
+                format('Report from %s requested Backlog (deferred). This board''s report-intake policy keeps '
+                       'reports in Triage, so it was created here with the request recorded; the Director '
+                       'decides whether to defer it.', normalized_origin_project)
+            END
+        );
+    END IF;
+    -- The actor is named for the refresh only, as REPORT_ACTOR (SYRD-256): not a
+    -- role, unable to become one, and in no transition's actor list.
     PERFORM set_config('ticket_board.workflow_actor', 'report:tenant', true);
     PERFORM ticket_board.refresh_ticket_source_json(ticket_id);
     PERFORM set_config('ticket_board.workflow_actor', '', true);
     RETURN ticket_id;
 END;
+$$;
+
+-- The four-argument form every client before SYRD-548 calls: a report that asks
+-- for nothing, exactly as before.
+CREATE OR REPLACE FUNCTION ticket_board.file_report(
+    title text,
+    body text,
+    origin_project text,
+    external_source_ref text
+)
+RETURNS text
+LANGUAGE sql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+    SELECT ticket_board.file_report(title, body, origin_project, external_source_ref, '');
 $$;
 
 CREATE OR REPLACE FUNCTION ticket_board.file_bug(

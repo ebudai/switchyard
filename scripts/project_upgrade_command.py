@@ -50,6 +50,9 @@ def upgrade_project_command(
     # next upgrade needs no flag and the panes need none ever (SYRD-238).
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    # One narrow step instead of the upgrade (SYRD-548): `upstream-report`
+    # connects the tenant for reports and runs no phase at all.
+    only: str = "",
     registry_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
@@ -66,6 +69,12 @@ def upgrade_project_command(
     """
     from scripts import team_launcher as launcher
 
+    if only:
+        return launcher.connect_upstream_report_command(
+            only, config, config_path=config_path, dry_run=dry_run, registry_dir=registry_dir,
+            upstream_report_url=upstream_report_url, upstream_report_token_file=upstream_report_token_file,
+            print_func=print_func,
+        )
     source_pinned = launcher._pin_upgrade_source(
         config,
         commit_git_dir=commit_git_dir,

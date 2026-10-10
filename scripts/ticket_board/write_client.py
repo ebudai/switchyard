@@ -713,16 +713,24 @@ class TicketBoardWriteClient:
         origin_project: str,
         external_source_ref: str = "",
         report_token: str | None = None,
+        requested_stage: str = "",
     ) -> dict[str, Any]:
-        return self._post_report(
-            {
-                "title": title,
-                "body": body,
-                "origin_project": origin_project,
-                "external_source_ref": external_source_ref,
-            },
-            report_token=report_token,
-        )
+        payload = {
+            "title": title,
+            "body": body,
+            "origin_project": origin_project,
+            "external_source_ref": external_source_ref,
+        }
+        if requested_stage:
+            # Only when asked: a board older than SYRD-548 ignores the key, and a
+            # report that asks for nothing is the request every client sent before.
+            payload["requested_stage"] = requested_stage
+        return self._post_report(payload, report_token=report_token)
+
+    def set_report_intake(self, *, backlog_requests: str, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """The Director's policy for reports that ask for Backlog: `backlog` honours them, `triage` does not."""
+        return self._post("/actions/set_report_intake", {"backlog_requests": backlog_requests, "reason": reason},
+                          caller_role=caller_role)
 
     def route(self, ticket_id: str, *, state: str, assignee: str, caller_role: str | None = None) -> dict[str, Any]:
         return self._ticket_action(ticket_id, "route", {"state": state, "assignee": assignee}, caller_role=caller_role)

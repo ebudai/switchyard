@@ -44,6 +44,8 @@ from scripts.runtime_handover import (
     await_registration,
     board_holder,
     pane_holders,
+    prove_worker,
+    slot_binding_problem,
 )
 from scripts.ticket_board import runtime_catalog
 from scripts.tmux_session_argv import tmux_current_command_args
@@ -719,6 +721,8 @@ def _start_and_prove(
         raise RuntimeError(f"{role.role} reported a successful start but left no live session")
     if role_registers_runtime(role):
         await_registration(config, role, runner=runner, handover=handover or RuntimeHandover())
+    # SYRD-560: up means observed up -- the declared provider, still running, still registered.
+    prove_worker(config, role, runner=runner, handover=handover or RuntimeHandover())
 
 
 def journal_path_for(config: team_launcher.ProjectConfig, *, config_path: Path, role_name: str) -> Path:
@@ -1171,6 +1175,10 @@ def switch_role_runtime(
             reconnected = presentation_controller.reconnect_role_slots(
                 updated, config_path=config_path, role_name=role_name, runner=runner
             )
+            unbound = slot_binding_problem(updated, config_path=config_path, role_name=role_name,
+                                           slots=tuple(reconnected), runner=runner)
+            if unbound:  # SYRD-560: reconnected means `present list` shows it, not that a call returned
+                raise RuntimeError(unbound)
             journal.record("slots")
             journal.write(journal_path)
     except Exception as exc:  # noqa: BLE001 - a half-applied switch must not look like success

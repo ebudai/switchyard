@@ -19,6 +19,7 @@ role's recorded holder is still a live process. tmux is a stand-in too, and its
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
@@ -85,6 +86,12 @@ class Processes:
 
     def __init__(self) -> None:
         self.started: list[subprocess.Popen] = []
+        # Panes run as the provider they stand for -- a symlink to Python named
+        # `codex` or `claude` -- so a check of the running worker reads exactly
+        # what it would read of the real CLI (SYRD-560).
+        self._bin = tempfile.TemporaryDirectory(prefix="syrd559-bin-")
+        for name in ("claude", "codex", "agy", "hermes"):
+            (Path(self._bin.name) / name).symlink_to(sys.executable)
         self._stop = threading.Event()
         self._reaper = threading.Thread(target=self._reap, daemon=True)
         self._reaper.start()
@@ -95,9 +102,10 @@ class Processes:
                 proc.poll()
             time.sleep(0.005)
 
-    def spawn(self, kind: str) -> subprocess.Popen:
+    def spawn(self, kind: str, program: str = "") -> subprocess.Popen:
+        executable = str(Path(self._bin.name) / program) if program else sys.executable
         proc = subprocess.Popen(
-            [sys.executable, "-c", PANE_SCRIPTS[kind]],
+            [executable, "-c", PANE_SCRIPTS[kind]],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             # Its own session, so a signal meant for the pane never reaches us.
             start_new_session=True,
@@ -115,6 +123,7 @@ class Processes:
             if proc.poll() is None:
                 proc.kill()
             proc.wait(timeout=10)
+        self._bin.cleanup()
 
 
 def identity(proc: subprocess.Popen) -> tuple[int, int]:
@@ -227,7 +236,7 @@ class PaneHost:
         """
         runtime = team_launcher._role_cli_name(role)
         self.starts.append((role.tmux_session, runtime))
-        proc = self.processes.spawn(self.next_kind)
+        proc = self.processes.spawn(self.next_kind, runtime)
         self.sessions[role.tmux_session] = proc
         if not self.board.register(role.role, runtime, identity(proc)):
             timer = threading.Timer(0.047, lambda: proc.poll() is None and proc.kill())
@@ -292,9 +301,11 @@ def _handover(board: RegistrationBoard, **overrides: Any) -> dict[str, Any]:
         "kill_grace_seconds": 3.0,
         "registration_timeout_seconds": 5.0,
         "poll_seconds": 0.02,
+        "settle_seconds": 0.5,
     }
     settings.update(overrides)
-    return {"handover": factory(**settings)}
+    known = {f.name for f in dataclasses.fields(factory)}  # a release without SYRD-560 has no settle window
+    return {"handover": factory(**{k: v for k, v in settings.items() if k in known})}
 
 
 class Case:
@@ -309,7 +320,7 @@ class Case:
         self.board = RegistrationBoard(self.workflow)
         self.processes = Processes()
         self.host = PaneHost(self.processes, self.board)
-        self.old = self.processes.spawn(old_kind)
+        self.old = self.processes.spawn(old_kind, "codex")
         self.old_holder = identity(self.old)
         self.host.adopt(SESSION, self.old, "codex")
         self.output: list[str] = []

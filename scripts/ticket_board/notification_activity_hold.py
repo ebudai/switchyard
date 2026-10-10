@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from . import composer_hold
 from .notification_dispatch import ComposerSnapshot, NotificationDispatch
 from .notification_eligibility import NotificationEligibility
 from .notification_ledger import NotificationLedger
@@ -67,6 +68,17 @@ class ActivityTrace:
     region_digest: str = ""
 
 
+@dataclass(frozen=True)
+class ComposerHoldTrace(ActivityTrace):
+    """The gate's composer verdict, and whether the runtime's own trusted hook says the turn is over (SYRD-570).
+
+    Built here, from the gate's trace and its hook state, so the gate's own
+    traces stay exactly what they were.
+    """
+
+    trusted_idle: bool = False
+
+
 class NotificationActivityHold:
     def __init__(
         self,
@@ -105,6 +117,11 @@ class NotificationActivityHold:
         if callable(last_trace):
             trace = last_trace(target)
             if isinstance(trace, ActivityTrace):
+                if trace.busy and trace.reason in composer_hold.HOLD_REASONS:
+                    # SYRD-570: whether the runtime's own trusted hook says the
+                    # turn is over while the composer holds the pane.
+                    return ComposerHoldTrace(trace.busy, trace.reason, trace.region_digest,
+                                             composer_hold.trusted_idle(gate_owner.state_store.read(target)))
                 return trace
         return ActivityTrace(pane_busy, "busy" if pane_busy else "idle")
 

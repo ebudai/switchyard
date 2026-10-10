@@ -248,6 +248,8 @@ class NotificationDispatch:
                 "busy": activity_trace.busy,
                 "reason": activity_trace.reason,
                 "region_digest": activity_trace.region_digest,
+                # SYRD-570: a composer hold while the runtime's trusted hook says idle.
+                "trusted_idle": bool(getattr(activity_trace, "trusted_idle", False)),
             },
             "decision": decision,
             "decision_reason": reason,

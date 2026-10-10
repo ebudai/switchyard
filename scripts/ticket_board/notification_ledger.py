@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from . import background_hold
+from . import background_hold, composer_hold
 
 
 class NotificationLedger:
@@ -154,10 +154,22 @@ SELECT ticket_board.record_notification_trace(
         work is what holds it, so a hold that lasts can be told to the Director
         (SYRD-557).
         """
+        computed: list[dict[str, Any]] = []
+
+        def once() -> dict[str, Any]:
+            if not computed:
+                computed.append(detail())
+            return computed[0]
+
         if fields.get("event") == "gate_defer":
-            background_hold.note(self, conn, notification_id, str(fields.get("busy_reason") or ""))
+            reason = str(fields.get("busy_reason") or "")
+            background_hold.note(self, conn, notification_id, reason)
+            # SYRD-570: a composer hold under a trusted idle hook opens or joins
+            # the role's episode; any other deferral ends it.
+            trusted = reason in composer_hold.HOLD_REASONS and bool(once().get("anti_clobber", {}).get("trusted_idle"))
+            composer_hold.note(self, conn, notification_id, str(fields.get("target_role") or ""), reason, trusted)
         if notification_id not in self._traced_gate_defer_notifications:
-            self.trace(conn, notification_id=notification_id, detail=detail(), **fields)
+            self.trace(conn, notification_id=notification_id, detail=once(), **fields)
             self._traced_gate_defer_notifications.add(notification_id)
 
     def forget(self, notification_id: int) -> None:

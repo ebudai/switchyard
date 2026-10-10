@@ -353,6 +353,11 @@ def attach_role_to_slot(
         print(conflict, file=sys.stderr)
         return 1
     exists = runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if not exists:
+        # SYRD-569: the last conversation may be recorded in the project's shared store.
+        from scripts.stranded_session_records import adopt_stranded_session_record
+
+        adopt_stranded_session_record(role, session_dir)
     session_id = launcher.session_id_for_role(role, session_dir)
     if not exists:
         if not session_id:

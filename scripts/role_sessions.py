@@ -101,6 +101,11 @@ def _start_role_session(
 ) -> int:
     from scripts import team_launcher as launcher
 
+    if prefer_resume:
+        # SYRD-569: the last conversation may be recorded in the project's shared store.
+        from scripts.stranded_session_records import adopt_stranded_session_record
+
+        adopt_stranded_session_record(role, session_dir)
     session_id = launcher.session_id_for_role(role, session_dir) if prefer_resume else ""
     if prefer_resume and not session_id:
         print(

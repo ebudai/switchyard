@@ -143,7 +143,14 @@ def _resolve_pane_state_dir(raw_state_dir: str, target: str, environ: dict[str, 
 
 
 def _resolve_pane_session_dir(raw_session_dir: str, target: str, environ: dict[str, str]) -> Path | None:
-    explicit = raw_session_dir.strip() or _env_first(environ, "TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    pane_session_dir = _env_first(environ, "TICKET_BOARD_PANE_SESSION_DIR", "PGU_TICKET_BOARD_PANE_SESSION_DIR")
+    # SYRD-569: the installed hooks are the account's, shared by every role it
+    # runs, so their --session-dir is the project's shared store. The launcher
+    # gives each pane its role's own store, and reads the record back from
+    # there: for the pane's own target, the pane's word wins.
+    if pane_session_dir and target == _env_first(environ, "TICKET_BOARD_PANE_TARGET", "PGU_PANE_TARGET"):
+        return Path(pane_session_dir).expanduser()
+    explicit = raw_session_dir.strip() or pane_session_dir
     if explicit:
         return Path(explicit).expanduser()
     project = _project_for_dirs(target, environ)

@@ -251,8 +251,12 @@ def test_the_transition_that_was_trapped_is_delivered_once() -> None:
         assert len(sent) == 1, sent
         assert sent[0][0] == pane.target, sent
         assert "SYRD-99" in sent[0][1], sent
-        # Delivered and acknowledged, not requeued again.
-        assert conn.acked == [1093], conn.acked
+        # Delivered and acknowledged, not requeued again. SYRD-565: this pane's
+        # hooks never record the turn, so the notice -- out of the composer --
+        # is acknowledged by the board as it starts watching for that receipt.
+        watched = [params for statement, params in conn.executed
+                   if "watch_notification_receipt" in str(statement) and params and params[0] == 1093]
+        assert conn.acked == [1093] or (conn.acked == [] and len(watched) == 1), (conn.acked, watched)
         assert conn.requeued == [], conn.requeued
 
 

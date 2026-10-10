@@ -90,3 +90,31 @@ def composing(lines: list[str], cursor_x: int, cursor_y: int, home_x: int = 2) -
     # next line of a draft whose lines are each prompted.
     previous = lines[cursor_y - 1] if cursor_y > 0 else ""
     return _prompted(previous) and bool(_text(previous))
+
+
+def composer_text(lines: list[str], cursor_x: int, cursor_y: int) -> str | None:
+    """What the composer holds, prompt glyphs and indentation set aside (SYRD-565).
+
+    '' when it holds nothing, None when the capture cannot place the cursor.
+    The same composer `composing` reads: a ruled box's rows, or else the cursor
+    row and the prompted rows of a draft directly above it. On the cursor's own
+    row only what is left of the cursor counts -- right of it is where an empty
+    box shows its placeholder -- so the text a notice just typed, which leaves
+    the cursor at its end, is read whole.
+    """
+    if cursor_y < 0 or cursor_x < 0:
+        return None
+    lines = list(lines) + [""] * (cursor_y + 1 - len(lines))
+    above = next((i for i in range(cursor_y - 1, -1, -1) if _is_rule(lines[i])), None)
+    below = next((i for i in range(cursor_y + 1, len(lines)) if _is_rule(lines[i])), None)
+    ruled = above is not None and (below is not None or all(_composer_shaped(l) for l in lines[above + 1:cursor_y]))
+    if ruled:
+        rows = list(range(above + 1, below if below is not None else cursor_y + 1))
+    else:
+        rows = [cursor_y]
+        row = cursor_y - 1
+        while row >= 0 and _prompted(lines[row]) and _text(lines[row]):
+            rows.insert(0, row)
+            row -= 1
+    texts = [_text(lines[r][:cursor_x]) if r == cursor_y else _text(lines[r]) for r in rows]
+    return "\n".join(text for text in texts if text)

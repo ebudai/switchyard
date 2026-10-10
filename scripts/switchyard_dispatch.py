@@ -214,6 +214,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             upstream_report_url=getattr(args, "upstream_report_url", "") or "",
             upstream_report_token_file=getattr(args, "upstream_report_token_file", "") or "",
             only=args.only,
+            role_models=args.role_models,
         )
     if argv[0].casefold() == "install-shared-release":
         args = launcher._build_switchyard_install_shared_release_parser().parse_args(argv[1:])
@@ -384,10 +385,47 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         if args.prompt_file is not None:
             forwarded += ["--prompt-file", str(args.prompt_file)]
         return workflow_manage.main(forwarded)
-    if argv[0].casefold() == "set-role-runtime":
-        args = launcher._build_switchyard_set_role_runtime_parser().parse_args(argv[1:])
+    if argv[0].casefold() in {"set-role-runtime", "reconcile-role-models"}:
+        # SYRD-579 shares this block: both change what a role runs and restart it.
+        reconcile = argv[0].casefold() == "reconcile-role-models"
+        if reconcile:
+            parser = argparse.ArgumentParser(
+                prog="switchyard reconcile-role-models",
+                description=(
+                    "Record which model and effort each role keeps when its own session last ran another "
+                    "than its configuration, and restart only the live roles not running it, resuming "
+                    "their conversations."
+                ),
+            )
+            parser.add_argument("project", help="registered project name or slug")
+            parser.add_argument(
+                "--role", action="append", default=[],
+                help="a role to reconcile; repeat it for more (default: every role)",
+            )
+            parser.add_argument(
+                "--keep",
+                default="running",
+                choices=("running", "configured"),
+                help="keep what each session ran last (default), or put each back on its configuration",
+            )
+            parser.add_argument("--model", default=None, help="set this model for the roles named with --role")
+            parser.add_argument(
+                "--dry-run", action="store_true", help="say what would be recorded and restarted, change nothing"
+            )
+        else:
+            parser = launcher._build_switchyard_set_role_runtime_parser()
+        args = parser.parse_args(argv[1:])
         entry = launcher._resolve_switchyard_project(args.project)
         config = launcher._load_switchyard_project_config_for_command(entry, argv)
+        if reconcile:
+            return launcher.reconcile_role_models_command(
+                config,
+                config_path=entry.config_path,
+                roles=args.role,
+                keep=args.keep,
+                model=args.model,
+                dry_run=args.dry_run,
+            )
         return launcher.set_project_role_runtime_command(
             config,
             config_path=entry.config_path,

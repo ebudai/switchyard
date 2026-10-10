@@ -53,6 +53,9 @@ def upgrade_project_command(
     # One narrow step instead of the upgrade (SYRD-548): `upstream-report`
     # connects the tenant for reports and runs no phase at all.
     only: str = "",
+    # What a role keeps when its own session last ran another model than its
+    # configuration: "running", "configured", or "" to refuse (SYRD-579).
+    role_models: str = "",
     registry_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
@@ -75,6 +78,13 @@ def upgrade_project_command(
             upstream_report_url=upstream_report_url, upstream_report_token_file=upstream_report_token_file,
             print_func=print_func,
         )
+    # Before anything is stopped or written: a restart in any later phase would
+    # put a role that chose another model back on its configuration (SYRD-579).
+    role_selections = launcher.hold_role_selections_for_upgrade(
+        config, config_path=config_path, keep=role_models, dry_run=dry_run, print_func=print_func,
+    )
+    if role_selections is None:
+        return 1
     source_pinned = launcher._pin_upgrade_source(
         config,
         commit_git_dir=commit_git_dir,
@@ -168,7 +178,7 @@ def upgrade_project_command(
     config = identities_done.config
     release_report_config = identities_done.release_report_config
 
-    return launcher._finish_upgrade(
+    finished = launcher._finish_upgrade(
         config,
         commit_git_dir=commit_git_dir,
         config_path=config_path,
@@ -179,4 +189,7 @@ def upgrade_project_command(
         print_func=print_func,
         release_report_config=release_report_config,
         runner=runner,
+    )
+    return launcher.role_selections_after_upgrade(
+        role_selections, config_path=config_path, code=finished, print_func=print_func,
     )

@@ -99,6 +99,9 @@ SWITCHYARD_COMMANDS = (
     "replace-window",
     "set-vcs-close-role",
     "set-role-runtime",
+    # Settles a role whose own session chose another model than its
+    # configuration, which a launch and an upgrade refuse to restart (SYRD-579).
+    "reconcile-role-models",
     "agy-credential",
     "seed-role-credentials",
     "role-prompt",
@@ -154,7 +157,7 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # named as unavailable instead (SYRD-241).
     {
         "present", "attach", "board-skill", "role-prompt", "design-stage", "set-role-runtime",
-        "finish-upgrade", "worker-pool", "privileged-action", "status",
+        "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -190,6 +193,8 @@ Commands:
   set-vcs-close-role
                    set which existing project role can mark tickets done
   set-role-runtime change an existing role's agent runtime and reconnect its panes
+  reconcile-role-models
+                   keep the model each role chose, or its configured one, and restart only those
   agy-credential   show, set, or clear this host's agy credential source
   role-prompt      show, set, or clear a role's onboarding prompt
   design-stage     add a designer-owned design stage and the Director's design review

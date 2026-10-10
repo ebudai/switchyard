@@ -90,7 +90,8 @@ def check(condition: bool, detail: str) -> None:
 #: What launch_project reads through the launcher (SYRD-429).
 LAUNCH_READS = ("_launch_runners_and_paths", "_prepare_launch", "_write_layout_and_plan", "_start_workers_and_present", "_report_launch",
                 "process_authority_board_compatibility", "migrate_declarative_director_onboarding", "upgrade_generated_project_layout",
-                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config", "report_kept_worktrees")
+                "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config", "report_kept_worktrees",
+                "refuse_restart_on_another_model")  # SYRD-579
 
 
 def launcher_with_launch_project() -> ast.Module:
@@ -1427,6 +1428,7 @@ def launch_through_p78(answer: object, *, mode: str = "attach", running: list | 
                  upgrade_generated_project_layout=lambda c, **k: SimpleNamespace(changed=False),
                  _verify_pane_launcher_path=lambda c, **k: PANE_SCRIPT,
                  prepare_project_desktop=lambda c, **k: c,
+                 refuse_restart_on_another_model=lambda c, **k: False,  # SYRD-579's gate, stood in like the phases
                  _prepare_launch=lambda c, **k: going_on, _write_layout_and_plan=lambda c, **k: None,
                  _start_workers_and_present=phase, unsafe_root_presentation_windows=p9,
                  report_launch_session_records=lambda c, **k: seen.append(("records", k))), fence_workers():

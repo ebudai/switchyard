@@ -262,6 +262,16 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
             "it is never read from the project account, which every role runs as"
         ),
     )
+    parser.add_argument(
+        "--role-models",
+        default="",
+        choices=("running", "configured"),
+        help=(
+            "when a role's own session last ran another model or effort than its configuration: "
+            "record what it ran (running) or keep the configuration (configured); without it the "
+            "upgrade refuses before changing anything"
+        ),
+    )
     return parser
 
 

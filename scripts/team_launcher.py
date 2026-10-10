@@ -991,6 +991,8 @@ from scripts.project_vcs_close_role import (
 )
 from scripts.project_role_runtime import _role_named, set_project_role_runtime_command
 from scripts.repository_boundary_repair import switchyard_repair_boundary_command
+from scripts.role_model_selection import hold_role_selections_for_upgrade, role_selections_after_upgrade
+from scripts.role_model_selection import reconcile_role_models_command, refuse_restart_on_another_model
 from scripts.root_plan_reconstruction import (
     REGENERATED_PLAN_FIELDS,
     _regenerated_field_divergence,

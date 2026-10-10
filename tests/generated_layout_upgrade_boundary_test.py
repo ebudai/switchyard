@@ -425,7 +425,8 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
 LAUNCH_READS = ("_launch_runners_and_paths", "_prepare_launch", "_write_layout_and_plan", "_start_workers_and_present", "_report_launch",
                 "process_authority_board_compatibility", "migrate_declarative_director_onboarding", "upgrade_generated_project_layout",
                 "prepare_project_desktop", "_verify_pane_launcher_path", "WorkerStartup", "load_project_config",
-                "report_kept_worktrees")  # SYRD-555: the launch ends with worktrees it kept
+                "report_kept_worktrees",  # SYRD-555: the launch ends with worktrees it kept
+                "refuse_restart_on_another_model")  # SYRD-579: and starts no role over the model it chose
 
 
 def launcher_with_launch_project() -> ast.Module:

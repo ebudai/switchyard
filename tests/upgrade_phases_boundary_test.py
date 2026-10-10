@@ -117,7 +117,9 @@ UPGRADE_READS = ("_pin_upgrade_source", "_recover_upgrade_state", "_refresh_upgr
                  "_upgrade_identities_and_accounts", "_finish_upgrade", "UpgradeSourcePinned", "UpgradeStateReady",
                  "UpgradeToolingStaged", "UpgradeIdentitiesDone",
                  # SYRD-548: `--only upstream-report` returns this before U1.
-                 "connect_upstream_report_command")
+                 "connect_upstream_report_command",
+                 # SYRD-579: role models are held before U1 and checked after U6.
+                 "hold_role_selections_for_upgrade", "role_selections_after_upgrade")
 
 
 def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
@@ -155,6 +157,22 @@ def upgrade_command() -> tuple[ast.Module, ast.FunctionDef, str]:
               and ast.unparse(only.body[0].value.func) == "launcher.connect_upstream_report_command",
               f"before U1, only --only's return: {ast.unparse(only)[:120]}")
         del upgrade.body[1]
+        # SYRD-579: the role models are held before U1, a drift refused there, and
+        # checked after U6, which answers the upgrade. Checked here, once, and set
+        # aside as `only` is, so U6 is again the upgrade's own return.
+        hold, refused = upgrade.body[1], upgrade.body[2]
+        check(ast.unparse(hold).startswith("role_selections = launcher.hold_role_selections_for_upgrade(config, config_path=config_path, "
+                                           "keep=role_models, dry_run=dry_run")
+              and ast.unparse(refused) == "if role_selections is None:\n    return 1",
+              f"before U1, the role models held and a drift refused: {ast.unparse(hold)[:160]} {ast.unparse(refused)}")
+        del upgrade.body[1:3]
+        finished, answered = upgrade.body[-2], upgrade.body[-1]
+        check(isinstance(finished, ast.Assign) and ast.unparse(finished.targets[0]) == "finished"
+              and ast.unparse(finished.value.func) == "launcher._finish_upgrade"
+              and ast.unparse(answered) == "return launcher.role_selections_after_upgrade(role_selections, "
+                                           "config_path=config_path, code=finished, print_func=print_func)",
+              f"after U6, its answer checked against the held role models: {ast.unparse(answered)}")
+        upgrade.body[-2:] = [ast.copy_location(ast.Return(value=finished.value), finished)]
 
         class AsLauncherGlobal(ast.NodeTransformer):
             def visit_Attribute(self, node: ast.Attribute) -> ast.AST:

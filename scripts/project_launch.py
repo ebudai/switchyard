@@ -81,6 +81,12 @@ def launch_project(
                 f"its running board does not provide project-account process authority ({reason})"
             )
             return 1
+    # Before anything starts: a role whose own session chose another model than
+    # its configuration is not put back on the configuration by a flag (SYRD-579).
+    if not dry_run and launcher.refuse_restart_on_another_model(
+        config, config_path=config_path, mode=mode, runner=runner, print_func=print_func
+    ):
+        return 1
     if mode == "reload" and not dry_run:
         # Reload re-projects the stored document, so an unmigrated tenant would reload
         # into the same missing director onboarding forever. Run the one-time backfill

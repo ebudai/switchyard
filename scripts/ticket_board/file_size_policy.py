@@ -89,14 +89,17 @@ def physical_lines(data: bytes) -> int | None:
 
 
 def _git(repo: Path, *args: str) -> bytes:
-    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+    # A path is a checkout of one's own; the board passes the reader of its
+    # trusted commit cache, which names the repository exactly (SYRD-571).
+    argv, env = repo.git_command(args) if hasattr(repo, "git_command") else (["git", "-C", str(repo), *args], None)
+    proc = subprocess.run(argv, capture_output=True, env=env)
     if proc.returncode != 0:
         raise ScanError(f"git {' '.join(args)}: {proc.stderr.decode(errors='replace').strip()}")
     return proc.stdout
 
 
 def resolve(repo: Path, rev: str) -> str:
-    return _git(repo, "rev-parse", "--verify", f"{rev}^{{commit}}").decode().strip()
+    return _git(repo, "rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}").decode().strip()
 
 
 def merge_base(repo: Path, main: str, candidate: str) -> str:
@@ -113,7 +116,7 @@ def measure(repo: Path, base: str, candidate: str) -> Measurement:
     Raises ScanError on any git failure: an incomplete scan is never a clean one.
     """
     base, candidate = resolve(repo, base), resolve(repo, candidate)
-    raw = _git(repo, "diff", "--name-status", "-M", "-z", base, candidate)
+    raw = _git(repo, "diff", "--name-status", "-M", "-z", "--no-ext-diff", "--no-textconv", base, candidate)
     fields = [f.decode("utf-8", errors="surrogateescape") for f in raw.split(b"\0") if f]
     result = Measurement(base=base, candidate=candidate)
     i = 0
@@ -155,7 +158,7 @@ def measure(repo: Path, base: str, candidate: str) -> Measurement:
 
 def _added_blocks(repo: Path, base: str, candidate: str, path: str) -> list[list[str]]:
     """Each run of lines `candidate` adds to `path`, trailing whitespace dropped; a new file is one run."""
-    diff = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", base, candidate, "--", path)
+    diff = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", base, candidate, "--", path)
     blocks: list[list[str]] = []
     current: list[str] = []
     for line in diff.decode("utf-8", errors="replace").splitlines():

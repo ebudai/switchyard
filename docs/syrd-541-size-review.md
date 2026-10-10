@@ -64,6 +64,10 @@ warning, so they cannot disagree.
   - **Limit:** if a ticket lands as several separate commits, only the last
     one's growth is measured at the close. Each was still reviewed as part of
     the candidate.
+- **Where it reads:** the board's trusted commit cache, through
+  `commit_cache_reader`. The cache is named exactly and only reads run there,
+  as the board's own account, although another account owns the cache. See
+  `docs/syrd-571-size-review-cache-ownership.md`.
 - **Identity:** the path, plus git rename detection (`-M`), so a renamed file
   keeps its size history and its allowance.
   - A deletion is never a finding.

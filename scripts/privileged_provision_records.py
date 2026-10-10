@@ -131,6 +131,47 @@ def ensure_privileged_provision_dir(target: Path, *, root: Path | None = None) -
 
     base = Path(root) if root is not None else launcher.switchyard_privileged_provision_root()
     owner = launcher.expected_privileged_uid()
+    # The root's own parents (SYRD-575). On a fresh host /etc/switchyard does
+    # not exist until something makes it, and the walk below creates only from
+    # the root down, so a first project could not stage anything. The nearest
+    # parent that exists -- the one the rest is made in, /etc/switchyard on a
+    # host that has a project, /etc on a fresh one -- is judged before anything
+    # is made, so a refusal leaves the host as it was; the missing ones are made
+    # root's and 0755, as `install -d` makes /etc/switchyard/publish, at that
+    # mode from the start. A sticky directory's owner is not asked: it is shared
+    # by design, and inside a user namespace root's /tmp is owned by nobody.
+    missing: list[Path] = []
+    for directory in base.parents:
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            missing.append(directory)
+            continue
+        sticky = bool(info.st_mode & stat.S_ISVTX)
+        why = ""
+        if stat.S_ISLNK(info.st_mode):
+            why = "is a symlink"
+        elif not stat.S_ISDIR(info.st_mode):
+            why = "is not a directory"
+        elif info.st_uid not in (0, os.getuid()) and not sticky:
+            why = f"is owned by uid {info.st_uid} rather than by root"
+        elif info.st_mode & 0o022 and not sticky:
+            why = f"can be written by others (mode {stat.S_IMODE(info.st_mode):04o})"
+        if why:
+            raise SystemExit(
+                f"switchyard: {directory} {why}, so it cannot hold root's provisioning directory {base}: "
+                "what root keeps under it could be replaced. Nothing was written."
+            )
+        break
+    for directory in reversed(missing):
+        umask = os.umask(0o022)
+        try:
+            directory.mkdir(mode=0o755, exist_ok=True)
+        finally:
+            os.umask(umask)
+        made = directory.lstat()  # read back: what was made is what is there
+        if stat.S_ISLNK(made.st_mode) or not stat.S_ISDIR(made.st_mode):
+            raise SystemExit(f"switchyard: {directory} changed while it was being made. Nothing more was written.")
     repaired: list[str] = []
     for directory in (*reversed(target.parents), target):
         private = directory == target

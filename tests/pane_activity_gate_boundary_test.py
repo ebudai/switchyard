@@ -82,7 +82,7 @@ SEAMS = {
     'PaneActivityGate.child_work_trace': {'ActivityTrace': 6, 'ChildWorkMemory': 1, 'PRIOR_TURN_CHILD_WORK': 1, 'STALE_PRIOR_TURN_CHILD_WORK': 1},
     'PaneActivityGate._trusted_idle_source_trace': {'TRUSTED_IDLE_SOURCES': 1},
     'PaneActivityGate._idle_cursor_trace': {'ActivityTrace': 3},
-    'PaneActivityGate._untrusted_idle_source_trace': {'ActivityTrace': 2, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1, 'TRUSTED_IDLE_SOURCES': 1},
+    'PaneActivityGate._untrusted_idle_source_trace': {'ActivityTrace': 3, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1, 'TRUSTED_IDLE_SOURCES': 1},  # SYRD-566: provider_starting
     'PaneActivityGate._stale_codex_busy_trace': {'ActivityTrace': 3, 'LOGGER': 1, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1},
     'PaneActivityGate._anti_clobber_trace': {'ActivityTrace': 4},
     'PaneActivityGate._full_activity_trace': {'ActivityTrace': 2},
@@ -141,6 +141,7 @@ DEFAULTS = {
     'PaneActivityGate._working_timer_trace': ['None'],
     'PaneActivityGate._working_timer_idle_probe_trace': [],
     'PaneActivityGate._target_cursor_state': [],
+    'PaneActivityGate._open_prompt_trace': [],  # SYRD-566
     'PaneActivityGate._reset_director_startup_hold': ['True'],
     'PaneActivityGate._director_startup_hold_trace': [],
     'PaneActivityGate._pane_pid': [],
@@ -599,7 +600,9 @@ def test_the_readers_build_their_gate_from_notify_listener_when_they_run() -> No
 
 # SYRD-550: the cursor check reads the composer's content through a leaf module
 # imported when it runs. It imports nothing itself, so it can close no cycle.
-LATER_IMPORTS = {"PaneActivityGate._target_cursor_state": ["from . import pane_composer"]}
+# SYRD-566: and names a provider's own question on the same capture, through
+# another leaf module that imports nothing of the board.
+LATER_IMPORTS = {"PaneActivityGate._target_cursor_state": ["from . import pane_composer, provider_prompt"]}
 
 
 def test_the_seams_read_through_notify_listener_and_nothing_bound() -> None:

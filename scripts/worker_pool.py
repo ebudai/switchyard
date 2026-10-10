@@ -588,6 +588,7 @@ class WorkerReadiness:
     #: "Trust this folder?" and not a worker that can take a ticket (SYRD-279).
     trusted: bool = True
     session: bool = False
+    stopped_at: str = ""  # the provider question its live session is stopped at, and what answers it (SYRD-566)
     holding: tuple[str, ...] = ()
     #: The worker's one serial slot, as the board's routing gate decides it:
     #: the ticket holding it ("" when free), where that ticket is, and whether
@@ -633,7 +634,7 @@ class WorkerReadiness:
     @property
     def can_take_work(self) -> bool | None:
         """Whether routing a ticket to it now would start work: None when the board did not say."""
-        if not (self.ready and self.session):
+        if not (self.ready and self.session) or self.stopped_at:
             return False
         return None if not self.reservation_known else not self.reserved_by
 
@@ -652,7 +653,7 @@ class WorkerReadiness:
         return f"serial slot unknown: {self.unreported}" + (f" ({waiting})" if waiting else "")
 
     def describe(self) -> str:
-        state = "running" if self.session else "stopped"
+        state = ("running, blocked: " + self.stopped_at if self.stopped_at else "running") if self.session else "stopped"
         held = f", holding {', '.join(self.holding)}" if self.holding else ""
         pull = "" if self.claimant is None else ("; claims ready work" if self.claimant else "; not a pull claimant")
         if self.ready:
@@ -680,7 +681,7 @@ def worker_readiness(
     """
     import subprocess
 
-    from scripts import team_launcher as launcher
+    from scripts import team_launcher as launcher, worker_screen
     from scripts.ticket_board import board_skill
 
     runner = runner or subprocess.run
@@ -747,6 +748,7 @@ def worker_readiness(
                     runtime, owner_home=home, workdir=Path(workdir)
                 ),
                 session=session_alive,
+                stopped_at=worker_screen.live_question(configured, role_runner) if session_alive else "",
                 holding=tuple(str(ticket.get("id") or "") for ticket in queues.get(name, [])),
                 claimant=None if claimants is None else name in claimants,
                 **_reservation_of(name, reservations, board),
@@ -1072,7 +1074,7 @@ def prepare_role_command(config_path: Path | str, member: str) -> str:
     return shlex.join([str(program), "prepare-role", "--config", str(config_path), "--role", member])
 
 
-def observe_worker(config, member: str, *, runner=None) -> tuple[str, str]:
+def observe_worker(config, member: str, *, runner=None, watch: bool = False) -> tuple[str, str]:
     """What one worker is doing now: running, stopped, not its runtime, or unknown.
 
     "running" is the launcher's own meaning -- a live session whose process tree
@@ -1082,7 +1084,7 @@ def observe_worker(config, member: str, *, runner=None) -> tuple[str, str]:
     """
     import subprocess
 
-    from scripts import team_launcher as launcher
+    from scripts import team_launcher as launcher, worker_screen
 
     runner = runner or subprocess.run
     role = None
@@ -1094,6 +1096,8 @@ def observe_worker(config, member: str, *, runner=None) -> tuple[str, str]:
         if probe.returncode != 0:
             return "stopped", f"it has no live session {role.tmux_session}"
         if launcher.live_command_matches_role(role, runner=role_runner):
+            if (detail := worker_screen.live_question(role, role_runner, watch=watch)):
+                return "blocked", f"its session at {role.target} is live and {detail}"  # not ready (SYRD-566)
             return "running", f"its session is live at {role.target}"
     except Exception as exc:  # noqa: BLE001 - an unreadable worker is reported, not guessed at
         return "unknown", f"its state could not be read ({type(exc).__name__}: {exc})"
@@ -1183,7 +1187,7 @@ def start_worker(
     # The pane command's exit status is not a worker: a resume it could not
     # verify in time exits 0, and so does a runtime that exits straight after.
     # Only what is running now answers "started".
-    after, seen = observe_worker(config, member, runner=runner)
+    after, seen = observe_worker(config, member, runner=runner, watch=True)
     if result.returncode != 0:
         return WorkerAction(
             member, "failed to start",

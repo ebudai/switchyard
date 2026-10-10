@@ -28,6 +28,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from . import provider_prompt
+
 #: How long background work may hold a role's notices before the Director is
 #: told. Otto's own tenant watchdog settled on half an hour, and an ordinary
 #: mutation run or suite sweep finishes inside it.
@@ -48,38 +50,77 @@ HOLD_REASONS = frozenset({
 #: The requeue error `_defer_for_background_work` writes, before its phase.
 OWNER_BACKGROUND_WORK = "owner_background_work"
 
+#: How long a pane stopped at its provider's own question may hold notices
+#: before the Director is told (SYRD-566). Short: unlike background work, the
+#: question never ends by itself, and two minutes is long enough for a person
+#: already at the pane to answer it first.
+DEFAULT_PROMPT_ALERT_AFTER_SECONDS = 120.0
+PROMPT_ALERT_AFTER_ENV = "TICKET_BOARD_PROVIDER_PROMPT_ALERT_SECONDS"
 
-def alert_after_seconds(environ: dict[str, str] | None = None) -> float:
-    raw = (os.environ if environ is None else environ).get(ALERT_AFTER_ENV, "")
+
+def alert_after_seconds(environ: dict[str, str] | None = None, *, env: str = ALERT_AFTER_ENV,
+                        default: float = DEFAULT_ALERT_AFTER_SECONDS) -> float:
+    raw = (os.environ if environ is None else environ).get(env, "")
     try:
-        value = float(raw) if raw.strip() else DEFAULT_ALERT_AFTER_SECONDS
+        value = float(raw) if raw.strip() else default
     except ValueError:
-        return DEFAULT_ALERT_AFTER_SECONDS
-    return value if value >= 0 else DEFAULT_ALERT_AFTER_SECONDS
+        return default
+    return value if value >= 0 else default
 
 
-def _present(ledger: Any, conn: Any) -> bool:
-    """Whether this board records hold episodes yet: a listener can be newer than its board's migrations."""
+def prompt_alert_after_seconds(environ: dict[str, str] | None = None) -> float:
+    return alert_after_seconds(environ, env=PROMPT_ALERT_AFTER_ENV, default=DEFAULT_PROMPT_ALERT_AFTER_SECONDS)
+
+
+def prompt_hold_description(kind: str) -> str:
+    """What the Director is told a pane held at this question is, and what releases it."""
+    description, remedy = provider_prompt.KINDS[kind]
+    return (f"its CLI is stopped at {description}. Nothing answers it by itself, and nothing was typed into it. "
+            f"To release them, {remedy}.")
+
+
+def _present(ledger: Any, conn: Any) -> Any:
+    """Which hold record this board has: a listener can be newer than its board's migrations.
+
+    "described" once a hold can say what it is (SYRD-566); any other true value
+    for SYRD-557's, which says only "background work"; false before either.
+    """
     present = getattr(ledger, "_background_hold_present", None)
     if present is None:
         row = conn.execute(
-            "SELECT to_regprocedure('ticket_board.note_background_hold(bigint, text, interval)') IS NOT NULL AS present"
+            "SELECT CASE WHEN to_regprocedure('ticket_board.note_background_hold(bigint, text, interval, text)') IS NOT NULL "
+            "THEN 'described' WHEN to_regprocedure('ticket_board.note_background_hold(bigint, text, interval)') IS NOT NULL "
+            "THEN 'background' ELSE '' END AS present"
         ).fetchone()
-        present = bool(row and (row["present"] if isinstance(row, dict) else row[0]))
+        present = (row["present"] if isinstance(row, dict) else row[0]) if row else ""
+        present = present.decode() if isinstance(present, bytes) else present
         ledger._background_hold_present = present
     return present
 
 
 def note(ledger: Any, conn: Any, notification_id: int, reason: str) -> None:
-    """Record that background work held this notice again; the board decides whether that is news.
+    """Record that background work, or a provider's own question, held this notice again.
+
+    The board decides whether that is news.
 
     Never fatal: a failure here is logged, and the hold goes on exactly as it
     would have without it.
     """
-    if reason not in HOLD_REASONS:
+    prompt = reason[len(provider_prompt.PROVIDER_PROMPT_PREFIX):] if reason.startswith(
+        provider_prompt.PROVIDER_PROMPT_PREFIX) else ""
+    if reason not in HOLD_REASONS and prompt not in provider_prompt.KINDS:
         return
     try:
-        if not _present(ledger, conn):
+        present = _present(ledger, conn)
+        if not present:
+            return
+        if prompt:
+            if present != "described":
+                return  # an older board would call it background work, which it is not
+            conn.execute(
+                "SELECT ticket_board.note_background_hold(%s::bigint, %s::text, %s::interval, %s::text)",
+                (notification_id, reason, f"{prompt_alert_after_seconds():g} seconds", prompt_hold_description(prompt)),
+            )
             return
         conn.execute(
             "SELECT ticket_board.note_background_hold(%s::bigint, %s::text, %s::interval)",

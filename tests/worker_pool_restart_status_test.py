@@ -147,6 +147,8 @@ class Host:
                 proc.send_signal(signal.SIGTERM)
                 proc.wait(timeout=10)
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if verb == "capture-pane":  # a recorded host has no screen to read (SYRD-566)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         if verb == "display-message":
             if command[-1] == "#{pane_pid}":
                 pid = self.pid(session)

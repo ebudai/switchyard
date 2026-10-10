@@ -344,7 +344,7 @@ def worker_problem(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     handover: RuntimeHandover,
 ) -> str:
-    """Why the role's worker is not its declared provider, running and registered, or "".
+    """Why the role's worker is not its declared provider, running, registered and able to take work, or "".
 
     Each answer is a distinct finding: a session that has gone, a pane whose
     process has exited, a process table that could not be read -- "cannot
@@ -363,7 +363,12 @@ def worker_problem(
     problem = _identity_problem(config, role, runner=runner, handover=handover)
     if problem:
         return _liveness_problem(role, runner=runner) or problem
-    return ""
+    # Up, its own provider, registered -- and stopped at that provider's own
+    # question is still not a worker that can take anything (SYRD-566).
+    from scripts import worker_screen
+
+    prompt = worker_screen.open_prompt(role.target, runner)
+    return "" if prompt is None else worker_screen.blocked_detail(team_launcher._role_cli_name(role), prompt)
 
 
 def provider_command(config: team_launcher.ProjectConfig, role: team_launcher.RoleConfig) -> str:

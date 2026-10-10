@@ -14558,7 +14558,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS background_hold_episodes_open
 -- A requeue caused by background work: open or join the role's episode, and
 -- tell the Director once it has lasted p_alert_after.
 CREATE OR REPLACE FUNCTION ticket_board.note_background_hold(
-    p_notification_id bigint, p_reason text, p_alert_after interval)
+    p_notification_id bigint, p_reason text, p_alert_after interval, p_what text DEFAULT NULL)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
 DECLARE
     now_at timestamptz := clock_timestamp();
@@ -14594,13 +14594,21 @@ BEGIN
     INTO held_ids, held_tickets
     FROM ticket_board.ticket_notification_queue h
     WHERE h.id = ANY(ep.notification_ids) AND h.dead_lettered_at IS NULL;
-    notice := format(
-        '%s''s pane has held %s ticket notice%s (%s) for %s minutes behind background work it is still running (%s). '
-        'Nothing was interrupted and nothing will be; they go out when the work ends. A job that never ends -- '
-        'a wait loop whose pgrep matches itself, say -- holds them for good: check %s''s pane.',
-        ep.target_role, cardinality(held_ids), CASE WHEN cardinality(held_ids) = 1 THEN '' ELSE 's' END,
-        array_to_string(held_tickets, ', '), floor(extract(epoch FROM now_at - ep.held_since) / 60)::bigint,
-        ep.reason, ep.target_role);
+    IF p_what IS NULL THEN
+        notice := format(
+            '%s''s pane has held %s ticket notice%s (%s) for %s minutes behind background work it is still running (%s). '
+            'Nothing was interrupted and nothing will be; they go out when the work ends. A job that never ends -- '
+            'a wait loop whose pgrep matches itself, say -- holds them for good: check %s''s pane.',
+            ep.target_role, cardinality(held_ids), CASE WHEN cardinality(held_ids) = 1 THEN '' ELSE 's' END,
+            array_to_string(held_tickets, ', '), floor(extract(epoch FROM now_at - ep.held_since) / 60)::bigint,
+            ep.reason, ep.target_role);
+    ELSE
+        -- The hold says what it is (SYRD-566): a provider's own question, say.
+        notice := format('%s''s pane has held %s ticket notice%s (%s) for %s minutes: %s',
+            ep.target_role, cardinality(held_ids), CASE WHEN cardinality(held_ids) = 1 THEN '' ELSE 's' END,
+            array_to_string(held_tickets, ', '), floor(extract(epoch FROM now_at - ep.held_since) / 60)::bigint,
+            p_what);
+    END IF;
     alert_id := ticket_board.enqueue_notification(
         q.ticket_id, 'ticket_update', 'director', notice,
         jsonb_build_object('kind', 'background_hold', 'id', q.ticket_id, 'target_role', 'director',

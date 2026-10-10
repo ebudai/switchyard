@@ -90,6 +90,8 @@ class Host:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/hermes\n")
         if "config" in command and "check" in command:
             return subprocess.CompletedProcess(command, 0, stdout="\N{CHECK MARK} OPENROUTER_API_KEY\n")
+        if "capture-pane" in command:  # a recorded host has no screen to read (SYRD-566)
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
         if "display-message" in command:
             # A running session shows its runtime. With no pane pid to walk, the
             # launcher's live-worker check reads the pane's current command.

@@ -311,6 +311,9 @@ def composer_snapshot_from_pane_text(pane_text: str) -> ComposerSnapshot:
 
 
 class PaneActivityGate:
+    #: How long after the launcher seeds a pane idle it is still a CLI starting up (SYRD-566).
+    LAUNCHER_SEED_SETTLE_SECONDS = 10.0
+
     def __init__(
         self,
         *,
@@ -352,6 +355,8 @@ class PaneActivityGate:
         self.child_work_cpu_ticks = max(0, child_work_cpu_ticks)
 
         self._child_work_memory_by_target: dict[str, ChildWorkMemory] = {}
+        #: The provider question each pane's last capture showed, if any (SYRD-566).
+        self._open_prompt_by_target: dict[str, Any] = {}
         self.director_startup_hold_seconds = director_startup_hold_seconds
         self.director_composer_home_x = director_composer_home_x
         self.working_timer_sample_delay_seconds = max(0.0, working_timer_sample_delay_seconds)
@@ -632,6 +637,7 @@ class PaneActivityGate:
         )
 
     def _target_cursor_state(self, target: str) -> bool | None:
+        self._open_prompt_by_target.pop(target, None)
         try:
             proc = self.cursor_position_runner(
                 ["tmux", "display-message", "-p", "-t", target, "#{cursor_x} #{cursor_y} #{pane_height}"],
@@ -656,7 +662,7 @@ class PaneActivityGate:
         # SYRD-550: the composer's own content decides, not the cursor's column
         # alone (pane_composer). No capture at all keeps the column rule; a
         # capture that cannot place the cursor is unavailable, which holds.
-        from . import pane_composer
+        from . import pane_composer, provider_prompt
 
         try:
             capture = self.capture_pane_runner(
@@ -665,7 +671,20 @@ class PaneActivityGate:
             )
         except (OSError, subprocess.SubprocessError):
             return cursor_x > self.director_composer_home_x
-        return pane_composer.composing(capture.stdout.splitlines(), cursor_x, cursor_y, self.director_composer_home_x)
+        lines = capture.stdout.splitlines()
+        self._open_prompt_by_target[target] = provider_prompt.open_prompt(lines)
+        return pane_composer.composing(lines, cursor_x, cursor_y, self.director_composer_home_x)
+
+    def _open_prompt_trace(self, target: str) -> ActivityTrace | None:
+        """Busy while the last capture showed a provider's own question (SYRD-566).
+
+        Whatever the hook says, and before the first hook: a notice typed there
+        ends in Enter, which answers the question with whatever is highlighted.
+        """
+        from . import notify_listener as listener
+
+        prompt = self._open_prompt_by_target.get(target)
+        return None if prompt is None else listener.ActivityTrace(True, prompt.reason)
 
     def _reset_director_startup_hold(self, *, clear_released: bool = True) -> None:
         self._director_startup_hold_state_ts = None
@@ -902,6 +921,8 @@ class PaneActivityGate:
         from . import notify_listener as listener
 
         cursor_composing = self._target_cursor_state(target)
+        if (prompt_trace := self._open_prompt_trace(target)) is not None:
+            return prompt_trace
         if target == self.director_target:
             startup_trace = self._director_startup_hold_trace(state)
             if startup_trace is not None and cursor_composing is not True:
@@ -948,6 +969,13 @@ class PaneActivityGate:
             ):
                 return self._working_timer_idle_probe_trace(target)
             return None
+        # Only the launcher has said anything, and only just: the CLI is still
+        # starting. Codex 0.162 draws its ordinary prompt first and, on a
+        # retiring model, the retirement notice over it 4.0 s later (measured,
+        # SYRD-566) -- a notice typed in between would meet that question.
+        seeded_for = self.wall_time() - state.updated_at
+        if state.source.startswith("team_launcher.") and seeded_for < self.LAUNCHER_SEED_SETTLE_SECONDS:
+            return listener.ActivityTrace(True, "provider_starting")
         probe_trace = self._working_timer_idle_probe_trace(target)
         if probe_trace.busy:
             return probe_trace
@@ -972,6 +1000,8 @@ class PaneActivityGate:
         if working_trace is not None:
             return working_trace
         cursor_composing = self._target_cursor_state(target)
+        if (prompt_trace := self._open_prompt_trace(target)) is not None:
+            return prompt_trace
         if cursor_composing is None:
             return listener.ActivityTrace(True, "cursor_state_unavailable")
         if cursor_composing:
@@ -1010,6 +1040,8 @@ class PaneActivityGate:
             if target == self.director_target:
                 self._reset_director_startup_hold()
             cursor_composing = self._target_cursor_state(target)
+            if (prompt_trace := self._open_prompt_trace(target)) is not None:
+                return prompt_trace
             if cursor_composing is None:
                 return listener.ActivityTrace(True, "cursor_state_unavailable")
             if cursor_composing:

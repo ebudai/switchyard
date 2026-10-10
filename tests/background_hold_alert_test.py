@@ -326,7 +326,7 @@ def scenario(root: Path) -> dict:
             seen["foreground_turn"] = [held("PGU-804"), episodes("app")]
 
             # Who may run the new functions, and a fresh schema.sql board installs the same text.
-            new = ("note_background_hold(bigint, text, interval)", "background_hold_notice_left()")
+            new = ("note_background_hold(bigint, text, interval, text)", "background_hold_notice_left()")
             try:
                 seen["grantees"] = {f: sql("SELECT coalesce(string_agg(DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' "
                                            "ELSE a.grantee::regrole::text END, '+'), '') "
@@ -516,11 +516,11 @@ def candidate(after: dict) -> None:
           and len(config["failing_board"]) == 1 and "notification 7" in config["failing_board"][0],
           f"half an hour unless configured, a bad value falls back, and no other hold reaches the board: {config}")
 
-    check(after["grantees"] == {"note_background_hold(bigint, text, interval)": "ticket_board_listener",
+    check(after["grantees"] == {"note_background_hold(bigint, text, interval, text)": "ticket_board_listener",
                                 "background_hold_notice_left()": ""},
           f"only the listener may note a hold; nobody may call the trigger function: {after['grantees']}")
     if os.environ.get("SYRD557_MUTATION_SKIP_COPY_PARITY") != "1":
-        check(after["fresh_equals_migrated"] == {"note_background_hold(bigint, text, interval)": True,
+        check(after["fresh_equals_migrated"] == {"note_background_hold(bigint, text, interval, text)": True,
                                                  "background_hold_notice_left()": True, "trigger": True},
               f"a schema.sql board installs exactly what the migration does: {after['fresh_equals_migrated']}")
 

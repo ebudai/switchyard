@@ -292,6 +292,36 @@ tenant's own repair, run by the project's Director: a runtime switch to the
 runtime a role already has (`switchyard set-role-runtime <project> <role> --cli
 <its runtime>`), which rewrites them from the board's document (SYRD-558).
 
+##### A role added after adoption
+
+A workflow-driven tenant adds a role with its own reviewed `workflow apply`.
+That changes the board and the tenant's files, and cannot change root's
+record, which upgrade and recovery read: otto's `uiux` (display slot 5) was
+never in it (SYRD-562). `workflow apply` now names each role it added and the
+operator's preview for it. The preview of a project whose record lacks a role
+the board declares lists the same commands:
+
+```sh
+pkexec switchyard adopt-workflow <project> --add-role <role>
+```
+
+This takes only that role from the board: its definition exactly as the board
+declares it (runtime, slot, target, capabilities), and its name in the stage
+owners and transition actors where the board lists it. Every other line of
+root's record stays as root has it, so a runtime or policy change the board
+carries alongside the role is not adopted with it; the preview shows what root's
+record becomes, says when other differences remain, and names any reference to
+the role it did not take (a stage's notify role, `reassign`, the queue), because
+changing one of those is replacing policy, not adding a role. It ends with the
+apply, which has the same digest checks, read-back and board re-read as above:
+
+```sh
+pkexec switchyard adopt-workflow <project> --apply --add-role <role> --from-live <board digest> --replacing <root digest>
+```
+
+A role the board does not declare, or one root's record already has, is
+refused.
+
 A project that declares its own workflow has that document recorded where only
 root can write it -- `workflow.json`, beside root's plan record, carrying a
 digest of what it holds -- when root first generates that project's artifacts.

@@ -158,6 +158,29 @@ def _hand_projection_to_tenant(config_path: Path, *extra: Path) -> None:
             launcher.ensure_owner_file(config, path, runner=subprocess.run)
 
 
+def _report_roles_root_lacks(config_path: Path, previous: dict | None, desired: dict) -> list[str]:
+    """Name the operator's step when this write added roles (SYRD-562).
+
+    Upgrade and recovery read root's own record of the declared workflow, not
+    the board's, and the tenant cannot write it. A role added here is therefore
+    absent from root's record until an operator reviews it; say which, and the
+    exact preview that adds only that role.
+    """
+    held = {r.get("name") for r in (previous or {}).get("roles") or []}
+    added = [r["name"] for r in desired.get("roles") or [] if r.get("name") and r["name"] not in held]
+    if previous is None or not added:
+        return []
+    slug = _project_slug(config_path)
+    print(
+        f"workflow: added role(s) {', '.join(added)}. Root's record of {slug}'s declared workflow, "
+        "which upgrade and recovery read, does not have them until an operator reviews and records "
+        "them; the preview of each: "
+        + "; ".join(f"`pkexec switchyard adopt-workflow {slug} --add-role {name}`" for name in added),
+        file=sys.stderr,
+    )
+    return added
+
+
 PHASE_ONE_BOARD_REQUIRED = "board predates the phase-one schema"
 
 
@@ -545,6 +568,7 @@ def main(argv=None):
         raise RuntimeError(
             f'board revision {result["revision"]} applied; local projection pending. Preserve {journal} and rerun apply with the same document: {exc}'
         ) from exc
+    _report_roles_root_lacks(args.config, current.get("document"), cfg)
     # Kept as a compatibility report field for old journals. Project-account
     # runtimes return no pending roles: applying PostgreSQL workflow data is the
     # complete unprivileged role-definition operation (SYRD-69).

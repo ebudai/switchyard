@@ -25,6 +25,12 @@ holds a record:
   board that changed while root wrote is answered by restoring root's previous
   record. No upgrade phase runs.
 
+`--add-role <role>` (SYRD-562) takes only one role from the board -- its
+definition and its place in stage owners and transition actors -- onto root's
+record, for a role the tenant added with `workflow apply` after root recorded
+its workflow, without adopting any other difference the board carries. The
+apply is the same compare-and-swap, read-back and board re-read.
+
 Root does not write the tenant's files. They are the tenant's, in directories
 the tenant controls, and a root process writing through those follows whatever
 the tenant has placed there. The tenant already has a supported repair -- a
@@ -36,6 +42,7 @@ never shows their content.
 
 from __future__ import annotations
 
+import copy
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -54,6 +61,65 @@ def record_difference(recorded: Mapping[str, Any], live: Mapping[str, Any]) -> l
         tofile="the board's declared workflow",
         lineterm="",
     ))
+
+
+def missing_roles(recorded: Mapping[str, Any], live: Mapping[str, Any]) -> list[str]:
+    """Roles the board declares that root's record does not, in the board's order (SYRD-562)."""
+    held = {r.get("name") for r in recorded.get("roles") or []}
+    return [r["name"] for r in live.get("roles") or [] if r.get("name") and r["name"] not in held]
+
+
+def _insert_like(names: list[str], role: str, live_names: list[str]) -> list[str]:
+    """`names` with `role` added where the board's list has it, relative to the names both share."""
+    if role in names:
+        return names
+    after = None
+    for name in live_names[: live_names.index(role)]:
+        if name in names:
+            after = name
+    position = names.index(after) + 1 if after is not None else 0
+    return [*names[:position], role, *names[position:]]
+
+
+def with_role_added(recorded: Mapping[str, Any], live: Mapping[str, Any], role: str) -> tuple[dict, list[str]]:
+    """Root's record plus one role, exactly as the board declares it, and nothing else (SYRD-562).
+
+    The role's own definition, and its name in the stage owners and transition
+    actors where the board lists it -- the additive references, which only give
+    this role a place. Scalar references (a stage's notify role, `reassign`,
+    the queue) are never copied: changing one would replace policy that has
+    nothing to do with adding a role. Whatever of the board's this leaves out
+    is returned, so the operator sees it.
+    """
+    definition = next((r for r in live.get("roles") or [] if r.get("name") == role), None)
+    if definition is None:
+        raise ValueError(f"the board's declared workflow has no role {role!r}")
+    if any(r.get("name") == role for r in recorded.get("roles") or []):
+        raise ValueError(f"root's record already declares role {role!r}")
+    merged = copy.deepcopy(dict(recorded))
+    live_roles = [r.get("name") for r in live.get("roles") or []]
+    merged["roles"] = [copy.deepcopy(definition) if r == role else next(x for x in merged["roles"] if x.get("name") == r)
+                       for r in _insert_like([x.get("name") for x in merged["roles"]], role, live_roles)]
+    left_out: list[str] = []
+    live_stages = {s.get("name"): s for s in live.get("stages") or []}
+    for stage in merged.get("stages") or []:
+        other = live_stages.get(stage.get("name")) or {}
+        if role in (other.get("owners") or []):
+            stage["owners"] = _insert_like(list(stage.get("owners") or []), role, list(other["owners"]))
+        if (other.get("notify") or {}).get("role") == role and (stage.get("notify") or {}).get("role") != role:
+            left_out.append(f"stage {stage.get('name')}: the board notifies {role}; root's record keeps its own notify role")
+    key = lambda t: (t.get("from"), t.get("to"), t.get("action"))
+    live_transitions = {key(t): t for t in live.get("transitions") or []}
+    for transition in merged.get("transitions") or []:
+        other = live_transitions.get(key(transition)) or {}
+        if role in (other.get("actors") or []):
+            transition["actors"] = _insert_like(list(transition.get("actors") or []), role, list(other["actors"]))
+    for name, target in (live.get("reassign") or {}).items():
+        if target == role and (merged.get("reassign") or {}).get(name) != role:
+            left_out.append(f"reassign {name}: the board sends it to {role}; root's record keeps its own")
+    if (live.get("queue") or {}).get("assignee") == role and (merged.get("queue") or {}).get("assignee") != role:
+        left_out.append(f"queue: the board queues for {role}; root's record keeps its own")
+    return merged, left_out
 
 
 def stale_tenant_files(config_path: Path | None, live: Mapping[str, Any]) -> list[str]:
@@ -88,8 +154,15 @@ def reconcile_recorded_workflow(
     say: Callable[[str], None],
     write_record: Callable[[str, Mapping[str, Any]], Path],
     read_record: Callable[[str], tuple[dict | None, str]],
+    add_role: str = "",
 ) -> tuple[int, str]:
-    """Preview, or on review re-record, root's workflow from the board. Returns (exit status, journal detail)."""
+    """Preview, or on review re-record, root's workflow from the board. Returns (exit status, journal detail).
+
+    With `add_role`, only that role is taken from the board (SYRD-562): its
+    definition and its place in stage owners and transition actors, added to
+    root's record and nothing else, so a role added after adoption reaches root
+    without replacing unrelated policy the two disagree on.
+    """
     from scripts.ticket_board.project_provision import workflow_document_digest
     from scripts.ticket_board.workflow_config import validate
 
@@ -137,20 +210,51 @@ def reconcile_recorded_workflow(
     say("switchyard: they differ:")
     for line in record_difference(recorded, live):
         say(f"    {line}")
-    try:
-        # A check, not a transform: the record must carry the board's exact
-        # document, so that the digest root holds is the digest the board runs.
-        validate(dict(live), project=slug)
-    except Exception as exc:  # noqa: BLE001 - a document root would not accept is an answer
-        say(f"switchyard: the board's document is not one root will record for {slug}: {exc}. "
-            f"{REFUSED_NOTHING_CHANGED}")
-        tenant_advice()
-        return 1, "refused: live document invalid"
-    command = (f"pkexec switchyard adopt-workflow {slug} --apply "
-               f"--from-live {live_digest} --replacing {root_digest}")
+    absent = missing_roles(recorded, live)
+    if add_role:
+        try:
+            target, left_out = with_role_added(recorded, live, add_role)
+            validate(dict(target), project=slug)
+        except Exception as exc:  # noqa: BLE001 - a role root cannot add this way is an answer
+            say(f"switchyard: refusing to add role {add_role} to root's record: {exc}. {REFUSED_NOTHING_CHANGED}")
+            tenant_advice()
+            return 1, "refused: role cannot be added"
+        target_digest = workflow_document_digest(target)
+        say(f"switchyard: adding only role {add_role} makes root's record (digest {target_digest}):")
+        from scripts.workflow_adoption import _canonical_workflow
+
+        for line in unified_diff(_canonical_workflow(recorded).splitlines(), _canonical_workflow(target).splitlines(),
+                                 fromfile="root's recorded workflow", tofile=f"with role {add_role} added", lineterm=""):
+            say(f"    {line}")
+        for line in left_out:
+            say(f"switchyard: not taken from the board: {line}")
+        if target_digest != live_digest:
+            say("switchyard: every other difference above stays as root's record has it.")
+        command = (f"pkexec switchyard adopt-workflow {slug} --apply --add-role {add_role} "
+                   f"--from-live {live_digest} --replacing {root_digest}")
+        done_detail = f"role {add_role} added from the board"
+    else:
+        try:
+            # A check, not a transform: the record must carry the board's exact
+            # document, so that the digest root holds is the digest the board runs.
+            validate(dict(live), project=slug)
+        except Exception as exc:  # noqa: BLE001 - a document root would not accept is an answer
+            say(f"switchyard: the board's document is not one root will record for {slug}: {exc}. "
+                f"{REFUSED_NOTHING_CHANGED}")
+            tenant_advice()
+            return 1, "refused: live document invalid"
+        target, target_digest = live, live_digest
+        command = (f"pkexec switchyard adopt-workflow {slug} --apply "
+                   f"--from-live {live_digest} --replacing {root_digest}")
+        done_detail = "re-recorded from the board"
     if not (apply and selecting):
         say("switchyard: re-recording root's workflow from the board is an operator's decision. Having "
             f"reviewed the difference above, run: `{command}`")
+        if absent and not add_role:
+            say(f"switchyard: the board declares role(s) root's record does not: {', '.join(absent)}. To add "
+                "only a role, keeping every other line of root's record, review and run:")
+            for name in absent:
+                say(f"    pkexec switchyard adopt-workflow {slug} --add-role {name}")
         tenant_advice()
         if apply:
             say(f"switchyard: --apply alone does not choose a document. {REFUSED_NOTHING_CHANGED}")
@@ -166,11 +270,11 @@ def reconcile_recorded_workflow(
             f"{REFUSED_NOTHING_CHANGED}")
         return 1, "refused: digest moved"
 
-    path = write_record(slug, live)
+    path = write_record(slug, target)
     stored, stored_problem = read_record(slug)
-    if stored is None or workflow_document_digest(stored) != live_digest:
+    if stored is None or workflow_document_digest(stored) != target_digest:
         write_record(slug, recorded)
-        say(f"switchyard: the record at {path} did not read back as the board's document "
+        say(f"switchyard: the record at {path} did not read back as written "
             f"({stored_problem or 'a different digest'}); root's previous record was restored.")
         return 1, "record did not read back; restored"
     after, after_problem = board_reader(config)
@@ -181,6 +285,6 @@ def reconcile_recorded_workflow(
             f"(digest {root_digest}) was restored. Review it again. {REFUSED_NOTHING_CHANGED}")
         return 1, "board moved during the write; restored"
     say(f"switchyard: re-recorded {slug}'s declared workflow at {path} from the board "
-        f"(digest {root_digest} -> {live_digest}, by {operator_name})")
+        f"(digest {root_digest} -> {target_digest}{f', role {add_role} only' if add_role else ''}, by {operator_name})")
     tenant_advice()
-    return 0, "re-recorded from the board"
+    return 0, done_detail

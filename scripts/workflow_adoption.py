@@ -789,6 +789,7 @@ def switchyard_adopt_workflow_command(
     despite_board: str = "",
     from_live: str = "",
     replacing: str = "",
+    add_role: str = "",
     registry_dir: Path | None = None,
     config_path: Path | None = None,
     euid_getter: Callable[[], int] = os.geteuid,
@@ -863,9 +864,9 @@ def switchyard_adopt_workflow_command(
         return 1
 
     existing, existing_problem = launcher.recorded_declared_workflow(slug)
-    if existing is None and (from_live or replacing):
+    if existing is None and (from_live or replacing or add_role):
         print_func(
-            f"switchyard: --from-live and --replacing re-record a workflow root already holds, and "
+            f"switchyard: --from-live, --replacing and --add-role change a workflow root already holds, and "
             f"root holds none for {slug}; adopt it without them. Nothing was changed."
         )
         return 1
@@ -903,7 +904,7 @@ def switchyard_adopt_workflow_command(
         board_reader=board_reader or launcher.read_board_declared_workflow,
     )
     if config is None or verified is None:
-        if existing is not None and not (from_live or replacing):
+        if existing is not None and not (from_live or replacing or add_role):
             # As before SYRD-561: a record exists and nothing was asked of it.
             print_func(
                 f"switchyard: root already holds {slug}'s declared workflow at "
@@ -924,6 +925,7 @@ def switchyard_adopt_workflow_command(
     attempt = journal or Attempt(
         slug,
         ["switchyard", "adopt-workflow", slug, *(["--apply"] if apply else []),
+         *(["--add-role", add_role] if add_role else []),
          *(["--from-live", from_live] if from_live else []), *(["--replacing", replacing] if replacing else [])],
         operator=operator.name,
     )
@@ -944,6 +946,7 @@ def switchyard_adopt_workflow_command(
                 from_live=from_live, replacing=replacing, operator_name=operator.name,
                 board_reader=board_reader, say=say,
                 write_record=write_workflow_record, read_record=launcher.recorded_declared_workflow,
+                add_role=add_role,
             )
             status = "completed" if exit_status == 0 else "failed"
             return exit_status
@@ -1099,6 +1102,15 @@ def _build_switchyard_adopt_workflow_parser() -> argparse.ArgumentParser:
         default="",
         metavar="DIGEST",
         help="with --from-live: the digest of root's record being replaced, as the preview showed",
+    )
+    parser.add_argument(
+        "--add-role",
+        default="",
+        metavar="ROLE",
+        help=(
+            "when root already holds a record: take only this role from the board's declared "
+            "workflow, keeping every other line of root's record (SYRD-562)"
+        ),
     )
     parser.add_argument(
         "--config",

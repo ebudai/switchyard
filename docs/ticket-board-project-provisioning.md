@@ -248,6 +248,50 @@ how it stops being stuck, and it is deliberately not automatic:
 Afterwards `switchyard upgrade` and `switchyard resume-provision` regenerate
 that project's declared workflow from root's copy, byte for byte (SYRD-166).
 
+#### When root already holds a record
+
+A runtime switch made before SYRD-558, or an operation interrupted half way,
+can leave root's record behind the board: otto's record named `main=hermes`
+after the board had moved it to codex. `migrate-workflow` and the upgrade's own
+checks then fail closed on the two digests, correctly, and `adopt-workflow`
+used to stop at "root already holds" (SYRD-561).
+
+Run against a project whose record exists, `adopt-workflow` now compares
+instead:
+
+```sh
+pkexec switchyard adopt-workflow <project>
+```
+
+It prints root's digest, the board's digest, every line where the two
+documents differ, and which of the tenant's files (its configuration,
+`workflow.json`, `plan.json`, the layout) the board's document would rewrite,
+and writes nothing. When the three agree it says so and stops. When root's
+record differs, the preview ends with the one command that re-records it, both
+digests filled in:
+
+```sh
+pkexec switchyard adopt-workflow <project> --apply --from-live <board digest> --replacing <root digest>
+```
+
+- The only document that can be selected is the board's live declaration,
+  which the board already validated and enforces; a tenant's file is never
+  adopted this way.
+- Both digests are compared before anything is written. A board or a record
+  that moved since the preview is refused, and `--apply` alone chooses nothing.
+- The board's document is validated for this project, written through root's
+  staged writer (root-owned, 0600), and read back. The board is then read once
+  more; if it changed while root wrote, root's previous record is restored and
+  the run is refused.
+- No upgrade phase runs, and the run is kept in the rollout journal with the
+  operator who authorized it.
+
+Root does not write the tenant's files: they are the tenant's, in directories
+the tenant controls. When they are stale the preview names them and gives the
+tenant's own repair, run by the project's Director: a runtime switch to the
+runtime a role already has (`switchyard set-role-runtime <project> <role> --cli
+<its runtime>`), which rewrites them from the board's document (SYRD-558).
+
 A project that declares its own workflow has that document recorded where only
 root can write it -- `workflow.json`, beside root's plan record, carrying a
 digest of what it holds -- when root first generates that project's artifacts.

@@ -186,6 +186,8 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             args.project,
             apply=args.apply,
             despite_board=args.despite_board,
+            from_live=args.from_live,
+            replacing=args.replacing,
             config_path=args.config_path,
         )
     if argv[0].casefold() == "resume-provision":

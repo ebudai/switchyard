@@ -787,6 +787,8 @@ def switchyard_adopt_workflow_command(
     *,
     apply: bool = False,
     despite_board: str = "",
+    from_live: str = "",
+    replacing: str = "",
     registry_dir: Path | None = None,
     config_path: Path | None = None,
     euid_getter: Callable[[], int] = os.geteuid,
@@ -861,13 +863,13 @@ def switchyard_adopt_workflow_command(
         return 1
 
     existing, existing_problem = launcher.recorded_declared_workflow(slug)
-    if existing is not None:
+    if existing is None and (from_live or replacing):
         print_func(
-            f"switchyard: root already holds {slug}'s declared workflow at "
-            f"{launcher.workflow_record_path(slug)}. Nothing was changed."
+            f"switchyard: --from-live and --replacing re-record a workflow root already holds, and "
+            f"root holds none for {slug}; adopt it without them. Nothing was changed."
         )
-        return 0
-    if "holds no recorded workflow" not in existing_problem:
+        return 1
+    if existing is None and "holds no recorded workflow" not in existing_problem:
         print_func(f"switchyard: {existing_problem}")
         print_func(
             f"switchyard: refusing to replace a record this cannot read. Nothing was changed."
@@ -901,6 +903,16 @@ def switchyard_adopt_workflow_command(
         board_reader=board_reader or launcher.read_board_declared_workflow,
     )
     if config is None or verified is None:
+        if existing is not None and not (from_live or replacing):
+            # As before SYRD-561: a record exists and nothing was asked of it.
+            print_func(
+                f"switchyard: root already holds {slug}'s declared workflow at "
+                f"{launcher.workflow_record_path(slug)}; the tenant's configuration could not be "
+                f"verified, so it cannot be compared with the board. Nothing was changed."
+            )
+            for objection in config_problems:
+                print_func(f"switchyard: {objection}")
+            return 0
         for objection in config_problems:
             print_func(f"switchyard: {objection}")
         print_func(
@@ -911,7 +923,8 @@ def switchyard_adopt_workflow_command(
 
     attempt = journal or Attempt(
         slug,
-        ["switchyard", "adopt-workflow", slug, *(["--apply"] if apply else [])],
+        ["switchyard", "adopt-workflow", slug, *(["--apply"] if apply else []),
+         *(["--from-live", from_live] if from_live else []), *(["--replacing", replacing] if replacing else [])],
         operator=operator.name,
     )
     # The person this command verified, and the mechanism that named them, are
@@ -921,6 +934,19 @@ def switchyard_adopt_workflow_command(
     attempt.open()
     status, exit_status, detail = "failed", 1, ""
     try:
+        if existing is not None:
+            # SYRD-561: root holds a record; compare it with the board and the
+            # tenant's files, and re-record it from the board only on review.
+            from scripts.workflow_reconcile import reconcile_recorded_workflow
+
+            exit_status, detail = reconcile_recorded_workflow(
+                slug, existing, config=config, config_path=verified, apply=apply,
+                from_live=from_live, replacing=replacing, operator_name=operator.name,
+                board_reader=board_reader, say=say,
+                write_record=write_workflow_record, read_record=launcher.recorded_declared_workflow,
+            )
+            status = "completed" if exit_status == 0 else "failed"
+            return exit_status
         proposal = propose_workflow_adoption(
             slug, plan, config, verified,
             owner_uid=launcher.uid_for_user(plan.owner_user),
@@ -1058,6 +1084,21 @@ def _build_switchyard_adopt_workflow_parser() -> argparse.ArgumentParser:
             "adopt a document the running board is not enforcing, for a board that lost its "
             "configuration; the reason is recorded with everything else"
         ),
+    )
+    parser.add_argument(
+        "--from-live",
+        default="",
+        metavar="DIGEST",
+        help=(
+            "when root already holds a record: re-record it from the board's declared workflow, "
+            "whose digest the preview showed (SYRD-561)"
+        ),
+    )
+    parser.add_argument(
+        "--replacing",
+        default="",
+        metavar="DIGEST",
+        help="with --from-live: the digest of root's record being replaced, as the preview showed",
     )
     parser.add_argument(
         "--config",

@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from . import delivery_proof
 from .notification_ledger import NotificationLedger
 from .runtime_paths import directorctl_path
 
@@ -68,6 +69,11 @@ class DirectorctlSender:
             capture_output=True,
         )
         return parse_directorctl_diagnostic(proc.stdout)
+
+    def submit(self, target: str) -> None:
+        """Press submit on text already in the composer, typing nothing (SYRD-565)."""
+        subprocess.run([self.directorctl_bin, "submit", target], check=True, timeout=self.timeout_seconds,
+                       text=True, capture_output=True)
 
 
 def parse_directorctl_diagnostic(output: str | None) -> dict[str, Any]:
@@ -252,6 +258,23 @@ class NotificationDispatch:
             "directorctl": directorctl_diagnostic or {},
         }
 
+    def _park_if_unsubmitted(self, conn: Any, gate: Any, before: str | None, *, notification_id: int, ticket_id: str,
+                             target_role: str, kind: str, target: str, sent_at: float, reason: str,
+                             error_output: str = "") -> bool:
+        """SYRD-565: text still in the composer is never delivered; park it for the proof pass."""
+        after = delivery_proof.read_composer(gate, target) if gate is not None else None
+        if not delivery_proof.left_in_composer(before, after):
+            return False
+        self.logger.warning("Notification %s for %s is still in %s's composer (%s); parked, not delivered",
+                            notification_id, ticket_id, target, reason)
+        self.ledger.trace(conn, notification_id=notification_id, ticket_id=ticket_id, target_role=target_role,
+                          kind=kind, event=delivery_proof.UNSUBMITTED_EVENT, pane_busy=False, busy_reason=reason,
+                          region_digest="", detail={"composer_length": len(after or ""),
+                                                    **({"error_output": error_output[-500:]} if error_output else {})})
+        delivery_proof.park_unsubmitted(conn, notification_id, target, sent_at, after or "")
+        self.ledger.forget(notification_id)
+        return True
+
     def _await_submission(self, target: str, since: float) -> tuple[bool | None, str]:
         """Wait, bounded, for the recipient's own hooks to record a turn.
 
@@ -286,6 +309,9 @@ class NotificationDispatch:
     ) -> bool:
         """Send once and classify receipt; never resend an unconfirmed composer."""
         directorctl_diagnostic: dict[str, Any] = {}
+        # SYRD-565: submission is read from the composer itself, before and after.
+        gate = delivery_proof.gate_of(self)
+        composer_text_before = delivery_proof.read_composer(gate, target) if gate is not None else None
         send_started_at = self.wall_clock()
         try:
             sender_result = self.sender()(target, display_message(message))
@@ -297,6 +323,13 @@ class NotificationDispatch:
                 directorctl_diagnostic = parse_directorctl_diagnostic(stdout if isinstance(stdout, str) else None)
             failure_reason = delivery_failure_reason(exc, target)
             error_output = delivery_error_output(exc)
+            # directorctl can fail AFTER typing -- its own submit check gave up.
+            # Requeued as a failure, the text would be typed a second time.
+            if self._park_if_unsubmitted(conn, gate, composer_text_before, notification_id=notification_id,
+                                         ticket_id=ticket_id, target_role=target_role, kind=kind, target=target,
+                                         sent_at=send_started_at, reason="sender_failed_after_input",
+                                         error_output=error_output):
+                return False
             if failure_reason == "tmux_target_missing":
                 self.logger.error(
                     "Dead-lettering ticket notification %s because target %s does not exist; role %s is undeliverable until its tmux session is restored",
@@ -348,6 +381,10 @@ class NotificationDispatch:
                 self.ledger.requeue(conn, notification_id, attempts, failure_reason)
             return False
         composer_after = self._composer_snapshot(target)
+        if self._park_if_unsubmitted(conn, gate, composer_text_before, notification_id=notification_id,
+                                     ticket_id=ticket_id, target_role=target_role, kind=kind, target=target,
+                                     sent_at=send_started_at, reason="text_left_in_composer"):
+            return False
         # directorctl returning 0 is not delivery: its check is what the
         # pane looks like, and a pane already busy on another turn looks
         # submitted whatever happened -- so MEFP-1's Final Sign-Off notice
@@ -356,6 +393,11 @@ class NotificationDispatch:
         # "Cannot tell" is not receipt either: without the recipient's
         # own record the notice is unconfirmed, whatever the reason.
         submission, unconfirmed_reason = self._await_submission(target, send_started_at)
+        if submission is False and gate is not None and delivery_proof.read_composer(gate, target) == "":
+            # SYRD-565: the text left the composer and no turn has started yet --
+            # a slow preflight looks exactly like this. The notice is in, so it is
+            # acknowledged with its receipt still watched, not settled as missed.
+            unconfirmed_reason = delivery_proof.RECEIPT_PENDING
         if submission is not True:
             self.logger.warning(
                 "Notification %s for %s was sent to %s but its receipt is not witnessed (%s); "
@@ -393,7 +435,10 @@ class NotificationDispatch:
             # Not re-sent automatically: the text may be sitting in the
             # composer, and typing it again would put it there twice. The
             # board reports it unconfirmed; the owner of the stage decides.
-            self.ledger.ack(conn, notification_id)
+            if unconfirmed_reason == delivery_proof.RECEIPT_PENDING:
+                delivery_proof.watch_receipt(conn, notification_id, target, send_started_at, send_started_at)
+            else:
+                self.ledger.ack(conn, notification_id)
             self.ledger.forget(notification_id)
             return False
         self.ledger.trace(

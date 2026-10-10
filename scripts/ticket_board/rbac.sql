@@ -230,4 +230,19 @@ REVOKE EXECUTE ON FUNCTION ticket_board.settle_serial_focus(text, boolean, text)
 REVOKE EXECUTE ON FUNCTION ticket_board.serial_queue() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.serial_queue() TO ticket_board_service, ticket_board_listener;
 
+-- SYRD-565: delivery proof.
+REVOKE ALL ON ticket_board.notification_proofs FROM PUBLIC;
+GRANT SELECT ON ticket_board.notification_proofs TO ticket_board_service;
+REVOKE EXECUTE ON FUNCTION ticket_board.record_unsubmitted_notification(bigint, text, timestamptz, text, interval) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.watch_notification_receipt(bigint, text, timestamptz, timestamptz, interval) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.open_notification_proofs() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_notification_submit_attempt(bigint) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.resolve_notification_proof(bigint, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.record_unsubmitted_notification(bigint, text, timestamptz, text, interval) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.watch_notification_receipt(bigint, text, timestamptz, timestamptz, interval) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.open_notification_proofs() TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.note_notification_submit_attempt(bigint) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.resolve_notification_proof(bigint, text, text, text) TO ticket_board_listener;
+
+
 COMMIT;

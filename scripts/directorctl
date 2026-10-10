@@ -413,6 +413,7 @@ Usage:
 Commands:
   send         Send a one-line message to a role's assigned target and submit it.
   send-file    Send the contents of a file to a tmux target and submit it.
+  submit       Press submit on text already in a target's composer (types nothing).
   ticket-create
                Create a ticket through the board HTTP action API.
   callback     Send a message to the configured director target and submit it.
@@ -632,6 +633,21 @@ cmd_send() {
     shift
     local message="$*"
     send_payload "$target" "$message"
+}
+
+# SYRD-565: press submit on text already in the composer, typing nothing. The
+# listener calls this only while the composer holds exactly what its own send
+# left there; whether it went is read back from the pane, not from here.
+cmd_submit() {
+    if [ $# -ne 1 ]; then
+        echo "error: submit requires <tmux-target>" >&2
+        echo "usage: directorctl submit <tmux-target>" >&2
+        exit 1
+    fi
+    local target
+    target="$(resolve_runtime_target "$1")"
+    exit_copy_mode_if_needed "$target"
+    role_tmux "$target" send-keys -t "$target" Enter
 }
 
 cmd_send_file() {
@@ -920,6 +936,10 @@ case "$1" in
     send-file)
         shift
         cmd_send_file "$@"
+        ;;
+    submit)
+        shift
+        cmd_submit "$@"
         ;;
     callback)
         shift

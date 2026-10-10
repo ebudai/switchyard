@@ -8140,7 +8140,7 @@ BEGIN
     END LOOP;
     SELECT x INTO tr FROM jsonb_array_elements(cfg->'transitions') x
       WHERE x->>'from'=previous.state AND x->>'to'=proposed.state AND x->>'action'=action_name;
-    IF tr IS NULL OR NOT tr->'actors' ? actor OR ((tr->>'owner_scoped')::boolean AND previous.assignee<>actor) THEN
+    IF tr IS NULL OR NOT ticket_board.transition_allows_actor(cfg,tr,actor) OR ((tr->>'owner_scoped')::boolean AND previous.assignee<>actor) THEN
         RAISE EXCEPTION 'unauthorized configured transition: % / %',actor,action_name USING ERRCODE='42501'; END IF;
     SELECT x INTO source_stage FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=previous.state;
     IF (source_stage->>'terminal')::boolean AND tr->>'primitive'<>'reopen' THEN RAISE EXCEPTION 'terminal exit requires reopen'; END IF;
@@ -8331,7 +8331,7 @@ BEGIN
     IF candidates<>1 THEN RAISE EXCEPTION 'unknown or ambiguous workflow action; specify target'; END IF;
     SELECT x INTO tr FROM jsonb_array_elements(cfg->'transitions') x WHERE x->>'from'=t.state AND x->>'action'=action
         AND (payload->>'target' IS NULL OR x->>'to'=payload->>'target');
-    IF NOT tr->'actors' ? actor OR ((tr->>'owner_scoped')::boolean AND t.assignee<>actor) THEN
+    IF NOT ticket_board.transition_allows_actor(cfg,tr,actor) OR ((tr->>'owner_scoped')::boolean AND t.assignee<>actor) THEN
         RAISE EXCEPTION 'actor cannot perform workflow action' USING ERRCODE='42501'; END IF;
     SELECT x INTO source_stage FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=t.state;
     IF t.manually_controlled AND tr->>'primitive'='approve' AND ticket_board.workflow_flag(to_jsonb(t),source_stage->>'signoff',cfg) THEN
@@ -12988,6 +12988,37 @@ RETURNS SETOF jsonb LANGUAGE sql IMMUTABLE AS $$
                                          WHERE r->>'name'=a AND r->>'kind'='implementer'));
 $$;
 
+-- Who may claim (SYRD-573): every active, ephemeral implementer that owns the
+-- implementation stage, read from the role declarations rather than from the
+-- claim transition's actor list. That list was written once, naming the
+-- workers running when pull was enabled, and a rotation that stops some and
+-- starts others changes which sessions run, not the document -- so it went
+-- stale and refused the replacements. Ephemeral is what every claimant already
+-- had to be (a claimed ticket starts its own conversation), and is what keeps
+-- a persistent implementer out. Which of these may be given work NOW is the
+-- listener's to judge from the registered, running provider process; nothing
+-- here starts a worker, so concurrent claims never exceed the running ones.
+CREATE OR REPLACE FUNCTION ticket_board.pull_claimant_pool(cfg jsonb)
+RETURNS SETOF text LANGUAGE sql IMMUTABLE AS $$
+    SELECT r->>'name' FROM jsonb_array_elements(cfg->'roles') r
+     WHERE nullif(cfg->'scheduling','null'::jsonb) IS NOT NULL
+       AND r->>'kind'='implementer' AND r->'active'='true'::jsonb AND r->'ephemeral'='true'::jsonb
+       AND EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') s
+                   WHERE s->>'kind'='implementation' AND s->'owners' ? (r->>'name'))
+     ORDER BY r->>'name';
+$$;
+
+-- Whether `actor` may take transition `tr`: one of its declared actors, or, for
+-- THE claim, any declared claimant. Every claim path asks this -- claim-next,
+-- the listener's pickup, the canonical action -- so they cannot disagree.
+CREATE OR REPLACE FUNCTION ticket_board.transition_allows_actor(cfg jsonb, tr jsonb, actor text)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT tr->'actors' ? actor
+        OR (EXISTS (SELECT FROM ticket_board.scheduling_claim_transitions(cfg) x
+                    WHERE x->>'action'=tr->>'action' AND x->>'from'=tr->>'from' AND x->>'to'=tr->>'to')
+            AND actor IN (SELECT ticket_board.pull_claimant_pool(cfg)));
+$$;
+
 -- The same rules as workflow_config._validate_scheduling, on the stored
 -- document itself, so no write path can store an incoherent policy.
 CREATE OR REPLACE FUNCTION ticket_board.validate_declared_scheduling(cfg jsonb)
@@ -13189,7 +13220,8 @@ BEGIN
     -- implementation stage's default owner, whoever claimed it.
     IF TG_OP='UPDATE' AND actor IS NOT NULL AND OLD.state=ticket_board.declared_scheduling()->>'ready_stage'
        AND EXISTS (SELECT FROM ticket_board.scheduling_claim_transitions(ticket_board.declared_workflow()) x
-                   WHERE x->>'action'=current_setting('ticket_board.workflow_action',true) AND x->'actors' ? actor) THEN
+                   WHERE x->>'action'=current_setting('ticket_board.workflow_action',true)
+                     AND ticket_board.transition_allows_actor(ticket_board.declared_workflow(), x, actor)) THEN
         NEW.assignee := actor;
     END IF;
     IF TG_OP='UPDATE' AND OLD.state IS NOT DISTINCT FROM NEW.state AND OLD.assignee IS NOT DISTINCT FROM NEW.assignee THEN
@@ -13240,7 +13272,10 @@ BEGIN
     IF policy IS NULL THEN RETURN 0; END IF;
     SELECT coalesce(jsonb_object_agg(k, v), '{}'::jsonb) INTO free
       FROM jsonb_each_text(coalesce(p_idle,'{}'::jsonb)) AS e(k, v)
-     WHERE ticket_board.ticket_current_reserved_ticket(k) IS NULL;
+     -- Only a declared claimant is idle capacity; the listener names the
+     -- running ones (SYRD-573), and nothing else it might send is believed.
+     WHERE k IN (SELECT ticket_board.pull_claimant_pool(ticket_board.declared_workflow()))
+       AND ticket_board.ticket_current_reserved_ticket(k) IS NULL;
     IF free='{}'::jsonb THEN RETURN 0; END IF;
     SELECT t.id, t.state, t.assignee, ns.entered_current_state_at AS since INTO waiting
       FROM ticket_board.tickets t JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id=t.id
@@ -13339,7 +13374,7 @@ BEGIN
         RAISE EXCEPTION 'claim requires the board service or listener' USING ERRCODE='42501';
     END IF;
     IF policy IS NULL THEN RAISE EXCEPTION 'this workflow does not use pull scheduling'; END IF;
-    SELECT x INTO tr FROM ticket_board.scheduling_claim_transitions(cfg) x WHERE x->'actors' ? p_role;
+    SELECT x INTO tr FROM ticket_board.scheduling_claim_transitions(cfg) x WHERE ticket_board.transition_allows_actor(cfg, x, p_role);
     IF tr IS NULL OR NOT EXISTS (SELECT FROM ticket_board.workflow_roles r WHERE r.name=p_role AND (r.definition->>'active')::boolean) THEN
         RAISE EXCEPTION 'role % cannot claim ready work', p_role USING ERRCODE='42501'; END IF;
     PERFORM pg_advisory_xact_lock(ticket_board.implementer_assignment_lock_key(p_role));

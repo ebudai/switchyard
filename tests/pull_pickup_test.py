@@ -147,9 +147,10 @@ def test_the_listener_claims_only_for_eligible_idle_workers() -> None:
             listener.listen_once(max_notifications=5)
             listener.listen_once(max_notifications=5)
             alerts = [m for t, m in sent if t == TARGETS["director"]]
+            # app has no registered provider process: it is not running, so it is not idle capacity (SYRD-573).
             check(len(alerts) == 1 and "PGU-2" in alerts[0] and "ops (stopped on a prompt)" in alerts[0]
-                  and "app (no registered provider process)" in alerts[0],
-                  f"one alert, naming each idle worker's reason: {alerts}; traced: "
+                  and "app" not in alerts[0].split("claiming it:")[1],
+                  f"one alert, naming each idle running worker's reason, and no stopped one: {alerts}; traced: "
                   + sql("SELECT coalesce(string_agg(event || ':' || coalesce(busy_reason,'') || ':' || left(detail::text, 160), ' | ' ORDER BY id), 'none') "
                         "FROM ticket_board.notification_trace WHERE ticket_id='PGU-2' AND kind='ticket_update';"))
             check(sql("SELECT count(*) FROM ticket_board.notification_trace WHERE kind='ticket_update' AND event='enqueue' "

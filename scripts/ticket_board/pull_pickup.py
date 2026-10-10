@@ -18,6 +18,14 @@ Director nothing. What the Director is told, once per waiting ticket, is when
 claimable work has waited past the policy's `idle_alert_seconds` while
 implementers sit idle -- with each one's reason, so unknown readiness is
 visible as unknown rather than reported as idle.
+
+Who is asked is the declared claimant pool (SYRD-573), not the claim
+transition's actor list: every active, ephemeral implementer that owns the
+implementation stage (`workflow_config.pull_claimant_pool`, the rule the
+board applies to every claim). Of those, only a worker whose registered
+provider process is running is a claimant now; a stopped one is neither
+claimed for nor called idle, since starting workers is the operator's, never
+the board's.
 """
 
 from __future__ import annotations
@@ -26,18 +34,12 @@ import json
 from typing import Any
 
 from . import session_context
+from .workflow_config import pull_claimant_pool
 
 
-def _claimants(workflow: dict[str, Any] | None, policy: dict[str, Any]) -> list[str]:
-    """The implementers the declared claim transition names."""
-    if not workflow:
-        return []
-    ready = policy.get("ready_stage")
-    implementation = {s["name"] for s in workflow.get("stages", []) if s.get("kind") == "implementation"}
-    for tr in workflow.get("transitions", []):
-        if tr.get("from") == ready and tr.get("to") in implementation and tr.get("primitive") == "move":
-            return sorted(tr.get("actors") or [])
-    return []
+#: Why a pool member is not running, as `why_not_eligible` says it: such a
+#: worker is not capacity, so it is never reported as idle.
+NOT_RUNNING = frozenset({"no registered provider process", "registered provider process is gone"})
 
 
 def why_not_eligible(gate: Any, role: str) -> str:
@@ -86,10 +88,11 @@ def run(listener: Any, conn: Any) -> int:
         return 0
     claimed = 0
     idle: dict[str, str] = {}
-    for role in _claimants(listener.workflow, policy):
+    for role in pull_claimant_pool(listener.workflow or {}):
         reason = why_not_eligible(gate, role)
         if reason:
-            idle[role] = reason
+            if reason not in NOT_RUNNING:
+                idle[role] = reason
             continue
         try:
             result = _scalar(conn.execute("SELECT ticket_board.claim_ready_ticket(%s)", (role,)).fetchone())

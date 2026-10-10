@@ -511,6 +511,8 @@ def switchyard_worker_pool_command(
             free = sum(1 for state in readiness if state.can_take_work)
             held = sum(1 for state in readiness if state.reserved_by)
             capacity = f"{free} can take a ticket now, {held} held by a ticket"
+            if any(state.claimant is not None for state in readiness):
+                capacity += f", {sum(1 for state in readiness if state.can_claim)} can claim ready work"
         print_func(
             f"switchyard: {pool.name}: {len(readiness)} worker(s), {ready} ready, {running} running; {capacity}"
         )

@@ -601,6 +601,9 @@ class WorkerReadiness:
     queued_behind: tuple[tuple[str, str], ...] = ()
     #: Why the slot is not known, when it is not.
     unreported: str = "this board does not report serial reservations"
+    #: Under a pull policy, whether the board lets it claim ready work: the
+    #: declared claimant pool (SYRD-573). None when the board does not pull.
+    claimant: bool | None = None
 
     @property
     def blockers(self) -> tuple[str, ...]:
@@ -634,6 +637,11 @@ class WorkerReadiness:
             return False
         return None if not self.reservation_known else not self.reserved_by
 
+    @property
+    def can_claim(self) -> bool | None:
+        """Whether it would pull ready work now: free as above, and a declared claimant."""
+        return self.can_take_work if self.claimant else False
+
     def slot(self) -> str:
         """The serial slot, said apart from readiness: ready and running is not free."""
         if self.reservation_known:
@@ -646,9 +654,10 @@ class WorkerReadiness:
     def describe(self) -> str:
         state = "running" if self.session else "stopped"
         held = f", holding {', '.join(self.holding)}" if self.holding else ""
+        pull = "" if self.claimant is None else ("; claims ready work" if self.claimant else "; not a pull claimant")
         if self.ready:
-            return f"{self.role} ({self.target}): ready, {state}{held}; {self.slot()}"
-        return f"{self.role} ({self.target}): not ready, {state}{held}; {self.slot()} -- {'; '.join(self.blockers)}"
+            return f"{self.role} ({self.target}): ready, {state}{held}; {self.slot()}{pull}"
+        return f"{self.role} ({self.target}): not ready, {state}{held}; {self.slot()}{pull} -- {'; '.join(self.blockers)}"
 
 
 def worker_readiness(
@@ -685,18 +694,20 @@ def worker_readiness(
     # from: a worker reading a slightly older copy of the skill still knows how
     # to read the board, and refusing to start it over that would be stricter
     # than the property this gate exists to hold.
-    skill_state = "unknown"
-    if names:
-        results = {
-            result.runtime: result
-            for result in board_skill.verify_board_skill(home=home, expected_commit="")
-        }
-        found = results.get(pool.runtime)
-        skill_state = found.action if found is not None else "not a runtime the skill installs into"
+    skills = {result.runtime: result.action
+              for result in board_skill.verify_board_skill(home=home, expected_commit="")} if names else {}
+    # Each worker is asked about the runtime it declares: a runtime rotation
+    # moves single workers off the pool's, and judging a Codex worker by
+    # Claude's sign-in, skill and trust reported it unable to work (SYRD-573).
+    auth: dict[str, str] = {}
 
-    runtime_state = launcher._cli_auth_status(
-        pool.runtime, owner_user=owner, owner_home=home, runner=runner
-    ) if names else "unknown"
+    def signed_in(runtime: str) -> str:
+        if runtime not in auth:
+            auth[runtime] = launcher._cli_auth_status(runtime, owner_user=owner, owner_home=home, runner=runner)
+        return auth[runtime]
+
+    from scripts.ticket_board.workflow_config import pull_claimant_pool
+    claimants = set(pull_claimant_pool(document)) if isinstance(document.get("scheduling"), dict) else None
 
     queues = {}
     if board is not None:
@@ -707,6 +718,7 @@ def worker_readiness(
     readiness: list[WorkerReadiness] = []
     for name in names:
         role = role_named(document, name) or {}
+        runtime = str(role.get("runtime") or pool.runtime)
         identity = WorkerIdentity(config.project, pool.name, member_index(pool.name, name) or 0, config.worktree_base)
         configured = next((candidate for candidate in config.roles if candidate.role == name), None)
         workdir = Path(configured.workdir) if configured is not None else identity.workdir
@@ -727,15 +739,16 @@ def worker_readiness(
                 declared=role.get("active") is True,
                 routed=tuple(stages_owned_by(document, name)),
                 onboarding=bool(str(role.get("onboarding_prompt") or "").strip() or role.get("onboarding")),
-                skill=skill_state,
-                runtime=runtime_state,
+                skill=skills.get(runtime, "not a runtime the skill installs into"),
+                runtime=signed_in(runtime),
                 account=bool(pane_user) and launcher.local_account_exists(pane_user),
                 worktree=workdir is not None and Path(workdir).is_dir(),
                 trusted=workdir is None or not Path(workdir).is_dir() or launcher._workdir_is_trusted(
-                    pool.runtime, owner_home=home, workdir=Path(workdir)
+                    runtime, owner_home=home, workdir=Path(workdir)
                 ),
                 session=session_alive,
                 holding=tuple(str(ticket.get("id") or "") for ticket in queues.get(name, [])),
+                claimant=None if claimants is None else name in claimants,
                 **_reservation_of(name, reservations, board),
             )
         )

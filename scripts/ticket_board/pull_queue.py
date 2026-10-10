@@ -27,7 +27,7 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
 
 def context_restore(cfg: dict[str, Any] | None) -> dict[str, str]:
     """What happens to each claimant's returned rework (SYRD-540), so the limit is visible before anyone relies on it."""
-    from .pull_pickup import _claimants
+    from .workflow_config import pull_claimant_pool
     from .session_context import RESUME_COMMANDS
     policy = (cfg or {}).get("scheduling")
     if not isinstance(policy, dict):
@@ -37,7 +37,7 @@ def context_restore(cfg: dict[str, Any] | None) -> dict[str, str]:
                    if runtimes.get(role) in RESUME_COMMANDS else
                    f"not automatic: {runtimes.get(role) or 'no runtime'} has no verified in-session resume, "
                    "so returned rework parks for the Director")
-            for role in _claimants(cfg, policy)}
+            for role in pull_claimant_pool(cfg)}
 
 
 def status(app: Any) -> dict[str, Any]:

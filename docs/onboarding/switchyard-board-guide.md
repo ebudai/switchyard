@@ -446,6 +446,13 @@ view and `ticket-board-read ticket` show each ticket's place ("Queue: #2 in app'
 behind SYRD-601"). A board with a pull policy keeps work in its ready stage instead. This is
 the design, not a failure (SYRD-568).
 
+**Who claims on a pull board.** On a pull board, every active, ephemeral implementer that owns
+Implementation may claim, whatever the claim transition's actor list says. The board claims for
+a worker, or names it as idle, only while its registered provider process is running. So
+rotating workers means stopping some and starting others; the document is not edited. A
+persistent (non-ephemeral) implementer is routed by the Director and never pulls. The board
+never starts a worker, so claims never exceed the workers you run (SYRD-573).
+
 **Blocked is not deferred.** If a ticket waits on another, set a blocker and leave it in
 its owning stage. Moving it to backlog reads as abandoned.
 

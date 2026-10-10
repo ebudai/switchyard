@@ -240,6 +240,41 @@ def ephemeral_roles(cfg: dict[str, Any]) -> set[str]:
     }
 
 
+def pull_claimant_pool(cfg: dict[str, Any]) -> list[str]:
+    """Who may claim ready work under a pull policy: the board's `pull_claimant_pool` (SYRD-573).
+
+    Every active, ephemeral implementer that owns the implementation stage --
+    read from the role declarations, not from the claim transition's actor
+    list, which names whoever ran when pull was enabled and goes stale when a
+    rotation stops some workers and starts others. Which of them may be given
+    work now is the listener's to judge, from a running registered process.
+    """
+    if not isinstance(cfg.get("scheduling"), dict):
+        return []
+    owners = {owner for stage in cfg.get("stages", []) if stage.get("kind") == "implementation"
+              for owner in stage.get("owners") or []}
+    return sorted(role["name"] for role in cfg.get("roles", [])
+                  if role.get("kind") == "implementer" and role.get("active") is True
+                  and role.get("ephemeral") is True and role["name"] in owners)
+
+
+def _is_claim(cfg: dict[str, Any], tr: dict[str, Any]) -> bool:
+    """THE claim: the move from the ready stage into implementation taken only by implementers."""
+    policy = cfg.get("scheduling")
+    if not isinstance(policy, dict):
+        return False
+    kinds = {role["name"]: role.get("kind") for role in cfg.get("roles", [])}
+    implementation = next((stage["name"] for stage in cfg.get("stages", [])
+                           if stage.get("kind") == "implementation"), None)
+    return (tr["from"] == policy.get("ready_stage") and tr["to"] == implementation and tr["primitive"] == "move"
+            and bool(tr["actors"]) and all(kinds.get(actor) == "implementer" for actor in tr["actors"]))
+
+
+def transition_allows_actor(cfg: dict[str, Any], tr: dict[str, Any], actor: str) -> bool:
+    """One of the transition's actors, or, for the claim, any declared claimant (`transition_allows_actor`)."""
+    return actor in tr["actors"] or (_is_claim(cfg, tr) and actor in pull_claimant_pool(cfg))
+
+
 #: The stage a role is serialised in when the document says nothing. Every
 #: tenant's implementation stage is already one-ticket-at-a-time -- the board
 #: reroutes a second ticket to its queue -- so a role that owns it was serial
@@ -1068,7 +1103,7 @@ def available_transitions(
         and (
             actor is None
             or (
-                actor in tr["actors"]
+                transition_allows_actor(cfg, tr, actor)
                 and (not tr["owner_scoped"] or actor == ticket["assignee"])
             )
         )

@@ -11,39 +11,75 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
-from . import commit_cache
+from . import commit_cache_reader
 from . import file_size_policy as policy
 
 OPERATIONS = frozenset({"approve_size_exception", "enable_size_review", "measure_size"})
 _MAIN_REFS = ("refs/remotes/origin/main", "refs/heads/main")
 _SHA = re.compile(r"[0-9a-f]{40}")
+#: What a ticket may name for measurement: a commit id, never a ref, a path or an option.
+_COMMIT_ID = re.compile(r"[0-9A-Fa-f]{7,40}")
 
 
-def _repo(app: Any) -> Path | None:
+def _reader(app: Any) -> commit_cache_reader.CacheReader:
+    """The board's trusted commit cache, opened for reading by the board's own account.
+
+    Only the configured caches, never a path from the ticket (SYRD-571). When
+    none can be opened, the scan fails with each one's reason.
+    """
+    problems: list[str] = []
     for git_dir in getattr(app, "commit_git_dirs", ()) or ():
-        if (Path(git_dir) / ".git").exists() or Path(git_dir).exists():
-            return Path(git_dir)
-    return None
+        try:
+            return commit_cache_reader.cache_reader(Path(git_dir))
+        except (PermissionError, ValueError) as exc:
+            problems.append(str(exc))
+    if not problems:
+        raise policy.ScanError("the board has no trusted commit cache to measure in")
+    raise policy.ScanError("; ".join(problems))
 
 
-def _main_commit(app: Any) -> str:
+def _with_repair(app: Any, error: str) -> str:
+    """A refusal of the board's own account names the supported repair: the grant, re-applied."""
+    if "Permission denied" not in error and "cannot read its trusted commit cache" not in error:
+        return error
+    return (f"{error}. Repair: pkexec switchyard repair-boundary {getattr(app, 'project', '<project>')} --apply "
+            "grants the board service read access to its commit store")
+
+
+def _present(reader: commit_cache_reader.CacheReader, ticket_id: str, raw: str, what: str) -> str:
+    """The full id of a commit in the cache, or a failure saying how to bring it there."""
+    if not _COMMIT_ID.fullmatch(raw):
+        raise policy.ScanError(f"{raw!r} is not a commit id")
+    try:
+        return policy.resolve(reader, raw)
+    except policy.ScanError as exc:
+        if "Needed a single revision" not in str(exc):
+            raise  # not a missing commit (an unreadable object, say): git's own reason
+        again = (f"the next approval or close measures again, or the Director runs ticket-board-write measure-size "
+                 f"{ticket_id} --commit {raw}" if ticket_id else "then run enable-size-review again")
+        raise policy.ScanError(
+            f"the {what} {raw} is not in the board's trusted commit cache {reader.git_dir}. Repair: publish it "
+            f"(switchyard-publish-candidate brings the cache up to what it publishes); {again}") from None
+
+
+def _main_commit(reader: commit_cache_reader.CacheReader) -> str:
     for ref in _MAIN_REFS:
-        found = commit_cache.cache_ref_commit(tuple(app.commit_git_dirs), ref)
-        if found:
-            return found
-    raise policy.ScanError("the board's repository has no main to measure against")
+        try:
+            return policy.resolve(reader, ref)
+        except policy.ScanError:
+            continue
+    raise policy.ScanError(f"the board's trusted commit cache {reader.git_dir} has no main to measure against")
 
 
-def _first_parent(repo: Path, commit: str) -> str:
-    proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^1"],
-                          capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise policy.ScanError(f"{commit[:12]} has no parent to measure against")
-    return proc.stdout.strip()
+def _first_parent(reader: commit_cache_reader.CacheReader, commit: str) -> str:
+    try:
+        return policy.resolve(reader, f"{commit}^1")
+    except policy.ScanError:
+        raise policy.ScanError(f"{commit[:12]} has no parent in the board's trusted commit cache "
+                               f"{reader.git_dir} to measure against") from None
 
 
 def _gated(cfg: dict, transition: dict) -> tuple[bool, bool]:
@@ -92,19 +128,17 @@ def measure_commit(app: Any, ticket_id: str, raw: str, *, close: bool, caller_ro
     a merge. Always measured afresh -- the database accepts only a scan made
     for the action at hand.
     """
-    repo = _repo(app)
     candidate, base, report, findings, error = raw, None, [], [], None
     try:
-        if repo is None:
-            raise policy.ScanError("the board has no repository to measure in")
-        candidate = policy.resolve(repo, raw)
+        repo = _reader(app)
+        candidate = _present(repo, ticket_id, raw, "candidate")
         if close:
             with app._pg_connect() as conn:
                 previous = _last_scan(conn, ticket_id)
             same = previous and previous["candidate"] == candidate and previous["base"]
-            base = previous["base"] if same else _first_parent(repo, candidate)
+            base = _present(repo, ticket_id, previous["base"], "base") if same else _first_parent(repo, candidate)
         else:
-            base = policy.merge_base(repo, _main_commit(app), candidate)
+            base = policy.merge_base(repo, _main_commit(repo), candidate)
         measured = policy.measure(repo, base, candidate)
         with app._pg_connect() as conn:
             named = [f.path for f in measured.files] + [f.previous_path for f in measured.files if f.previous_path]
@@ -126,7 +160,7 @@ def measure_commit(app: Any, ticket_id: str, raw: str, *, close: bool, caller_ro
                                  "before": growth.before, "after": growth.after, "ceiling": ceiling,
                                  "detail": detail})
     except policy.ScanError as exc:
-        error = str(exc) or "size scan failed"
+        error = _with_repair(app, str(exc) or "size scan failed")
     if not _SHA.fullmatch(candidate):
         return  # nothing resolvable to record against; the database refuses an unmeasured gated commit
     with app._pg_connect() as conn:
@@ -163,10 +197,11 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         carried = payload.get("carried") or []
         if not isinstance(carried, list):
             raise ValueError("carried must be a list of exceptions")
-        repo = _repo(app)
-        if repo is None:
-            raise ValueError("the board has no repository to take a baseline in")
-        baseline = policy.resolve(repo, str(payload.get("baseline") or _main_commit(app)))
+        try:
+            repo = _reader(app)
+            baseline = _present(repo, "", str(payload.get("baseline") or _main_commit(repo)), "baseline")
+        except policy.ScanError as exc:
+            raise ValueError(f"cannot take a baseline: {_with_repair(app, str(exc))}") from None
         inventory = [{"path": path, "lines": lines} for path, lines in policy.inventory(repo, baseline)]
         sql = "SELECT ticket_board.enable_size_review(%s, %s::jsonb, %s::jsonb, %s) AS result"
         params = (baseline, json.dumps(inventory), json.dumps(carried), apply)

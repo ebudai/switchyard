@@ -244,5 +244,12 @@ GRANT EXECUTE ON FUNCTION ticket_board.open_notification_proofs() TO ticket_boar
 GRANT EXECUTE ON FUNCTION ticket_board.note_notification_submit_attempt(bigint) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.resolve_notification_proof(bigint, text, text, text) TO ticket_board_listener;
 
+-- SYRD-557: background-hold alerts.
+REVOKE ALL ON ticket_board.background_hold_episodes FROM PUBLIC;
+GRANT SELECT ON ticket_board.background_hold_episodes TO ticket_board_service;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_background_hold(bigint, text, interval) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.background_hold_notice_left() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_background_hold(bigint, text, interval) TO ticket_board_listener;
+
 
 COMMIT;

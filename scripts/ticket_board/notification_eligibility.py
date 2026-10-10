@@ -352,7 +352,7 @@ WHERE id = %s
         # A pull policy's idle-capacity alert is about the ready queue and is
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).
-        if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof"}:  # SYRD-539, SYRD-540, SYRD-565
+        if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold"}:  # SYRD-539, 540, 565, 557
             return target_role == "director"
         terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
         if current_state in terminal_states:

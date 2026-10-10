@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from . import background_hold
+
 
 class NotificationLedger:
     def __init__(self, *, logger: Any, requeue_base_seconds: float, requeue_max_seconds: float) -> None:
@@ -107,6 +109,8 @@ SELECT ticket_board.record_notification_trace(
         delay_seconds: float | None = None,
     ) -> None:
         delay_seconds = self.backoff_seconds(attempts) if delay_seconds is None else delay_seconds
+        if error.startswith(background_hold.OWNER_BACKGROUND_WORK):
+            background_hold.note(self, conn, notification_id, background_hold.OWNER_BACKGROUND_WORK)  # SYRD-557
         conn.execute(
             "SELECT ticket_board.requeue_notification(%s::bigint, %s::interval, %s::text)",
             (notification_id, f"{delay_seconds:g} seconds", error[:500]),
@@ -144,7 +148,14 @@ SELECT ticket_board.record_notification_trace(
         self.forget(notification_id)
 
     def trace_deferral_once(self, conn: Any, *, notification_id: int, detail: Callable[[], dict[str, Any]], **fields: Any) -> None:
-        """Trace a deferral the first time this notification is deferred, not on every requeue."""
+        """Trace a deferral the first time this notification is deferred, not on every requeue.
+
+        Every activity-gate deferral is also noted as a hold, when background
+        work is what holds it, so a hold that lasts can be told to the Director
+        (SYRD-557).
+        """
+        if fields.get("event") == "gate_defer":
+            background_hold.note(self, conn, notification_id, str(fields.get("busy_reason") or ""))
         if notification_id not in self._traced_gate_defer_notifications:
             self.trace(conn, notification_id=notification_id, detail=detail(), **fields)
             self._traced_gate_defer_notifications.add(notification_id)

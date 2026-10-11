@@ -385,6 +385,9 @@ WHERE (r.definition->>'active')::boolean
             raise ValueError("unknown workflow action payload field")
         if "commit_hash" in payload:
             payload["commit_hash"] = self._validate_commit_hash(payload["commit_hash"])
+            # A blank hash closes as an omitted one; a relay still takes none (SYRD-489, SYRD-535).
+            if not payload["commit_hash"] and action == "mark_done":
+                del payload["commit_hash"]
         with self._pg_connect() as conn:
             self._pg_set_caller_role(conn, caller_role)
             self._pg_call(conn, "SELECT ticket_board.perform_workflow_action(%s,%s,%s::jsonb)", (ticket_id, action, json.dumps(payload)))

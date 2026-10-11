@@ -2748,43 +2748,78 @@ BEGIN
         RETURN CASE WHEN blocker_ticket_id IS NULL OR blocker_ticket_id = p_ticket_id THEN '' ELSE blocker_ticket_id END;
     END IF;
 
-    WITH current_ticket AS (
-        SELECT
-            t.ticket_number,
-            ns.entered_current_state_at
-        FROM ticket_board.tickets t
-        LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-        WHERE t.id = p_ticket_id
-          AND t.state = p_state
-          AND t.assignee = p_target_role
-          AND NOT t.manually_controlled
-    ),
-    blocker_candidates AS (
+    -- SYRD-581: the role's current ticket is the one last handed to it in this
+    -- stage -- a transition notice actually sent, as the trace records it; a
+    -- dropped notice is acknowledged too, so last_transition_notified_at cannot
+    -- say -- and before anything is handed over, the earliest arrival. A
+    -- blocked ticket is nobody's current ticket, as SYRD-568 made it for an
+    -- implementer's slot: the listener drops its notice, so it is never handed
+    -- over, and counting it held every later ticket for good. On MEFP,
+    -- MEFP-529 sat in Audit blocked on another ticket, and MEFP-593..595
+    -- waited behind it as "finish current" while Audit was idle. When it
+    -- unblocks, it waits behind the ticket handed over meanwhile.
+    WITH stage_tickets AS (
         SELECT
             t.id,
             t.ticket_number,
-            ns.entered_current_state_at
-        FROM current_ticket c
-        JOIN ticket_board.tickets t ON t.state = p_state
+            ns.entered_current_state_at,
+            (SELECT max(nt.ts)
+             FROM ticket_board.notification_trace nt
+             WHERE nt.ticket_id = t.id
+               AND nt.target_role = p_target_role
+               AND nt.ticket_state_at_event = p_state
+               AND nt.kind = 'transition'
+               AND nt.event = 'send'
+               AND nt.ts >= ns.entered_current_state_at) AS handed_over_at
+        FROM ticket_board.tickets t
         LEFT JOIN ticket_board.ticket_notification_state ns ON ns.ticket_id = t.id
-        WHERE t.assignee = p_target_role
-          AND t.id <> p_ticket_id
+        WHERE t.state = p_state
+          AND t.assignee = p_target_role
           AND NOT t.manually_controlled
-          AND (
-              (
-                  ns.entered_current_state_at IS NOT NULL
-                  AND c.entered_current_state_at IS NOT NULL
-                  AND ns.entered_current_state_at < c.entered_current_state_at
-              )
-              OR (
-                  (
-                      ns.entered_current_state_at IS NULL
-                      OR c.entered_current_state_at IS NULL
-                      OR ns.entered_current_state_at = c.entered_current_state_at
-                  )
-                  AND t.ticket_number < c.ticket_number
-              )
-          )
+    ),
+    current_ticket AS (
+        SELECT * FROM stage_tickets WHERE id = p_ticket_id
+    ),
+    candidates AS (
+        SELECT *
+        FROM stage_tickets s
+        WHERE s.id <> p_ticket_id
+          AND NOT ticket_board.ticket_has_unresolved_blockers(s.id)
+    ),
+    blocker_candidates AS (
+        SELECT b.*
+        FROM current_ticket c
+        JOIN candidates b ON (
+            -- Handed over in this stage: the latest handover is the work under way.
+            (
+                b.handed_over_at IS NOT NULL
+                AND (
+                    c.handed_over_at IS NULL
+                    OR b.handed_over_at > c.handed_over_at
+                    OR (b.handed_over_at = c.handed_over_at AND b.ticket_number < c.ticket_number)
+                )
+            )
+            -- Nothing handed over to either: arrival order, as before.
+            OR (
+                b.handed_over_at IS NULL
+                AND c.handed_over_at IS NULL
+                AND (
+                    (
+                        b.entered_current_state_at IS NOT NULL
+                        AND c.entered_current_state_at IS NOT NULL
+                        AND b.entered_current_state_at < c.entered_current_state_at
+                    )
+                    OR (
+                        (
+                            b.entered_current_state_at IS NULL
+                            OR c.entered_current_state_at IS NULL
+                            OR b.entered_current_state_at = c.entered_current_state_at
+                        )
+                        AND b.ticket_number < c.ticket_number
+                    )
+                )
+            )
+        )
     )
     SELECT b.id
     INTO blocker_ticket_id
@@ -2813,6 +2848,7 @@ BEGIN
         )
     )
     ORDER BY
+        b.handed_over_at DESC NULLS LAST,
         CASE
             WHEN b.entered_current_state_at IS NOT NULL
                 THEN b.entered_current_state_at

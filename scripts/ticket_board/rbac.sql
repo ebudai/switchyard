@@ -264,5 +264,11 @@ REVOKE EXECUTE ON FUNCTION ticket_board.note_composer_hold(bigint, text, boolean
 REVOKE EXECUTE ON FUNCTION ticket_board.composer_hold_notice_left() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.note_composer_hold(bigint, text, boolean, interval) TO ticket_board_listener;
 
+-- SYRD-583: background-child alerts.
+REVOKE ALL ON ticket_board.background_child_alerts FROM PUBLIC;
+GRANT SELECT ON ticket_board.background_child_alerts TO ticket_board_service;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_background_child(bigint, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_background_child(bigint, text, text) TO ticket_board_listener;
+
 
 COMMIT;

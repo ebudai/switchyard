@@ -66,6 +66,12 @@ role.
 The Director's own pane opens no episode: an alert about it would wait behind
 the same hold.
 
+**SYRD-583.** A hold by a pane's children now names them: pid, process group,
+age, the ticket each was started for, and the one stop that ends only it. A
+notice also goes out past a child whose ticket is no longer the role's, and past
+a finished turn's poll loop once SYRD-212's bound is reached, and the Director is
+told once per child. See `docs/syrd-583-background-child-lease.md`.
+
 ## Configuration
 
 The threshold is `TICKET_BOARD_BACKGROUND_HOLD_ALERT_SECONDS`, in the

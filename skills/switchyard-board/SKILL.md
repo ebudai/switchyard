@@ -177,6 +177,33 @@ submission is owner-scoped, so nobody else can take it for you - a director can
 only recover the ticket to its next required gate, and that is a repair, not the
 path.
 
+## Background commands
+
+A command you leave running under your pane can hold back your next ticket: the
+board does not type into a pane whose children are still working. Give every
+background command an end, and finish it before you move the ticket on.
+
+- **Wait on the exact process you started, never on a search.** A loop like
+  `while pgrep -f "sweep.sh my-worktree"; do sleep 20; done` carries that
+  pattern in its own command line, so it always finds itself and never ends.
+  One ran for eighteen hours and held the next ticket back the whole time.
+- **Always set a deadline, and stop only what you started when it passes.**
+  Check that it really stopped.
+
+```bash
+long-command & pid=$!                      # the one process to wait for
+deadline=$((SECONDS + 1800))               # always a deadline
+while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 20; done
+if kill -0 "$pid" 2>/dev/null; then        # past it: stop only that process
+  kill -TERM "$pid"; sleep 5
+  kill -0 "$pid" 2>/dev/null && echo "still running: $pid" >&2
+fi
+```
+
+Your CLI's own background-task tools work too, if they tell you when the
+command exits. The board names a ticket's leftover processes to the director
+with their pid, and does not stop them itself.
+
 ## Review sign-offs
 
 Review stages are gates, not implementation stages. A reviewer signs off or kicks

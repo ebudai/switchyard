@@ -6,9 +6,9 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import composer_hold
+from . import background_child, composer_hold
 from .notification_dispatch import ComposerSnapshot, NotificationDispatch
-from .notification_eligibility import NotificationEligibility
+from .notification_eligibility import TERMINAL_STATES, NotificationEligibility
 from .notification_ledger import NotificationLedger
 
 # Reminders addressed to the same role they are about. Their whole claim is
@@ -54,6 +54,9 @@ PRIOR_TURN_CHILD_WORK = "prior_turn_child_work"
 #: on purpose -- that is the CURRENT turn working, and interrupting it is what
 #: the activity gate exists to prevent.
 PRIOR_TURN_HOLD_REASONS = frozenset({PRIOR_TURN_CHILD_WORK, ORPHANED_PRIOR_TURN_WAITER})
+#: Every hold a pane's children make: a finished turn's, and work started since
+#: the runtime's last turn ended. Either can be a ticket's lapsed lease (SYRD-583).
+CHILD_HOLD_REASONS = PRIOR_TURN_HOLD_REASONS | {"pane_child_work"}
 #: Why a queued handoff was dropped instead of delivered: the owner reached the
 #: ticket without it, so delivering would hand them the same assignment twice.
 OWNER_ALREADY_ACTED = "owner_already_acted"
@@ -77,6 +80,17 @@ class ComposerHoldTrace(ActivityTrace):
     """
 
     trusted_idle: bool = False
+
+
+@dataclass(frozen=True)
+class ChildHoldTrace(ActivityTrace):
+    """The gate's child-work verdict, and what was holding the pane (SYRD-583).
+
+    Built here, like `ComposerHoldTrace`, so the gate's own traces stay exactly
+    what they were.
+    """
+
+    holders: tuple[background_child.Holder, ...] = ()
 
 
 class NotificationActivityHold:
@@ -122,6 +136,11 @@ class NotificationActivityHold:
                     # turn is over while the composer holds the pane.
                     return ComposerHoldTrace(trace.busy, trace.reason, trace.region_digest,
                                              composer_hold.trusted_idle(gate_owner.state_store.read(target)))
+                child_holders = getattr(gate_owner, "child_holders", None)
+                holders = child_holders(target) if trace.busy and trace.reason in CHILD_HOLD_REASONS and callable(
+                    child_holders) else ()
+                if holders:
+                    return ChildHoldTrace(trace.busy, trace.reason, trace.region_digest, holders)
                 return trace
         return ActivityTrace(pane_busy, "busy" if pane_busy else "idle")
 
@@ -244,19 +263,32 @@ class NotificationActivityHold:
         is not: interrupting it is precisely what the activity gate exists to
         prevent, and no clock here may override that.
         """
-        if activity_trace is None or activity_trace.reason not in PRIOR_TURN_HOLD_REASONS:
+        reason = "" if activity_trace is None else activity_trace.reason
+        holders = tuple(getattr(activity_trace, "holders", ()) or ()) if reason in CHILD_HOLD_REASONS else ()
+        origins = self._holder_origins(conn, holders)
+        # A child whose ticket is no longer this role's is a lapsed lease: it
+        # holds nothing. Every holder has to be one; work for a ticket the role
+        # still owns keeps the pane exactly as before (SYRD-583).
+        lapsed = bool(holders) and all(
+            background_child.lapsed(origins.get(holder.key), target_role, self._terminal_states()) for holder in holders)
+        if not lapsed and reason not in PRIOR_TURN_HOLD_REASONS:
             # Whatever is holding it now, it is not a finished turn's leftovers.
             # Forgetting the wait is deliberate: a pane that went back to work
             # for its CURRENT turn starts the bound again if it later falls back
-            # to a prior-turn hold.
-            self._prior_turn_hold_started_at.pop(notification_id, None)
+            # to a prior-turn hold. An idle verdict is not that: the first gate
+            # never samples children, and its idle word on every pass reset the
+            # bound the recheck was counting (SYRD-583).
+            if activity_trace is None or activity_trace.busy:
+                self._prior_turn_hold_started_at.pop(notification_id, None)
             return ""
         now = self.monotonic()
         started = self._prior_turn_hold_started_at.setdefault(notification_id, now)
         held = now - started
-        if held < self.prior_turn_hold_max_seconds:
+        if not lapsed and held < self.prior_turn_hold_max_seconds:
             return ""
-        notified_at = self._owner_already_notified_at(conn, ticket_id, target_role)
+        # Only a handoff can be the same assignment twice. A comment's notice
+        # is a different message, whatever was sent before it (SYRD-583).
+        notified_at = self._owner_already_notified_at(conn, ticket_id, target_role) if kind == "transition" else ""
         if notified_at:
             self.eligibility._drop_superseded_notification(
                 conn,
@@ -274,9 +306,10 @@ class NotificationActivityHold:
             )
             self._prior_turn_hold_started_at.pop(notification_id, None)
             return PRIOR_TURN_HOLD_DISCARD
+        escalated = background_child.COMPLETED_TICKET_CHILD if lapsed else ORPHANED_PRIOR_TURN_WAITER
         self.logger.warning(
-            "Delivering notification %s for %s past a finished turn's %s held %.0fs",
-            notification_id, ticket_id, activity_trace.reason, held,
+            "Delivering notification %s for %s past %s (%s) held %.0fs",
+            notification_id, ticket_id, escalated, activity_trace.reason, held,
         )
         self.ledger.trace(
             conn,
@@ -286,15 +319,50 @@ class NotificationActivityHold:
             kind=kind,
             event="gate_escalate",
             pane_busy=True,
-            busy_reason=ORPHANED_PRIOR_TURN_WAITER,
+            busy_reason=escalated,
             detail={
                 "held_seconds": round(held, 1),
                 "held_reason": activity_trace.reason,
                 "bound_seconds": self.prior_turn_hold_max_seconds,
+                "holders": [{**holder.as_detail(), "ticket": origins.get(holder.key)} for holder in holders],
             },
         )
+        # The child is still running, and nothing here stops it: the Director
+        # is told once what it is and how to end only it (SYRD-583).
+        identity = getattr(getattr(self.activity_gate(), "__self__", None), "role_identities", {}).get(target_role)
+        for holder in holders:
+            what = background_child.sentence(holder, origins.get(holder.key), provider_pid=getattr(identity, "pid", None))
+            background_child.tell(self.ledger, conn, notification_id, holder, what)
         self._prior_turn_hold_started_at.pop(notification_id, None)
         return PRIOR_TURN_HOLD_DELIVER
+
+    def _recheck_release(self, conn: Any, release: str, *, activity_trace: ActivityTrace, **notice: Any) -> str:
+        """The first gate's release, if the recheck still sees that hold; otherwise the recheck's own.
+
+        Only the pre-send recheck samples a pane's children, so a finished
+        turn's hold that only it saw was never bounded and never released:
+        SYRD-581 waited seven hours behind one (SYRD-583).
+        """
+        if release == PRIOR_TURN_HOLD_DELIVER and (
+                not activity_trace.busy or activity_trace.reason in PRIOR_TURN_HOLD_REASONS):
+            return release
+        return self._release_prior_turn_hold(conn, activity_trace=activity_trace, **notice)
+
+    def _terminal_states(self) -> set[str]:
+        workflow = getattr(self.eligibility, "workflow", None)
+        if workflow:
+            return {stage["name"] for stage in workflow["stages"] if stage["terminal"]}
+        return set(TERMINAL_STATES)
+
+    def _holder_origins(self, conn: Any, holders: tuple[background_child.Holder, ...]) -> dict[str, dict[str, Any]]:
+        """The ticket each holder was started for, as the board has it. Never fatal."""
+        if not holders:
+            return {}
+        try:
+            return background_child.origins(conn, holders)
+        except Exception as exc:  # An unknown origin is no lease; the hold stays as it was.
+            self.logger.warning("Failed to read the tickets behind %s: %s", [h.key for h in holders], exc)
+            return {}
 
     def _owner_already_notified_at(self, conn: Any, ticket_id: str, target_role: str) -> str:
         """When this ticket's owner was last sent this assignment, if ever.
@@ -322,4 +390,7 @@ WHERE trace.ticket_id = %s
         if row is None:
             return ""
         value = row["last_sent_at"] if isinstance(row, dict) else row[0]
-        return self._decode_text(value).strip()
+        # max() over no sends is one row holding NULL, not no row. Read as the
+        # text "None", it discarded every handoff nobody had ever been sent
+        # (SYRD-583).
+        return "" if value is None else self._decode_text(value).strip()

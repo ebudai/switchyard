@@ -353,7 +353,7 @@ WHERE id = %s
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold",
-                    "composer_hold"}:  # SYRD-539, 540, 565, 557, 570
+                    "composer_hold", "background_child"}:  # SYRD-539, 540, 565, 557, 570, 583
             return target_role == "director"
         terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
         if current_state in terminal_states:

@@ -869,6 +869,10 @@ operator has to be able to read the one they are being asked to register.
 **Roles read it directly.** `switchyard rollout-log <project>` lists the
 attempts, prints the latest record, optionally prints the captured output, and
 verifies the chain. Nobody has to paste a privileged run's output into a ticket.
+It reads an attempt only from the absolute directory its start entry recorded.
+An attempt whose start entry was lost, garbled or names no absolute directory
+is listed as such and refused when asked for; nothing is read from where the
+command runs (SYRD-441).
 
 ### Integrating into the integration branch
 

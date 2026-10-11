@@ -6,6 +6,9 @@ is asked for without one), what that attempt recorded as its result and,
 with `--output`, its captured stdout and stderr. It reads only and needs no
 privilege.
 
+An attempt whose record names no absolute directory is refused: nothing is
+read for it, least of all from the working directory (SYRD-441).
+
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-439). The launcher
 imports this module and re-exports the name; `switchyard_main` still calls the
 launcher's name. It reads nothing from the launcher: the journal functions are
@@ -15,8 +18,6 @@ before, and its one default, `print`, is the builtin.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 
 def rollout_log_command(
     project: str, *, attempt: str = "", output: bool = False, print_func=print
@@ -24,9 +25,11 @@ def rollout_log_command(
     """Show the journal, or one attempt of it. Reads only; needs no privilege."""
     from scripts.ticket_board.rollout_journal import (
         RESULT_NAME,
+        attempt_directory,
         attempts,
         format_attempts,
         project_journal_dir,
+        unusable_directory_reason,
         verify_index,
     )
 
@@ -47,16 +50,24 @@ def rollout_log_command(
     if selected is None:
         print_func(f"switchyard: {project} has no recorded attempt {attempt}")
         return 1
-    directory = Path(selected.get("directory") or "")
-    result = directory / RESULT_NAME if directory else None
-    if result is not None and result.is_file():
+    directory = attempt_directory(selected)
+    if directory is None:
+        # Never Path(""): that is the working directory, and its files are not
+        # this attempt's (SYRD-441).
+        print_func(
+            f"switchyard: attempt {attempt} {unusable_directory_reason(selected)}, "
+            "so it has no result or output to show"
+        )
+        return 1
+    result = directory / RESULT_NAME
+    if result.is_file():
         print_func(result.read_text(encoding="utf-8").rstrip())
     else:
         print_func(
             f"switchyard: attempt {attempt} recorded no result; it started at "
             f"{selected.get('started_at', '?')} and never completed"
         )
-    if output and directory:
+    if output:
         for name in ("stdout.log", "stderr.log"):
             path = directory / name
             if path.is_file():

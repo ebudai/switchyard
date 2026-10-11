@@ -319,10 +319,36 @@ def attempts(project: str, *, root: Path | str | None = None) -> list[dict]:
             record["exit_status"] = entry.get("exit_status")
     ordered = sorted(seen.values(), key=lambda item: item["attempt"])
     for record in ordered:
-        directory = Path(record.get("directory") or "")
-        result = directory / RESULT_NAME if directory else None
-        record["result_present"] = bool(result and result.is_file())
+        directory = attempt_directory(record)
+        record["result_present"] = bool(directory and (directory / RESULT_NAME).is_file())
     return ordered
+
+
+def attempt_directory(record: dict) -> Path | None:
+    """The directory an attempt recorded, or None when it recorded none to read.
+
+    The writer records the absolute path it created. A record whose directory is
+    missing, empty, null, not a string or relative names no fixed place: an
+    empty one becomes Path(""), which is wherever the reader is standing, and a
+    relative one is read against it. Such a record reaches a reader when the
+    index loses or garbles an attempt's start entry -- its finish entry alone
+    still makes an attempt -- or when the entry is edited. Reading its "result"
+    would present unrelated files as the attempt's, so nothing is read for it
+    (SYRD-441).
+    """
+    recorded = record.get("directory")
+    if not isinstance(recorded, str) or not recorded:
+        return None
+    directory = Path(recorded)
+    return directory if directory.is_absolute() else None
+
+
+def unusable_directory_reason(record: dict) -> str:
+    """Why `attempt_directory` gave nothing for this record, in words."""
+    recorded = record.get("directory")
+    if recorded is None or recorded == "":
+        return "recorded no directory"
+    return f"recorded the directory {recorded!r}, which is not an absolute path"
 
 
 def format_attempts(project: str, records: Iterable[dict], problems: Iterable[str]) -> str:
@@ -337,8 +363,10 @@ def format_attempts(project: str, records: Iterable[dict], problems: Iterable[st
         lines.append(
             f"  {record['attempt']}  {record.get('started_at', '') or '?':<24} {outcome}"
         )
-        if record.get("directory"):
-            lines.append(f"      {record['directory']}")
+        if attempt_directory(record) is None:
+            lines.append(f"      {unusable_directory_reason(record)}; nothing is read for it")
+            continue
+        lines.append(f"      {record['directory']}")
         if not record.get("result_present", True):
             lines.append("      result.json is missing from this attempt's directory")
     listed_problems = list(problems)

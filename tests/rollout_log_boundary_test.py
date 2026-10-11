@@ -24,6 +24,12 @@ re-exports it. This pins what makes that safe:
   cases embedded here (`gold439.py`), not typed; it is byte-identical under
   `env -i`, in a normal role pane, with another HOME, USER and COLUMNS, and
   under umask 077.
+- **Except where SYRD-441 changed it on purpose:** an attempt that recorded no
+  directory is no longer read from where the command runs. Its three cases --
+  two real journals and the null-directory stand-in -- carry the candidate's
+  measured answers: the summary says the attempt recorded no directory, and
+  asked for, it is refused with 1. Every other case is still the baseline's.
+  `tests/rollout_log_attempt_directory_test.py` pins the new rule itself.
 
 Nothing reaches the host: every journal is written into a test-owned tree
 that `SWITCHYARD_ROLLOUT_JOURNAL_ROOT` points at, so the live journal is never
@@ -84,13 +90,13 @@ GOLDEN = {
     'journal: a broken chain, with output': {'result': 1, 'calls': [], 'printed': ['switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)\n      TMP/journal/p439/0001-deploy\n  journal integrity:\n    entry 2 (0001-deploy finish) follows <digest>, but the entry before it hashes to <digest>', '{"status": "completed"}', '--- stdout.log ---', 'did it', '--- stderr.log ---', 'a warning']},
     'journal: an unreadable index line': {'result': 1, 'calls': [], 'printed': ['switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)\n      TMP/journal/p439/0001-deploy\n  journal integrity:\n    entry 3 is not readable as JSON', '{"status": "completed"}', '--- stdout.log ---', 'did it', '--- stderr.log ---', 'a warning']},
     'journal: only an unreadable index line': {'result': 0, 'calls': [], 'printed': ['switchyard: p439 rollout journal\n  no attempts recorded\n  journal integrity:\n    entry 1 is not readable as JSON', 'switchyard: nothing has been recorded for p439 under TMP/journal/p439']},
-    'journal: an attempt that recorded no directory, a result where the command runs': {'result': 0, 'calls': [], 'printed': ['switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)', "the working directory's result", '--- stdout.log ---', 'cwd out']},
-    'journal: an attempt that recorded no directory, nothing where the command runs': {'result': 0, 'calls': [], 'printed': ["switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)\n      result.json is missing from this attempt's directory", 'switchyard: attempt 0001-deploy recorded no result; it started at 2026-01-01T00:00:00+00:00 and never completed']},
+    'journal: an attempt that recorded no directory, a result where the command runs': {'result': 1, 'calls': [], 'printed': ['switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)\n      recorded no directory; nothing is read for it', 'switchyard: attempt 0001-deploy recorded no directory, so it has no result or output to show']},
+    'journal: an attempt that recorded no directory, nothing where the command runs': {'result': 1, 'calls': [], 'printed': ['switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)\n      recorded no directory; nothing is read for it', 'switchyard: attempt 0001-deploy recorded no directory, so it has no result or output to show']},
     'stand-in: the journal functions are read when it runs': {'result': 0, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}], ['format_attempts', ['p439', [{'attempt': 'A1', 'directory': 'TMP/a1', 'started_at': 'T0'}], []], {}]], 'printed': ['FORMATTED p439 1 []', 'R', '--- stdout.log ---', 'O']},
     'stand-in: the result name is read when it runs': {'result': 0, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}]], 'printed': ['this one']},
     'stand-in: nothing recorded, problems found': {'result': 0, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}], ['format_attempts', ['p439', [], ['entry 1 is broken']], {}], ['project_journal_dir', ['p439'], {}]], 'printed': ["FORMATTED p439 0 ['entry 1 is broken']", 'switchyard: nothing has been recorded for p439 under TMP/journal-dir/p439']},
     'stand-in: a record without a start time': {'result': 0, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}]], 'printed': ['switchyard: attempt A1 recorded no result; it started at ? and never completed']},
-    'stand-in: a record whose directory is null': {'result': 0, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}]], 'printed': ['switchyard: attempt A1 recorded no result; it started at T0 and never completed']},
+    'stand-in: a record whose directory is null': {'result': 1, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}]], 'printed': ['switchyard: attempt A1 recorded no directory, so it has no result or output to show']},
     'stand-in: a record without an attempt id': {'result': {'raised': 'KeyError', 'message': "'attempt'"}, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}]], 'printed': []},
     'stand-in: the latest record without an attempt id': {'result': {'raised': 'KeyError', 'message': "'attempt'"}, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}], ['format_attempts', ['p439', [{'attempt': 'A0'}, {'directory': 'TMP/a1'}], []], {}]], 'printed': ['FORMATTED p439 2 []']},
     'stand-in: records that name the attempt twice': {'result': 1, 'calls': [['attempts', ['p439'], {}], ['verify_index', ['p439'], {}]], 'printed': ['FIRST']},
@@ -415,7 +421,8 @@ def test_either_import_order_gives_one_set_of_objects_and_no_defaults() -> None:
         check(result.stdout.strip() == "True [\"attempt=''\", 'output=False'] True True",
               f"{' then '.join(order)}: one object, the same defaults, the builtin printer, and nothing of the journal bound at load: {result.stdout}{result.stderr[-600:]}")
     import pathlib
-    check(m.Path is Path is pathlib.Path and t.Path is m.Path, "the one standard-library name is the module's own, the very object the launcher holds")
+    check(not hasattr(m, "Path") and t.Path is pathlib.Path,
+          "it binds no standard-library name since SYRD-441 -- the journal decides what an attempt's directory is -- and the launcher keeps its own")
 
 
 def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
@@ -426,15 +433,16 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         first = 1 if ast.get_docstring(node) is not None else 0
         check(SEAMS.get(name, {}) == {} and through == []
-              and imports == ["from scripts.ticket_board.rollout_journal import RESULT_NAME, attempts, format_attempts, project_journal_dir, verify_index"]
+              and imports == ["from scripts.ticket_board.rollout_journal import RESULT_NAME, attempt_directory, attempts, format_attempts, "
+                              "project_journal_dir, unusable_directory_reason, verify_index"]
               and ast.unparse(node.body[first]) == imports[0],
               f"{name}: reads nothing from the launcher, as before, and keeps its one call-time import of the journal, first thing: {through} {imports}")
-        journal = {"RESULT_NAME", "attempts", "format_attempts", "project_journal_dir", "verify_index"}
+        journal = {"RESULT_NAME", "attempt_directory", "attempts", "format_attempts", "project_journal_dir", "unusable_directory_reason", "verify_index"}
         stores = sorted({x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store)} & journal)
         check(stores == [], f"{name}: nothing rebinds a journal name it imports: {stores}")
     top = [ast.unparse(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
-    check(top == ["from __future__ import annotations", "from pathlib import Path"] and not [n for n in tree.body if isinstance(n, ast.If)],
-          f"the standard library only, nothing for annotations: {top}")
+    check(top == ["from __future__ import annotations"] and not [n for n in tree.body if isinstance(n, ast.If)],
+          f"no module-level import beyond annotations, nothing for annotations: {top}")
     runtime = [ast.unparse(x) for x in ast.walk(tree) if isinstance(x, (ast.Import, ast.ImportFrom)) and "team_launcher" in ast.unparse(x)]
     check(runtime == [], f"the launcher is never imported: {runtime}")
     names = [n.name if isinstance(n, (ast.FunctionDef, ast.ClassDef)) else ast.unparse(n)[:40] for n in tree.body
@@ -514,14 +522,18 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and shown("journal: an interrupted attempt, named") == ["switchyard: attempt 0001-deploy recorded no result; it started at 2026-01-01T00:00:00+00:00 and never completed"]
           and shown("stand-in: a record without a start time") == ["switchyard: attempt A1 recorded no result; it started at ? and never completed"]
           and all(result(k) == 0 and "recorded no result" in " ".join(shown(k)) for k in ("journal: a finished attempt whose result is gone", "journal: a result that is a directory",
-                                                                                       "stand-in: a result that is a dangling link", "stand-in: a record whose directory is null")),
+                                                                                       "stand-in: a result that is a dangling link")),
           "the result is shown trimmed; with no result file it says when the attempt started ('?' if unknown), and that is not an error")
     check(shown("journal: output that is not UTF-8")[3] == "caf�"
           and result("journal: a result that is not UTF-8") == {"raised": "UnicodeDecodeError", "message": "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"},
           "a log that is not UTF-8 is shown with replacements; a result that is not UTF-8 raises")
-    check(shown("journal: an attempt that recorded no directory, a result where the command runs")[1:] == ["the working directory's result", "--- stdout.log ---", "cwd out"]
-          and "recorded no result" in shown("journal: an attempt that recorded no directory, nothing where the command runs")[1],
-          "an attempt that recorded no directory is read relative to where the command runs (the baseline's behaviour, kept)")
+    nodir = ("journal: an attempt that recorded no directory, a result where the command runs", "journal: an attempt that recorded no directory, nothing where the command runs")
+    check(GOLDEN[nodir[0]] == GOLDEN[nodir[1]] and result(nodir[0]) == 1
+          and shown(nodir[0]) == ["switchyard: p439 rollout journal\n  0001-deploy  2026-01-01T00:00:00+00:00 completed (exit 0)\n      recorded no directory; nothing is read for it",
+                                  "switchyard: attempt 0001-deploy recorded no directory, so it has no result or output to show"]
+          and result("stand-in: a record whose directory is null") == 1
+          and shown("stand-in: a record whose directory is null") == ["switchyard: attempt A1 recorded no directory, so it has no result or output to show"],
+          "an attempt that recorded no directory reads nothing -- what the working directory holds makes no difference -- and is refused with 1 (SYRD-441)")
     check(steps("stand-in: the journal functions are read when it runs") == ["attempts", "verify_index", "format_attempts"]
           and steps("stand-in: nothing recorded, problems found") == ["attempts", "verify_index", "format_attempts", "project_journal_dir"]
           and shown("stand-in: the result name is read when it runs") == ["this one"]

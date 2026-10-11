@@ -236,6 +236,7 @@ def test_event_hub_versions_and_keeps_only_the_latest_change() -> None:
 def test_event_hub_degrades_on_the_third_failure_and_recovers() -> None:
     with fakes(), Logs() as logs:
         hub = owner.TicketBoardEventHub(App((("a", 1),)), scan_interval_seconds=0.5)
+        hub._clock = lambda: 0.0  # every failure inside one report interval (SYRD-552)
         listener, _ = hub.register()
         hub.app.scans = [RuntimeError("dsn=secret one"), RuntimeError("two"), RuntimeError("three")]
         hub._stop_event = ScriptedStop(2)
@@ -254,7 +255,11 @@ def test_event_hub_degrades_on_the_third_failure_and_recovers() -> None:
         hub.close()
         assert hub._stop_event.was_set
     warnings = [message for _, level, message, _ in logs.records if level == "WARNING"]
-    assert warnings == [f"board reconciliation scan failed: {text}" for text in ("dsn=secret one", "two", "three", "four")]
+    # Reported once, then quiet inside the minute, and its recovery once (SYRD-552).
+    assert warnings == [
+        "board reconciliation scan failed: dsn=secret one; retrying every 0.5s, reported at most once every 60s while it fails",
+        "board reconciliation scan recovered after 4 failed attempts",
+    ], warnings
 
 
 def test_servers_construct_and_close_workers_in_order() -> None:

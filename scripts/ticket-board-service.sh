@@ -816,6 +816,8 @@ render_unit() {
 [Unit]
 Description=$PROJECT_SLUG Ticket Board
 After=network.target
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -825,7 +827,7 @@ ExecStartPre=/bin/mkdir -p $FRAME_ROOT
 ExecStartPre=/bin/chmod 1777 $FRAME_ROOT
 ExecStart=$PYTHON_BIN $BOARD_SCRIPT --host $BOARD_HOST --port $BOARD_PORT --unix-socket $BOARD_UNIX_SOCKET --frames $FRAME_ROOT --commit-git-dir $COMMIT_GIT_DIR
 Restart=on-failure
-RestartSec=2
+RestartSec=30s
 EnvironmentFile=-$RUNTIME_HOME/.config/$PROJECT_SLUG/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=$RUNTIME_HOME

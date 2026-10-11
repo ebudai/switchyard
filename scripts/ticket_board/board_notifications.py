@@ -12,6 +12,7 @@ import logging
 import queue
 import subprocess
 import threading
+import time
 from typing import TYPE_CHECKING, Callable
 
 from .app import project_slug
@@ -106,9 +107,20 @@ class TicketBoardEventHub:
     #: this fixed string and nothing derived from the failure.
     DEGRADED_REASON = "the board service cannot read its own state"
 
+    #: How often a failing scan is reported, at most. The scan runs every
+    #: second, and a database outage used to put a two-line warning per scan
+    #: into the journal: sixty a minute for each board, for as long as the
+    #: outage lasted (SYRD-552). Now a failure is reported once, then at most
+    #: once a minute while scans keep failing, and a reported failure's
+    #: recovery once.
+    FAILURE_REPORT_INTERVAL_SECONDS = 60.0
+
     def __init__(self, app: TicketBoardApp, scan_interval_seconds: float = 1.0) -> None:
         self.app = app
         self.scan_interval_seconds = scan_interval_seconds
+        self._clock = time.monotonic
+        self._last_failure_report: float | None = None
+        self._failures_reported = False
         self._listeners: set[queue.Queue[int]] = set()
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -121,6 +133,11 @@ class TicketBoardEventHub:
             LOGGER.warning("board reconciliation could not read its initial state", exc_info=True)
             self._signature = ()
             self.degraded_reason = self.DEGRADED_REASON
+            # That was this outage's first report: the scans after it wait
+            # their minute, and its recovery is announced.
+            self._consecutive_failures = 1
+            self._last_failure_report = self._clock()
+            self._failures_reported = True
         self._thread = threading.Thread(target=self._watch_loop, name="ticket-board-events", daemon=True)
         self._thread.start()
 
@@ -176,14 +193,41 @@ class TicketBoardEventHub:
     def _record_scan_failure(self, exc: BaseException) -> None:
         with self._lock:
             self._consecutive_failures += 1
+            failures = self._consecutive_failures
             crossed = (
                 self._consecutive_failures >= self.DEGRADED_AFTER_FAILURES
                 and not self.degraded_reason
             )
             if crossed:
                 self.degraded_reason = self.DEGRADED_REASON
+            # One clock for every report, outages and flapping alike: a scan
+            # that fails, recovers and fails again is still one report a minute.
+            now = self._clock()
+            report = (
+                self._last_failure_report is None
+                or now - self._last_failure_report >= self.FAILURE_REPORT_INTERVAL_SECONDS
+            )
+            if report:
+                self._last_failure_report = now
+                self._failures_reported = True
         # Raw here, where the operator is; never in the frame the browser gets.
-        LOGGER.warning("board reconciliation scan failed: %s", exc)
+        # On one line: a connection error's text carries its own line breaks.
+        if report:
+            detail = " ".join(str(exc).split())
+            if failures == 1:
+                LOGGER.warning(
+                    "board reconciliation scan failed: %s; retrying every %gs, "
+                    "reported at most once every %gs while it fails",
+                    detail,
+                    self.scan_interval_seconds,
+                    self.FAILURE_REPORT_INTERVAL_SECONDS,
+                )
+            else:
+                LOGGER.warning(
+                    "board reconciliation scan still failing after %d attempts: %s",
+                    failures,
+                    detail,
+                )
         if crossed:
             # Wake every open client so it learns the board may be stale.
             self.notify_change()
@@ -191,7 +235,12 @@ class TicketBoardEventHub:
     def _record_scan_success(self) -> None:
         with self._lock:
             recovered = bool(self.degraded_reason)
+            failures = self._consecutive_failures
+            announce = failures > 0 and self._failures_reported
             self._consecutive_failures = 0
+            self._failures_reported = False
             self.degraded_reason = ""
+        if announce:
+            LOGGER.warning("board reconciliation scan recovered after %d failed attempts", failures)
         if recovered:
             self.notify_change()

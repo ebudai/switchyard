@@ -29,6 +29,13 @@ This pins what makes that safe:
   byte-identical under `env -i`, in a normal role pane, with another HOME, USER
   and COLUMNS, under umask 077, under several hash seeds and with another
   TMPDIR, locale and board Python in the environment.
+- **Except the board unit, which SYRD-552 changed on purpose:** it no longer
+  pulls in PostgreSQL, restarts no faster than every 30s and has a start
+  limit. Its thirteen cases carry the candidate's measured answers, and
+  `BEFORE_SYRD552` keeps the baseline's. Undoing exactly those lines
+  (`SYRD552_LINES`) in every new render gives the baseline's answer back, so
+  nothing else in the unit changed. `tests/board_unit_restart_storm_test.py`
+  pins the new settings themselves.
 - **The direct script answers what the package answers** and looks at no host
   path (a recorder with a positive control), and the default, shaped, lean and
   roles packets are byte-identical through both.
@@ -94,84 +101,107 @@ GOLDEN = {
     "primary group of ' p471-owner '": {'result': {'type': 'str', 'value': 'p471-owner'}, 'calls': {}},
     "primary group of 'p471-orphan'": {'result': {'type': 'str', 'value': ''}, 'calls': {}},
     "primary group of 'p471-stranger'": {'result': {'type': 'str', 'value': ''}, 'calls': {}},
-    'render_board_unit: default': {'result': {'type': 'str', 'value': 'TEXT 2078 chars sha256:46a0ff41e57ed8bc'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: default': {'result': {'type': 'str', 'value': 'TEXT 2100 chars sha256:0d58ae040042f7b4'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: default': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     'render_listener_unit: default': {'result': {'type': 'str', 'value': 'TEXT 1282 chars sha256:375b764c1733fe34'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: default': {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: default': {'result': {'type': 'str', 'value': 'd /p471/home/.claude/p471-ticket-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: default': {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     'render_database_sql: default': {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:0eb7fbc998038161'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: role accounts': {'result': {'type': 'str', 'value': 'TEXT 2111 chars sha256:a27f78418641b121'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'role_accounts_env': 1, 'systemd_environment': 1}},
+    'render_board_unit: role accounts': {'result': {'type': 'str', 'value': 'TEXT 2133 chars sha256:5d9abb9eef38314e'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'role_accounts_env': 1, 'systemd_environment': 1}},
     'listener_board_url: role accounts': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     'render_listener_unit: role accounts': {'result': {'type': 'str', 'value': 'TEXT 1316 chars sha256:396e10905ae130d6'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1, 'role_accounts_env': 1}},
     'render_canary_unit: role accounts': {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: role accounts': {'result': {'type': 'str', 'value': 'd /p471/home/.claude/p471-ticket-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: role accounts': {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     'render_database_sql: role accounts': {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:0eb7fbc998038161'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: operation roles': {'result': {'type': 'str', 'value': 'TEXT 2155 chars sha256:9848242b00c1cf32'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 6, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: operation roles': {'result': {'type': 'str', 'value': 'TEXT 2177 chars sha256:12261d3e723540b1'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 6, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: operation roles': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     'render_listener_unit: operation roles': {'result': {'type': 'str', 'value': 'TEXT 1282 chars sha256:375b764c1733fe34'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: operation roles': {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: operation roles': {'result': {'type': 'str', 'value': 'd /p471/home/.claude/p471-ticket-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: operation roles': {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     'render_database_sql: operation roles': {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:0eb7fbc998038161'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 2028 chars sha256:f1a37e35ddd1ecf6'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 2050 chars sha256:6d1741a3a9f8f2ba'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: a frame directory': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     'render_listener_unit: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 1282 chars sha256:375b764c1733fe34'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: a frame directory': {'result': {'type': 'str', 'value': 'd /p471/frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     'render_database_sql: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:0eb7fbc998038161'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 2056 chars sha256:a22c8237505b4159'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 2078 chars sha256:524cbb30e677af72'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: a database and roles': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     'render_listener_unit: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 1259 chars sha256:aa6ede462f594432'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: a database and roles': {'result': {'type': 'str', 'value': 'd /p471/home/.claude/p471-ticket-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     'render_database_sql: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 720 chars sha256:b406027d23b0625e'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: no roles group': {'result': {'type': 'str', 'value': 'TEXT 1981 chars sha256:ae4bd004c6373456'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: no roles group': {'result': {'type': 'str', 'value': 'TEXT 2003 chars sha256:0cce7ae03d4db7fe'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: no roles group': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     'render_listener_unit: no roles group': {'result': {'type': 'str', 'value': 'TEXT 1282 chars sha256:375b764c1733fe34'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: no roles group': {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: no roles group': {'result': {'type': 'str', 'value': 'd /p471/home/.claude/p471-ticket-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: no roles group': {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     'render_database_sql: no roles group': {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:0eb7fbc998038161'}, 'calls': {'sql_identifier': 1}},
-    "render_board_unit: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 2034 chars sha256:f5da258b1f05aae1'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    "render_board_unit: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 2056 chars sha256:06f65156f6d7da3e'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     "listener_board_url: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'http://127.0.0.1:34471'}, 'calls': {}},
     "render_listener_unit: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 1282 chars sha256:375b764c1733fe34'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     "render_canary_unit: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 855 chars sha256:b47c963a066eba96'}, 'calls': {'default_ticket_board_python': 1}},
     "render_tmpfiles: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'd /tmp/pgu-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     "render_polkit_rule: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 1230 chars sha256:99b7c3c4087682f1'}, 'calls': {}},
     "render_database_sql: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:0eb7fbc998038161'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: pgu': {'result': {'type': 'str', 'value': 'TEXT 2011 chars sha256:79bb26f6e49d4739'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: pgu': {'result': {'type': 'str', 'value': 'TEXT 2033 chars sha256:2d6db710f74137ed'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: pgu': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34472'}, 'calls': {}},
     'render_listener_unit: pgu': {'result': {'type': 'str', 'value': 'TEXT 1231 chars sha256:f590b12fcd01145a'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: pgu': {'result': {'type': 'str', 'value': 'TEXT 850 chars sha256:a6461e7cf6c5243f'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: pgu': {'result': {'type': 'str', 'value': 'd /tmp/pgu-frames 1777 root root -\n'}, 'calls': {}},
     'render_polkit_rule: pgu': {'result': {'type': 'str', 'value': 'TEXT 1227 chars sha256:b959d3ba89f4e531'}, 'calls': {}},
     'render_database_sql: pgu': {'result': {'type': 'str', 'value': 'TEXT 752 chars sha256:1f691d27bf601e71'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 2011 chars sha256:79bb26f6e49d4739'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 2033 chars sha256:2d6db710f74137ed'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: pgu with the shared frames': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34472'}, 'calls': {}},
     'render_listener_unit: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 1231 chars sha256:f590b12fcd01145a'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 850 chars sha256:a6461e7cf6c5243f'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: pgu with the shared frames': {'result': {'type': 'str', 'value': 'd /tmp/pgu-frames 1777 root root -\n'}, 'calls': {}},
     'render_polkit_rule: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 1227 chars sha256:b959d3ba89f4e531'}, 'calls': {}},
     'render_database_sql: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 752 chars sha256:1f691d27bf601e71'}, 'calls': {'sql_identifier': 1}},
-    'render_board_unit: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 2013 chars sha256:f1d38c3abd5c6316'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 2035 chars sha256:6843a1a583321500'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
     'listener_board_url: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'http://127.0.0.1:34472'}, 'calls': {}},
     'render_listener_unit: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 1231 chars sha256:f590b12fcd01145a'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url': 1}},
     'render_canary_unit: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 850 chars sha256:a6461e7cf6c5243f'}, 'calls': {'default_ticket_board_python': 1}},
     'render_tmpfiles: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'd /p471/pgu-frames 0775 p471-owner p471-owner -\n'}, 'calls': {}},
     'render_polkit_rule: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 1227 chars sha256:b959d3ba89f4e531'}, 'calls': {}},
     'render_database_sql: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 752 chars sha256:1f691d27bf601e71'}, 'calls': {'sql_identifier': 1}},
-    'board unit: the python rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2086 chars sha256:2b6b6a797f5359b5'}, 'calls': {'default_ticket_board_python rebound': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
-    'board unit: the environment quoting rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2078 chars sha256:ced9555be8d34250'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment rebound': 1}},
-    'board unit: the role map rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2082 chars sha256:beefcaefb0aa5630'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'role_accounts_env rebound': 1, 'systemd_environment': 1}},
+    'board unit: the python rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2108 chars sha256:af47200c6966840b'}, 'calls': {'default_ticket_board_python rebound': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'board unit: the environment quoting rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2100 chars sha256:68445903b7bfd12f'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment rebound': 1}},
+    'board unit: the role map rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2104 chars sha256:919d33bf1682db30'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'role_accounts_env rebound': 1, 'systemd_environment': 1}},
     'listener unit: the board URL rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 1285 chars sha256:2b9e7d693a956830'}, 'calls': {'default_ticket_board_python': 1, 'listener_board_url rebound': 1}},
     'canary unit: the python rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 863 chars sha256:6eb8bcfa3ab4c49a'}, 'calls': {'default_ticket_board_python rebound': 1}},
     'database sql: the identifier quoting rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 810 chars sha256:fdbf02f7ef0a2c01'}, 'calls': {'sql_identifier rebound': 1}},
     'constant': {'result': {'type': 'str', 'value': '/opt/switchyard/venv/bin/python'}, 'calls': {}},
 }
+#: The baseline's answers for the board unit before SYRD-552 changed it on purpose. GOLDEN above holds the measured new
+#: answers; undoing exactly the SYRD-552 lines in each new render gives these back (`SYRD552_LINES`).
+BEFORE_SYRD552 = {
+    'render_board_unit: default': {'result': {'type': 'str', 'value': 'TEXT 2078 chars sha256:46a0ff41e57ed8bc'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: role accounts': {'result': {'type': 'str', 'value': 'TEXT 2111 chars sha256:a27f78418641b121'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'role_accounts_env': 1, 'systemd_environment': 1}},
+    'render_board_unit: operation roles': {'result': {'type': 'str', 'value': 'TEXT 2155 chars sha256:9848242b00c1cf32'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 6, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: a frame directory': {'result': {'type': 'str', 'value': 'TEXT 2028 chars sha256:f1a37e35ddd1ecf6'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: a database and roles': {'result': {'type': 'str', 'value': 'TEXT 2056 chars sha256:a22c8237505b4159'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: no roles group': {'result': {'type': 'str', 'value': 'TEXT 1981 chars sha256:ae4bd004c6373456'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    "render_board_unit: pgu's frame directory in another project": {'result': {'type': 'str', 'value': 'TEXT 2034 chars sha256:f5da258b1f05aae1'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: pgu': {'result': {'type': 'str', 'value': 'TEXT 2011 chars sha256:79bb26f6e49d4739'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: pgu with the shared frames': {'result': {'type': 'str', 'value': 'TEXT 2011 chars sha256:79bb26f6e49d4739'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'render_board_unit: pgu with its own frame directory': {'result': {'type': 'str', 'value': 'TEXT 2013 chars sha256:f1d38c3abd5c6316'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'board unit: the python rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2086 chars sha256:2b6b6a797f5359b5'}, 'calls': {'default_ticket_board_python rebound': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment': 1}},
+    'board unit: the environment quoting rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2078 chars sha256:ced9555be8d34250'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'systemd_environment rebound': 1}},
+    'board unit: the role map rebound on project_provision': {'result': {'type': 'str', 'value': 'TEXT 2082 chars sha256:beefcaefb0aa5630'}, 'calls': {'default_ticket_board_python': 1, 'env_list': 4, 'env_operation_role_map': 1, 'role_accounts_env rebound': 1, 'systemd_environment': 1}},
+}
+#: What SYRD-552 changed in the board unit, new text to old.
+SYRD552_LINES = (
+    ("After=network.target postgresql.service\nStartLimitIntervalSec=5min\nStartLimitBurst=5\n\n[Service]",
+     "After=network.target postgresql.service\nWants=postgresql.service\n\n[Service]"),
+    ("Restart=on-failure\nRestartSec=30s\n", "Restart=on-failure\nRestartSec=2\n"),
+)
 REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- its package, nothing else.
 DEFAULT_MODULES_LOADED = ['scripts.ticket_board']
@@ -686,6 +716,21 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and calls("render_database_sql: default") == {"sql_identifier": 1},
           "the database SQL names the plan's database and roles -- the identifier quoted through project_provision")
     check(value("constant") == "/opt/switchyard/venv/bin/python", "the shared Python the board runs when it is installed")
+
+
+def test_the_board_unit_changed_only_by_syrd552() -> None:
+    from types import SimpleNamespace
+
+    def undo(text):
+        for new, old in SYRD552_LINES:
+            assert text.count(new) == 1, (new, text)
+            text = text.replace(new, old)
+        return text
+
+    reverted = SimpleNamespace(render_board_unit=lambda *args: undo(m.render_board_unit(*args)))
+    for label, before in BEFORE_SYRD552.items():
+        check(run(reverted, CASES[label]) == before and GOLDEN[label] != before,
+              f"{label}: SYRD-552's lines undone, the board unit is the baseline's to the byte, calls included")
 
 
 def test_every_seam_is_reached() -> None:

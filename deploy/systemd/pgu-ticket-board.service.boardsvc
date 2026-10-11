@@ -1,7 +1,8 @@
 [Unit]
 Description=PGU Ticket Board
 After=network.target postgresql.service
-Wants=postgresql.service
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -10,7 +11,7 @@ WorkingDirectory=/home/agent/pgu-ticketboard-live/current
 RuntimeDirectory=pgu-ticket-board
 ExecStart=/usr/bin/python3 /home/agent/pgu-ticketboard-live/current/scripts/ticket-board.py --host 127.0.0.1 --port 8770 --unix-socket /run/pgu-ticket-board/ticket-board.sock --frames /tmp/pgu-frames --assets /home/agent/.claude/pgu-tickets-assets
 Restart=on-failure
-RestartSec=2
+RestartSec=30s
 EnvironmentFile=-/home/agent/.config/pgu/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/home/agent

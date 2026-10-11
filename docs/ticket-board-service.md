@@ -276,6 +276,19 @@ path without attempting a global daemon reload.
 Plain `restart` only restarts the currently deployed SHA. It does **not** update
 code.
 
+**A database outage is not a restart storm (SYRD-552).**
+- **Ordering, not pulling:** a board unit is ordered after
+  `postgresql.service` and never pulls it in, so no start or restart of a board
+  queues a PostgreSQL start. PostgreSQL is enabled and started by its own unit.
+- **Restart limits:** a failed board restarts no faster than every 30 seconds
+  (`RestartSec=30s`). Five starts in five minutes leave it failed
+  (`StartLimitIntervalSec=5min`, `StartLimitBurst=5`); after the outage, an
+  operator resets it with `systemctl reset-failed` and starts it.
+- **Logging:** a board whose database is down keeps serving and reports the
+  failure once, then at most once a minute, then its recovery once.
+- **Upgrades:** `switchyard upgrade` re-renders an existing tenant's unit with
+  these settings; pgu's static unit carries them too.
+
 ## Operations
 
 ```bash

@@ -98,10 +98,21 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
     # (SYRD-251). The board prefers the argument to any environment value. The
     # `Environment=` line stays because it is where the publisher reads the
     # cache it refreshes.
+    #
+    # PostgreSQL is ordered before the board and never pulled in by it. With
+    # `Wants=postgresql.service` every start -- each automatic restart included
+    # -- queued another PostgreSQL start, and at `RestartSec=2` seven boards
+    # turned one database outage into a storm of them (SYRD-552). The server
+    # is enabled and started by its own unit (`ensure-postgres-cluster`). A
+    # board that fails is restarted no faster than every 30 seconds, and five
+    # failed starts in five minutes leave it failed rather than flapping. Fixed
+    # settings, not `RestartSteps=`: that needs systemd 254, and an Ubuntu
+    # 22.04-based host ships 249.
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
-Wants=postgresql.service
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -111,7 +122,7 @@ RuntimeDirectory={plan.runtime_directory}
 RuntimeDirectoryMode=0750
 ExecStart={provision.default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir} --commit-git-dir {plan.commit_git_dir}
 Restart=on-failure
-RestartSec=2
+RestartSec=30s
 EnvironmentFile=-{plan.owner_home}/.config/{plan.project}/ticket-board.env
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME={plan.owner_home}

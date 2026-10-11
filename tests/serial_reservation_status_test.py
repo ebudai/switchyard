@@ -16,8 +16,9 @@ are real implementers. A ticket is taken to User UAT by real transitions, the
 real board server serves it, and the real `switchyard worker-pool status`
 reads it over HTTP through its shipped reader. The gate is then asked to route
 a second ticket to the same worker, and what it does is compared with what
-status said -- for a UAT stage declared as a review stage (it holds), as a
-system stage (it releases), and as a system stage under "lifecycle" (it holds).
+status said -- for a UAT stage declared as a review stage (it releases under
+the default policy since SYRD-582, and holds under "lifecycle"), as a system
+stage (it releases), and as a system stage under "lifecycle" (it holds).
 """
 
 from __future__ import annotations
@@ -225,7 +226,9 @@ def _line(said: list[str], member: str = WORKER) -> str:
 def run_policies(cluster, tmp: Path) -> None:
     cases = (
         # (label, UAT stage kind, policy, the gate holds the worker at UAT)
-        ("UAT declared a review stage (the shipped document)", "review", None, True),
+        # SYRD-582: under the default policy, User review releases the worker.
+        ("UAT declared a review stage (the shipped document)", "review", None, False),
+        ("UAT declared a review stage under lifecycle", "review", "lifecycle", True),
         ("UAT declared a system stage (MEFP's revision 57)", "system", None, False),
         ("UAT a system stage under lifecycle", "system", "lifecycle", True),
     )

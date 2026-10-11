@@ -230,6 +230,7 @@ GRANT EXECUTE ON FUNCTION ticket_board.set_ticket_context_checkout(bigint, text,
 
 -- SYRD-568: assigned implementation queues.
 GRANT SELECT ON ticket_board.serial_focus TO ticket_board_service, ticket_board_listener;
+GRANT SELECT ON ticket_board.user_review_releases TO ticket_board_service, ticket_board_listener;
 REVOKE EXECUTE ON FUNCTION ticket_board.settle_serial_focus(text, boolean, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.serial_queue() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.serial_queue() TO ticket_board_service, ticket_board_listener;

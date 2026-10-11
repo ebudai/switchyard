@@ -438,13 +438,16 @@ Notifications are delivered by typing into the assignee's pane. Two consequences
 
 **Serial focus.** An implementer works one ticket at a time, but may have several assigned.
 Route a second ticket to a busy implementer and it stays in Implementation, assigned, waiting
-in their queue: no handoff, no highlight, no reminders, and it cannot be submitted. When the
-active ticket finishes (or is blocked, parked or reassigned), the next one becomes active and
-its owner is told, once. Order is the lowest ticket number unless you set `blocked_by`; a
+in their queue: no handoff, no highlight, no reminders, and it cannot be submitted. Commenting
+on a waiting ticket does not hand it over either. When the active ticket finishes (or is
+blocked, parked or reassigned), the next one becomes active and its owner is told, once.
+Under the default policy that also happens when the active ticket reaches the User's review:
+the implementer is free while the User reviews, and a User kick-back waits in their queue
+behind whatever they took next. Order is the lowest ticket number unless you set `blocked_by`; a
 blocked ticket waits until its blockers resolve, and `parent_id` orders nothing. The ticket
 view and `ticket-board-read ticket` show each ticket's place ("Queue: #2 in app's queue,
 behind SYRD-601"). A board with a pull policy keeps work in its ready stage instead. This is
-the design, not a failure (SYRD-568).
+the design, not a failure (SYRD-568, SYRD-582).
 
 **Who claims on a pull board.** On a pull board, every active, ephemeral implementer that owns
 Implementation may claim, whatever the claim transition's actor list says. The board claims for

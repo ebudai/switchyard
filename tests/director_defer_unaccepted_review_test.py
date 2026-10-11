@@ -139,7 +139,9 @@ def undecided_reviews_are_parked(app, admin: str, label: str) -> None:
                   "VALUES ('PGU-37','user_review','user','ops') ON CONFLICT (ticket_id) DO UPDATE SET "
                   "current_state='user_review', last_implementer_assignee='ops';")
     held_before = reserved_by(admin, "PGU-37")
-    check(held_before == ["ops"], (label, "the fixture holds no reservation to release", held_before))
+    # SYRD-582: User Review holds nothing, so ops was already free; the Audit
+    # case below is the review that parking must hand a slot back from.
+    check(held_before == [], (label, "a ticket with the User holds its implementer", held_before))
     before = row(admin, "PGU-37")
     notes_before = comments(admin, "PGU-37")
 
@@ -156,8 +158,7 @@ def undecided_reviews_are_parked(app, admin: str, label: str) -> None:
     check(after["needs_user_signoff"] is True, (label, after))
     check(after["title"] == before["title"], (label, after))
     check(comments(admin, "PGU-37") == notes_before, (label, "a comment was added or removed"))
-    # And the slot it held is handed back.
-    check(reserved_by(admin, "PGU-37") == [], (label, "still reserved", held_before))
+    check(reserved_by(admin, "PGU-37") == [], (label, "reserved by parking", held_before))
 
     # --- every other review nobody has decided parks the same way ---------
     for ticket_id, stage, owner, flags, signoff in (
@@ -166,9 +167,17 @@ def undecided_reviews_are_parked(app, admin: str, label: str) -> None:
     ):
         t.seed_postgres_ticket(admin, ticket_id, title=f"Unjudged {stage}", state=stage,
                                assignee=owner, commit_hash=COMMIT, **flags)
+        if stage == "audit":
+            # As a real submission leaves it: the review is held against its implementer.
+            t.psql(admin, "INSERT INTO ticket_board.ticket_notification_state(ticket_id,current_state,current_assignee,"
+                          f"last_implementer_assignee) VALUES ('{ticket_id}','audit','audit','ops') ON CONFLICT (ticket_id) "
+                          "DO UPDATE SET current_state='audit', last_implementer_assignee='ops';")
+            check(reserved_by(admin, ticket_id) == ["ops"], (label, "the fixture holds no reservation to release"))
         moved = app.perform_workflow_action(ticket_id, "defer", {}, caller_role="director")
         now = row(admin, ticket_id)
         check(moved["state"] == "backlog", (label, stage, moved["state"]))
+        # And the slot it held is handed back.
+        check(reserved_by(admin, ticket_id) == [], (label, stage, "still reserved"))
         check(now[signoff] is False, (label, stage, "a verdict was recorded by parking", now))
         check(now["commit_hash"] == COMMIT, (label, stage, now))
 

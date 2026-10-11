@@ -362,6 +362,27 @@ WHERE id = %s
                 and expected_state in terminal_states
                 and current_state == expected_state
             )
+        # SYRD-582: a ticket queued behind its implementer's active work is
+        # not their work yet, whatever was queued for them about it before --
+        # a comment's owner notice delivered Otto's OTTO-134 as work the board
+        # then refused to accept. Its activation hands it over once, and the
+        # ticket it hands over carries every change. Asked of the board's
+        # published order (serial_queue, which the listener may read), only in
+        # a declared implementation stage, and not of blocked work, whose owner
+        # still hears what changed, as before.
+        if (target_role == current_assignee and not has_unresolved_blockers and getattr(self, "workflow", None)
+                and any(stage["name"] == current_state and stage["kind"] == "implementation"
+                        for stage in self.workflow["stages"])):
+            present = conn.execute(
+                "SELECT to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS present").fetchone()
+            if present is not None and bool(present["present"] if isinstance(present, dict) else present[0]):
+                queued = conn.execute(
+                    "SELECT coalesce(bool_or(NOT q.active), false) AS waiting FROM ticket_board.serial_queue() q "
+                    "WHERE q.ticket_id = %s AND q.implementer = %s",
+                    (ticket_id, current_assignee),
+                ).fetchone()
+                if queued is not None and bool(queued["waiting"] if isinstance(queued, dict) else queued[0]):
+                    return False
         # SYRD-517: a turn-end prompt or grace escalation queued before the
         # ticket was held (or blocked, or put in a wait) was still delivered
         # after it -- MEFP-114's Director was told, turn after turn, that a

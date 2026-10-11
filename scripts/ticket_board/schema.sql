@@ -2409,6 +2409,17 @@ BEGIN
     IF target_role IS NULL OR actor IS NULL OR actor = target_role THEN
         RETURN;
     END IF;
+    -- SYRD-582: a ticket queued behind its implementer's active work is not
+    -- their work yet. A comment, edit or reassignment on it woke them with it
+    -- anyway (Otto's OTTO-134: the Director's routing comment arrived as work
+    -- the board then refused to accept). It is handed over once, when it
+    -- becomes active, and the ticket it hands over carries every change. A
+    -- ticket held back by its own blocker still tells its owner what changed,
+    -- as before: it cannot be submitted, and the change may be what frees it.
+    IF ticket_board.ticket_serial_waiting(p_ticket_id)
+       AND NOT ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
+        RETURN;
+    END IF;
 
     message := ticket_board.ticket_update_message(
         p_ticket_id,
@@ -13131,6 +13142,45 @@ CREATE TABLE IF NOT EXISTS ticket_board.serial_focus (
     ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
     activated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+-- SYRD-582: a human's review releases its author's slot
+CREATE TABLE IF NOT EXISTS ticket_board.user_review_releases (
+    -- SYRD-582: a ticket whose author's slot was released when it reached a
+    -- human's review -- a review stage assigned to a role of kind 'user'.
+    -- Written whatever the policy (the policy decides what it means), removed
+    -- when the ticket re-enters implementation, which holds its author again.
+    ticket_id text PRIMARY KEY REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    released_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    stage text NOT NULL
+);
+CREATE OR REPLACE FUNCTION ticket_board.record_user_review_release()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+-- SYRD-582: remember that a ticket reached a human's review, so its author's
+-- slot stays released through the stages after it (Director review, or a
+-- Director's re-audit) until rework brings it back into implementation.
+-- Named to run before settle_serial_focus, which reads it.
+DECLARE v_kind text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN RETURN NULL; END IF;
+    IF TG_OP = 'UPDATE' AND OLD.state IS NOT DISTINCT FROM NEW.state
+       AND OLD.assignee IS NOT DISTINCT FROM NEW.assignee THEN
+        RETURN NULL;
+    END IF;
+    v_kind := ticket_board.declared_stage_kind(NEW.state);
+    IF v_kind = 'implementation' THEN
+        DELETE FROM ticket_board.user_review_releases WHERE ticket_id = NEW.id;
+    ELSIF v_kind = 'review' AND EXISTS (
+        SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'roles') r
+        WHERE r->>'name' = NEW.assignee AND r->>'kind' = 'user') THEN
+        INSERT INTO ticket_board.user_review_releases (ticket_id, stage) VALUES (NEW.id, NEW.state)
+        ON CONFLICT (ticket_id) DO NOTHING;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS tickets_z_user_review_release ON ticket_board.tickets;
+CREATE TRIGGER tickets_z_user_review_release
+AFTER INSERT OR UPDATE ON ticket_board.tickets
+FOR EACH ROW EXECUTE FUNCTION ticket_board.record_user_review_release();
 CREATE OR REPLACE FUNCTION ticket_board.ticket_current_reserved_ticket(p_implementer text,p_excluding_ticket_id text DEFAULT NULL)
 RETURNS text LANGUAGE sql STABLE AS $$
  -- Which ticket holds an implementer's one serial slot. Under the default
@@ -13145,6 +13195,14 @@ RETURNS text LANGUAGE sql STABLE AS $$
  -- Under a pull policy (SYRD-539) a review stage holds only until the ticket's
  -- declared approval out of `release_after` is recorded; rework re-entering
  -- implementation clears that record, so it holds its author again.
+ --
+ -- SYRD-582: under the default 'review' policy on a Director-dispatched board,
+ -- a ticket that has reached a human's review (user_review_releases) holds
+ -- nothing: its author is free for the next ticket while the User reviews,
+ -- and stays free through the stages after it. Rework re-entering
+ -- implementation clears that record and queues behind the author's new
+ -- active ticket. Every other review stage still holds, the lifecycle policy
+ -- still holds through User review, and a pull board keeps its own release.
  --
  -- SYRD-568: an implementer may have several tickets assigned in its
  -- implementation stage, and only one of them holds the slot. A ticket with an
@@ -13176,6 +13234,9 @@ RETURNS text LANGUAGE sql STABLE AS $$
     AND (CASE WHEN s.kind='implementation' THEN t.assignee ELSE ns.last_implementer_assignee END)=p_implementer
     AND NOT (s.kind='review' AND ticket_board.declared_scheduling() IS NOT NULL
              AND EXISTS (SELECT FROM ticket_board.pull_releases r WHERE r.ticket_id=t.id))
+    AND NOT (s.kind='review' AND ticket_board.declared_scheduling() IS NULL
+             AND coalesce((SELECT d.cfg->>'reservation' FROM doc d),'review')='review'
+             AND EXISTS (SELECT FROM ticket_board.user_review_releases u WHERE u.ticket_id=t.id))
     AND NOT (s.kind='implementation' AND ticket_board.ticket_has_unresolved_blockers(t.id)))
    OR (coalesce((SELECT d.cfg->>'reservation' FROM doc d),'review')='lifecycle'
     AND s.kind='system' AND NOT s.terminal AND NOT t.parked

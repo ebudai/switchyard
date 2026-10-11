@@ -135,6 +135,9 @@ class ChildWorkSample:
     #: one old child leaving with 100 ticks hides a surviving sibling's 3 and
     #: makes real work look like nothing at all (SYRD-101 review).
     cpu_by_pid: tuple[tuple[int, int], ...] = ()
+    #: Each descendant's session. A detached session is the unit a provider's
+    #: tool starts a command in, so its children are that command's (SYRD-583).
+    sessions: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,7 @@ def descendant_work_sample(
         detached,
         tuple(sorted((pid, started_by_pid.get(pid, 0.0)) for pid in seen)),
         tuple(sorted((pid, cpu_by_pid.get(pid, 0)) for pid in seen)),
+        tuple(sorted((pid, session_by_pid[pid]) for pid in seen if pid in session_by_pid)),
     )
 
 
@@ -355,6 +359,8 @@ class PaneActivityGate:
         self.child_work_cpu_ticks = max(0, child_work_cpu_ticks)
 
         self._child_work_memory_by_target: dict[str, ChildWorkMemory] = {}
+        #: What held each pane at its last child-work hold (`background_child.Holder`s).
+        self._child_holders_by_target: dict[str, tuple[Any, ...]] = {}
         #: The provider question each pane's last capture showed, if any (SYRD-566).
         self._open_prompt_by_target: dict[str, Any] = {}
         self.director_startup_hold_seconds = director_startup_hold_seconds
@@ -804,11 +810,18 @@ class PaneActivityGate:
         """
         if trusted_idle_at is None or trusted_idle_at <= 0:
             return frozenset()
-        return frozenset(
+        own = frozenset(
             pid
             for pid, started in sample.starts
             if started > 0 and started <= trusted_idle_at
         )
+        # A detached session that already existed when the turn ended is that
+        # turn's, and so is every child it starts afterwards. Dated one by one,
+        # a wait loop's fresh `sleep 20` always postdates the turn end, and an
+        # 18-hour leftover from SYRD-579 read as App's current work (SYRD-583).
+        session_of = dict(sample.sessions)
+        finished = {session_of[pid] for pid in own & sample.detached if pid in session_of}
+        return own | frozenset(pid for pid in sample.detached if session_of.get(pid) in finished)
 
     def child_work_trace(
         self, target: str, *, trusted_idle_at: float | None = None
@@ -831,6 +844,7 @@ class PaneActivityGate:
         """
         from . import notify_listener as listener
 
+        self._child_holders_by_target.pop(target, None)
         pane_pid = self._pane_pid(target)
         if pane_pid is None:
             return None
@@ -882,9 +896,15 @@ class PaneActivityGate:
             # anything is the listener's, not this probe's -- a probe cannot
             # know how long a build should be allowed to run.
             if advancing and advancing <= prior_turn:
-                return listener.ActivityTrace(True, listener.PRIOR_TURN_CHILD_WORK)
-            return listener.ActivityTrace(True, "pane_child_work")
-        if holding and not appeared and holding <= prior_turn:
+                return self._holding(target, second, advancing | holding, prior_turn, listener.PRIOR_TURN_CHILD_WORK)
+            return self._holding(target, second, advancing | holding, prior_turn, "pane_child_work")
+        if holding and holding <= prior_turn:
+            if any(started > (trusted_idle_at or 0) for pid, started in second.starts if pid in holding):
+                # A finished turn's session that has started processes since the
+                # turn ended -- a poll loop's latest `sleep` -- is still cycling:
+                # held as work, but named as a finished turn's, so the listener's
+                # bound and the ticket lease apply to it (SYRD-583).
+                return self._holding(target, second, holding, prior_turn, listener.PRIOR_TURN_CHILD_WORK)
             # Everything that would have held this pane predates the turn's own
             # idle hook, and none of it is progressing. Said out loud, with a
             # reason of its own, so it can never be read as this turn's work.
@@ -894,15 +914,28 @@ class PaneActivityGate:
             # gives it a new session; the runtime and the helpers it keeps stay
             # in the pane's. This needs no history, so it is the signal that
             # survives a listener restart in the middle of a turn's work.
-            return listener.ActivityTrace(True, "pane_child_work")
+            return self._holding(target, second, holding, prior_turn, "pane_child_work")
         if appeared:
-            return listener.ActivityTrace(True, "pane_child_work")
+            return self._holding(target, second, holding, prior_turn, "pane_child_work")
         if arrived:
             # A child this turn started, sitting on a fetch, a lock or a long
             # build, using no CPU and printing nothing. It is work until it
             # leaves: a wait has no length at which it stops being a wait.
-            return listener.ActivityTrace(True, "pane_child_work")
+            return self._holding(target, second, holding, prior_turn, "pane_child_work")
         return None
+
+    def _holding(self, target: str, sample: ChildWorkSample, pids: frozenset[int],
+                 finished: frozenset[int], reason: str) -> ActivityTrace:
+        """A child-work hold, with what is holding it kept for the listener (SYRD-583)."""
+        from . import background_child, notify_listener as listener
+
+        self._child_holders_by_target[target] = background_child.describe(
+            sample, pids, finished, proc_root=Path(self.proc_root))
+        return listener.ActivityTrace(True, reason)
+
+    def child_holders(self, target: str) -> tuple[Any, ...]:
+        """What held this pane at its last child sample; the caller asks only of a child-work verdict."""
+        return self._child_holders_by_target.get(target, ())
 
     def _trusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         # The runtime's own statement that its turn ended, and when. That is the

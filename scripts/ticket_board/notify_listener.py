@@ -977,13 +977,12 @@ WHERE (r.definition->>'active')::boolean
                     break
             pane_busy, activity_trace = self.activity_hold._activity_state_for_notification(kind, target, pre_send_recheck=True)
             composer_before = self.dispatch._composer_snapshot(target)
-            # The same release the first gate honoured. Without it the recheck a
-            # moment later re-imposes the hold this handoff has already waited
-            # out, and the bound buys nothing (SYRD-212).
-            if self.activity_hold._should_defer_for_activity(activity_trace) and not (
-                release == PRIOR_TURN_HOLD_DELIVER
-                and activity_trace.reason in PRIOR_TURN_HOLD_REASONS
-            ):
+            # The first gate's release, or the recheck's own: only it samples children (SYRD-212, SYRD-583).
+            release = self.activity_hold._recheck_release(conn, release, notification_id=notification_id, ticket_id=ticket_id,
+                                                          target_role=target_role, kind=kind, activity_trace=activity_trace)
+            if release == PRIOR_TURN_HOLD_DISCARD:
+                continue
+            if self.activity_hold._should_defer_for_activity(activity_trace) and release != PRIOR_TURN_HOLD_DELIVER:
                 if self.activity_hold._reminder_is_stale_for_activity(kind, activity_trace):
                     self.activity_hold._drop_stale_reminder(
                         conn,

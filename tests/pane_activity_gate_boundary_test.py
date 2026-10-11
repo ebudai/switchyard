@@ -79,7 +79,7 @@ SEAMS = {
     'PaneActivityGate.composer_snapshot': {'ComposerSnapshot': 1, 'composer_snapshot_from_pane_text': 1},
     'PaneActivityGate._director_startup_hold_trace': {'ActivityTrace': 2},
     'PaneActivityGate._child_work_sample': {'ChildWorkSample': 2, 'descendant_work_sample': 1},
-    'PaneActivityGate.child_work_trace': {'ActivityTrace': 6, 'ChildWorkMemory': 1, 'PRIOR_TURN_CHILD_WORK': 1, 'STALE_PRIOR_TURN_CHILD_WORK': 1},
+    'PaneActivityGate.child_work_trace': {'ActivityTrace': 1, 'ChildWorkMemory': 1, 'PRIOR_TURN_CHILD_WORK': 2, 'STALE_PRIOR_TURN_CHILD_WORK': 1},  # SYRD-583: holds built by _holding
     'PaneActivityGate._trusted_idle_source_trace': {'TRUSTED_IDLE_SOURCES': 1},
     'PaneActivityGate._idle_cursor_trace': {'ActivityTrace': 3},
     'PaneActivityGate._untrusted_idle_source_trace': {'ActivityTrace': 3, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1, 'TRUSTED_IDLE_SOURCES': 1},  # SYRD-566: provider_starting
@@ -150,6 +150,8 @@ DEFAULTS = {
     'PaneActivityGate._survivors_that_advanced': [],
     'PaneActivityGate._prior_turn_children': [],
     'PaneActivityGate.child_work_trace': ['None'],
+    'PaneActivityGate._holding': [],  # SYRD-583
+    'PaneActivityGate.child_holders': [],  # SYRD-583
     'PaneActivityGate._trusted_idle_source_trace': [],
     'PaneActivityGate._idle_cursor_trace': ['False'],
     'PaneActivityGate._untrusted_idle_source_trace': [],
@@ -179,10 +181,10 @@ GOLDEN = {
     'digest: codex': {'result': {'type': 'str', 'value': '631fd71161ac9bdf9abf12a6498cf3cb8ba5e7ed77719115fa8e9243166932a6'}, 'calls': {}},
     'digest: typed': {'result': {'type': 'str', 'value': 'ddc2b1f07e84a54d6a063df5d36838f520d400d235221bb339ef0807187ed7bb'}, 'calls': {}},
     'digest: prompt': {'result': {'type': 'str', 'value': '09bf4e9faa06e4ea56667235110c8b234a8916fe926139a3179d79f7703d3ba8'}, 'calls': {}},
-    'descendants: a tree': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [101, 102, 103, 104], 'cpu_ticks': 31, 'detached': [102, 103], 'starts': [[101, 2.0], [102, 3.0], [103, 4.0], [104, 6.0]], 'cpu_by_pid': [[101, 7], [102, 11], [103, 13], [104, 0]]}}, 'calls': {}},
-    'descendants: a leaf': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [], 'cpu_ticks': 0, 'detached': [], 'starts': [], 'cpu_by_pid': []}}, 'calls': {}},
-    'descendants: unknown pane': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [], 'cpu_ticks': 0, 'detached': [], 'starts': [], 'cpu_by_pid': []}}, 'calls': {}},
-    'descendants: empty table': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [], 'cpu_ticks': 0, 'detached': [], 'starts': [], 'cpu_by_pid': []}}, 'calls': {}},
+    'descendants: a tree': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [101, 102, 103, 104], 'cpu_ticks': 31, 'detached': [102, 103], 'starts': [[101, 2.0], [102, 3.0], [103, 4.0], [104, 6.0]], 'cpu_by_pid': [[101, 7], [102, 11], [103, 13], [104, 0]], 'sessions': [[101, 100], [102, 102], [103, 102], [104, 100]]}}, 'calls': {}},  # SYRD-583: sessions
+    'descendants: a leaf': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [], 'cpu_ticks': 0, 'detached': [], 'starts': [], 'cpu_by_pid': [], 'sessions': []}}, 'calls': {}},  # SYRD-583: sessions
+    'descendants: unknown pane': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [], 'cpu_ticks': 0, 'detached': [], 'starts': [], 'cpu_by_pid': [], 'sessions': []}}, 'calls': {}},  # SYRD-583: sessions
+    'descendants: empty table': {'result': {'type': 'ChildWorkSample', 'value': {'__type__': 'ChildWorkSample', 'observed': True, 'pids': [], 'cpu_ticks': 0, 'detached': [], 'starts': [], 'cpu_by_pid': [], 'sessions': []}}, 'calls': {}},  # SYRD-583: sessions
     'boot time: synthetic': {'result': {'type': 'float', 'value': 1700000000.0}, 'calls': {}},
     'boot time: missing': {'result': {'type': 'float', 'value': 0.0}, 'calls': {}},
     'process table: synthetic': {'result': {'type': 'tuple', 'value': [[102, 101, 11, 102, 1700000003.0], [101, 100, 7, 100, 1700000002.0], [100, 1, 5, 100, 1700000001.0]]}, 'calls': {}},

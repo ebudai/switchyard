@@ -250,6 +250,9 @@ class NotificationDispatch:
                 "region_digest": activity_trace.region_digest,
                 # SYRD-570: a composer hold while the runtime's trusted hook says idle.
                 "trusted_idle": bool(getattr(activity_trace, "trusted_idle", False)),
+                # SYRD-583: what was holding the pane, when its children were.
+                **({"holders": [holder.as_detail() for holder in activity_trace.holders]}
+                   if getattr(activity_trace, "holders", ()) else {}),
             },
             "decision": decision,
             "decision_reason": reason,

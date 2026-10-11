@@ -28,7 +28,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from . import provider_prompt
+from . import background_child, provider_prompt
 
 #: How long background work may hold a role's notices before the Director is
 #: told. Otto's own tenant watchdog settled on half an hour, and an ordinary
@@ -98,10 +98,22 @@ def _present(ledger: Any, conn: Any) -> Any:
     return present
 
 
-def note(ledger: Any, conn: Any, notification_id: int, reason: str) -> None:
+def child_hold_description(conn: Any, holders: Any) -> str:
+    """What the Director is told a pane held by its children is: each child, its ticket, how to end only it (SYRD-583)."""
+    parsed = [holder for holder in map(background_child.Holder.from_detail, holders or ()) if holder is not None]
+    if not parsed:
+        return ""
+    origins = background_child.origins(conn, parsed)
+    children = " ".join(background_child.sentence(holder, origins.get(holder.key)) for holder in parsed)
+    return (f"behind background work under its pane. {children} They go out by themselves when that work ends. "
+            f"A job that never ends -- a wait loop whose pgrep matches itself, say -- holds them for good.")
+
+
+def note(ledger: Any, conn: Any, notification_id: int, reason: str, holders: Any = None) -> None:
     """Record that background work, or a provider's own question, held this notice again.
 
-    The board decides whether that is news.
+    The board decides whether that is news. A hold by the pane's children says
+    which children, when the gate saw them (SYRD-583).
 
     Never fatal: a failure here is logged, and the hold goes on exactly as it
     would have without it.
@@ -120,6 +132,13 @@ def note(ledger: Any, conn: Any, notification_id: int, reason: str) -> None:
             conn.execute(
                 "SELECT ticket_board.note_background_hold(%s::bigint, %s::text, %s::interval, %s::text)",
                 (notification_id, reason, f"{prompt_alert_after_seconds():g} seconds", prompt_hold_description(prompt)),
+            )
+            return
+        children = child_hold_description(conn, holders) if holders and present == "described" else ""
+        if children:
+            conn.execute(
+                "SELECT ticket_board.note_background_hold(%s::bigint, %s::text, %s::interval, %s::text)",
+                (notification_id, reason, f"{alert_after_seconds():g} seconds", children),
             )
             return
         conn.execute(

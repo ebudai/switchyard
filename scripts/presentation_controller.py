@@ -42,6 +42,11 @@ from scripts.presentation_display_session import (
     display_slot_terminal_title_commands,
     worker_attach_argv,
 )
+from scripts.presentation_role_recovery import (
+    absent_role_refusal,
+    assignment_config_with_absent,
+    await_recovered_registration,
+)
 from scripts.presentation_runtime_assignments import (
     _exact_tmux_target,
     _resolved_runtime_assignments,
@@ -681,17 +686,36 @@ def presentation_report(
     state_path: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
 ) -> dict[str, Any]:
-    config = runtime_assignment_config(config)
+    absent: list[str] = []
+    try:
+        config = runtime_assignment_config(config)
+    except SystemExit:
+        # A role with no live assignment is reported as one, not by a name the
+        # projection would guess, and does not stop the rest being reported:
+        # this is what `present recover` prints after starting one role while
+        # another is still gone (SYRD-580). Any other refusal is made again.
+        config, absent = assignment_config_with_absent(config)
     _validate_role_namespace(config)
     state_path = state_path or presentation_state_path(config, config_path=config_path)
     owner_runner = _tmux_runner(config, runner)
     state = _read_state(state_path, config=config, config_path=config_path)
     visible_names = {role for role in state["slots"].values() if role}
+    assigned = team_launcher.replace(config, roles=[role for role in config.roles if role.role not in absent])
+
+    def worker_status(name: str) -> dict[str, Any]:
+        if name not in absent:
+            return _role_status(config, name, runner=owner_runner)
+        role = _role_by_name(config, name)
+        resumable = bool(team_launcher.session_id_for_role(role, team_launcher.role_session_dir(config, role)))
+        return {"role": name, "state": "unregistered", "live": False, "resumable": resumable}
+
     slots = []
     for slot in range(state["slot_count"]):
         desired = state["slots"][str(slot)]
-        actual, client_state = _actual_proxy_role(config, slot, runner=owner_runner)
-        role_status = _role_status(config, desired, runner=owner_runner) if desired else None
+        actual, client_state = _actual_proxy_role(assigned, slot, runner=owner_runner)
+        if actual in absent:
+            client_state = "unregistered"
+        role_status = worker_status(desired) if desired else None
         slots.append({
             "slot": slot,
             "desired_role": desired,
@@ -701,7 +725,7 @@ def presentation_report(
             "worker": role_status,
         })
     hidden_roles = [
-        _role_status(config, role.role, runner=owner_runner)
+        worker_status(role.role)
         for role in config.roles
         if role.role not in visible_names
     ]
@@ -864,11 +888,13 @@ def presentation_action(
     sleep: Callable[[float], None] = time.sleep,
     proc_root: Path | None = None,
     assignment_opener: Callable[[str], Any] | None = None,
+    registration_timeout: float | None = None,
 ) -> dict[str, Any]:
     # Narrow on purpose: the operator path opens for the recovery of the
     # DIRECTOR's slot and nothing else. A disconnected app or ops slot is still
     # the Director's to recover, because the Director is still there to do it.
     operator_recovery = action == "recover" and (role_name or "").strip().lower() == DIRECTOR_ROLE
+    absent: list[str] = []
     try:
         config = runtime_assignment_config(config, opener=assignment_opener)
     except SystemExit as refusal:
@@ -878,13 +904,20 @@ def presentation_action(
             _require_director(config, environ, operator_recovery=operator_recovery)
         except SystemExit:
             raise refusal from None
-        precise = runtime_divergence_refusal(
-            config, opener=assignment_opener, runner=_tmux_runner(config, runner),
-            proc_root=proc_root,
-        )
-        if precise:
-            raise SystemExit(precise) from None
-        raise
+        if action != "recover":
+            precise = runtime_divergence_refusal(
+                config, opener=assignment_opener, runner=_tmux_runner(config, runner),
+                proc_root=proc_root,
+            )
+            if precise:
+                raise SystemExit(precise) from None
+            raise
+        # Recovery starts a role that is gone, so it cannot require every role
+        # to be live: a missing role refused its own recovery, and two could not
+        # be recovered in either order (SYRD-580). Every live assignment is
+        # still checked; only the requested role is held to anything more,
+        # below.
+        config, absent = assignment_config_with_absent(config, opener=assignment_opener)
     _validate_role_namespace(config)
     actor = _require_director(config, environ, operator_recovery=operator_recovery)
     owner_runner = _tmux_runner(config, runner)
@@ -1010,6 +1043,15 @@ def presentation_action(
             )
         return state
     if action == "recover":
+        requested = _role_by_name(config, role_name or "")
+        if requested is not None and requested.role in absent:
+            # Only the role being recovered, and before anything is prepared
+            # or started.
+            refusal = absent_role_refusal(
+                config, requested, opener=assignment_opener, runner=owner_runner, proc_root=proc_root,
+            )
+            if refusal:
+                raise SystemExit(refusal)
         # Recovery is a new worker launch entry. Reuse the launcher's desktop
         # readiness validation and its prepared per-role environment before a
         # start/resume attempt; presentation must not invent a parallel setup
@@ -1038,6 +1080,18 @@ def presentation_action(
         )
         if result != 0:
             raise SystemExit(f"switchyard: recovery failed for {role.role} (exit {result})")
+        if role.role in absent:
+            # Attached to the worker that registered, never to a name the
+            # projection guessed (SYRD-69): its own new registration first.
+            role = await_recovered_registration(
+                prepared_config, role, opener=assignment_opener, runner=prepared_owner_runner,
+                proc_root=proc_root, timeout=registration_timeout, sleep=sleep, monotonic=monotonic,
+            )
+            prepared_config = team_launcher.replace(
+                prepared_config,
+                roles=[role if other.role == role.role else other for other in prepared_config.roles],
+            )
+            prepared_owner_runner = _tmux_runner(prepared_config, runner)
         return _recover_role_display(
             prepared_config, role, config_path=config_path, state_path=state_path, actor=actor,
             runner=prepared_owner_runner, file_runner=runner, monotonic=monotonic, sleep=sleep,

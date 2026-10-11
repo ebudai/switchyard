@@ -597,9 +597,11 @@ def test_a_live_worker_the_declaration_disowns_is_named_not_reattached() -> None
     check("Director has to correct the declared runtime" in message, f"and who can fix it: {message}")
     # app's declared pane is not live, so there is nothing verified to say about it.
     check("app:" not in message, f"an unverifiable role is not guessed at: {message}")
-    # Exactly the two declared targets were probed -- exact-match, nothing else run.
-    check(sorted(c[-2] for c in calls) == [f"={PROJECT}-app:0.0", f"={PROJECT}-director:0.0"],
-          f"only the declared targets, exactly: {calls}")
+    # Exactly the recovered role's declared target was probed -- exact-match,
+    # nothing else run. App is absent too, but a recovery of the Director does
+    # not depend on it, so its pane is not read (SYRD-580).
+    check([c[-2] for c in calls] == [f"={PROJECT}-director:0.0"],
+          f"only the declared target, exactly: {calls}")
     check(all(c[:2] == ["tmux", "display-message"] for c in calls), f"and only probes: {calls}")
 
 

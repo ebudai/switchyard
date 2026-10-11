@@ -599,10 +599,10 @@ def test_one_prompt_per_unresolved_episode_on_every_board_shape() -> None:
                   f"{shape}: after a continuation, the next unresolved turn inside the grace is prompted")
 
             definitions[shape] = (
-                sql("SELECT md5(pg_get_functiondef('ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval)'::regprocedure));"),
+                sql("SELECT md5(pg_get_functiondef('ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval, jsonb)'::regprocedure));"),
                 sql("SELECT coalesce(string_agg(a.grantee::regrole::text || ':' || a.privilege_type, ',' ORDER BY 1), '') "
                     "FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = "
-                    "'ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval)'::regprocedure;"),
+                    "'ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval, jsonb)'::regprocedure;"),
             )
     check(len(set(definitions.values())) == 1,
           f"schema.sql, every migration, and an upgrade end with the same function and the same grants: {definitions}")

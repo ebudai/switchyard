@@ -227,13 +227,36 @@ class IdleNudges:
                 self.logger.warning(
                     "Failed to consume continuation lease for %s: %s", role, exc
                 )
+        # Each owner's own turn as its CLI hook recorded it -- state, when
+        # written, when its turn started -- so a prompted owner who is working
+        # is not reported as silent (SYRD-584). Raw hook facts only: nothing
+        # the listener observed is folded in, so a background child left
+        # running (SYRD-583) or a moving pane is not a turn. A role with no
+        # hook state is left out, and with no gate the map is empty: "cannot
+        # tell", and the board times the grace from the prompt's delivery.
+        owner_turns: dict[str, dict[str, str | None]] = {}
+        store = getattr(getattr(self._activity_gate(), "__self__", None), "state_store", None)
+        for role, target in sorted(self._role_targets().items()) if store is not None else ():
+            try:
+                state = store.read(target)
+            except Exception as exc:
+                self.logger.warning("Failed to read %s's turn from its hook state: %s", role, exc)
+                continue
+            if state is not None:
+                started = state.turn_started_at
+                owner_turns[role] = {
+                    "state": state.state,
+                    "updated_at": datetime.fromtimestamp(state.updated_at, timezone.utc).isoformat(),
+                    "turn_started_at": None if started is None else datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                }
         try:
             result = conn.execute(
                 "SELECT ticket_board.notify_unresolved_turn_end("
-                "%s::jsonb, clock_timestamp(), %s::interval)",
+                "%s::jsonb, clock_timestamp(), %s::interval, %s::jsonb)",
                 (
                     json.dumps(idle_since, sort_keys=True),
                     f"{self.unresolved_turn_grace_seconds} seconds",
+                    json.dumps(owner_turns, sort_keys=True),
                 ),
             )
             row = result.fetchone()

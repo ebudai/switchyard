@@ -86,7 +86,7 @@ def main() -> int:
         t.psql(admin, MIGRATION)
         t.psql(
             admin,
-            f"GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval) TO {LISTENER};"
+            f"GRANT EXECUTE ON FUNCTION ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval, jsonb) TO {LISTENER};"
             f"GRANT EXECUTE ON FUNCTION ticket_board.consume_turn_continuation(text, text) TO {LISTENER};"
             f"GRANT SELECT ON ticket_board.turn_continuation_lease TO {LISTENER};",
         )

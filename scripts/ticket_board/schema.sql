@@ -12599,13 +12599,19 @@ ALTER TABLE ticket_board.ticket_notification_queue
 -- to depend on that reasoning.
 
 
+DROP FUNCTION IF EXISTS ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval);
 CREATE OR REPLACE FUNCTION ticket_board.notify_unresolved_turn_end(
     p_turn_by_role jsonb,
     p_now timestamptz,
     -- How long the owner has to answer their own prompt before the Director is
     -- told. Staged recovery: one unresolved turn is one nudge to the person who
     -- can fix it, and an escalation only if that does not work (SYRD-203).
-    p_grace interval DEFAULT interval '10 minutes'
+    p_grace interval DEFAULT interval '10 minutes',
+    -- The owners' own turns, as their CLI hooks recorded them:
+    -- {role: {state, updated_at, turn_started_at}} (SYRD-584). NULL, or a role
+    -- missing from it, is "cannot tell", and the grace then runs from the
+    -- prompt's delivery alone.
+    p_owner_turns jsonb DEFAULT NULL
 )
 RETURNS integer
 LANGUAGE plpgsql
@@ -12619,6 +12625,10 @@ DECLARE
     identity text;
     escalate record;
     owner_reported boolean;
+    owner_turn jsonb;
+    turn_started timestamptz;
+    owner_idle_at timestamptz;
+    grace_from timestamptz;
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('notify_unresolved_turn_end');
     -- An empty map means no turn ended on this pass. That skips the prompting
@@ -12821,6 +12831,21 @@ BEGIN
             ticket_board.transition_target_role(t.state, t.assignee) AS owner_role,
             prompted.repair_key,
             prompted.prompted_at,
+            -- When the prompt actually reached the owner (SYRD-584). A prompt
+            -- held behind a menu, a busy pane or a composer was not an answer
+            -- the owner could give, so its grace cannot have started.
+            (SELECT min(sent.ts)
+             FROM ticket_board.notification_trace sent
+             WHERE sent.event IN ('send', 'send_unconfirmed')
+               AND sent.ts >= prompted.prompted_at
+               AND sent.notification_id IN (
+                   SELECT queued.notification_id
+                   FROM ticket_board.notification_trace queued
+                   WHERE queued.ticket_id = prompted.id
+                     AND queued.kind = 'unresolved_turn_repair'
+                     AND queued.event = 'enqueue'
+                     AND queued.detail ->> 'dedupe_key' = prompted.repair_key
+               )) AS delivered_at,
             EXISTS (
                 SELECT 1 FROM ticket_board.ticket_notification_queue q
                 WHERE q.dedupe_key = prompted.repair_key
@@ -12848,9 +12873,33 @@ BEGIN
           AND prompted.prompted_at >= ns.current_assignment_at
         ORDER BY prompted.id
     LOOP
-        CONTINUE WHEN NOT (
-            escalate.undeliverable OR escalate.prompted_at <= p_now - p_grace
-        );
+        -- SYRD-584: the grace is the owner's time to answer a prompt they
+        -- have, so once the prompt is delivered it runs from the delivery, not
+        -- the enqueue -- on Otto a prompt held behind a CLI menu had used most
+        -- of its grace before it arrived. A prompt still waiting runs from its
+        -- enqueue as before: a hold that outlasts the grace is still news. And
+        -- the grace is the owner's time NOT working on it: a turn the owner
+        -- started after the prompt cancels this wave while it runs, and once
+        -- it ends unresolved the grace runs again from that end. Turns are read
+        -- from the owner's CLI hooks alone, so a background child left running
+        -- holds nothing here. An undeliverable prompt is still reported at once.
+        IF NOT escalate.undeliverable THEN
+            grace_from := coalesce(escalate.delivered_at, escalate.prompted_at);
+            owner_turn := p_owner_turns -> escalate.owner_role;
+            BEGIN
+                turn_started := (owner_turn ->> 'turn_started_at')::timestamptz;
+                owner_idle_at := (owner_turn ->> 'updated_at')::timestamptz;
+            EXCEPTION WHEN others THEN
+                -- An instant nobody can read is "cannot tell", not a turn.
+                turn_started := NULL;
+                owner_idle_at := NULL;
+            END;
+            IF turn_started >= escalate.prompted_at THEN
+                CONTINUE WHEN owner_turn ->> 'state' IS DISTINCT FROM 'idle';
+                grace_from := greatest(grace_from, owner_idle_at);
+            END IF;
+            CONTINUE WHEN grace_from > p_now - p_grace;
+        END IF;
         identity := replace(escalate.repair_key, 'repair:', '');
         -- Not at all if the Director has already been told about this
         -- ticket since the owner was prompted -- whether that telling is still
@@ -12894,6 +12943,8 @@ BEGIN
                 'target_role', 'director',
                 'undeliverable', escalate.undeliverable,
                 'prompted_at', escalate.prompted_at,
+                'delivered_at', escalate.delivered_at,
+                'grace_from', CASE WHEN escalate.undeliverable THEN NULL ELSE grace_from END,
                 'message', format(
                     '%s is still unresolved after %s was prompted.',
                     escalate.id, escalate.owner_role

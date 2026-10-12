@@ -466,7 +466,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="end a wait on another board's work, explicitly and with why (SYRD-270)",
     )
     release_external.add_argument("ticket_id")
-    release_external.add_argument("--ref", required=True, help="the external blocker, as project:PREFIX-N")
+    release_external.add_argument("--ref", required=True, help="the external blocker, as project:PREFIX-N or operator:<name>")
     add_free_text_argument(release_external, "--reason", required=True, help="what happened that ends the wait")
     release_external.add_argument(
         "--commit",
@@ -531,8 +531,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         required=True,
         help=(
-            "a ticket on this board (PREFIX-N), or work on another board as project:PREFIX-N; "
-            "an external blocker never resolves by itself -- see release-external-blocker"
+            "a ticket on this board (PREFIX-N), work on another board as project:PREFIX-N, or a person as "
+            "operator:<name>; those two never resolve by themselves and stay until release-external-blocker"
         ),
     )
     add_free_text_argument(blockers, "--blocked-reason", required=True)

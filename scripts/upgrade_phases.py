@@ -472,7 +472,34 @@ def _upgrade_identities_and_accounts(
         launcher.record_upgrade_phase(
             config, config_path=config_path, phase="accounts", state="done", dry_run=dry_run
         )
-        if not cutover.is_complete:
+        if not cutover.is_complete and not launcher.running_role_identities(config, runner=runner):
+            # The transaction restarts every role under its own account and
+            # proves each one can write as itself, so it would start a tenant
+            # that was stopped -- workers that can claim work -- as a side effect
+            # of an upgrade. An upgrade leaves a stopped tenant stopped; starting
+            # it is the operator's explicit step (SYRD-577).
+            print_func(
+                f"switchyard: {config.project}'s roles still have to move onto their own accounts, and that "
+                "transaction restarts every role and proves each one can write as itself. No role of "
+                f"{config.project}'s is running, and an upgrade does not start a tenant that was stopped, so "
+                f"it was not run{' (dry run)' if dry_run else ''}. Start the tenant explicitly when it may take "
+                f"work -- `switchyard start {config.project}` -- then rerun `switchyard upgrade {config.project}`."
+            )
+            launcher.record_upgrade_phase(
+                config, config_path=config_path, phase="identities", state="pending", dry_run=dry_run
+            )
+            if not dry_run:
+                for line in launcher.upgrade_phase_report(
+                    config,
+                    config_path=config_path,
+                    cutover=cutover,
+                    journal=launcher.read_upgrade_journal(config, config_path=config_path, trusted=True),
+                    desktop_policy=desktop_choice,
+                    dry_run=dry_run,
+                ):
+                    print_func(line)
+                return 1
+        elif not cutover.is_complete:
             # The whole transaction: workers, trees, configuration, installed
             # units, services, and a real write from each role. Nothing about
             # the director gates it -- the director's own write comes after,

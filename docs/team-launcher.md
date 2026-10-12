@@ -1359,6 +1359,30 @@ preserves the recorded values. Running upgrade again after deployment reports
 the release unchanged. Panes still need a separate restart after a release
 update to pick up hook installer, hook binary, or pane launcher changes.
 
+**An upgrade and a release deploy leave a tenant as they found it.** Neither
+starts a role pane, a pull claimant, notification delivery, or a presentation
+window, and neither replaces or duplicates a window that was open.
+`switchyard deploy-release <project> --commit <sha>` (the catalogued
+`deploy-release`) reads the board unit and the listener first and says whether
+the tenant began active, suspended or partly running:
+
+- The listener comes back afterwards only if it was running.
+- A board that was stopped serves only for the deploy's health check and the
+  close, which re-proves the release against what the running board reports,
+  and is then stopped again.
+- A board already on the release is started only for the close.
+
+With the listener down and no pane up, nothing can assign work in that
+interval. Every exit, failures included, ends by saying whether the tenant
+ends as it began, or which component could not be put back; that is also a
+failure. So a suspended tenant is deployed and closed without `switchyard
+start`, which on MEFP had started the worker pool and let its queue assign work
+the user wanted held (SYRD-577).
+
+`switchyard upgrade` also does not run a pending per-role-account cutover for a
+tenant with no running role: that transaction restarts every role. It names
+`switchyard start <project>` as the explicit step instead.
+
 Resume records are preflighted against each CLI's local transcript store before
 the launcher passes them to the CLI. Claude uses the recorded
 `payload.transcript_path` when present, otherwise the cwd-scoped

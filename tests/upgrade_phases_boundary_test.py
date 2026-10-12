@@ -502,10 +502,12 @@ def test_an_error_reaches_the_caller() -> None:
 #: U5's launcher lookups and how many times each is read (measured on the SYRD-347 baseline: 23 reads of 19 names).
 U5_SEAMS = {"_tenant_owner_home": 1, "current_user_name": 1, "_plan_data_from_config": 1,
             "switchyard_privileged_provision_root": 1, "github_identity_status": 1, "github_identity_remedy": 1,
-            "write_pending_identities": 1, "record_upgrade_phase": 5, "_role_accounts_ready": 1,
+            "write_pending_identities": 1, "record_upgrade_phase": 6, "_role_accounts_ready": 1,
             "trusted_role_account_migration_path": 1, "publish_role_account_migration": 1, "read_upgrade_source": 1,
             "role_account_migration_instruction": 1, "cutover_role_identities_command": 1, "_staged_tooling_dir": 1,
-            "load_project_config": 1, "role_account_cutover": 1, "read_upgrade_journal": 1, "upgrade_phase_report": 1}
+            "load_project_config": 1, "role_account_cutover": 1, "read_upgrade_journal": 2, "upgrade_phase_report": 2,
+            # SYRD-577: a pending cutover is not run for a tenant with no running role.
+            "running_role_identities": 1}
 U5_LOCAL = [("scripts.ticket_board.project_provision", "owner_github_identity_commands"),
             ("scripts.ticket_board.project_provision", "owner_github_key_path"),
             ("scripts.ticket_board.project_provision", "publication_uses_github"),
@@ -525,8 +527,9 @@ class Identities:
     def __init__(self, *, euid: int = 0, github: object = True, resolved: bool = True, plan: dict | None = None,
                  script: int = 0, remedy: str = "", ready: bool = True, trusted_path: object = MIGRATION,
                  published: tuple = (MIGRATION, []), instruction: tuple = (MIGRATION, []), transaction: object = 0,
-                 error: Exception | None = None) -> None:
+                 error: Exception | None = None, running: tuple = ("director",)) -> None:
         self.euid, self.github, self.resolved = euid, github, resolved
+        self.running = running
         self.plan = plan if plan is not None else {"owner_github_key_name": "id_347", "owner_github_host_alias": "gh-347"}
         self.script, self.remedy, self.ready = script, remedy, ready
         self.trusted_path, self.published, self.instruction = trusted_path, published, instruction
@@ -567,6 +570,8 @@ class Identities:
             read_upgrade_journal=lambda config, *, config_path, trusted: L.append(("read-journal", config, trusted))
             or self.journal,
             upgrade_phase_report=lambda config, **kw: L.append(("report", config, kw)) or ["SYRD347 REPORT"],
+            # Not logged, so every case that has a running role keeps its baseline log (SYRD-577).
+            running_role_identities=lambda config, *, runner: {role: "acct" for role in self.running},
         )
 
     def provision(self) -> dict[str, object]:
@@ -621,6 +626,28 @@ def u5(ids: Identities, *, dry_run: bool = False, complete: bool = False, detail
             patched(publication_boundary, resolve_pinned_remote=ids.remote()), patched(os, geteuid=lambda: ids.euid):
         result = upgrade_phases._upgrade_identities_and_accounts(config, **kwargs)
     return result, said, config, report_config
+
+
+def test_u5_does_not_start_a_stopped_tenant_for_its_cutover() -> None:
+    """SYRD-577: the cutover restarts every role, so it is not run where none is running."""
+    ids = Identities(running=())
+    result, said, _config, _report = u5(ids)
+    kinds = ids.kinds()
+    check(result == 1 and "transaction" not in kinds, f"no running role: the cutover is not run and U5 stops: {result} {kinds}")
+    journals = [e[2] for e in ids.log if e[0] == "journal"]
+    check({"phase": "identities", "state": "pending", "dry_run": False} in [
+        {k: v for k, v in j.items() if k in ("phase", "state", "dry_run")} for j in journals],
+        f"the identities phase is recorded pending: {journals}")
+    check(any(f"switchyard start {PROJECT}" in line and "does not start a tenant that was stopped" in line for line in said)
+          and "SYRD347 REPORT" in said, f"and the operator is told the explicit step, with the phase report: {said}")
+    ids = Identities(running=())
+    result, said, _config, _report = u5(ids, dry_run=True)
+    check(type(result).__name__ == "UpgradeIdentitiesDone" and "transaction" not in ids.kinds()
+          and any("(dry run)" in line for line in said),
+          f"a dry run says so and goes on to report the rest: {type(result).__name__} {ids.kinds()}")
+    ids = Identities(running=("director",))
+    result, _said, _config, _report = u5(ids)
+    check("transaction" in ids.kinds(), "with a role running, the cutover runs as before")
 
 
 def test_u5_reads_its_lookups_through_the_launcher_and_keeps_its_imports_local() -> None:

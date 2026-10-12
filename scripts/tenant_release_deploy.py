@@ -106,9 +106,62 @@ def switchyard_deploy_release_command(
             f"{config.project}'s release resolves to {status.target_sha or 'nothing'}, not {commit}"
             + (f": {status.resolve_error}" if status.resolve_error else "")
         )
+    # Where the tenant was before anything here touched it, so it ends the same
+    # way: a suspended tenant stays suspended and a running one keeps running.
+    # Deploying is not starting -- on MEFP the operator started the whole tenant
+    # only so the close could reach a board, and its pull queue began assigning
+    # work the user wanted held (SYRD-577). Panes and windows are never touched.
+    board_was_active = launcher.board_system_unit_is_active(config, runner=runner)
+    listener_was = launcher.capture_listener_state(config, runner=runner, config_path=config_path)
+    listener_was_active = listener_was == "active"
+    if board_was_active and listener_was_active:
+        began = "active (its board and listener were running)"
+    elif not board_was_active and not listener_was_active:
+        began = f"suspended (its board was not running, and its listener was {listener_was or 'not running'})"
+    else:
+        began = f"partly running (board {'active' if board_was_active else 'inactive'}, listener {listener_was})"
+    print_func(
+        f"switchyard: {config.project} began {began}; this deploy leaves it that way and starts no pane, "
+        "window or notification delivery."
+    )
+
+    def board_back() -> list[str]:
+        """Put a board this command started back down, and say if it would not go."""
+        if board_was_active:
+            return []
+        if not launcher.board_system_unit_is_active(config, runner=runner):
+            return []
+        return launcher._board_system_unit_action(config, "stop", runner=runner)
+
+    def ended(code: int, leftovers: list[str]) -> int:
+        """The lifecycle report every exit after this point ends with."""
+        if leftovers:
+            for problem in leftovers:
+                print_func(f"switchyard: not restored: {problem}")
+            print_func(
+                f"switchyard: {config.project} did NOT end as it began ({began}); the components above "
+                "are not in their prior state and need an operator."
+            )
+            return code or 1
+        print_func(f"switchyard: {config.project} ends as it began: {began}.")
+        return code
+
     if status.unchanged:
         print_func(f"switchyard: {config.project}'s board already serves {commit}; closing the phase against it.")
-        return launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+        if not board_was_active:
+            # The close re-proves the release against what the running board
+            # reports, so a stopped board has to answer for that long -- with the
+            # listener still down and no pane up, nothing can assign work in the
+            # meantime -- and is then put back down.
+            print_func(
+                f"switchyard: starting {config.project}'s board only for the close; it is stopped again afterwards."
+            )
+            started_board = launcher._board_system_unit_action(config, "start", runner=runner)
+            if started_board:
+                return ended(refuse(f"the board could not be started for the close: {'; '.join(started_board)}"),
+                             board_back())
+        code = launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+        return ended(code, board_back())
     if status.provisioned_system_unit is None:
         return refuse(launcher.release_update_blocked(status) or f"{config.project} has no provisioned board units")
     if not status.provisioned_system_unit.is_relative_to(launcher.switchyard_privileged_provision_root()):
@@ -128,6 +181,8 @@ def switchyard_deploy_release_command(
         return 1
 
     def listener_back() -> str:
+        if not listener_was_active:
+            return f"the notify listener stays {listener_was or 'inactive'}, as it was"
         problems = launcher.start_owner_listener(config, runner=runner, config_path=config_path)
         return "; ".join(problems) if problems else "the notify listener is running again"
 
@@ -139,15 +194,20 @@ def switchyard_deploy_release_command(
     # only after it.
     stopped = launcher.stop_owner_listener(config, runner=runner, config_path=config_path)
     if stopped:
-        return blocked("; ".join(stopped), "nothing was deployed; the listener's state is as that says")
+        return ended(blocked("; ".join(stopped), "nothing was deployed; the listener's state is as that says"),
+                     stopped if listener_was_active else [])
     units = runner(["sh", "-c", launcher.tenant_release_unit_install_command(status, config.project)],
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if units.returncode != 0:
-        return blocked(
+        listener_said = listener_back()
+        return ended(blocked(
             f"installing {config.project}'s board units failed (exit {units.returncode}): "
             f"{(str(units.stderr or '').strip() or 'no output')[:300]}",
-            f"nothing was deployed; {listener_back()}",
-        )
+            f"nothing was deployed; {listener_said}",
+        ), _listener_leftover(listener_said) + board_back())
+    # The tenant's own deploy-restart restarts the board -- and so starts one
+    # that was stopped -- because its health gates and live-build check need a
+    # serving board. A board that was stopped is put back down after the close.
     problems, _restarted = launcher.deploy_release_in_transaction(
         config, config_path=config_path, source_repo=source, commit_git_dir=pinned.get("commit_git_dir") or None,
         deploy_ref=commit, runner=runner, print_func=print_func,
@@ -155,17 +215,33 @@ def switchyard_deploy_release_command(
     if problems:
         now = launcher._current_tenant_release(status.board_root)[1]
         if now == before:
-            return blocked("; ".join(problems), f"the board still names {before or 'no release'}; {listener_back()}")
-        return blocked(
+            listener_said = listener_back()
+            return ended(
+                blocked("; ".join(problems), f"the board still names {before or 'no release'}; {listener_said}"),
+                _listener_leftover(listener_said) + board_back(),
+            )
+        return ended(blocked(
             "; ".join(problems),
             f"the board now names {now or 'no release'}, not the {before or 'no release'} it had, so the "
             "listener was left stopped: bring it back only once release-status shows a board it can read",
-        )
-    started = launcher.start_owner_listener(config, runner=runner, config_path=config_path)
-    if started:
-        return blocked("; ".join(started), f"the board was deployed at {commit} but its listener is not running")
+        ), (["the notify listener was running before and was left stopped"] if listener_was_active else [])
+           + board_back())
+    if listener_was_active:
+        started = launcher.start_owner_listener(config, runner=runner, config_path=config_path)
+        if started:
+            return ended(
+                blocked("; ".join(started), f"the board was deployed at {commit} but its listener is not running"),
+                started + board_back(),
+            )
     print_func(
         f"switchyard: {config.project}'s board was deployed at {commit}; closing the phase only against what "
         "the running board reports. Panes are not restarted."
     )
-    return launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+    code = launcher.close_release_phase(config, config_path=config_path, opener=opener, print_func=closing)
+    return ended(code, board_back())
+
+
+def _listener_leftover(said: str) -> list[str]:
+    """A listener that was running and did not come back, as a lifecycle leftover."""
+    benign = ("the notify listener is running again", "the notify listener stays")
+    return [] if said.startswith(benign) else [f"the notify listener: {said}"]

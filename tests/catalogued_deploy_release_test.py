@@ -83,6 +83,10 @@ class Host:
         result = lambda code, out="": SimpleNamespace(returncode=code, stdout=out, stderr="" if code == 0 else "simulated failure")
         if "systemctl --user is-active" in text:
             return result(0 if self.listener == "active" else 3, self.listener)
+        if text.startswith("systemctl is-active ") and text.endswith("-ticket-board.service"):
+            # SYRD-577: the board's state is read first, so the deploy can leave it
+            # as it was; these scenarios are a running tenant's.
+            return result(0, "active")
         if "systemctl --user stop" in text:
             self.steps.append("stop listener")
             if self.outcome["stop"] == "ok":

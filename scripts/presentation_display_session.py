@@ -366,6 +366,18 @@ def _configure_display_session(
         )
         if detach_proc.returncode != 0:
             raise RuntimeError(f"tmux could not configure recovery for {role_name} (exit {detach_proc.returncode})")
+        # The slot hands the wheel to this nested client, and the role's own
+        # session decides what it does: forward it to a program that asked for
+        # the mouse, or enter copy mode over the role's scrollback. With mouse
+        # off it does neither. A detached start sets it, but a session made by
+        # `attach-role` or an older release inherits the server's default, which
+        # is off -- live syrd Audit did -- so the slot sets it each time it
+        # shows a role (SYRD-389).
+        mouse_proc = runner(
+            ["tmux", "set-option", "-t", _exact_tmux_target(f"{role.tmux_session}:"), "mouse", "on"]
+        )
+        if mouse_proc.returncode != 0:
+            raise RuntimeError(f"tmux could not turn on the mouse for {role_name} (exit {mouse_proc.returncode})")
     observer = bool(
         role is not None
         and status.get("live")

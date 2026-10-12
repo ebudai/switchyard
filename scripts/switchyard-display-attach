@@ -60,9 +60,10 @@ DISPLAY_KEY_TABLE = "switchyard-display"
 
 #: What makes an attached client input-only. Kept beside the attach it guards.
 #:
-#: `mouse on` is here so the bindings below can see a click. It does not open
-#: anything up: mouse events are looked up in the key table like any other key,
-#: and this table has one mouse binding, which selects a pane.
+#: `mouse on` is here so the bindings below can see a click and the wheel. It
+#: does not open anything up: mouse events are looked up in the key table like
+#: any other key, and this table's mouse bindings select a pane or hand the
+#: wheel to it.
 LOCK_OPTIONS = (
     ("prefix", "None"),
     ("prefix2", "None"),
@@ -91,6 +92,22 @@ FOCUS_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("M-Down", ("select-pane", "-D")),
     ("M-Left", ("select-pane", "-L")),
     ("M-Right", ("select-pane", "-R")),
+)
+
+#: The wheel, handed to the pane as the mouse event it is (SYRD-389).
+#:
+#: The pane is a nested client of the role's own session, and it asks for the
+#: mouse exactly when that session's mouse is on. tmux 3.7c already passes an
+#: unbound wheel event to a pane that asked, so what stopped live syrd Audit's
+#: wheel was that session's inherited `mouse off`, which configuring the slot
+#: now repairs. This states the forwarding in the table instead of leaving it to
+#: that fallback. `send-keys -M` passes only the event that triggered it, to the
+#: pane under the pointer: input to the pane, like a keystroke. tmux's own root
+#: binding would enter copy mode in this outer session for a pane that did not
+#: ask, and copy mode carries key tables of its own; this table never does.
+WHEEL_BINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("WheelUpPane", ("send-keys", "-M")),
+    ("WheelDownPane", ("send-keys", "-M")),
 )
 GRANT_ROOT = Path("/usr/local/lib/switchyard")
 GRANT_NAME = "control-grant.json"
@@ -186,7 +203,7 @@ def lock_argv(session: str) -> list[str]:
     first_key, first_command = FOCUS_BINDINGS[0]
     part(["bind-key", "-T", DISPLAY_KEY_TABLE, first_key, *first_command])
     part(["unbind-key", "-a", "-T", DISPLAY_KEY_TABLE])
-    for key, command in FOCUS_BINDINGS:
+    for key, command in (*FOCUS_BINDINGS, *WHEEL_BINDINGS):
         part(["bind-key", "-T", DISPLAY_KEY_TABLE, key, *command])
     return argv
 

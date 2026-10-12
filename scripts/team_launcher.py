@@ -841,6 +841,7 @@ from scripts.presentation_windows import (
     close_presentation_window,
     desktop_presentation_windows,
     presentation_layout_markers,
+    presentation_terminal_windows,
     presentation_window_processes,
     PresentationWindowProcess,
     _proc_cmdline,

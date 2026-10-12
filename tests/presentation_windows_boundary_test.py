@@ -3,14 +3,15 @@
 
 Finding a project's presentation windows among running processes and closing
 them moved into `scripts/presentation_windows.py` unchanged -- including BOTH
-definitions of `presentation_window_processes`, in their original order. This
-pins what makes that safe:
+definitions of `presentation_window_processes`, in their original order. SYRD-322
+then gave the earlier one, the SYRD-43 root scan, its own name. This pins what
+makes that safe:
 
 - **No cycle.** The module imports nothing of Switchyard's at its top.
-- **The same definition binds (rule 12).** The name is defined twice, and the
-  later definition is the one the launcher's name, the module's name and every
-  caller reach -- exactly as in the launcher, where the later one shadowed the
-  earlier since SYRD-193.
+- **Each scan binds under its own name (rule 12).** `presentation_window_processes`
+  is the SYRD-193 close scan, which the launcher's name, the module's name and
+  every caller reach as before; `presentation_terminal_windows` is the SYRD-43
+  root scan, and no name is defined twice.
 - Every exported name is the very same object whichever module is imported
   first, and every reader goes through the launcher (rule 21).
 - **Seams (rule 24).** The suites rebind `close_desktop_presentation` on the
@@ -19,10 +20,10 @@ pins what makes that safe:
 - **What it does is unchanged:** whole-argument matching of the layout path in
   either spelling, Konsole only, the owner's uid; SIGTERM to exactly those pids;
   what a close could not do is reported.
-- **A baseline defect is pinned, not fixed.** `unsafe_root_presentation_windows`
-  was written against the earlier definition and reaches the later one, so a
-  matching window makes it raise. SYRD-321 reported it; a fix must change the
-  check below on purpose.
+- **The baseline defect is fixed on purpose.** `unsafe_root_presentation_windows`
+  was written against the earlier definition and reached the later one, so a
+  matching window made it raise. SYRD-321 reported it and pinned it here;
+  SYRD-322 changed that check, and the root check now finds the window.
 
 No real process is read or signalled: every scan is given a `/proc` tree this
 test builds, and the signaller is a recorder.
@@ -48,7 +49,8 @@ CHECKS = 0
 
 EXPORTED = (
     'PRESENTATION_PROGRAM_NAMES', 'close_desktop_presentation', 'close_presentation_window',
-    'desktop_presentation_windows', 'presentation_layout_markers', 'presentation_window_processes',
+    'desktop_presentation_windows', 'presentation_layout_markers', 'presentation_terminal_windows',
+    'presentation_window_processes',
     'PresentationWindowProcess', '_proc_cmdline', 'unsafe_presentation_report', 'unsafe_root_presentation_windows',
     'UnsafePresentationWindow',
 )
@@ -62,11 +64,15 @@ READ_ELSEWHERE = {
 #: SYRD-344 moved launch_project's P9, holding one scan and one report, to
 #: launch_phases, which calls them through the launcher too; SYRD-348 moved the
 #: upgrade's U6, holding one of each, to upgrade_phases, which does the same.
+#: SYRD-405 moved the one close_presentation_window call to tenant_suspension, and
+#: the one close_desktop_presentation call is command_crossing's; both call
+#: through the launcher, and this list had not followed them.
 LAUNCHER_CALLS = {"unsafe_root_presentation_windows": 5, "unsafe_presentation_report": 4,
                   "close_presentation_window": 1, "close_desktop_presentation": 1}
-MOVED_CALLERS = ("presentation_window_replacement.py", "launch_phases.py", "upgrade_phases.py")
+MOVED_CALLERS = ("presentation_window_replacement.py", "launch_phases.py", "upgrade_phases.py",
+                 "tenant_suspension.py", "command_crossing.py")
 PATCHED_SEAMS = ("presentation_window_processes", "desktop_presentation_windows", "close_desktop_presentation",
-                 "unsafe_root_presentation_windows")
+                 "unsafe_root_presentation_windows", "presentation_terminal_windows")
 
 
 def check(condition: bool, detail: str) -> None:
@@ -137,23 +143,29 @@ def test_either_import_order_gives_one_set_of_objects() -> None:
               f"{' then '.join(order)}: every moved name is the launcher's too: {result.stdout}{result.stderr[-600:]}")
 
 
-def test_a_binding_is_the_later_definition_as_in_the_launcher() -> None:
+def test_a_binding_is_each_scan_under_its_own_name() -> None:
     # Named to run first: the binding is checked before any scan could fail on it.
     from scripts import presentation_windows, team_launcher
 
     tree = ast.parse((ROOT / "scripts" / "presentation_windows.py").read_text(encoding="utf-8"))
-    copies = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "presentation_window_processes"]
-    check(len(copies) == 2 and copies[0].lineno < copies[1].lineno, "both definitions moved, in their order")
+    names = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+    check(names.count("presentation_window_processes") == 1 and names.count("presentation_terminal_windows") == 1
+          and len(names) == len(set(names)), f"each scan is defined once, and nothing twice: {names}")
     bound = team_launcher.presentation_window_processes
-    check(bound is presentation_windows.presentation_window_processes
-          and bound.__code__.co_firstlineno == copies[1].lineno,
-          "the launcher's name and the module's are the later definition")
+    check(bound is presentation_windows.presentation_window_processes,
+          "the launcher's name and the module's are the same close scan")
     check(bound.__annotations__["return"] == "list[PresentationWindowProcess]"
           and inspect.signature(bound).parameters["config_path"].default is inspect.Parameter.empty,
           "the SYRD-193 scan: PresentationWindowProcess results, config_path required")
-    launcher_defs = [n for n in ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8")).body
-                     if isinstance(n, ast.FunctionDef) and n.name == "presentation_window_processes"]
-    check(launcher_defs == [], "and no copy is left in the launcher to re-bind the name after its import")
+    terminals = team_launcher.presentation_terminal_windows
+    check(terminals is presentation_windows.presentation_terminal_windows
+          and terminals.__annotations__["return"] == "list[UnsafePresentationWindow]"
+          and inspect.signature(terminals).parameters["config_path"].default is None,
+          "the SYRD-43 scan: UnsafePresentationWindow results, config_path optional")
+    launcher_tree = ast.parse((ROOT / "scripts" / "team_launcher.py").read_text(encoding="utf-8"))
+    launcher_defs = [n for n in launcher_tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name in ("presentation_window_processes", "presentation_terminal_windows")]
+    check(launcher_defs == [], "and no copy is left in the launcher to re-bind a name after its import")
 
 
 def test_every_reader_reaches_its_names_through_the_launcher() -> None:
@@ -277,7 +289,7 @@ def test_the_desktop_side_closes_every_window_it_finds() -> None:
     check(rebound == 0 and len(sent) == 2, "a rebound desktop_presentation_windows is what the close asks")
 
 
-def test_the_root_window_check_behaves_as_on_the_baseline() -> None:
+def test_the_root_window_check_finds_a_root_window() -> None:
     from scripts import presentation_windows, team_launcher
 
     with tempfile.TemporaryDirectory(prefix="syrd321.") as raw:
@@ -286,21 +298,22 @@ def test_the_root_window_check_behaves_as_on_the_baseline() -> None:
         proc = root / "proc"
         proc.mkdir()
         _process(proc, 400, ["konsole", "--layout", str(desk)])
-        config = SimpleNamespace(project="p321")
+        (proc / "400" / "status").write_text("Name:\tkonsole\nUid:\t0\t0\t0\t0\n", encoding="utf-8")
+        config = SimpleNamespace(project="p321", project_name="", layout=None)
         with patched(team_launcher, **paths):
             empty = presentation_windows.unsafe_root_presentation_windows(
                 config, config_path=root / "p321.json", proc_root=root / "empty")
             try:
-                presentation_windows.unsafe_root_presentation_windows(config, config_path=root / "p321.json",
-                                                                      proc_root=proc)
+                found = presentation_windows.unsafe_root_presentation_windows(
+                    config, config_path=root / "p321.json", proc_root=proc)
                 raised = ""
             except AttributeError as exc:
-                raised = str(exc)
+                found, raised = [], str(exc)
     check(empty == [], "no window, nothing unsafe")
-    # The SYRD-321 defect, as on the baseline: the check reaches the later
-    # definition, whose results have no `uid`. Fixing it must change this line.
-    check(raised == "'PresentationWindowProcess' object has no attribute 'uid'",
-          f"a matching window makes the check raise, exactly as on the baseline: {raised!r}")
+    # The SYRD-321 defect, fixed by SYRD-322: the check reached the later
+    # definition, whose results have no `uid`, and raised here.
+    check(raised == "" and [(w.pid, w.uid, w.user) for w in found] == [(400, 0, "root")],
+          f"a matching root window is found, not raised on: {raised!r} {found!r}")
     window = presentation_windows.UnsafePresentationWindow(pid=7, uid=0, user="root", command="konsole --layout x")
     report = presentation_windows.unsafe_presentation_report(SimpleNamespace(project="p321"), [window])
     check(report.splitlines()[1:] == ["  pid 7 (root): konsole --layout x",

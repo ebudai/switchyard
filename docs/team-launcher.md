@@ -524,7 +524,12 @@ stay up and `switchyard attach <project> <role>` reaches any of them.
 A window opened by an earlier release can still be running as root, and the
 tenant cannot signal it. `switchyard <project>`, `switchyard status` and
 `switchyard upgrade` look for one and refuse to report the project safely
-attached while it exists, naming the pids. `sudo switchyard replace-window
+attached while it exists, naming the pids. A terminal is the project's when one
+of its own arguments, compared whole, is the project's title, configured layout
+or config file, or names `<project>-presentation-layout.json`,
+`<project>-konsole-layout.json` or `<project>-team-layout.json` (what releases
+before this check opened), so a sibling tenant's window or one on a `.backup`
+copy is not counted. `sudo switchyard replace-window
 <project>` is the way off it: it stops those GUI processes and opens a
 replacement as the desktop account. It never touches a worker session -- losing
 a role's session loses that role's work, which is worse than the window -- and it

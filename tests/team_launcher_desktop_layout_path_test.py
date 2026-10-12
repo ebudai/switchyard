@@ -435,7 +435,7 @@ def test_a_privilege_dropping_wrapper_is_not_a_terminal() -> None:
         proc_root.mkdir()
         layout = str(tmp / f"{PROJECT}-presentation-layout.json")
         _privileged_launch(proc_root, layout)
-        windows = team_launcher.presentation_window_processes(
+        windows = team_launcher.presentation_terminal_windows(
             config, config_path=config_path, proc_root=proc_root
         )
         assert [(window.pid, window.uid) for window in windows] == [(901, 1000)], windows
@@ -454,7 +454,7 @@ def test_a_wrapper_whose_terminal_has_not_started_reports_no_window() -> None:
         layout = str(tmp / f"{PROJECT}-presentation-layout.json")
         _privileged_launch(proc_root, layout)
         (proc_root / "901" / "cmdline").unlink()
-        assert team_launcher.presentation_window_processes(
+        assert team_launcher.presentation_terminal_windows(
             config, config_path=config_path, proc_root=proc_root
         ) == []
         assert team_launcher.unsafe_root_presentation_windows(

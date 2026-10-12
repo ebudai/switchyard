@@ -8,25 +8,26 @@
 - **Closing them:** `close_presentation_window` and
   `close_desktop_presentation` terminate exactly those pids and report what
   they could not close.
-- **Root windows:** `unsafe_root_presentation_windows` and
-  `unsafe_presentation_report` are the SYRD-43 check that a window is running
-  as root (`UnsafePresentationWindow`).
+- **Root windows:** `presentation_terminal_windows` names every terminal
+  showing this project's panes, current or legacy, with the uid it runs as;
+  `unsafe_root_presentation_windows` and `unsafe_presentation_report` are the
+  SYRD-43 check that one of them is running as root (`UnsafePresentationWindow`).
 
-`presentation_window_processes` is defined TWICE here, as it was in the
-launcher: the SYRD-43 scan (`PRESENTATION_PROGRAM_NAMES`, `_proc_cmdline`,
-`presentation_layout_markers`) and, after it, the SYRD-193 scan. The later
-definition is the one the name binds to and the one every caller reaches;
-`unsafe_root_presentation_windows` still calls it with the earlier one's
-expectations (SYRD-321 records this). Both copies moved in their original
-order so that nothing about which one binds changed.
+The two scans answer different questions, and each has one data model. The
+close scan matches only the layout paths this release opens a window on, so a
+close never reaches a window it did not mean. The root scan also matches the
+layout names and title earlier releases used, because a root window is most
+likely to predate the repair. SYRD-193 had given its close scan the root
+scan's name, so the root check reached the close scan and raised on the first
+window it matched (SYRD-322).
 
 The process table root, the layout paths, the window title and the command
 name stay in `scripts/team_launcher.py` and are read there when a function
 runs. The suites patch `close_desktop_presentation` on the launcher, and every
 caller reaches the entry points there.
 
-Moved out of `scripts/team_launcher.py` unchanged (SYRD-321). `team_launcher`
-imports this module at its top and still exports every name callers read there.
+Moved out of `scripts/team_launcher.py` (SYRD-321). `team_launcher` imports
+this module at its top and still exports every name callers read there.
 This module never imports `team_launcher` at its top.
 """
 
@@ -46,7 +47,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class UnsafePresentationWindow:
-    """A presentation process running as root, which no role pane may do."""
+    """A terminal showing a project's panes, and the uid it runs as.
+
+    `presentation_terminal_windows` returns one for every such terminal; it is
+    unsafe when `uid` is 0, which no role pane may be.
+    """
 
     pid: int
     uid: int
@@ -66,7 +71,7 @@ def _proc_cmdline(proc_root: Path, pid: str) -> list[str]:
 
 
 def presentation_layout_markers(config: ProjectConfig, *, config_path: Path | None = None) -> list[str]:
-    """Argument fragments that identify a window as this project's presentation."""
+    """Argument values that identify a window as this project's presentation."""
     from scripts import team_launcher as launcher
 
     markers = [
@@ -99,14 +104,24 @@ def unsafe_root_presentation_windows(
 
     return [
         window
-        for window in launcher.presentation_window_processes(
+        for window in launcher.presentation_terminal_windows(
             config, config_path=config_path, proc_root=proc_root
         )
         if window.uid == 0
     ]
 
 
-def presentation_window_processes(
+def _argument_values(argv: Sequence[str]) -> list[str]:
+    """Each argument after the program, and the value of an `--option=value` one."""
+    values: list[str] = []
+    for part in argv[1:]:
+        values.append(part)
+        if "=" in part:
+            values.append(part.partition("=")[2])
+    return [value for value in values if value]
+
+
+def presentation_terminal_windows(
     config: ProjectConfig,
     *,
     config_path: Path | None = None,
@@ -120,11 +135,20 @@ def presentation_window_processes(
     it could not read leaves clients behind for a moment and no window at all
     (SYRD-65). The root subset of this is what `status` refuses to call
     attached (SYRD-43).
+
+    A window is this project's when an argument is one of its markers, whole,
+    or names one of its layout files: `<project>-presentation-layout.json` (this
+    release), `<project>-konsole-layout.json` (the configured template) or
+    `<project>-team-layout.json` (what releases before SYRD-43 opened, under
+    the project's title). Whole values, not text: `old-atlas`'s layout and a
+    `.backup` copy contain `atlas`'s names, and `replace-window atlas` kills
+    what this returns. Without a config path there is simply one marker fewer.
     """
     from scripts import team_launcher as launcher
 
     proc_root = proc_root or launcher.PROC_ROOT
-    markers = presentation_layout_markers(config, config_path=config_path)
+    markers = set(presentation_layout_markers(config, config_path=config_path))
+    layout_names = {f"{config.project}-{kind}-layout.json" for kind in ("presentation", "konsole", "team")}
     found: list[UnsafePresentationWindow] = []
     try:
         entries = sorted(path.name for path in proc_root.iterdir() if path.name.isdigit())
@@ -146,7 +170,9 @@ def presentation_window_processes(
         # account -- is scanned here on its own merits (SYRD-90).
         if launcher._command_name(argv[0]) not in PRESENTATION_PROGRAM_NAMES:
             continue
-        if not any(marker in part for part in argv for marker in markers):
+        if not any(
+            value in markers or Path(value).name in layout_names for value in _argument_values(argv)
+        ):
             continue
         try:
             user = pwd.getpwuid(uid).pw_name

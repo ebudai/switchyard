@@ -43,14 +43,18 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
     probe = conn.execute(
         "SELECT to_regprocedure('ticket_board.ticket_reminder_snooze(text,timestamptz)') IS NOT NULL AS snooze, "
         "to_regprocedure('ticket_board.ticket_size_review(text)') IS NOT NULL AS size_review, "
-        "to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS serial_queue"
+        "to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS serial_queue, "
+        "to_regprocedure('ticket_board.ticket_privileged_jobs(text)') IS NOT NULL AS privileged_jobs"
     ).fetchone()
     present = (dict(probe) if isinstance(probe, dict)
-               else {"snooze": probe[0], "size_review": probe[1], "serial_queue": probe[2]} if probe is not None else {})
+               else {"snooze": probe[0], "size_review": probe[1], "serial_queue": probe[2],
+                     "privileged_jobs": probe[3]} if probe is not None else {})
     snooze_sql = (
         "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())" if present.get("snooze") else "NULL::jsonb"
     )
     size_sql = "ticket_board.ticket_size_review(t.id)" if present.get("size_review") else "NULL::jsonb"
+    # SYRD-113: root's privileged jobs for the ticket; none on an older board.
+    jobs_sql = "ticket_board.ticket_privileged_jobs(t.id)" if present.get("privileged_jobs") else "'[]'::jsonb"
     # SYRD-568: each implementer's queue, read once per query. A board older
     # than the queue has none, and every ticket reads as not queued.
     queue_sql = (
@@ -235,6 +239,7 @@ SELECT
     COALESCE(notification_state.awaiting_role, '') AS awaiting_role,
     {snooze_sql} AS reminder_snooze,
     {size_sql} AS size_review,
+    {jobs_sql} AS privileged_jobs,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b

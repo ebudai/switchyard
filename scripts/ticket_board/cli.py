@@ -16,6 +16,7 @@ from .app import (
     POSTGRES_DSN_DEFAULT,
     TicketBoardApp,
 )
+from . import privileged_jobs
 from .commit_repos import commit_git_dir_env_for_project
 from .server import (
     DirectorNotifier,
@@ -104,6 +105,9 @@ def run_server(args: argparse.Namespace) -> int:
         else:
             unix_thread = threading.Thread(target=unix_server.serve_forever, name="ticket-board-unix-socket", daemon=True)
             unix_thread.start()
+    # SYRD-113: root's privileged jobs, recorded on their tickets by this
+    # service -- never by the listener, whose account every role shares.
+    privileged_jobs.start_reconciler(app)
     host, port = server.server_address[:2]
     url = f"http://{host}:{port}/"
     print(f"[ticket-board] backend: {app.store_backend}")

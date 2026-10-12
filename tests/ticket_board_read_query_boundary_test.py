@@ -76,10 +76,10 @@ def configured_workflow() -> dict[str, Any]:
 
 def test_legacy_and_configured_sql_bytes_and_parameters() -> None:
     # SYRD-537 added the reminder_snooze column, SYRD-541 size_review, SYRD-568 the serial_queue CTE and
-    # column; hashes measured from the new SQL.
+    # column, SYRD-113 privileged_jobs; hashes measured from the new SQL.
     expected = {
-        False: "93e769ffa69cd2f24c62055edabc5e41c0d7221f55a4796357f576850fba1bc0",
-        True: "7bc4595eb3790b1b04dd16463a327b95f05e0a603f23e6ad7b74a2a256783557",
+        False: "0e1aba6bca59dbd7e28198871d178cbe17ae6c8baffbe0eca1eb1584fc700cb4",
+        True: "4dd1f94ac58c35567c770551a05c8543ad37fe78b014d352d4f7cbf90a5dd299",
     }
     for workflow in (None, configured_workflow()):
         conn = ReadOnlyConnection(workflow)

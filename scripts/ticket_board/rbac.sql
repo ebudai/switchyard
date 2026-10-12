@@ -270,5 +270,15 @@ GRANT SELECT ON ticket_board.background_child_alerts TO ticket_board_service;
 REVOKE EXECUTE ON FUNCTION ticket_board.note_background_child(bigint, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.note_background_child(bigint, text, text) TO ticket_board_listener;
 
+-- SYRD-113: privileged jobs. Only the board service records one, and only its
+-- reconciler session may (record_privileged_job checks); the listener, whose
+-- account every role shares, gets nothing here.
+REVOKE ALL ON ticket_board.privileged_jobs FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.record_privileged_job(jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ticket_privileged_jobs(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.finished_privileged_jobs() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.record_privileged_job(jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_privileged_jobs(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.finished_privileged_jobs() TO ticket_board_service;
 
 COMMIT;

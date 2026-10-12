@@ -97,7 +97,9 @@ GOLDEN = {
     'pane: the legacy marker': {'result': True, 'type': 'bool', 'calls': []},
     'pane: a tmux command carrying it': {'result': False, 'type': 'bool', 'calls': []},
     'pane: another target': {'result': False, 'type': 'bool', 'calls': []},
-    'pane: a prefix of the target': {'result': True, 'type': 'bool', 'calls': []},
+    # SYRD-444 changed this one answer on purpose: the baseline matched the marker
+    # as a substring, so pane 0.10's process was pane 0.1's.
+    'pane: a prefix of the target': {'result': False, 'type': 'bool', 'calls': []},
     'pane: an unparsable command': {'result': True, 'type': 'bool', 'calls': []},
     'pane: an unparsable tmux command': {'result': False, 'type': 'bool', 'calls': []},
     'pane: blank commands': {'result': False, 'type': 'bool', 'calls': []},
@@ -544,8 +546,8 @@ def test_the_rules_hold_in_the_measured_record() -> None:
                                            "an unparsable tmux command", "blank commands", "no commands")]
           == [True, True, False, False, True, False, False, False],
           "a role has a pane process when a non-tmux command carries its pane marker, current or legacy")
-    check(result("pane: a prefix of the target") is True,
-          "the marker is matched as a substring, so a longer target that starts with it matches (the baseline's behaviour, kept)")
+    check(result("pane: a prefix of the target") is False,
+          "the marker is matched as a whole word, so a longer target that starts with it does not match (SYRD-444)")
     check(result("uid: the effective uid") == 4420 and result("uid: the default root rebound on the launcher") == 4421
           and result("uid: no such process") is None and result("uid: pid zero") is None and steps("uid: pid zero") == []
           and all(result(f"uid: {k}") == "THE FIXTURE DIRECTORY'S OWNER" for k in ("a short uid line", "an unreadable uid", "no status file"))

@@ -103,7 +103,8 @@ def test_each_cli_is_asked_with_the_flags_its_panes_use() -> None:
     ):
         command = team_launcher._model_validation_command(_role("r", cli, "m", model_arg=model_arg), workspace)
         assert command is not None
-        expected_flags = team_launcher.YOLO_ARGS_BY_CLI[cli]
+        # And the startup flags its pane starts with, from the same table (SYRD-547).
+        expected_flags = [*team_launcher.YOLO_ARGS_BY_CLI[cli], *team_launcher.STARTUP_ARGS_BY_CLI.get(cli, [])]
         assert command == [cli, model_arg, "m", *expected_flags, *expected_tail], command
 
     codex = team_launcher._model_validation_command(_role("r", "codex", "m"), workspace)

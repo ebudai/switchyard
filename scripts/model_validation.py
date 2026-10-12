@@ -4,7 +4,10 @@ This module covers:
 - **The probe.** `validate_role_models` asks each role's CLI, in a scratch
   workspace as the project owner, to make one tool call against a named file
   (`MODEL_VALIDATION_PROMPT`). A model that cannot does not pass.
-- **Failures.** They carry the evidence and a suggestion.
+- **Failures.** They carry the evidence and a suggestion. The probe carries
+  the effort and startup arguments the role's pane starts with, and a Hermes
+  probe's evidence includes the provider's error from the request dump its
+  attempt left, since `hermes -z` shows none (SYRD-547).
 - **Unknown models.** `switchyard new` reports that models were not probed,
   and has the owner confirm and record models the runtime catalog does not
   know. A launch stops before running on an unconfirmed model.
@@ -39,6 +42,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
+from scripts import role_command
 from scripts.role_command import YOLO_ARGS_BY_CLI
 from scripts.ticket_board import runtime_catalog, terminal_select
 from scripts.ticket_board.prompt_schema import KIND_SINGLE, Choice, Field, with_existing_value
@@ -226,16 +230,20 @@ def _model_validation_command(role: RoleConfig, workspace: Path | None = None) -
     # tool call for it, so without these the reply is a permission prompt rather
     # than an answer -- and the question under test would go unasked (SYRD-111).
     tool_args = list(YOLO_ARGS_BY_CLI.get(cli, []))
+    # And the effort and startup arguments the pane is started with, from the
+    # pane's own adapter and in its order: a probe without them passed a Hermes
+    # role whose pane exited 2 on an effort flag the probe never sent (SYRD-547).
+    pane_args = [*role_command.effort_args_for_role(role), *tool_args, *role_command.startup_args_for_role(role)]
     if cli == "codex":
         workspace_args = ["-C", str(workspace)] if workspace is not None else []
         return [
-            *role.cli, "exec", "--skip-git-repo-check", *model_args, *tool_args,
+            *role.cli, "exec", "--skip-git-repo-check", *model_args, *pane_args,
             *workspace_args, MODEL_VALIDATION_PROMPT,
         ]
     if cli in {"agy", "claude"}:
-        return [*role.cli, *model_args, *tool_args, "-p", MODEL_VALIDATION_PROMPT]
+        return [*role.cli, *model_args, *pane_args, "-p", MODEL_VALIDATION_PROMPT]
     if cli == "hermes":
-        return [*role.cli, *model_args, *tool_args, "-z", MODEL_VALIDATION_PROMPT]
+        return [*role.cli, *model_args, *pane_args, "-z", MODEL_VALIDATION_PROMPT]
     return None
 
 
@@ -365,6 +373,59 @@ def _model_probe_evidence(
     return joined
 
 
+def _hermes_request_dump_dirs(owner_home: Path) -> tuple[Path, ...]:
+    """Where a Hermes probe's request dumps land: the home it inherits, or the owner's own."""
+    from scripts import team_launcher as launcher
+
+    inherited = str(launcher._pane_identity_scrubbed_env().get("HERMES_HOME") or "").strip()
+    homes = [Path(inherited)] if inherited else []
+    homes.append(owner_home / ".hermes")
+    return tuple(dict.fromkeys(home / "sessions" for home in homes))
+
+
+def _hermes_request_dumps(dirs: Sequence[Path]) -> set[Path]:
+    found: set[Path] = set()
+    for directory in dirs:
+        try:
+            found.update(directory.glob("request_dump_*.json"))
+        except OSError:
+            continue
+    return found
+
+
+def _hermes_request_dump_error(dirs: Sequence[Path], *, before: set[Path], token: str,
+                               limit: int = MODEL_PROBE_EVIDENCE_CHARS) -> str:
+    """The provider's own error from the newest request dump this attempt left, or "".
+
+    `hermes -z` sends its output to /dev/null and exits 0 even when the
+    provider refuses the request, so the probe saw only "did not answer"; the
+    refusal is in `$HERMES_HOME/sessions/request_dump_*.json` (SYRD-547). Only
+    a dump that was not there when the attempt began is read, the token is
+    removed, and a dump this process cannot read is passed over.
+    """
+    newest: tuple[float, Path] | None = None
+    for path in _hermes_request_dumps(dirs) - before:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, path)
+    if newest is None:
+        return ""
+    try:
+        error = json.loads(newest[1].read_text(encoding="utf-8")).get("error")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    if not isinstance(error, dict) or not str(error.get("message") or "").strip():
+        return ""
+    status = error.get("status_code") or error.get("response_status")
+    raw = str(error["message"])
+    message = " ".join((raw.replace(token, "<token>") if token else raw).split())
+    text = f"provider error{f' (HTTP {status})' if status else ''} in {newest[1].name}: {message}"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
 def _probe_role_model(
     *,
     command: Sequence[str],
@@ -373,6 +434,7 @@ def _probe_role_model(
     workspace: "_ModelProbeWorkspace",
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     attempts: int = MODEL_PROBE_TOOL_CALL_ATTEMPTS,
+    request_dumps: Sequence[Path] = (),
 ) -> tuple[subprocess.CompletedProcess[Any], list[ModelProbeAttempt]]:
     """Ask until the model reads the file, or until the attempts run out.
 
@@ -386,6 +448,7 @@ def _probe_role_model(
     history: list[ModelProbeAttempt] = []
     proc: subprocess.CompletedProcess[Any] | None = None
     for attempt in range(1, max(1, attempts) + 1):
+        dumps_before = _hermes_request_dumps(request_dumps) if request_dumps else set()
         proc = launcher._run_owner_cli_probe(
             owner_user=owner_user,
             owner_home=owner_home,
@@ -395,13 +458,17 @@ def _probe_role_model(
         )
         answered = _model_validation_passed(proc)
         called_tool = answered and _model_probe_called_a_tool(proc, workspace.token)
+        evidence = _model_probe_evidence(proc, workspace.token)
+        if request_dumps and not called_tool:
+            provider_error = _hermes_request_dump_error(request_dumps, before=dumps_before, token=workspace.token)
+            evidence = " | ".join(part for part in (evidence, provider_error) if part)
         history.append(
             ModelProbeAttempt(
                 attempt=attempt,
                 exit_status=int(getattr(proc, "returncode", 1) or 0),
                 answered=answered,
                 called_tool=called_tool,
-                evidence=_model_probe_evidence(proc, workspace.token),
+                evidence=evidence,
             )
         )
         if called_tool or not answered:
@@ -451,6 +518,7 @@ def validate_role_models(
                 owner_home=owner_home,
                 workspace=workspace,
                 runner=runner,
+                request_dumps=_hermes_request_dump_dirs(owner_home) if cli == "hermes" else (),
             )
             # A later attempt that reads the file settles it: the model can call
             # tools, and the earlier reply was a reply rather than a limit.

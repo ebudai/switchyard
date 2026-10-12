@@ -104,11 +104,11 @@ def test_first_run_auth_phase_validates_configured_models_for_all_clis() -> None
             "--dangerously-skip-permissions", "-p", team_launcher.MODEL_VALIDATION_PROMPT,
         ],
         [
-            "sudo", "-u", "otto-agent", "hermes", "-m", "z-ai/glm-4.6", "--yolo", "-z",
+            "sudo", "-u", "otto-agent", "hermes", "-m", "z-ai/glm-4.6", "--yolo", "--accept-hooks", "--pass-session-id", "-z",
             team_launcher.MODEL_VALIDATION_PROMPT,
         ],
         [
-            "sudo", "-u", "otto-agent", "hermes", "-m", "deepseek/deepseek-chat", "--yolo", "-z",
+            "sudo", "-u", "otto-agent", "hermes", "-m", "deepseek/deepseek-chat", "--yolo", "--accept-hooks", "--pass-session-id", "-z",
             team_launcher.MODEL_VALIDATION_PROMPT,
         ],
     ]
@@ -289,7 +289,7 @@ def test_first_run_auth_phase_skips_model_validation_for_unauthenticated_or_miss
     assert not any(call[:5] == ["sudo", "-u", "otto-agent", "codex", "exec"] for call in runner.calls)
     assert not any(call[:4] == ["sudo", "-u", "otto-agent", "agy"] and "-p" in call for call in runner.calls)
     assert [
-        "sudo", "-u", "otto-agent", "hermes", "-m", "openrouter/missing", "--yolo", "-z",
+        "sudo", "-u", "otto-agent", "hermes", "-m", "openrouter/missing", "--yolo", "--accept-hooks", "--pass-session-id", "-z",
         team_launcher.MODEL_VALIDATION_PROMPT,
     ] in runner.calls
     assert messages == [

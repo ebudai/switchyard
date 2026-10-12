@@ -57,7 +57,8 @@ def check(condition: bool, detail: str) -> None:
 
 
 def role(name: str = "ops", model: str = "gpt-5.6-sol"):
-    return types.SimpleNamespace(role=name, cli=["codex"], model=model, model_arg="-m")
+    # A real role always carries its effort and extra arguments; the probe reads both (SYRD-547).
+    return types.SimpleNamespace(role=name, cli=["codex"], model=model, model_arg="-m", effort="", extra_args=[])
 
 
 class Model:

@@ -332,10 +332,25 @@ def precheck_new_project(
         # between installing its units and creating its database; running it
         # again completes it. Anything else is not ours to build over (SYRD-261).
         if not launcher._installed_unit_is_this_plans(plan):
+            # A different unit is still this project's own stranded provisioning
+            # when root holds the record that `switchyard new` installed before
+            # its packet ran: an earlier release rendered it, or other options
+            # did. That record is what `resume-provision` verifies and rebuilds
+            # from, completing only what is missing, so it is the way forward --
+            # not a teardown of everything the first run created (SYRD-260).
+            record = launcher.partial_provision_record(plan.project)
+            way_forward = (
+                f"  root holds this project's provisioning record ({record}), so this is its own "
+                "`switchyard new`, stopped before the database. Once anything listed above is fixed, "
+                "finish it from that record, which keeps the accounts, repository and credentials and "
+                f"completes only what is missing: sudo switchyard resume-provision {plan.project}"
+                if record is not None
+                else f"  to inspect recovery: switchyard teardown {plan.project} --dry-run"
+            )
             errors.append(
                 f"{plan.board_unit} is installed but database {plan.database!r} does not exist, "
                 "and the installed unit is not the one this provisioning would install.\n"
-                f"  to inspect recovery: switchyard teardown {plan.project} --dry-run"
+                + way_forward
             )
     else:
         table_count = launcher._ticket_board_table_count(plan.database, runner=runner)

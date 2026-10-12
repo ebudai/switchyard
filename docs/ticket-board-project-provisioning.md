@@ -190,6 +190,16 @@ the release that failed, so re-running it would repeat the defect it failed on.
 Nothing the tenant owns is touched and running it twice produces the same
 artifacts.
 
+Running `switchyard new` again reaches the same place when the first run stopped
+after installing the board unit and before creating the database -- on a
+minimal host, at the polkit rule between the two. If the installed unit is
+byte-for-byte the one this release renders, the new run simply finishes the job
+(SYRD-261). If it is not -- the operator upgraded Switchyard in between to get
+the fix the first run lacked, or chose different options -- and root holds this
+project's record, the precheck names this command, after any prerequisite it
+found, rather than a teardown of what the first run created. A unit with no
+record behind it is still refused as someone else's (SYRD-260).
+
 ### Approving this host's desktop, without a prompt
 
 A project's scoped Wayland policy is generated from this host's standing

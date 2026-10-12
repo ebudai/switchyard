@@ -338,6 +338,169 @@ waiting. Root's recorded workflow is not refreshed by this or any workflow
 write until SYRD-561 and SYRD-562 land. Details:
 [SYRD-567](../syrd-567-design-stage.md).
 
+## Host health the board depends on
+
+Every board on a host shares one PostgreSQL cluster, one filesystem and one journal. When
+the host crashed on 2026-10-04, it could not be diagnosed afterwards, for three reasons:
+- the journal was capped at 50M, and the boards' restart storm (SYRD-552) had rotated
+  away the crash boot's last hour;
+- 1,435 PostgreSQL core dumps (928 MiB) had piled up;
+- `kernel.sysrq = 16` allowed a sync but not a clean reboot.
+
+Keeping the host diagnosable is **yours to ensure**. You have no root, so you **check**,
+and you **escalate** with the exact remedy for the human, or for an operator with polkit,
+to apply. Never apply a host-wide change yourself, and never ask a role to.
+
+### The automated check
+
+`scripts/host_diagnostics.py` (SYRD-553) checks the first three settings below, read-only,
+and prints each shortfall with the file that fixes it. Root sees its report after every
+`switchyard install-shared-release`. You can run it as yourself against the host's shared
+release:
+
+```bash
+python3 -I -c 'import sys; sys.path.insert(0, "/opt/switchyard/current"); from scripts.host_diagnostics import host_diagnostics_findings as f, host_diagnostics_report as r; print("\n".join(r(f())) or "host readiness: no findings")'
+```
+
+What the output means:
+- `ModuleNotFoundError` means the shared release predates SYRD-553. Read the three
+  settings by hand, with the commands below.
+- Each finding goes to the human as it is printed: the file, its lines, and the command
+  that applies them.
+- Items 4 and 5 below are never automated. They stay yours.
+
+### What you ensure
+
+**1. Journal retention.** Run, as yourself:
+
+```bash
+systemd-analyze cat-config systemd/journald.conf | grep -E '^(Storage|SystemMaxUse)='
+```
+
+The last value printed for each key is the one in effect.
+- **Needed:** `SystemMaxUse` of at least `1G`, plus 128 MiB for each registered tenant
+  past eight; and `Storage=persistent` (or no `Storage` line, while `/var/log/journal`
+  exists).
+- **Why it matters:** distributions can ship a much smaller cap. CachyOS, for example,
+  ships `/usr/lib/systemd/journald.conf.d/00-journal-size.conf` (package
+  `cachyos-settings`) with `SystemMaxUse=50M`.
+- **Escalate with this remedy:**
+
+```ini
+# /etc/systemd/journald.conf.d/50-switchyard.conf
+# then: sudo systemctl restart systemd-journald
+[Journal]
+Storage=persistent
+SystemMaxUse=1G
+```
+
+Any drop-in name works, provided it sorts after the distribution's: the check reads the
+merged result.
+
+**2. Core dumps.** Run, as yourself:
+
+```bash
+cat /proc/sys/kernel/core_pattern
+systemd-analyze cat-config systemd/coredump.conf | grep -E '^(Storage|MaxUse)='
+du -sh /var/lib/systemd/coredump
+```
+
+**When this applies:** only when `core_pattern` names `systemd-coredump` and
+`Storage=none` is not set.
+
+**Escalate when:**
+- no `MaxUse=` is set;
+- `MaxUse` is above `1G`;
+- the store holds more than 512M.
+
+`coredumpctl list` shows you only your own account's dumps, so when the store is large,
+ask the human what fills it. Deleting the dumps of a crash loop is safe once its cause is
+understood and recorded in a ticket. After the 2026-10-04 incident, 1,435
+`core.postgres.*` files were deleted that way.
+
+**Escalate with this remedy:**
+
+```ini
+# /etc/systemd/coredump.conf.d/50-switchyard.conf
+# then: sudo systemctl daemon-reload
+[Coredump]
+MaxUse=1G
+```
+
+**3. Magic SysRq.** Run `sysctl -n kernel.sysrq`, as yourself.
+
+**What passes:**
+- `1`;
+- any value with sync (16), remount read-only (32) and reboot (128) all set.
+
+systemd's own `/usr/lib/sysctl.d/50-default.conf` sets `16`, which allows sync only. The
+recommended `244` allows:
+- keyboard control (4);
+- signalling processes (64);
+- sync (16);
+- remount read-only (32);
+- reboot (128).
+
+Together these are exactly the keys of Alt+SysRq+R-E-I-S-U-B. They leave out the debugging
+dumps (8). **Escalate with this remedy:**
+
+```ini
+# /etc/sysctl.d/50-switchyard-sysrq.conf
+# then: sudo sysctl -p /etc/sysctl.d/50-switchyard-sysrq.conf
+kernel.sysrq = 244
+```
+
+Whenever the human reports a hang, remind them to try R-E-I-S-U-B before the power button:
+- hold Alt+SysRq;
+- press R, E, I, S, U, B, a few seconds apart.
+
+Even S (sync) alone, before a hard power-off, saves writes.
+
+**4. After any unclean shutdown, before relaunching tenants.** Ask the human, or an
+operator with polkit, to run these and paste the output into a ticket:
+
+```bash
+sudo btrfs device stats /
+sudo journalctl -k -b | grep "csum failed"
+sudo smartctl -H -A /dev/nvme0n1
+```
+
+- **`btrfs device stats /`:** `corruption_errs` must not have grown since the last
+  recorded value. The value after the 2026-10-04 incident was 92. Record each reading in a
+  ticket, so the next check has a baseline. You can read the same counters without root:
+  `cat /sys/fs/btrfs/*/devinfo/*/error_stats`.
+- **`csum failed`:** each line names an inode. Ask for it to be resolved to a file with
+  `sudo btrfs inspect-internal inode-resolve <inode> /`.
+- **`smartctl`:** substitute the drive behind `/` (`btrfs device stats` names its
+  partition). Media errors and error-log entries must be 0.
+
+Then check every git repository your tenant runs from: its control repository and its
+project checkout, at least. This is read-only, and you can run it as yourself:
+
+```bash
+git -C <repository> fsck --full
+```
+
+Ask the human to check repositories you cannot read.
+- **Derived index files:** a bad checksum in a derived index such as
+  `objects/pack/multi-pack-index` or `objects/info/commit-graph` is safe to move aside
+  (`mv <file> <file>.bad`). Git works without it, and `git multi-pack-index write`, or the
+  next repack, writes a fresh one. One such file made otto's launch fail with
+  `fetch failed with exit -7` (SIGBUS).
+- **Anything else:** a bad pack, loose object or ref is not derived. Escalate it; do not
+  move it.
+
+**5. PostgreSQL recovery facts.** Every board on the host shares one PostgreSQL cluster,
+so WAL lost to a crash takes all of them down at once. Recovery goes like this:
+1. restore from snapper snapshots, plus WAL replay;
+2. verify with `pg_amcheck --heapallindexed` on a spare port, before swapping in;
+3. keep the damaged original. Nobody deletes it until the human decides.
+
+The recovery is the human's. You make sure nobody skips the verification or the keeping.
+
+SYRD-553's check covers items 1 to 3 automatically. Until a check covers items 4 and 5,
+those are this section's alone.
+
 ## Escalating to the human
 
 Escalate **decisions**, not technical direction the team can reason out. Product choices,

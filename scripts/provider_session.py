@@ -45,6 +45,7 @@ from scripts.provider_screen import (
     _replaced_frame_starts_at,
     _screen_is_settled,
     _TerminalStream,
+    provider_screen_is_at_ordinary_prompt,
 )
 
 
@@ -55,12 +56,14 @@ from scripts.provider_screen import (
 FOREGROUND_COMPLETION_POLL_SECONDS = 0.5
 
 
-#: Long enough for a person to answer a prompt, including an OAuth round trip in
-#: a browser; short enough that a step nothing will ever record ends in minutes
-#: with an explanation rather than looking like a hang. Live on the testing
-#: tenant it was the second case: a trust step was scheduled for a worktree
-#: Claude already trusted, so it opened at a ready prompt and the watcher waited
-#: for a key that was never going to be written (SYRD-191).
+#: How long a provider may sit at its ORDINARY prompt with nothing recorded
+#: before the step is given up on, out loud. Live on the testing tenant a trust
+#: step was scheduled for a worktree Claude already trusted, so it opened at a
+#: ready prompt and the watcher waited for a key that was never going to be
+#: written (SYRD-191). It bounds nothing else: a screen that is asking, or that
+#: is not positively the ordinary prompt, waits for the person however long they
+#: take. A person who went to look up a Hermes API key came back to find the
+#: step closed and setup on the next provider (SYRD-544).
 FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 600.0
 
 
@@ -72,9 +75,11 @@ FOREGROUND_COMPLETION_TIMEOUT_SECONDS = 600.0
 PROVIDER_SCREEN_RESET_SECONDS = 1.0
 
 
-#: How long a provider must be BOTH silent and not waiting on anybody before its
-#: first run counts as finished. It is not a deadline -- a step that is still
-#: asking something resets it, however long the person takes.
+#: How long a provider must be BOTH silent and positively at its ordinary
+#: prompt before a step with nothing recorded is closed there. It is not a
+#: deadline -- a step that is still asking something, or showing anything not
+#: known to be that prompt, is never closed by it, however long the person
+#: takes (SYRD-544).
 PROVIDER_READY_QUIET_SECONDS = 6.0
 
 
@@ -128,18 +133,20 @@ SETUP_STEP_DONE_AT_PROMPT = {
 }
 
 
+#: Given up only at the provider's ordinary prompt, never while anything is
+#: being asked (SYRD-544), so each says that rather than "time ran out".
 SETUP_STEP_STALLED_DETAIL = {
     SETUP_PURPOSE_FIRST_RUN: (
-        "{cli} did not record its first run, so it was still asking for something when "
-        "time ran out -- most often the sign-in that follows the theme question."
+        "{cli} sat at its ordinary prompt and never recorded its first run, so nothing "
+        "was left on screen to answer and nothing was going to record it."
     ),
     SETUP_PURPOSE_SIGN_IN: (
-        "{cli} did not record a signed-in account, so the sign-in was still unfinished "
-        "when time ran out -- most often an authorization code that was never pasted back."
+        "{cli} sat at its ordinary prompt and never recorded a signed-in account, so "
+        "nothing was left on screen to answer and the sign-in was not going to finish here."
     ),
     SETUP_PURPOSE_FOLDER_TRUST: (
-        "{cli} did not record trust for that directory, so it was still asking whether "
-        "to trust it when time ran out."
+        "{cli} sat at its ordinary prompt and never recorded trust for that directory, so "
+        "nothing was left on screen to answer."
     ),
 }
 
@@ -147,9 +154,11 @@ SETUP_STEP_STALLED_DETAIL = {
 #: What the window says it is waiting for while the provider owns the screen.
 #: The title is the only channel available: this CLI draws inline rather than
 #: on the alternate screen, so anything written to stdout lands in the middle
-#: of what it is drawing (SYRD-221).
+#: of what it is drawing (SYRD-221). It counts the time waited, not the time
+#: left: nothing that may be asking the person is ever cut off, so a countdown
+#: would promise an end that does not come (SYRD-544).
 SETUP_WINDOW_WAITING_TITLE = (
-    "Switchyard setup: answer {cli}'s prompts to the end -- {remaining} left"
+    "Switchyard setup: answer {cli}'s prompts to the end -- waiting for you, {waited} so far"
 )
 
 
@@ -633,9 +642,10 @@ class _SetupWindowNarrator:
     hung. The title is the one channel the CLI does not contend for -- and it
     has to be republished, because Claude clears it on the way in.
 
-    The countdown is the part that cannot be faked by a static name: it says
-    the wait is still running and how much of it is left. A window that is
-    counting down is not a window that has stopped.
+    The running time is the part that cannot be faked by a static name: it
+    says the wait is still going. A window whose clock moves is not a window
+    that has stopped. It counts up rather than down because a step that may
+    still be asking the person has no time limit (SYRD-544).
     """
 
     def __init__(
@@ -655,6 +665,7 @@ class _SetupWindowNarrator:
         self._write = write
         self._interval = interval
         self._last = monotonic()
+        self._started = self._last
 
     def opened(self) -> None:
         """Name the window before the CLI takes it."""
@@ -664,14 +675,12 @@ class _SetupWindowNarrator:
         )
 
     def tick(self) -> None:
-        """Republish the name and the time left, if it is due."""
+        """Republish the name and the time waited so far, if it is due."""
         now = self._monotonic()
         if now - self._last < self._interval:
             return
         set_terminal_title(
-            SETUP_WINDOW_WAITING_TITLE.format(
-                cli=self._cli, remaining=_countdown(self._deadline - now)
-            ),
+            SETUP_WINDOW_WAITING_TITLE.format(cli=self._cli, waited=_countdown(now - self._started)),
             write=self._write,
         )
         self._last = now
@@ -786,7 +795,10 @@ def run_provider_first_run_session(
 
     A screen that is still asking something resets the quiet window, so somebody
     reading an OAuth code box or a theme list is never cut off however long they
-    take.
+    take. With nothing recorded, neither the quiet window nor the deadline ends
+    a step unless its screen is positively the provider's ordinary prompt: a
+    prompt no marker recognises is somebody who may be away fetching the answer,
+    and it waits for them until they answer or end the provider (SYRD-544).
     """
     #: Said once the terminal is back in its own mode. A line printed while the
     #: outer tty is raw has no carriage return of its own and climbs the screen
@@ -910,15 +922,24 @@ def run_provider_first_run_session(
                         at_prompt = True
                         break
                     quiet_for = monotonic() - last_output
-                    if (
-                        recent
-                        and quiet_for >= quiet_seconds
-                        and _screen_is_settled(recent, awaiting_redraw=awaiting_redraw)
-                    ):
+                    # With nothing recorded, quiet means finished only at a screen
+                    # positively known to be the ordinary prompt. A screen that is
+                    # merely not recognised as asking -- Hermes's
+                    # `OPENROUTER_API_KEY (or Enter to cancel): ` was one -- is a
+                    # person who may be fetching an answer, and closing it moved
+                    # setup on to the next provider while they were away (SYRD-544).
+                    positively_idle = _screen_is_settled(
+                        recent, awaiting_redraw=awaiting_redraw
+                    ) and provider_screen_is_at_ordinary_prompt(recent)
+                    if recent and quiet_for >= quiet_seconds and positively_idle:
                         closing_message = window.done_at_prompt()
                         at_prompt = True
                         break
-                    if monotonic() >= deadline:
+                    # The bound applies to that same screen and nothing else: a step
+                    # that may still be asking the person waits for them however long
+                    # they take (SYRD-544). They can always end it themselves, which
+                    # ends the provider and is read above.
+                    if monotonic() >= deadline and positively_idle:
                         # Specific about what did not happen, because "gave up
                         # waiting" on its own reads as a Switchyard fault when the
                         # usual cause is a sign-in nobody finished. The resumable

@@ -65,6 +65,15 @@ def screen(name: str) -> str:
     return (SCREENS / f"{name}.txt").read_text()
 
 
+#: SYRD-544: a step that may still be asking the person -- a question, a blank
+#: screen, anything not positively the provider's ordinary prompt -- is ended by
+#: neither the quiet window nor the deadline; it waits until they answer or end
+#: the provider themselves. The cases below that drive such a screen let the
+#: person end it, far past every bound: after this many reads, or at this time.
+AWAY_READS = 1000
+AWAY = 2 * team_launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS
+
+
 class ReplaySession:
     """A provider session that prints a recorded screen and then waits.
 
@@ -222,19 +231,6 @@ def test_the_folder_trust_dialog_is_a_question() -> None:
 
 # --- what the watcher does with those screens ------------------------------
 
-def test_the_window_is_not_closed_while_a_question_is_on_it() -> None:
-    """The reported failure, driven through the real watcher."""
-    finished, printed, _ = run_session(
-        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=5.0
-    )
-    check(finished is False, "an unanswered first run was reported as complete")
-    closed_early = [m for m in printed if "at its ordinary prompt" in m]
-    check(not closed_early,
-          f"the window was closed as 'finished' with the question still up: {closed_early}")
-    gave_up = [m for m in printed if "gave up waiting" in m]
-    check(gave_up, f"nothing was said about the step not completing: {printed}")
-
-
 def test_the_window_closes_itself_once_the_provider_records_its_first_run() -> None:
     """The successful path: the person answers, and control comes back.
 
@@ -263,7 +259,7 @@ def test_the_window_closes_itself_once_the_provider_records_its_first_run() -> N
 def test_the_setup_window_is_named_apart_from_the_presentation() -> None:
     """Both terminal output and window title, as the ticket asks."""
     _finished, _printed, written = run_session(
-        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=3.0
+        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=3.0, exit_after_reads=AWAY_READS
     )
     check("\033]0;" in written, "the setup window set no terminal title")
     check("Switchyard setup" in written and "temporary" in written,
@@ -512,7 +508,8 @@ def test_a_step_whose_provider_never_finishes_is_given_up_on_and_reported() -> N
     injected runner, which returns immediately and so cannot see that at all --
     so the shipped path is exercised directly here: a provider that never exits
     and never records anything must be given up on, loudly, and control handed
-    back.
+    back. Since SYRD-544 that is a provider sitting at its ordinary prompt: one
+    that may still be asking the person is waited for instead.
     """
     started: list[list[str]] = []
 
@@ -525,7 +522,7 @@ def test_a_step_whose_provider_never_finishes_is_given_up_on_and_reported() -> N
             return None
 
         def read(self) -> str:
-            return ""
+            return screen("ordinary-prompt")
 
         def relay_from(self, source_fd) -> None:
             return None
@@ -643,27 +640,23 @@ def test_the_window_says_what_it_is_waiting_for_while_it_waits() -> None:
     written to stdout lands in the middle of what it is drawing.
     """
     _finished, printed, written = run_session(
-        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=60.0
+        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=60.0, exit_after_reads=AWAY_READS
     )
     titles = [chunk for chunk in written.split("\033]0;") if chunk]
-    waiting = [t for t in titles if "answer" in t and "left" in t]
+    waiting = [t for t in titles if "answer" in t and "so far" in t]
     check(waiting, f"the window never said what it was waiting for: {titles[:4]}")
     check(any("claude" in t for t in waiting),
           f"the status does not name the provider being waited on: {waiting[:2]}")
-    # A countdown, so a person can tell waiting from hanging.
-    check(any(re.search(r"\d+m\d\ds left|\d+s left", t) for t in waiting),
-          f"the status carries no remaining time: {waiting[:2]}")
+    # A running time, so a person can tell waiting from hanging. Up, not down:
+    # a question has no time limit (SYRD-544).
+    check(any(re.search(r"\d+m\d\ds so far|\d+s so far", t) for t in waiting),
+          f"the status carries no running time: {waiting[:2]}")
     # And it keeps saying it, rather than saying it once and going quiet.
     check(len(waiting) > 1, f"the status was published only once: {len(waiting)}")
-    # The giving-up message names what was outstanding, not just the clock.
-    gave_up = [m for m in printed if "gave up waiting" in m]
-    check(gave_up, f"nothing was said when the step ran out of time: {printed}")
-    check("did not record its first run" in gave_up[0],
-          f"the message does not say what was missing: {gave_up[0]}")
-    check("sign-in" in gave_up[0],
-          f"the message does not name the usual cause: {gave_up[0]}")
-    check("resume" in gave_up[0],
-          f"the message does not point at how to resume: {gave_up[0]}")
+    # The question was never given up on; what giving up says is held below,
+    # on the one screen it still applies to.
+    check(not any("gave up waiting" in m for m in printed),
+          f"a window with a question on it was given up on: {printed}")
 
 
 def test_the_countdown_reads_as_time_a_person_recognises() -> None:
@@ -693,14 +686,20 @@ class SilentSession:
     endings -- the recorded state, and the deadline.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ends_after_reads: int | None = None) -> None:
         self._returncode: int | None = None
         self.terminated = False
+        #: When the person ends it themselves (SYRD-544); None, never.
+        self._ends_after_reads = ends_after_reads
+        self._reads = 0
 
     def poll(self):
         return self._returncode
 
     def read(self) -> str:
+        self._reads += 1
+        if self._ends_after_reads is not None and self._reads >= self._ends_after_reads and self._returncode is None:
+            self._returncode = 0
         return ""
 
     def relay_from(self, source_fd) -> None:
@@ -720,8 +719,25 @@ class SilentSession:
         return None
 
 
-def run_bounded_step(*, is_complete, purpose, cli="claude", timeout=60.0):
-    """Drive the real bounded runner with a fake clock and a captured title."""
+class RedrawsItsPrompt(SilentSession):
+    """A CLI sitting at its ordinary prompt and redrawing it, so it is never quiet.
+
+    Since SYRD-544 the one screen a bound still ends is the provider's ordinary
+    prompt with nothing recorded; this is that screen, never going quiet, so the
+    deadline is the only way the step can end.
+    """
+
+    def read(self) -> str:
+        super().read()
+        return screen("ordinary-prompt")
+
+
+def run_bounded_step(*, is_complete, purpose, cli="claude", timeout=60.0, at_prompt=False):
+    """Drive the real bounded runner with a fake clock and a captured title.
+
+    By default the provider draws nothing and the person ends it once they are
+    done with it; `at_prompt` makes it sit at its ordinary prompt instead.
+    """
     ticks = iter(range(0, 10_000))
     printed: list[str] = []
     titles: list[str] = []
@@ -732,7 +748,9 @@ def run_bounded_step(*, is_complete, purpose, cli="claude", timeout=60.0):
         command=[cli],
         is_complete=is_complete,
         watching=f"{cli} to record something for somebody",
-        session_factory=lambda args, **kwargs: SilentSession(),
+        session_factory=lambda args, **kwargs: (
+            RedrawsItsPrompt() if at_prompt else SilentSession(ends_after_reads=AWAY_READS)
+        ),
         sleep=lambda _seconds: None,
         monotonic=lambda: next(ticks),
         timeout_seconds=timeout,
@@ -776,7 +794,7 @@ def test_every_setup_window_says_which_step_it_is() -> None:
           f"two different steps claim the same window name: {seen}")
     # And the first run, which already had a name, still says which step it is.
     _f, _p, first_run = run_session(
-        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=3.0
+        "theme-menu", is_complete=lambda: False, quiet=0.0, timeout=3.0, exit_after_reads=AWAY_READS
     )
     check(team_launcher.SETUP_PURPOSE_FIRST_RUN in first_run,
           "the first-run window stopped naming its own step")
@@ -793,13 +811,14 @@ def test_a_bounded_step_counts_down_like_the_first_run_does() -> None:
         is_complete=lambda: False,
         purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
         timeout=60.0,
+        at_prompt=True,
     )
     names = titles_in(written)
-    waiting = [n for n in names if "answer" in n and "left" in n]
+    waiting = [n for n in names if "answer" in n and "so far" in n]
     check(waiting, f"the trust window never said what it was waiting for: {names[:3]}")
     check(len(waiting) > 1, f"the status was published only once: {len(waiting)}")
-    check(any(re.search(r"\d+m\d\ds left|\d+s left", n) for n in waiting),
-          f"the status carries no remaining time: {waiting[:2]}")
+    check(any(re.search(r"\d+m\d\ds so far|\d+s so far", n) for n in waiting),
+          f"the status carries no running time: {waiting[:2]}")
     check(names[-1] == team_launcher.SETUP_WINDOW_TITLE_DONE,
           f"the window was left still claiming to be setup: {names[-1]!r}")
     check(any("gave up waiting" in m for m in printed),
@@ -808,15 +827,16 @@ def test_a_bounded_step_counts_down_like_the_first_run_does() -> None:
 
 def test_giving_up_names_the_step_that_did_not_finish() -> None:
     """"Outstanding" without saying what is not a way out of anything."""
+    # Given up on only at the ordinary prompt since SYRD-544, and saying so.
     wanted = {
-        team_launcher.SETUP_PURPOSE_FIRST_RUN: "did not record its first run",
-        team_launcher.SETUP_PURPOSE_SIGN_IN: "did not record a signed-in account",
-        team_launcher.SETUP_PURPOSE_FOLDER_TRUST: "did not record trust",
+        team_launcher.SETUP_PURPOSE_FIRST_RUN: "never recorded its first run",
+        team_launcher.SETUP_PURPOSE_SIGN_IN: "never recorded a signed-in account",
+        team_launcher.SETUP_PURPOSE_FOLDER_TRUST: "never recorded trust",
     }
     messages = {}
     for purpose, phrase in wanted.items():
         _finished, printed, _written = run_bounded_step(
-            is_complete=lambda: False, purpose=purpose, timeout=3.0
+            is_complete=lambda: False, purpose=purpose, timeout=3.0, at_prompt=True
         )
         gave_up = [m for m in printed if "gave up waiting" in m]
         check(gave_up, f"the {purpose} step said nothing when it ran out of time")
@@ -919,7 +939,7 @@ def test_the_phase_tells_each_bounded_step_which_window_it_is() -> None:
 # these steps did not. They do now, through the same watched session.
 
 
-def run_bounded_step_over(screen_name: str, *, is_complete, purpose, timeout=60.0):
+def run_bounded_step_over(screen_name: str, *, is_complete, purpose, timeout=60.0, exit_after_reads=None):
     """Drive the real bounded runner over a recorded screen."""
     ticks = iter(range(0, 10_000))
     printed: list[str] = []
@@ -931,7 +951,7 @@ def run_bounded_step_over(screen_name: str, *, is_complete, purpose, timeout=60.
         command=["claude"],
         is_complete=is_complete,
         watching="claude to record trust for /tmp",
-        session_factory=factory_for(screen_name),
+        session_factory=factory_for(screen_name, exit_after_reads=exit_after_reads),
         sleep=lambda _seconds: None,
         monotonic=lambda: next(ticks),
         timeout_seconds=timeout,
@@ -1161,40 +1181,6 @@ def test_an_unfinished_first_run_is_not_reopened_by_a_model_probe() -> None:
     # Narrow: the provider whose first run was never in question is untouched.
     check(calls_of("codex", "login") != [],
           f"the other provider on the tenant was skipped too: {runner.calls}")
-
-
-def test_a_question_still_holds_the_window_open() -> None:
-    """The screen is evidence both ways, and must not become an escape hatch.
-
-    If an unanswered menu counted as "nothing left to ask", this change would
-    reintroduce the original defect -- a window closing under somebody who is
-    still reading it.
-    """
-    finished, printed, _written = run_bounded_step_over(
-        "folder-trust",
-        is_complete=lambda: False,
-        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
-        timeout=40.0,
-    )
-    check(finished is False, "an unanswered trust dialog was reported as complete")
-    check(not any("ordinary prompt" in m for m in printed),
-          f"the window closed with the trust question still on it: {printed}")
-    check(any("gave up waiting" in m for m in printed),
-          f"nothing was said when the step ran out of time: {printed}")
-
-
-def test_a_step_that_cannot_be_watched_is_still_bounded() -> None:
-    """A caller supplying a bare process gets no screen, and must not hang."""
-    finished, printed, _written = run_bounded_step(
-        is_complete=lambda: False,
-        purpose=team_launcher.SETUP_PURPOSE_FOLDER_TRUST,
-        timeout=30.0,
-    )
-    check(finished is False, "an unwatchable step reported itself complete")
-    check(any("gave up waiting" in m for m in printed),
-          f"an unwatchable step neither completed nor timed out: {printed}")
-    check(not any("ordinary prompt" in m for m in printed),
-          f"a step with no screen claimed to have read one: {printed}")
 
 
 # --- the branch that ships ---------------------------------------------------
@@ -1787,11 +1773,14 @@ def test_the_provider_follows_the_window_when_it_is_resized() -> None:
 
 #: A provider sitting on an unanswered choice, so the step runs out of time and
 #: Switchyard has something to say at the end of it.
-KEEPS_A_QUESTION_UP = (
+#: A provider sitting at its ordinary prompt and redrawing it every second, so
+#: it is never quiet and only the bound can end it. Since SYRD-544 that bound
+#: applies to nothing else -- a question is waited for -- so this is the screen
+#: that gives the "gave up waiting" message something to say.
+REDRAWS_ITS_PROMPT = (
     "#!/bin/sh\n"
     "stty raw -echo\n"
-    "printf '\\342\\235\\257 yes\\r\\n  no\\r\\n'\n"
-    "sleep 20\n"
+    f"for i in $(seq 20); do cat '{SCREENS / 'ordinary-prompt.txt'}'; sleep 1; done\n"
 )
 
 
@@ -1802,7 +1791,7 @@ def test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode() -> None:
     the message explaining what went wrong arrives looking like more of the
     corruption it is trying to explain.
     """
-    screen = drive_through_a_real_terminal(KEEPS_A_QUESTION_UP, seconds=5.0, quiet=False)
+    screen = drive_through_a_real_terminal(REDRAWS_ITS_PROMPT, seconds=5.0, quiet=False)
     check("PROBEFAIL" not in screen, f"the probe never ran: {screen[:200]!r}")
     at = screen.find("gave up waiting")
     check(at != -1, f"the step never said it had run out of time: {screen[-300:]!r}")
@@ -1819,7 +1808,9 @@ def test_switchyard_speaks_only_once_the_terminal_is_in_its_own_mode() -> None:
 SITS_AT_ITS_PROMPT = (
     "#!/bin/sh\n"
     "stty raw -echo\n"
-    "printf 'ready\\r\\n'\n"
+    # The recorded prompt: since SYRD-544 a step with nothing recorded closes
+    # only at a screen positively known to be the ordinary prompt.
+    f"cat '{SCREENS / 'ordinary-prompt.txt'}'\n"
     "sleep 20\n"
 )
 
@@ -1929,7 +1920,7 @@ def test_the_terminal_is_given_back_even_when_switchyard_is_killed() -> None:
         # the session ends first and the case proves nothing -- it passed
         # against a mutant that caught no signals at all before this changed.
         screen = drive_through_a_real_terminal(
-            KEEPS_A_QUESTION_UP, seconds=30.0, kill_with=number
+            REDRAWS_ITS_PROMPT, seconds=30.0, kill_with=number
         )
         check("AFTERSIGNAL " in screen,
               f"the {name} case never reported the terminal state: {screen[-200:]!r}")
@@ -2080,19 +2071,6 @@ def test_every_sign_in_marker_is_a_line_somebody_recorded() -> None:
         check(flattened in recordings,
               f"{marker!r} matches no recorded screen, so nothing says a real "
               "provider ever printed it")
-
-
-def test_the_window_is_not_closed_while_a_sign_in_is_outstanding() -> None:
-    """Driven through the real watcher, not just the predicate."""
-    finished, printed, _written = run_session(
-        "codex-login-waiting", is_complete=lambda: False, quiet=0.0, timeout=30.0
-    )
-    check(finished is False, "an unfinished sign-in was reported as complete")
-    closed = [m for m in printed if "ordinary prompt" in m]
-    check(not closed,
-          f"the sign-in was closed as 'finished' while it waited: {closed}")
-    check(any("gave up waiting" in m for m in printed),
-          f"the step neither waited nor reported running out of time: {printed}")
 
 
 def test_a_role_is_not_started_when_its_provider_has_no_credentials() -> None:
@@ -2324,15 +2302,19 @@ class ClockedSession:
     screen under the old rule.
     """
 
-    def __init__(self, timeline, clock) -> None:
+    def __init__(self, timeline, clock, ends_at=None) -> None:
         self._timeline = list(timeline)
         self._clock = clock
+        #: When the person ends it themselves (SYRD-544); None, never.
+        self._ends_at = ends_at
         self.written: list[str] = []
         self.written_at: list[float] = []
         self.terminated = False
         self._returncode = None
 
     def poll(self):
+        if self._returncode is None and self._ends_at is not None and self._clock.now >= self._ends_at:
+            self._returncode = 0
         return self._returncode
 
     def read(self) -> str:
@@ -2376,13 +2358,13 @@ def session_clock_now() -> float:
     return _CURRENT_CLOCK[-1].now
 
 
-def watch_timeline(timeline, *, timeout=30.0, quiet=6.0, is_complete=lambda: False):
+def watch_timeline(timeline, *, timeout=30.0, quiet=6.0, is_complete=lambda: False, person_ends_at=None):
     clock = FakeClock()
     _CURRENT_CLOCK.append(clock)
     built: list[ClockedSession] = []
 
     def factory(args, **kwargs):
-        session = ClockedSession(timeline, clock)
+        session = ClockedSession(timeline, clock, ends_at=person_ends_at)
         built.append(session)
         return session
 
@@ -2429,30 +2411,6 @@ def test_the_focus_out_reassertion_draws_nothing() -> None:
           f"escape residue is read as text: {team_launcher._visible_text(focus)!r}")
     check(not team_launcher._draws_something(focus),
           "a chunk that only reasserts keyboard modes counts as drawing something")
-
-
-def test_leaving_for_the_browser_does_not_close_the_sign_in() -> None:
-    """test8, on the recorded bytes and the timing the User actually had."""
-    session, printed, _out = watch_timeline(
-        [(0.0, screen("sign-in-box")), (7.0, screen("focus-out-reassert"))],
-    )
-    check("ordinary prompt" not in printed,
-          f"the sign-in box was taken for an ordinary prompt: {printed!r}")
-    check("did not record its first run" in printed,
-          f"the step did not end by waiting out the sign-in: {printed!r}")
-
-
-def test_a_stalled_step_types_nothing_into_the_screen() -> None:
-    """Whatever it is still asking, `/exit` would be taken as the answer.
-
-    On Claude's sign-in box it is pasted as the authorization code. Before this
-    fix the deadline path typed it exactly as the finished path does.
-    """
-    session, printed, _out = watch_timeline([(0.0, screen("sign-in-box"))], timeout=20.0)
-    check("did not record its first run" in printed, f"the step did not stall: {printed!r}")
-    check(not any("/exit" in text for text in session.written),
-          f"the exit input was typed into an unanswered sign-in: {session.written!r}")
-    check(session.terminated, "a stalled provider was left running")
 
 
 def test_a_real_ordinary_prompt_is_still_closed_after_a_focus_change() -> None:
@@ -2512,7 +2470,7 @@ def test_the_recorded_trust_question_is_a_question() -> None:
 def test_a_recorded_first_run_is_not_ended_while_trust_is_asked() -> None:
     """test9 on the recorded screen: the flag is set, the question is up."""
     session, printed, _out = watch_timeline(
-        [(0.0, screen("folder-trust"))], timeout=20.0, is_complete=lambda: True,
+        [(0.0, screen("folder-trust"))], timeout=20.0, is_complete=lambda: True, person_ends_at=AWAY,
     )
     check(not any("/exit" in text for text in session.written),
           f"`/exit` was typed into the trust question: {session.written!r}")
@@ -2606,7 +2564,7 @@ def test_an_erased_screen_is_not_a_prompt_yet() -> None:
     """Between the erase and the new frame there is nothing to type `/exit` at."""
     session, printed, _out = watch_timeline(
         [(0.0, screen("folder-trust")), (0.5, screen("trust-answered-erase"))],
-        timeout=20.0, is_complete=lambda: True,
+        timeout=20.0, is_complete=lambda: True, person_ends_at=AWAY,
     )
     check(not any("/exit" in text for text in session.written),
           f"`/exit` was typed into an erased, undrawn screen: {session.written!r}")
@@ -2658,7 +2616,7 @@ def test_a_bare_replacement_with_no_redraw_is_never_closed() -> None:
     for name, sequence in BARE_FRAME_REPLACEMENTS.items():
         session, _printed, _out = watch_timeline(
             [(0.0, screen("folder-trust")), (0.5, sequence)],
-            timeout=20.0, is_complete=lambda: True,
+            timeout=20.0, is_complete=lambda: True, person_ends_at=AWAY,
         )
         check(not any("/exit" in text for text in session.written),
               f"{name}: `/exit` was typed into a screen erased and never redrawn")
@@ -2826,7 +2784,7 @@ def test_leaving_for_the_browser_survives_every_split_of_the_focus_chunk() -> No
     """test8 again, with the focus-out arriving in two reads at every cut point."""
     for first, second in _every_split(screen("focus-out-reassert")):
         _session, printed, _out = watch_timeline(
-            [(0.0, screen("sign-in-box")), (7.0, first), (7.5, second)],
+            [(0.0, screen("sign-in-box")), (7.0, first), (7.5, second)], person_ends_at=AWAY,
         )
         check("ordinary prompt" not in printed,
               f"split {first!r} | {second!r} closed the sign-in box: {printed!r}")
@@ -2841,12 +2799,16 @@ def test_an_escape_split_across_reads_is_still_seen() -> None:
 
 
 def test_a_killed_provider_s_modes_are_handed_back_through_the_same_channel() -> None:
+    # Ended by Switchyard, so at the one screen it ends without being recorded:
+    # the ordinary prompt, which ignores `/exit` here and is terminated (SYRD-544
+    # leaves a sign-in box to the person).
     session, _printed, out = watch_timeline(
-        [(0.0, "\x1b[?1004h\x1b[>5u" + screen("sign-in-box"))], timeout=10.0,
+        [(0.0, "\x1b[?1004h\x1b[>5u" + screen("ordinary-prompt"))], timeout=10.0,
     )
     check(session.terminated, "the provider was not ended")
-    handed_back = out.rfind("\x1b[?1004l\x1b[<1u")
-    check(handed_back > out.rfind("\x1b[?1004h"),
+    # Each mode it switched on is switched off after it was last switched on. The
+    # recorded prompt switches on more than these two, so they are not adjacent.
+    check(out.rfind("\x1b[?1004l") > out.rfind("\x1b[?1004h") and out.rfind("\x1b[<1u") > out.rfind("\x1b[>5u"),
           f"the terminal was left reporting focus for a provider that is gone: {out[-80:]!r}")
 
 
@@ -2862,6 +2824,9 @@ def _signs_in_like_claude(log: Path) -> str:
         "printf \"Browser didn't open? Use the url below to sign in (c to copy)\\r\\n\\r\\n\"\n"
         "printf 'https://claude.com/cai/oauth/authorize?code=true\\r\\n\\r\\n'\n"
         "printf 'Paste code here if prompted > '\n"
+        # The person comes back and ends it: since SYRD-544 nothing else ends a
+        # sign-in box, and handing the terminal back is what this case watches.
+        "( sleep 10; kill -TERM $$ ) 2>/dev/null &\n"
         f": > '{log}'\n"
         "while :; do\n"
         f"  before=$(wc -c < '{log}')\n"

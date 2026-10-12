@@ -1,0 +1,43 @@
+[?1l>[40;1H[?12l[?25h[?1049l[23;0;0t[?1l>Select provider:
+  → 1. Nous Portal (Nous Research subscription)
+    2. OpenRouter (100+ models, pay-per-use)
+    3. NovitaAI (AI-native cloud: Model API, Agent Sandbox, GPU Cloud)
+    4. LM Studio (local desktop app with built-in model server)
+    5. Anthropic (Claude models — API key or Claude Code)
+    6. OpenAI Codex
+    7. OpenAI API (api.openai.com, API key)
+    8. Qwen Cloud / DashScope Coding (Qwen + multi-provider)
+    9. xAI Grok OAuth (SuperGrok / Premium+)
+    10. Xiaomi MiMo (MiMo-V2.5 and V2 models — pro, omni, flash)
+    11. Tencent TokenHub (Hy3 Preview — direct API via tokenhub.tencentmaas.com)
+    12. NVIDIA NIM (Nemotron models — build.nvidia.com or local NIM)
+    13. GitHub Copilot (uses GITHUB_TOKEN or gh auth token)
+    14. GitHub Copilot ACP (spawns `copilot --acp --stdio`)
+    15. Hugging Face Inference Providers (20+ open models)
+    16. Google AI Studio (Gemini models — native Gemini API)
+    17. Google Gemini via OAuth + Code Assist (free tier supported; no API key needed)
+    18. DeepSeek (DeepSeek-V3, R1, coder — direct API)
+    19. xAI (Grok models — direct API)
+    20. Z.AI / GLM (Zhipu AI direct API)
+    21. Kimi Coding Plan (api.kimi.com) & Moonshot API
+    22. Kimi / Moonshot China (Moonshot CN direct API)
+    23. StepFun Step Plan (agent/coding models via Step Plan API)
+    24. MiniMax (global direct API)
+    25. MiniMax via OAuth browser login (Coding Plan, minimax.io)
+    26. MiniMax China (domestic direct API)
+    27. Ollama Cloud (cloud-hosted open models — ollama.com)
+    28. Arcee AI (Trinity models — direct API)
+    29. GMI Cloud (multi-model direct API)
+    30. Kilo Code (Kilo Gateway API)
+    31. OpenCode Zen (35+ curated models, pay-as-you-go)
+    32. OpenCode Go (open models, $10/month subscription)
+    33. AWS Bedrock (Claude, Nova, Llama, DeepSeek — IAM or API key)
+    34. Azure Foundry (OpenAI-style or Anthropic-style endpoint — your Azure AI deployment)
+    35. Qwen OAuth (reuses local Qwen CLI login)
+    36. Alibaba Cloud Coding Plan — dedicated coding tier
+    37. custom (direct API)
+    38. Custom endpoint (enter URL manually)
+    39. Configure auxiliary models...
+    40. Leave unchanged
+
+Choice [1-40] (1): 

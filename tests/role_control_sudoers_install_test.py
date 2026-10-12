@@ -59,6 +59,37 @@ def _fragment(script: str, project: str) -> list[str]:
     return lines[start : end + 1]
 
 
+#: The publishers SYRD-123 retired. A fresh packet still names them, but only to
+#: delete what an older release staged: an upgrade can take a program away only
+#: by naming it (SYRD-434).
+RETIRED_PUBLISHERS = ("switchyard-publish-ref", "switchyard-integrate-main")
+
+
+def _retired_publisher_lines(script: str, project: str) -> tuple[list[str], list[str]]:
+    """Split the lines naming a retired publisher into removals and the rest.
+
+    A removal is the whole line `sudo rm -f <staging>/<publisher>`, read the way
+    a shell reads it: one command, nothing chained after it, and the project's
+    own staged path. Every other line naming a publisher -- an install, a grant,
+    an invocation, a comment -- lands in the rest.
+    """
+    staged = {f"/usr/local/lib/switchyard/{project}/{name}" for name in RETIRED_PUBLISHERS}
+    removals: list[str] = []
+    rest: list[str] = []
+    for line in script.splitlines():
+        if not any(name in line for name in RETIRED_PUBLISHERS):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            tokens = []
+        if len(tokens) == 4 and tokens[:3] == ["sudo", "rm", "-f"] and tokens[3] in staged:
+            removals.append(tokens[3])
+        else:
+            rest.append(line)
+    return removals, rest
+
+
 def _execute(fragment: list[str], *, project: str, workdir: Path) -> subprocess.CompletedProcess[str]:
     """Run the generated lines with sudo stubbed and the sudoers directory moved."""
     user, group = _me()
@@ -168,10 +199,15 @@ def test_fresh_provisioning_grants_a_shared_account_project_nothing() -> None:
         expected = (workdir / plan.role_control_sudoers_name).read_text(encoding="utf-8")
         assert not expected.strip(), expected
         assert provision.role_control_sudoers_install_commands("otto", expected) == []
-        # And nothing anywhere in the packet grants root or names a publisher.
+        # And nothing anywhere in the packet grants root, and a publisher is
+        # named only to remove what an older release staged (SYRD-434): no
+        # install, grant or invocation of one, and each removal is there.
         assert "NOPASSWD: /usr/local/lib/switchyard" not in commands, commands
-        assert "switchyard-publish-ref" not in commands, commands
-        assert "switchyard-integrate-main" not in commands, commands
+        removals, rest = _retired_publisher_lines(commands, "otto")
+        assert rest == [], rest
+        assert removals == [
+            f"/usr/local/lib/switchyard/otto/{name}" for name in RETIRED_PUBLISHERS
+        ], removals
         # The packet says so rather than silently emitting nothing, and there
         # is no install line for `_fragment` to find.
         assert "no role control interface" in commands, commands
@@ -179,6 +215,32 @@ def test_fresh_provisioning_grants_a_shared_account_project_nothing() -> None:
             line for line in commands.splitlines()
             if "-o root -g root" in line and "role-control" in line
         ], commands
+
+
+def test_the_retired_publisher_reader_admits_only_a_removal() -> None:
+    """A reader that calls everything a removal would pass the packet forever."""
+    staged = "/usr/local/lib/switchyard/otto/switchyard-publish-ref"
+    integrator = "/usr/local/lib/switchyard/otto/switchyard-integrate-main"
+    removal = f"sudo rm -f '{staged}'"
+    assert _retired_publisher_lines(removal, "otto") == ([staged], [])
+    assert _retired_publisher_lines(f"    sudo rm -f {integrator}", "otto") == ([integrator], [])
+    not_removals = [
+        f"sudo install -m 0755 -o root -g root '/opt/switchyard/current/scripts/switchyard-publish-ref' '{staged}'",
+        f"otto-agent ALL=(root) NOPASSWD: {staged}",
+        f"sudo {integrator} --project otto",
+        f"{removal} && sudo install -m 0755 -o root -g root /tmp/x '{staged}'",
+        f"{removal}; sudo {staged}",
+        f"{removal} # then restage it",
+        "sudo rm -f '/usr/local/lib/switchyard/porter/switchyard-publish-ref'",
+        f"sudo rm -rf '{staged}'",
+        f"rm -f '{staged}'",
+        f"sudo rm -f '{staged}' \\",
+        "# switchyard-integrate-main is retired",
+    ]
+    for line in not_removals:
+        assert _retired_publisher_lines(line, "otto") == ([], [line]), line
+    # A line that names no publisher is not read at all.
+    assert _retired_publisher_lines("sudo rm -f '/usr/local/lib/switchyard/otto/directorctl'", "otto") == ([], [])
 
 
 # --- the failure this ticket is about ----------------------------------------

@@ -149,6 +149,35 @@ Changing a gate later is a real decision - it adds or removes a review - so make
 it with `edit-fields` and say in a comment what changed and why. Never clear a
 gate to get a ticket moving.
 
+## Withdrawing an approval
+
+An Audit, Inspector or User sign-off is a verdict on the exact commit the ticket
+carried when it was given.
+
+- **A different commit withdraws it for you.** When work leaves implementation
+  carrying a different commit, the board clears every carried sign-off before
+  it walks the gates, so the new commit is reviewed. Routing work back for
+  rework clears nothing, and needs to clear nothing.
+- **The same commit keeps it.** Resubmitting the approved commit goes straight
+  past the review it already passed. That is right while the approval holds.
+  When it no longer does - the approved commit itself was wrong, or rework will
+  be resubmitted on the same commit - withdraw it before the owner submits:
+
+  ```bash
+  ticket-board-write director-edit <id> --set audit_signoff=false --reason "<why the approval no longer holds>"
+  ```
+
+  `inspector_signoff` and `user_signoff` work the same way. The reason is
+  recorded on the ticket. The gate flag is untouched, so the ticket still goes
+  through that review. `director-edit` only ever lowers a sign-off: raising one
+  is refused, because only the reviewer's own action approves.
+- **`edit-fields` is not the tool.** It edits ordinary fields. On a board with a
+  declared workflow it cannot change a sign-off at all ("flag change requires
+  authorized workflow action"). On a board without one it still lowers one, but
+  records no reason - use `director-edit` there too.
+- **Never clear the gate flag instead.** Clearing `needs_audit` removes the
+  review, not the stale approval.
+
 ## Blocked, deferred, held: three different things
 
 - **Blocked** - waiting on something that is not this role's to do. Set the

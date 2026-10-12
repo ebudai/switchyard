@@ -228,6 +228,23 @@ return move as the workflow decision it is -- raise it, do not take it.
 `edit-fields` bypasses the normal field-specific operations. Each exceptional use needs a
 comment explaining why. Never fake a signoff.
 
+**Withdrawing an approval is a reasoned Director edit, not a field edit.** A sign-off is a
+verdict on the exact commit the ticket carried. Submitting a different commit clears every
+carried sign-off by itself, so routing work back for rework needs nothing more (SYRD-271).
+Resubmitting the same commit keeps the approval and skips the review it already passed. When
+that approval no longer holds, withdraw it before the owner submits:
+
+```bash
+ticket-board-write director-edit <id> --set audit_signoff=false --reason "<why the approval no longer holds>"
+```
+
+The same goes for `inspector_signoff` and `user_signoff`. The reason is recorded on the
+ticket, and the gate flag stays, so the review still happens. `director-edit` can only lower
+a sign-off; raising one is refused. `edit-fields` cannot change a sign-off on a declared
+board ("flag change requires authorized workflow action"). On an undeclared board it still
+lowers one without a reason, so use `director-edit` there too. Never clear `needs_audit` to
+get rid of a stale approval: that removes the review itself (SYRD-280, from MEFP-8).
+
 ---
 
 ## Setting a role's onboarding prompt

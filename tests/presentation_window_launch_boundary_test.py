@@ -96,9 +96,11 @@ def test_handoff_writes_facts_then_reports_and_bad_descriptor_refuses() -> None:
         assert payload['project'] == 'sample' and payload['slot_count'] == 2
         assert payload['slot_titles'] and payload['window_title']
         assert "window opens in desktop-user's own session" in said.getvalue()
+        # A descriptor that is not open is refused before anything is written,
+        # with the supported desktop-account command, not EBADF (SYRD-481).
         with patch.dict(os.environ, {team_launcher.PRESENTATION_HANDOFF_FD_ENV: '999999'}):
             refusal(lambda: owner._hand_off_desktop_half(cfg, {'slot_count': 2}, gui_user='desktop-user'),
-                    'could not hand sample\'s presentation window to desktop-user')
+                    "not handing sample's presentation window to desktop-user: its handoff descriptor 999999 is not open")
 
 
 def test_launch_checks_before_write_and_preserves_write_and_launch_failures() -> None:

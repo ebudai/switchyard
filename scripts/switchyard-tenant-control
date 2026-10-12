@@ -275,6 +275,10 @@ def main(argv: list[str]) -> int:
     # a captured stdout is not a terminal (SYRD-90).
     read_fd, write_fd = os.pipe()
     environ[HANDOFF_FD_ENV] = str(HANDOFF_CHILD_FD)
+    # Which pipe, too: the number alone is whatever a later process happens to
+    # have open there, and the owner half checks it is this one (SYRD-481).
+    piped = os.fstat(write_fd)
+    environ[HANDOFF_PIPE_ENV] = f"{piped.st_dev}:{piped.st_ino}"
 
     child = os.fork()
     if child == 0:  # pragma: no cover - exercised through the real fork
@@ -437,6 +441,7 @@ def record_privileged_boundary(
 #: here rather than by the caller: the child's environment is built from
 #: root-owned data and this is one more field of it (SYRD-90).
 HANDOFF_FD_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_FD"
+HANDOFF_PIPE_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_PIPE"
 HANDOFF_CHILD_FD = 3
 HANDOFF_LIMIT_BYTES = 4096
 HANDOFF_SCHEMA = "switchyard.presentation-handoff.v2"

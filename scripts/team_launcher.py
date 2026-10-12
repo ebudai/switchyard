@@ -752,11 +752,14 @@ from scripts.layout_modes import (
 )
 from scripts.presentation_reconnect import (
     PRESENTATION_HANDOFF_FD_ENV,
+    PRESENTATION_HANDOFF_PIPE_ENV,
     hand_presentation_back_to_the_caller,
+    presentation_handoff_descriptor,
     presentation_is_attached,
     presentation_slot_titles,
     reconnect_presentation,
     render_presentation_handoff,
+    stale_handoff_refusal,
 )
 from scripts.desktop_layout_writer import (
     _open_owned_directory_chain,
@@ -1902,6 +1905,17 @@ PANE_TARGET_ENV_KEYS = (
     "TICKET_BOARD_CALLER_ROLE",
 )
 PROBE_IDENTITY_ENV_KEYS = ("TMUX", "TMUX_PANE", *PANE_TARGET_ENV_KEYS)
+#: The tenant control bridge's one-shot handoff: the descriptor, which pipe it
+#: is, and who asked. They belong to the one launch the bridge started. The
+#: tmux server that launch starts keeps its environment, so every role pane
+#: inherited them: a Director pane's later `switchyard present` then wrote to
+#: a descriptor that was long closed (SYRD-481), and the caller's name would
+#: have stood in for the bridge's word. A role's command drops all three.
+PRESENTATION_HANDOFF_ENV_KEYS = (
+    PRESENTATION_HANDOFF_FD_ENV,
+    PRESENTATION_HANDOFF_PIPE_ENV,
+    TENANT_CONTROL_CALLER_ENV,
+)
 
 
 def _command_name(value: str) -> str:

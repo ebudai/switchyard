@@ -137,8 +137,12 @@ def _hand_off_desktop_half(
     this end writes to a pipe it was handed, and root decides what becomes of
     it (SYRD-90).
     """
-    raw_fd = os.environ.get(team_launcher.PRESENTATION_HANDOFF_FD_ENV, "").strip()
-    if not raw_fd.isdigit():
+    descriptor, unusable = team_launcher.presentation_handoff_descriptor()
+    if unusable:
+        # Named but unusable: stale, closed or somebody else's descriptor. Not
+        # a window opened from here, and not EBADF either (SYRD-481).
+        raise SystemExit(team_launcher.stale_handoff_refusal(config.project, unusable, gui_user=gui_user))
+    if descriptor is None:
         return False
     payload = team_launcher.render_presentation_handoff(
         config.project,
@@ -150,7 +154,7 @@ def _hand_off_desktop_half(
         window_title=team_launcher.project_window_title(config),
     )
     try:
-        with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
     except OSError as exc:
         raise SystemExit(

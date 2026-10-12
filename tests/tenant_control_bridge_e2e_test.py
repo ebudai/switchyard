@@ -133,6 +133,8 @@ json.dump(
         "argv": sys.argv,
         "environ": dict(os.environ),
         "cwd": os.getcwd(),
+        # The pipe this process was really handed, to hold the bridge's name for it against (SYRD-481).
+        "handoff_pipe": "{0.st_dev}:{0.st_ino}".format(os.fstat(int(os.environ["SWITCHYARD_PRESENTATION_HANDOFF_FD"]))),
     },
     open("@RECORD@", "w"),
 )
@@ -201,6 +203,9 @@ def case_the_bridge_returns_one_validated_handoff_to_its_caller(
     assert ran["uid"] == accounts.owner.pw_uid, ran
     assert 0 not in ran["groups"], ran["groups"]
     assert ran["environ"]["SWITCHYARD_PRESENTATION_HANDOFF_FD"] == "3", ran["environ"]
+    # And names which pipe that is, so a descriptor 3 inherited by anything
+    # later cannot pass for it (SYRD-481).
+    assert ran["environ"]["SWITCHYARD_PRESENTATION_HANDOFF_PIPE"] == ran["handoff_pipe"], ran
 
     assert published.is_file(), sorted(str(path) for path in published.parent.parent.glob("*"))
     info = published.stat()

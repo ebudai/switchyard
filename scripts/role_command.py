@@ -206,7 +206,13 @@ def cli_command_for_role(
         pane_path_dirs.insert(0, str(directorctl_path.parent))
         runtime_registrar = str(directorctl_path.parent / "ticket-board-register-runtime")
     env["PATH"] = launcher._prepend_paths(env.get("PATH") or launcher.default_pane_base_path(bin_user), pane_path_dirs)
-    env_prefix = ["env", *launcher._env_unset_prefix((*launcher.PANE_TARGET_ENV_KEYS, *role.unset_env)), *launcher._env_prefix(env)]
+    env_prefix = [
+        "env",
+        *launcher._env_unset_prefix(
+            (*launcher.PANE_TARGET_ENV_KEYS, *launcher.PRESENTATION_HANDOFF_ENV_KEYS, *role.unset_env)
+        ),
+        *launcher._env_prefix(env),
+    ]
     socket_path = str(role.env.get("TICKET_BOARD_SOCKET") or "").strip()
     if role_registers_runtime(role):
         runtime, target = launcher.role_runtime_binding(role)

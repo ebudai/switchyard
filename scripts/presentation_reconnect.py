@@ -23,8 +23,10 @@ This module never imports `team_launcher` at its top.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import stat
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Sequence
@@ -61,8 +63,10 @@ def hand_presentation_back_to_the_caller(
     """
     from scripts import team_launcher as launcher
 
-    raw_fd = os.environ.get(PRESENTATION_HANDOFF_FD_ENV, "").strip()
-    if not raw_fd.isdigit():
+    descriptor, unusable = presentation_handoff_descriptor()
+    if unusable:
+        raise SystemExit(stale_handoff_refusal(config.project, unusable))
+    if descriptor is None:
         return False
     payload = render_presentation_handoff(
         config.project,
@@ -81,7 +85,7 @@ def hand_presentation_back_to_the_caller(
         layout=layout,
     )
     try:
-        with os.fdopen(int(raw_fd), "w", encoding="utf-8", closefd=True) as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
     except OSError as exc:
         raise SystemExit(
@@ -99,6 +103,59 @@ def hand_presentation_back_to_the_caller(
 #: it, never the caller: the environment the child gets is rebuilt from
 #: root-owned data, and this is one more field of it.
 PRESENTATION_HANDOFF_FD_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_FD"
+#: And which pipe that descriptor is, as `st_dev:st_ino`. A descriptor number
+#: is only a number: in any later process it is whatever that process opened
+#: there, or nothing (SYRD-481).
+PRESENTATION_HANDOFF_PIPE_ENV = "SWITCHYARD_PRESENTATION_HANDOFF_PIPE"
+
+
+def presentation_handoff_descriptor() -> tuple[int | None, str]:
+    """The bridge's handoff descriptor, checked: `(fd, "")`, `(None, "")` or `(None, why)`.
+
+    `(None, "")` means no handoff was asked for. A handoff is one-shot: it
+    belongs to the one launch the tenant control bridge started, and nothing
+    stops its variables outliving it -- a role pane started by that launch
+    inherited them, and a later `switchyard present` there wrote to a
+    descriptor 3 that was closed, and answered EBADF (SYRD-481). Worse, a
+    descriptor reused for something else would have been written to. So the
+    descriptor is used only if it is open, it is the write end of a pipe, and
+    -- where the bridge names it -- it is that very pipe. Anything else is
+    `(None, why)`, and the caller refuses rather than opening a window from
+    here.
+    """
+    raw = os.environ.get(PRESENTATION_HANDOFF_FD_ENV, "").strip()
+    if not raw:
+        return None, ""
+    if not raw.isdigit():
+        return None, f"{PRESENTATION_HANDOFF_FD_ENV}={raw!r} names no descriptor"
+    descriptor = int(raw)
+    try:
+        info = os.fstat(descriptor)
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+    except OSError:
+        return None, f"its handoff descriptor {descriptor} is not open"
+    if not stat.S_ISFIFO(info.st_mode) or flags & os.O_ACCMODE not in (os.O_WRONLY, os.O_RDWR):
+        return None, f"its handoff descriptor {descriptor} is not the write end of a pipe"
+    expected = os.environ.get(PRESENTATION_HANDOFF_PIPE_ENV, "").strip()
+    # An older bridge names no pipe; its descriptor is still checked above.
+    if expected and expected != f"{info.st_dev}:{info.st_ino}":
+        return None, f"its handoff descriptor {descriptor} is not the pipe the bridge opened"
+    return descriptor, ""
+
+
+def stale_handoff_refusal(project: str, unusable: str, *, gui_user: str = "") -> str:
+    """The refusal for a handoff that is named but cannot be used.
+
+    No window is opened from here, and no broader authority is assumed: the
+    supported route is the one the cross-account refusal gives (SYRD-481).
+    """
+    who = gui_user or "the desktop account"
+    return (
+        f"switchyard: not handing {project}'s presentation window to {who}: {unusable}. "
+        "A presentation handoff belongs to the one launch the tenant control bridge started, "
+        f"and this is not it. Run `sudo switchyard {project}` from {who}'s own session to "
+        "open the window."
+    )
 
 
 def presentation_slot_titles(config: ProjectConfig, slot_count: int) -> list[str]:

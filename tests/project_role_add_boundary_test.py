@@ -549,7 +549,11 @@ def test_the_role_plan_is_built_from_the_recorded_plan() -> None:
             m._project_plan_for_added_role(config, config_path=Path("/c.json"), role_name="perf"); raised = None
         except SystemExit as exc:
             raised = str(exc)
-    check(raised == "use ticket-board-workflow apply to update configured roles and stages", "a declared workflow refuses")
+    # SYRD-510: the refusal now names the tenant's supported path; tests/declared_workflow_add_role_test.py holds its content.
+    from scripts.declared_role_guidance import declared_workflow_add_role_refusal
+
+    check(raised == declared_workflow_add_role_refusal(config, config_path=Path("/c.json"), role_name="perf")
+          and raised.startswith("switchyard: p355 runs a declared workflow"), "a declared workflow refuses, naming its path")
 
 
 def test_a_recognized_generated_layout() -> None:

@@ -124,7 +124,10 @@ not a fictitious atomic transaction across PostgreSQL and the filesystem.
 Fresh provisioning accepts `--workflow-config` on both `switchyard new` and
 `team-launcher <project> new`. Reprovisioning from an artifact reads its saved
 workflow. Existing legacy add-role/VCS-close commands reject configured tenants;
-use the complete validated workflow operation instead.
+use the complete validated workflow operation instead. `switchyard add-role`'s
+refusal names that operation for the tenant it refused, with the pool route
+when the tenant declares a worker pool, and the preparation and start that
+follow (SYRD-510).
 
 ```sh
 scripts/ticket-board-write workflow-action CER-42 accept_verification

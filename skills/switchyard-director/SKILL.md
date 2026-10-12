@@ -214,7 +214,20 @@ These reshape the running team rather than a ticket, so they belong to you:
   auditor, its worktree, pane and board registration. It refuses rather than
   silently replacing a hand-maintained layout; `--relayout` is explicit consent
   to regenerate one, and a new visible slot appears only after the project
-  window is relaunched.
+  window is relaunched. That is the built-in workflow's path. On a tenant that
+  runs a declared workflow its roles come from the workflow document, so
+  `add-role` refuses, changes nothing, and prints that tenant's supported path
+  with every command filled in:
+  - a pool worker: raise `worker_pool.size` in the launcher config, then
+    `switchyard worker-pool <project> apply` (and `--apply`), then the printed
+    `ticket-board-workflow prepare-role` and `switchyard worker-pool <project>
+    start <worker>`;
+  - any other role: a workflow-document entry with `template_role` (whose model
+    and effort it copies), the template's stages and actors, `slot: null` for a
+    detached session and `ephemeral: true` for a fresh session per ticket,
+    applied with `ticket-board-workflow apply`, then `prepare-role` and
+    `team-launcher <project> pane attach-or-start <role>`;
+  - either one's model or effort: `switchyard set-role-runtime`.
 - `switchyard set-vcs-close-role <project> <role>` moves the final close.
 - `switchyard set-role-runtime <project> <role> --cli <runtime>` moves an
   existing role to a different agent CLI, restarts only that worker, and

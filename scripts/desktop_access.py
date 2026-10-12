@@ -302,6 +302,98 @@ def gui_lock(runtime):
         os.close(fd)
 
 
+#: Where the GUI owner leaves a clipboard image for one project's tenant
+#: (SYRD-247): `<gui runtime>/switchyard-paste/<project>/`, inside the runtime
+#: the approved grant already lets the tenant traverse. The owner creates
+#: everything here; the tenant may traverse the parent, list its own project's
+#: directory and read each file, and write nothing.
+HANDOFF_DIR = 'switchyard-paste'
+#: How long a handed-over image exists, from the moment it was copied. The
+#: owner's access service removes it within one watch interval after this.
+HANDOFF_TTL_SECONDS = 15 * 60
+#: The only names a handoff directory holds: an image and its manifest, sharing
+#: one random stem, plus the manifest's temporary name before it is renamed in.
+HANDOFF_NAME = re.compile(r'(?:\.tmp-)?paste-[0-9a-f]{32}\.(?:png|jpg|gif|webp|bmp|handoff\.json)')
+
+
+def handoff_dir(runtime, project):
+    return Path(runtime) / HANDOFF_DIR / project
+
+
+def _owned_directory(path, uid, *, create):
+    """`path` as a real directory `uid` owns that nobody else may write, or a refusal.
+
+    Created 0700 when `create` and missing. A symlink, a non-directory, another
+    owner, or a group/other write bit is refused rather than written through.
+    """
+    if create:
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(path, 0o700)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022 or info.st_mode & 0o007:
+        raise DesktopAccessError(f'{path} is not a private directory owned by uid {uid}; refusing to use it for an image handoff')
+    return Path(path)
+
+
+def prepare_handoff_dir(runtime, project, tenant_uid):
+    """As the GUI owner: the project's handoff directory, with the tenant's two entries.
+
+    The parent gets `--x` for the tenant (reach the project directory, list
+    nothing), the project directory `r-x` (list and open what is there). Both
+    through `grant`, which refuses to broaden any unrelated masked entry.
+    """
+    runtime = Path(runtime)
+    owner = os.geteuid()
+    if runtime.lstat().st_uid != owner or runtime.is_symlink():
+        raise DesktopAccessError(f'{runtime} is not this account\'s runtime directory; run this as the desktop owner')
+    if not effective_acl(runtime, tenant_uid) & 1:
+        # The approved grant's own traverse entry, which `apply` makes. Without
+        # it the tenant can reach nothing in here, so nothing is handed over.
+        raise DesktopAccessError(f'the approved desktop grant is not applied to {runtime}; start the project\'s desktop access service first')
+    parent = _owned_directory(runtime / HANDOFF_DIR, owner, create=True)
+    leaf = _owned_directory(parent / project, owner, create=True)
+    for path, wanted in ((parent, '--x'), (leaf, 'r-x')):
+        if effective_acl(path, tenant_uid) != bits(wanted):
+            grant(path, tenant_uid, wanted)
+    return leaf
+
+
+def _handoff_entries(runtime, project):
+    leaf = handoff_dir(runtime, project)
+    try:
+        _owned_directory(leaf, os.geteuid(), create=False)
+        with os.scandir(leaf) as entries:
+            return [entry for entry in entries if HANDOFF_NAME.fullmatch(entry.name) and entry.is_file(follow_symlinks=False)]
+    except (OSError, DesktopAccessError):
+        return []
+
+
+def sweep_handoffs(runtime, project, *, now=None, ttl=HANDOFF_TTL_SECONDS):
+    """As the GUI owner: remove this project's handed-over files older than `ttl`.
+
+    Run by the owner's access service on every watch pass, so an image leaves
+    within one interval of expiring whether or not anything is pasted again.
+    """
+    now = time.time() if now is None else now
+    removed = []
+    for entry in _handoff_entries(runtime, project):
+        with contextlib.suppress(OSError):
+            if now - entry.stat(follow_symlinks=False).st_mtime >= ttl:
+                os.unlink(entry.path)
+                removed.append(entry.name)
+    return removed
+
+
+def remove_handoffs(runtime, project):
+    """As the GUI owner: remove the project's handoff directory, as a grant is withdrawn."""
+    for entry in _handoff_entries(runtime, project):
+        with contextlib.suppress(OSError):
+            os.unlink(entry.path)
+    for path in (handoff_dir(runtime, project), Path(runtime) / HANDOFF_DIR):
+        with contextlib.suppress(OSError):
+            os.rmdir(path)
+
+
 def apply(policy):
     gui, tenant, name = names(policy)
     if os.geteuid() != gui.pw_uid:
@@ -493,6 +585,8 @@ def rollback(policy):
                 if (record['device'],record['inode']) not in active:
                     restore_grant(record)
             ready.unlink()
+        # Withdrawing the grant withdraws anything still handed over under it.
+        remove_handoffs(runtime, policy['project'])
 
 
 def main(argv=None):
@@ -514,7 +608,8 @@ def main(argv=None):
         apply(policy);return 0
     while True:
         try:
-            apply(policy)
+            # The owner's reliable cleanup for handed-over images (SYRD-247).
+            sweep_handoffs(apply(policy).parent, policy['project'])
         except (DesktopAccessError,OSError) as exc:
             print(f'Wayland access pending: {exc}',file=sys.stderr,flush=True)
         time.sleep(5)

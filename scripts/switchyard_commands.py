@@ -115,6 +115,10 @@ SWITCHYARD_COMMANDS = (
     "teardown",
     "status",
     "validate-models",
+    # Hands one image from the desktop owner's clipboard to one role, on a
+    # compositor where no provider can read that clipboard itself. Run by the
+    # desktop owner the project's policy names, never by a role (SYRD-247).
+    "paste-image",
 )
 # `present` and `board-skill` act on the caller's own runtime -- display slots
 # and the caller's CLI skill trees -- so neither needs to escalate. `role-prompt`
@@ -155,9 +159,15 @@ SWITCHYARD_UNPRIVILEGED_COMMANDS = frozenset(
     # prompt for a read. The root-owned registry, release and journal records
     # this reports are world-readable by design; anything it cannot read is
     # named as unavailable instead (SYRD-241).
+    #
+    # `paste-image` must run as the DESKTOP OWNER, as typed. It reads that
+    # owner's clipboard -- the authority it passes on, one image at a time --
+    # and proves who the caller is from the policy that owner installed.
+    # Escalated, it would read root's clipboard, which does not exist (SYRD-247).
     {
         "present", "attach", "board-skill", "role-prompt", "design-stage", "set-role-runtime",
         "reconcile-role-models", "finish-upgrade", "worker-pool", "privileged-action", "status",
+        "paste-image",
     }
 )
 SWITCHYARD_PRIVILEGED_COMMANDS = frozenset(
@@ -206,6 +216,7 @@ Commands:
   release-status   compare the shared release, deployed board, live build and both journals
   status           list registered projects and pane liveness
   validate-models  check configured role models without starting panes
+  paste-image      hand one copied image to a role, as the project's desktop owner
 
 Bare project names start or attach the project. Recognized commands: {commands}.
 """

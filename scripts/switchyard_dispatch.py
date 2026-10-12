@@ -321,6 +321,10 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import onboarding_readiness
 
         return onboarding_readiness.main(argv[1:])
+    if argv[0].casefold() == "paste-image":
+        from scripts import paste_image
+
+        return paste_image.main(argv[1:])
     # `design-stage` shares this block: like role-prompt it writes the tenant's own
     # declared workflow through workflow_manage as the caller (SYRD-567).
     if argv[0].casefold() in ("role-prompt", "design-stage"):

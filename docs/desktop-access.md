@@ -136,6 +136,24 @@ removed so inaccessible inherited X11 settings cannot win transport selection.
 No tmux global environment is changed. Headless roles remove display/clipboard
 variables without granting GUI access.
 
+## Handing over one image
+
+On a compositor with no data-control protocol, such as GNOME's Mutter, no
+provider in a role pane can read the desktop clipboard even with this grant.
+The desktop owner can still hand one image to a role:
+
+```sh
+switchyard paste-image <project> <role>
+```
+
+It runs as the GUI owner named in this project's installed policy, and as
+nobody else. It writes the image into `<gui runtime>/switchyard-paste/<project>/`,
+where the tenant may traverse the parent, list the project directory and read
+each file, and write nothing. The project's listener tells the role where the
+image is once its pane is idle. This GUI-owned service removes the image 15
+minutes after the copy, and revoking the grant removes anything still there.
+See [syrd-247-image-handoff.md](syrd-247-image-handoff.md).
+
 ## Existing projects, reapplication and rollback
 
 `switchyard upgrade` installs the same policy/service and verifies readiness

@@ -9,8 +9,8 @@ top-level nodes through `launcher_body` here. For each dispatcher:
 - **Before its move** (no module, and no re-export from it): the launcher's own nodes, unchanged.
 - **After it**, only once the launcher defines no function of that name; re-exports exactly the dispatcher's names,
   unaliased, from exactly its module; that module imports nothing of Switchyard's when it loads; and its one function begins
-  with the call-time launcher import, imports nothing else but the nested imports it had in the launcher (none for `main`; for `switchyard_main` its four, in their
-  order), and reads none of the launcher's names bare: the launcher's nodes plus that function, its launcher import
+  with the call-time launcher import, imports nothing else but the nested imports it had in the launcher (none for `main`; for `switchyard_main` its five --
+  SYRD-247 added `paste_image` -- in their order), and reads none of the launcher's names bare: the launcher's nodes plus that function, its launcher import
   dropped and each `launcher.X` read as `X` -- so it counts exactly as the launcher's own definition did.
 
 Anything else raises AssertionError, which fails the guard reading it.
@@ -27,7 +27,8 @@ DISPATCHERS = {
     "main": ("scripts/launcher_dispatch.py", "scripts.launcher_dispatch", [("_reject_removed_commands", None), ("main", None)], []),
     "switchyard_main": ("scripts/switchyard_dispatch.py", "scripts.switchyard_dispatch", [("switchyard_main", None)],
                         ["from scripts.ticket_board import privileged_front_door", "from scripts import board_skill_cli",
-                         "from scripts import onboarding_readiness", "from scripts import workflow_manage"]),
+                         "from scripts import onboarding_readiness", "from scripts import paste_image",
+                         "from scripts import workflow_manage"]),
 }
 
 

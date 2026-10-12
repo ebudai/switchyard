@@ -99,7 +99,7 @@ from .pane_state import (
     verify_pane_state_authority,
 )
 from .peer_identity import PROC_ROOT, SessionIdentity, read_process, session_is_live
-from . import background_work
+from . import background_work, image_handoff
 from .runtime_paths import directorctl_path
 
 CHANNEL = "ticket_board_state_transition"
@@ -1134,6 +1134,7 @@ WHERE (r.definition->>'active')::boolean
                 self.process_idle_stall_nudges(conn)
                 self.process_serial_focus_queue_wakeups(conn)
                 pull_pickup.run(self, conn); delivery_proof.run(self, conn)  # SYRD-539, SYRD-565: both before delivery
+                image_handoff.run(self)  # SYRD-247: images the desktop owner handed over
                 delivered = self.process_due_notifications(conn, max_notifications=max_notifications)
                 if max_notifications is not None and self.delivered_count >= max_notifications:
                     break
@@ -1227,6 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
         poll_seconds=args.poll_seconds,
         pre_send_recheck_delay_seconds=args.pre_send_recheck_delay_seconds,
     )
+    listener.image_handoffs = image_handoff.from_environment(listener.project, log=LOGGER.info)  # SYRD-247
     # Rediscovery on every start. A restarted listener re-reads whatever the
     # hooks have written since, and says out loud which directory that is --
     # so a disagreement appears in the log at startup instead of only as

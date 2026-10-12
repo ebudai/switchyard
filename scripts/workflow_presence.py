@@ -94,11 +94,10 @@ class DeclaredWorkflowPresence:
         """The condition this ticket exists for.
 
         The board a tenant is running is enforcing no declared workflow. That
-        tenant's Director is on provisioning-scaffold onboarding by
-        construction -- the pane hook's scaffold branch is gated on
-        `TICKET_BOARD_ROLE_ONBOARDING_MIGRATED`, which exists only when a
-        workflow document carries the migration marker -- and it is the state
-        the upgrade used to close over.
+        tenant's Director was on provisioning-scaffold onboarding by
+        construction -- the pane hook's scaffold branch answered only until a
+        workflow document carried the migration marker, and SYRD-40 removed
+        it -- and it is the state the upgrade used to close over.
 
         Deliberately NOT conditioned on some other source already declaring a
         workflow. A tenant provisioned before declarative workflows existed has

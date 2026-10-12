@@ -199,17 +199,11 @@ def test_no_session_start_of_any_kind_carries_a_skill_sentence() -> None:
 def test_a_fresh_start_with_nothing_to_say_emits_nothing() -> None:
     """It used to emit the pointer alone, which is the repetition this removes.
 
-    A director on a tenant that predates stored onboarding still gets the
-    packet through the legacy bridge, so that case is pinned with the marker
-    set, which is what a migrated tenant looks like.
+    The director is no exception: the legacy packet bridge that answered for an
+    unmigrated director is gone (SYRD-40), so no marker is needed to silence it.
     """
     assert hook_session_start("startup", role="ops") is None
-    assert (
-        hook_session_start(
-            "startup", role="director", TICKET_BOARD_ROLE_ONBOARDING_MIGRATED="1"
-        )
-        is None
-    )
+    assert hook_session_start("startup", role="director") is None
 
 
 def test_onboarding_still_reaches_a_fresh_session_unadorned() -> None:

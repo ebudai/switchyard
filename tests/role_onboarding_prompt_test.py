@@ -242,10 +242,11 @@ def test_a_stored_prompt_is_delivered_without_a_skill_sentence() -> None:
 def _controlled_project_root(packet: bool):
     """Run with every onboarding-root candidate under this test's control.
 
-    The legacy bridge searches several environment roots and finally the process cwd, so
-    a test that leaves cwd alone reads whatever directory it happens to run from -- this
+    The legacy bridge searched several environment roots and finally the process cwd, so
+    a test that left cwd alone read whatever directory it happened to run from -- this
     suite passed from tests/ and failed from the repository root, which has its own
-    docs/onboarding. Both the environment roots and cwd are pinned here.
+    docs/onboarding. Both the environment roots and cwd are pinned here, each holding a
+    packet, so a bridge that came back would find one wherever it looked.
     """
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "project"
@@ -283,28 +284,21 @@ def test_director_receives_a_stored_prompt_through_the_generic_path() -> None:
     assert "/srv/porter/docs/onboarding/switchyard-director-guide.md" in text
 
 
-def test_the_legacy_bridge_is_gated_on_the_migration_marker() -> None:
-    """Phase one keeps the packet lookup, but only for a tenant that has not migrated.
+def test_the_legacy_bridge_is_gone_and_the_director_is_an_ordinary_role() -> None:
+    """SYRD-40: the phase-one packet lookup no longer answers for any director.
 
-    This is the exact contract: no stored onboarding *and* no marker means the tenant
-    predates the feature and the old lookup still serves it. Once the marker is present,
-    an empty prompt and path mean the director cleared it deliberately, and the answer is
-    no role-specific onboarding. SYRD-40 removes the branch entirely.
+    With a packet in every root the bridge searched, a director with no stored
+    onboarding gets no role-specific text, marker or not: an empty prompt and path are
+    a deliberate clear, and with the skill sentence gone the hook emits nothing at all
+    (SYRD-106). Its onboarding comes only through the generic prompt or path.
     """
     with _controlled_project_root(packet=True) as env:
-        unmigrated = _context_text(_director_start(env))
-        migrated = _director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"})
-
-    assert "Read the onboarding packet first:" in unmigrated, unmigrated
-    # Migrated and cleared: the bridge must not answer for this director, and
-    # with the skill sentence gone there is nothing else left to send, so the
-    # hook emits no context at all rather than an empty one (SYRD-106).
-    assert migrated is None, migrated
-
-    # And with no packet anywhere, an unmigrated director gets nothing either.
-    with _controlled_project_root(packet=False) as env:
-        bare = _director_start(env)
-    assert bare is None, bare
+        unmarked = _director_start(env)
+        marked = _director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"})
+        prompted = _context_text(_director_start({**env, "TICKET_BOARD_ROLE_ONBOARDING_PROMPT": "Remit."}))
+    assert unmarked is None, unmarked
+    assert marked is None, marked
+    assert prompted == "Your director session started.\n\nRemit.", prompted
 
 
 def test_a_migrated_director_with_a_prompt_still_gets_the_prompt() -> None:
@@ -319,22 +313,23 @@ def test_a_migrated_director_with_a_prompt_still_gets_the_prompt() -> None:
     assert "Director remit body." in text
 
 
-def test_the_marker_is_projected_only_once_the_document_carries_it() -> None:
+def test_the_marker_is_no_longer_projected_and_a_stale_one_is_shed() -> None:
+    """Only the removed bridge read the projected marker (SYRD-40).
+
+    A migrated document projects no marker, and a projection written before the
+    removal loses the one it carried the next time it is projected.
+    """
     document = _minimal_document()
-    raw = {"project": PROJECT, "roles": [{"role": "ops", "env": {}}], "layout": "layout.json"}
-
-    before = next(
-        r for r in project_roles(raw, validate(json.loads(json.dumps(document))))["roles"]
-        if r["role"] == "ops"
-    )["env"]
-    assert "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED" not in before
-
     document["migrations"] = {"director_onboarding": True}
-    after = next(
-        r for r in project_roles(raw, validate(json.loads(json.dumps(document))))["roles"]
-        if r["role"] == "ops"
-    )["env"]
-    assert after["TICKET_BOARD_ROLE_ONBOARDING_MIGRATED"] == "1"
+    raw = {
+        "project": PROJECT,
+        "roles": [{"role": "ops", "env": {"TICKET_BOARD_ROLE_ONBOARDING_MIGRATED": "1"}}],
+        "layout": "layout.json",
+    }
+    projected = project_roles(raw, validate(json.loads(json.dumps(document))))
+    for role in projected["roles"]:
+        assert "TICKET_BOARD_ROLE_ONBOARDING_MIGRATED" not in role["env"], role
+    assert projected["workflow"]["migrations"]["director_onboarding"] is True
 
 
 def test_provisioning_seeds_the_director_and_leaves_other_roles_alone() -> None:

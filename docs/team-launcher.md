@@ -1512,7 +1512,11 @@ Each role entry contains:
   the pane's scrollback, so the wheel reaches them through the `mouse on` that
   the launcher already sets: codex-cli 0.153.4 holds neither the alternate
   screen nor mouse capture, which is the branch of tmux's `WheelUpPane` binding
-  that enters copy mode. A role that wants a different Codex output mode can
+  that enters copy mode. A presentation slot sets that `mouse on` again each
+  time it shows a role, because a session made by `attach-role` or by an older
+  release inherits the server's `mouse off`, and then the wheel in the slot does
+  nothing; the slot's display table hands the wheel to the pane with
+  `send-keys -M` (SYRD-389). A role that wants a different Codex output mode can
   still say so in its own `extra_args` (SYRD-91).
 - `yolo`: optional boolean. When true, the launcher appends the appropriate
   bypass-permissions flag for the configured CLI: Agy and Claude use

@@ -13,6 +13,8 @@ Designer, Director, Audit and Main could not be answered at all.
 
 Focus is not a capability. The table now holds exactly five bindings, all of
 which move focus and nothing else, and everything else still falls through.
+SYRD-389 added the wheel, handed to the pane with `send-keys -M` and nothing
+more, so the table holds those two besides.
 
 These cases drive a REAL tmux server with a REAL attached client on a pty,
 because key tables are not exercised by `send-keys`: that writes to the pane's
@@ -150,13 +152,15 @@ def test_the_locked_table_holds_focus_bindings_and_nothing_else() -> None:
         listed = server.tmux(
             "list-keys", "-T", helper.DISPLAY_KEY_TABLE
         ).stdout.strip().splitlines()
-        check(len(listed) == len(helper.FOCUS_BINDINGS),
+        check(len(listed) == len(helper.FOCUS_BINDINGS) + len(helper.WHEEL_BINDINGS),
               f"exactly the bindings this release grants: {listed}")
         for line in listed:
-            check("select-pane" in line,
-                  f"every one of them only moves focus: {line.strip()}")
+            words = line.split()
+            wheel = words[3:] in (["WheelUpPane", "send-keys", "-M"], ["WheelDownPane", "send-keys", "-M"])
+            check("select-pane" in line or wheel,
+                  f"every one of them only moves focus, or hands the wheel to the pane: {line.strip()}")
         for forbidden in ("new-window", "split-window", "command-prompt",
-                          "choose-tree", "switch-client", "kill-pane", "send-prefix"):
+                          "choose-tree", "switch-client", "kill-pane", "send-prefix", "copy-mode"):
             check(not any(forbidden in line for line in listed),
                   f"and none of them is {forbidden}: {listed}")
         check(server.ask("#{prefix}") in ("", "None", "none"),
@@ -185,7 +189,7 @@ def test_a_stale_table_from_an_older_release_is_cleared_first() -> None:
               f"a stale prefix binding is gone: {listed}")
         check(not any("kill-pane" in line for line in listed),
               f"and so is a stale kill: {listed}")
-        check(len(listed) == len(helper.FOCUS_BINDINGS),
+        check(len(listed) == len(helper.FOCUS_BINDINGS) + len(helper.WHEEL_BINDINGS),
               f"leaving only what this release grants: {listed}")
     finally:
         server.close()

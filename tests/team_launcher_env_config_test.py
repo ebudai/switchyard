@@ -823,8 +823,7 @@ def test_project_config_accepts_hermes_runtime_defaults() -> None:
         session_id,
         "-m",
         "zai/glm-5.3",
-        "--reasoning",
-        "xhigh",
+        # SYRD-546: no `--reasoning xhigh`; Hermes takes its effort from the role's home config.yaml.
         "--yolo",
         "--accept-hooks",
         "--pass-session-id",

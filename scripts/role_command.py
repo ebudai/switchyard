@@ -5,7 +5,8 @@ differently. This module holds those per-CLI adapter tables:
 - unattended/approval flags (`YOLO_ARGS_BY_CLI`);
 - startup arguments;
 - how a reasoning effort is passed (`EFFORT_STYLE_BY_CLI`). For Codex that is
-  the TOML override `-c model_reasoning_effort="<level>"`;
+  the TOML override `-c model_reasoning_effort="<level>"`; Hermes takes none
+  on its command line, only in its home's config.yaml (SYRD-546);
 - the model flag and resume conventions `_role_from_json` defaults a role to.
 
 It also builds a role's arguments from those tables, and the whole pane
@@ -46,7 +47,9 @@ EFFORT_STYLE_BY_CLI = {
     "agy": None,
     "claude": "flag",
     "codex": "config",
-    "hermes": "reasoning",
+    # Hermes has no effort flag; its effort is `agent.reasoning_effort` in the
+    # role's own HERMES_HOME (`scripts/hermes_role_config.py`, SYRD-546).
+    "hermes": "home",
 }
 
 
@@ -113,8 +116,11 @@ def effort_args_for_role(role: RoleConfig) -> list[str]:
         # extra_args come after this and Codex applies the last `-c` of a key,
         # so an explicit override there still wins.
         return ["-c", f'model_reasoning_effort="{role.effort}"']
-    if style == "reasoning":
-        return ["--reasoning", role.effort]
+    if style == "home":
+        # `--reasoning <effort>` made Hermes 0.15.2 exit 2 at launch: it read
+        # the level as a subcommand (SYRD-546). The effort is set where the
+        # role's home is prepared, and nothing is passed here.
+        return []
     if style is None and cli_name in EFFORT_STYLE_BY_CLI:
         return []
     raise SystemExit(f"role {role.role} uses unsupported effort cli {cli_name!r}")

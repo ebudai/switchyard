@@ -199,8 +199,15 @@ def prepare_hermes_home_for_role(role: RoleConfig, *, session_dir: Path) -> Path
     hermes_home = hermes_home_for_role(role, session_dir=session_dir)
     launcher._ensure_private_dir(hermes_home)
     shared_home = hermes_shared_home_for_session_dir(session_dir)
+    # Hermes takes its effort only from config.yaml: a role with one gets its
+    # own copy of the shared document instead of the link (SYRD-546).
+    from scripts.hermes_role_config import HERMES_CONFIG_NAME, prepare_hermes_role_config
+
+    private_config, notice = prepare_hermes_role_config(role, hermes_home=hermes_home, shared_home=shared_home)
+    if notice:
+        print(f"team-launcher: {notice}", file=sys.stderr)
     for entry in HERMES_SHARED_HOME_ENTRIES:
-        if entry in HERMES_PRIVATE_HOME_ENTRIES:
+        if entry in HERMES_PRIVATE_HOME_ENTRIES or (private_config and entry == HERMES_CONFIG_NAME):
             continue
         source = shared_home / entry
         # Locks must live with the resource they guard. Hermes derives both

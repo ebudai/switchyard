@@ -146,7 +146,7 @@ RECORDED_EFFORT: dict[str, tuple[Choice, ...]] = {
         Choice("low", "low"),
     ),
     "hermes": (
-        Choice("high", "high", "rendered as --reasoning high"),
+        Choice("high", "high", "set as agent.reasoning_effort in its Hermes home"),
         Choice("medium", "medium"),
         Choice("low", "low"),
     ),

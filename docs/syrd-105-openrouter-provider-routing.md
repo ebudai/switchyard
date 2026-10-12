@@ -48,8 +48,10 @@ away from being live.
 - A role's model is a plain configuration string passed through as `-m`
   (`DEFAULT_MODEL_ARG_BY_CLI`). `openrouter/<model>` is an ordinary value; the
   suite already uses one (`tests/team_launcher_first_run_models_test.py`).
-- Reasoning effort reaches hermes as `--reasoning <effort>`
-  (`EFFORT_STYLE_BY_CLI`).
+- Reasoning effort reaches hermes as `agent.reasoning_effort` in the role's
+  own hermes home `config.yaml` (`scripts/hermes_role_config.py`). This doc
+  first said `--reasoning <effort>`; hermes has no such flag, and 0.15.2 exited
+  2 on it at launch (SYRD-546).
 
 What is **not** true today:
 
@@ -101,7 +103,7 @@ Three consequences follow, and they are the substance of this spike:
 | --- | --- | --- |
 | Same model, different providers | Yes, once a hermes role exists | Two roles drift in quality with identical config; nothing reports which provider served either |
 | Vision advertised, silently degraded | Reachable, not exercised by the launcher | Switchyard passes no image to any CLI; whether an agent opens one itself is its own business, so there is nothing here to gate |
-| `reasoning.effort` accepted and ignored | Yes | `--reasoning high` is passed and may mean nothing; a role's depth setting becomes decorative with no signal |
+| `reasoning.effort` accepted and ignored | Yes | `agent.reasoning_effort: high` is set and may mean nothing; a role's depth setting becomes decorative with no signal |
 | Quantization/provider metadata as a quality proxy | Yes | Not actionable here: Switchyard has no per-completion metadata at all |
 | Tool calls arriving as text | Yes | The most damaging: a role that "says" it edited a file and did not. Caught only by review, and only if review happens |
 | HTTP 200 with no content | Yes | Looks like an idle worker; the nudge path fires instead of a failure |
@@ -138,8 +140,8 @@ than rediscovered from a stalled pane.
 4. **Resume survives a replayed history**, because Switchyard resumes sessions
    by id as a matter of course. A provider that rejects replayed reasoning traces
    breaks resumption, not just one turn.
-5. **Effort is honoured or known to be ignored.** `--reasoning <effort>` is
-   passed for hermes; if a provider accepts it and does nothing, the role's depth
+5. **Effort is honoured or known to be ignored.** `agent.reasoning_effort` is
+   set for hermes; if a provider accepts it and does nothing, the role's depth
    setting is decorative and nobody is told.
 6. **Rate limits are understood as shared.** One key serves every hermes role, so
    concurrency is the realistic case and a single call proves little.

@@ -88,10 +88,13 @@ def test_a_resumed_codex_session_is_given_it_too() -> None:
 def test_other_runtimes_keep_their_own_effort_styles() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd277-styles.") as raw:
         root = Path(raw)
-        for cli, expected in (("claude", ["--effort", "high"]), ("hermes", ["--reasoning", "high"])):
-            args = cli_args(tl.cli_command_for_role(load_role(root, cli), session_dir=root / "s"), cli)
-            check(any(args[i:i + 2] == expected for i in range(len(args))), f"{cli}: {args}")
-            check(not any("reasoning_effort" in a for a in args), f"{cli} is not given Codex's key: {args}")
+        args = cli_args(tl.cli_command_for_role(load_role(root, "claude"), session_dir=root / "s"), "claude")
+        check(any(args[i:i + 2] == ["--effort", "high"] for i in range(len(args))), f"claude: {args}")
+        check(not any("reasoning_effort" in a for a in args), f"claude is not given Codex's key: {args}")
+        # SYRD-546: Hermes has no effort flag (`--reasoning high` made 0.15.2 exit 2); its effort is set
+        # in the role's Hermes home, so its command line carries none.
+        args = cli_args(tl.cli_command_for_role(load_role(root, "hermes"), session_dir=root / "s"), "hermes")
+        check(not any("reasoning" in a or a == "high" for a in args), f"hermes takes its effort from its home, not argv: {args}")
         agy = cli_args(tl.cli_command_for_role(load_role(root, "agy"), session_dir=root / "s"), "agy")
         check(not any("effort" in a or a == "--reasoning" for a in agy), f"agy takes no effort: {agy}")
 

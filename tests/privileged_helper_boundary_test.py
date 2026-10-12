@@ -430,7 +430,7 @@ def test_a_failed_action_is_recorded_as_failed_with_its_exit_status() -> None:
 
 
 def test_a_timeout_closes_the_record_rather_than_leaving_it_open() -> None:
-    """An abandoned run is a failed attempt with a duration, not an absent one."""
+    """An abandoned run is a timed-out attempt with a duration, not an absent one (SYRD-113)."""
     log: list[str] = []
     made: list = []
     printed: list[str] = []
@@ -454,11 +454,11 @@ def test_a_timeout_closes_the_record_rather_than_leaving_it_open() -> None:
         made[0].closed is not None,
         "the attempt was closed rather than left open for somebody to find later",
     )
-    check(made[0].closed["status"] == "failed", str(made[0].closed))
+    check(made[0].closed["status"] == "timed_out", str(made[0].closed))
     check("900s" in made[0].closed["detail"], f"and the record says how long: {made[0].closed}")
     report = "\n".join(printed)
     check("did not complete within 900s" in report, report)
-    check("recorded as failed" in report, f"and says the record is durable: {report}")
+    check("recorded as timed out" in report, f"and says the record is durable: {report}")
     check("nothing further will happen" in report, f"and that it stopped: {report}")
 
 

@@ -67,6 +67,23 @@ def _commit(value: str) -> str:
     return value
 
 
+def _ticket(value: str) -> str:
+    """The originating ticket, as its board names it: PREFIX-N, and nothing else.
+
+    It says which ticket a run is reported back to (SYRD-113). It reaches no
+    command: the helper hands an operation only its operation values.
+    """
+    if not re.fullmatch(r"[A-Z][A-Z0-9]{0,15}-[1-9][0-9]{0,8}", value or ""):
+        raise ArgumentError(f"ticket must be a ticket id such as SYRD-113: {value!r}")
+    return value
+
+
+#: Values about the JOB rather than the operation, optional on every action
+#: that names a project. A projectless action has no board to report to, so it
+#: takes none (SYRD-113).
+JOB_ARGUMENTS: tuple[tuple[str, Callable[[str], str]], ...] = (("ticket", _ticket),)
+
+
 @dataclass(frozen=True)
 class PrivilegedAction:
     """One catalogued operation: its name, its policy, and its arguments."""
@@ -92,14 +109,16 @@ class PrivilegedAction:
         helper might otherwise pass on.
         """
         declared = {name for name, _ in self.arguments}
-        extra = sorted(set(values) - declared)
+        optional = dict(self.job_arguments)
+        extra = sorted(set(values) - declared - set(optional))
         if extra:
             raise ArgumentError(
-                f"{self.name} takes {sorted(declared) or 'no arguments'}; "
+                f"{self.name} takes {sorted(declared) or 'no arguments'}"
+                f"{' and optionally ' + str(sorted(optional)) if optional else ''}; "
                 f"refusing unexpected {extra}"
             )
         validated: dict[str, str] = {}
-        for name, validate in self.arguments:
+        for name, validate in (*self.arguments, *((n, v) for n, v in optional.items() if n in values)):
             if name not in values:
                 raise ArgumentError(f"{self.name} requires {name}")
             raw = values[name]
@@ -107,6 +126,16 @@ class PrivilegedAction:
                 raise ArgumentError(f"{name} must be text: {raw!r}")
             validated[name] = validate(raw)
         return validated
+
+    @property
+    def job_arguments(self) -> tuple[tuple[str, Callable[[str], str]], ...]:
+        """The optional job values this action takes: none without a project to report to."""
+        return JOB_ARGUMENTS if any(name == "project" for name, _ in self.arguments) else ()
+
+    def operation_values(self, values: Mapping[str, str]) -> dict[str, str]:
+        """The values the operation itself is built from: the job's are not among them."""
+        job = {name for name, _ in JOB_ARGUMENTS}
+        return {key: value for key, value in values.items() if key not in job}
 
 
 CATALOGUE: tuple[PrivilegedAction, ...] = (

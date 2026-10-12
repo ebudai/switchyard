@@ -236,7 +236,31 @@ def _control_role_of(document: Mapping[str, Any]) -> str:
 #: How long a privileged action may run before it is abandoned and recorded as
 #: abandoned. Finite for the same reason the pre-flight exists: the failure this
 #: replaces had no upper bound, so nobody learned anything for three minutes.
-ACTION_TIMEOUT_SECONDS = 900.0
+#: Shorter than the front door's own deadline, so it is this side that stops
+#: the operation and records it, and the caller still receives that result
+#: (SYRD-113).
+ACTION_TIMEOUT_SECONDS = 840.0
+#: How long a stopped operation's process group has to exit after SIGTERM
+#: before it is killed.
+TERMINATE_GRACE_SECONDS = 10.0
+
+
+def require_ticket_on_board(
+    project: str, ticket: str, *, board_get: Callable[[str, str], Any], board_url: str
+) -> None:
+    """Refuse a job for a ticket the project's board does not hold (SYRD-113).
+
+    The board is the one re-derived from root's registration, as for the
+    caller check, so a caller cannot name a board that would agree.
+    """
+    try:
+        found = board_get(board_url, f"/api/tickets/{ticket}")
+    except Exception as exc:  # noqa: BLE001 - any failure to find it is a refusal
+        raise Refused(
+            f"{project}'s board has no ticket {ticket} to report this job to ({exc}); nothing was run"
+        ) from None
+    if not isinstance(found, dict) or str(found.get("id") or "") != ticket:
+        raise Refused(f"{project}'s board did not answer with ticket {ticket}; nothing was run")
 
 
 def run_privileged_action(
@@ -249,6 +273,7 @@ def run_privileged_action(
     command_for: Callable[[str, Mapping[str, str]], list[str]] = None,
     timeout: float = ACTION_TIMEOUT_SECONDS,
     print_func: Callable[[str], None] = print,
+    requester_role: str = "",
 ) -> int:
     """Build the command, record the attempt, run it, and close the record.
 
@@ -269,7 +294,7 @@ def run_privileged_action(
     """
     builder = command_for or privileged_operations.command_for
     try:
-        command = builder(action.name, values)
+        command = builder(action.name, action.operation_values(values))
     except privileged_operations.NoTrustedSource as exc:
         raise Refused(str(exc)) from None
     except privileged_operations.NotExecutableYet as exc:
@@ -280,21 +305,37 @@ def run_privileged_action(
     attempt = attempt_factory(
         project, command, target_commit=str(values.get("commit") or "")
     )
+    # What was asked for, for which ticket and by whom: the job a run is
+    # reported back as (SYRD-113). A record that cannot describe a job is
+    # still a record of the run.
+    describe = getattr(attempt, "describe_job", None)
+    if callable(describe):
+        describe({
+            "action": action.name,
+            "action_id": action.action_id,
+            "arguments": action.operation_values(values),
+            "ticket": str(values.get("ticket") or ""),
+            "requester_role": requester_role,
+            "release_commit": str(values.get("commit") or ""),
+        })
     directory = attempt.open()
     print_func(f"switchyard: recording attempt {attempt.attempt} in {directory}")
+    # The installed runner streams the operation's output into the record as
+    # it is produced; a runner that does not say it streams is called as before.
+    streaming = {"sink": attempt.write} if getattr(runner, "streams_output", False) else {}
     try:
-        result = runner(command, timeout=timeout)
+        result = runner(command, timeout=timeout, **streaming)
     except TimeoutError:
         attempt.close(
-            status="failed",
+            status="timed_out",
             exit_status=None,
             detail=(
-                f"{action.action_id} did not complete within {timeout:g}s and was abandoned"
+                f"{action.action_id} did not complete within {timeout:g}s and was stopped"
             ),
         )
         print_func(
             f"switchyard: {action.action_id} did not complete within {timeout:g}s. The attempt "
-            f"is recorded as failed in {directory}; nothing further will happen"
+            f"is recorded as timed out in {directory}; nothing further will happen"
         )
         return 124
     except BaseException as exc:  # noqa: BLE001 - the record must close either way
@@ -379,13 +420,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         caller = caller_identity()
         project = values.get("project") or ""
+        requester_role = ""
         if project:
-            require_registered_control_caller(
+            board_url = board_url_for(project)
+            requester_role = require_registered_control_caller(
                 project,
                 board_get=_board_get,
-                board_url=board_url_for(project),
+                board_url=board_url,
                 caller=caller,
-            )
+            ) or ""
+            if values.get("ticket"):
+                require_ticket_on_board(project, values["ticket"], board_get=_board_get, board_url=board_url)
         # A host-wide action names no tenant, so there is no single board to
         # prove the caller against -- which is exactly why every action without
         # a project is `auth_admin` in the catalogue: a human authenticates,
@@ -398,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             project=journal_project(values),
             attempt_factory=_attempt_factory,
             runner=_run_command,
+            requester_role=requester_role,
         )
     except Refused as exc:
         print(f"switchyard-privileged-helper: {exc}", file=sys.stderr, flush=True)
@@ -408,13 +454,94 @@ def _attempt_factory(project: str, command: Sequence[str], **kwargs: Any) -> Any
     return rollout_journal.Attempt(project, list(command), **kwargs)
 
 
-def _run_command(command: Sequence[str], *, timeout: float) -> Any:
-    import subprocess
+def _run_command(
+    command: Sequence[str],
+    *,
+    timeout: float,
+    sink: Callable[[str, str], None] | None = None,
+    terminal: Mapping[str, Any] | None = None,
+    grace: float = TERMINATE_GRACE_SECONDS,
+) -> Any:
+    """Run the operation, its output streamed to the pane and, through `sink`, into the record.
 
+    Read in bounded chunks as it is produced, never accumulated: the pane sees
+    the bytes as they come, and `sink` gets them decoded, to redact and bound
+    before anything is written (SYRD-113). The operation runs in its own
+    process group, and at the deadline that whole group is stopped, SIGTERM
+    then SIGKILL, before this returns -- not left running behind a record that
+    says it was abandoned.
+    """
+    import codecs
+    import io
+    import selectors
+    import signal
+    import subprocess
+    import time
+
+    # The pane: its byte stream where it has one, so the operation's bytes reach it unchanged.
+    outputs = dict(terminal or {name: getattr(stream, "buffer", stream)
+                                for name, stream in (("stdout", sys.stdout), ("stderr", sys.stderr))})
+    process = subprocess.Popen(list(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               stdin=subprocess.DEVNULL, start_new_session=True)
+    decoders = {name: codecs.getincrementaldecoder("utf-8")("replace") for name in ("stdout", "stderr")}
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    deadline = time.monotonic() + timeout
+    timed_out = False
     try:
-        return subprocess.run(list(command), timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise TimeoutError(f"{command[0]} exceeded {timeout:g}s") from None
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            for key, _ in selector.select(timeout=min(remaining, 1.0)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                try:
+                    pane = outputs[key.data]
+                    pane.write(chunk if not isinstance(pane, io.TextIOBase) else chunk.decode("utf-8", "replace"))
+                    pane.flush()
+                except (OSError, ValueError):
+                    pass  # a pane that went away does not stop the record
+                if sink is not None:
+                    sink(key.data, decoders[key.data].decode(chunk))
+        if not timed_out:
+            try:
+                process.wait(timeout=max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        if timed_out:
+            for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
+                try:
+                    os.killpg(process.pid, sig)
+                except ProcessLookupError:
+                    break
+                try:
+                    process.wait(timeout=wait)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            raise TimeoutError(f"{command[0]} exceeded {timeout:g}s")
+        if sink is not None:
+            for name, decoder in decoders.items():
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    sink(name, tail)
+        return process
+    finally:
+        selector.close()
+        for stream in (process.stdout, process.stderr):
+            stream.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+#: `run_privileged_action` hands the record's writer only to a runner that says it streams.
+_run_command.streams_output = True  # type: ignore[attr-defined]
 
 
 def _board_get(board_url: str, path: str) -> Any:

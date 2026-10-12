@@ -87,6 +87,13 @@ REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s:@]+):([^/\s@]+)@"), r"\1\2:<redacted>@"),
 )
 
+#: SYRD-113: what a privileged job's capture records at most. Output past a
+#: stream's limit is counted and replaced by one marker; a line past its limit
+#: is cut, and the end of what is kept goes too (`CUT_LINE_MARGIN`).
+STREAM_LIMIT_BYTES = 4 * 1024 * 1024
+LINE_LIMIT_CHARS = 64 * 1024
+CUT_LINE_MARGIN = 256
+
 #: Private key material spans lines, so it is handled as a state rather than a
 #: pattern: everything between the markers is dropped, markers included.
 PRIVATE_KEY_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
@@ -162,26 +169,54 @@ class Redactor:
     through.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_line: int | None = None) -> None:
         self._pending = ""
         self._in_private_key = False
+        #: SYRD-113: the most of one line held while its newline is awaited.
+        #: Unbounded, a line that never ends is memory that never stops
+        #: growing. What is past it is counted and not recorded.
+        self.max_line = max_line
+        self._dropped = 0
 
     def feed(self, text: str) -> str:
-        self._pending += text
         out: list[str] = []
-        while True:
-            newline = self._pending.find("\n")
-            if newline < 0:
-                break
-            line, self._pending = self._pending[: newline + 1], self._pending[newline + 1 :]
-            out.append(self._line(line))
+        while text:
+            newline = text.find("\n")
+            part, text = (text, "") if newline < 0 else (text[: newline + 1], text[newline + 1 :])
+            self._take(part)
+            if part.endswith("\n"):
+                out.append(self._emit())
         return "".join(out)
 
     def flush(self) -> str:
         """Whatever never got its newline. Redacted the same way."""
-        if not self._pending:
+        if not self._pending and not self._dropped:
             return ""
+        return self._emit()
+
+    def _take(self, part: str) -> None:
+        if self.max_line is None:
+            self._pending += part
+            return
+        ends = part.endswith("\n")
+        body = part[:-1] if ends else part
+        room = max(self.max_line - len(self._pending), 0)
+        self._pending += body[:room]
+        self._dropped += len(body) - len(body[:room])
+        if ends:
+            self._pending += "\n"
+
+    def _emit(self) -> str:
         line, self._pending = self._pending, ""
+        dropped, self._dropped = self._dropped, 0
+        if dropped:
+            # A secret may straddle the cut, and the part of it before the cut
+            # can be too short for any pattern to know it for one. So the end
+            # of a cut line is not recorded either.
+            kept = line.rstrip("\n")
+            margin = min(len(kept), CUT_LINE_MARGIN)
+            kept, dropped = kept[: len(kept) - margin], dropped + margin
+            line = f"{kept} [switchyard: {dropped} more characters of this line were not recorded]\n"
         return self._line(line)
 
     def _line(self, line: str) -> str:
@@ -313,6 +348,8 @@ def attempts(project: str, *, root: Path | str | None = None) -> list[dict]:
             record["command"] = entry.get("command", record["command"])
             record["directory"] = entry.get("directory", "")
             record["target_commit"] = entry.get("target_commit", "")
+            if isinstance(entry.get("job"), dict):
+                record["job"] = entry["job"]
         elif entry.get("event") == "finish":
             record["finished_at"] = entry.get("at", "")
             record["status"] = entry.get("status", "")
@@ -367,6 +404,12 @@ def format_attempts(project: str, records: Iterable[dict], problems: Iterable[st
             lines.append(f"      {unusable_directory_reason(record)}; nothing is read for it")
             continue
         lines.append(f"      {record['directory']}")
+        job = record.get("job")
+        if isinstance(job, dict):
+            lines.append(
+                f"      {job.get('action', '?')} for {job.get('ticket') or 'no ticket'}, "
+                f"asked by {job.get('requester_role') or 'an unrecorded role'}"
+            )
         if not record.get("result_present", True):
             lines.append("      result.json is missing from this attempt's directory")
     listed_problems = list(problems)
@@ -408,6 +451,24 @@ class Attempt:
         self._stdout = None
         self._stderr = None
         self._redactors: dict[str, Redactor] = {}
+        self.job: dict | None = None
+        self._capture: dict[str, dict] | None = None
+
+    def describe_job(self, job: dict) -> None:
+        """Record this run as a privileged job (SYRD-113), before it is opened.
+
+        `job` says what was asked for and on whose behalf: the action, its
+        validated values, the originating ticket and the requesting role. A job
+        also captures bounded output: each line timestamped, each stream cut
+        at `STREAM_LIMIT_BYTES` and each line at `LINE_LIMIT_CHARS`, with
+        what was dropped counted in the result and marked in the log.
+        """
+        self.job = dict(job)
+        self._capture = {
+            stream: {"limit": STREAM_LIMIT_BYTES, "recorded_bytes": 0, "dropped_bytes": 0,
+                     "dropped_lines": 0, "truncated": False}
+            for stream in ("stdout", "stderr")
+        }
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -422,7 +483,8 @@ class Attempt:
         os.chmod(self.directory, DIRECTORY_MODE)
         self._stdout = (self.directory / "stdout.log").open("w", encoding="utf-8")
         self._stderr = (self.directory / "stderr.log").open("w", encoding="utf-8")
-        self._redactors = {"stdout": Redactor(), "stderr": Redactor()}
+        line_limit = LINE_LIMIT_CHARS if self._capture is not None else None
+        self._redactors = {"stdout": Redactor(line_limit), "stderr": Redactor(line_limit)}
         self._append_index(
             "start",
             {
@@ -431,6 +493,7 @@ class Attempt:
                 "target_commit": self.target_commit,
                 "operator": self.operator.name,
                 "operator_source": self.operator.source,
+                **({"job": self.job} if self.job is not None else {}),
             },
         )
         self._write_result(status="running", exit_status=None, finished_at="")
@@ -440,14 +503,40 @@ class Attempt:
         handle = self._stdout if stream == "stdout" else self._stderr
         if handle is None:
             return
-        handle.write(self._redactors[stream].feed(text))
+        handle.write(self._bounded(stream, self._redactors[stream].feed(text)))
         handle.flush()
+
+    def _bounded(self, stream: str, redacted: str) -> str:
+        """A job's redacted lines, timestamped and cut at the stream's limit. Anything else, as is."""
+        if self._capture is None or not redacted:
+            return redacted
+        counts = self._capture[stream]
+        stamp = now_text()
+        kept: list[str] = []
+        for line in redacted.splitlines(keepends=True):
+            line = f"{stamp} {line}"
+            size = len(line.encode("utf-8"))
+            if counts["truncated"] or counts["recorded_bytes"] + size > counts["limit"]:
+                counts["truncated"] = True
+                counts["dropped_bytes"] += size
+                counts["dropped_lines"] += 1
+                continue
+            counts["recorded_bytes"] += size
+            kept.append(line)
+        return "".join(kept)
 
     def close(self, *, status: str, exit_status: int | None, detail: str = "") -> dict:
         for stream, handle in (("stdout", self._stdout), ("stderr", self._stderr)):
             if handle is None:
                 continue
-            handle.write(self._redactors[stream].flush())
+            handle.write(self._bounded(stream, self._redactors[stream].flush()))
+            if self._capture is not None and self._capture[stream]["truncated"]:
+                counts = self._capture[stream]
+                handle.write(
+                    f"{now_text()} [switchyard: output truncated. {counts['dropped_bytes']} bytes in "
+                    f"{counts['dropped_lines']} lines after the first {counts['recorded_bytes']} bytes "
+                    f"were not recorded; the limit is {counts['limit']} bytes]\n"
+                )
             handle.flush()
             handle.close()
         self._stdout = self._stderr = None
@@ -500,6 +589,13 @@ class Attempt:
             "detail": detail,
             "artifacts": artifacts,
         }
+        if self.job is not None:
+            record["job"] = self.job
+            record["capture"] = {
+                stream: {**counts, "bytes": (self.directory / f"{stream}.log").stat().st_size
+                         if (self.directory / f"{stream}.log").is_file() else 0}
+                for stream, counts in (self._capture or {}).items()
+            }
         path = self.directory / RESULT_NAME
         # Rewritten in place while the run is live, because the record has to
         # exist from the first moment: a run killed before it can finish is one

@@ -48,7 +48,15 @@ DEFAULT_POLICY = privileged_install.policy_path()
 PKEXEC = "pkexec"
 #: How long the privileged call may take before it is abandoned and said so.
 #: Finite on purpose: the failure this replaces had no upper bound at all.
-DEFAULT_ACTION_TIMEOUT_SECONDS = 900.0
+#: Longer than the helper's own deadline by a margin, so the helper is the one
+#: that stops the operation and records it, and this side receives and shows
+#: that durable result rather than racing it (SYRD-113).
+HELPER_RESULT_MARGIN_SECONDS = 40.0
+DEFAULT_ACTION_TIMEOUT_SECONDS = (
+    privileged_helper.ACTION_TIMEOUT_SECONDS
+    + 2 * privileged_helper.TERMINATE_GRACE_SECONDS
+    + HELPER_RESULT_MARGIN_SECONDS
+)
 
 
 @dataclass
@@ -177,7 +185,7 @@ def plan_action(
     # something and then quietly doing nothing.
     command: list[str] = []
     try:
-        command = list(build_command(action.name, validated))
+        command = list(build_command(action.name, action.operation_values(validated)))
     except privileged_operations.NoTrustedSource as exc:
         problems.append(str(exc))
     except privileged_operations.NotExecutableYet as exc:

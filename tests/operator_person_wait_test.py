@@ -301,8 +301,10 @@ def scenario(root: Path, prefix: str, setting_only: bool = False, before_root: P
             upgraded = fixture.conninfo(cluster.socket_dir, cluster.port, "upgraded")
             fixture.run(["createdb", "-h", str(cluster.socket_dir), "-p", str(cluster.port), "-U", "postgres", "upgraded"])
             fixture.psql(upgraded, (before_root / "scripts/ticket_board/schema.sql").read_text())
+            fixture.psql(upgraded, (before_root / "scripts/ticket_board/rbac.sql").read_text())
+            # Each tree's rbac.sql after its own migrations, as a deploy runs them: a later
+            # tree's grants may name what only its migrations create.
             for tree in (before_root, root):
-                fixture.psql(upgraded, (tree / "scripts/ticket_board/rbac.sql").read_text())
                 done = subprocess.run(["bash", str(tree / "scripts/ticket-board-migrate")], capture_output=True, text=True,
                                       env={**os.environ, "TICKET_BOARD_ADMIN_DATABASE_URL": upgraded}, timeout=300)
                 assert done.returncode == 0, done.stderr[-1500:]

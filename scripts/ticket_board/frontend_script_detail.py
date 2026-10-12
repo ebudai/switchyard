@@ -32,6 +32,15 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
 
     // The candidate's size evidence in one sentence, or '' (SYRD-541): what the
     // board measured, what is unresolved, and what was approved.
+    // SYRD-113: root's record of each privileged job asked for this ticket, one line each.
+    function privilegedJobLines(jobs) {
+      const said = {running: 'running', succeeded: 'succeeded', failed: 'failed', timed_out: 'timed out'};
+      return (jobs || []).map((job) => `Privileged job ${job.job_id}: ${job.action} ${said[job.state] || job.state}` +
+        (job.exit_status === null || job.exit_status === undefined ? '' : ` (exit ${job.exit_status})`) +
+        (job.requester_role ? `, asked by ${job.requester_role}` : '') +
+        (job.state === 'running' ? '' : ` - ${job.record_dir}, stdout sha256 ${((job.artifacts || {})['stdout.log'] || '?').slice(0, 12)}`));
+    }
+
     function sizeReviewText(review) {
       if (!review) {
         return '';
@@ -593,6 +602,12 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         sizeLine.className = 'detail-size-review';
         sizeLine.textContent = sizeText;
         meta.appendChild(sizeLine);
+      }
+      for (const jobText of privilegedJobLines(ticket.privileged_jobs)) {
+        const jobLine = document.createElement('div');
+        jobLine.className = 'detail-privileged-job';
+        jobLine.textContent = jobText;
+        meta.appendChild(jobLine);
       }
       const snoozeText = reminderSnoozeText(ticket.reminder_snooze);
       if (snoozeText) {

@@ -37,10 +37,12 @@ def ticket_fields(row: Any) -> dict[str, Any]:
     reminder_snooze is scheduling, not delivery status, and null unless the
     ticket is snoozed (SYRD-537); size_review is the packet's size evidence and
     null until a candidate is measured (SYRD-541); serial_queue is the ticket's
-    place in its implementer's queue, and null outside one (SYRD-568).
+    place in its implementer's queue, and null outside one (SYRD-568);
+    privileged_jobs is root's record of each privileged job asked for the
+    ticket, as the board service read it (SYRD-113).
     """
     return {"reminder_snooze": row.get("reminder_snooze"), "size_review": row.get("size_review"),
-            "serial_queue": row.get("serial_queue")}
+            "serial_queue": row.get("serial_queue"), "privileged_jobs": row.get("privileged_jobs") or []}
 
 
 def reservation_fields(app: Any) -> dict[str, Any]:

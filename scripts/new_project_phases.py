@@ -381,6 +381,23 @@ def _check_new_project_preflight(
     )
     if resolved_agy_credential_source:
         launcher._validate_agy_credential_source(resolved_agy_credential_source, owner_user, home_base)
+    # Said before anything is created, not after the first launch: a teardown
+    # that kept the owner's home kept these too, and the launch refuses a store
+    # that fetches from another checkout (SYRD-545).
+    leftovers = [
+        str(path)
+        for path in (
+            home_base / owner_user / ".local" / "state" / "switchyard" / "projects" / resolved_slug / "control.git",
+            home_base / owner_user / f"{resolved_slug}-worktrees",
+        )
+        if path.is_symlink() or path.exists()
+    ]
+    if leftovers:
+        print_func(
+            f"switchyard: warning: {' and '.join(leftovers)} already exist from an earlier {resolved_slug}. "
+            f"This project uses the same paths: the launch keeps the commit store only if it fetches from "
+            f"{project_dir}, and refuses it otherwise. Move them aside now if they belong to the earlier project."
+        )
     # BEFORE the first mutation, and that placement is the fix. Everything below
     # this line creates something: the service user, the owner account, the
     # project directory, the provisioning artifacts. A CLI problem discovered

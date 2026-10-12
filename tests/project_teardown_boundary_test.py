@@ -192,8 +192,10 @@ def test_the_seams_the_classes_the_constants_and_the_leaf() -> None:
           and m.TEARDOWN_PROTECTED_USERS is team_launcher.TEARDOWN_PROTECTED_USERS, "the constants unchanged, one object")
     for cls in (m.SwitchyardTeardownAction, m.SwitchyardTeardownPlan):
         check(cls.__dataclass_params__.frozen and cls is getattr(team_launcher, cls.__name__), f"{cls.__name__}: frozen, one object")
+    # SYRD-545 appended the slug's commit store and worktree base, defaulting to None.
     check([f.name for f in dataclasses.fields(m.SwitchyardTeardownPlan)] == ["project", "owner_user", "owner_home", "project_checkout",
-                                                                           "ticket_count", "registered_healthy", "registry_path", "actions"],
+                                                                           "ticket_count", "registered_healthy", "registry_path", "actions",
+                                                                           "control_repository", "worktree_base"],
           "the plan's fields in order")
     check(m.owner_removal_refusal.__kwdefaults__ == {"caller": "", "uid_lookup": host_accounts.uid_for_user, "desktop_approval": None}
           and m.switchyard_teardown_command.__kwdefaults__["home_base"] == Path("/home")

@@ -1273,6 +1273,16 @@ partially stopped tenant exits non-zero and says so.
 **`switchyard teardown <project>` removes provisioned state.** That is a
 different question, and it is not reversible by starting anything.
 
+By default it keeps the owner's home, and with it the project's commit store
+(`~/.local/state/switchyard/projects/<slug>/control.git`) and role worktrees
+(`~/<slug>-worktrees`); the plan lists both under "preserved by default". A
+later `switchyard new` for the slug names the same paths, so it warns about them
+before it creates anything, and the launch refuses a store whose remote is not
+the project's repository -- naming the store, both checkouts and the remedy --
+rather than fetching from the earlier project's checkout. A role worktree added
+from another store, or from a store since replaced, is refused the same way
+instead of being reset (SYRD-545).
+
 `switchyard start <project>` is the other half of `stop`: it starts the board,
 then the listener, then restores the sessions and opens the presentation --
 forwards through the same dependency order. Unlike the suspension it stops at

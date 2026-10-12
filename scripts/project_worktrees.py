@@ -35,6 +35,7 @@ reach it through the launcher.
 from __future__ import annotations
 
 import pwd
+import shlex
 import stat
 import subprocess
 import sys
@@ -446,6 +447,144 @@ def control_repository_state(path: Path) -> str:
     return CONTROL_REPOSITORY_OCCUPIED if occupied else CONTROL_REPOSITORY_EMPTY
 
 
+def _git_config_value(raw: str) -> str:
+    """One value as git writes it in a config file: quotes, escapes, a trailing comment."""
+    out: list[str] = []
+    quoted = False
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if char == "\\" and index + 1 < len(raw):
+            out.append({"n": "\n", "t": "\t", "b": "\b"}.get(raw[index + 1], raw[index + 1]))
+            index += 2
+            continue
+        if char == '"':
+            quoted = not quoted
+        elif char in "#;" and not quoted:
+            break
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out).strip()
+
+
+def _control_remote_url(control: Path, remote: str) -> str:
+    """The URL a bare repository records for `remote`, read from its config file, or "".
+
+    Read from the file rather than by running git, as `control_repository_state`
+    reads the store: nothing runs against a store that may be somebody else's,
+    and a store this cannot read is no evidence either way.
+    """
+    try:
+        lines = (control / "config").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    header = f'[remote "{remote}"]'
+    inside = False
+    for line in lines:
+        text = line.strip()
+        if text.startswith("["):
+            inside = text.replace("\t", " ") == header
+            continue
+        if not inside or "=" not in text:
+            continue
+        key, _, value = text.partition("=")
+        if key.strip().lower() == "url":
+            return _git_config_value(value)
+    return ""
+
+
+def _same_local_repository(recorded: str, repository: Path, *, base: Path) -> bool:
+    """Whether a remote URL git recorded names this local repository."""
+    url = recorded[len("file://"):] if recorded.startswith("file://") else recorded
+    if "://" in url or (":" in url.split("/", 1)[0] and not url.startswith("/")):
+        return False
+    path = Path(url).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return path.resolve(strict=False) == repository.expanduser().resolve(strict=False)
+
+
+def control_repository_origin_mismatch(config: ProjectConfig) -> str:
+    """Why an existing commit store belongs to another checkout, or "".
+
+    `switchyard teardown` keeps the owner's home by default, and with it the
+    store a previous project under this slug cloned from ITS checkout. A
+    `switchyard new` for the slug names the same store path, saw a ready
+    repository, skipped the clone and fetched from the old checkout: on otto
+    that checkout had been moved, and the launch said only `fetch failed with
+    exit 128` (SYRD-545). Where the old checkout still existed it would have
+    handed every role the old project's history instead.
+
+    Only a recorded URL naming another place is evidence. No URL, or a store
+    this cannot read, is left to the fetch as before, which says what is wrong
+    in git's words.
+    """
+    if config.control_repository is None or config.repository is None:
+        return ""
+    recorded = _control_remote_url(config.control_repository, config.worktree_remote)
+    if not recorded or _same_local_repository(recorded, config.repository, base=config.control_repository):
+        return ""
+    control = config.control_repository
+    worktrees = f" and the role worktrees under {config.worktree_base}" if config.worktree_base is not None else ""
+    return (
+        f"{control} is another checkout's commit store: its {config.worktree_remote} is {recorded}, "
+        f"but this project's repository is {config.repository}. It is probably left from an earlier "
+        "project under this slug (`switchyard teardown` keeps the owner's home), so nothing was "
+        f"fetched into it. Move it aside{worktrees} -- for example "
+        f"`mv {shlex.quote(str(control))} {shlex.quote(str(control) + '.legacy')}` -- and launch again; "
+        "or, if it really should follow this repository, "
+        f"`git -C {shlex.quote(str(control))} remote set-url {shlex.quote(config.worktree_remote)} "
+        f"{shlex.quote(str(config.repository))}`."
+    )
+
+
+def role_worktree_foreign_store(config: ProjectConfig, role: RoleConfig) -> str:
+    """Why an existing role worktree is not one of this commit store's, or "".
+
+    A linked worktree's `.git` is a file naming its entry in the store it was
+    added from, `<store>/worktrees/<name>`. One that names another store, or an
+    entry this store no longer has -- the store was replaced, the worktree was
+    left -- is not this project's to reset (SYRD-545). A `.git` that cannot be
+    read is no evidence, and the ordinary check below still runs.
+    """
+    if config.control_repository is None:
+        return ""
+    dot_git = Path(role.workdir) / ".git"
+    try:
+        if dot_git.is_dir():
+            return (
+                f"{role.workdir} is a repository of its own, not a worktree of this project's commit store "
+                f"{config.control_repository}; nothing here adopts or resets it. Move it aside and launch "
+                "again, and the launch creates the worktree."
+            )
+        if not dot_git.is_file():
+            return ""
+        text = dot_git.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not text.startswith("gitdir:"):
+        return ""
+    gitdir = Path(text[len("gitdir:"):].strip()).expanduser()
+    if not gitdir.is_absolute():
+        gitdir = Path(role.workdir) / gitdir
+    gitdir = gitdir.resolve(strict=False)
+    store = config.control_repository.expanduser().resolve(strict=False)
+    if gitdir.parent == store / "worktrees" and gitdir.is_dir():
+        return ""
+    owner = gitdir.parent.parent if gitdir.parent.name == "worktrees" else gitdir
+    detail = (
+        f"is a worktree of {owner}, not of this project's commit store {config.control_repository}"
+        if owner != store
+        else f"was added to a commit store at {store} that has since been replaced: it names {gitdir}, "
+        "which this store does not have"
+    )
+    return (
+        f"{role.workdir} {detail}; nothing here adopts or resets another store's worktree. Move it aside "
+        "and launch again, and the launch creates it from this project's store."
+    )
+
+
 def ensure_control_repository(
     config: ProjectConfig,
     *,
@@ -470,6 +609,11 @@ def ensure_control_repository(
             "project's commit store at another path, and start again."
         )
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
+    if state == CONTROL_REPOSITORY_READY:
+        # Before anything writes to it or fetches into it (SYRD-545).
+        foreign = control_repository_origin_mismatch(config)
+        if foreign:
+            return WorktreeProvisionResult({role.role: foreign for role in config.roles})
     if state in (
         CONTROL_REPOSITORY_MISSING,
         CONTROL_REPOSITORY_EMPTY,
@@ -688,6 +832,10 @@ def ensure_control_role_worktrees(
             )
             if add_proc.returncode != 0:
                 failed[role.role] = launcher._proc_failure_reason(add_proc, f"worktree add failed with exit {add_proc.returncode}")
+            continue
+        foreign = role_worktree_foreign_store(config, role)
+        if foreign:
+            failed[role.role] = foreign
             continue
         check_proc = launcher.run_owner_correct_git(
             git_role_worktree_check_args(role),

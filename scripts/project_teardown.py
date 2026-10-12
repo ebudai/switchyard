@@ -475,6 +475,12 @@ def _print_teardown_plan(
     if not remove_owner_home:
         print_func(f"  - owner home directory {teardown.owner_home}")
         print_func(f"  - project checkout {teardown.project_checkout}")
+        if teardown.control_repository is not None and teardown.worktree_base is not None:
+            print_func(
+                f"  - commit store {teardown.control_repository} and role worktrees under {teardown.worktree_base}: "
+                f"a later `switchyard new` for {teardown.project} names the same paths, and its launch refuses "
+                "this store while it fetches from another checkout -- move both aside before that"
+            )
     print_func("switchyard: actions:")
     for index, action in enumerate(teardown.actions, start=1):
         print_func(f"  {index}. {action.label}")
@@ -555,10 +561,11 @@ def switchyard_teardown_command(
         home_base=home_base,
     )
     ticket_count = launcher._ticket_board_existing_ticket_count(plan.database, runner=runner)
+    owner_home = home_base / plan.owner_user
     teardown = launcher.SwitchyardTeardownPlan(
         project=plan.project,
         owner_user=plan.owner_user,
-        owner_home=home_base / plan.owner_user,
+        owner_home=owner_home,
         project_checkout=project_checkout,
         ticket_count=ticket_count,
         registered_healthy=registered_healthy,
@@ -570,6 +577,9 @@ def switchyard_teardown_command(
             remove_owner_home=remove_owner_home,
             remove_owner_user=remove_owner_user,
         ),
+        # The paths `switchyard new` gives this slug, under this owner's home.
+        control_repository=owner_home / ".local" / "state" / "switchyard" / "projects" / plan.project / "control.git",
+        worktree_base=owner_home / f"{plan.project}-worktrees",
     )
     # Asked before the plan is printed and before anything runs, so a dry run
     # shows the refusal and a real run costs nothing to refuse. One account is
@@ -647,3 +657,8 @@ class SwitchyardTeardownPlan:
     registered_healthy: bool
     registry_path: Path
     actions: tuple[SwitchyardTeardownAction, ...]
+    #: Where `switchyard new` puts this slug's commit store and role worktrees
+    #: in the owner's home. Kept with the home, and a later `new` for the slug
+    #: names the same paths (SYRD-545).
+    control_repository: Path | None = None
+    worktree_base: Path | None = None

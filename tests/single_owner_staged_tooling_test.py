@@ -691,6 +691,7 @@ def test_the_new_flow_checks_before_it_opens_any_window() -> None:
         # SYRD-374: both are in the tail phase `switchyard new` returns; the
         # command must return it, and inside it the gate still comes first.
         import ast
+        import importlib
         import inspect
 
         from scripts import new_project_phases
@@ -699,7 +700,20 @@ def test_the_new_flow_checks_before_it_opens_any_window() -> None:
         holder = next((node for node in ast.parse(phases).body if isinstance(node, ast.FunctionDef)
                        and gate_line in ast.get_source_segment(phases, node).replace("launcher.", "")), None)
         assert holder is not None, "the new flow no longer checks the staged bundle before it opens a window"
-        assert f"return {holder.name}(" in body, f"switchyard new does not return {holder.name}"
+        command = body
+        if "def switchyard_new_command(" not in body:
+            # SYRD-425 moved the command into its own module, which the
+            # launcher re-exports by its own name (SYRD-431): read the
+            # command where that re-export says it is.
+            source = next((node.module for node in ast.parse(body).body if isinstance(node, ast.ImportFrom)
+                           and any(alias.name == "switchyard_new_command" and alias.asname is None for alias in node.names)), None)
+            assert source is not None, "the launcher neither defines nor re-exports switchyard_new_command"
+            module = inspect.getsource(importlib.import_module(source))
+            command = next((ast.get_source_segment(module, node) for node in ast.parse(module).body
+                            if isinstance(node, ast.FunctionDef) and node.name == "switchyard_new_command"), None)
+            assert command is not None, f"{source} does not define switchyard_new_command"
+            command = command.replace("launcher.", "")
+        assert f"return {holder.name}(" in command, f"switchyard new does not return {holder.name}"
         text = ast.get_source_segment(phases, holder).replace("launcher.", "")
         gate, launch = text.index(gate_line), text.index(launch_line)
     assert gate < launch, (gate, launch)

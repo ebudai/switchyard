@@ -238,7 +238,10 @@ def tenant_control_repair_command(
 
     release = release_root or str(launcher.switchyard_shared_install_root() / "current")
     commands = launcher.role_tooling_staging_commands(project, release, staging_root=root)
-    script = "\n".join(commands)
+    # A failed step stops the script and is its exit status, so the launch and
+    # the rollout journal both see it. Without this, an `install` that failed in
+    # the middle was hidden behind whatever ran last (SYRD-551).
+    script = "set -eu\n" + "\n".join(commands)
     recorder = launcher._rollout_recorder_path()
     if recorder is None:
         return f"bash -c {shlex.quote(script)}"
@@ -276,7 +279,7 @@ def repair_tenant_control_helper(
     command = launcher.tenant_control_repair_command(project, release_root=release_root, root=root)
     print_func(
         f"switchyard: {project}: the tenant control helper is not staged; repairing it from "
-        "the current release before continuing"
+        f"{release_root or 'the current release'} before continuing"
     )
     result = runner(["bash", "-c", command])
     code = int(getattr(result, "returncode", 1) or 0)
@@ -406,6 +409,16 @@ def ensure_tenant_control_helper(
     """
     from scripts import team_launcher as launcher
 
+    # One selected release for the check and the repair: the one this tenant's
+    # bundle was staged from, as `staged_bundle_launch_problems` judges it, and
+    # `current` only for a tenant with no staged release at all. Checking and
+    # repairing against `current` moved a pinned tenant's whole bundle off the
+    # release its board runs, and a repair from one release judged against
+    # another never converged (SYRD-551).
+    if not release_root:
+        pinned = launcher.tenant_pinned_release_root(project, root=root)
+        release_root = str(pinned) if pinned is not None else ""
+    release_name = release_root or "the current release"
     states = launcher.staged_protocol_states(
         project, grant=grant, root=root, owner_uid=owner_uid
     )
@@ -433,13 +446,13 @@ def ensure_tenant_control_helper(
     if absent:
         for name in absent:
             print_func(
-                f"switchyard: {project}: {name} is not staged; repairing it from the "
-                "current release before continuing"
+                f"switchyard: {project}: {name} is not staged; repairing it from "
+                f"{release_name} before continuing"
             )
     if stale:
         print_func(
-            f"switchyard: {project}'s staged tooling is from an older release "
-            f"({', '.join(stale)}); restaging it from the current one before continuing"
+            f"switchyard: {project}'s staged tooling is not {release_name}'s "
+            f"({', '.join(stale)}); restaging it from there before continuing"
         )
     problem = launcher.repair_tenant_control_helper(
         project, release_root=release_root, root=root, runner=runner, print_func=print_func

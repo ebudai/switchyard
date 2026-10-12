@@ -338,9 +338,14 @@ def staged_role_tooling_problems(
             _owned(staging / f"{module}.py", f"the companion module {module}", executable=False)
     template_files = provision.git_template_files(str(source))
     if Path(template_files[0][0]).is_file():
-        for source_file, relative, _mode in template_files:
-            _owned(staging / provision.GIT_TEMPLATE_DIR_NAME / relative, f"the Git template's {relative}",
-                   executable=True)
+        for index, (source_file, relative, _mode) in enumerate(template_files):
+            target = staging / provision.GIT_TEMPLATE_DIR_NAME / relative
+            # The hook itself, and each helper the selected release carries; a
+            # helper it lacks must not be there either (SYRD-551).
+            if index == 0 or Path(source_file).is_file():
+                _owned(target, f"the Git template's {relative}", executable=True)
+            else:
+                _absent(target, f"the Git template's {relative}")
     else:
         _absent(staging / provision.GIT_TEMPLATE_DIR_NAME, "the Git template")
     for tree, what in ((staging / "ticket_board", "the ticket_board package"),
@@ -525,6 +530,12 @@ def git_template_staging_commands(release_root: str, staging: str) -> list[str]:
     alone would give roles a template that copies scripts nothing runs, so the
     template is removed instead -- which is also what a rollback to such a
     release needs.
+
+    Each helper is staged only if the selected release carries it. The list
+    comes from the running code, and a release older than a helper -- 792774a
+    has no `file_size_policy.py`, which SYRD-541 added -- made the template's
+    `install` fail on a file that is not there (SYRD-551). The template is
+    rebuilt from nothing, so a helper this release lacks is simply absent.
     """
     try:
         from . import project_provision as provision
@@ -539,10 +550,17 @@ def git_template_staging_commands(release_root: str, staging: str) -> list[str]:
         f"    sudo install -d -m 0755 -o root -g root {provision.shell_quote(template)} "
         f"{provision.shell_quote(f'{template}/hooks')}"
     )
-    for source, relative, mode in files:
+    hook_source, hook_relative, hook_mode = files[0]
+    commands.append(
+        f"    sudo install -m {hook_mode} -o root -g root {provision.shell_quote(hook_source)} "
+        f"{provision.shell_quote(f'{template}/{hook_relative}')}"
+    )
+    for source, relative, mode in files[1:]:
+        commands.append(f"    if [ -f {provision.shell_quote(source)} ]; then")
         commands.append(
-            f"    sudo install -m {mode} -o root -g root {provision.shell_quote(source)} "
+            f"        sudo install -m {mode} -o root -g root {provision.shell_quote(source)} "
             f"{provision.shell_quote(f'{template}/{relative}')}"
         )
+        commands.append("    fi")
     commands.append("fi")
     return commands

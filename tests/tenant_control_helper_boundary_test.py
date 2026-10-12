@@ -60,7 +60,9 @@ SEAMS = {
     'repair_tenant_control_helper': {'tenant_control_repair_command': 1},
     'staged_protocol_states': {'PROTOCOL_STAGED_EXECUTABLES': 1, 'tenant_control_helper_state': 1},
     'staged_tooling_out_of_date': {'PROTOCOL_STAGED_EXECUTABLES': 1, 'TENANT_CONTROL_ROOT': 1, 'switchyard_shared_install_root': 1},
-    'ensure_tenant_control_helper': {'repair_tenant_control_helper': 1, 'staged_protocol_states': 2, 'staged_tooling_out_of_date': 2},
+    # SYRD-551: with no release named, the check and the repair use the tenant's pinned release.
+    'ensure_tenant_control_helper': {'repair_tenant_control_helper': 1, 'staged_protocol_states': 2, 'staged_tooling_out_of_date': 2,
+                                     'tenant_pinned_release_root': 1},
 }
 #: Every seam name a stand-in on the launcher has been shown to reach; checked last.
 REACHED: set[str] = set()
@@ -250,7 +252,8 @@ def test_the_verb_an_invocation_is() -> None:
 def test_the_repair_command_is_the_recorded_staging_step() -> None:
     staged: list = []
     commands = lambda project, release, *, staging_root: staged.append((project, release, staging_root)) or ["install -d /x", "echo 'a b'"]
-    script = "install -d /x\necho 'a b'"
+    # SYRD-551: the script stops at its first failed step, so a failure is its exit status.
+    script = "set -eu\ninstall -d /x\necho 'a b'"
     with patched(t, role_tooling_staging_commands=seam("role_tooling_staging_commands", commands),
                  switchyard_shared_install_root=seam("switchyard_shared_install_root", lambda: Path("/opt/sy")),
                  _rollout_recorder_path=seam("_rollout_recorder_path", lambda: None)):
@@ -278,7 +281,7 @@ def test_the_repair_is_announced_run_and_judged_by_its_exit() -> None:
             check(m.repair_tenant_control_helper("p391", release_root="/r", root=Path("/s"), runner=runner, print_func=said.append) == expected,
                   f"exit {code}: {expected!r}")
         check(ran[0] == ("command", "p391", {"release_root": "/r", "root": Path("/s")})
-              and ran[1] == ("run", ["bash", "-c", "REPAIR"], "switchyard: p391: the tenant control helper is not staged; repairing it from the current release before continuing"),
+              and ran[1] == ("run", ["bash", "-c", "REPAIR"], "switchyard: p391: the tenant control helper is not staged; repairing it from /r before continuing"),
               f"the command for this project, announced before it is run through bash: {ran[:2]}")
         check(m.repair_tenant_control_helper("p391", runner=lambda argv, **k: object(), print_func=said.append)
               == "repairing the tenant control helper for p391 failed (exit 1); the rollout journal records the attempt",
@@ -325,11 +328,16 @@ def test_the_state_protocol_and_ensure_seams_are_the_launchers() -> None:
         ok = m.TenantControlHelperState(project="p391", path=root, present=True)
         absent = m.TenantControlHelperState(project="p391", path=root, present=False)
         asked: list = []
-        with patched(t, staged_protocol_states=seam("staged_protocol_states", lambda project, **kw: asked.append("states") or {"a": absent if not asked.count("repair") else ok}),
-                     staged_tooling_out_of_date=seam("staged_tooling_out_of_date", lambda project, **kw: asked.append("stale") or []),
-                     repair_tenant_control_helper=seam("repair_tenant_control_helper", lambda project, **kw: asked.append("repair") or "")):
+        releases: list = []
+        pinned = Path("/opt/sy/releases/p391c")
+        with patched(t, tenant_pinned_release_root=seam("tenant_pinned_release_root", lambda project, **kw: asked.append("pinned") or pinned),
+                     staged_protocol_states=seam("staged_protocol_states", lambda project, **kw: asked.append("states") or {"a": absent if not asked.count("repair") else ok}),
+                     staged_tooling_out_of_date=seam("staged_tooling_out_of_date", lambda project, **kw: asked.append("stale") or releases.append(kw["release_root"]) or []),
+                     repair_tenant_control_helper=seam("repair_tenant_control_helper", lambda project, **kw: asked.append("repair") or releases.append(kw["release_root"]) or "")):
             m.ensure_tenant_control_helper("p391", runner=refuse("a real runner"), print_func=lambda line: None)
-        check(asked == ["states", "stale", "repair", "states", "stale"], f"states, staleness, repair, and both again after it -- the launcher's: {asked}")
+        check(asked == ["pinned", "states", "stale", "repair", "states", "stale"], f"the pinned release, then states, staleness, repair, and both again after it -- the launcher's: {asked}")
+        # SYRD-551: with no release named, the check and the repair both use the tenant's pinned one.
+        check(releases == [str(pinned)] * 3, f"and every check and the repair were given that release: {releases}")
 
 
 
@@ -461,19 +469,21 @@ def ensure(root: Path, release: Path, *, reasons: dict | None = None, stage_on_r
 
 
 def test_refuse_repair_or_carry_on_per_protocol_program() -> None:
-    announce = "switchyard: p391: the tenant control helper is not staged; repairing it from the current release before continuing"
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
         release = base / "release"
+        # SYRD-551: the release a repair stages from is named, not called "current".
+        announce = f"switchyard: p391: the tenant control helper is not staged; repairing it from {release} before continuing"
         stage(release / "scripts", BRIDGE, b"b1")
         stage(release / "scripts", DISPLAY, b"d1")
         root = base / "staged"
         current = {BRIDGE: b"b1", DISPLAY: b"d1"}
 
         answer, said, ran = ensure(root, release, stage_on_repair=current)
-        check(answer is None and ran == [["bash", "-c", "bash -c 'stage p391'"]] and said == [
-            f"switchyard: p391: {BRIDGE} is not staged; repairing it from the current release before continuing",
-            f"switchyard: p391: {DISPLAY} is not staged; repairing it from the current release before continuing",
+        # SYRD-551: the repair script stops at its first failed step.
+        check(answer is None and ran == [["bash", "-c", "bash -c 'set -eu\nstage p391'"]] and said == [
+            f"switchyard: p391: {BRIDGE} is not staged; repairing it from {release} before continuing",
+            f"switchyard: p391: {DISPLAY} is not staged; repairing it from {release} before continuing",
             announce,
             f"switchyard: p391: {BRIDGE} repaired at {root / 'p391' / BRIDGE}",
             f"switchyard: p391: {DISPLAY} repaired at {root / 'p391' / DISPLAY}",
@@ -486,7 +496,7 @@ def test_refuse_repair_or_carry_on_per_protocol_program() -> None:
         stage(root / "p391", DISPLAY, b"old")
         answer, said, ran = ensure(root, release, stage_on_repair=current)
         check(answer is None and len(ran) == 1 and said == [
-            f"switchyard: p391's staged tooling is from an older release ({DISPLAY}); restaging it from the current one before continuing",
+            f"switchyard: p391's staged tooling is not {release}'s ({DISPLAY}); restaging it from there before continuing",
             announce, "switchyard: p391's staged tooling is this release's"], f"safe but stale: restaged: {said}")
 
         answer, said, ran = ensure(root, release, reasons={DISPLAY: ["writable by others"]})

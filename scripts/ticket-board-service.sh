@@ -89,6 +89,8 @@ readonly MIGRATION_RUNNER="${TICKET_BOARD_MIGRATION_RUNNER:-$BOARD_CURRENT_LINK/
 readonly SERVICE_SCOPE="${TICKET_BOARD_SERVICE_SCOPE:-auto}"
 readonly POLKIT_APPROVAL_USER="${TICKET_BOARD_POLKIT_APPROVAL_USER:-eric}"
 readonly POLKIT_TIMEOUT_SECONDS="${TICKET_BOARD_POLKIT_TIMEOUT_SECONDS:-30}"
+readonly BOARD_SUPERVISOR_CONFIG_ROOT="${SWITCHYARD_BOARD_SUPERVISOR_CONFIG_ROOT:-/etc/switchyard/board-supervisor}"
+readonly BOARD_SUPERVISOR_RUNTIME_ROOT="${SWITCHYARD_BOARD_SUPERVISOR_RUNTIME_ROOT:-/run/switchyard-board-supervisor}"
 
 usage() {
     cat <<EOF
@@ -220,7 +222,29 @@ is_board_service_systemctl_action() {
     esac
 }
 
+# SYRD-586: a tenant migrated to the host board supervisor keeps its unit
+# installed, but systemd refuses to start it while root's tenant record exists.
+# Its board is the supervisor's child, and root or the tenant's owner starts,
+# stops, restarts and reads it over the supervisor's socket.
+board_is_supervised() {
+    [[ -e "$BOARD_SUPERVISOR_CONFIG_ROOT/tenants/$PROJECT_SLUG.json" || -L "$BOARD_SUPERVISOR_CONFIG_ROOT/tenants/$PROJECT_SLUG.json" ]]
+}
+
+supervised_board_action() {
+    "${BOARD_SUPERVISOR_PYTHON:-/usr/bin/python3}" -I -B "$SERVICE_SCRIPT_REPO/scripts/board_supervisor.py" \
+        --config-root "$BOARD_SUPERVISOR_CONFIG_ROOT" --runtime-root "$BOARD_SUPERVISOR_RUNTIME_ROOT" \
+        "$1" "$PROJECT_SLUG"
+}
+
 systemctl_system() {
+    if [[ "$#" -eq 2 && "$2" == "$SERVICE_NAME" ]] && board_is_supervised; then
+        case "$1" in
+            start|stop|restart|status)
+                supervised_board_action "$1"
+                return
+                ;;
+        esac
+    fi
     if [[ "$(id -u)" == "0" ]]; then
         systemctl "$@"
         return

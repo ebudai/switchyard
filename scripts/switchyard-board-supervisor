@@ -1,0 +1,3 @@
+#!/bin/sh
+# The host board supervisor's command (SYRD-586); see docs/board-supervisor.md.
+exec /usr/bin/python3 -I -B "$(dirname "$(readlink -f "$0")")/board_supervisor.py" "$@"

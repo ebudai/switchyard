@@ -19,6 +19,15 @@ located by `_owner_user_unit_path`. `authority_unit_installs`,
 authority's units, activate them, and put back what was there if a cutover
 fails.
 
+A tenant whose board has been migrated to the host board supervisor (SYRD-586)
+keeps its unit installed but disabled, and systemd refuses to start it.
+`board_is_supervised` tells the two apart, and `_board_system_unit_action`,
+`board_system_unit_is_active`, `activate_board_authority` and
+`restore_installed_units` send a supervised tenant's board to the supervisor
+(`supervised_board_action`), so suspending, resuming, upgrading and restoring
+reach it exactly as they reach a unit. A tenant that is not supervised takes
+the systemd path as before.
+
 Suspending, resuming, cutting over, upgrading and creating a tenant decide
 WHEN these run; that stays in `scripts/team_launcher.py`, which calls them
 through its own names. The suites patch several of those names on the
@@ -43,6 +52,10 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 if TYPE_CHECKING:
     from scripts.team_launcher import ProjectConfig
     from scripts.ticket_board.project_provision import ProjectBoardProvision
+
+#: The host board supervisor's unit (SYRD-586); `board_supervisor_spec.SUPERVISOR_UNIT`, named here
+#: so this module still imports nothing of Switchyard's at its top.
+SUPERVISOR_UNIT = "switchyard-board-supervisor.service"
 
 
 def board_service_user(config: ProjectConfig) -> str:
@@ -443,6 +456,12 @@ def activate_board_authority(
     is not the same fact as the board serving it (SYRD-63).
     """
     board_unit = _board_system_unit(config)
+    if board_is_supervised(config.project):
+        if restart:
+            return supervised_board_action(config.project, "restart")
+        if not supervised_board_is_running(config.project):
+            return [f"{config.project}'s supervised board is not running after the deploy"]
+        return []
     if restart:
         result = runner(["systemctl", "restart", board_unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode != 0:
@@ -492,7 +511,10 @@ def restore_installed_units(
         except OSError as exc:
             problems.append(f"could not restore {unit}: {exc}")
     runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if runner(["systemctl", "restart", board_unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
+    if board_is_supervised(config.project):
+        # The supervisor reads the restored unit at this start.
+        problems.extend(supervised_board_action(config.project, "restart"))
+    elif runner(["systemctl", "restart", board_unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:
         problems.append(f"could not restart {board_unit} after restoring it")
     if listener_unit in captured and listener_state:
         if listener_state == "active":
@@ -515,7 +537,84 @@ def managed_unit_names(config: ProjectConfig) -> frozenset[str]:
         _board_system_unit(config),
         _canary_system_unit(config),
         _listener_user_unit(config),
+        # A supervised board runs in the supervisor's control group (SYRD-586).
+        SUPERVISOR_UNIT,
     })
+
+
+def board_supervisor_paths():
+    """Where the board supervisor keeps its records; a suite replaces this to use a scratch tree."""
+    from scripts import board_supervisor_spec
+
+    return board_supervisor_spec.Paths()
+
+
+def board_is_supervised(project: str) -> bool:
+    """Whether root has handed this tenant's board to the board supervisor.
+
+    The record's presence is the fact systemd itself acts on: the drop-in
+    refuses the unit while it exists. Whether the record is sound is the
+    supervisor's to judge, and it refuses loudly if not.
+    """
+    return os.path.lexists(board_supervisor_paths().tenant_record(project))
+
+
+def supervised_board_action(project: str, action: str) -> list[str]:
+    """Start, stop or restart one supervised board through the supervisor, and check the state it reports."""
+    from scripts import board_supervisor
+
+    label = f"{project}'s board ({SUPERVISOR_UNIT} child)"
+    try:
+        answer = board_supervisor.request({"verb": action, "project": project}, paths=board_supervisor_paths())
+    except board_supervisor.SupervisorUnavailable as exc:
+        return [f"could not {action} {label}: {exc}"]
+    tenant = answer.get("tenant") or {}
+    if not answer.get("ok"):
+        return [f"could not {action} {label}: {answer.get('error') or 'refused'}"]
+    wanted = "stopped" if action == "stop" else "running"
+    if tenant.get("state") != wanted:
+        return [f"{label} is {tenant.get('state') or 'unknown'} after {action}"]
+    print(f"switchyard: {action} {label}: pid {answer.get('previous_pid') or '-'} -> {tenant.get('pid') or '-'}")
+    return []
+
+
+def supervised_board_release_action(project: str, board_unit: str):
+    """Teardown's first step for a supervised tenant: a `SwitchyardTeardownAction` running one shell line as root.
+
+    Stops the child and waits for it to exit, removes the tenant record and the
+    desired state, has the supervisor forget the tenant, and removes the
+    drop-in that refused the unit. A supervisor that is not running has no
+    child to stop, so its two requests may fail without stopping the step.
+    """
+    import shlex
+
+    from scripts import team_launcher as launcher
+
+    paths = board_supervisor_paths()
+    client = shlex.join(["/usr/bin/python3", "-I", "-B", str(Path(__file__).resolve().with_name("board_supervisor.py"))])
+    drop_in = paths.drop_in_path(project)
+    script = (
+        f"{client} stop {shlex.quote(project)} || true; "
+        f"rm -f {shlex.quote(str(paths.tenant_record(project)))} {shlex.quote(str(paths.desired_path(project)))}; "
+        f"{client} reload || true; "
+        f"rm -f {shlex.quote(str(drop_in))}; rmdir {shlex.quote(str(drop_in.parent))} 2>/dev/null || true"
+    )
+    return launcher.SwitchyardTeardownAction(
+        f"release {project}'s board from {SUPERVISOR_UNIT} and remove the drop-in on {board_unit}",
+        launcher._bash_action(script),
+    )
+
+
+def supervised_board_is_running(project: str) -> bool:
+    from scripts import board_supervisor
+
+    try:
+        answer = board_supervisor.request({"verb": "status", "project": project},
+                                          paths=board_supervisor_paths(), timeout=10.0)
+    except board_supervisor.SupervisorUnavailable:
+        return False
+    tenants = answer.get("tenants") or []
+    return bool(tenants) and tenants[0].get("state") == "running"
 
 
 def _board_system_unit_action(
@@ -530,8 +629,11 @@ def _board_system_unit_action(
     the wrong manager is not a smaller mistake than asking the wrong host. A
     `systemctl --user stop` for the board stops nothing and returns cleanly,
     which is how a tenant is reported suspended with its board still serving
-    (SYRD-193).
+    (SYRD-193). A supervised board is asked of the supervisor for the same
+    reason: its unit is not the thing running it (SYRD-586).
     """
+    if board_is_supervised(config.project):
+        return supervised_board_action(config.project, action)
     unit = _board_system_unit(config)
     result = runner(["systemctl", action, unit], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if getattr(result, "returncode", 1) != 0:
@@ -550,6 +652,8 @@ def _board_system_unit_action(
 def board_system_unit_is_active(
     config: ProjectConfig, *, runner: Callable[..., subprocess.CompletedProcess[Any]]
 ) -> bool:
+    if board_is_supervised(config.project):
+        return supervised_board_is_running(config.project)
     result = runner(
         ["systemctl", "is-active", _board_system_unit(config)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,

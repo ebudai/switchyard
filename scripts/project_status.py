@@ -415,6 +415,47 @@ def switchyard_project_statuses(
     return statuses
 
 
+def _unit_is_active(unit: str, *, runner: Callable[..., subprocess.CompletedProcess[Any]]) -> bool | None:
+    try:
+        result = runner(
+            ["systemctl", "is-active", "--quiet", unit],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=STATUS_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    code = getattr(result, "returncode", None)
+    return code == 0 if code in (0, 3) else None
+
+
+def supervised_board_entries() -> dict[str, dict]:
+    """What the host board supervisor last published, by tenant; empty on a host that has none (SYRD-586).
+
+    The supervisor writes the whole record, world-readable, whenever a child
+    starts, exits or changes state, so any account can say which process is
+    each tenant's board without asking anything privileged.
+    """
+    from scripts import board_services
+    from scripts.board_supervisor import read_status_file
+
+    published = read_status_file(board_services.board_supervisor_paths()) or {}
+    tenants = published.get("tenants") if isinstance(published, dict) else None
+    return {str(tenant.get("project")): tenant for tenant in tenants or [] if isinstance(tenant, dict)}
+
+
+def board_supervisor_lines(slugs: Sequence[str]) -> list[str]:
+    """The board-services section: one line per tenant the supervisor runs, naming its child process."""
+    from scripts.board_supervisor import describe_tenant
+    from scripts.board_supervisor_spec import SUPERVISOR_UNIT
+
+    supervised = supervised_board_entries()
+    if not supervised:
+        return []
+    lines = [f"BOARD SERVICES (supervised by {SUPERVISOR_UNIT})"]
+    lines.extend(f"  {describe_tenant(supervised[slug])}" for slug in sorted(supervised) if not slugs or slug in slugs)
+    lines.extend(f"  {slug}: {slug}-ticket-board.service (not supervised)" for slug in slugs if slug not in supervised)
+    return lines
+
+
 def root_recorded_tenant_facts(
     slug: str,
     *,
@@ -438,16 +479,12 @@ def root_recorded_tenant_facts(
     # the slug alone: the tenant's own document is exactly what is unreadable.
     unit = f"{slug}-ticket-board.service"
     active: bool | None = None
-    try:
-        result = runner(
-            ["systemctl", "is-active", "--quiet", unit],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=STATUS_PROBE_TIMEOUT_SECONDS,
-        )
-        code = getattr(result, "returncode", None)
-        if code in (0, 3):
-            active = code == 0
-    except (OSError, subprocess.SubprocessError):
-        active = None
+    supervised = supervised_board_entries()
+    if slug in supervised:
+        # Its unit is disabled on purpose; the supervisor's own published record says (SYRD-586).
+        active = supervised[slug].get("state") == "running"
+    else:
+        active = _unit_is_active(unit, runner=runner)
     last = ""
     index = rollout_journal.index_path(slug, root=journal_root)
     try:
@@ -539,18 +576,19 @@ def switchyard_status_command(
         source_repo=source_repo,
         switchyard_install_path=switchyard_install_path,
     )
+    supervised = supervised_board_entries()
     if json_output:
-        print_func(
-            json.dumps(
-                {
-                    "projects": [_switchyard_project_status_payload(status) for status in statuses],
-                    "runtime_copies": [
-                        _switchyard_runtime_copy_status_payload(status) for status in runtime_statuses
-                    ],
-                },
-                indent=2,
-            )
-        )
+        payload: dict[str, Any] = {
+            "projects": [_switchyard_project_status_payload(status) for status in statuses],
+            "runtime_copies": [
+                _switchyard_runtime_copy_status_payload(status) for status in runtime_statuses
+            ],
+        }
+        if supervised:
+            payload["supervised_boards"] = [
+                supervised[slug] for slug in sorted(supervised) if not project or slug == project
+            ]
+        print_func(json.dumps(payload, indent=2))
         return 0
     rows = [("NAME", "SLUG", "STATE", "PANES", "VIEWER")]
     rows.extend(
@@ -597,6 +635,11 @@ def switchyard_status_command(
                 f"switchyard:   to see the rest, run `switchyard status {status.slug}`{as_owner}, "
                 f"or `sudo switchyard status {status.slug}`"
             )
+    board_lines = board_supervisor_lines([status.slug for status in statuses])
+    if board_lines:
+        print_func("")
+        for line in board_lines:
+            print_func(line)
     unsafe = [status for status in statuses if status.root_windows]
     if unsafe:
         print_func("")

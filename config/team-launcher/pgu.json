@@ -14,6 +14,9 @@
         "claude"
       ],
       "effort": "high",
+      "env": {
+        "TICKET_BOARD_ROLE_ONBOARDING_PROMPT": "Your director session just started fresh. Read the onboarding packet first: /home/agent/Projects/pgu/docs/onboarding. Start with /home/agent/Projects/pgu/docs/onboarding/switchyard-director-guide.md."
+      },
       "model": "claude-opus-5",
       "resume_mode": "flag",
       "resume_flag": "--resume",

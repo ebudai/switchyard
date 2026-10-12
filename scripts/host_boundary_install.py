@@ -107,6 +107,13 @@ def switchyard_install_shared_release_command(
             "install-shared-release commit=<sha>`, which asks polkit for it"
         )
         return 1
+    def report_host_readiness() -> None:
+        # Read-only, and said every time root installs a release: settings that
+        # would leave the next incident undiagnosable are the operator's to
+        # change, so this names them and the files that would (SYRD-553).
+        for line in launcher.host_diagnostics_report(launcher.host_diagnostics_findings()):
+            print_func(line)
+
     if dry_run:
         record = shared_release_activation.recorded_rollback()
         current = shared_release_activation.read_pointer()
@@ -116,6 +123,7 @@ def switchyard_install_shared_release_command(
             + (f"the recorded previous target {record.get('previous_target') or 'nothing'}"
                if rollback else commit)
         )
+        report_host_readiness()
         return 0
     try:
         if rollback:
@@ -126,6 +134,7 @@ def switchyard_install_shared_release_command(
         print_func(f"switchyard: {exc}")
         return 1
     print_func(f"switchyard: {result.describe()}")
+    report_host_readiness()
     if getattr(result, "rolled_back", False) or not getattr(result, "release_root", ""):
         return 0
     # The host's boundary follows the host's shared release, so installing one

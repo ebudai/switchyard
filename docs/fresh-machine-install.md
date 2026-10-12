@@ -213,6 +213,54 @@ authenticate on first run.
   only used in the pacman package set.
 - `PyYAML` is optional for preserving an existing Hermes config.
 
+## Host Settings for Diagnosing an Incident
+
+After the 2026-10-04 crash the host could not be diagnosed: the journal had
+been rotated down to tens of megabytes and stopped minutes before the
+power-off, a crash loop had left about 930 MB of PostgreSQL core dumps, and
+`kernel.sysrq = 16` allowed a sync but not the remount and reboot that would
+have kept the last writes. These are the operator's host-wide settings.
+Switchyard does not change them, but `switchyard install-shared-release`
+reports any that fall short, each with the file that fixes it (SYRD-553).
+
+Recommended:
+
+```ini
+# /etc/systemd/journald.conf.d/50-switchyard.conf
+# then: sudo systemctl restart systemd-journald
+[Journal]
+Storage=persistent
+SystemMaxUse=1G
+```
+
+The report asks for more than `1G` on a host with more than eight registered
+tenants: 128 MiB for each one.
+
+```ini
+# /etc/systemd/coredump.conf.d/50-switchyard.conf
+# then: sudo systemctl daemon-reload
+[Coredump]
+MaxUse=1G
+```
+
+```ini
+# /etc/sysctl.d/50-switchyard-sysrq.conf
+# then: sudo sysctl -p /etc/sysctl.d/50-switchyard-sysrq.conf
+kernel.sysrq = 244
+```
+
+### When the host hangs
+
+- Before a hard power-off, hold Alt+SysRq and press S (sync), U (remount
+  read-only), then B (reboot), a few seconds apart. With `kernel.sysrq = 16`
+  only S works; even that is worth pressing.
+- Afterwards, the previous boot's journal is `journalctl -b -1`, core dumps are
+  listed by `coredumpctl list` (stored in `/var/lib/systemd/coredump`), and
+  every privileged Switchyard step is in `switchyard rollout-log <project>`.
+- Lost writes that should already have been flushed, or filesystem checksum
+  errors afterwards, are the drive's: check SMART (`smartctl -a`) and scrub
+  the filesystem.
+
 ## Version Reporting
 
 The installer does not fetch, pull, or reach the network at any point, and

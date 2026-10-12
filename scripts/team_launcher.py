@@ -1285,6 +1285,7 @@ from scripts.host_boundary_install import (
     install_host_privileged_boundary,
     switchyard_install_shared_release_command,
 )
+from scripts.host_diagnostics import host_diagnostics_findings, host_diagnostics_report
 from scripts.board_authority_install import (
     install_board_authority,
     install_board_authority_files,

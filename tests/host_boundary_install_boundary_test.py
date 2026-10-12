@@ -54,7 +54,9 @@ CHECKS = 0
 MOVED = ("install_host_privileged_boundary", "switchyard_install_shared_release_command")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals.
 SEAMS = {
-    'switchyard_install_shared_release_command': {'install_host_privileged_boundary': 1},
+    # SYRD-553: the host-readiness report it prints, read through the launcher like the boundary installer.
+    'switchyard_install_shared_release_command': {'install_host_privileged_boundary': 1, 'host_diagnostics_findings': 1,
+                                                  'host_diagnostics_report': 1},
 }
 #: Measured on the baseline launcher: the Switchyard imports each body makes when it runs.
 LOCAL_IMPORTS = {
@@ -293,7 +295,11 @@ def command(commit: str, *, euid: int = 0, activation: str = "activated", bounda
                     read_pointer=lambda: log.append(["read pointer"]) or "/nonexistent/syrd400/releases/now"), \
             patched(os, geteuid=lambda: log.append(["euid"]) or euid), \
             patched(t, install_host_privileged_boundary=seam("install_host_privileged_boundary",
-                                                             lambda root, **k: log.append(["boundary", str(root), {a: norm(b) for a, b in k.items()}]) or list(boundary))):
+                                                             lambda root, **k: log.append(["boundary", str(root), {a: norm(b) for a, b in k.items()}]) or list(boundary)),
+                    # SYRD-553: the host-readiness report, stood in as a host with nothing to report, so the
+                    # baseline's prints and calls are unchanged and the real host is not read.
+                    host_diagnostics_findings=seam("host_diagnostics_findings", lambda: []),
+                    host_diagnostics_report=seam("host_diagnostics_report", lambda findings: [])):
         try:
             code = m.switchyard_install_shared_release_command(commit, print_func=lambda line: said.append(line) or log.append(["say"]), **kw)
         except AssertionError:

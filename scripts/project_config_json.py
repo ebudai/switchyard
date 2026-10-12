@@ -3,7 +3,8 @@
 `_role_from_json` turns one role entry into a `RoleConfig` (with `_string_list`
 and `_bool_value` checking its list and boolean fields), and
 `_with_project_board_env` gives every role the board environment
-(`_role_board_env`) and the staged Git template (`role_git_template_env`);
+(`_role_board_env`), the staged Git template (`role_git_template_env`) and,
+since SYRD-458, its own Git identity (`scripts/role_git_identity.py`);
 `load_project_config` calls both. `_project_board_provision_from_json` parses a
 provision plan written by this release or an older one, filling fields the
 document predates from a reference plan (`_plan_migration_reference`, anchored
@@ -181,6 +182,7 @@ def role_git_template_env(project: str) -> dict[str, str]:
 
 def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> list[RoleConfig]:
     from scripts import team_launcher as launcher
+    from scripts.role_git_identity import role_git_identity_env
 
     session_role_map = {role.tmux_session: role.role for role in roles}
     git_env = launcher.role_git_template_env(config.project)
@@ -192,6 +194,8 @@ def _with_project_board_env(config: ProjectConfig, roles: list[RoleConfig]) -> l
                 # on purpose is not overridden.
                 **git_env,
                 **role.env,
+                # Its own Git settings are carried inside, after the identity.
+                **role_git_identity_env(config, role),
                 **launcher._role_board_env(config, role, session_role_map),
             },
         )

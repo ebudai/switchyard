@@ -54,7 +54,7 @@ if mode in ("ok", "fail"):
     print("Authorization: Bearer abcdefgh12345678", file=sys.stderr, flush=True)
     print("-----BEGIN OPENSSH PRIVATE KEY-----\nkeymaterialkeymaterial\n-----END OPENSSH PRIVATE KEY-----", flush=True)
     print("done", flush=True)
-    sys.exit(0 if mode == "ok" else 3)
+    sys.exit(0 if mode == "ok" else 5)  # 3 is deploy-release's rolled back
 if mode == "flood":
     line = ("x" * 1023) + "\n"
     for _ in range(6 * 1024):
@@ -290,7 +290,7 @@ def main() -> int:
           f"a ticket the board does not hold is refused before any attempt is opened: {board['main/MEFP-999']['stderr']}")
 
     # What a run records.
-    for key, status, code in (("ok", "succeeded", 0), ("fail", "failed", 3)):
+    for key, status, code in (("ok", "succeeded", 0), ("fail", "failed", 5)):
         run, result = after[key], after[key]["attempt"]["result"]
         lines = run["attempt"]["logs"]["stdout"].splitlines() + run["attempt"]["logs"]["stderr"].splitlines()
         check(run["done"] == {"ok": True, "value": code} and result["status"] == status and result["exit_status"] == code

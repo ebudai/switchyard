@@ -2,6 +2,10 @@
 set -euo pipefail
 
 PROJECT_SLUG="${TICKET_BOARD_PROJECT:-${PGU_TICKET_BOARD_PROJECT:-pgu}}"
+# SYRD-113: a deploy whose health gate failed and whose rollback restored the
+# previous release exits with this, so a caller can tell it from a deploy that
+# failed and changed nothing. A rollback that itself fails still dies with 1.
+ROLLED_BACK_EXIT=3
 PROJECT_DB_IDENT="${PROJECT_SLUG//-/_}"
 DEFAULT_DATABASE_NAME="$PROJECT_DB_IDENT"
 if [[ "$PROJECT_SLUG" != "pgu" ]]; then
@@ -1036,27 +1040,27 @@ deploy_restart_service() {
     if ! smoke_check_http; then
         rollback_live_service "$scope" "$previous_release"
         start_listener_after_upgrade
-        exit 1
+        exit "$ROLLED_BACK_EXIT"
     fi
     if ! verify_live_build_id "$deployed_sha"; then
         rollback_live_service "$scope" "$previous_release"
         start_listener_after_upgrade
-        exit 1
+        exit "$ROLLED_BACK_EXIT"
     fi
     if ! verify_live_commit_repositories "$scope"; then
         rollback_live_service "$scope" "$previous_release"
         start_listener_after_upgrade
-        exit 1
+        exit "$ROLLED_BACK_EXIT"
     fi
     start_listener_after_upgrade
     if ! verify_listener_pane_state_authority; then
         rollback_live_service "$scope" "$previous_release"
-        exit 1
+        exit "$ROLLED_BACK_EXIT"
     fi
     if [[ "$scope" == "system" ]]; then
         if ! verify_post_deploy_system_runtime; then
             rollback_live_service "$scope" "$previous_release"
-            exit 1
+            exit "$ROLLED_BACK_EXIT"
         fi
     fi
     log "deployed $deployed_sha from $DEPLOY_REF and restarted $SERVICE_NAME ($scope scope)"

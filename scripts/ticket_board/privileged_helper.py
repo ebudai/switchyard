@@ -342,8 +342,9 @@ def run_privileged_action(
         attempt.close(status="failed", exit_status=None, detail=f"{type(exc).__name__}: {exc}")
         raise
     exit_status = int(getattr(result, "returncode", 1) or 0)
+    rolled_back = exit_status == privileged_operations.ROLLED_BACK_EXITS.get(action.name)
     attempt.close(
-        status="succeeded" if exit_status == 0 else "failed",
+        status="succeeded" if exit_status == 0 else "rolled_back" if rolled_back else "failed",
         exit_status=exit_status,
         detail=action.action_id,
     )

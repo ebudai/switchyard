@@ -323,7 +323,8 @@ def test_deploy_restart_runs_the_check_and_rolls_back_on_it() -> None:
     assert function.index("restart_live_service") < check, function
     assert check < function.index("start_listener_after_upgrade\n    if ! verify_listener"), function
     after = function[check:check + 200]
-    assert "rollback_live_service" in after and "exit 1" in after, after
+    # Rolled back, the deploy ends with its rolled-back exit (SYRD-113).
+    assert "rollback_live_service" in after and 'exit "$ROLLED_BACK_EXIT"' in after, after
 
 
 def test_the_user_scope_unit_also_passes_the_cache_on_the_command_line() -> None:

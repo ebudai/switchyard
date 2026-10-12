@@ -15225,7 +15225,7 @@ CREATE TABLE IF NOT EXISTS ticket_board.privileged_jobs (
     arguments jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(arguments) = 'object'),
     requester_role text NOT NULL DEFAULT '',
     release_commit text NOT NULL DEFAULT '' CHECK (release_commit = '' OR release_commit ~ '^[0-9a-f]{40}$'),
-    state text NOT NULL CHECK (state IN ('running', 'succeeded', 'failed', 'timed_out')),
+    state text NOT NULL CHECK (state IN ('running', 'succeeded', 'failed', 'timed_out', 'rolled_back')),
     exit_status integer,
     started_at text NOT NULL DEFAULT '',
     finished_at text NOT NULL DEFAULT '',
@@ -15269,7 +15269,7 @@ BEGIN
         RAISE EXCEPTION 'only the board service''s privileged-job reconciler records a privileged job'
             USING ERRCODE = '42501';
     END IF;
-    IF v_state IS NULL OR v_state NOT IN ('running', 'succeeded', 'failed', 'timed_out') THEN
+    IF v_state IS NULL OR v_state NOT IN ('running', 'succeeded', 'failed', 'timed_out', 'rolled_back') THEN
         RAISE EXCEPTION 'privileged job % has no recordable state: %', v_id, v_state;
     END IF;
     SELECT * INTO v_ticket FROM ticket_board.tickets WHERE id = p_job->>'ticket' FOR UPDATE;
@@ -15317,6 +15317,7 @@ BEGIN
     v_outcome := CASE v_state
         WHEN 'succeeded' THEN 'succeeded'
         WHEN 'timed_out' THEN 'timed out and was stopped'
+        WHEN 'rolled_back' THEN 'failed its health gate after the deploy and was rolled back to the previous release'
         ELSE format('failed with exit status %s', coalesce(p_job->>'exit_status', 'unknown')) END;
     v_event := format(
         E'Privileged job %s: %s %s.\n'

@@ -12,6 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+if __name__ == "__main__" and sys.argv[1:2] == ["job-selftest"]:
+    # SYRD-113: the catalogued job-selftest action's operation. It reads and
+    # changes nothing, so it runs before the launcher or anything else is imported.
+    from scripts.ticket_board.privileged_selftest import main as job_selftest
+
+    raise SystemExit(job_selftest(sys.argv[2:]))
+
 from scripts.team_launcher import switchyard_main
 from scripts.repository_hooks import install_new_registry_entries, registry_snapshot
 

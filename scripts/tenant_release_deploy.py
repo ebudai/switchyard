@@ -24,6 +24,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+#: What `ticket-board-service.sh deploy-restart` exits with when a health gate
+#: failed after the restart and its rollback restored the previous release; the
+#: mark `deploy_release_in_transaction` puts on that problem; and what
+#: `deploy-release` then exits with itself (SYRD-113).
+ROLLED_BACK_EXIT = 3
+ROLLED_BACK = "rolled back: "
+
+
 def _build_switchyard_deploy_release_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="switchyard deploy-release",
@@ -170,7 +178,7 @@ def switchyard_deploy_release_command(
             f"the tenant owns; run `switchyard upgrade {config.project}` as root to stage root's copy first"
         )
 
-    def blocked(reason: str, listener: str) -> int:
+    def blocked(reason: str, listener: str, code: int = 1) -> int:
         print_func(f"switchyard: {reason}")
         print_func(f"switchyard: {listener}")
         launcher.record_upgrade_phase(config, config_path=config_path, phase="release", state="blocked", detail=reason)
@@ -178,7 +186,7 @@ def switchyard_deploy_release_command(
             f"switchyard: recorded {config.project}'s release phase blocked with that reason; "
             f"`switchyard release-status {config.project}` shows where the board is."
         )
-        return 1
+        return code
 
     def listener_back() -> str:
         if not listener_was_active:
@@ -215,9 +223,12 @@ def switchyard_deploy_release_command(
     if problems:
         now = launcher._current_tenant_release(status.board_root)[1]
         if now == before:
+            # SYRD-113: deployed, failed its health gate and rolled back is its own outcome.
+            rolled_back = any(problem.startswith(ROLLED_BACK) for problem in problems)
             listener_said = listener_back()
             return ended(
-                blocked("; ".join(problems), f"the board still names {before or 'no release'}; {listener_said}"),
+                blocked("; ".join(problems), f"the board still names {before or 'no release'}; {listener_said}",
+                        ROLLED_BACK_EXIT if rolled_back else 1),
                 _listener_leftover(listener_said) + board_back(),
             )
         return ended(blocked(

@@ -78,6 +78,13 @@ def _ticket(value: str) -> str:
     return value
 
 
+def _outcome(value: str) -> str:
+    """`job-selftest`'s chosen ending, and nothing else."""
+    if value not in ("succeed", "fail"):
+        raise ArgumentError(f"outcome must be succeed or fail: {value!r}")
+    return value
+
+
 #: Values about the JOB rather than the operation, optional on every action
 #: that names a project. A projectless action has no board to report to, so it
 #: takes none (SYRD-113).
@@ -130,7 +137,8 @@ class PrivilegedAction:
     @property
     def job_arguments(self) -> tuple[tuple[str, Callable[[str], str]], ...]:
         """The optional job values this action takes: none without a project to report to."""
-        return JOB_ARGUMENTS if any(name == "project" for name, _ in self.arguments) else ()
+        declared = {name for name, _ in self.arguments}
+        return tuple(item for item in JOB_ARGUMENTS if item[0] not in declared) if "project" in declared else ()
 
     def operation_values(self, values: Mapping[str, str]) -> dict[str, str]:
         """The values the operation itself is built from: the job's are not among them."""
@@ -210,6 +218,18 @@ CATALOGUE: tuple[PrivilegedAction, ...] = (
         message="Authentication is required to repair a Switchyard tenant's boundary",
         authentication=ALLOW_ACTIVE,
         arguments=(("project", _slug),),
+    ),
+    # SYRD-113: the disposable acceptance of the privileged-job path itself. It
+    # runs a fixed program that prints fixed synthetic lines -- one a fixed fake
+    # credential, to show the record redacts it -- and ends as asked. It reads
+    # nothing and changes nothing; the ticket it reports to is required, and the
+    # same control-pane proof and policy apply as for every tenant action.
+    PrivilegedAction(
+        name="job-selftest",
+        summary="Run a synthetic privileged job that changes nothing, so its result can be seen on its ticket",
+        message="Authentication is required to run a Switchyard privileged-job self-test",
+        authentication=ALLOW_ACTIVE,
+        arguments=(("project", _slug), ("ticket", _ticket), ("outcome", _outcome)),
     ),
 )
 

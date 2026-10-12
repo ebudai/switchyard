@@ -432,8 +432,9 @@ def test_the_release_is_switched_inside_the_transaction() -> None:
     check(run(status(target_sha="", resolve_error="gone")) == (["the release to deploy could not be resolved: gone"], False), "unresolved")
     check(run(status(target_sha=OLD)) == ([], False), "unchanged: nothing restarted")
     check(run(status(), deploy="") == (["no deploy command could be built for this release"], False), "no command")
-    runner = lambda argv, **kw: calls.append((argv, kw)) or Result(returncode=3, stderr="x" * 500 + " \n", stdout="")  # noqa: E731
-    check(run(status(), runner=runner) == ([f"deploying {NEW} failed (exit 3): {'x' * 400}"], False)
+    # Exit 7: deploy-restart's 3 now means its rollback undid the deploy (SYRD-113).
+    runner = lambda argv, **kw: calls.append((argv, kw)) or Result(returncode=7, stderr="x" * 500 + " \n", stdout="")  # noqa: E731
+    check(run(status(), runner=runner) == ([f"deploying {NEW} failed (exit 7): {'x' * 400}"], False)
           and calls == [(["sh", "-c", "<deploy>"], dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))] and said == [],
           f"a failed deploy: its exit and at most 400 characters of what it said: {calls}")
     check(run(status(), runner=lambda argv, **kw: Result(returncode=1, stderr="  ", stdout=""))[0] == [f"deploying {NEW} failed (exit 1): no output"],

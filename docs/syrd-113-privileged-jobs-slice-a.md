@@ -121,7 +121,7 @@ and requester under its attempt.
   a missing ticket is refused before any attempt is opened.
 - **The job:** recorded exactly, in the result and the start entry, with the
   requester the control check resolved.
-- **Success and failure (exit 3):**
+- **Success and failure (exit 5; exit 3 now means a rolled-back `deploy-release`, slice C):**
   - every line is recorded, timestamped and redacted;
   - no secret is anywhere in the record;
   - the checksums are the files';

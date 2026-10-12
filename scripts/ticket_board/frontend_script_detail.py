@@ -34,7 +34,7 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
     // board measured, what is unresolved, and what was approved.
     // SYRD-113: root's record of each privileged job asked for this ticket, one line each.
     function privilegedJobLines(jobs) {
-      const said = {running: 'running', succeeded: 'succeeded', failed: 'failed', timed_out: 'timed out'};
+      const said = {running: 'running', succeeded: 'succeeded', failed: 'failed', timed_out: 'timed out', rolled_back: 'rolled back'};
       return (jobs || []).map((job) => `Privileged job ${job.job_id}: ${job.action} ${said[job.state] || job.state}` +
         (job.exit_status === null || job.exit_status === undefined ? '' : ` (exit ${job.exit_status})`) +
         (job.requester_role ? `, asked by ${job.requester_role}` : '') +

@@ -53,7 +53,7 @@ print("API_TOKEN=never-on-the-board", flush=True)
 if mode == "hang":
     time.sleep(600)
 print(f"{mode}: finished", file=sys.stderr, flush=True)
-sys.exit({"ok": 0, "fail": 5}[mode])
+sys.exit({"ok": 0, "fail": 5, "rollback": 3}[mode])
 '''
 
 
@@ -165,6 +165,8 @@ def scenario(root: Path, prefix: str) -> dict:
         fail_job = run("fail", "PGU-2")
         hang_job = run("hang", "PGU-3", timeout=2.0)
         seen["jobs"] = {"ok": ok_job, "fail": fail_job, "hang": hang_job}
+        # SYRD-113 slice C: deploy-release's exit 3 is a deploy its rollback undid.
+        seen["jobs"]["rollback"] = run("rollback", "PGU-1")
         if pj is None:
             seen["ticket_json_keys"] = sorted(ticket_json("PGU-1"))
             server.shutdown()
@@ -276,8 +278,10 @@ def scenario(root: Path, prefix: str) -> dict:
             [sys.executable, str(root / "scripts" / "ticket-board.py"), "--database", service_url,
              "--frames", str(tmp / "frames-service"), "--assets", str(tmp / "assets-service"), "--port", "0",
              "--unix-socket", str(tmp / "service.sock")],
-            env={**os.environ, "TICKET_BOARD_PROJECT": "pgu", "TICKET_BOARD_TICKET_PREFIX": "PGU",
-                 "TICKET_BOARD_PRIVILEGED_JOB_INTERVAL": "0.5"},
+            # A pane's own board settings (TICKET_BOARD_PROCESS_AUTHORITY and the rest) are not the unit's.
+            env={**{k: v for k, v in os.environ.items() if not k.startswith(("TICKET_BOARD_", "PGU_TICKET_BOARD_"))},
+                 "SWITCHYARD_ROLLOUT_JOURNAL_ROOT": str(journal), "TICKET_BOARD_PROJECT": "pgu",
+                 "TICKET_BOARD_TICKET_PREFIX": "PGU", "TICKET_BOARD_PRIVILEGED_JOB_INTERVAL": "0.5"},
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         said = []
         deadline = time.time() + 30
@@ -359,7 +363,7 @@ def main() -> int:
         before = json.loads(child.stdout.strip().splitlines()[-1])
     after = scenario(ROOT, "syrd113ba-")
     a, jobs = after, after["jobs"]
-    ok, fail, hang, live = jobs["ok"], jobs["fail"], jobs["hang"], jobs["live"]
+    ok, fail, hang, live, rb = jobs["ok"], jobs["fail"], jobs["hang"], jobs["live"], jobs["rollback"]
 
     check(before.get("module", "").startswith("ImportError") and "privileged_jobs" not in before["ticket_json_keys"],
           f"main: nothing reads root's job records, and a ticket carries none: {before.get('module')}")
@@ -369,13 +373,15 @@ def main() -> int:
                 "action": "deploy-release"}
 
     check(sorted(a["first"]["recorded"]) == sorted([f"{ok}: completed", f"{fail}: completed", f"{hang}: completed",
-                                                    f"{live}: running"]) and a["first"]["refused"] == []
+                                                    f"{rb}: completed", f"{live}: running"]) and a["first"]["refused"] == []
           and a["after_first"]["jobs"] == [row(ok, "PGU-1", "succeeded", 0), row(fail, "PGU-2", "failed", 5),
-                                           row(hang, "PGU-3", "timed_out", None), row(live, "PGU-1", "running", None)],
+                                           row(hang, "PGU-3", "timed_out", None), row(rb, "PGU-1", "rolled_back", 3),
+                                           row(live, "PGU-1", "running", None)],
           f"each job root recorded for a ticket is recorded on it, with its state, exit and requester: {a['after_first']['jobs']}")
     comments = a["after_first"]["comments"]
     check([(c["ticket_id"], c["who"], c["urgent"]) for c in comments]
-          == [("PGU-1", "privileged-job", False), ("PGU-2", "privileged-job", True), ("PGU-3", "privileged-job", True)],
+          == [("PGU-1", "privileged-job", False), ("PGU-2", "privileged-job", True), ("PGU-3", "privileged-job", True),
+              ("PGU-1", "privileged-job", True)],
           f"each finished job writes one machine-attributed event, urgent when it failed or timed out; the running "
           f"one writes none: {[(c['ticket_id'], c['urgent']) for c in comments]}")
     listed = {job["job_id"]: job for job in a["ticket_json"] or []}
@@ -384,10 +390,11 @@ def main() -> int:
           and listed[ok]["record_dir"] in first and listed[ok]["artifacts"]["stdout.log"] in first
           and listed[ok]["artifacts"]["stderr.log"] in first and listed[ok]["result_sha256"] in first
           and "ok: preparing" in first and "API_TOKEN=<redacted>" in first
-          and "failed with exit status 5" in comments[1]["text"] and "timed out and was stopped" in comments[2]["text"],
+          and "failed with exit status 5" in comments[1]["text"] and "timed out and was stopped" in comments[2]["text"]
+          and "failed its health gate after the deploy and was rolled back to the previous release" in comments[3]["text"],
           f"the event says what ran, for whom, how it ended, where root's record is and its checksums, and the "
           f"redacted last lines: {first}")
-    check(set(listed) == {ok, live} and listed[live]["state"] == "running" and listed[ok]["final_lines"][-1].endswith("ok: finished")
+    check(set(listed) == {ok, rb, live} and listed[live]["state"] == "running" and listed[ok]["final_lines"][-1].endswith("ok: finished")
           and "never-on-the-board" not in json.dumps(a) ,
           f"the ticket's JSON lists its jobs, running ones included, and no secret reaches the board: {sorted(listed)}")
     queue = [(q["ticket_id"], q["target_role"], q["dedupe_key"]) for q in a["after_first"]["queue"]]
@@ -395,18 +402,21 @@ def main() -> int:
                                    ("PGU-2", "main", f"privileged-job:{fail}:main"),
                                    ("PGU-2", "director", f"privileged-job:{fail}:director"),
                                    ("PGU-3", "ops", f"privileged-job:{hang}:ops"),
-                                   ("PGU-3", "director", f"privileged-job:{hang}:director")]),
-          f"a success wakes the ticket's owner; a failure or a timeout wakes the owner and the Director; once each: {queue}")
+                                   ("PGU-3", "director", f"privileged-job:{hang}:director"),
+                                   ("PGU-1", "app", f"privileged-job:{rb}:app"),
+                                   ("PGU-1", "director", f"privileged-job:{rb}:director")]),
+          f"a success wakes the ticket's owner; a failure, a timeout or a rollback wakes the owner and the Director; "
+          f"once each: {queue}")
     check(a["second"] == {"recorded": [f"{live}: unchanged"], "refused": []} and a["after_second"] == a["after_first"],
           f"the next pass re-reads only the unfinished job, and changes nothing: {a['second']}")
     check(a["finished"] == {"recorded": [f"{live}: completed"], "refused": []}
           and a["after_finished"]["jobs"][-1] == row(live, "PGU-1", "succeeded", 0)
-          and len(a["after_finished"]["comments"]) == 4 and a["after_finished"]["queue"][-1]["target_role"] == "app",
+          and len(a["after_finished"]["comments"]) == 5 and a["after_finished"]["queue"][-1]["target_role"] == "app",
           f"when the running job finishes it is completed once, with its one event and one wake: {a['finished']}")
     check(a["restart"] == {"recorded": [], "refused": []} and a["after_restart"]["jobs"] == a["after_finished"]["jobs"]
           and a["after_restart"]["comments"] == a["after_finished"]["comments"] and a["after_restart"]["queue"] == [],
           "a restarted service, after every notice was delivered, reads root's records again and repeats nothing")
-    check(any(line.endswith(": completed") for line in a["thread_logged"]) and len(a["after_thread"]["jobs"]) == 5
+    check(any(line.endswith(": completed") for line in a["thread_logged"]) and len(a["after_thread"]["jobs"]) == 6
           and len(a["after_thread"]["queue"]) == 1,
           f"the service's own reconciler thread records a job root finished while it ran: {a['thread_logged']}")
     reasons = {

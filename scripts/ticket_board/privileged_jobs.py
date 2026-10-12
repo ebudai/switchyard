@@ -40,7 +40,7 @@ from . import rollout_journal
 
 ATTEMPT_PATTERN = re.compile(r"[0-9]{4,}-[0-9]{8}T[0-9]{6}Z")
 TICKET_PATTERN = re.compile(r"[A-Z][A-Z0-9]{0,15}-[1-9][0-9]{0,8}")
-STATES = ("running", "succeeded", "failed", "timed_out")
+STATES = ("running", "succeeded", "failed", "timed_out", "rolled_back")
 RESULT_LIMIT_BYTES = 1024 * 1024
 INDEX_LIMIT_BYTES = 64 * 1024 * 1024
 #: A finished log may exceed its stream's limit by its truncation marker and
@@ -189,6 +189,8 @@ def scan(project: str, prefix: str, *, root: Path | str | None = None, owner_uid
     root = Path(root) if root is not None else rollout_journal.journal_root()
     allowed = {0, os.getgid()} if gids is None else set(gids)
     skipped = set(skip)
+    if not os.path.lexists(root):
+        return [], []  # a host that has run nothing privileged has no journal yet
     root_fd = _open_root(root, owner_uid=owner_uid, gids=allowed)
     try:
         try:

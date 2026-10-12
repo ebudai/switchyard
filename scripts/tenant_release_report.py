@@ -468,8 +468,11 @@ def deploy_release_in_transaction(
         return ["no deploy command could be built for this release"], False
     result = runner(["sh", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if result.returncode != 0:
+        # SYRD-113: deploy-restart's 3 is a deploy its rollback undid
+        # (tenant_release_deploy.ROLLED_BACK_EXIT), and the problem says so.
         return [
-            f"deploying {status.target_sha} failed (exit {result.returncode}): "
+            ("rolled back: " if result.returncode == 3 else "")
+            + f"deploying {status.target_sha} failed (exit {result.returncode}): "
             f"{(str(result.stderr).strip() or 'no output')[:400]}"
         ], False
     print_func(f"switchyard: {config.project} board release deployed: {status.target_sha}")

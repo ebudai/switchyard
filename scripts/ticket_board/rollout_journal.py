@@ -39,11 +39,14 @@ Three shapes, and each exists for a failure that actually happens:
 
 from __future__ import annotations
 
+import grp
 import hashlib
 import json
 import os
 import pwd
 import re
+import shutil
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -62,6 +65,27 @@ SCHEMA = "switchyard.rollout-journal.v1"
 DIRECTORY_MODE = 0o755
 COMPLETED_MODE = 0o444
 INDEX_MODE = 0o644
+
+#: SYRD-113: a tenant's journal is that tenant's to read, and nobody else's.
+#: Root owns it and its group is the one the tenant's board service runs with,
+#: taken from root's own unit for that board (`tenant_group`); another tenant's
+#: account can read none of it. A project whose unit names no group keeps the
+#: modes above, and `repair_journal` says so.
+TENANT_DIRECTORY_MODE = 0o750
+TENANT_LIVE_MODE = 0o640
+TENANT_COMPLETED_MODE = 0o440
+TENANT_INDEX_MODE = 0o640
+SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
+UNIT_LIMIT_BYTES = 256 * 1024
+
+#: SYRD-113: how long an attempt's directory is kept. The newest
+#: `RETENTION_KEEP` are kept whatever their age; an older one is removed once it
+#: finished more than `RETENTION_DAYS` ago. Its index entries stay, and a chained
+#: `pruned` entry says it was removed, so the chain still verifies.
+RETENTION_KEEP = 200
+RETENTION_DAYS = 180
+ATTEMPT_NAME = re.compile(r"[0-9]{4,}-[0-9]{8}T[0-9]{6}Z")
+_RESOLVE = object()
 
 #: What must never reach the disk. Applied line by line as output is captured,
 #: because a redaction pass that runs afterwards is a pass that runs after the
@@ -354,6 +378,8 @@ def attempts(project: str, *, root: Path | str | None = None) -> list[dict]:
             record["finished_at"] = entry.get("at", "")
             record["status"] = entry.get("status", "")
             record["exit_status"] = entry.get("exit_status")
+        elif entry.get("event") == "pruned":
+            record["pruned_at"] = entry.get("at", "")
     ordered = sorted(seen.values(), key=lambda item: item["attempt"])
     for record in ordered:
         directory = attempt_directory(record)
@@ -400,6 +426,9 @@ def format_attempts(project: str, records: Iterable[dict], problems: Iterable[st
         lines.append(
             f"  {record['attempt']}  {record.get('started_at', '') or '?':<24} {outcome}"
         )
+        if record.get("pruned_at"):
+            lines.append(f"      removed by retention at {record['pruned_at']}")
+            continue
         if attempt_directory(record) is None:
             lines.append(f"      {unusable_directory_reason(record)}; nothing is read for it")
             continue
@@ -419,6 +448,177 @@ def format_attempts(project: str, records: Iterable[dict], problems: Iterable[st
     return "\n".join(lines)
 
 
+def tenant_group(project: str, *, unit_dir: Path | str | None = None, owner_uid: int = 0) -> int | None:
+    """The group `project`'s board service runs with, from root's own unit for it; or None.
+
+    The unit is read without following a link and believed only if it is
+    root's and writable by nobody else: its `Group=` is what makes the board
+    service able to read this journal and nobody else's (SYRD-113). A project
+    named with a leading underscore (`_host`) is no tenant.
+    """
+    if not project or project.startswith("_"):
+        return None
+    directory = Path(unit_dir) if unit_dir is not None else SYSTEM_UNIT_DIR
+    try:
+        fd = os.open(directory / f"{project}-ticket-board.service", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        status = os.fstat(fd)
+        if (not stat.S_ISREG(status.st_mode) or status.st_uid != owner_uid or status.st_mode & 0o022
+                or status.st_size > UNIT_LIMIT_BYTES):
+            return None
+        text = os.read(fd, UNIT_LIMIT_BYTES).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+    section, name = "", ""
+    for line in (raw.strip() for raw in text.splitlines()):
+        if line.startswith("[") and line.endswith("]"):
+            section = line
+        elif section == "[Service]" and line.startswith("Group="):
+            name = line.partition("=")[2].strip()
+    if not name:
+        return None
+    try:
+        return grp.getgrnam(name).gr_gid
+    except KeyError:
+        return None
+
+
+def _append_event(index: Path, attempt: str, event: str, detail: dict, group: int | None) -> None:
+    """Chain one event onto the index, as `Attempt` does."""
+    previous = ""
+    if index.is_file():
+        for line in index.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                entry = {"malformed": line}
+            previous = sha256_text(json.dumps(entry, sort_keys=True, separators=(",", ":")))
+    line = IndexEntry(attempt=attempt, event=event, at=now_text(), previous=previous, digest="", detail=detail).to_json()
+    with index.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+    if group is not None:
+        os.chown(index, -1, group)
+    os.chmod(index, INDEX_MODE if group is None else TENANT_INDEX_MODE)
+
+
+def prune(project: str, *, root: Path | str | None = None, now: float | None = None,
+          keep: int = RETENTION_KEEP, days: float = RETENTION_DAYS) -> list[str]:
+    """Remove finished attempts past retention, saying so in the index. What was removed."""
+    base = project_journal_dir(project, root=root)
+    if base.is_symlink() or not base.is_dir():
+        return []
+    names = sorted(entry.name for entry in base.iterdir() if ATTEMPT_NAME.fullmatch(entry.name))
+    cutoff = (time.time() if now is None else now) - days * 86400
+    group = None if base.stat().st_gid == 0 else base.stat().st_gid
+    removed: list[str] = []
+    for name in names[: max(len(names) - keep, 0)]:
+        directory = base / name
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        result = directory / RESULT_NAME
+        try:
+            record = json.loads(result.read_text(encoding="utf-8")) if result.is_file() and not result.is_symlink() else {}
+        except (OSError, ValueError):
+            record = {}
+        if record.get("status") == "running":
+            continue
+        finished = (result if result.is_file() and not result.is_symlink() else directory).lstat().st_mtime
+        if finished > cutoff:
+            continue
+        _append_event(base / INDEX_NAME, name, "pruned", {"retention_days": days, "kept_newest": keep}, group)
+        shutil.rmtree(directory)
+        removed.append(name)
+    return removed
+
+
+def repair_journal(project: str, *, root: Path | str | None = None, group: object = _RESOLVE,
+                   owner_uid: int = 0, now: float | None = None) -> list[str]:
+    """Bring a tenant's journal to its tenant-group modes, and apply retention. What it did, and what it could not.
+
+    Run by root on every upgrade, at provisioning and by `repair-boundary`.
+    Nothing is followed: a link anywhere is reported and left alone, and so is
+    anything that is not root's.
+    """
+    gid = tenant_group(project) if group is _RESOLVE else group
+    said: list[str] = []
+    base = project_journal_dir(project, root=root)
+    if gid is None:
+        if not project.startswith("_"):
+            said.append(f"{project}'s board unit names no group, so its rollout journal stays readable by every account")
+        return said + [f"pruned {name}" for name in prune(project, root=root, now=now)]
+    if base.is_symlink():
+        return [f"{base} is a link; left alone"]
+    if not base.exists():
+        base.mkdir(parents=True)
+        os.chown(base, -1, gid)
+        os.chmod(base, TENANT_DIRECTORY_MODE)
+        said.append(f"created {base}")
+
+    def fix(fd: int, path: Path, mode: int) -> None:
+        status = os.fstat(fd)
+        if status.st_uid != owner_uid:
+            said.append(f"{path} is owned by uid {status.st_uid}, not root; left alone")
+            return
+        if status.st_gid != gid or stat.S_IMODE(status.st_mode) != mode:
+            os.fchown(fd, -1, gid)
+            os.fchmod(fd, mode)
+            said.append(f"{path}: {stat.S_IMODE(status.st_mode):o} group {status.st_gid} -> {mode:o} group {gid}")
+
+    def opened(path: Path, name: str, dir_fd: int, directory: bool) -> int | None:
+        try:
+            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_DIRECTORY if directory else 0),
+                           dir_fd=dir_fd)
+        except OSError:
+            said.append(f"{path} cannot be opened without following a link; left alone")
+            return None
+
+    base_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        fix(base_fd, base, TENANT_DIRECTORY_MODE)
+        for name in sorted(os.listdir(base_fd)):
+            path = base / name
+            if name == INDEX_NAME:
+                fd = opened(path, name, base_fd, False)
+                if fd is not None:
+                    try:
+                        fix(fd, path, TENANT_INDEX_MODE)
+                    finally:
+                        os.close(fd)
+                continue
+            if not ATTEMPT_NAME.fullmatch(name):
+                continue
+            fd = opened(path, name, base_fd, True)
+            if fd is None:
+                continue
+            try:
+                fix(fd, path, TENANT_DIRECTORY_MODE)
+                try:
+                    with open(os.open(RESULT_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd),
+                              encoding="utf-8") as handle:
+                        running = json.load(handle).get("status") == "running"
+                except (OSError, ValueError, AttributeError):
+                    running = False
+                for child in sorted(os.listdir(fd)):
+                    child_fd = opened(path / child, child, fd, False)
+                    if child_fd is None:
+                        continue
+                    try:
+                        if stat.S_ISREG(os.fstat(child_fd).st_mode):
+                            fix(child_fd, path / child, TENANT_LIVE_MODE if running else TENANT_COMPLETED_MODE)
+                    finally:
+                        os.close(child_fd)
+            finally:
+                os.close(fd)
+    finally:
+        os.close(base_fd)
+    return said + [f"pruned {name}" for name in prune(project, root=root, now=now)]
+
+
 class Attempt:
     """One privileged run, recorded as it happens.
 
@@ -436,6 +636,7 @@ class Attempt:
         root: Path | str | None = None,
         target_commit: str = "",
         operator: str = "",
+        group: object = _RESOLVE,
     ) -> None:
         self.project = project
         self.command = list(command)
@@ -453,6 +654,17 @@ class Attempt:
         self._redactors: dict[str, Redactor] = {}
         self.job: dict | None = None
         self._capture: dict[str, dict] | None = None
+        #: The tenant's group, resolved when the attempt opens (`tenant_group`), or None.
+        self.group = group
+        #: What closing this attempt repaired or pruned in the journal (`repair_journal`).
+        self.repairs: list[str] = []
+
+    def _mode(self, legacy: int, tenant: int) -> int:
+        return legacy if self.group is None else tenant
+
+    def _own(self, path: Path) -> None:
+        if self.group is not None:
+            os.chown(path, -1, self.group)
 
     def describe_job(self, job: dict) -> None:
         """Record this run as a privileged job (SYRD-113), before it is opened.
@@ -473,16 +685,26 @@ class Attempt:
     # -- lifecycle ----------------------------------------------------------
 
     def open(self) -> Path:
+        if self.group is _RESOLVE:
+            # Only root writes a real journal, and only root can give a file to
+            # a tenant's group; any other writer keeps the legacy modes.
+            self.group = tenant_group(self.project) if os.geteuid() == 0 else None
         self.base.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.base, DIRECTORY_MODE)
+        self._own(self.base)
+        os.chmod(self.base, self._mode(DIRECTORY_MODE, TENANT_DIRECTORY_MODE))
         self.started_at = now_text()
         self.attempt = self._next_attempt_id()
         self.directory = self.base / self.attempt
         # Not exist_ok: reusing a directory is how two runs come to share a log.
         self.directory.mkdir()
-        os.chmod(self.directory, DIRECTORY_MODE)
+        self._own(self.directory)
+        os.chmod(self.directory, self._mode(DIRECTORY_MODE, TENANT_DIRECTORY_MODE))
         self._stdout = (self.directory / "stdout.log").open("w", encoding="utf-8")
         self._stderr = (self.directory / "stderr.log").open("w", encoding="utf-8")
+        if self.group is not None:
+            for name in ("stdout.log", "stderr.log"):
+                self._own(self.directory / name)
+                os.chmod(self.directory / name, TENANT_LIVE_MODE)
         line_limit = LINE_LIMIT_CHARS if self._capture is not None else None
         self._redactors = {"stdout": Redactor(line_limit), "stderr": Redactor(line_limit)}
         self._append_index(
@@ -547,7 +769,7 @@ class Attempt:
         for name in ("stdout.log", "stderr.log", RESULT_NAME):
             path = self.directory / name
             if path.is_file():
-                os.chmod(path, COMPLETED_MODE)
+                os.chmod(path, self._mode(COMPLETED_MODE, TENANT_COMPLETED_MODE))
         self._append_index(
             "finish",
             {
@@ -558,6 +780,18 @@ class Attempt:
                 "result_sha256": sha256_file(self.directory / RESULT_NAME),
             },
         )
+        # Every root write to a tenant's journal leaves the whole journal in its
+        # tenant-group modes and within retention: provisioning's recorded
+        # packet, `upgrade-tenant`, `repair-boundary` and every other privileged
+        # action all close an attempt. A board unit installed during this very
+        # run -- provisioning's -- names its group now if it did not at open.
+        try:
+            if self.group is None and os.geteuid() == 0:
+                self.group = tenant_group(self.project)
+            self.repairs = repair_journal(self.project, root=self.base.parent, group=self.group,
+                                          owner_uid=os.geteuid())
+        except OSError as exc:
+            self.repairs = [f"the journal could not be repaired: {exc}"]  # never fails the run it follows
         return record
 
     # -- the files ----------------------------------------------------------
@@ -600,10 +834,12 @@ class Attempt:
         # Rewritten in place while the run is live, because the record has to
         # exist from the first moment: a run killed before it can finish is one
         # this file says is still running, which is the truth.
+        live = self._mode(0o644, TENANT_LIVE_MODE)
         if path.exists():
-            os.chmod(path, 0o644)
+            os.chmod(path, live)
         path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.chmod(path, 0o644 if status == "running" else COMPLETED_MODE)
+        self._own(path)
+        os.chmod(path, live if status == "running" else self._mode(COMPLETED_MODE, TENANT_COMPLETED_MODE))
         return record
 
     def _next_attempt_id(self) -> str:
@@ -621,22 +857,7 @@ class Attempt:
         return f"{highest + 1:04d}-{stamp}"
 
     def _append_index(self, event: str, detail: dict) -> None:
-        previous = ""
-        for entry in read_index(self.project, root=self.base.parent):
-            previous = sha256_text(
-                json.dumps(entry, sort_keys=True, separators=(",", ":"))
-            )
-        line = IndexEntry(
-            attempt=self.attempt,
-            event=event,
-            at=now_text(),
-            previous=previous,
-            digest="",
-            detail=detail,
-        ).to_json()
-        with self.index.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        os.chmod(self.index, INDEX_MODE)
+        _append_event(self.index, self.attempt, event, detail, None if self.group is _RESOLVE else self.group)
 
 
 def now_text() -> str:

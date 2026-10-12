@@ -220,6 +220,11 @@ def _repair_boundary(values: Mapping[str, str]) -> list[str]:
     return [LAUNCHER, "repair-boundary", values["project"], "--apply"]
 
 
+def _job_selftest(values: Mapping[str, str]) -> list[str]:
+    # SYRD-113: handed straight to privileged_selftest by the launcher's wrapper.
+    return [LAUNCHER, "job-selftest", values["project"], "--outcome", values["outcome"]]
+
+
 #: One entry per catalogued action. `privileged_operations_test` asserts the
 #: two tables have exactly the same names, so an action added to the catalogue
 #: without an operation here is a failing test rather than a helper that
@@ -232,7 +237,16 @@ OPERATIONS: dict[str, Callable[[Mapping[str, str]], list[str]]] = {
     "install-shared-release": _install_shared_release,
     "select-shared-release": _select_shared_release,
     "repair-boundary": _repair_boundary,
+    "job-selftest": _job_selftest,
 }
+
+
+#: The exit status an action's operation gives when it changed the host and
+#: then put it back: `deploy-release` whose health gate failed and whose
+#: rollback restored the previous release (`tenant_release_report.ROLLED_BACK_EXIT`,
+#: `ticket-board-service.sh`'s `ROLLED_BACK_EXIT`). Recorded as `rolled_back`
+#: (SYRD-113).
+ROLLED_BACK_EXITS: dict[str, int] = {"deploy-release": 3}
 
 
 def command_for(action_name: str, values: Mapping[str, str]) -> list[str]:

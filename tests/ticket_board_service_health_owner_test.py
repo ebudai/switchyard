@@ -311,7 +311,8 @@ def test_deploy_order_around_the_health_checks(fx: Fixture) -> None:
 
     for label, build_id in (("wrong build", "zzz"), ("live board down", None)):
         failed, steps = deploy(fx, build_id)
-        assert failed.returncode == 1, (label, failed.stderr)
+        # Rolled back to the previous release: its own exit, not a plain failure (SYRD-113).
+        assert failed.returncode == 3, (label, failed.stderr)
         assert steps == [
             "STEP assert_user_manager_identity", "STEP stop_listener", "STEP migrate",
             f"STEP activate {fx.release}", "STEP verify_current abc123", "STEP restart user",

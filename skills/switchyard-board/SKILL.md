@@ -31,6 +31,12 @@ rarely pass an address at all.
 If `TICKET_BOARD_CALLER_ROLE` is empty you are not in a role pane. Find out who
 you are before writing anything; do not assume a default.
 
+Your pane also commits as your role: `git config --show-origin user.name` says
+`command line`, and each commit you make names your role. Do not set
+`user.name` or `user.email` with `git config`. Every worktree of a repository
+shares that repository's config, so a name set there becomes every other
+worker's name outside its pane.
+
 ## Reading
 
 Reads are HTTP GET. They never register you, notify anyone, or change state.

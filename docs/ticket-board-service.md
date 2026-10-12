@@ -1,5 +1,10 @@
 # Ticket Board Service
 
+A tenant can instead have its board run by the host board supervisor,
+`switchyard-board-supervisor.service`. Its unit then stays installed but
+disabled, and `start`, `stop`, `restart`, `status` and `deploy-restart` below
+reach the supervisor's child for it. See `docs/board-supervisor.md` (SYRD-586).
+
 The deploy tooling auto-targets the live board unit:
 
 - if a system `pgu-ticket-board.service` is installed, deploy/start/stop/

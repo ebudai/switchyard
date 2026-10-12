@@ -137,6 +137,16 @@ def _install_and_restart_board_unit(
     daemon_reload = runner(["sudo", "systemctl", "daemon-reload"])
     if daemon_reload.returncode != 0:
         raise SystemExit("team-launcher: failed to reload systemd after updating the board unit")
+    from scripts import board_services
+
+    project = getattr(plan, "project", "")
+    if project and board_services.board_is_supervised(project):
+        # Systemd refuses the unit while the host supervisor runs this board;
+        # the supervisor reads the unit just installed when it starts the child (SYRD-586).
+        problems = board_services.supervised_board_action(project, "restart")
+        if problems:
+            raise SystemExit(f"team-launcher: failed to restart {project}'s supervised board: {'; '.join(problems)}")
+        return
     restart = runner(["sudo", "systemctl", "restart", plan.board_unit])
     if restart.returncode != 0:
         raise SystemExit(f"team-launcher: failed to restart {plan.board_unit}")

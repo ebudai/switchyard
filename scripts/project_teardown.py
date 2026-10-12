@@ -429,6 +429,12 @@ def _switchyard_teardown_actions(
             ("rm", "-f", str(registry_path)),
         ),
     ]
+    from scripts import board_services
+
+    if board_services.board_is_supervised(plan.project):
+        # First: the unit is already disabled, so the next step stops nothing;
+        # the board is the host supervisor's child (SYRD-586).
+        actions.insert(0, board_services.supervised_board_release_action(plan.project, plan.board_unit))
     if remove_owner_home:
         actions.append(
             launcher.SwitchyardTeardownAction(

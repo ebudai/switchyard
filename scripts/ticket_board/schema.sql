@@ -5077,6 +5077,7 @@ DECLARE
     own_board_ref text;
     missing_id text;
     cycle_id text;
+    standing_ref text;
 BEGIN
     SELECT count(*)
     INTO blocker_count
@@ -5159,6 +5160,27 @@ BEGIN
     LIMIT 1;
     IF cycle_id IS NOT NULL THEN
         RAISE EXCEPTION 'blocked_by cycle detected for %', p_ticket_id;
+    END IF;
+
+    -- SYRD-451: another board's work or a person is a wait nothing on this
+    -- board resolves, so it ends only by its release, whose reason records
+    -- what happened (release_external_blocker). Replacing or clearing the
+    -- list must still name every one that stands; dropping one here ended the
+    -- wait with no reason and no record of the person's answer.
+    SELECT b.blocker_ticket_id
+    INTO standing_ref
+    FROM ticket_board.ticket_blockers b
+    WHERE b.ticket_id = p_ticket_id
+      AND ticket_board.is_external_blocker(b.blocker_ticket_id)
+      AND b.blocker_ticket_id <> ALL (ARRAY(
+          SELECT ticket_board.normalize_blocker_ref(raw_id)
+          FROM unnest(coalesce(p_blocker_ids, ARRAY[]::text[])) AS raw_id
+      ))
+    ORDER BY b.position
+    LIMIT 1;
+    IF standing_ref IS NOT NULL THEN
+        RAISE EXCEPTION 'external blocker % stands until it is released: release-external-blocker % --ref % --reason "<what happened>"',
+            standing_ref, p_ticket_id, standing_ref;
     END IF;
 
     DELETE FROM ticket_board.ticket_blockers

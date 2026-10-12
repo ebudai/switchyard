@@ -10235,7 +10235,37 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.workflow_wait_stage(stage text)
 RETURNS boolean LANGUAGE sql STABLE AS $$
  SELECT CASE WHEN ticket_board.declared_workflow() IS NULL THEN stage IN ('in_progress','inspection','audit','user_review')
- ELSE EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') s WHERE s->>'name'=stage AND NOT (s->>'terminal')::boolean AND s->>'kind'<>'draft') END;
+ ELSE EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') s WHERE s->>'name'=stage AND NOT (s->>'terminal')::boolean
+  -- SYRD-549: owned Draft work can wait like any other; a draft stage that
+  -- nobody owns (Backlog) holds no work to wait.
+  AND (s->>'kind'<>'draft' OR jsonb_array_length(coalesce(s->'owners','[]'::jsonb))>0)) END;
+$$;
+-- SYRD-549: who a wait may name, and how they are reached.
+--   'pane':     a role with a pane, handed the wait by the awaiting-role
+--               schedule;
+--   'external': the declared User, who has no pane and no process authority.
+--               The wait is recorded and mutes the owner's reminders, and
+--               nothing is sent: a notice to a role with no pane is requeued
+--               for ever, and the Director being told the User has not
+--               answered is the non-decision SYRD-273 ended;
+--   NULL:       not a role a wait may name.
+CREATE OR REPLACE FUNCTION ticket_board.wait_target_kind(p_role text)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN
+        RETURN CASE WHEN p_role IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'research')
+                    THEN 'pane' END;
+    END IF;
+    RETURN (SELECT CASE WHEN r.definition->>'target' IS NOT NULL THEN 'pane'
+                        WHEN r.definition->>'kind' = 'user' THEN 'external' END
+            FROM ticket_board.workflow_roles r
+            WHERE r.name = p_role AND (r.definition->>'active')::boolean);
+END;
 $$;
 CREATE OR REPLACE FUNCTION ticket_board.enqueue_awaiting_role_handoff(p_ticket_id text)
 RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER
@@ -10258,6 +10288,13 @@ BEGIN
     -- a board with a declared workflow actually runs, and it overrides that
     -- one, so a guard added only there is a guard this board never reaches.
     IF ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
+        RETURN;
+    END IF;
+    -- SYRD-549: a wait on the User is recorded and sends nothing; see
+    -- wait_target_kind. Marked handed over, so a repeated request is too.
+    IF ticket_board.wait_target_kind(ns.awaiting_role) = 'external' THEN
+        UPDATE ticket_board.ticket_notification_state
+        SET awaiting_notified_since_at = ns.awaiting_since_at WHERE ticket_id = p_ticket_id;
         RETURN;
     END IF;
     FOR step IN 1..4 LOOP
@@ -10365,11 +10402,15 @@ DECLARE
     actor text;
     normalized_role text := lower(btrim(coalesce(awaiting_role, '')));
 BEGIN
+    -- The list is the legacy board's. Under a declared workflow require_actor
+    -- admits by the caller's own `await_role` capability and ignores it, so a
+    -- custom-named role holding the capability may record a wait (SYRD-549).
     actor := ticket_board.require_actor(
         ARRAY['director', 'main', 'app', 'ops', 'audit', 'inspector', 'perf', 'research'],
         'set_awaiting_role'
     );
-    IF NOT (CASE WHEN ticket_board.declared_workflow() IS NULL THEN normalized_role IN ('director', 'main', 'app', 'perf', 'ops', 'audit', 'inspector', 'research') ELSE EXISTS (SELECT FROM ticket_board.workflow_roles r WHERE r.name=normalized_role AND (r.definition->>'active')::boolean AND r.definition->>'target' IS NOT NULL) END) THEN
+    -- A pane role, or the declared User (SYRD-549).
+    IF ticket_board.wait_target_kind(normalized_role) IS NULL THEN
         RAISE EXCEPTION 'invalid awaiting_role: %', awaiting_role;
     END IF;
     IF normalized_role = ticket_board.current_app_actor() THEN
@@ -12600,6 +12641,92 @@ ALTER TABLE ticket_board.ticket_notification_queue
 
 
 DROP FUNCTION IF EXISTS ticket_board.notify_unresolved_turn_end(jsonb, timestamptz, interval);
+-- SYRD-549: what the owner of an unresolved turn may do about it, from its
+-- own authority on this ticket in this stage, by the rules the moves
+-- themselves check:
+--   'transition':         a declared transition out of the stage that names
+--                         the owner (transition_allows_actor, and owner_scoped
+--                         as the assignee);
+--   'request-dependency': the owner holds add_comment and await_role, and the
+--                         stage is one a wait may be recorded in;
+--   'blocker':            the owner holds set_blockers.
+-- "Continue work" is not among them: no route reaches grant_turn_continuation.
+-- A legacy board keeps its fixed rules: the owner's move, a wait for any role
+-- but the User in a wait stage, and blockers for the Director.
+CREATE OR REPLACE FUNCTION ticket_board.unresolved_turn_choices(p_state text, p_assignee text, p_owner text)
+RETURNS text[]
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    cfg jsonb := ticket_board.declared_workflow();
+    caps jsonb;
+    choices text[] := ARRAY[]::text[];
+BEGIN
+    IF cfg IS NULL THEN
+        choices := ARRAY['transition'];
+        IF ticket_board.workflow_wait_stage(p_state) AND p_owner <> 'user' THEN
+            choices := choices || 'request-dependency'::text;
+        END IF;
+        IF p_owner = 'director' THEN
+            choices := choices || 'blocker'::text;
+        END IF;
+        RETURN choices;
+    END IF;
+    SELECT r.definition->'capabilities' INTO caps
+    FROM ticket_board.workflow_roles r
+    WHERE r.name = p_owner AND (r.definition->>'active')::boolean;
+    IF EXISTS (
+        SELECT FROM jsonb_array_elements(cfg->'transitions') tr
+        WHERE tr->>'from' = p_state
+          AND ticket_board.transition_allows_actor(cfg, tr, p_owner)
+          AND (NOT coalesce((tr->>'owner_scoped')::boolean, false) OR p_owner = p_assignee)
+    ) THEN
+        choices := choices || 'transition'::text;
+    END IF;
+    IF ticket_board.workflow_wait_stage(p_state) AND coalesce(caps ?& ARRAY['add_comment', 'await_role'], false) THEN
+        choices := choices || 'request-dependency'::text;
+    END IF;
+    IF coalesce(caps ? 'set_blockers', false) THEN
+        choices := choices || 'blocker'::text;
+    END IF;
+    RETURN choices;
+END;
+$$;
+
+-- SYRD-549: the sentence of the owner's repair prompt that names what to do,
+-- naming only `p_choices`. The guard writes the rest, as it always has.
+CREATE OR REPLACE FUNCTION ticket_board.unresolved_turn_repair_options(p_choices text[])
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    options text[];
+BEGIN
+    SELECT coalesce(array_agg(CASE c
+               WHEN 'transition' THEN 'transition it if the work is done'
+               WHEN 'request-dependency' THEN '`request-dependency` if it is waiting on another role'
+                   || CASE WHEN EXISTS (SELECT FROM ticket_board.workflow_roles r
+                                        WHERE ticket_board.wait_target_kind(r.name) = 'external')
+                           THEN ' or on the User' ELSE '' END
+               WHEN 'blocker' THEN 'record a blocker if something else must land first'
+           END ORDER BY n) FILTER (WHERE c IN ('transition', 'request-dependency', 'blocker')), ARRAY[]::text[])
+    INTO options
+    FROM unnest(p_choices) WITH ORDINALITY AS u(c, n);
+    RETURN CASE cardinality(options)
+               WHEN 0 THEN 'No move on it from this stage is yours to make: say in a comment what it needs.'
+               WHEN 1 THEN 'Do this: ' || options[1] || '.'
+               ELSE 'Do one of: ' || array_to_string(options[1:cardinality(options) - 1], '; ')
+                    || '; or ' || options[cardinality(options)] || '.'
+           END;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.notify_unresolved_turn_end(
     p_turn_by_role jsonb,
     p_now timestamptz,
@@ -12629,6 +12756,7 @@ DECLARE
     turn_started timestamptz;
     owner_idle_at timestamptz;
     grace_from timestamptz;
+    choices text[];
 BEGIN
     PERFORM ticket_board.require_ticket_board_listener('notify_unresolved_turn_end');
     -- An empty map means no turn ended on this pass. That skips the prompting
@@ -12763,17 +12891,20 @@ BEGIN
         -- the owner's only prompt to repair the turn, which was half of
         -- SYRD-203.
         IF NOT owner_reported THEN
+        -- Only the moves this owner can make on this ticket, in this stage
+        -- (SYRD-549). The fixed list offered a blocker only the Director can
+        -- set, "continue work", which no role can reach, and a wait the stage
+        -- or the role could not record.
+        choices := ticket_board.unresolved_turn_choices(candidate.state, candidate.assignee, candidate.owner_role);
         PERFORM ticket_board.enqueue_notification(
             candidate.id,
             'unresolved_turn_repair',
             candidate.owner_role,
             format(
-                '%s is still yours and this turn ended without resolving it. Do one of: '
-                || 'transition it if the work is done; `request-dependency` if you need '
-                || 'another role; record a blocker if something else must land first; or '
-                || 'continue work, which covers the next turn only. The Director has NOT '
+                '%s is still yours and this turn ended without resolving it. %s The Director has NOT '
                 || 'been told, and will be if it is still unresolved in %s.',
                 candidate.id,
+                ticket_board.unresolved_turn_repair_options(choices),
                 p_grace
             ),
             jsonb_build_object(
@@ -12784,9 +12915,7 @@ BEGIN
                 'owner_role', candidate.owner_role,
                 'target_role', candidate.owner_role,
                 'turn_id', candidate.turn_id,
-                'choices', jsonb_build_array(
-                    'transition', 'request-dependency', 'blocker', 'continue'
-                ),
+                'choices', to_jsonb(choices),
                 'message', format(
                     '%s is still yours and this turn ended without resolving it.',
                     candidate.id

@@ -135,8 +135,28 @@ def _list_process_command_lines(
 
 
 def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) -> bool:
+    """Whether a non-tmux process carries this role's pane marker, as a whole word.
+
+    The marker is `TICKET_BOARD_PANE_TARGET=<target>` (or the legacy
+    `PGU_PANE_TARGET=`), one argument of the env wrapper that starts a pane. A
+    target is `session:window.pane`, so `p:0.1` is a prefix of `p:0.10`, and a
+    substring match called pane 10's process pane 1's (SYRD-444). Either side of
+    the marker must be whitespace, an end of the line, or shell punctuation for a
+    marker inside a `sh -c` string; anything else continues the word.
+    """
     target_marker = f"TICKET_BOARD_PANE_TARGET={role.target}"
     legacy_target_marker = f"PGU_PANE_TARGET={role.target}"
+
+    def whole(command: str, marker: str) -> bool:
+        start = command.find(marker)
+        while start != -1:
+            end = start + len(marker)
+            edges = (command[start - 1] if start else " ", command[end] if end < len(command) else " ")
+            if all(edge.isspace() or edge in "'\"`;&|()" for edge in edges):
+                return True
+            start = command.find(marker, start + 1)
+        return False
+
     for command in process_commands:
         try:
             first = shlex.split(command)[0] if command.strip() else ""
@@ -144,7 +164,7 @@ def _role_has_pane_process(role: RoleConfig, process_commands: Sequence[str]) ->
             first = command.strip().split(maxsplit=1)[0] if command.strip() else ""
         if Path(first).name == "tmux":
             continue
-        if target_marker in command or legacy_target_marker in command:
+        if whole(command, target_marker) or whole(command, legacy_target_marker):
             return True
     return False
 

@@ -75,7 +75,10 @@ def _project_plan_for_added_role(
 
     plan_data = launcher._plan_data_from_config(config, config_path)
     if plan_data.get("workflow") or launcher._load_json(config_path).get("workflow"):
-        raise SystemExit("use ticket-board-workflow apply to update configured roles and stages")
+        # Refused before anything is written, and the refusal names this tenant's supported path (SYRD-510).
+        from scripts.declared_role_guidance import declared_workflow_add_role_refusal
+
+        raise SystemExit(declared_workflow_add_role_refusal(config, config_path=config_path, role_name=role_name))
     implementer_roles = launcher._configured_implementer_roles(
         config,
         plan_data=plan_data,

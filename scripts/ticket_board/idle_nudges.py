@@ -328,20 +328,20 @@ SELECT ticket_board.notify_idle_turn_end_nudges(
             row = result.fetchone()
         except Exception as exc:
             self.logger.warning("Failed to enqueue idle turn-end reminders: %s", exc)
-            return 0
-        if row is None:
-            return 0
-        value = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+            row = None
+        value = None if row is None else row[0] if not isinstance(row, dict) else next(iter(row.values()))
         try:
             enqueued = int(value)
         except (TypeError, ValueError):
-            return 0
+            enqueued = 0
         if enqueued:
             self.logger.info("Enqueued %s idle turn-end ticket nudges", enqueued)
         # After the reminder path, never conditional on it, so the generator
         # above decides on exactly the inputs it always had. An owner that
         # stopped without resolving is reported whether or not a reminder was
-        # due, and whether or not one was enqueued (SYRD-194).
+        # due, whether or not one was enqueued (SYRD-194), and whether or not
+        # the reminder query worked: this pass has already marked the turn-end
+        # boundary seen, so returning before these lost it for good (SYRD-482).
         self._process_unresolved_turn_end(conn, idle_since)
         self._process_permission_prompt_waits(conn)
         return enqueued

@@ -8,10 +8,10 @@
   what it may: a layout template only from a known generated shape, never an
   unknown one; the configuration only after reading it without following a
   link, then written atomically and handed back to its owner. A dry run says
-  what would change and writes neither the layout template nor a new pane
-  launcher or session directory; a stale `directorctl` pin, though, is still
-  written to the configuration while the result reports `changed=False`, as
-  it was before this module existed (SYRD-418 tracks that correction).
+  what would change and writes neither the layout template nor the
+  configuration, nor hands either to its owner. A stale `directorctl` pin was
+  still written by a dry run until SYRD-418; it is still read without
+  following a link, so a dry run refuses what the upgrade would refuse.
 - `upgrade_generated_project_layout` is the public entry point `launch_project`
   and the upgrade phases call.
 
@@ -157,8 +157,12 @@ def upgrade_generated_project_config(
                     raw_env = {}
                     raw_role["env"] = raw_env
                 raw_env["TICKET_BOARD_DIRECTORCTL"] = directorctl_upgrade
-        launcher._write_json_atomic(config_path, raw_config)
-        launcher.ensure_owner_file(config, config_path, runner=runner)
+        # A dry run reports a stale pin and refuses a linked configuration as
+        # an upgrade would, but neither writes the document nor hands it to
+        # its owner (SYRD-418).
+        if not dry_run:
+            launcher._write_json_atomic(config_path, raw_config)
+            launcher.ensure_owner_file(config, config_path, runner=runner)
     return launcher.LauncherUpgradeResult(
         changed=not dry_run,
         message=f"switchyard: upgraded generated project config for {config.project}: {'; '.join(changed_messages)}",

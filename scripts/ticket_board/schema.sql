@@ -12056,7 +12056,9 @@ SET search_path = ticket_board, pg_temp
 AS $$
 DECLARE
     who text;
-    reason text := btrim(coalesce(p_reason, ''));
+    -- SYRD-585: not `reason`, which is also a reminder_snooze_batches column;
+    -- the batch close below could not tell the two apart and refused to run.
+    clear_reason text := btrim(coalesce(p_reason, ''));
     ids text[] := ticket_board.reminder_snooze_ticket_ids(p_tickets);
     now_ts timestamptz := clock_timestamp();
     batch ticket_board.reminder_snooze_batches;
@@ -12067,7 +12069,7 @@ DECLARE
 BEGIN
     PERFORM ticket_board.require_actor(ARRAY['director'], 'set_manually_controlled');
     who := ticket_board.current_app_actor();
-    IF reason = '' THEN
+    IF clear_reason = '' THEN
         refusals := refusals || jsonb_build_object('reason', 'a reason is required');
     END IF;
     IF p_apply THEN
@@ -12105,19 +12107,19 @@ BEGIN
     END IF;
     IF p_apply THEN
         UPDATE ticket_board.reminder_snooze_members m
-           SET released_at = now_ts, released_by = who, release_reason = 'cleared: ' || reason
+           SET released_at = now_ts, released_by = who, release_reason = 'cleared: ' || clear_reason
          WHERE m.batch_id = p_batch AND m.released_at IS NULL AND m.ticket_id = ANY (targets);
         IF NOT EXISTS (SELECT 1 FROM ticket_board.reminder_snooze_members m
                        WHERE m.batch_id = p_batch AND m.released_at IS NULL) THEN
             UPDATE ticket_board.reminder_snooze_batches
-               SET state = 'cleared', closed_by = who, closed_at = now_ts, close_reason = reason
+               SET state = 'cleared', closed_by = who, closed_at = now_ts, close_reason = clear_reason
              WHERE id = p_batch;
         END IF;
     END IF;
     RETURN jsonb_build_object(
         'applied', p_apply,
         'batch', p_batch,
-        'reason', reason,
+        'reason', clear_reason,
         'by', who,
         'releases', to_jsonb(coalesce(targets, ARRAY[]::text[])),
         'remaining', to_jsonb(coalesce(ARRAY(SELECT x FROM unnest(open_ids) x WHERE x <> ALL (coalesce(targets, ARRAY[]::text[]))), ARRAY[]::text[])),

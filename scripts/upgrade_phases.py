@@ -1034,13 +1034,24 @@ def _pin_upgrade_source(
         )
         if refused is not None:
             return refused
+    chosen = (deploy_ref or "").strip()
+    # An exact commit with no source, given or recovered: as root, the source is
+    # this host's active installed release of that commit, recorded with it, or
+    # the upgrade refuses here. An empty source exited 0 and advertised a
+    # `deploy-release` that refuses it (SYRD-578).
+    if source_repo is None and deploy_ref_chosen and len(chosen) == 40 and all(char in "0123456789abcdef" for char in chosen):
+        from scripts.active_release_source import exact_release_source
+
+        source_repo, refused = exact_release_source(config.project, chosen, print_func=print_func)
+        if refused:
+            return 1
+        pinned_explicitly = pinned_explicitly or source_repo is not None
     # An installed release as the source and an exact commit chosen for it must
     # agree before anything is written: the artifacts phase refuses the same
     # disagreement, but only after this step has recorded the mismatched pin --
     # which every later unpinned upgrade would then recover (SYRD-529). Only
     # that comparison moves earlier; the release's other checks stay where
     # they are, before staging.
-    chosen = (deploy_ref or "").strip()
     if (
         not dry_run
         and source_repo is not None

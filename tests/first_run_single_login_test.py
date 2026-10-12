@@ -40,6 +40,15 @@ if str(ROOT / "tests") not in sys.path:
 
 from scripts import team_launcher as launcher  # noqa: E402
 
+#: Claude's ordinary prompt as recorded (its input box between two rules). Since
+#: SYRD-544 a step with nothing recorded closes only at a screen positively known
+#: to be that prompt, so the cases that mean "it reached its prompt" draw this
+#: recording rather than a hand-written `> Try ...` line.
+ORDINARY_PROMPT = (ROOT / "tests" / "fixtures" / "claude-first-run" / "ordinary-prompt.txt").read_text(encoding="utf-8")
+#: How long the person is away in the cases that wait for them: hours, past
+#: both the quiet window and the bound.
+AWAY = 3 * 3600.0
+
 def _bounded(clock: dict, step: float, ceiling: float = 2000.0):
     """A fake clock that fails instead of looping.
 
@@ -227,7 +236,7 @@ def test_a_provider_at_its_ordinary_prompt_is_ended_by_switchyard() -> None:
             self.screens = [
                 "Select\x1b[8Ga\x1b[10Gtheme",
                 "\x1b[2GPaste\x1b[8Gcode\x1b[13Ghere\x1b[18Gif\x1b[21Gprompted\x1b[30G>",
-                "\x1b[38;5;246m>\x1b[39m  Try \"fix the build\"",
+                ORDINARY_PROMPT,
             ]
             self.terminated = False
             self.exited = False
@@ -334,7 +343,8 @@ def test_a_provider_still_asking_something_is_never_cut_off() -> None:
             return None
 
         def poll(self):
-            return None
+            # The person ends it themselves, hours later (SYRD-544).
+            return 0 if clock["now"] >= AWAY else None
 
         def terminate(self) -> None:
             self.terminated = True
@@ -361,19 +371,20 @@ def test_a_provider_still_asking_something_is_never_cut_off() -> None:
         is_complete=lambda: False,
         watching="claude to record its own first run",
         session_factory=factory,
-        sleep=_bounded(clock, 5.0),
+        sleep=_bounded(clock, 5.0, ceiling=AWAY + 60),
         monotonic=lambda: clock["now"],
         print_func=said.append,
         output_write=lambda _text: None,
     )
-    check(clock["now"] >= launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
-          f"the person was given the whole bound to answer: {clock['now']}s")
-    check(any("gave up waiting" in line for line in said),
-          f"and only the bound ended it: {said}")
+    # SYRD-544: no bound ends a screen that is asking. It waited for the person,
+    # past the quiet window and past the bound, until they ended it.
+    check(clock["now"] >= AWAY and not made[0].terminated,
+          f"the person was given as long as they took, and Switchyard never ended it: {clock['now']}s")
+    check(not any("gave up waiting" in line for line in said),
+          f"no bound gave up on it: {said}")
     check(not any("ordinary prompt" in line for line in said),
           f"it was never mistaken for a ready prompt: {said}")
-    check(all(at >= launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS
-              for at, _ in written_while_asking),
+    check(written_while_asking == [],
           f"nothing was sent into it while the question stood: {written_while_asking}")
 
 
@@ -400,7 +411,9 @@ def test_a_provider_that_has_printed_nothing_yet_is_not_closed_for_being_quiet()
             return None
 
         def poll(self):
-            return None
+            # Nothing drawn is not known to be idle, so it waits for the person,
+            # who ends it themselves (SYRD-544).
+            return 0 if clock["now"] >= AWAY else None
 
         def terminate(self) -> None:
             if self.closed_at is None:
@@ -421,16 +434,15 @@ def test_a_provider_that_has_printed_nothing_yet_is_not_closed_for_being_quiet()
         is_complete=lambda: False,
         watching="claude to record its own first run",
         session_factory=lambda a, **k: (made.append(_StillStarting(a, **k)) or made[-1]),
-        sleep=_bounded(clock, 5.0),
+        sleep=_bounded(clock, 5.0, ceiling=AWAY + 60),
         monotonic=lambda: clock["now"],
         print_func=said.append,
         output_write=lambda _text: None,
     )
-    check(made[0].closed_at is not None, "it was ended eventually")
-    check(made[0].closed_at >= launcher.FOREGROUND_COMPLETION_TIMEOUT_SECONDS,
-          f"but only by the bound, never for being quiet: closed at {made[0].closed_at}s")
-    check(not any("ordinary prompt" in line for line in said),
-          f"and it was never called ready: {said}")
+    check(made[0].closed_at is None and clock["now"] >= AWAY,
+          f"never ended for being quiet, nor by a bound -- open until the person ended it: {made[0].closed_at}")
+    check(not any("ordinary prompt" in line or "gave up waiting" in line for line in said),
+          f"and it was never called ready or given up on: {said}")
 
 
 def test_an_account_that_records_its_first_run_ends_the_session_at_once() -> None:
@@ -577,8 +589,9 @@ def test_the_watch_loop_advances_while_a_real_terminal_sits_idle() -> None:
     # A provider that prints an ordinary prompt and then waits forever.
     child = [
         _sys.executable, "-c",
-        "import sys,time; sys.stdout.write('> Try \"fix the build\"'); "
+        "import sys,time; sys.stdout.write(open(sys.argv[1], encoding='utf-8').read()); "
         "sys.stdout.flush(); time.sleep(300)",
+        str(ROOT / "tests" / "fixtures" / "claude-first-run" / "ordinary-prompt.txt"),
     ]
     started = time.monotonic()
     try:

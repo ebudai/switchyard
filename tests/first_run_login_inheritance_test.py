@@ -593,20 +593,27 @@ def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> Non
     said: list[str] = []
     ended = {"terminated": False}
 
-    class NeverFinishes:
-        """A CLI that draws nothing and never exits.
+    #: Claude's recorded ordinary prompt. Since SYRD-544 the bound applies only
+    #: to a screen positively known to be that prompt -- anything that may be
+    #: asking the person waits for them -- so the CLI that never records sits
+    #: there, redrawing it, and is never quiet long enough to be closed early.
+    prompt = (Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "claude-first-run"
+              / "ordinary-prompt.txt").read_text(encoding="utf-8")
 
-        Drawing nothing matters: the step can also end on a screen that has
-        gone quiet with nothing left to ask, and this double is here to prove
-        the OTHER ending -- a disagreement between this code and a CLI must
-        never look like a hang (SYRD-221).
+    class NeverFinishes:
+        """A CLI that sits at its ordinary prompt, redrawing it, and never exits.
+
+        Never quiet matters: the step can also end on a screen that has gone
+        quiet with nothing left to ask, and this double is here to prove the
+        OTHER ending -- a disagreement between this code and a CLI must never
+        look like a hang (SYRD-221).
         """
 
         def poll(self):
             return None
 
         def read(self):
-            return ""
+            return prompt
 
         def relay_from(self, source_fd):
             return None
@@ -640,6 +647,8 @@ def test_a_step_that_can_never_complete_ends_loudly_rather_than_hanging() -> Non
         monotonic=lambda: clock["now"],
         timeout_seconds=60,
         print_func=said.append,
+        # The prompt it redraws is not this suite's output.
+        output_write=lambda _text: None,
     )
 
     check(completed is False, "it reports the step as outstanding")

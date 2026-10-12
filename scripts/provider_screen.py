@@ -15,7 +15,9 @@ reading, with no I/O:
   cursor;
 - `provider_is_waiting_for_an_answer` gives three independent readings, each
   only ever evidence FOR a question;
-- `_screen_is_settled` decides when a finished step may be closed;
+- `_screen_is_settled` decides when a finished step may be closed, and
+  `provider_screen_is_at_ordinary_prompt` when one with nothing recorded may
+  (SYRD-544);
 - `_TerminalStream` re-cuts pty reads so no escape sequence straddles two
   chunks;
 - `_replaced_frame_starts_at` finds where a redrawn frame begins.
@@ -67,7 +69,11 @@ _INVISIBLE_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 #: The glyphs these CLIs put beside the option a person is on. Claude uses the
 #: first for both its menu cursor and its empty input box, which is why what
 #: follows it is what matters rather than its presence.
-PROVIDER_SELECTION_CURSORS: tuple[str, ...] = ("\u276f", "\u203a")
+#: Hermes 0.15.2's `hermes model` draws its provider list with curses, the
+#: chosen line led by an arrow -- `→ (●) Nous Portal` -- and its radio options
+#: matched nothing here, so the menu read as an idle screen (SYRD-544,
+#: `tests/fixtures/hermes-model/provider-menu.txt`).
+PROVIDER_SELECTION_CURSORS: tuple[str, ...] = ("\u276f", "\u203a", "\u2192")
 
 
 #: A menu line: a number, a dot, and the option. No ordinary prompt draws one,
@@ -86,6 +92,11 @@ PROVIDER_PENDING_ANSWER_MARKERS: tuple[str, ...] = (
     "[y/n]",
     "enter to confirm",
     "authorization code",
+    # Hermes's own credential prompt, `OPENROUTER_API_KEY (or Enter to cancel): `,
+    # with nothing else on its screen to read: recorded from `hermes model`
+    # 0.15.2, offline, after choosing OpenRouter. A person who went to look the
+    # key up came back to the next provider's sign-in (SYRD-544).
+    "or enter to cancel",
 )
 
 
@@ -314,6 +325,26 @@ def _provider_screen_is_waiting_on_a_sign_in(recent_output: str) -> bool:
         "".join(marker.split()).casefold() in text
         for marker in PROVIDER_WAITING_ON_SIGN_IN_MARKERS
     )
+
+
+def provider_screen_is_at_ordinary_prompt(recent_output: str) -> bool:
+    """Is this screen positively the provider's ordinary prompt, with nothing asked?
+
+    The one shape a step with nothing recorded may be closed at, because it is
+    the only one known to be idle rather than merely not recognised as asking:
+    Claude's input box, its cursor between two horizontal rules, which is what
+    all three recordings of it at rest show and none of its questions do.
+    Anything else -- an input line no marker knows, a menu drawn some new way --
+    is a screen a person may be answering, and is left open for them
+    (SYRD-544). Evidence FOR idle, so a screen also asking is not idle.
+    """
+    lines = _visible_lines(recent_output)
+    at_box = any(
+        line.startswith(cursor) and _is_input_box(lines, index)
+        for index, line in enumerate(lines)
+        for cursor in PROVIDER_SELECTION_CURSORS
+    )
+    return at_box and not provider_is_waiting_for_an_answer(recent_output)
 
 
 def provider_is_waiting_for_an_answer(recent_output: str) -> bool:

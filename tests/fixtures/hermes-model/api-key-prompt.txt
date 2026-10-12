@@ -1,0 +1,5 @@
+2
+Get one at: https://openrouter.ai/keys
+
+No OpenRouter API key configured.
+OPENROUTER_API_KEY (or Enter to cancel): 

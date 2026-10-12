@@ -13,7 +13,9 @@ any particular project.
 
 3. **[switchyard-director-guide.md](switchyard-director-guide.md)** — *judgment*. Writing a
    ticket, review discipline, merge versus kick back, working with audit, routing and
-   holds, escalation. Directors read this one.
+   holds, escalation. Directors read this one, including **Host health the board depends
+   on**: the journal, core-dump, SysRq and post-crash disk and repository checks the
+   Director ensures and escalates.
 
 ## Start here if you are new
 

@@ -87,6 +87,15 @@ def _report_startup_exit(role: RoleConfig, capture: Path | None) -> None:
         print(line, file=sys.stderr)
 
 
+def _decided(role: RoleConfig, session_dir: Path, entry: str, event: str, message: str = "", session_id: str = "") -> None:
+    """Print what a start decided, if it says anything, and keep it in the pane's resume history (SYRD-569)."""
+    from scripts.resume_history import record_resume_decision
+
+    if message:
+        print(message, file=sys.stderr)
+    record_resume_decision(role, session_dir, event, entry=entry, session_id=session_id, detail=message)
+
+
 def _start_role_session(
     role: RoleConfig,
     *,
@@ -107,23 +116,21 @@ def _start_role_session(
 
         adopt_stranded_session_record(role, session_dir)
     session_id = launcher.session_id_for_role(role, session_dir) if prefer_resume else ""
+    if not prefer_resume:
+        _decided(role, session_dir, seed_source, "fresh_requested")
     if prefer_resume and not session_id:
-        print(
-            f"team-launcher: no recorded session id for {role.role}; starting fresh session",
-            file=sys.stderr,
-        )
+        _decided(role, session_dir, seed_source, "no_record",
+                 f"team-launcher: no recorded session id for {role.role}; starting fresh session")
         prefer_resume = False
     if prefer_resume and _uses_fresh_session_per_ticket(role):
-        print(
-            f"team-launcher: {role.role} is configured for fresh sessions per ticket; "
-            "starting a fresh session instead of inheriting the previous ticket context",
-            file=sys.stderr,
-        )
+        _decided(role, session_dir, seed_source, "fresh_per_ticket",
+                 f"team-launcher: {role.role} is configured for fresh sessions per ticket; "
+                 "starting a fresh session instead of inheriting the previous ticket context", session_id)
         prefer_resume = False
     if prefer_resume:
         preflight_ok, preflight_message = launcher._resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
         if not preflight_ok:
-            print(preflight_message, file=sys.stderr)
+            _decided(role, session_dir, seed_source, "preflight_refused", preflight_message, session_id)
             prefer_resume = False
     if not prefer_resume:
         launcher.clear_session_record_for_role(role, session_dir)
@@ -148,14 +155,14 @@ def _start_role_session(
         ]
     )
     if start_proc.returncode != 0:
+        _decided(role, session_dir, seed_source, "start_failed",
+                 session_id=session_id if prefer_resume else "")
         return int(start_proc.returncode)
     if not prefer_resume:
         if post_start_verifier is not None and not post_start_verifier():
             launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
-            print(
-                f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session",
-                file=sys.stderr,
-            )
+            _decided(role, session_dir, seed_source, "fresh_not_live",
+                     f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session")
             _report_startup_exit(role, capture)
             return 1
         _disarm_startup_capture(role, capture, runner=runner)
@@ -164,6 +171,7 @@ def _start_role_session(
             return configure_result
         launcher.clear_unverified_resume_for_role(role, session_dir)
         launcher.seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
+        _decided(role, session_dir, seed_source, "fresh_started")
         return 0
     resume_status = launcher._resume_launch_status(role, runner=runner)
     if resume_status == launcher.RESUME_LAUNCH_VERIFIED and (post_start_verifier is None or post_start_verifier()):
@@ -173,6 +181,7 @@ def _start_role_session(
             return configure_result
         launcher.clear_unverified_resume_for_role(role, session_dir)
         launcher.seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=seed_source)
+        _decided(role, session_dir, seed_source, "resumed", session_id=session_id)
         return 0
     if resume_status == launcher.RESUME_LAUNCH_TIMEOUT:
         _disarm_startup_capture(role, capture, runner=runner)
@@ -180,16 +189,14 @@ def _start_role_session(
         if configure_result != 0:
             return configure_result
         record_unverified_resume_for_role(role, session_dir, session_id)
-        print(
-            f"team-launcher: resume for {role.role} using session {session_id} was not verified within "
-            f"{launcher.RESUME_STARTUP_TIMEOUT_SECONDS:g}s; leaving tmux session and session record intact",
-            file=sys.stderr,
-        )
+        _decided(role, session_dir, seed_source, "resume_unverified",
+                 f"team-launcher: resume for {role.role} using session {session_id} was not verified within "
+                 f"{launcher.RESUME_STARTUP_TIMEOUT_SECONDS:g}s; leaving tmux session and session record intact",
+                 session_id)
         return 0
-    print(
-        f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",
-        file=sys.stderr,
-    )
+    _decided(role, session_dir, seed_source, "resume_failed",
+             f"team-launcher: resume failed for {role.role} using session {session_id}; falling back to fresh session",
+             session_id)
     _report_startup_exit(role, capture)
     if runner(launcher.tmux_has_session_args(role), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         kill_proc = runner(launcher.tmux_kill_session_args(role))
@@ -211,13 +218,12 @@ def _start_role_session(
         ]
     )
     if fresh_proc.returncode != 0:
+        _decided(role, session_dir, seed_source, "fallback_start_failed")
         return int(fresh_proc.returncode)
     if post_start_verifier is not None and not post_start_verifier():
         launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
-        print(
-            f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session after resume fallback",
-            file=sys.stderr,
-        )
+        _decided(role, session_dir, seed_source, "fallback_not_live",
+                 f"team-launcher: role {role.role} did not leave a live {role.tmux_session} session after resume fallback")
         _report_startup_exit(role, capture)
         return 1
     _disarm_startup_capture(role, capture, runner=runner)
@@ -226,10 +232,8 @@ def _start_role_session(
         return configure_result
     launcher.clear_unverified_resume_for_role(role, session_dir)
     launcher.seed_initial_pane_idle_state(role, pane_state_dir=pane_state_dir, source=f"{seed_source}.fallback")
-    print(
-        f"team-launcher: started fresh session for {role.role} after resume fallback",
-        file=sys.stderr,
-    )
+    _decided(role, session_dir, seed_source, "fallback_started",
+             f"team-launcher: started fresh session for {role.role} after resume fallback")
     return 0
 
 

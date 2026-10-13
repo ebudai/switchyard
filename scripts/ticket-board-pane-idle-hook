@@ -64,6 +64,13 @@ HERMES_BACKGROUND_MAX_SECONDS = 1800.0
 HERMES_PAYLOAD_TIMEOUT_SECONDS = 2.0
 PROC_ROOT = Path("/proc")
 SESSION_START_FRESH_SOURCE = "startup"
+#: What runs between a provider and its hook, or between tmux and the provider,
+#: without being a provider: the shells that run a hook's command line.
+HOOK_SHELLS = frozenset({"sh", "bash", "dash", "zsh"})
+#: Kept beside the session record, in the format and under the limit of
+#: scripts/resume_history.py, which the launcher writes to the same file.
+RESUME_HISTORY_SUFFIX = ".resume.log"
+RESUME_HISTORY_MAX_BYTES = 256 * 1024
 
 
 def _default_board_url(environ: dict[str, str]) -> str:
@@ -199,6 +206,58 @@ def _pane_root_identity(pid: int, proc_root: Path = PROC_ROOT) -> tuple[int, int
             return current, child[1]
         current = child[0]
     return None
+
+
+def _started_by_pane_provider(pid: int, proc_root: Path = PROC_ROOT) -> int:
+    """The pid of the provider that ran this hook when it is the pane's own, else 0 (SYRD-569).
+
+    Claude Code 2.1.294 and Codex 0.162.0 run a hook as their own direct child
+    (measured), so the first process above the hook that is not a shell is the
+    provider that ran it. It is the pane's own when nothing but shells lies
+    between it and the tmux server. A `claude -p` or `codex exec` started from
+    a role's tool shell has the pane's provider above it, so it is not.
+    """
+    stat = _proc_stat(pid, proc_root)
+    provider = 0
+    current = stat[0] if stat is not None else 0
+    for _ in range(128):
+        info = _proc_stat(current, proc_root)
+        if info is None:
+            return 0
+        if info[2].startswith("tmux"):
+            return provider
+        if info[2] not in HOOK_SHELLS:
+            if provider:
+                return 0
+            provider = current
+        current = info[0]
+    return 0
+
+
+def _append_resume_history(session_dir: Path, target: str, entry: dict) -> None:
+    """scripts/resume_history.append_resume_history, for this standalone program: never fails the hook."""
+    path = session_dir / f"{_target_path(session_dir, target).stem}{RESUME_HISTORY_SUFFIX}"
+    entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "time": time.time(), "by": "hook", "pid": os.getpid(),
+             "target": target, **entry}
+    line = (json.dumps(entry, sort_keys=True, default=str) + "\n").encode("utf-8")
+    try:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            size = 0
+        if size + len(line) > RESUME_HISTORY_MAX_BYTES:
+            kept = path.read_bytes().splitlines(keepends=True)
+            kept = kept[len(kept) // 2 :]
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(b"".join(kept))
+            os.replace(tmp, path)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "ab") as handle:
+            handle.write(line)
+    except OSError:
+        pass
 
 
 def _background_work(payload: object, source: str, *, pid: int | None = None,
@@ -496,6 +555,7 @@ def _should_write_session(
     launched_session_id: str,
     record_session: bool,
     explicit_session_id: bool,
+    pane_provider_switch: bool = False,
 ) -> bool:
     if not incoming_session_id:
         return False
@@ -504,6 +564,10 @@ def _should_write_session(
     if incoming_session_id == existing_session_id:
         return record_session
     if explicit_session_id:
+        return True
+    if pane_provider_switch:
+        # The pane's own provider opened another conversation in the pane -- the
+        # User's /resume, a /clear -- and that is the one to resume next (SYRD-569).
         return True
     if launched_session_id:
         if incoming_session_id == launched_session_id:
@@ -873,6 +937,8 @@ def main(argv: list[str] | None = None) -> int:
     session_id = _extract_session_id(payload, os.environ, args.session_id)
     launched_session_id = args.session_id.strip() or _env_session_id(os.environ)
     resume_session_id = args.session_id.strip() or _launcher_resume_session_id(os.environ)
+    switched = bool(existing_session_id and session_id and session_id != existing_session_id)
+    provider = _started_by_pane_provider(os.getpid()) if switched and _is_session_start_hook_source(args.source) else 0
     if _should_write_session(
         target=target,
         existing_session_id=existing_session_id,
@@ -881,8 +947,17 @@ def main(argv: list[str] | None = None) -> int:
         launched_session_id=launched_session_id,
         record_session=args.record_session,
         explicit_session_id=bool(args.session_id.strip()),
+        pane_provider_switch=bool(provider),
     ):
         _write_session(session_dir, target, session_id, source=args.source, payload=payload)
+        if session_id != existing_session_id:
+            _append_resume_history(session_dir, target, {
+                "event": "recorded", "session_id": session_id, "previous": existing_session_id,
+                "source": args.source, "provider_pid": provider or None})
+    elif switched:
+        _append_resume_history(session_dir, target, {
+            "event": "kept", "session_id": existing_session_id, "refused": session_id,
+            "source": args.source, "launched": launched_session_id})
     if args.state == "idle" and _is_session_start_hook_source(args.source):
         output = _session_start_additional_context_output(
             target=target,

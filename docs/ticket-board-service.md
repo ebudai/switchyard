@@ -373,9 +373,15 @@ but replacing an existing session id is guarded for every source:
 `SessionStart`, `PreInvocation`, `PostInvocation`, `Stop`, and equivalents. A
 different incoming id is accepted only when it matches the launcher-provided
 `TICKET_BOARD_PANE_SESSION_ID` or when the hook invocation passed `--session-id`
-explicitly. A transient CLI launched inside a pane inherits that pane's
+explicitly, or when it is a `SessionStart` from the pane's own provider: the
+User's `/resume`, or a `/clear` (SYRD-569). The pane's own provider is the
+first process above the hook that is not a shell, with only shells between it
+and the tmux server. A transient CLI launched inside a pane inherits that pane's
 target/session environment, but it cannot replace that pane's durable resume id
-with a different conversation id.
+with a different conversation id, because the pane's provider is above it. Each
+change the hook makes to the record, and each one it refuses, is kept in the
+pane's `<pane>.resume.log` beside the record, with the launcher's start
+decisions.
 Before the launcher deliberately starts a pane fresh instead of resuming, it
 clears that pane's old session record; the newly launched CLI can then claim the
 empty record first. Payloads without a session id still update pane state and do

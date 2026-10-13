@@ -359,13 +359,16 @@ def attach_role_to_slot(
 
         adopt_stranded_session_record(role, session_dir)
     session_id = launcher.session_id_for_role(role, session_dir)
+    from scripts.role_sessions import _decided
+
     if not exists:
         if not session_id:
-            print(f"team-launcher: cannot attach {role.role}; no live session or recorded resume id", file=sys.stderr)
+            _decided(role, session_dir, "team_launcher.attach_role", "no_record",
+                     f"team-launcher: cannot attach {role.role}; no live session or recorded resume id")
             return 1
         preflight_ok, preflight_message = _resume_preflight_allows_attempt(role, session_id, session_dir=session_dir)
         if not preflight_ok:
-            print(preflight_message, file=sys.stderr)
+            _decided(role, session_dir, "team_launcher.attach_role", "preflight_refused", preflight_message, session_id)
             return 1
     updated_config = launcher._write_role_visibility(
         config,
@@ -395,6 +398,7 @@ def attach_role_to_slot(
         if resume_status == RESUME_LAUNCH_VERIFIED:
             clear_unverified_resume_for_role(updated_role, session_dir)
             launcher.seed_initial_pane_idle_state(updated_role, pane_state_dir=pane_state_dir, source="team_launcher.attach_role")
+            _decided(updated_role, session_dir, "team_launcher.attach_role", "resumed", session_id=session_id)
         else:
             launcher._write_role_visibility(
                 updated_config,
@@ -404,11 +408,9 @@ def attach_role_to_slot(
                 slot=None,
                 runner=runner,
             )
-            print(
-                f"team-launcher: resume for {updated_role.role} using session {session_id} was not verified; "
-                "leaving tmux session and session record intact",
-                file=sys.stderr,
-            )
+            _decided(updated_role, session_dir, "team_launcher.attach_role", "resume_unverified",
+                     f"team-launcher: resume for {updated_role.role} using session {session_id} was not verified; "
+                     "leaving tmux session and session record intact", session_id)
             return 1
     print_func(f"team-launcher: attached role {role.role} to slot {slot}; refusing to relayout other panes")
     return runner(tmux_attach_args(updated_role)).returncode

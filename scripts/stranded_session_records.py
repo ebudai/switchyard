@@ -29,7 +29,6 @@ preflight is not retried at every launch.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -86,8 +85,8 @@ def adopt_stranded_session_record(role: RoleConfig, session_dir: Path) -> None:
         return
     launcher.clear_session_record_for_role(role, session_dir)
     launcher._write_private_json_atomic(session_dir / name, stranded)
-    print(
-        f"team-launcher: {role.role}'s last session {session_id} was recorded in the shared store {shared}; "
-        f"resuming from a copy in {session_dir} (SYRD-569); the shared record is left in place",
-        file=sys.stderr,
-    )
+    from scripts.role_sessions import _decided
+
+    _decided(role, session_dir, "", "adopted_shared",
+             f"team-launcher: {role.role}'s last session {session_id} was recorded in the shared store {shared}; "
+             f"resuming from a copy in {session_dir} (SYRD-569); the shared record is left in place", session_id)

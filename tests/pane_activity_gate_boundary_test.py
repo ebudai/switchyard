@@ -152,6 +152,8 @@ DEFAULTS = {
     'PaneActivityGate.child_work_trace': ['None'],
     'PaneActivityGate._holding': [],  # SYRD-583
     'PaneActivityGate.child_holders': [],  # SYRD-583
+    'PaneActivityGate.provider_started_at': [],  # SYRD-589
+    'PaneActivityGate.turnless_since': ['None'],  # SYRD-589
     'PaneActivityGate._trusted_idle_source_trace': [],
     'PaneActivityGate._idle_cursor_trace': ['False'],
     'PaneActivityGate._untrusted_idle_source_trace': [],
@@ -734,14 +736,37 @@ def without_composer_reads(value, dropped: list):
     return value
 
 
+def with_turn_probes(gold, got, inserted: list) -> bool:
+    """SYRD-589 asks for the pane's pid once more, to date its provider, before the child-work probe asks.
+
+    `got` is the baseline's answer with such `#{pane_pid}` reads inserted, and nothing else different.
+    """
+    if isinstance(gold, dict) and isinstance(got, dict):
+        return set(gold) == set(got) and all(with_turn_probes(gold[k], got[k], inserted) for k in gold)
+    if isinstance(gold, list) and isinstance(got, list):
+        at = 0
+        for item in got:
+            if at < len(gold) and with_turn_probes(gold[at], item, []):
+                at += 1
+            elif isinstance(item, str) and item.startswith("tmux display-message -p -t ") and item.endswith(" #{pane_pid}"):
+                inserted.append(item)
+            else:
+                return False
+        return at == len(gold)
+    return gold == got
+
+
 def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
     dropped: list = []
+    inserted: list = []
     for label, spec in CASES.items():
         for holder in (m, t):
             got = without_composer_reads(run(holder, spec), dropped)
-            check(got == GOLDEN[label], f"{label} ({holder.__name__}): the baseline's answer, every call in order: {json.dumps(got)[:600]}")
+            check(got == GOLDEN[label] or with_turn_probes(GOLDEN[label], got, inserted),
+                  f"{label} ({holder.__name__}): the baseline's answer, every call in order: {json.dumps(got)[:600]}")
     check(len(dropped) >= 100, f"the composer reads after cursor probes were there to set aside: {len(dropped)}")
+    check(len(inserted) >= 100, f"the provider-dating pid reads were there to set aside: {len(inserted)}")  # SYRD-589
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

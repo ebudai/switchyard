@@ -281,4 +281,8 @@ GRANT EXECUTE ON FUNCTION ticket_board.record_privileged_job(jsonb) TO ticket_bo
 GRANT EXECUTE ON FUNCTION ticket_board.ticket_privileged_jobs(text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.finished_privileged_jobs() TO ticket_board_service;
 
+-- SYRD-589: work delivered to a replaced provider, told to its replacement once.
+REVOKE EXECUTE ON FUNCTION ticket_board.redeliver_replaced_work(jsonb, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.redeliver_replaced_work(jsonb, timestamptz) TO ticket_board_listener;
+
 COMMIT;

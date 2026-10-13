@@ -317,6 +317,8 @@ def composer_snapshot_from_pane_text(pane_text: str) -> ComposerSnapshot:
 class PaneActivityGate:
     #: How long after the launcher seeds a pane idle it is still a CLI starting up (SYRD-566).
     LAUNCHER_SEED_SETTLE_SECONDS = 10.0
+    #: How soon after a provider starts the launcher seeds its pane: a later seed re-seeded a running pane (SYRD-589).
+    LAUNCHER_SEED_STARTUP_SECONDS = 60.0
 
     def __init__(
         self,
@@ -937,12 +939,60 @@ class PaneActivityGate:
         """What held this pane at its last child sample; the caller asks only of a child-work verdict."""
         return self._child_holders_by_target.get(target, ())
 
+    def provider_started_at(self, target: str) -> float | None:
+        """When the process the pane runs now started, from the process table; None when that is unknown (SYRD-589)."""
+        pane_pid = self._pane_pid(target)
+        if pane_pid is None:
+            return None
+        try:
+            table = self.process_table_reader()
+        except OSError:
+            return None
+        started = next((float(row[4]) for row in table if int(row[0]) == pane_pid and len(row) > 4), 0.0)
+        return started if started > 0 else None
+
+    def turnless_since(self, target: str, state: PaneHookState | None = None) -> float | None:
+        """When the pane's provider started, if it is idle and provably has begun no turn since; otherwise None (SYRD-589).
+
+        Proof, not the absence of evidence: a turn start recorded since the
+        process started rules it out, and so does any record the provider
+        wrote since that is not one of the few that only a start writes. What
+        is left is a record from before the process -- the previous provider's
+        -- the launcher's own seed of this start, a SessionStart, or the
+        listener's recovery of an older turn's busy hook. A start time that
+        cannot be read, a seed written long after the start (a viewer's
+        attach-or-start re-seeds a running pane, erasing its turns), and every
+        other record are no answer.
+        """
+        state = self.state_store.read(target) if state is None else state
+        if state is None or state.state != "idle":
+            return None
+        started = self.provider_started_at(target)
+        if started is None or (state.turn_started_at is not None and state.turn_started_at >= started):
+            return None
+        if state.updated_at < started:
+            return started
+        if state.source.startswith("team_launcher."):
+            return started if state.updated_at - started <= self.LAUNCHER_SEED_STARTUP_SECONDS else None
+        if state.source.endswith(".SessionStart"):
+            return started
+        if state.source == "listener.stale_codex_busy_recovery" and state.turn_started_at is not None:
+            return started
+        return None
+
     def _trusted_idle_source_trace(self, target: str, state: PaneHookState) -> ActivityTrace | None:
         # The runtime's own statement that its turn ended, and when. That is the
         # line between work this turn started and what an earlier one left
         # behind; without it the probe has no way to tell them apart (SYRD-101).
         from . import notify_listener as listener
 
+        if self.turnless_since(target, state) is not None:
+            # No turn has run in this provider, so nothing under it is a turn's
+            # work: it is the runtime's own. Codex 0.162 starts its app-server
+            # daemon in a session of its own, and that read as a tool's command
+            # until a first turn ended -- so a provider at its startup prompt
+            # never received the notice that would start one (SYRD-589).
+            return None
         trusted_idle_at = (
             state.updated_at
             if state.state == "idle" and state.source in listener.TRUSTED_IDLE_SOURCES

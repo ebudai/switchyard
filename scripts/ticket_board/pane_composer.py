@@ -25,6 +25,18 @@ placeholder. And a cursor past the prompt's home with nothing at all left of it
 -- a capture that does not show what the cursor is in -- is read as the column
 rule always read it, composing. Holding a notice can only delay it; typing into
 a draft destroys it.
+
+A rule is a composer's only while the cursor can be inside it. Codex 0.162
+draws its update banner as a closed box at the top of the pane, and the box's
+bottom border read as the top rule of a composer holding the Codex header
+under it: every idle Codex pane that showed the banner held its notices as
+"human_composing" (MEFP-51 on luna-9, SYRD-591). The border that closes a box
+above the cursor ends that box, so it does not bound a composer the cursor is
+in. A cursor inside a box is still inside a ruled composer.
+
+Codex does not rule its composer: a draft's first row is prompted and its
+further rows are indented under it. A cursor at home on an empty row of its
+own under such rows is on the draft's next line, as it is under prompted rows.
 """
 
 from __future__ import annotations
@@ -34,10 +46,36 @@ from __future__ import annotations
 PROMPT_GLYPHS = frozenset("❯>›▸❱")
 RULE_CHAR = "─"
 RULE_MIN = 40
+#: Box corners, square and rounded: Codex's update banner is a rounded box (SYRD-591).
+BOX_TOP_CORNERS = frozenset("╭┌╮┐")
+BOX_BOTTOM_CORNERS = frozenset("╰└╯┘")
 
 
 def _is_rule(line: str) -> bool:
     return line.count(RULE_CHAR) >= RULE_MIN
+
+
+def _has_corner(line: str, corners: frozenset[str]) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and (stripped[0] in corners or stripped[-1] in corners)
+
+
+def box_border(line: str) -> bool:
+    """A box's top or bottom edge: the line has a corner at either end."""
+    return _has_corner(line, BOX_TOP_CORNERS | BOX_BOTTOM_CORNERS)
+
+
+def _bounding_rules(lines: list[str], cursor_y: int) -> tuple[int | None, int | None]:
+    """The nearest rules above and below the cursor; None for a side with none.
+
+    A box's bottom border above the cursor closed that box: it is no rule of
+    a composer the cursor is in.
+    """
+    above = next((i for i in range(cursor_y - 1, -1, -1) if _is_rule(lines[i])), None)
+    below = next((i for i in range(cursor_y + 1, len(lines)) if _is_rule(lines[i])), None)
+    if above is not None and _has_corner(lines[above], BOX_BOTTOM_CORNERS):
+        above = None
+    return above, below
 
 
 def _text(line: str) -> str:
@@ -56,6 +94,28 @@ def _prompted(line: str) -> bool:
 def _composer_shaped(line: str) -> bool:
     """A line that can belong to a composer: blank, prompted, or an indented continuation."""
     return not line.strip() or _prompted(line) or line[:1].isspace()
+
+
+def _draft_rows_above(lines: list[str], cursor_y: int, left: str) -> list[int]:
+    """The rows of an unruled draft directly above the cursor's row, top first; [] when there is none.
+
+    Prompted rows that hold text, as each line of a prompted draft is. Or,
+    when nothing left of the cursor is a prompt, indented rows that hold text
+    under a prompted row that does: Codex's continuation lines (SYRD-591).
+    """
+    row = cursor_y - 1
+    rows: list[int] = []
+    while row >= 0 and _prompted(lines[row]) and _text(lines[row]):
+        rows.insert(0, row)
+        row -= 1
+    if rows or any(ch in PROMPT_GLYPHS for ch in left):
+        return rows
+    while row >= 0 and lines[row][:1].isspace() and not _prompted(lines[row]) and _text(lines[row]):
+        rows.insert(0, row)
+        row -= 1
+    if rows and row >= 0 and _prompted(lines[row]) and _text(lines[row]):
+        return [row] + rows
+    return []
 
 
 def composing(lines: list[str], cursor_x: int, cursor_y: int, home_x: int = 2) -> bool | None:
@@ -78,18 +138,15 @@ def composing(lines: list[str], cursor_x: int, cursor_y: int, home_x: int = 2) -
         # is not, so it is read as the column rule always read it.
         return True
 
-    above = next((i for i in range(cursor_y - 1, -1, -1) if _is_rule(lines[i])), None)
-    below = next((i for i in range(cursor_y + 1, len(lines)) if _is_rule(lines[i])), None)
+    above, below = _bounding_rules(lines, cursor_y)
     ruled = above is not None and (below is not None or all(_composer_shaped(l) for l in lines[above + 1:cursor_y]))
     if ruled:
         others = lines[above + 1:cursor_y] + (lines[cursor_y + 1:below] if below is not None else [])
         return bool(cursor_text) or any(_text(line) for line in others)
     if cursor_text:
         return True
-    # Unruled: an empty prompt line under a prompted line that holds text is the
-    # next line of a draft whose lines are each prompted.
-    previous = lines[cursor_y - 1] if cursor_y > 0 else ""
-    return _prompted(previous) and bool(_text(previous))
+    # Unruled: an empty line under a draft's rows is the draft's next line.
+    return bool(_draft_rows_above(lines, cursor_y, left))
 
 
 def composer_text(lines: list[str], cursor_x: int, cursor_y: int) -> str | None:
@@ -97,7 +154,7 @@ def composer_text(lines: list[str], cursor_x: int, cursor_y: int) -> str | None:
 
     '' when it holds nothing, None when the capture cannot place the cursor.
     The same composer `composing` reads: a ruled box's rows, or else the cursor
-    row and the prompted rows of a draft directly above it. On the cursor's own
+    row and the rows of a draft directly above it. On the cursor's own
     row only what is left of the cursor counts -- right of it is where an empty
     box shows its placeholder -- so the text a notice just typed, which leaves
     the cursor at its end, is read whole.
@@ -105,16 +162,11 @@ def composer_text(lines: list[str], cursor_x: int, cursor_y: int) -> str | None:
     if cursor_y < 0 or cursor_x < 0:
         return None
     lines = list(lines) + [""] * (cursor_y + 1 - len(lines))
-    above = next((i for i in range(cursor_y - 1, -1, -1) if _is_rule(lines[i])), None)
-    below = next((i for i in range(cursor_y + 1, len(lines)) if _is_rule(lines[i])), None)
+    above, below = _bounding_rules(lines, cursor_y)
     ruled = above is not None and (below is not None or all(_composer_shaped(l) for l in lines[above + 1:cursor_y]))
     if ruled:
         rows = list(range(above + 1, below if below is not None else cursor_y + 1))
     else:
-        rows = [cursor_y]
-        row = cursor_y - 1
-        while row >= 0 and _prompted(lines[row]) and _text(lines[row]):
-            rows.insert(0, row)
-            row -= 1
+        rows = _draft_rows_above(lines, cursor_y, lines[cursor_y][:cursor_x]) + [cursor_y]
     texts = [_text(lines[r][:cursor_x]) if r == cursor_y else _text(lines[r]) for r in rows]
     return "\n".join(text for text in texts if text)

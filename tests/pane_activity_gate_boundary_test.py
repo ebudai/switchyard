@@ -606,7 +606,10 @@ def test_the_readers_build_their_gate_from_notify_listener_when_they_run() -> No
 # imported when it runs. It imports nothing itself, so it can close no cycle.
 # SYRD-566: and names a provider's own question on the same capture, through
 # another leaf module that imports nothing of the board.
-LATER_IMPORTS = {"PaneActivityGate._target_cursor_state": ["from . import pane_composer, provider_prompt"]}
+# SYRD-591: the composer snapshot asks the same leaf module which rules are a box's edges, after its
+# notify_listener import.
+LATER_IMPORTS = {"PaneActivityGate._target_cursor_state": ["from . import pane_composer, provider_prompt"],
+                 "composer_snapshot_from_pane_text": ["from . import pane_composer"]}
 
 
 def test_the_seams_read_through_notify_listener_and_nothing_bound() -> None:
@@ -624,7 +627,7 @@ def test_the_seams_read_through_notify_listener_and_nothing_bound() -> None:
         first = 1 if ast.get_docstring(node) is not None else 0
         own = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         if expected:
-            check(ast.unparse(node.body[first]) == CALL_TIME_IMPORT and own == [CALL_TIME_IMPORT],
+            check(ast.unparse(node.body[first]) == CALL_TIME_IMPORT and own == [CALL_TIME_IMPORT, *LATER_IMPORTS.get(label, [])],
                   f"{label}: notify_listener imported first thing (after its docstring), and nothing else: {own}")
         else:
             check(own == LATER_IMPORTS.get(label, []), f"{label}: reads nothing of notify_listener and imports nothing: {own}")

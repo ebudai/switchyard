@@ -294,11 +294,15 @@ def pane_content_digest(pane_text: str) -> str:
 
 def composer_snapshot_from_pane_text(pane_text: str) -> ComposerSnapshot:
     from . import notify_listener as listener
+    from . import pane_composer
 
     if not pane_text:
         return listener.ComposerSnapshot(False, error="empty_capture")
     lines = pane_text.splitlines()
-    horizontal_indices = [idx for idx, line in enumerate(lines) if line.count("─") >= 40]
+    # Only rules without corners bound Claude Code's composer: a box is Codex's
+    # update banner or a header, and its edges are not a composer's (SYRD-591).
+    horizontal_indices = [idx for idx, line in enumerate(lines)
+                          if line.count("─") >= 40 and not pane_composer.box_border(line)]
     if len(horizontal_indices) < 2:
         return listener.ComposerSnapshot(True, marker_found=False)
     composer_content = "\n".join(lines[horizontal_indices[-2] + 1 : horizontal_indices[-1]])

@@ -285,4 +285,14 @@ GRANT EXECUTE ON FUNCTION ticket_board.finished_privileged_jobs() TO ticket_boar
 REVOKE EXECUTE ON FUNCTION ticket_board.redeliver_replaced_work(jsonb, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION ticket_board.redeliver_replaced_work(jsonb, timestamptz) TO ticket_board_listener;
 
+-- SYRD-594: Codex capacity retries; the listener reports, the board decides.
+REVOKE ALL ON ticket_board.provider_capacity_episodes FROM PUBLIC;
+GRANT SELECT ON ticket_board.provider_capacity_episodes TO ticket_board_service;
+REVOKE EXECUTE ON FUNCTION ticket_board.withdraw_provider_capacity_notice(bigint, bigint, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.close_provider_capacity(bigint, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_provider_capacity(jsonb, double precision[], timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.provider_capacity_retry_is_current(jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_provider_capacity(jsonb, double precision[], timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.provider_capacity_retry_is_current(jsonb) TO ticket_board_listener;
+
 COMMIT;

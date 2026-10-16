@@ -1073,6 +1073,9 @@ class PaneActivityGate:
 
         if state.state != "busy" or not state.source.startswith("codex."):
             return None
+        # A turn that ended on Codex's capacity error is over at any age, and is retried, not idle (SYRD-594).
+        if (capacity_trace := listener.capacity_retry.turn_end_trace(self, target, state)) is not None:
+            return capacity_trace
         if self.stale_codex_busy_hook_seconds <= 0:
             return None
         if state.updated_at < listener.MIN_RECOVERABLE_HOOK_EPOCH_SECONDS:

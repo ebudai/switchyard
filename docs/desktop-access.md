@@ -76,8 +76,19 @@ For approved Wayland access, provide a JSON file:
 ```
 
 `auto` accepts exactly one socket owned by the selected GUI user in the runtime
-reported by logind. If several sockets exist, use the selected socket basename
-such as `wayland-0`. An active Wayland session is required. The project and tenant
+reported by logind, and is the recommended value. If several sockets exist, use
+the selected socket basename such as `wayland-0`. An active Wayland session is
+required.
+
+A socket name is not stable across logins: after plasma-login-manager 6.8.0 the
+greeter took `wayland-0` and the owner's KWin moved to `wayland-1` (SYRD-592).
+So when a pinned name is absent from the owner's runtime, the GUI service grants
+the one Wayland socket that is there instead, with the same owner, session and
+symlink checks, and logs that it did. It never chooses among several: with two
+or more live sockets and the pinned name absent it grants nothing and logs the
+names. A pinned name that is present -- even beside another socket -- is always
+the one used, and a socket granted only in its absence loses that grant when the
+pinned name returns. The project and tenant
 must match the target configuration. Missing, rejected or malformed consent
 stops setup without a grant.
 
@@ -128,6 +139,14 @@ its own config: startup verifies the matching receipt, socket ownership/identity
 access and a Unix-socket connection as the tenant. The probe reads no clipboard
 content. Missing ACL tools, account/runtime, permission, session, socket or active
 unit produces a pre-launch failure with its cause.
+
+While it is waiting, the service logs why every five seconds (`journalctl --user
+-u switchyard-desktop-<gui-uid>-<tenant-uid>-<project>.service`, as the GUI
+owner). Where this login has already let the tenant traverse the GUI runtime, it
+also marks the receipt `pending` with that reason, and the launch error quotes
+it. Before any grant in a login the tenant cannot read the runtime at all, and
+nothing is granted just to report a reason, so the launch error names the unit
+and the journal command instead.
 
 For Wayland roles and their authentication commands, `WAYLAND_DISPLAY` is the
 absolute GUI socket path. `XDG_RUNTIME_DIR` remains the tenant's logind runtime;

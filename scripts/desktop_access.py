@@ -24,6 +24,10 @@ class DesktopAccessError(RuntimeError):
     pass
 
 
+class SocketSelectionError(DesktopAccessError):
+    """The GUI owner's Wayland session is active, but no one socket in its runtime is the approved one."""
+
+
 def run(args):
     result = subprocess.run(args, text=True, capture_output=True)
     if result.returncode:
@@ -187,6 +191,35 @@ def runtime_for(user) -> Path:
     return runtime
 
 
+def wayland_sockets(runtime) -> list[Path]:
+    """The runtime's Wayland sockets: real sockets named `wayland-*`, never a symlink to one."""
+    return sorted(p for p in runtime.glob('wayland-*') if p.is_socket() and not p.is_symlink())
+
+
+def sole_socket_for_absent(configured, runtime) -> Path:
+    """The one socket a policy pinned to a name that no longer exists may use instead, or a refusal naming why not.
+
+    A compositor's socket name is not stable across logins: after
+    plasma-login-manager 6.8.0 its greeter took `wayland-0` and the owner's own
+    KWin moved to `wayland-1`, so a policy approved as `wayland-0` stranded the
+    desktop until something renamed the socket by hand (SYRD-592). The name was
+    never the approval -- the owner, the tenant and the active session are, and
+    `selected_socket` still checks each of those -- so the owner's only socket
+    serves. Several are a choice nobody approved, and none is a compositor not
+    yet up; both are refused by name.
+    """
+    candidates = wayland_sockets(runtime)
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise SocketSelectionError(f'Configured Wayland socket {configured} is absent from {runtime}, and no other '
+                                   'Wayland socket is live there; waiting for the compositor')
+    raise SocketSelectionError(
+        f'Configured Wayland socket {configured} is absent from {runtime}, while several other Wayland sockets are live '
+        f'({", ".join(p.name for p in candidates)}); Switchyard will not choose between them. Name one in the policy\'s '
+        'wayland_display, or auto once only one remains, with: switchyard upgrade <project> --desktop-policy FILE')
+
+
 def selected_socket(policy, gui, runtime):
     sessions = run(['loginctl', 'show-user', gui.pw_name, '-p', 'Sessions', '--value']).split()
     active = False
@@ -195,13 +228,16 @@ def selected_socket(policy, gui, runtime):
         active |= values.get('Type') == 'wayland' and values.get('Active') == 'yes' and values.get('User') == str(gui.pw_uid)
     if not active:
         raise DesktopAccessError(f'{gui.pw_name} has no active Wayland session; log into the selected desktop or choose headless')
-    if policy['wayland_display'] == 'auto':
-        candidates = [p for p in runtime.glob('wayland-*') if p.is_socket() and not p.is_symlink()]
+    configured = policy['wayland_display']
+    if configured == 'auto':
+        candidates = wayland_sockets(runtime)
         if len(candidates) != 1:
-            raise DesktopAccessError('Wayland socket discovery is missing or ambiguous; select a socket basename in the policy')
+            raise SocketSelectionError('Wayland socket discovery is missing or ambiguous; select a socket basename in the policy')
         path = candidates[0]
     else:
-        path = runtime / policy['wayland_display']
+        path = runtime / configured
+        if not os.path.lexists(path):
+            path = sole_socket_for_absent(configured, runtime)
     info = path.lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != gui.pw_uid:
         raise DesktopAccessError(f'Selected Wayland socket is unavailable or owned by another user: {path}')
@@ -394,13 +430,40 @@ def remove_handoffs(runtime, project):
             os.rmdir(path)
 
 
+def record_pending(policy, gui, tenant, runtime, ready, reason):
+    """Say in the readiness receipt why access is waiting, where the tenant can already read it.
+
+    Only where this login already lets the tenant traverse the runtime -- an
+    earlier grant to this or another of its projects -- because that is the only
+    place the tenant's launch can read it. Nothing is granted to say it: before
+    the first grant of a login the launch can only point at the service's
+    journal (`verify`). The grants already recorded are kept, so rollback still
+    restores them, and the socket the receipt named is dropped, so no launch
+    takes it for ready.
+    """
+    with gui_lock(runtime):
+        previous = json.loads(ready.read_text()) if ready.exists() else {}
+        if previous and previous.get('policy_digest') != digest(policy):
+            return
+        if not effective_acl(runtime, tenant.pw_uid) & 1:
+            return
+        pending = {'policy_digest': digest(policy), 'state': 'pending', 'reason': reason,
+                   'gui_uid': gui.pw_uid, 'tenant_uid': tenant.pw_uid, 'grants': previous.get('grants', [])}
+        if previous != pending:
+            atomic_json(ready, pending, mode=0o644)
+
+
 def apply(policy):
     gui, tenant, name = names(policy)
     if os.geteuid() != gui.pw_uid:
         raise DesktopAccessError('ACL reapplication must execute as the configured GUI owner')
     runtime = runtime_for(gui)
-    path = selected_socket(policy, gui, runtime)
     ready = runtime / (name+'.json')
+    try:
+        path = selected_socket(policy, gui, runtime)
+    except SocketSelectionError as exc:
+        record_pending(policy, gui, tenant, runtime, ready, str(exc))
+        raise
     with gui_lock(runtime):
         previous = json.loads(ready.read_text()) if ready.exists() else {}
         info = path.stat()
@@ -414,22 +477,33 @@ def apply(policy):
             records.append(grant(path, tenant.pw_uid, 'rw-'))
             info = path.stat()
             # Preserve original rollback state for the runtime and same socket.
-            original_records = list(previous.get('grants', []))
+            peer_records = []
             for peer in runtime.glob(f'switchyard-desktop-{gui.pw_uid}-{tenant.pw_uid}-*.json'):
                 if peer != ready:
-                    original_records.extend(json.loads(peer.read_text()).get('grants', []))
-            originals = {(r['device'],r['inode']):r for r in original_records}
+                    peer_records.extend(json.loads(peer.read_text()).get('grants', []))
+            originals = {(r['device'],r['inode']):r for r in [*previous.get('grants', []), *peer_records]}
             for r in records:
                 prior = originals.get((r['device'],r['inode']))
                 if prior:
                     r['before'] = prior['before']
+            # A socket this receipt granted before and no longer selects -- the
+            # pinned name back beside the one used in its absence -- keeps no
+            # grant from it: the tenant is a client of the selected socket only.
+            held = {(r['device'],r['inode']) for r in [*records, *peer_records]}
+            for stale in previous.get('grants', []):
+                if (stale['device'],stale['inode']) not in held:
+                    restore_grant(stale)
             atomic_json(ready, {'policy_digest':digest(policy), 'socket':str(path),
                 'socket_identity':[info.st_dev,info.st_ino,info.st_ctime_ns],
+                'configured_socket':policy['wayland_display'],
                 'gui_uid':gui.pw_uid, 'tenant_uid':tenant.pw_uid, 'grants':records}, mode=0o644)
         except Exception:
             for record in reversed(records):
                 restore_grant(record)
             raise
+    if policy['wayland_display'] not in ('auto', path.name):
+        print(f"Wayland access: configured socket {policy['wayland_display']} is absent from {runtime}; "
+              f'granted the only live Wayland socket there, {path.name}', file=sys.stderr, flush=True)
     return ready
 
 
@@ -442,11 +516,23 @@ def verify(policy):
     ready = gui_runtime / (name+'.json')
     try:
         info = ready.lstat()
+    except (FileNotFoundError, PermissionError) as exc:
+        # Unreadable before the owner's service has granted anything in this
+        # login, so why it is waiting is in its journal, not here (SYRD-592).
+        raise DesktopAccessError(
+            f"Desktop access is not ready before launch: {gui.pw_name}'s desktop access service has not recorded "
+            f'{tenant.pw_name} as ready in this login ({exc}). It retries every 5 seconds and logs why it is waiting, '
+            f'such as a configured Wayland socket that is absent while other Wayland sockets are live; as {gui.pw_name}, '
+            f'run: journalctl --user -u {name}.service') from exc
+    try:
         if not stat.S_ISREG(info.st_mode) or info.st_uid != gui.pw_uid or info.st_mode & 0o022:
             raise DesktopAccessError('Desktop readiness record is not protected by the GUI owner')
         value = json.loads(ready.read_text())
         if value.get('policy_digest') != digest(policy):
             raise DesktopAccessError('Desktop policy has not been installed by its GUI owner; run the supported upgrade with this policy before launch')
+        if value.get('state') == 'pending':
+            raise DesktopAccessError(f"Desktop access is not ready before launch: {gui.pw_name}'s desktop access service "
+                                     f"is waiting: {value.get('reason')}")
         path = Path(value['socket'])
         if path.parent != gui_runtime or path.is_symlink():
             raise DesktopAccessError('Desktop readiness refers to an invalid socket')

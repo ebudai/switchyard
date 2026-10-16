@@ -83,7 +83,9 @@ SEAMS = {
     'PaneActivityGate._trusted_idle_source_trace': {'TRUSTED_IDLE_SOURCES': 1},
     'PaneActivityGate._idle_cursor_trace': {'ActivityTrace': 3},
     'PaneActivityGate._untrusted_idle_source_trace': {'ActivityTrace': 3, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1, 'TRUSTED_IDLE_SOURCES': 1},  # SYRD-566: provider_starting
-    'PaneActivityGate._stale_codex_busy_trace': {'ActivityTrace': 3, 'LOGGER': 1, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1},
+    # SYRD-594: asks the capacity_retry sibling, through notify_listener, whether the turn ended on Codex's capacity error.
+    'PaneActivityGate._stale_codex_busy_trace': {'ActivityTrace': 3, 'LOGGER': 1, 'MIN_RECOVERABLE_HOOK_EPOCH_SECONDS': 1,
+                                                 'capacity_retry': 1},
     'PaneActivityGate._anti_clobber_trace': {'ActivityTrace': 4},
     'PaneActivityGate._full_activity_trace': {'ActivityTrace': 2},
     'PaneActivityGate.permission_prompt_waits': {'PERMISSION_PROMPT_BLOCK_SOURCES': 1},
@@ -739,20 +741,26 @@ def without_composer_reads(value, dropped: list):
     return value
 
 
-def with_turn_probes(gold, got, inserted: list) -> bool:
+def with_turn_probes(gold, got, inserted: list, looks: list | None = None) -> bool:
     """SYRD-589 asks for the pane's pid once more, to date its provider, before the child-work probe asks.
 
     `got` is the baseline's answer with such `#{pane_pid}` reads inserted, and nothing else different.
+    SYRD-594 looks once at a busy Codex pane's screen -- its cursor, then a capture, which
+    `without_composer_reads` has already set aside -- for the capacity error; those cursor reads go in `looks`.
     """
+    looks = [] if looks is None else looks
     if isinstance(gold, dict) and isinstance(got, dict):
-        return set(gold) == set(got) and all(with_turn_probes(gold[k], got[k], inserted) for k in gold)
+        return set(gold) == set(got) and all(with_turn_probes(gold[k], got[k], inserted, looks) for k in gold)
     if isinstance(gold, list) and isinstance(got, list):
         at = 0
         for item in got:
-            if at < len(gold) and with_turn_probes(gold[at], item, []):
+            if at < len(gold) and with_turn_probes(gold[at], item, [], []):
                 at += 1
             elif isinstance(item, str) and item.startswith("tmux display-message -p -t ") and item.endswith(" #{pane_pid}"):
                 inserted.append(item)
+            elif isinstance(item, str) and item.startswith("tmux display-message -p -t ") and item.endswith(
+                    " #{cursor_x} #{cursor_y} #{pane_height}"):
+                looks.append(item)
             else:
                 return False
         return at == len(gold)
@@ -763,13 +771,16 @@ def test_every_answer_is_the_baselines() -> None:
     check(sorted(CASES) == sorted(GOLDEN), "every measured case is asserted, and nothing else")
     dropped: list = []
     inserted: list = []
+    looks: list = []
     for label, spec in CASES.items():
         for holder in (m, t):
             got = without_composer_reads(run(holder, spec), dropped)
-            check(got == GOLDEN[label] or with_turn_probes(GOLDEN[label], got, inserted),
+            check(got == GOLDEN[label] or with_turn_probes(GOLDEN[label], got, inserted, looks),
                   f"{label} ({holder.__name__}): the baseline's answer, every call in order: {json.dumps(got)[:600]}")
     check(len(dropped) >= 100, f"the composer reads after cursor probes were there to set aside: {len(dropped)}")
     check(len(inserted) >= 100, f"the provider-dating pid reads were there to set aside: {len(inserted)}")  # SYRD-589
+    # SYRD-594: one look at each busy Codex pane the record asks about, through both modules, and no other read.
+    check(len(looks) == 12, f"the capacity looks were the only cursor reads added: {len(looks)}")
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:

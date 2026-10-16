@@ -353,8 +353,15 @@ WHERE id = %s
         # for the Director: current while its ticket still waits there, which
         # the state and assignee checks above already establish (SYRD-539).
         if kind in {"pull_idle_capacity", "ticket_context", "delivery_proof", "background_hold",
-                    "composer_hold", "background_child"}:  # SYRD-539, 540, 565, 557, 570, 583
+                    "composer_hold", "background_child", "provider_capacity"}:  # SYRD-539, 540, 565, 557, 570, 583, 594
             return target_role == "director"
+        # SYRD-594: a capacity retry only while its episode still wants it: the pane is still
+        # at the error, nothing else went first, and this is the episode's latest retry.
+        if kind == "capacity_retry":
+            row = conn.execute("SELECT ticket_board.provider_capacity_retry_is_current(%s::jsonb) AS current",
+                               (payload,)).fetchone()
+            if row is None or not bool(row["current"] if isinstance(row, dict) else row[0]):
+                return False
         terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
         if current_state in terminal_states:
             return (
@@ -489,7 +496,7 @@ SELECT EXISTS (
         )
         # Scheduling flags hold owner work and optional reminders. They do
         # not undo a completed handoff to the Director's final review.
-        if kind in {"idle_reminder", "nudge", "triage"} and (
+        if kind in {"idle_reminder", "nudge", "triage", "capacity_retry"} and (
             manually_controlled or parked or has_unresolved_blockers
         ) and not required_final_review_handoff:
             return False

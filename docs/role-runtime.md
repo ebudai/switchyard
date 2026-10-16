@@ -129,6 +129,18 @@ new CLI that cannot read it at the next launch.
 Steps 7 and 8 are therefore skipped: there is no session to replace, and nothing
 for a slot to reconnect to.
 
+## A model repair while the Director is down
+
+The launch gate stops every role while one is configured for a model its
+owner's account does not offer, and prints this command as the repair. The
+Director is one of the roles it stopped, so root may run that repair as well:
+the operator's own `switchyard set-role-runtime ...` crosses to root through
+sudo, as it does for anyone who is not the project's owner. Root may change the
+role's model and nothing else, to one the owner's own account lists (or `''`
+for the runtime's default), while neither the Director nor that role has a
+session, and the board is not written. See
+[SYRD-593](syrd-593-stopped-project-model-repair.md).
+
 ## When something fails
 
 Every applied step is undone and the command says the switch was undone. The

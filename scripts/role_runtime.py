@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from scripts import presentation_controller, team_launcher
-from scripts import runtime_arguments
+from scripts import runtime_arguments, stopped_project_model_repair
 from scripts.role_command import role_registers_runtime
 from scripts.runtime_projection import (  # SYRD-558: every tenant copy of the declaration
     declared_projection as _declared_projection,
@@ -150,6 +150,7 @@ class RuntimeJournal:
         payload = asdict(self)
         payload["slots"] = list(self.slots)
         team_launcher._write_private_json_atomic(path, payload)
+        stopped_project_model_repair.keep_owner(path, Path(self.config_path))  # root writes the owner's journal
 
 
 @dataclass(frozen=True)
@@ -231,7 +232,8 @@ def _require_director(config: team_launcher.ProjectConfig, environ: Mapping[str,
     actor = (environ.get("TICKET_BOARD_CALLER_ROLE") or "").strip().lower()
     if actor != DIRECTOR_ROLE:
         raise RoleRuntimeRefusal(
-            "switchyard: changing a role runtime requires TICKET_BOARD_CALLER_ROLE=director"
+            "switchyard: changing a role runtime requires TICKET_BOARD_CALLER_ROLE=director; while the "
+            "Director is not running, root may repair a stopped role's model with the same command (SYRD-593)"
         )
     selected = (environ.get("TICKET_BOARD_PROJECT") or "").strip()
     if selected and selected != config.project:
@@ -1029,7 +1031,10 @@ def switch_role_runtime(
     #: (SYRD-559). None uses the defaults and the tenant's own board.
     handover: RuntimeHandover | None = None,
 ) -> RuntimeSwitchResult:
-    _require_director(config, environ)
+    # Root repairing a stopped role's model needs no Director: the gate that
+    # names this repair is what keeps the Director down (SYRD-593).
+    operator = stopped_project_model_repair.operator_repair(environ)
+    _require_director(config, {**environ, "TICKET_BOARD_CALLER_ROLE": DIRECTOR_ROLE} if operator else environ)
     if force and not reason.strip():
         raise RoleRuntimeRefusal(
             "switchyard: --force interrupts a working role, so it requires --reason describing why"
@@ -1049,6 +1054,8 @@ def switch_role_runtime(
         workflow_reader=workflow_reader,
         busy_check=busy_check,
     )
+    if operator:
+        stopped_project_model_repair.check_repair(config, checks, effort=effort, force=force, runner=runner)
     if checks.blockers:
         raise RoleRuntimeRefusal(
             f"switchyard: cannot switch {role_name} to {runtime}:\n  - "
@@ -1059,7 +1066,7 @@ def switch_role_runtime(
         # workflow can still name another runtime: an interrupted write, or a
         # switch made before this one wrote them all (Otto, SYRD-558). The same
         # command brings them in line with the board, with no worker restarted.
-        stale = _stale_projection(_declared_projection(config_path, document)) if checks.board_runtime is not None else {}
+        stale = _stale_projection(_declared_projection(config_path, document)) if checks.board_runtime is not None and not operator else {}
         if stale and not dry_run:
             from scripts.workflow_manage import apply_files
 
@@ -1079,13 +1086,14 @@ def switch_role_runtime(
             projection_written=bool(stale) and not dry_run,
         )
 
-    board = client or TicketBoardWriteClient(
+    board = None if operator else client or TicketBoardWriteClient(
         board_url=config.board_url or DEFAULT_BOARD_URL, caller_role=DIRECTOR_ROLE
     )
     proposed = document_with_runtime(document, role=role_name, runtime=runtime)
     # The board validates the whole document, so this rejects a change the
     # launcher would happily write and the board would then refuse.
-    board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=True)
+    if board is not None:
+        board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=True)
     if checks.board_runtime is not None and checks.board_runtime != checks.current_runtime:
         # Said before anything else, because "from codex to codex" alone reads
         # as nothing to do: the board is the half that moves (SYRD-525).
@@ -1126,6 +1134,8 @@ def switch_role_runtime(
         slots=checks.visible_slots,
     )
     journal_path = journal_path_for(config, config_path=config_path, role_name=role_name)
+    if operator:
+        stopped_project_model_repair.make_owner_dirs(journal_path.parent, config_path)
     journal.write(journal_path)
 
     live_changed = False
@@ -1137,10 +1147,11 @@ def switch_role_runtime(
     recorded_holder = board_holder(config, team_launcher._role_by_name(config, role_name), handover)
     stopped: set[Holder] = set()
     try:
-        applied = board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=False)
-        journal.applied_workflow_revision = int((applied or {}).get("revision") or 0)
-        journal.record("workflow")
-        journal.write(journal_path)
+        if board is not None:  # a model-only repair leaves the declared workflow as it is
+            applied = board.configure_workflow(proposed, expected_revision=checks.workflow_revision, dry_run=False)
+            journal.applied_workflow_revision = int((applied or {}).get("revision") or 0)
+            journal.record("workflow")
+            journal.write(journal_path)
 
         updated = _write_runtime_projection(
             config, config_path=config_path, role_name=role_name, runtime=runtime,

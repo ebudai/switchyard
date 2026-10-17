@@ -99,7 +99,7 @@ class ParentLinkBoardApp:
     def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         self.update_calls.append((ticket_id, patch, caller_role))
         assert ticket_id == "PGU-501", ticket_id
-        assert caller_role == "director", caller_role
+        assert caller_role == "user", caller_role  # SYRD-598: the board page acts as the User
         assert patch == {"parent_id": "PGU-502"}, patch
         ticket = self.tickets[0]
         ticket["parent_id"] = "PGU-502"

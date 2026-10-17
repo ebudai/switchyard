@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -239,11 +240,11 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
         parent_input.fill("syrd-10")
         page.get_by_role("button", name="Save Parent Link").click()
         page.wait_for_timeout(500)
-        assert app.update_calls[-1] == ("SYRD-2", {"parent_id": "SYRD-10"}, "director")
+        assert app.update_calls[-1] == ("SYRD-2", {"parent_id": "SYRD-10"}, "user")  # SYRD-598: the User's edit
         assert parent_input.input_value() == "SYRD-10"
         page.get_by_role("button", name="Clear Parent Link").click()
         page.wait_for_timeout(500)
-        assert app.update_calls[-1] == ("SYRD-2", {"parent_id": ""}, "director")
+        assert app.update_calls[-1] == ("SYRD-2", {"parent_id": ""}, "user")
 
         comment.fill("Switchyard draft survives reload")
         page.reload(wait_until="domcontentloaded")
@@ -303,11 +304,34 @@ def run_browser_check(playwright: object, server: TicketBoardServer, app: Tenant
             "localStorage.getItem('pgu-ticket-board:comment-draft:SYRD-2')"
         ) is None
 
-        page.once("dialog", lambda dialog: dialog.accept())
+        # SYRD-598: a merge is confirmed with both tickets, by this tenant's IDs, before any grant is minted.
+        # The grant itself needs the board's database, which this in-memory board stands in for, so the
+        # confirmation is answered here from the board's own tickets and the User cancels it.
+        def delegations(route: Any) -> None:
+            body = route.request.post_data_json or {}
+            by_id = {item["id"]: item for item in app.tickets}
+            source = by_id[body["ticket_id"]]
+            if body.get("describe"):
+                answer = {"ticket_id": source["id"], "authority": "director", "operations": [{
+                    "operation": "merge", "label": "Merge into another ticket", "mode": "delegated", "placement": "merge",
+                    "fields": [{"name": "target_id", "kind": "ticket", "label": "Merge into", "required": True}]}]}
+            else:
+                target = by_id[body["payload"]["target_id"]]
+                answer = {"ticket_id": source["id"], "title": source["title"], "state": source["state"],
+                          "assignee": source["assignee"], "authority": "director", "ticket_version": "v",
+                          "target": {"ticket_id": target["id"], "title": target["title"], "state": target["state"]}}
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(answer))
+
+        page.route("**/api/ui/delegations", delegations)
         page.get_by_label("Merge target ticket").fill("syrd-10")
         page.get_by_role("button", name="Merge Into…").click()
-        page.wait_for_function("() => document.querySelector('.detail-ticket-headline strong')?.textContent === 'SYRD-10'")
-        assert app.merge_calls == [("SYRD-2", "SYRD-10", "director")]
+        merge = page.locator("[data-board-ui-dialog='merge']")
+        merge.locator("[data-board-ui-summary]").wait_for(timeout=5000)
+        source_title, target_title = (next(i["title"] for i in app.tickets if i["id"] == n) for n in ("SYRD-2", "SYRD-10"))
+        assert f"Merging SYRD-2 ({source_title}) into SYRD-10 ({target_title})" in merge.inner_text(), merge.inner_text()
+        merge.locator("[data-board-ui-cancel]").click()
+        page.unroute("**/api/ui/delegations")
+        assert app.merge_calls == []
 
         app.configure("orbit", "Orbital Ops", "ORB")
         page.goto(url, wait_until="domcontentloaded")

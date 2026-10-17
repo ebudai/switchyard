@@ -73,14 +73,6 @@ MARKUP = """  <div class="layout">
             Needs UAT
           </label>
           <label class="check">
-            <input id="needsInspectionInput" type="checkbox">
-            Needs inspection
-          </label>
-          <label class="check">
-            <input id="needsAuditInput" type="checkbox" checked>
-            Needs audit
-          </label>
-          <label class="check">
             <input id="createRegressionInput" type="checkbox">
             Regression
           </label>

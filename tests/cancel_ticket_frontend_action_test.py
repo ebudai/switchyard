@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: Cancel Ticket prompts for a reason and calls the cancel action."""
+"""Regression test: Cancel asks for a reason and calls the cancel action, confirmed by the User (SYRD-598)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.frontend import HTML
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
+from tests.board_ui_stub import cancel_op, stub_board_ui
 
 
 def load_playwright() -> object:
@@ -89,15 +90,14 @@ class CancelBoardApp:
             "refreshed_at": iso_now(),
         }
 
-    def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
-        self.update_calls.append((ticket_id, patch, caller_role))
+    def cancel(self, ticket_id: str, payload: dict[str, Any], *, caller_role: str) -> dict[str, Any]:
+        self.update_calls.append((ticket_id, payload, caller_role))
         assert ticket_id == "PGU-293", ticket_id
-        assert caller_role == "director", caller_role
-        assert patch["state"] == "cancelled", patch
-        assert patch["comment"] == {"who": "director", "text": "No longer needed."}, patch
+        assert caller_role == "user", caller_role
+        assert payload == {"reason": "No longer needed."}, payload
         ticket = self.tickets[0]
         ticket["state"] = "cancelled"
-        ticket["comments"].append({"who": "director", "text": "No longer needed.", "ts": iso_now()})
+        ticket["comments"].append({"who": "user", "text": "No longer needed.", "ts": iso_now()})
         ticket["updated"] = iso_now()
         return ticket
 
@@ -106,23 +106,29 @@ def run_browser_check(playwright: object, server_port: int, app: CancelBoardApp)
     browser = playwright.chromium.launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
+        # SYRD-598: cancelling is a Director operation the board describes with its required reason, and the
+        # User confirms; the confirmed request carries the grant (tests/board_ui_stub.py stands in for it).
+        seen = stub_board_ui(page, lambda: app.tickets, lambda ticket: [cancel_op(ticket)],
+                             perform=lambda ticket_id, _op, payload: app.cancel(ticket_id, payload, caller_role="user"))
         page.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         page.locator(".card", has_text="PGU-293").click()
 
-        page.once("dialog", lambda dialog: dialog.dismiss())
-        page.get_by_role("button", name="Cancel Ticket").click()
-        page.wait_for_function(
-            "() => document.getElementById('createStatus').textContent.includes('cancellation requires a non-empty reason')",
-            timeout=5000,
-        )
-        assert app.update_calls == []
+        page.locator("[data-board-ui-op='cancel']").click()
+        dialog = page.locator("[data-board-ui-dialog='cancel']")
+        dialog.locator("[data-board-ui-review]").click()
+        dialog.locator("[data-board-ui-error]", has_text="Why is required.").wait_for(timeout=5000)
+        assert app.update_calls == [] and not [s for s in seen if not s.get("describe")]
         assert app.tickets[0]["state"] == "analysis"
 
-        page.once("dialog", lambda dialog: dialog.accept("No longer needed."))
-        page.get_by_role("button", name="Cancel Ticket").click()
+        dialog.locator("[data-board-ui-field='reason']").fill("No longer needed.")
+        dialog.locator("[data-board-ui-review]").click()
+        summary = dialog.locator("[data-board-ui-summary]")
+        summary.wait_for(timeout=5000)
+        assert "Why: No longer needed." in summary.inner_text(), summary.inner_text()
+        dialog.locator("[data-board-ui-confirm]").click()
         page.wait_for_function(
-            "() => document.getElementById('createStatus').textContent.includes('Cancelled PGU-293.')",
+            "() => document.getElementById('createStatus').textContent.includes('Cancel: done for PGU-293.')",
             timeout=5000,
         )
         assert len(app.update_calls) == 1
@@ -134,7 +140,7 @@ def run_browser_check(playwright: object, server_port: int, app: CancelBoardApp)
 
 def main() -> int:
     assert "await updateTicketAction(ticketId, 'cancel', { reason: actionReason(patch) }, normalizedCaller);" in HTML
-    assert "await cancelTicket(ticket.id, cancelReason(commentText.value));" in HTML
+    assert "await cancelTicket(ticket.id, cancelReason(commentText.value));" not in HTML
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

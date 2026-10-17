@@ -24,15 +24,14 @@ def main() -> int:
     assert "showCancelledInput.checked = state.showCancelled;" in HTML
     assert "showCancelledCountEl.textContent = `(${cancelledCount})`;" in HTML
     assert "showCancelledInput.addEventListener('change', () => {" in HTML
-    assert "function cancelReason(text)" in HTML
-    assert "const prompted = window.prompt('Cancellation reason');" in HTML
-    assert "async function cancelTicket(ticketId, text)" in HTML
-    assert "throw new Error('cancellation requires a non-empty reason');" in HTML
-    assert "state: 'cancelled'," in HTML
-    assert "who: 'director'," in HTML
-    assert "}, 'director');" in HTML
-    assert "cancelButton.textContent = 'Cancel Ticket';" in HTML
-    assert "Requires a cancellation reason in the comment box below." in HTML
+    # SYRD-598: cancelling is a Director operation. The page no longer cancels as the Director; the server
+    # describes cancel with its required reason, and the User confirms it (board_ui_delegation tests).
+    assert "function cancelReason(text)" not in HTML
+    assert "async function cancelTicket(ticketId, text)" not in HTML
+    assert "who: 'director'," not in HTML
+    assert "}, 'director');" not in HTML
+    assert "cancelButton.textContent = 'Cancel Ticket';" not in HTML
+    assert "void renderBoardUiActions(ticket, workflowActions);" in HTML
     print("cancelled_state_frontend_test: ok")
     return 0
 

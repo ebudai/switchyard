@@ -31,18 +31,15 @@ except ModuleNotFoundError:
 
 from scripts.ticket_board.app import TicketBoardApp
 from scripts.ticket_board.server import (
-    CALLER_ROLE_HEADER,
-    LEGACY_CALLER_ROLE_HEADER,
-    LEGACY_WRITE_TOKEN_HEADER,
-    OPERATION_ALLOWED_ROLES,
-    REPORT_TOKEN_HEADER,
-    WRITE_TOKEN_HEADER,
-    LocalRoleAuthority,
-    TicketBoardEventHub,
-    TicketBoardServer,
-    TicketBoardUnixServer,
+    CALLER_ROLE_HEADER, LEGACY_CALLER_ROLE_HEADER, LEGACY_WRITE_TOKEN_HEADER, OPERATION_ALLOWED_ROLES, REPORT_TOKEN_HEADER,
+    WRITE_TOKEN_HEADER, LocalRoleAuthority, TicketBoardEventHub, TicketBoardServer, TicketBoardUnixServer,
 )
 from scripts.ticket_board.write_client import TicketBoardWriteClient, TicketBoardWriteError
+from scripts.ticket_board import ui_delegation as _ui_delegation
+
+# SYRD-598: production serves HTTP to the User only. These suites stand in for the role panes, which reach
+# the board through its Unix socket, and name their role in a header; board_ui_delegation_test proves the refusal.
+_ui_delegation.TRUST_HEADER_ROLES = True
 
 from temporary_cluster import temporary_cluster  # noqa: E402
 

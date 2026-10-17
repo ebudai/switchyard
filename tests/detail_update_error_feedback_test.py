@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.frontend import HTML
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
+from tests.board_ui_stub import REFUSAL, blockers_op, stub_board_ui
 
 
 def load_playwright() -> object:
@@ -124,13 +125,27 @@ def run_browser_check(playwright: object, server_port: int, app: RejectingDetail
         assert len(app.update_calls) == 1
         assert app.tickets[0]["title"] == "Original title"
 
+        # SYRD-598: removing a blocker is a Director operation the User confirms; a refused confirmation is
+        # said, and the blocker stays.
+        stub_board_ui(page, lambda: app.tickets, lambda ticket: [blockers_op(ticket)])
         page.get_by_role("button", name="Remove Blocker PGU-510").click()
+        dialog = page.locator("[data-board-ui-dialog='set_blockers']")
+        dialog.locator("[data-board-ui-summary]").wait_for(timeout=5000)
+        dialog.locator("[data-board-ui-confirm]").click()
         page.wait_for_function(
-            "() => document.getElementById('createStatus')?.textContent.includes('remove blocker rejected by test server')",
+            "(refusal) => document.getElementById('createStatus')?.textContent.includes(refusal)", arg=REFUSAL,
             timeout=5000,
         )
-        assert len(app.update_calls) == 2
+        assert len(app.update_calls) == 1
         assert app.tickets[0]["blocked_by"] == ["PGU-510"]
+        assert page.locator(".detail-modal").get_by_role("button", name="Remove Blocker PGU-510").count() == 1
+        # And when the board cannot even say what may be done, that is said too.
+        page.unroute("**/api/ui/delegations")
+        page.get_by_role("button", name="Remove Blocker PGU-510").click()
+        page.wait_for_function(
+            "() => document.getElementById('createStatus')?.textContent.includes('set blockers is unavailable')",
+            timeout=5000,
+        )
     finally:
         browser.close()
 
@@ -141,8 +156,8 @@ def main() -> int:
     assert "setCreateStatus(error.message, true);" in HTML
     assert "await requestBoardReload();" in HTML
     assert "await updateDetailTicket({ title: titleEditInput.value });" in HTML
-    assert "await updateDetailTicket({\n              blocked_by: nextBlockedBy,\n            });" in HTML
-    assert "await updateDetailTicketForToggle({ manually_controlled: checked }, 'director');" in HTML
+    assert "await runBoardUiOperation(ticket, 'set_manually_controlled', { manually_controlled: checked });" in HTML
+    assert "setCreateStatus(`${name} is unavailable: ${failure.message}`, true);" in HTML
     assert "await updateTicket(ticket.id, { title: titleEditInput.value }, detailCallerRole());" not in HTML
     assert "await updateTicket(ticket.id, {\n              blocked_by: nextBlockedBy," not in HTML
 

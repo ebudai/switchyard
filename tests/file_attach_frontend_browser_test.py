@@ -178,7 +178,7 @@ def main() -> int:
             thread.join(timeout=2)
 
         assert app.ticket["screenshots"] == [str(assets / "upload_1.png")]
-        assert app.ticket["last_caller_role"] == "director"
+        assert app.ticket["last_caller_role"] == "user"  # SYRD-598: attaching is the User's own operation
 
     print("file_attach_frontend_browser_test: ok")
     return 0

@@ -15,14 +15,13 @@ from scripts.ticket_board.frontend import HTML
 
 def main() -> int:
     assert "function ticketIsUserReview(ticket)" in HTML
-    assert "const commentWho = document.createElement('select');" in HTML
-    assert "commentWho.setAttribute('aria-label', 'Comment author');" in HTML
+    # SYRD-598: the board page comments as the User; there is no author to pick.
+    assert "const commentWho = document.createElement('select');" not in HTML
+    assert "commentWho.setAttribute('aria-label', 'Comment author');" not in HTML
     assert "state.callerRoles = payload.caller_roles || [];" in HTML
-    assert "const commentAuthorRoles = state.callerRoles.length" in HTML
-    assert "['director', 'main', 'app', 'ops', 'perf', 'audit', 'inspector', 'research', 'user'];" in HTML
-    assert "commentAuthorRoles.forEach((role) => {" in HTML
-    assert "buildOption(commentWho, role, roleLabel(role));" in HTML
-    assert "commentWho.value = ticketIsUserReview(ticket) ? 'user' : 'director';" in HTML
+    assert "const commentAuthorRoles = state.callerRoles.length" not in HTML
+    assert "const commentWho = { value: 'user' };" in HTML
+    assert "commentAuthor.textContent = 'Commenting as User';" in HTML
     assert "commentWho.type = 'text';" not in HTML
     assert "commentWho.placeholder = 'who';" not in HTML
     assert "userBannerSignoffButton.type = 'button';" in HTML
@@ -31,8 +30,9 @@ def main() -> int:
     assert "const patch = { user_signoff: true, state: 'done' };" not in HTML
     assert "setCreateStatus(`Signed off ✓ ${ticketId} moved to Final Sign-Off.`);" in HTML
     assert "toggleControl('UAT sign-off', ticket.user_signoff" in HTML
-    assert "toggleControl('Needs audit', ticket.needs_audit !== false" in HTML
-    assert "Ticket does not require audit sign-off." in HTML
+    # SYRD-598: review gates and Audit's sign-off are not the board page's to change.
+    assert "toggleControl('Needs audit', ticket.needs_audit !== false" not in HTML
+    assert "toggleControl('Audit signoff'" not in HTML
     assert "toggleControl('Requires UAT', ticket.needs_user_signoff" in HTML
     assert "disabled: !ticket.needs_user_signoff" in HTML
     assert "Ticket does not require UAT sign-off." in HTML
@@ -47,14 +47,14 @@ def main() -> int:
     assert "if (!trimmedText && !nextState) {" in HTML
     assert "setCreateStatus(nextState ? `Moved ${ticketId} to ${stateLabel(nextState)}.`" in HTML
     assert "kickbackButton.textContent = 'Return for Rework';" in HTML
-    assert "ticket.state === 'audit'" in HTML
-    assert "kickbackButton.textContent = 'Comment + Return to Implementation';" in HTML
-    assert "await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');" in HTML
+    # SYRD-598: an Inspector's or Audit's kick-back is that role's, from its own pane.
+    assert "kickbackButton.textContent = 'Comment + Return to Implementation';" not in HTML
+    assert "await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');" not in HTML
     assert "kickbackButton.textContent = 'Kick Back -> Implementation';" not in HTML
     assert "await submitComment(ticket.id, commentWho.value, commentText.value, 'analysis');" in HTML
     assert "await updateTicketAction(ticketId, 'user_reopen', { reason: actionReason(patch) }, normalizedCaller);" in HTML
     assert "nextState === 'analysis' &&\n          patch.comment &&" not in HTML
-    assert "await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');" in HTML
+    assert "await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');" not in HTML
     print("user_review_actions_test: ok")
     return 0
 

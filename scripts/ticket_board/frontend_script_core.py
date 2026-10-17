@@ -67,7 +67,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
     const createDraftInput = document.getElementById('createDraftInput');
     const createBacklogInput = document.getElementById('createBacklogInput');
     const needsUserInput = document.getElementById('needsUserInput');
-    const needsInspectionInput = document.getElementById('needsInspectionInput');
     const createRegressionInput = document.getElementById('createRegressionInput');
     const showDeferredInput = document.getElementById('showDeferredInput');
     const showDeferredCountEl = document.getElementById('showDeferredCount');
@@ -169,85 +168,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
       renderBoard();
     }
 
-    function defaultAdvanceState(ticket) {
-      if (state.workflow) return null;
-      const hasState = (name) => (state.states || []).includes(name);
-      if (ticket.state === 'draft') {
-        return 'analysis';
-      }
-      if (ticket.state === 'backlog') {
-        return 'analysis';
-      }
-      if (ticket.state === 'analysis') {
-        return 'in_progress';
-      }
-      if (ticket.state === 'in_progress') {
-        return ticket.needs_inspection ? 'inspection' : (hasState('audit') && ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review'));
-      }
-      if (ticket.state === 'inspection') {
-        return hasState('audit') && ticket.needs_audit !== false ? 'audit' : (ticket.needs_user_signoff ? 'dat' : 'director_review');
-      }
-      if (ticket.state === 'audit') {
-        return ticket.needs_user_signoff ? 'dat' : 'director_review';
-      }
-      if (ticket.state === 'dat') {
-        return 'user_review';
-      }
-      if (ticket.state === 'user_review') {
-        return 'director_review';
-      }
-      if (ticket.state === 'director_review') {
-        return hasState('vcs') ? 'vcs' : 'done';
-      }
-      if (ticket.state === 'vcs') {
-        return 'done';
-      }
-      return null;
-    }
-
-    function stateTransitionCallerRole(ticket) {
-      if (ticket.state === 'inspection') {
-        return 'inspector';
-      }
-      if (ticket.state === 'analysis') {
-        return ticket.assignee;
-      }
-      return ticket.state === 'in_progress'
-        ? ticket.assignee
-        : 'director';
-    }
-
-    function advanceBlockedReason(ticket) {
-      const nextState = defaultAdvanceState(ticket);
-      if (!nextState) {
-        return 'No default advance from this state.';
-      }
-      const unresolved = unresolvedBlockedBy(ticket);
-      if (unresolved.length) {
-        return `Resolve blockers before advancing: ${formatBlockedByList(unresolved)}.`;
-      }
-      if (ticket.state === 'analysis') {
-        if (!isImplementerAssignee(ticket.assignee)) {
-          return 'Assign an implementer before advancing to Implementation.';
-        }
-      }
-      if (ticket.state === 'inspection' && !ticket.inspector_signoff) {
-        return 'Record inspector signoff before advancing to audit.';
-      }
-      if (ticket.state === 'audit' && !ticket.audit_signoff) {
-        return ticket.needs_user_signoff
-          ? 'Set audit signoff before advancing to DAT.'
-          : 'Set audit signoff before advancing to Final Sign-Off.';
-      }
-      if (ticket.state === 'user_review' && ticket.needs_user_signoff && !ticket.user_signoff) {
-        return 'Record UAT sign-off before advancing to Final Sign-Off.';
-      }
-      if (nextState === 'done' && !ticket.commit_exempt && !(ticket.commit_hash || '').trim()) {
-        return 'Save a verified commit hash or enable no-commit override before advancing to done.';
-      }
-      return '';
-    }
-
     function ticketBlockedReason(ticket) {
       return (ticket.blocked_reason || '').trim();
     }
@@ -326,62 +246,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
         stack.appendChild(alert);
       });
       return stack;
-    }
-
-    async function advanceTicket(ticketId, commentText = '') {
-      const ticket = state.tickets.find((item) => item.id === ticketId);
-      if (!ticket) {
-        throw new Error(`ticket not found: ${ticketId}`);
-      }
-      const nextState = defaultAdvanceState(ticket);
-      if (!nextState) {
-        throw new Error('no default advance from this state');
-      }
-      const blockedReason = advanceBlockedReason(ticket);
-      if (blockedReason) {
-        throw new Error(blockedReason);
-      }
-      const patch = { state: nextState };
-      if (commentText.trim()) {
-        patch.comment = { who: stateTransitionCallerRole(ticket), text: commentText.trim() };
-      }
-      await updateTicket(ticketId, patch, stateTransitionCallerRole(ticket));
-      clearPersistentCommentDraft(ticketId);
-    }
-
-    function cancelReason(text) {
-      const trimmedText = text.trim();
-      if (trimmedText) {
-        return trimmedText;
-      }
-      const prompted = window.prompt('Cancellation reason');
-      return (prompted || '').trim();
-    }
-
-    function reassignReason(text) {
-      const trimmedText = text.trim();
-      if (trimmedText) {
-        return trimmedText;
-      }
-      const prompted = window.prompt('Reassignment reason');
-      return (prompted || '').trim();
-    }
-
-    async function cancelTicket(ticketId, text) {
-      const trimmedText = text.trim();
-      if (!trimmedText) {
-        throw new Error('cancellation requires a non-empty reason');
-      }
-      clearDetailDraft(ticketId);
-      await updateTicket(ticketId, {
-        state: 'cancelled',
-        comment: {
-          who: 'director',
-          text: trimmedText,
-        },
-      }, 'director');
-      clearPersistentCommentDraft(ticketId);
-      setCreateStatus(`Cancelled ${ticketId}.`);
     }
 
     function commentDraftStorageKey(ticketId) {
@@ -649,7 +513,7 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
         payload.feedback_number = Number.parseInt(feedbackValue, 10);
       }
       setCreateStatus(`Attaching crop ${rect.x},${rect.y},${rect.w},${rect.h}…`);
-      await updateTicketAction(ticketId, 'crop_attachment', payload, 'director');
+      await updateTicketAction(ticketId, 'crop_attachment', payload, 'user');
       state.cropState = null;
       closeImageLightbox();
       await requestBoardReload();
@@ -754,10 +618,6 @@ SCRIPT_CORE = """    const TICKET_REF_PATTERN = /\\b(?:[a-z0-9_]+:)?([A-Z][A-Z0-
           }
         }
       });
-    }
-
-    function ticketAllowsKickback(ticket) {
-      return ['director_review', 'audit', 'dat', 'user_review'].includes(ticket.state);
     }
 
     function ticketIsUserReview(ticket) {

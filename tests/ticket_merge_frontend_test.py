@@ -16,11 +16,11 @@ from scripts.ticket_board.frontend import HTML
 def main() -> int:
     assert "Merge Into…" in HTML
     assert "Merge target ticket" in HTML
-    assert "window.confirm(" in HTML
-    assert "`/api/tickets/${encodeURIComponent(sourceTicketId)}/actions/merge`" in HTML
-    assert "{ target_id: targetTicketId }" in HTML
-    assert "'director'," in HTML
-    assert "Merged ${sourceTicketId} into ${targetTicketId}." in HTML
+    # SYRD-598: a merge is a Director operation the User confirms, with both tickets by ID and title, under
+    # a grant for exactly that source and destination; the page no longer merges as the Director.
+    assert "async function mergeTicket(" not in HTML
+    assert "await runBoardUiOperation(ticket, 'merge', { target_id: targetId });" in HTML
+    assert "line(`Merging ${prepared.ticket_id} (${prepared.title}) into ${prepared.target.ticket_id} (${prepared.target.title})`);" in HTML
     print("ticket_merge_frontend_test: ok")
     return 0
 

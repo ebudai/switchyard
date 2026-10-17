@@ -85,6 +85,8 @@ DEFAULT_OPERATION_ALLOWED_ROLES = {
     "crop_attachment": {"director", "user"},
     "merge": {"director"},
     "dismiss_notification": {"director"},
+    # SYRD-598: lowering one named approval, with why; the database checks control authority.
+    "withdraw_signoff": {"director"},
 }
 
 #: The two operations that exist to move a ticket the declared workflow will
@@ -130,6 +132,9 @@ COMPOSED_OPERATION_CAPABILITIES = {
     # Director could otherwise give it: the Director's edit authority. The
     # database checks director_edit itself (SYRD-548).
     "set_report_intake": frozenset({"director_edit"}),
+    # Withdrawing an approval is the control role's: the capabilities that define it (SYRD-49). The
+    # database checks role_controls_project itself (SYRD-598).
+    "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),
 }
 
 #: SYRD-93: publication is admitted by declared capability, never by role name.

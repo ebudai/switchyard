@@ -1,17 +1,6 @@
 """Ticket-detail rendering JavaScript for the board frontend."""
 
-SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The database is the
-    // authority and refuses anything else; this list is what the panel offers,
-    // and identity and creation provenance are deliberately not in it.
-    const DIRECTOR_EDITABLE_FIELDS = [
-      'title', 'body', 'parent_id', 'assignee', 'state', 'implementation',
-      'audit_prompt', 'origin_project', 'external_source_ref', 'blocked_reason',
-      'needs_audit', 'needs_inspection', 'needs_user_signoff', 'commit_exempt',
-      'regression', 'manually_controlled', 'queued_for_assignee',
-      'queued_behind_ticket', 'audit_signoff', 'inspector_signoff', 'user_signoff',
-    ];
-
-    function selectedTicket() {
+SCRIPT_DETAIL = """    function selectedTicket() {
       return state.tickets.find((ticket) => ticket.id === state.selectedId) || null;
     }
 
@@ -85,16 +74,13 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       const box = document.createElement('div');
       box.className = 'detail-box';
       const draftFields = new Map();
-      const commentWho = document.createElement('select');
-      commentWho.setAttribute('aria-label', 'Comment author');
-      const commentAuthorRoles = state.callerRoles.length
-        ? state.callerRoles
-        : ['director', 'main', 'app', 'ops', 'perf', 'audit', 'inspector', 'research', 'user'];
-      commentAuthorRoles.forEach((role) => {
-        buildOption(commentWho, role, roleLabel(role));
-      });
-      commentWho.value = state.workflow && ticket.assignee !== 'unassigned' ? ticket.assignee : (ticketIsUserReview(ticket) ? 'user' : 'director');
-      bindDetailDraftField(draftFields, commentWho, 'commentWho', commentWho.value);
+      // SYRD-598: the board page acts as the User and nobody else. A Director
+      // operation is the User's, confirmed, under a grant the server issues.
+      const commentWho = { value: 'user' };
+      const commentAuthor = document.createElement('span');
+      commentAuthor.className = 'soft-note';
+      commentAuthor.setAttribute('data-comment-author', 'user');
+      commentAuthor.textContent = 'Commenting as User';
       const commentText = document.createElement('textarea');
       commentText.placeholder = 'Add a comment or bounce-back note';
       commentText.value = readPersistentCommentDraft(ticket.id);
@@ -231,151 +217,17 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
 
       const workflowActions = document.createElement('div');
       workflowActions.className = 'inline-actions';
-      if (state.workflow) {
-        for (const [name, spec] of Object.entries(state.workflow.flags || {})) {
-          if (spec.kind !== 'gate') continue;
-          const label = document.createElement('label');
-          const input = document.createElement('input'); input.type = 'checkbox';
-          input.checked = ticket[name] ?? ticket.workflow_flags?.[name] ?? spec.default;
-          const updateGateEnabled = () => { input.disabled = commentWho.value !== 'director'; };
-          updateGateEnabled(); commentWho.addEventListener('change', updateGateEnabled);
-          label.append(input, document.createTextNode(name.replaceAll('_', ' ')));
-          input.addEventListener('change', async () => {
-            try {
-              await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/set_workflow_flags`, {[name]: input.checked}, commentWho.value);
-              await requestBoardReload();
-            } catch (error) { input.checked = !input.checked; setCreateStatus(error.message, true); }
-          });
-          workflowActions.appendChild(label);
-        }
-        for (const action of ticket.workflow_actions || []) {
-          const button = document.createElement('button');
-          button.type = 'button';
-          button.textContent = action.label;
-          const updateEnabled = () => {
-            button.disabled = !action.actors.includes(commentWho.value) || (action.owner_scoped && ticket.assignee !== commentWho.value);
-            button.title = `Allowed: ${action.actors.join(', ')}`;
-          };
-          updateEnabled();
-          commentWho.addEventListener('change', updateEnabled);
-          button.addEventListener('click', async () => {
-            try {
-              const payload = { target: action.to };
-              if (commentText.value.trim()) payload.text = commentText.value.trim();
-              if (action.require_reason && !payload.text) throw new Error('Enter the reason in the comment box.');
-              if (commitHashInput.value.trim()) payload.commit_hash = commitHashInput.value.trim();
-              if (action.require_commit && !ticket.commit_exempt && !payload.commit_hash) throw new Error('Enter the implementation commit.');
-              await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/${encodeURIComponent(action.action)}`, payload, commentWho.value);
-              await requestBoardReload();
-            } catch (error) { setCreateStatus(error.message, true); }
-          });
-          workflowActions.appendChild(button);
-        }
-      }
-      const detailAdvanceState = state.workflow ? null : defaultAdvanceState(ticket);
-      if (detailAdvanceState) {
-        const advanceButton = document.createElement('button');
-        advanceButton.className = 'primary';
-        advanceButton.type = 'button';
-        advanceButton.textContent = `Advance -> ${stateLabel(detailAdvanceState)}`;
-        const blockedReason = advanceBlockedReason(ticket);
-        if (blockedReason) {
-          advanceButton.disabled = true;
-          advanceButton.title = blockedReason;
-        }
-        advanceButton.addEventListener('click', async () => {
-          try {
-            await advanceTicket(ticket.id, commentText.value);
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        workflowActions.appendChild(advanceButton);
-      }
-      if (!state.workflow && ticket.state !== 'done' && ticket.state !== 'cancelled') {
-        const cancelButton = document.createElement('button');
-        cancelButton.type = 'button';
-        cancelButton.textContent = 'Cancel Ticket';
-        cancelButton.title = 'Requires a cancellation reason in the comment box below.';
-        cancelButton.addEventListener('click', async () => {
-          try {
-            await cancelTicket(ticket.id, cancelReason(commentText.value));
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        workflowActions.appendChild(cancelButton);
-      }
+      // SYRD-598: what may be done for this ticket now, as the server describes it
+      // from the live workflow: the User's own actions, and the Director
+      // operations the board lends to a confirmed board-UI action.
+      void renderBoardUiActions(ticket, workflowActions);
 
-      const assigneeLabel = document.createElement('label');
+      const assigneeLabel = document.createElement('div');
       assigneeLabel.innerHTML = '<span class="field-label">Assignee</span>';
-      const assigneeSelect = document.createElement('select');
-      state.assignees.forEach((assignee) => buildOption(assigneeSelect, assignee, roleLabel(assignee)));
-      assigneeSelect.value = ticket.assignee;
-      assigneeSelect.title = 'Director-only: hand this ticket to another owner in its current stage. Requires a reason.';
-      assigneeSelect.addEventListener('change', async () => {
-        const reason = reassignReason(commentText.value);
-        if (!reason) {
-          assigneeSelect.value = ticket.assignee;
-          setCreateStatus('reassignment requires a reason', true);
-          return;
-        }
-        await updateDetailTicket(
-          { assignee: assigneeSelect.value, comment: { who: 'director', text: reason } },
-          'director',
-        );
-      });
-      assigneeLabel.appendChild(assigneeSelect);
-
-      // SYRD-83: one Director-only generic edit, reachable from the board.
-      // Everything else in this panel is a workflow action wearing a field's
-      // clothes; this is the field itself, at whatever stage the ticket is in
-      // and whoever owns it. A sign-off can be cleared here and never raised --
-      // the database refuses that on every path, this one included.
-      const directorEditField = document.createElement('div');
-      directorEditField.className = 'director-edit';
-      directorEditField.innerHTML = '<div class="field-label">Director Edit</div>';
-      const directorEditSelect = document.createElement('select');
-      DIRECTOR_EDITABLE_FIELDS.forEach((field) => buildOption(directorEditSelect, field, field));
-      const directorEditValue = document.createElement('input');
-      directorEditValue.type = 'text';
-      directorEditValue.placeholder = 'new value';
-      directorEditValue.setAttribute('data-director-edit-value', '');
-      const directorEditReason = document.createElement('input');
-      directorEditReason.type = 'text';
-      directorEditReason.placeholder = 'why this edit is being made';
-      directorEditReason.setAttribute('data-director-edit-reason', '');
-      const directorEditButton = document.createElement('button');
-      directorEditButton.textContent = 'Apply Director Edit';
-      directorEditButton.setAttribute('data-director-edit-apply', '');
-      directorEditButton.title =
-        'Director-only: change any mutable field at any stage, for any owner. Records the reason and the old and new value.';
-      directorEditButton.addEventListener('click', async () => {
-        const reason = directorEditReason.value.trim();
-        if (!reason) {
-          setCreateStatus('a Director edit requires a reason', true);
-          return;
-        }
-        const field = directorEditSelect.value;
-        const raw = directorEditValue.value;
-        // Typed the way the field is: a gate is a boolean and a title is not,
-        // and the database refuses a value of the wrong shape rather than
-        // coercing it.
-        const value = raw === 'true' ? true : raw === 'false' ? false : raw;
-        await updateDetailTicket(
-          { director_edit: true, [field]: value, reason },
-          'director',
-        );
-      });
-      const directorEditActions = document.createElement('div');
-      directorEditActions.className = 'inline-actions';
-      directorEditActions.appendChild(directorEditSelect);
-      directorEditActions.appendChild(directorEditValue);
-      directorEditActions.appendChild(directorEditReason);
-      directorEditActions.appendChild(directorEditButton);
-      directorEditField.appendChild(directorEditActions);
+      const assigneeValue = document.createElement('span');
+      assigneeValue.setAttribute('data-detail-assignee', ticket.assignee);
+      assigneeValue.textContent = roleLabel(ticket.assignee);
+      assigneeLabel.appendChild(assigneeValue);
 
       // SYRD-93: what this ticket is waiting on, when it is waiting to be
       // published. The implementer sees that its ask is recorded; the control
@@ -403,36 +255,6 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         how.setAttribute('data-publication-command', '');
         how.textContent = 'Control role: switchyard-publish ' + ticket.id;
         publicationField.appendChild(how);
-        const rejectReason = document.createElement('input');
-        rejectReason.type = 'text';
-        rejectReason.placeholder = 'why this publication is refused';
-        rejectReason.setAttribute('data-publication-reject-reason', '');
-        const rejectButton = document.createElement('button');
-        rejectButton.textContent = 'Reject publication';
-        rejectButton.setAttribute('data-publication-reject', '');
-        rejectButton.title =
-          'Control role only: refuse this request with a reason. The implementer is told and keeps its commit.';
-        rejectButton.addEventListener('click', async () => {
-          const reason = rejectReason.value.trim();
-          if (!reason) {
-            setCreateStatus('rejecting a publication requires a reason', true);
-            return;
-          }
-          await updateDetailTicket(
-            {
-              resolve_publication: true,
-              request_id: publication.id,
-              outcome: 'rejected',
-              reason,
-            },
-            'director',
-          );
-        });
-        const publicationActions = document.createElement('div');
-        publicationActions.className = 'inline-actions';
-        publicationActions.appendChild(rejectReason);
-        publicationActions.appendChild(rejectButton);
-        publicationField.appendChild(publicationActions);
       }
 
       const parentLinkField = document.createElement('div');
@@ -470,7 +292,7 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         parentLinkField.appendChild(parentPreview);
       }
 
-      controls.append(assigneeLabel, parentLinkField, directorEditField, publicationField);
+      controls.append(assigneeLabel, parentLinkField, publicationField);
 
       const toggles = document.createElement('div');
       toggles.className = 'tag-row';
@@ -478,37 +300,16 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       toggles.appendChild(toggleControl('Requires UAT', ticket.needs_user_signoff, async (checked) => {
         await updateDetailTicketForToggle({ needs_user_signoff: checked });
       }));
-      toggles.appendChild(toggleControl('Needs inspection', ticket.needs_inspection, async (checked) => {
-        await updateDetailTicketForToggle({ needs_inspection: checked }, 'director');
-      }));
-      toggles.appendChild(toggleControl('Needs audit', ticket.needs_audit !== false, async (checked) => {
-        await updateDetailTicketForToggle({ needs_audit: checked }, 'director');
-      }));
       }
       toggles.appendChild(toggleControl('Regression', ticket.regression, async (checked) => {
         await updateDetailTicketForToggle({ regression: checked });
       }));
       toggles.appendChild(toggleControl('Manual control', ticket.manually_controlled, async (checked) => {
-        await updateDetailTicketForToggle({ manually_controlled: checked }, 'director');
+        await runBoardUiOperation(ticket, 'set_manually_controlled', { manually_controlled: checked });
       }, {
-        title: 'Director-only: hold or release this ticket outside automatic workflow movement.',
+        title: 'A Director operation: hold or release this ticket, done as you after you confirm it.',
       }));
       if (!state.workflow) {
-      if (ticket.needs_inspection) {
-        toggles.appendChild(toggleControl('Inspector signoff', ticket.inspector_signoff, async (checked) => {
-          await updateDetailTicketForToggle({ inspector_signoff: checked }, 'inspector');
-        }));
-      }
-      toggles.appendChild(toggleControl('Audit signoff', ticket.audit_signoff, async (checked) => {
-        const patch = { audit_signoff: checked };
-        if (checked && commentText.value.trim()) {
-          patch.comment = { who: 'audit', text: commentText.value.trim() };
-        }
-        await updateDetailTicketForToggle(patch, 'audit');
-      }, {
-        disabled: ticket.needs_audit === false,
-        title: ticket.needs_audit === false ? 'Ticket does not require audit sign-off.' : '',
-      }));
       toggles.appendChild(toggleControl('UAT sign-off', ticket.user_signoff, async (checked) => {
         const patch = { user_signoff: checked };
         if (checked && commentText.value.trim()) {
@@ -551,16 +352,9 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
           if (!targetId) {
             throw new Error('merge requires a target ticket ID');
           }
-          const confirmed = window.confirm(
-            `Merge ${ticket.id} into ${targetId}? ${ticket.id}'s comments/attachments move to ${targetId} and ${ticket.id} is closed as merged.`,
-          );
-          if (!confirmed) {
-            return;
-          }
-          await mergeTicket(ticket.id, targetId);
+          await runBoardUiOperation(ticket, 'merge', { target_id: targetId });
         } catch (error) {
-          setCreateStatus(error.message, true);
-          await requestBoardReload();
+          // reported by the confirmation flow
         }
       });
       titleActions.append(mergeTargetInput, mergeButton);
@@ -685,10 +479,11 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         const nextBlockedBy = Array.from(new Set([...(ticket.blocked_by || []), blockerId]));
         const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;
         blockedReasonInput.value = blockedReasonValue;
-        await updateDetailTicket({
-          blocked_by: nextBlockedBy,
-          blocked_reason: blockedReasonValue,
-        });
+        try {
+          await runBoardUiOperation(ticket, 'set_blockers', { blocked_by: nextBlockedBy, blocked_reason: blockedReasonValue });
+        } catch (error) {
+          // reported by the confirmation flow
+        }
       });
       blockedByActions.append(blockerPicker, addBlockedByButton);
       const blockedByNote = document.createElement('div');
@@ -709,9 +504,17 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
           removeBlockedByButton.textContent = `Remove Blocker ${blockerId}`;
           removeBlockedByButton.addEventListener('click', async () => {
             const nextBlockedBy = (ticket.blocked_by || []).filter((item) => item !== blockerId);
-            await updateDetailTicket({
-              blocked_by: nextBlockedBy,
-            });
+            try {
+              // The reason stays while anything is still awaited, and goes with the last blocker:
+              // the board refuses a reason with nothing to wait on (SYRD-285).
+              const remainingReason = nextBlockedBy.length === 0 ? '' : (ticket.blocked_reason || '');
+              await runBoardUiOperation(ticket, 'set_blockers', {
+                blocked_by: nextBlockedBy,
+                blocked_reason: remainingReason,
+              });
+            } catch (error) {
+              // reported by the confirmation flow
+            }
           });
           removeBlockedByActions.appendChild(removeBlockedByButton);
         });
@@ -731,7 +534,13 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       const saveBlockedReasonButton = document.createElement('button');
       saveBlockedReasonButton.textContent = 'Save Blocked Reason';
       saveBlockedReasonButton.addEventListener('click', async () => {
-        await updateDetailTicket({ blocked_reason: blockedReasonInput.value });
+        try {
+          await runBoardUiOperation(ticket, 'set_blockers', {
+            blocked_by: ticket.blocked_by || [], blocked_reason: blockedReasonInput.value,
+          });
+        } catch (error) {
+          // reported by the confirmation flow
+        }
       });
       blockedReasonActions.appendChild(saveBlockedReasonButton);
       const blockedReasonNote = document.createElement('div');
@@ -785,17 +594,15 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
       commitHashInput.type = 'text';
       commitHashInput.value = ticket.commit_hash || '';
       commitHashInput.placeholder = 'Required before done unless exempt';
+      commitHashInput.readOnly = true;  // the implementer records it with its submission
       bindDetailDraftField(draftFields, commitHashInput, 'commitHash', commitHashInput.value);
       commitInfo.append(commitHashInput);
-      const commitOverride = toggleControl('No commit required', ticket.commit_exempt, async (checked) => {
-        await updateDetailTicketForToggle({ commit_exempt: checked });
-      });
       const commitNote = document.createElement('div');
       commitNote.className = 'soft-note';
       commitNote.textContent = ticket.commit_exempt
         ? 'Done-state commit check is bypassed for this ticket.'
         : 'A verified git commit is required before moving this ticket to done.';
-      commitInfo.append(commitOverride, commitNote);
+      commitInfo.append(commitNote);
 
       const attachmentUpload = document.createElement('div');
       attachmentUpload.className = 'attach-panel detail-attach-panel';
@@ -934,45 +741,9 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
           }
         });
         commentActions.appendChild(kickbackButton);
-      } else if (ticket.state === 'inspection') {
-        const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Return to Implementation';
-        kickbackButton.addEventListener('click', async () => {
-          try {
-            await submitComment(ticket.id, 'inspector', commentText.value, 'in_progress');
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        commentActions.appendChild(kickbackButton);
-      } else if (ticket.state === 'audit') {
-        const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Return to Implementation';
-        kickbackButton.addEventListener('click', async () => {
-          try {
-            await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        commentActions.appendChild(kickbackButton);
-      } else if (ticketAllowsKickback(ticket)) {
-        const kickbackButton = document.createElement('button');
-        kickbackButton.textContent = 'Comment + Move to Implementation';
-        kickbackButton.addEventListener('click', async () => {
-          try {
-            await submitComment(ticket.id, commentWho.value, commentText.value, 'in_progress');
-          } catch (error) {
-            setCreateStatus(error.message, true);
-            await requestBoardReload();
-          }
-        });
-        commentActions.appendChild(kickbackButton);
       }
       }
-      commentComposer.append(commentWho, commentText, commentUrgentLabel, commentActions);
+      commentComposer.append(commentAuthor, commentText, commentUrgentLabel, commentActions);
       comments.appendChild(commentComposer);
       if (ticket.comments.length) {
         const list = document.createElement('div');

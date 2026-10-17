@@ -26,8 +26,9 @@ def main() -> int:
     assert "toggleControl('Regression', ticket.regression" in SCRIPT_DETAIL
     assert "await updateDetailTicketForToggle({ regression: checked });" in SCRIPT_DETAIL
     assert "toggleControl('Manual control', ticket.manually_controlled" in SCRIPT_DETAIL
-    assert "await updateDetailTicketForToggle({ manually_controlled: checked }, 'director');" in SCRIPT_DETAIL
-    assert "Director-only: hold or release this ticket outside automatic workflow movement." in SCRIPT_DETAIL
+    # SYRD-598: manual control is a Director operation the User confirms through the board UI.
+    assert "await runBoardUiOperation(ticket, 'set_manually_controlled', { manually_controlled: checked });" in SCRIPT_DETAIL
+    assert "A Director operation: hold or release this ticket, done as you after you confirm it." in SCRIPT_DETAIL
     assert "await updateTicketAction(ticketId, 'set_manually_controlled', { manually_controlled: patch.manually_controlled }, normalizedCaller);" in SCRIPT_APP
     assert "if (ticket.regression)" in SCRIPT_CORE
     assert "badges.appendChild(badge('regression', false));" in SCRIPT_CORE

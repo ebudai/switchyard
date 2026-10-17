@@ -126,7 +126,8 @@ def main() -> int:
             created = post_json(
                 f"{base_url}/create_ticket",
                 {"title": "Orbit web create", "body": "Created through the web API."},
-                {CALLER_ROLE_HEADER: "director", WRITE_TOKEN_HEADER: server.write_token},
+                # SYRD-598: a web create is the User's; HTTP asserts no other role.
+                {CALLER_ROLE_HEADER: "user", WRITE_TOKEN_HEADER: server.write_token},
             )["ticket"]
             reported = post_json(
                 f"{base_url}/file_report",

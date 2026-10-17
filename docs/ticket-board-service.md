@@ -654,6 +654,21 @@ Unix account cannot connect at all. A board restart repairs an already-deployed
 socket's ownership and mode, so provisioning and `switchyard upgrade` both carry
 the repair before roles launch.
 
+### The board page is the User (SYRD-598)
+
+Over the board's TCP port a request acts as the human `user` role and nothing
+else: a request naming any other role in `X-Ticket-Board-Caller-Role` is refused
+("over HTTP a request acts as the User, not director; role panes act through the
+board's Unix socket"). The page asserts no role and its comments are the
+User's. A Director operation the board lends to the page -- route, reassign,
+blockers, manual control, recovery, notice dismissal, publication decisions,
+cancel/defer/mark done, non-approval control transitions, merge, and withdrawing
+a sign-off -- is the User's decision, confirmed on the page and done under a
+single-use grant the database issues for exactly that ticket, operation, payload
+and ticket version; approvals, gates, `commit_exempt`, force/override moves,
+generic Director edits, size approvals, workflow configuration and host
+controls are never lent. See `docs/syrd-598-board-ui-delegation.md`.
+
 ### Role sessions and control
 
 Because each role is a different account, each role gets its **own tmux server**

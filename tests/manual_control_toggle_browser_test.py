@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression test: detail UI exposes a director manual-control toggle."""
+"""Regression test: detail UI exposes the manual-control toggle, a Director operation the User confirms (SYRD-598)."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.frontend import HTML
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
+from tests.board_ui_stub import REFUSAL, manual_control_op, stub_board_ui
 
 
 def load_playwright() -> object:
@@ -113,22 +114,34 @@ def run_browser_check(playwright: object, server_port: int, app: ManualControlBo
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-508")).click()
         page.locator(".detail-modal").wait_for(timeout=5000)
 
+        stub_board_ui(page, lambda: app.tickets, lambda ticket: [manual_control_op(ticket)])
         manual_toggle = page.get_by_role("checkbox", name="Manual control")
         assert not manual_toggle.is_checked()
-        manual_toggle.check()
-
-        deadline = time.monotonic() + 5
-        while len(app.update_calls) < 1 and time.monotonic() < deadline:
-            page.wait_for_timeout(50)
-        assert len(app.update_calls) == 1
-        assert app.tickets[0]["manually_controlled"] is True
+        # The toggle asks for a confirmation of exactly this: the ticket, the action, the new value.
+        manual_toggle.click()
+        dialog = page.locator("[data-board-ui-dialog='set_manually_controlled']")
+        summary = dialog.locator("[data-board-ui-summary]")
+        summary.wait_for(timeout=5000)
+        text = summary.inner_text()
+        assert "Ticket: PGU-508 — Manual control toggle" in text and "Action: Hold under manual control" in text, text
+        assert "Manual control: yes" in text, text
+        dialog.locator("[data-board-ui-cancel]").click()
+        page.wait_for_function("() => !document.querySelector('[data-board-ui-dialog]')")
+        page.locator("#createStatus", has_text="was not confirmed").wait_for(timeout=5000)
+        assert not page.get_by_role("checkbox", name="Manual control").is_checked()
+        # Confirmed, but refused: the refusal is said and the toggle does not claim the change.
+        page.get_by_role("checkbox", name="Manual control").click()
+        dialog.locator("[data-board-ui-confirm]").click()
+        page.locator("#createStatus", has_text=REFUSAL).wait_for(timeout=5000)
+        assert not page.get_by_role("checkbox", name="Manual control").is_checked()
+        assert app.update_calls == [] and app.tickets[0]["manually_controlled"] is False
     finally:
         browser.close()
 
 
 def main() -> int:
     assert "toggleControl('Manual control', ticket.manually_controlled" in HTML
-    assert "await updateDetailTicketForToggle({ manually_controlled: checked }, 'director');" in HTML
+    assert "await runBoardUiOperation(ticket, 'set_manually_controlled', { manually_controlled: checked });" in HTML
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="manual-control-toggle.") as tmpdir:
         root = Path(tmpdir)

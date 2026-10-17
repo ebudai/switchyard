@@ -28,6 +28,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -203,7 +204,8 @@ def main() -> int:
                          if isinstance(row, dict) and row.get("commit_hash")}, key=text.index)
         for name, value in zip(("<approved>", "<correction>"), hashes):
             text = text.replace(value, name)
-        return json.loads(text)
+        # A refusal's CONTEXT names the line in its PL/pgSQL function, which moves when a function above it grows.
+        return json.loads(re.sub(r"line \d+ at", "line N at", text))
 
     d, legacy = after["declared"], after["legacy"]
     refused_flag = "flag change requires authorized workflow action"

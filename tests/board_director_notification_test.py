@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board import server as server_module
 from scripts.ticket_board.server import CALLER_ROLE_HEADER, WRITE_TOKEN_HEADER, DirectorNotifier, TicketBoardServer
+from scripts.ticket_board import ui_delegation
 from standalone_test_runner import run_module_tests
 
 
@@ -184,6 +185,7 @@ def post_file_bug(server: TicketBoardServer, title: str, *, caller: str) -> dict
 
 
 def test_server_human_web_director_create_notifies_director() -> None:
+    # SYRD-598: the human's board-page create is the User's; HTTP asserts no other role.
     with tempfile.TemporaryDirectory(prefix="board-director-notify-server.") as tmpdir:
         root = Path(tmpdir)
         notifier = FakeNotifier()
@@ -198,7 +200,7 @@ def test_server_human_web_director_create_notifies_director() -> None:
             payload = post_create(
                 server,
                 "Director web create",
-                caller="director",
+                caller="user",
                 assignee="unassigned",
             )
             assert payload["ticket"]["title"] == "Director web create", payload
@@ -220,10 +222,13 @@ def test_server_non_director_file_bug_notifies_director() -> None:
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
+        # SYRD-598: ops files through its pane's Unix socket; this TCP request stands in for that pane.
+        ui_delegation.TRUST_HEADER_ROLES = True
         try:
             payload = post_file_bug(server, "Instant notify", caller="ops")
             assert notifier.created == [{"id": payload["ticket"]["id"], "title": "Instant notify"}], notifier.created
         finally:
+            ui_delegation.TRUST_HEADER_ROLES = False
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
@@ -241,7 +246,7 @@ def test_server_backlog_create_does_not_notify_director() -> None:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            payload = post_create(server, "Quiet backlog", caller="director", state="backlog")
+            payload = post_create(server, "Quiet backlog", caller="user", state="backlog")
             assert payload["ticket"]["state"] == "backlog", payload
             assert notifier.created == [], notifier.created
         finally:
@@ -265,7 +270,7 @@ def test_server_blocked_create_does_not_notify_director() -> None:
             payload = post_create(
                 server,
                 "Quiet blocked create",
-                caller="director",
+                caller="user",
                 blocked_by=["PGU-1"],
                 blocked_reason="Waiting on PGU-1.",
             )
@@ -291,7 +296,7 @@ def test_server_create_does_not_notify_when_ticket_is_not_persisted() -> None:
         thread.start()
         try:
             try:
-                post_create(server, "Phantom create", caller="director")
+                post_create(server, "Phantom create", caller="user")
             except HTTPError as exc:
                 assert exc.code == 400
                 assert "created ticket was not persisted" in exc.read().decode("utf-8")

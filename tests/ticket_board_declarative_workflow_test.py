@@ -548,13 +548,18 @@ def main():
                             viewport={"width": 1500, "height": 1000}
                         )
                         page.goto(base)
-                        page.locator(
-                            ".card", has=page.locator(".card-id", has_text="PGU-2")
-                        ).click()
-                        button = page.get_by_role(
-                            "button", name="Accept verification", exact=True
-                        )
-                        assert button.is_enabled()
+                        # SYRD-598: the page acts as the User. The verifier's
+                        # approval is the verifier's, through its own pane; the
+                        # board UI neither offers it nor lends it.
+                        with page.expect_response(lambda response: "/api/ui/delegations" in response.url) as described:
+                            page.locator(
+                                ".card", has=page.locator(".card-id", has_text="PGU-2")
+                            ).click()
+                        assert described.value.ok, described.value.status
+                        offered = [op["operation"] for op in described.value.json()["operations"]]
+                        assert "verify_accept" not in offered, offered
+                        page.locator("[data-board-ui-actions='PGU-2']").wait_for()
+                        assert page.get_by_role("button", name="Accept verification", exact=True).count() == 0
                         assert (
                             page.get_by_role(
                                 "button",
@@ -563,21 +568,11 @@ def main():
                             ).count()
                             == 0
                         )
-                        # Wait for the action's own response, which is sent after
-                        # its transaction commits. A wait_for_function on an
-                        # async predicate resolves on the returned Promise
-                        # without awaiting it, so it waited for nothing, and
-                        # the read below raced the commit (SYRD-568 measured it
-                        # returning 0.04 s into a 0.15 s POST).
-                        with page.expect_response(lambda response: "/actions/verify_accept" in response.url
-                                                  and response.request.method == "POST") as accepted:
-                            button.click()
-                        assert accepted.value.ok, accepted.value.status
-                        page.wait_for_function(
-                            "async () => (await (await fetch('/api/tickets/PGU-2')).json()).workflow_flags.verification_signoff === true"
-                        )
                     finally:
                         browser.close()
+                # The verifier's pane (this fixture stands in for its Unix socket).
+                t.post_json(base, "/api/tickets/PGU-2/actions/verify_accept", {}, caller="verifier")
+                assert app.get_ticket("PGU-2")["workflow_flags"]["verification_signoff"] is True
                 held = app.get_ticket("PGU-2")
                 assert (held["state"], held["assignee"], held["awaiting_role"]) == (
                     "verification",

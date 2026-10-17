@@ -188,6 +188,16 @@ submission is owner-scoped, so nobody else can take it for you - a director can
 only recover the ticket to its next required gate, and that is a repair, not the
 path.
 
+## Reporting to another project's board
+
+`ticket-board-write file-report` creates a ticket on **another project's** board. Use it
+only for a Switchyard platform defect or a deliberate escalation to that project; your own
+project's work goes on your own board with `create-ticket`. It is two steps, every time:
+the command alone is a preview that files nothing and prints both projects, the report
+and a digest; only the same command with `--submit-upstream --expect <digest>` files it,
+and only if nothing changed since the preview. No configured token, URL or flag is
+standing permission.
+
 ## A ticket that is not yours
 
 When a project runs a Router, an implementer can be handed work that belongs to

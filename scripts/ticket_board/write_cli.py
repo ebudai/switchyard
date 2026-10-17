@@ -81,6 +81,55 @@ def not_connected_for_reports(environ: Any) -> str:
     )
 
 
+def file_report_command(args: Any, client: Any, environ: Any) -> dict[str, Any] | None:
+    """Preview a report to another project's board, or submit exactly the previewed report (SYRD-602).
+
+    Returns the board's response for a submission, None for a preview (printed here). Nothing is
+    written anywhere until `--submit-upstream --expect <digest>` names this report's own digest.
+    """
+    from . import report_confirmation as rc
+
+    if not (args.report_token.strip() or args.report_token_file.strip()) or not args.report_board_url.strip():
+        raise write_client.TicketBoardWriteError(not_connected_for_reports(environ))
+    if not args.origin_project.strip():
+        raise write_client.TicketBoardWriteError("file-report requires --origin-project or TICKET_BOARD_REPORT_ORIGIN_PROJECT")
+    if args.expect and not args.submit_upstream:
+        raise write_client.TicketBoardWriteError("file-report: --expect only confirms a submission; add "
+                                                 "--submit-upstream, or leave both off to preview. Nothing was filed.")
+    client.require_report_credential()  # missing, unreadable or empty: refused now, not at submission (SYRD-602)
+    identity = client.report_destination()
+    destination = rc.destination_identity(identity)
+    own = str(environ.get("TICKET_BOARD_PROJECT") or "").strip()
+    if own and destination["project"] == own:
+        raise write_client.TicketBoardWriteError(
+            f"file-report: the report board is {own}'s own board; a report crosses to another project. Work for "
+            f"{own} is created with ticket-board-write create-ticket. Nothing was filed.")
+    requested = "backlog" if args.defer else ""
+    digest = rc.report_digest(destination=destination, source_project=args.origin_project, title=args.title,
+                              body=args.body, requested_stage=requested, external_source_ref=args.external_source_ref)
+    if not args.submit_upstream:
+        print(rc.preview_text(destination=destination, project_name=str(identity.get("project_name") or destination["project"]),
+                              board_url=args.report_board_url, source_project=args.origin_project,
+                              caller_role=args.caller_role, title=args.title, body=args.body, requested_stage=requested,
+                              external_source_ref=args.external_source_ref, attachments=[], digest=digest,
+                              resubmit=f"--submit-upstream --expect {digest}"))
+        return None
+    if not args.expect:
+        raise write_client.TicketBoardWriteError("file-report --submit-upstream needs --expect <digest> from this "
+                                                 "report's preview. Nothing was filed.")
+    if args.expect.strip() != digest:
+        raise write_client.TicketBoardWriteError(
+            f"file-report: this is not the report that was previewed: its title, body, state, source or "
+            f"destination changed (its digest is now {digest}). Preview it again. Nothing was filed.")
+    response = client.file_report(title=args.title, body=args.body, origin_project=args.origin_project,
+                                  external_source_ref=args.external_source_ref, requested_stage=requested,
+                                  confirmation=digest)
+    if response.get("replayed"):
+        print(f"file-report: this exact report was already filed as {_ticket_from_response(response).get('id')}; "
+              "nothing new was created.", file=sys.stderr)
+    return response
+
+
 def _records_report_request(response: dict[str, Any]) -> bool:
     """Whether the board wrote a report's Backlog request on the ticket it created (SYRD-548)."""
     ticket = response.get("ticket") if isinstance(response, dict) else None
@@ -313,6 +362,10 @@ def _build_parser() -> argparse.ArgumentParser:
     add_free_text_argument(file_report, "--body", required=True)
     file_report.add_argument("--origin-project", default=write_client.DEFAULT_REPORT_ORIGIN_PROJECT)
     file_report.add_argument("--external-source-ref", default="")
+    # SYRD-602: without these, a preview that files nothing; with both, exactly the previewed report.
+    file_report.add_argument("--submit-upstream", action="store_true",
+                             help="file the report on the other project's board; needs --expect")
+    file_report.add_argument("--expect", default="", help="the digest this report's preview printed")
     file_report.add_argument(
         "--defer",
         action="store_true",
@@ -631,17 +684,9 @@ def main(argv: list[str] | None = None) -> int:
                 needs_audit=args.needs_audit,
             )
         elif command == "file_report":
-            if not (args.report_token.strip() or args.report_token_file.strip()):
-                raise write_client.TicketBoardWriteError(not_connected_for_reports(os.environ))
-            if not args.origin_project.strip():
-                raise write_client.TicketBoardWriteError("file-report requires --origin-project or TICKET_BOARD_REPORT_ORIGIN_PROJECT")
-            response = client.file_report(
-                title=args.title,
-                body=args.body,
-                origin_project=args.origin_project,
-                external_source_ref=args.external_source_ref,
-                requested_stage="backlog" if args.defer else "",
-            )
+            response = file_report_command(args, client, os.environ)
+            if response is None:  # a preview: printed, and nothing filed
+                return 0
             if args.defer and not _records_report_request(response):
                 print(
                     "file-report: the report was filed, but this board did not record the Backlog request; "

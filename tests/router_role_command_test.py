@@ -198,7 +198,9 @@ def drift_check() -> None:
                                                 schema, re.M)]
         final = schema[starts[-1]:schema.index("\n$$;\n", starts[-1]) + 5]
         check(final in migration, f"schema.sql's final {signature} is pgu997's copy")
-    later = [p.name for p in sorted(MIGRATION.parent.glob("*.sql")) if p.name > MIGRATION.name]
+    # Not "no migration comes after pgu997" -- every later ticket adds one -- but none redefines what it ships.
+    later = [(p.name, s) for p in sorted(MIGRATION.parent.glob("*.sql")) if p.name > MIGRATION.name for s in CHANGED
+             if f"CREATE OR REPLACE FUNCTION ticket_board.{s}" in p.read_text()]
     check(later == [], f"no later migration redefines what pgu997 ships: {later}")
 
 

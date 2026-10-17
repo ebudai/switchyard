@@ -48,6 +48,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
+from report_confirmation_fixture import confirmed_report  # noqa: E402
 from schema_function_drift import definition, owning_migration  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
@@ -144,7 +145,7 @@ def declare_workflow(base: str, board) -> None:
 
 def report(base: str, **fields) -> dict:
     payload = {"title": "Upstream defect", "body": "from mefp", "origin_project": "mefp", **fields}
-    return t.post_report_json(base, REPORT, payload, expect=201)["ticket"]
+    return t.post_report_json(base, REPORT, confirmed_report(base, payload), expect=201)["ticket"]  # SYRD-602
 
 
 def test_a_report_files_on_a_declared_board(base: str, admin: str) -> None:
@@ -296,7 +297,7 @@ def test_an_upgraded_board_is_repaired_by_the_migration(cluster) -> None:
         declare_workflow(base, board)
         t.psql(admin, OLD_COPY.read_text())
         broken = t.post_report_json(
-            base, REPORT, {"title": "Before", "body": "", "origin_project": "mefp"}, expect=400
+            base, REPORT, confirmed_report(base, {"title": "Before", "body": "", "origin_project": "mefp"}), expect=400
         )
         check("invalid configured caller role: <NULL>" in str(broken),
               f"the old copy reproduces the live failure: {broken}")

@@ -42,6 +42,20 @@ class RecordingHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    def do_GET(self) -> None:  # noqa: N802
+        """Only a board's public identity, which a report preview reads (SYRD-602)."""
+        if self.path != "/api/client-config":
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = json.dumps({"project": "syrd", "project_name": "Switchyard", "ticket_prefix": "SYRD"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
@@ -781,26 +795,19 @@ def assert_file_report_uses_configured_report_board_url(root: Path) -> None:
                 "TICKET_BOARD_REPORT_ORIGIN_PROJECT": "mefp",
             }
         )
-        proc = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "scripts" / "ticket-board-write"),
-                "file-report",
-                "--title",
-                "Env report",
-                "--body",
-                "Uses report URL env.",
-                "--external-source-ref",
-                "MEFP-2",
-            ],
-            cwd=root,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        report = [sys.executable, str(ROOT / "scripts" / "ticket-board-write"), "file-report", "--title", "Env report",
+                  "--body", "Uses report URL env.", "--external-source-ref", "MEFP-2"]
+        # SYRD-602: the command alone is a preview, which sends no report at all.
+        preview = subprocess.run(report, cwd=root, env=env, text=True, capture_output=True, check=False)
+        if preview.returncode != 0:
+            raise AssertionError(preview.stderr or preview.stdout)
+        assert len(upstream_board.report_tokens) == 1, upstream_board.report_tokens
+        digest = next(line.split()[-1] for line in preview.stdout.splitlines() if line.strip().startswith("digest:"))
+        proc = subprocess.run([*report, "--submit-upstream", "--expect", digest], cwd=root, env=env, text=True,
+                              capture_output=True, check=False)
         if proc.returncode != 0:
             raise AssertionError(proc.stderr or proc.stdout)
+        assert upstream_board.requests[-1][3].get("confirmation") == digest, upstream_board.requests[-1]
         assert len(own_board.requests) == 0
         assert upstream_board.report_tokens[-1] == ("/api/tickets/actions/file_report", "env-tenant-token")
     finally:

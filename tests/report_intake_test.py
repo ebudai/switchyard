@@ -34,6 +34,7 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 
 import tenant_report_declared_workflow_test as r  # noqa: E402  (isolates the tmux bus on import)
 import ticket_board_write_api_test as t  # noqa: E402
+from report_confirmation_fixture import confirmed_report  # noqa: E402
 from schema_function_drift import definition, migrations_from, owning_migration, rbac_before, schema_before  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 from upstream_report_credential_test import _host, _sandbox_home, _tenant  # noqa: E402
@@ -95,9 +96,16 @@ def file_report(env: dict[str, str], *, defer: bool, title: str) -> tuple[int, d
         for stale in ("TICKET_BOARD_TENANT_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN", "TICKET_BOARD_REPORT_TOKEN_FILE"):
             os.environ.pop(stale, None)
         importlib.reload(write_client)
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            status = write_cli.main(["file-report", "--title", title, "--body", "from mefp",
-                                     *(["--defer"] if defer else [])])
+        report = ["file-report", "--title", title, "--body", "from mefp", *(["--defer"] if defer else [])]
+        # SYRD-602: a report is previewed, then submitted with the preview's digest.
+        preview = io.StringIO()
+        with contextlib.redirect_stdout(preview), contextlib.redirect_stderr(err):
+            status = write_cli.main(report)
+        digest = next((line.split()[-1] for line in preview.getvalue().splitlines()
+                       if line.strip().startswith("digest:")), "")
+        if status == 0:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                status = write_cli.main([*report, "--submit-upstream", "--expect", digest])
     importlib.reload(write_client)
     return status, (json.loads(out.getvalue()) if status == 0 else {}), err.getvalue()
 
@@ -130,7 +138,8 @@ def exercise(base: str, admin: str, service: str, env: dict[str, str], label: st
     for payload, expected in (({"requested_stage": "done"}, "may request backlog or nothing"),
                               ({"requested_stage": "in_progress"}, "may request backlog or nothing"),
                               ({"state": "backlog"}, "file_report cannot set: state")):
-        refused = t.post_report_json(base, r.REPORT, {"title": "x", "body": "", "origin_project": "mefp", **payload},
+        refused = t.post_report_json(base, r.REPORT, confirmed_report(base, {"title": "x", "body": "",
+                                                                                "origin_project": "mefp", **payload}),
                                      expect=400 if "requested_stage" in payload else 403)
         check(expected in json.dumps(refused), (payload, refused))
     # The database refuses one too, behind the board's own check.

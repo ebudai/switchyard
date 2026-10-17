@@ -623,15 +623,14 @@ def exercise_write_api(base_url: str, commit_hash: str, *, frames: Path, assets:
         expect=403,
     )
     assert "missing or invalid X-Ticket-Board-Report-Token" in str(report_wrong_token), report_wrong_token
-    upstream_report_payload = post_report_json(
-        base_url,
-        "/api/tickets/actions/file_report",
-        {
+    from report_confirmation_fixture import confirmed_report  # SYRD-602: filed only as a confirmed preview
+
+    upstream_report_payload = post_report_json(base_url, "/api/tickets/actions/file_report", confirmed_report(base_url, {
             "title": "Tenant upstream defect",
             "body": "Shared launcher behavior breaks this tenant.",
             "origin_project": "otto",
             "external_source_ref": "otto:OTTO-123",
-        },
+        }),
         expect=201,
     )
     upstream_report = upstream_report_payload["ticket"]  # type: ignore[index]

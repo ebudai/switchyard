@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import extension_operations, pull_queue
+from . import extension_operations, pull_queue, report_confirmation
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -536,39 +536,18 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         self.send_json({"ticket": created}, HTTPStatus.CREATED)
 
     def handle_file_report(self, payload: dict[str, object]) -> None:
-        forbidden_fields = sorted(
-            set(payload)
-            & {
-                "assignee",
-                "state",
-                "initial_state",
-                "blocked_by",
-                "blocked_reason",
-                "parent_id",
-                "source_ticket_id",
-                "needs_audit",
-                "needs_inspection",
-                "needs_user_signoff",
-                "audit_signoff",
-                "inspector_signoff",
-                "user_signoff",
-                "commit_hash",
-                "commit_exempt",
-                "manually_controlled",
-            }
-        )
-        if forbidden_fields:
-            raise PermissionError(f"file_report cannot set: {', '.join(forbidden_fields)}")
+        # A tenant's report sets no state, owner, gate or link (SYRD-256), and creates a ticket only for the
+        # confirmation of a preview of exactly this report on this board, once (SYRD-602).
+        forbidden = sorted(set(payload) & {"assignee", "state", "initial_state", "blocked_by", "blocked_reason",
+                                           "parent_id", "source_ticket_id", "needs_audit", "needs_inspection",
+                                           "needs_user_signoff", "audit_signoff", "inspector_signoff", "user_signoff",
+                                           "commit_hash", "commit_exempt", "manually_controlled"})
+        if forbidden:
+            raise PermissionError(f"file_report cannot set: {', '.join(forbidden)}")
         before_signature = self.app.store_signature()
-        created = self.app.file_report(
-            title=str(payload.get("title", "")),
-            body=str(payload.get("body", "")),
-            origin_project=str(payload.get("origin_project", "")),
-            external_source_ref=str(payload.get("external_source_ref", payload.get("source_ref", ""))),
-            # SYRD-548: the reporter's request, never a stage it can set; the
-            # Director's report-intake policy decides where it lands.
-            requested_stage=payload.get("requested_stage", ""),  # type: ignore[arg-type]
-        )
+        created, new = report_confirmation.submit(self.app, payload)
+        if not new:  # the same confirmation again: the ticket it already created, and nothing more
+            return self.send_json({"ticket": created, "replayed": True})
         self.send_ticket_created(created, before_signature, notification_source_role="tenant_report")
 
     def handle_ticket_action(self, operation: str, payload: dict[str, object], ticket_id: str | None = None) -> None:

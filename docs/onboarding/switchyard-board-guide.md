@@ -241,9 +241,14 @@ Subcommands are the operation name with dashes: `submit-to-audit`, `audit-sign-o
 
 ### Reporting Switchyard issues upstream
 
-Tenant projects can file cross-cutting Switchyard defects and feature requests to an
-upstream board without receiving broader write access to that board. Use the report-only
-write path:
+`file-report` creates a ticket on **another project's board**. Use it only for a
+Switchyard platform defect, or for a deliberate escalation to that project. Work for your
+own project goes on your own board with `create-ticket`, every time: no local create,
+comment, transition or dependency request ever reaches the upstream board.
+
+Every report takes two steps (SYRD-602).
+
+**1. Preview.** The command alone writes nothing anywhere:
 
 ```bash
 ticket-board-write file-report \
@@ -251,6 +256,35 @@ ticket-board-write file-report \
   --body "What failed, what you expected, and any reproduction steps." \
   --external-source-ref "$TICKET_BOARD_PROJECT:local-context"
 ```
+
+It prints:
+- both projects, and your caller role;
+- the destination's ticket prefix;
+- the title, the requested state, the source reference and attachments;
+- a summary of the body;
+- a digest.
+
+Read it. If it is not a platform defect or a deliberate escalation, stop: nothing was
+filed.
+
+**2. Submit exactly that report.** Run the same command again, adding
+`--submit-upstream --expect <digest>`.
+
+- **Changes are refused.** If the title, body, requested state, source reference, origin or
+  destination changed since the preview, the digest no longer matches. Both this command
+  and the upstream board refuse it. Preview again.
+- **Replays are harmless.** Submitting the same confirmed report twice returns the ticket
+  it already created.
+- **No standing permission.** Nothing replaces the per-report digest: not a configured URL,
+  not a token, not a flag.
+
+**Things that stop at the preview:**
+- an upstream that is missing or unreachable;
+- a report board that is your own project's board.
+
+**No one-step path exists, for anyone.** No automated reporter exists. A health or crash
+monitor that needs to report upstream must first be given its own declared, authorised
+path on the receiving board, one an ordinary tenant credential cannot claim.
 
 The target board is `TICKET_BOARD_REPORT_URL`, not the tenant board's
 `TICKET_BOARD_URL`. The credential stays in a 0600 EnvironmentFile-style file, and panes
@@ -307,7 +341,8 @@ ticket-board-write set-report-intake --backlog-requests backlog --reason "tenant
 ticket-board-write set-report-intake --backlog-requests triage  --reason "every report is triaged first"
 ```
 
-With no policy set, a deferred report lands in Triage with its request shown. Only the
+With no policy set, a deferred report lands in Triage with its request shown. `--defer` is
+part of the report, so it is part of the digest: preview and submit with it. Only the
 role holding the Director's `director_edit` capability may set the policy, and a report
 may ask for Backlog and nothing else. Directors identify it
 by the detail metadata: `Origin: <tenant>` and, when supplied,

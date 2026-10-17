@@ -128,16 +128,18 @@ def main() -> int:
                 {"title": "Orbit web create", "body": "Created through the web API."},
                 {CALLER_ROLE_HEADER: "director", WRITE_TOKEN_HEADER: server.write_token},
             )["ticket"]
-            reported = post_json(
-                f"{base_url}/file_report",
-                {
-                    "title": "Orbit tenant report",
-                    "body": "Created through the tenant report API.",
-                    "origin_project": "peer",
-                    "external_source_ref": "peer:PEER-99",
-                },
-                {REPORT_TOKEN_HEADER: report_token},
-            )["ticket"]
+            report = {
+                "title": "Orbit tenant report",
+                "body": "Created through the tenant report API.",
+                "origin_project": "peer",
+                "external_source_ref": "peer:PEER-99",
+            }
+            # SYRD-602: a report is filed only with the confirmation its preview printed for this board.
+            from scripts.ticket_board.report_confirmation import report_digest
+            report["confirmation"] = report_digest(
+                destination={"project": "orbit", "ticket_prefix": "ORB"}, source_project="peer",
+                title=report["title"], body=report["body"], external_source_ref=report["external_source_ref"])
+            reported = post_json(f"{base_url}/file_report", report, {REPORT_TOKEN_HEADER: report_token})["ticket"]
         finally:
             server.shutdown()
             server.server_close()

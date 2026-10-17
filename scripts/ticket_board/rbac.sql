@@ -66,6 +66,9 @@ GRANT EXECUTE ON FUNCTION ticket_board.create_ticket(text, text, text, text, tex
 GRANT EXECUTE ON FUNCTION ticket_board.file_report(text, text, text, text) TO ticket_board_service;
 -- SYRD-548: a report's requested stage, and the Director's report-intake policy.
 GRANT EXECUTE ON FUNCTION ticket_board.file_report(text, text, text, text, text) TO ticket_board_service;
+-- SYRD-602: the only way the board server files a tenant report: confirmed, once.
+REVOKE ALL ON ticket_board.report_confirmations FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.file_confirmed_report(text, text, text, text, text, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.report_intake() TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.set_report_intake(boolean, text) TO ticket_board_service;
 GRANT EXECUTE ON FUNCTION ticket_board.file_bug(text, text, text) TO ticket_board_service;

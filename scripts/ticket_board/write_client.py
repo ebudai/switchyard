@@ -498,10 +498,35 @@ class TicketBoardWriteClient:
             raise TicketBoardWriteError("ticket board response was not an object")
         return parsed
 
-    def _post_report(self, payload: dict[str, Any], *, report_token: str | None = None) -> dict[str, Any]:
+    def report_destination(self) -> dict[str, Any]:
+        """The upstream board's own public identity, read and nothing written: what a report preview names."""
+        url = _normalize_api_url(self.report_board_url).removesuffix("/tickets") + "/client-config"
+        try:
+            with request.urlopen(request.Request(url, method="GET"), timeout=self.timeout) as response:
+                parsed = json.loads(response.read().decode("utf-8", errors="replace"))
+        except (urllib_error.URLError, OSError, ValueError) as exc:
+            raise TicketBoardWriteError(f"file-report: cannot read the upstream board at {self.report_board_url}: "
+                                        f"{getattr(exc, 'reason', exc)}. Nothing was filed.") from exc
+        if not isinstance(parsed, dict) or not parsed.get("project") or not parsed.get("ticket_prefix"):
+            raise TicketBoardWriteError(f"file-report: {self.report_board_url} did not name its project and ticket "
+                                        "prefix; it is not a board a report can be confirmed for. Nothing was filed.")
+        return parsed
+
+    def require_report_credential(self, report_token: str | None = None) -> str:
+        """The report token a submission would send, read now: a preview refuses what a submission would."""
         token = (report_token if report_token is not None else self.report_token).strip()
         if not token and self.report_token_file.strip():
-            token = _read_report_token_file(self.report_token_file.strip()).strip()
+            try:
+                token = _read_report_token_file(self.report_token_file.strip()).strip()
+            except TicketBoardWriteError as exc:
+                raise TicketBoardWriteError(f"file-report: {exc}. Nothing was filed.") from exc
+            if not token:
+                raise TicketBoardWriteError(f"file-report: the report credential file {self.report_token_file.strip()} "
+                                            "holds no report token. Nothing was filed.")
+        return token
+
+    def _post_report(self, payload: dict[str, Any], *, report_token: str | None = None) -> dict[str, Any]:
+        token = self.require_report_credential(report_token)
         if not token:
             raise ValueError("report_token must be non-empty")
         _refuse_production_write_under_test(self.report_board_url or self.board_url, None)
@@ -714,6 +739,7 @@ class TicketBoardWriteClient:
         external_source_ref: str = "",
         report_token: str | None = None,
         requested_stage: str = "",
+        confirmation: str = "",
     ) -> dict[str, Any]:
         payload = {
             "title": title,
@@ -721,6 +747,9 @@ class TicketBoardWriteClient:
             "origin_project": origin_project,
             "external_source_ref": external_source_ref,
         }
+        if confirmation:
+            # SYRD-602: the digest of the preview this exact report was shown as; the board checks it again.
+            payload["confirmation"] = confirmation
         if requested_stage:
             # Only when asked: a board older than SYRD-548 ignores the key, and a
             # report that asks for nothing is the request every client sent before.

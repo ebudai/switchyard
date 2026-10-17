@@ -72,8 +72,12 @@ Pane write API:
   at call time, so a patch on `write_client` is still observed.
 - Tenant projects may file cross-cutting defects or feature requests upstream
   through the report-only HTTP action `POST /api/tickets/actions/file_report`
-  using `X-Ticket-Board-Report-Token`. `ticket-board-write file-report` sends
-  to `TICKET_BOARD_REPORT_URL` when set, so a tenant can report to an upstream
+  using `X-Ticket-Board-Report-Token`, and only with a `confirmation`: the
+  digest a preview printed for exactly that report on exactly that board, which
+  the board recomputes and records so a replay creates nothing (SYRD-602,
+  `report_confirmation.py`). `ticket-board-write file-report` alone is that
+  preview and writes nothing; `--submit-upstream --expect <digest>` submits it.
+  It sends only to `TICKET_BOARD_REPORT_URL`, so a tenant reports to an upstream
   board while normal writes still use its own `TICKET_BOARD_URL`. The token is
   read from `TICKET_BOARD_TENANT_REPORT_TOKEN_FILE` or
   `TICKET_BOARD_REPORT_TOKEN_FILE` when set; those files use the same

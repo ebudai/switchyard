@@ -278,6 +278,12 @@ def end_to_end(owner: str) -> None:
 
         config_path, mapping = _tenant(tmp_path, accounts, owner)
         config = team_launcher.load_project_config("porter", config_path)
+        # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608):
+        # this owner keeps the project in the scratch directory, so that is its home for them.
+        from scripts import owner_writes
+
+        real_owner_home = owner_writes.owner_home
+        owner_writes.owner_home = lambda user: str(tmp_path) if user == owner else real_owner_home(user)
         runner = _RealRunner()
         identity_runner = _identity_runner(mapping, runner)
         ownership_before = {
@@ -401,6 +407,7 @@ def end_to_end(owner: str) -> None:
             )
             assert changed is False and problems == [], problems
         finally:
+            owner_writes.owner_home = real_owner_home
             _stopper(mapping, runner)(config)
             for role in mapping:
                 runner(

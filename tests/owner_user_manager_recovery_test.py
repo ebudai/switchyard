@@ -86,8 +86,14 @@ def _upgrade(config_path: Path, host: _Host, *, as_root: bool, dry_run: bool = F
     original_euid = team_launcher.os.geteuid
     original_exists = team_launcher.local_account_exists
     original_opener = team_launcher._open_board_url
+    from scripts import owner_writes
+
+    original_owner_home = owner_writes.owner_home
     try:
         team_launcher.os.geteuid = (lambda: 0) if as_root else original_euid
+        # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608): here, the fixture's directory.
+        owner = json.loads(config_path.read_text(encoding="utf-8")).get("run_as_user")
+        owner_writes.owner_home = lambda user: str(config_path.parent) if user == owner else original_owner_home(user)
         team_launcher.local_account_exists = lambda account: False
         team_launcher._open_board_url = cutover._unreachable_board
         config = team_launcher.load_project_config("porter", config_path)
@@ -104,6 +110,7 @@ def _upgrade(config_path: Path, host: _Host, *, as_root: bool, dry_run: bool = F
         team_launcher.os.geteuid = original_euid
         team_launcher.local_account_exists = original_exists
         team_launcher._open_board_url = original_opener
+        owner_writes.owner_home = original_owner_home
     return result, "\n".join(printed)
 
 

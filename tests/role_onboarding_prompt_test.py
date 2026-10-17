@@ -699,8 +699,13 @@ def test_the_intended_ownership_operation_names_the_tenant_uid_and_gid() -> None
     user would prove nothing. What can be asserted without root is the command it would
     run: the tenant as both user and group, on that exact path.
     """
-    args = team_launcher.chown_owner_file_args(_OwnerConfig(), Path("/srv/porter/workflow.json"))
-    assert args == ["chown", "porter-agent:porter-agent", "/srv/porter/workflow.json"]
+    import sys
+
+    args = team_launcher.chown_owner_file_args(_OwnerConfig(), Path("/home/porter-agent/porter/workflow.json"))
+    # The descriptor helper rooted at the tenant's home, never `chown` on the path (SYRD-608).
+    assert args == [sys.executable, "-I", str(ROOT / "scripts" / "tenant_paths.py"), "--root", "/home/porter-agent",
+                    "attrs", "--owner", "porter-agent", "--group", "porter-agent",
+                    "/home/porter-agent/porter/workflow.json"], args
 
 
 def test_ownership_is_refused_when_no_tenant_is_configured() -> None:

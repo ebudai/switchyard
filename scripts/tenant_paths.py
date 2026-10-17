@@ -714,24 +714,45 @@ def chown_tree(root: Root, path: str, uid: int, gid: int, if_exists: bool) -> No
 
 def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: int) -> None:
     """`install -m MODE -o U -g G SOURCE PATH`: a new file renamed into place, over a link if one is there."""
+    with open(source, "rb") as handle:  # root's own staged file
+        content = handle.read()
+    replace_file(root, content, path, mode, uid, gid)
+
+
+def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: int, gid: int, *,
+                 parents: tuple[int, int, int] | None = None, parent_mode: int | None = None) -> None:
+    """Publish `content` at `path` whole: a new file, owned and moded before it is written, renamed into place.
+
+    `mode` None keeps the mode of the regular file being replaced (0600 when
+    there is none). The parent is reached by descriptor from the home and,
+    with `parents` (mode, uid, gid), any missing directory on the way is made
+    as root makes any other; `parent_mode` then sets the parent's mode on its
+    descriptor. What is at the name is never opened for writing:
+    a link or a file planted there is replaced as a directory entry, and its
+    target is untouched. If anything fails before the rename the new file is
+    removed; after it, the parent is synced so the replacement is durable.
+    """
     parts = root.relative(path)
     if not parts:
         raise SystemExit("tenant_paths: the home itself is not a file")
-    with open(source, "rb") as handle:  # root's own staged file
-        content = handle.read()
-    parent = root.walk(parts[:-1])
+    parent = root.walk(parts[:-1], create=parents)
     if parent is None:
         if root.made_earlier(str(PurePosixPath(path).parent)):
             root.report(f"install {path}")
             return
         raise Refused(str(PurePosixPath(path).parent), "does not exist")
     try:
+        if parent_mode is not None:
+            root._own(parent, str(PurePosixPath(path).parent), parent_mode, None, None)
         try:
             existing = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
         if existing is not None and stat.S_ISDIR(existing.st_mode):
             raise Refused(path, "is a directory")
+        if mode is None:
+            mode = stat.S_IMODE(existing.st_mode) & 0o777 if existing is not None and stat.S_ISREG(existing.st_mode) \
+                else 0o600
         if existing is not None and stat.S_ISREG(existing.st_mode):
             fd = root.open_object(parent, parts[-1], path, existing)
             try:
@@ -743,22 +764,112 @@ def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: i
         root.report(f"install {path}")
         if root.preview:
             return
-        temporary = f".{parts[-1]}.switchyard-{os.getpid()}"
+        temporary = f".{parts[-1]}.switchyard-{os.urandom(6).hex()}"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
                      dir_fd=parent)
         try:
             os.fchown(fd, uid, gid)
             os.fchmod(fd, mode)
-            os.write(fd, content)
+            view = memoryview(content)
+            while view:
+                view = view[os.write(fd, view):]
             os.fsync(fd)
-        except BaseException:
             os.close(fd)
-            os.unlink(temporary, dir_fd=parent)
+            fd = -1
+            os.rename(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(temporary, dir_fd=parent)
+            except FileNotFoundError:
+                pass
             raise
-        os.close(fd)
-        os.rename(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
     finally:
         os.close(parent)
+
+
+# -- in-process --------------------------------------------------------------
+
+
+# Root's own Python acting under a home it opens afresh for each call. Each
+# raises `Refused` for a link, a mount crossing or a swap anywhere below the
+# home, and `SystemExit` for a path that is not a normalised absolute path
+# inside it -- which is never normalised in.
+
+
+def _quiet(home: str) -> Root:
+    return Root(home, preview=False, report=lambda line: None)
+
+
+def write_file(home: str, path: str, content: bytes, *, uid: int, gid: int, mode: int | None = None,
+               parents: tuple[int, int, int] | None = None, parent_mode: int | None = None) -> None:
+    """Publish `content` at `path` whole (`replace_file`)."""
+    root = _quiet(home)
+    try:
+        replace_file(root, content, path, mode, uid, gid, parents=parents, parent_mode=parent_mode)
+    finally:
+        root.close()
+
+
+def read_file(home: str, path: str) -> bytes | None:
+    """The contents of the regular file at `path`, or None when nothing is there."""
+    root = _quiet(home)
+    try:
+        found = root.leaf(root.relative(path))
+        if found is None:
+            return None
+        parent, fd, display, status = found
+        try:
+            if not stat.S_ISREG(status.st_mode):
+                raise Refused(display, "is not a regular file")
+            chunks = []
+            while chunk := os.read(fd, 1 << 16):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+            os.close(parent)
+    finally:
+        root.close()
+
+
+def open_file(home: str, path: str, *, uid: int, gid: int, mode: int,
+              parents: tuple[int, int, int] | None = None) -> int:
+    """A descriptor on the regular file at `path`, made (uid:gid, `mode`) when it is missing -- for a lock.
+
+    Made with O_EXCL in the held parent, so it is root's own new file; found,
+    it is opened bound to what was observed there. Never through a link.
+    """
+    root = _quiet(home)
+    try:
+        parts = root.relative(path)
+        if not parts:
+            raise SystemExit("tenant_paths: the home itself is not a file")
+        parent = root.walk(parts[:-1], create=parents)
+        if parent is None:
+            raise Refused(str(PurePosixPath(path).parent), "does not exist")
+        try:
+            try:
+                fd = os.open(parts[-1], os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode,
+                             dir_fd=parent)
+            except FileExistsError:
+                status = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISDIR(status.st_mode):
+                    raise Refused(path, "is not a regular file") from None
+                return root.open_object(parent, parts[-1], path, status)
+            try:
+                os.fchown(fd, uid, gid)
+                os.fchmod(fd, mode)
+            except BaseException:
+                os.close(fd)
+                raise
+            return fd
+        finally:
+            os.close(parent)
+    finally:
+        root.close()
 
 
 # -- command line -----------------------------------------------------------

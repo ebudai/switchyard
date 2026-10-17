@@ -503,6 +503,12 @@ def test_a_desktop_project_is_granted_installed_and_verified_before_its_first_ro
                 )
             )
             stack.enter_context(patch.object(mod.os, "geteuid", return_value=0))
+            # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608):
+            # here, the scratch root that holds the project.
+            from scripts import owner_writes
+            real_owner_home = owner_writes.owner_home
+            stack.enter_context(patch.object(owner_writes, 'owner_home',
+                side_effect=lambda name: str(root) if name == TENANT else real_owner_home(name)))
             for name in [
                 "_precheck_project_path_before_mutating", "precheck_new_project",
                 "_chown_switchyard_project_files", "_install_switchyard_onboarding_docs",

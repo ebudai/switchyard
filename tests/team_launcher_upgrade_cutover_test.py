@@ -17,6 +17,10 @@ import tempfile
 from pathlib import Path
 
 from team_launcher_test_helpers import *
+from scripts import owner_writes  # noqa: E402
+
+#: The shipped anchor for root's writes for an owner; a fixture's own stands in only when nothing else has.
+SHIPPED_OWNER_HOME = owner_writes.owner_home
 
 
 class _RunningTenant:
@@ -29,6 +33,7 @@ class _RunningTenant:
 
     def __init__(self, config_path: Path, *, account_uid: int):
         payload = json.loads(config_path.read_text(encoding="utf-8"))
+        self.config_path, self.owner = config_path, payload.get("run_as_user")
         self.targets = [role["target"] for role in payload["roles"]]
         self.sessions = {role["tmux_session"] for role in payload["roles"]}
         self.commands = {role["target"]: role["live_commands"][0] for role in payload["roles"]}
@@ -95,6 +100,12 @@ class _RunningTenant:
         return call
 
     def __enter__(self):
+        self._owner_home = owner_writes.owner_home
+        if self._owner_home is SHIPPED_OWNER_HOME:
+            # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608):
+            # this tenant's owner keeps its project in the fixture's directory, so that is its home for them.
+            owner_writes.owner_home = (
+                lambda user: str(self.config_path.parent) if user == self.owner else self._owner_home(user))
         self._uid = team_launcher.uid_for_user
         self._launch = team_launcher.launch_project
         self._stop = team_launcher.stop_project
@@ -129,6 +140,7 @@ class _RunningTenant:
         return self
 
     def __exit__(self, *_exc):
+        owner_writes.owner_home = self._owner_home
         team_launcher.uid_for_user = self._uid
         team_launcher.launch_project = self._launch
         team_launcher.stop_project = self._stop
@@ -354,10 +366,17 @@ def _upgrade(
     original_exists = team_launcher.local_account_exists
     original_migrate = team_launcher.migrate_declarative_director_onboarding
     original_opener = team_launcher._open_board_url
+    original_owner_home = owner_writes.owner_home
     migrations: list[str] = []
     try:
         team_launcher._open_board_url = board or _unreachable_board
         team_launcher.os.geteuid = (lambda: 0) if as_root else original_euid
+        if as_root and original_owner_home is SHIPPED_OWNER_HOME:
+            # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608):
+            # this tenant's owner keeps its project in the fixture's directory, so that is its home for them.
+            owner = json.loads(config_path.read_text(encoding="utf-8")).get("run_as_user")
+            owner_writes.owner_home = (
+                lambda user: str(config_path.parent) if user == owner else original_owner_home(user))
         team_launcher.local_account_exists = lambda account: account in known
         team_launcher.migrate_declarative_director_onboarding = (
             lambda config, **kwargs: migrations.append(config.project) or True
@@ -380,6 +399,7 @@ def _upgrade(
         team_launcher.local_account_exists = original_exists
         team_launcher.migrate_declarative_director_onboarding = original_migrate
         team_launcher._open_board_url = original_opener
+        owner_writes.owner_home = original_owner_home
     return result, "\n".join(printed), migrations
 
 

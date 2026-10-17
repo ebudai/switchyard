@@ -51,7 +51,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
-
+import owner_home_sandbox  # noqa: E402,F401 -- for its effect too: root's writes for this account's tenants (SYRD-608)
 from ticket_board_pane_env import (
     TICKET_BOARD_PANE_ENV_KEYS,
     candidate_live_pane_session_paths,

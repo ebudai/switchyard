@@ -54,7 +54,8 @@ CHECKS = 0
 MOVED = ('_write_json_atomic', '_ensure_private_dir', '_write_private_json_atomic')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
-    '_write_private_json_atomic': {'_ensure_private_dir': 1},
+    '_write_json_atomic': {'root_writes_for': 1, 'write_owner_file': 1},
+    '_write_private_json_atomic': {'_ensure_private_dir': 1, 'root_writes_for': 1, 'write_owner_file': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside the three that names them, and how often.
 DISPATCH = {}
@@ -62,19 +63,23 @@ DISPATCH = {}
 # SYRD-558: role_runtime's tenant-projection writer moved to scripts/runtime_projection.py.
 READERS = {'scripts/agy_credential.py': {'launcher._write_json_atomic': 1}, 'scripts/desktop_approval.py': {'launcher._write_json_atomic': 1}, 'scripts/desktop_layout_writer.py': {'launcher._write_private_json_atomic': 1}, 'scripts/generated_layout_upgrade.py': {'launcher._write_json_atomic': 1}, 'scripts/legacy_presentation.py': {'launcher._write_json_atomic': 1}, 'scripts/live_role_runtime.py': {'launcher._write_json_atomic': 1}, 'scripts/model_validation.py': {'launcher._write_json_atomic': 1}, 'scripts/new_project_artifacts.py': {'launcher._write_json_atomic': 3}, 'scripts/new_project_command.py': {'launcher._write_json_atomic': 1}, 'scripts/new_project_phases.py': {'launcher._write_json_atomic': 1}, 'scripts/new_project_support.py': {'launcher._write_json_atomic': 1}, 'scripts/presentation_controller.py': {'team_launcher._write_private_json_atomic': 1}, 'scripts/project_design_command.py': {'launcher._write_json_atomic': 1}, 'scripts/project_desktop.py': {'launcher._write_json_atomic': 2}, 'scripts/project_role_add.py': {'launcher._write_json_atomic': 3}, 'scripts/project_vcs_close_role.py': {'launcher._write_json_atomic': 1}, 'scripts/provider_resume.py': {'launcher._ensure_private_dir': 1}, 'scripts/provider_runtime_state.py': {'launcher._write_json_atomic': 1}, 'scripts/release_rollback.py': {'launcher._write_private_json_atomic': 1}, 'scripts/role_identity_cutover.py': {'launcher._write_json_atomic': 1, 'launcher._write_private_json_atomic': 1}, 'scripts/role_runtime.py': {'team_launcher._write_private_json_atomic': 1}, 'scripts/role_sessions.py': {'launcher._write_private_json_atomic': 1}, 'scripts/role_visibility.py': {'launcher._write_json_atomic': 1}, 'scripts/session_paths.py': {'launcher._write_json_atomic': 1}, 'scripts/session_records.py': {'launcher._ensure_private_dir': 2, 'launcher._write_private_json_atomic': 1}, 'scripts/tenant_release_root.py': {'launcher._write_private_json_atomic': 1}, 'scripts/upstream_report.py': {'launcher._write_json_atomic': 1}}
 #: The BASELINE's own behaviour for the cases below (`gold457.py`, run on the baseline launcher under the guard).
+#: SYRD-608: the seven owner labels are the baseline's, translated mechanically (`translate608a.py`): a writer given an
+#: owner first asks the launcher's `root_writes_for`; as root it hands exactly the baseline's JSON text to the
+#: launcher's `write_owner_file` (recorded here, tested on descriptors by owner_file_writes_test) and touches nothing by
+#: path; an unserialisable payload raises before anything is handed over.
 GOLDEN = {
     'json: a new file': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "a": [\n    1,\n    2\n  ],\n  "b": 1,\n  "\\u00e9": "\\u00fc"\n}\n']], 'calls': []},
     'json: a missing parent made': {'result': None, 'tree': [['deep', 'dir', '0o755'], ['deep/er', 'dir', '0o755'], ['deep/er/state.json', 'file', '0o600', '{\n  "x": 1\n}\n']], 'calls': []},
     'json: an existing file replaced, its mode not kept': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "x": 2\n}\n']], 'calls': []},
-    'json: an owner, not root, a new file': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "x": 3\n}\n']], 'calls': [['os.fchmod', ['0o600'], {}]]},
-    'json: an owner, not root, the existing mode kept': {'result': None, 'tree': [['state.json', 'file', '0o640', '{\n  "x": 4\n}\n']], 'calls': [['os.fchmod', ['0o640'], {}]]},
-    'json: an owner, root': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "x": 5\n}\n']], 'calls': [['pwd.getpwnam', ['p457-agent'], {}], ['os.fchown', [1457, 1458], {}], ['os.fchmod', ['0o600'], {}]]},
-    'json: an owner, root, the existing mode kept': {'result': None, 'tree': [['state.json', 'file', '0o660', '{\n  "x": 6\n}\n']], 'calls': [['pwd.getpwnam', ['p457-agent'], {}], ['os.fchown', [1457, 1458], {}], ['os.fchmod', ['0o660'], {}]]},
+    'json: an owner, not root, a new file': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "x": 3\n}\n']], 'calls': [['root_writes_for', ['p457-agent'], {}], ['os.fchmod', ['0o600'], {}]]},
+    'json: an owner, not root, the existing mode kept': {'result': None, 'tree': [['state.json', 'file', '0o640', '{\n  "x": 4\n}\n']], 'calls': [['root_writes_for', ['p457-agent'], {}], ['os.fchmod', ['0o640'], {}]]},
+    'json: an owner, root': {'result': None, 'tree': [], 'calls': [['root_writes_for', ['p457-agent'], {}], ['write_owner_file', ['p457-agent', 'PATH TMP/state.json', '{\n  "x": 5\n}\n'], {}]]},
+    'json: an owner, root, the existing mode kept': {'result': None, 'tree': [['state.json', 'file', '0o660', '{"old": true}\n']], 'calls': [['root_writes_for', ['p457-agent'], {}], ['write_owner_file', ['p457-agent', 'PATH TMP/state.json', '{\n  "x": 6\n}\n'], {}]]},
     'json: root without an owner': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "x": 7\n}\n']], 'calls': []},
-    'json: an owner that does not exist, root': {'result': {'raised': 'KeyError', 'message': '"getpwnam(): name not found: \'nobody457\'"'}, 'tree': [], 'calls': [['pwd.getpwnam', ['nobody457'], {}]]},
+    'json: an owner that does not exist, root': {'result': None, 'tree': [], 'calls': [['root_writes_for', ['nobody457'], {}], ['write_owner_file', ['nobody457', 'PATH TMP/state.json', '{\n  "x": 8\n}\n'], {}]]},
     'json: a payload that cannot be written': {'result': {'raised': 'TypeError', 'message': 'Object of type object is not JSON serializable'}, 'tree': [['state.json', 'file', '0o644', '{"old": true}\n']], 'calls': []},
-    'json: a payload that cannot be written, an owner': {'result': {'raised': 'TypeError', 'message': 'Object of type object is not JSON serializable'}, 'tree': [], 'calls': [['pwd.getpwnam', ['p457-agent'], {}]]},
-    'json: the target a symlink': {'result': None, 'tree': [['real.json', 'file', '0o640', '{"real": true}\n'], ['state.json', 'file', '0o640', '{\n  "x": 9\n}\n']], 'calls': [['os.fchmod', ['0o640'], {}]]},
+    'json: a payload that cannot be written, an owner': {'result': {'raised': 'TypeError', 'message': 'Object of type object is not JSON serializable'}, 'tree': [], 'calls': [['root_writes_for', ['p457-agent'], {}]]},
+    'json: the target a symlink': {'result': None, 'tree': [['real.json', 'file', '0o640', '{"real": true}\n'], ['state.json', 'file', '0o640', '{\n  "x": 9\n}\n']], 'calls': [['root_writes_for', ['p457-agent'], {}], ['os.fchmod', ['0o640'], {}]]},
     'json: the target a dangling symlink': {'result': None, 'tree': [['state.json', 'file', '0o600', '{\n  "x": 10\n}\n']], 'calls': []},
     'private dir: new and nested': {'result': None, 'tree': [['priv', 'dir', '0o755'], ['priv/nested', 'dir', '0o700']], 'calls': []},
     'private dir: an existing open directory': {'result': None, 'tree': [['open', 'dir', '0o700']], 'calls': []},
@@ -163,7 +168,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             out.append(entry)
         return out
 
-    saved = {n: getattr(t, n) for n in FUNCTIONS}
+    saved = {n: getattr(t, n) for n in (*FUNCTIONS, "root_writes_for", "write_owner_file")}
     saved_os = {n: getattr(os, n) for n in ("geteuid", "fchown", "fchmod", "chmod")}
     saved_getpwnam, saved_umask = pwd.getpwnam, os.umask(0o022)
     try:
@@ -201,6 +206,9 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
                     raise PermissionError(1, "Operation not permitted", str(path))
                 return saved_os["chmod"](path, mode, *args, **kwargs)
             os.chmod = chmod
+        # SYRD-608: root writing for an owner goes to the descriptor writer, stood in as a recorder.
+        t.root_writes_for = lambda owner: note("root_writes_for", owner) or (bool(owner) and uid == 0)
+        t.write_owner_file = lambda owner, path, text, **kw: note("write_owner_file", owner, path, text, **kw)
         if spec.get("helper"):
             t._ensure_private_dir = lambda path: note("_ensure_private_dir", path) or (path.mkdir(parents=True, exist_ok=True))
         else:
@@ -444,20 +452,21 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and tree("json: an existing file replaced, its mode not kept") == [["state.json", "file", "0o600", '{\n  "x": 2\n}\n']]
           and calls("json: a new file") == calls("json: an existing file replaced, its mode not kept") == calls("json: root without an owner") == [],
           "without an owner: the parents made, the temporary file's 0600 published, no owner or mode call, even as root")
-    check(calls("json: an owner, not root, a new file") == ["os.fchmod"] and GOLDEN["json: an owner, not root, a new file"]["calls"][0][1] == ["0o600"]
+    check(calls("json: an owner, not root, a new file") == ["root_writes_for", "os.fchmod"]
+          and GOLDEN["json: an owner, not root, a new file"]["calls"][1][1] == ["0o600"]
           and tree("json: an owner, not root, the existing mode kept")[0][2] == "0o640"
-          and GOLDEN["json: an owner, not root, the existing mode kept"]["calls"][0][1] == ["0o640"],
+          and GOLDEN["json: an owner, not root, the existing mode kept"]["calls"][1][1] == ["0o640"],
           "an owner, not root: no lookup and no chown; the existing file's mode (else 0600) set on the open temporary file")
-    check(GOLDEN["json: an owner, root"]["calls"] == [["pwd.getpwnam", ["p457-agent"], {}], ["os.fchown", [1457, 1458], {}], ["os.fchmod", ["0o600"], {}]]
-          and tree("json: an owner, root, the existing mode kept")[0][2] == "0o660" and calls("json: an owner, root, the existing mode kept")[-1] == "os.fchmod",
-          "an owner, as root: looked up first, then the owner and then the mode set on the open temporary file, before it is published")
-    check(result("json: an owner that does not exist, root")["raised"] == "KeyError" and tree("json: an owner that does not exist, root") == []
-          and calls("json: an owner that does not exist, root") == ["pwd.getpwnam"],
-          "an unknown owner, as root, is refused before anything is written")
+    check(GOLDEN["json: an owner, root"]["calls"] == [["root_writes_for", ["p457-agent"], {}],
+                                                      ["write_owner_file", ["p457-agent", "PATH TMP/state.json", '{\n  "x": 5\n}\n'], {}]]
+          and tree("json: an owner, root") == [] and tree("json: an owner, root, the existing mode kept")[0][3] == '{"old": true}\n'
+          and calls("json: an owner that does not exist, root") == ["root_writes_for", "write_owner_file"],
+          "an owner, as root (SYRD-608): the same JSON text handed to the launcher's descriptor writer, nothing done by path")
     check(result("json: a payload that cannot be written") == TYPE == result("json: a payload that cannot be written, an owner")
           and tree("json: a payload that cannot be written") == [["state.json", "file", "0o644", '{"old": true}\n']]
-          and tree("json: a payload that cannot be written, an owner") == [] and calls("json: a payload that cannot be written, an owner") == ["pwd.getpwnam"],
-          "a payload that cannot be written leaves the target as it was, and no temporary file; no owner or mode is set")
+          and tree("json: a payload that cannot be written, an owner") == []
+          and calls("json: a payload that cannot be written, an owner") == ["root_writes_for"],
+          "a payload that cannot be written leaves the target as it was, and no temporary file; nothing is handed over")
     check(tree("json: the target a symlink") == [["real.json", "file", "0o640", '{"real": true}\n'], ["state.json", "file", "0o640", '{\n  "x": 9\n}\n']]
           and tree("json: the target a dangling symlink") == [["state.json", "file", "0o600", '{\n  "x": 10\n}\n']],
           "a symlinked target is replaced by a regular file, its link target untouched; an owner's mode is read through the link")
@@ -483,7 +492,8 @@ def test_the_rules_hold_in_the_measured_record() -> None:
 def test_every_launcher_seam_is_reached() -> None:
     # The one name the three read on the launcher, the private-directory helper, is a recorder there.
     names = {name for reads in SEAMS.values() for name in reads}
-    check(names == {"_ensure_private_dir"} and names <= REACHED, f"a recorder on the launcher reached every function: missing {sorted(names - REACHED)}")
+    check(names == {"_ensure_private_dir", "root_writes_for", "write_owner_file"} and names <= REACHED,
+          f"a recorder on the launcher reached every function: missing {sorted(names - REACHED)}")
 
 
 STRUCTURE = ("test_the_module_loads_only_where_its_defaults_come_from", "test_either_import_order_gives_one_set_of_objects_and_no_defaults",

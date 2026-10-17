@@ -8,6 +8,13 @@ runs the same argv for a named owner. `_path_owner_label` and `_path_owner_ids`
 read a path's owner without following a final symlink (`lstat`), as a
 `user:group` label and as ids.
 
+The handoff no longer touches the path by name (SYRD-608): a tenant leaves
+links in its own tree, and `chown o:o PATH` follows one at the name, so a
+planted link had root give the tenant any file on the host. Both handoffs run
+`owner_handoff_args` (`scripts/owner_writes.py`, read through the launcher):
+`scripts/tenant_paths.py attrs` rooted at the owner's home, every component
+opened without following a link, and a path outside the home refused.
+
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-461). The launcher
 imports this module and re-exports all five, so every module that reads them
 through the launcher still reaches the launcher's names. What they read of the
@@ -54,9 +61,11 @@ def _path_owner_ids(path: Path) -> tuple[int, int] | None:
 
 
 def chown_owner_file_args(config: ProjectConfig, path: Path) -> list[str]:
+    from scripts import team_launcher as launcher
+
     if not config.run_as_user:
         raise ValueError("file ownership repair requires run_as_user")
-    return ["chown", f"{config.run_as_user}:{config.run_as_user}", str(path)]
+    return launcher.owner_handoff_args(config.run_as_user, path)
 
 
 def ensure_owner_file(
@@ -81,6 +90,12 @@ def _chown_project_file(
     path: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
-    result = runner(["chown", f"{owner_user}:{owner_user}", str(path)])
+    from scripts import team_launcher as launcher
+
+    try:
+        argv = launcher.owner_handoff_args(owner_user, path)
+    except ValueError:
+        raise SystemExit(f"switchyard: failed to assign {path} to {owner_user}: there is no owner") from None
+    result = runner(argv)
     if result.returncode != 0:
         raise SystemExit(f"switchyard: failed to assign {path} to {owner_user}")

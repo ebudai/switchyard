@@ -141,6 +141,11 @@ def new_project_command(
         include_audit = True
         audit_roles = ("audit",)
         board_service_traversal = True
+    # The project directory this command was handed is root's own choice of where the owner's project lives: root's
+    # writes for the owner go there by descriptor, while it is a real directory the owner owns (SYRD-608).
+    from scripts import owner_writes
+
+    owner_writes.trust_project_root(effective_owner, effective_repository)
     if worktree_policy not in launcher.WORKTREE_POLICIES:
         raise SystemExit(f"team-launcher: worktree policy must be one of {sorted(launcher.WORKTREE_POLICIES)}")
     plan = launcher.build_plan(

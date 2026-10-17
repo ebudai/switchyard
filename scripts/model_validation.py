@@ -610,7 +610,7 @@ def record_role_model(
     """
     from scripts import team_launcher as launcher
 
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw = launcher.read_owner_json(config.run_as_user, config_path)
     roles = raw.get("roles")
     if not isinstance(roles, list):
         raise SystemExit(f"switchyard: {config_path} must define a roles list")
@@ -622,7 +622,7 @@ def record_role_model(
             break
     else:
         raise SystemExit(f"switchyard: {config_path} has no role {role_name!r}")
-    launcher._write_json_atomic(config_path, raw)
+    launcher._write_json_atomic(config_path, raw, owner_user=config.run_as_user)
     launcher.ensure_owner_file(config, config_path, runner=runner)
     return launcher.load_project_config(config.project, config_path)
 

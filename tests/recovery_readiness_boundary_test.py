@@ -145,8 +145,10 @@ def test_the_seams_the_local_import_and_the_defaults() -> None:
         bare = sorted({n.id for n in ast.walk(f) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in every})
         check(through == SEAMS.get(f.name, {}) and not bare, f"{f.name}: exactly its call-time reads, none bare: {through} {bare}")
     locals_ = [ast.unparse(n) for f in functions for n in ast.walk(f) if isinstance(n, ast.ImportFrom) and n.module != "scripts"]
-    check(locals_ == ["from scripts.ticket_board.project_provision import roles_group_name, tenant_control_repository, tenant_worktree_base"],
-          f"the provisioning path helpers still imported where they are used: {locals_}")
+    check(locals_ == ["from scripts.commit_store_access import OperatorDependency",
+                      "from scripts.ticket_board.project_provision import roles_group_name, tenant_control_repository, tenant_worktree_base",
+                      "from scripts.commit_store_access import commit_store_problems"],
+          f"the provisioning path helpers, and the SYRD-604 commit-store check, imported where they are used: {locals_}")
 
     from scripts import provider_runtime_state, recovery_readiness as m, team_launcher
 

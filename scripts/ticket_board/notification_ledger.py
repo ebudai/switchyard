@@ -78,7 +78,9 @@ SELECT ticket_board.record_notification_trace(
                     pane_state,
                     busy_reason,
                     region_digest,
-                    json.dumps(detail or {}, sort_keys=True),
+                    # Raw text, not \u escapes: a board whose database is SQL_ASCII cannot translate those, and a
+                    # message with one character outside ASCII lost its whole trace (SYRD-595).
+                    json.dumps(detail or {}, sort_keys=True, ensure_ascii=False),
                 ),
             )
         except Exception as exc:  # Trace failures must not wedge delivery.
@@ -142,6 +144,7 @@ SELECT ticket_board.record_notification_trace(
                         **({"error_output": error_output[-1000:]} if error_output else {}),
                     },
                     sort_keys=True,
+                    ensure_ascii=False,
                 ),
             ),
         )

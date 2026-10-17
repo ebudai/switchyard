@@ -122,6 +122,9 @@ notification_candidates AS (
         unconfirmed.last_unconfirmed_at AS active_work_delivery_unconfirmed_at,
         unconfirmed.unconfirmed_reason AS active_work_delivery_unconfirmed_reason
     FROM notification_scope
+    -- The owner's live runtime registration: a send before it reached a provider
+    -- that has since been replaced, not the one running now (SYRD-595).
+    LEFT JOIN ticket_board.role_runtime_assignments live ON live.role = notification_scope.owner_role
     LEFT JOIN LATERAL (
         SELECT max(trace.ts) AS last_sent_at
         FROM ticket_board.notification_trace trace
@@ -137,6 +140,7 @@ notification_candidates AS (
           -- not bounded rather than hidden.
           AND (notification_scope.entered_current_state_at IS NULL
                OR trace.ts >= notification_scope.entered_current_state_at)
+          AND (live.registered_at IS NULL OR trace.ts >= live.registered_at)
     ) sent ON true
     -- The notice that has NOT been delivered, if there is one: acknowledged
     -- notices are deleted, so a remaining row for this owner and this stage is
@@ -160,13 +164,18 @@ notification_candidates AS (
     -- turn afterwards, or there was no hook record to read. Not a send, so it
     -- cannot read as delivered -- which is how MEFP-1's Final Sign-Off notice
     -- was reported (SYRD-268). The latest one, with the listener's reason.
+    -- A send that reached only a runtime since replaced is the same: nothing says
+    -- the provider running now has it (SYRD-595).
     LEFT JOIN LATERAL (
-        SELECT trace.ts AS last_unconfirmed_at, trace.busy_reason AS unconfirmed_reason
+        SELECT trace.ts AS last_unconfirmed_at,
+               CASE WHEN trace.event = 'send' THEN 'sent_to_retired_runtime' ELSE trace.busy_reason END
+                   AS unconfirmed_reason
         FROM ticket_board.notification_trace trace
         WHERE trace.ticket_id = notification_scope.id
           AND trace.target_role = notification_scope.owner_role
           AND trace.kind = 'transition'
-          AND trace.event = 'send_unconfirmed'
+          AND (trace.event = 'send_unconfirmed'
+               OR (trace.event = 'send' AND trace.ts < live.registered_at))
           AND trace.ticket_state_at_event = notification_scope.state
           AND (notification_scope.entered_current_state_at IS NULL
                OR trace.ts >= notification_scope.entered_current_state_at)

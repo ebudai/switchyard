@@ -295,4 +295,14 @@ REVOKE EXECUTE ON FUNCTION ticket_board.provider_capacity_retry_is_current(jsonb
 GRANT EXECUTE ON FUNCTION ticket_board.note_provider_capacity(jsonb, double precision[], timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.provider_capacity_retry_is_current(jsonb) TO ticket_board_listener;
 
+-- SYRD-595: role stall episodes; the listener reports, the board decides.
+REVOKE ALL ON ticket_board.role_stall_episodes FROM PUBLIC;
+GRANT SELECT ON ticket_board.role_stall_episodes TO ticket_board_service;
+REVOKE EXECUTE ON FUNCTION ticket_board.close_role_stall(bigint, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.role_generation_at(text, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) TO ticket_board_listener;
+GRANT EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) TO ticket_board_listener;
+
 COMMIT;

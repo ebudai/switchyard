@@ -161,6 +161,14 @@ def run_probe(nl: object) -> int:
     conn=Conn(ticket=(b'in_progress',b'main',False,False,False))
     out.append(['decoder patched late',owner._current_ticket_state(conn,'SYRD-1')])
     l._decode_text=original_decoder
+    # SYRD-595: the delivery check's one look at whether the board has stall episodes yet, asked once and
+    # cached. This probe's connection answers none, so every decision and every other call is as before.
+    stall_looks=0
+    for row in out:
+     if len(row)>2 and isinstance(row[2],list):
+      kept=[c for c in row[2] if not (isinstance(c,list) and c and "to_regprocedure('ticket_board.note_role_stall" in str(c[0]))]
+      stall_looks+=len(row[2])-len(kept); row[2][:]=kept
+    assert stall_looks == 1, stall_looks
     raw=json.dumps(out,sort_keys=True,default=str,separators=(',',':'))
     assert len(out) == 56
     assert hashlib.sha256(raw.encode()).hexdigest() == GOLDEN

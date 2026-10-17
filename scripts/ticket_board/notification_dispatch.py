@@ -261,7 +261,21 @@ class NotificationDispatch:
             "composer_changed": composer_changed,
             "suspected_clobber": suspected_clobber,
             "directorctl": directorctl_diagnostic or {},
+            # SYRD-595: the provider conversation it was typed into, when the pane's hook recorded one, so a
+            # provider that resumes that very conversation is not handed the ticket again.
+            **({"provider_session": session} if (session := self._provider_session(target)) else {}),
         }
+
+    def _provider_session(self, target: str) -> str | None:
+        """The session id of the pane's latest SessionStart, as its hook recorded it; None if unknown."""
+        store = getattr(getattr(self.activity_gate(), "__self__", None), "state_store", None)
+        try:
+            state = store.read(target) if store is not None else None
+        except Exception:  # a diagnostic: never the reason a send fails
+            return None
+        start = getattr(state, "last_session_start", None)
+        session = start.get("session_id") if isinstance(start, dict) else None
+        return str(session) if session else None
 
     def _park_if_unsubmitted(self, conn: Any, gate: Any, before: str | None, *, notification_id: int, ticket_id: str,
                              target_role: str, kind: str, target: str, sent_at: float, reason: str,

@@ -27,14 +27,35 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-def turnless_roles(gate: Any) -> dict[str, str]:
-    """Each role whose provider is idle and has begun no turn since it started, with when it started."""
-    roles: dict[str, str] = {}
+def turnless_roles(gate: Any) -> dict[str, Any]:
+    """Each role whose provider is idle and has begun no turn since it started, with when it started.
+
+    With the conversation it holds, when its hook recorded one (SYRD-595): a provider that resumed the very
+    conversation the ticket was typed into already has it.
+    """
+    roles: dict[str, Any] = {}
     for role, target in sorted(gate.role_targets.items()):
         started = gate.turnless_since(target)
         if started is not None:
-            roles[role] = datetime.fromtimestamp(started, timezone.utc).isoformat()
+            at = datetime.fromtimestamp(started, timezone.utc).isoformat()
+            session = _session(gate, target, started)
+            roles[role] = {"started": at, "session": session} if session else at
     return roles
+
+
+def _session(gate: Any, target: str, started: float) -> str | None:
+    """The session this provider announced since it started; an older record carried forward is not its own."""
+    try:
+        start = getattr(gate.state_store.read(target), "last_session_start", None)
+    except (OSError, AttributeError):
+        return None
+    if not isinstance(start, dict) or not start.get("session_id"):
+        return None
+    try:
+        announced = float(start.get("at"))
+    except (TypeError, ValueError):
+        return None
+    return str(start["session_id"]) if announced >= started else None
 
 
 def run(listener: Any, conn: Any) -> int:

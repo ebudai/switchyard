@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable
 
-from . import reminder_snooze
+from . import reminder_snooze, stall_episode
 
 TERMINAL_STATES = {"done", "cancelled"}
 NUDGE_ELIGIBLE_STATES = {"in_progress", "inspection", "audit", "dat", "director_review", "analysis", "backlog"}
@@ -364,6 +364,11 @@ WHERE id = %s
                 return False
             if kind == "provider_capacity":
                 return target_role == "director"
+        # SYRD-595: one recipient per stall. An open episode decides who may be told: the owner while it is
+        # being prompted, the Director once it was escalated, and then only by the escalation itself.
+        if kind in stall_episode.NOTICE_KINDS and not stall_episode.notice_is_current(
+                self, conn, ticket_id, target_role, payload):
+            return False
         terminal_states = {stage["name"] for stage in self.workflow["stages"] if stage["terminal"]} if getattr(self,"workflow",None) else TERMINAL_STATES
         if current_state in terminal_states:
             return (
@@ -400,13 +405,15 @@ WHERE id = %s
         # same question, so the two cannot disagree. Dropping the stale row
         # loses nothing: once the hold is lifted, the next unresolved turn
         # is prompted afresh.
-        if kind in UNRESOLVED_TURN_KINDS:
+        if kind in UNRESOLVED_TURN_KINDS or kind == "stall_escalation":
             resolved = conn.execute(
                 "SELECT ticket_board.ticket_turn_is_resolved(%s, clock_timestamp()) AS resolved",
                 (ticket_id,),
             ).fetchone()
             if bool(resolved["resolved"] if isinstance(resolved, dict) else resolved[0]):
                 return False
+        if kind == "stall_escalation":  # SYRD-595: the Director's one message about a stall
+            return target_role == "director"
         # SYRD-514: an escalation queued in an earlier round (before a
         # submission and return, or a reassignment away and back) matches the
         # current state and assignee again, so the checks above keep it. The

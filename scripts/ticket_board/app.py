@@ -1145,7 +1145,7 @@ ORDER BY rank;
         Ops's work while its one notice sat dead-lettered (SYRD-264). This says
         which of the three it is, from the durable records:
 
-        * ``delivered`` -- a send is traced for this owner at this stage;
+        * ``delivered`` -- a send is traced for this owner at this stage, since its live runtime registered;
         * ``failed`` -- the notice was dead-lettered, with its reason;
         * ``pending`` -- the notice is queued and has not been delivered yet,
           with the last error, if a send has been tried and failed;

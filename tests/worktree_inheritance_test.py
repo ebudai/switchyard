@@ -101,18 +101,16 @@ def test_the_boundary_phase_closes_what_does_not_exist_yet() -> None:
     check(not problem, f"the phase still parses: {problem}")
     joined = "\n".join(phase)
     base = "/home/switchyard-agent/syrd-worktrees"
-    check(
-        f"sudo setfacl -m '{INHERITED_WORKTREE_CLOSURE}' '{base}'" in joined,
-        f"the base is given an inherited closure: {joined}",
+    # Through the no-follow helper (SYRD-605): the closure is an ACL change on the base, rooted at the home.
+    closure = (
+        'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" '
+        f"'--root' '/home/switchyard-agent' 'acl' '--modify' '{INHERITED_WORKTREE_CLOSURE}' '--if-exists' '{base}'"
     )
-    # Inside the same guard as the sweep: a partial run must not die on a base
-    # that has not been made yet, and both lines are about the same directory.
-    statements = [s for s in repository_boundary_statements(phase) if any("setfacl -m 'd:" in l for l in s)]
-    check(len(statements) == 1, f"one statement carries it: {statements}")
-    check(
-        statements[0][0].strip().startswith("if [ -d ") and statements[0][-1].strip() == "fi",
-        f"and it is guarded on the base existing: {statements[0]}",
-    )
+    check(closure in phase, f"the base is given an inherited closure: {joined}")
+    # Skipped, not failed, when the base does not exist yet -- what the shell
+    # `[ -d ]` guard used to do, now done by the helper on its own descriptor.
+    statements = [s for s in repository_boundary_statements(phase) if any(INHERITED_WORKTREE_CLOSURE in l for l in s)]
+    check(len(statements) == 1 and statements[0] == [closure], f"one statement carries it, on its own line: {statements}")
 
 
 def test_the_closure_grants_nobody_anything_new() -> None:
@@ -146,7 +144,9 @@ def apply_boundary(plan, *, sudo_stub: Path) -> None:
     """Run the packet's boundary phase, the way `repair-boundary` runs it."""
     phase, problem = repository_boundary_phase(render_operator_commands(plan))
     assert not problem, problem
-    environment = {**os.environ, "PATH": f"{sudo_stub}{os.pathsep}{os.environ['PATH']}"}
+    environment = {**os.environ, "PATH": f"{sudo_stub}{os.pathsep}{os.environ['PATH']}",
+                   # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+                   "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")}
     for statement in repository_boundary_statements(phase):
         done = subprocess.run(
             ["sh", "-c", "\n".join(statement)], env=environment, text=True, capture_output=True

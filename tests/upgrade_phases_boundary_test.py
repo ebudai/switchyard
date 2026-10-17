@@ -512,7 +512,7 @@ U5_LOCAL = [("scripts.ticket_board.project_provision", "owner_github_identity_co
             ("scripts.ticket_board.project_provision", "owner_github_key_path"),
             ("scripts.ticket_board.project_provision", "publication_uses_github"),
             ("scripts.ticket_board.project_provision", "resolve_owner_github_identity"),
-            ("scripts.ticket_board.publication_boundary", "resolve_pinned_remote")]
+            ("scripts.ticket_board.project_provision", "tenant_paths_definition"), ("scripts.ticket_board.publication_boundary", "resolve_pinned_remote")]
 OWNER_HOME = Path("/nonexistent/syrd347/owner-home")
 MIGRATION = Path("/nonexistent/syrd347/migration.sh")
 
@@ -762,7 +762,7 @@ def test_u5_root_provisions_the_identity_then_reads_it_back() -> None:
                                                                         comment=f"syrd347-owner switchyard {PROJECT}")),
               f"the selected key, host and alias, with the owner's comment: {commands}")
         run = next(e for e in ids.log if e[0] == "run")
-        check(run[1:] == (["sh", "-c", "set -eu\nsyrd347 cmd one\nsyrd347 cmd two"],
+        check(run[1:] == (["sh", "-c", f"set -eu\nswitchyard_tenant_paths='{ROOT / 'scripts' / 'tenant_paths.py'}'\nsyrd347 cmd one\nsyrd347 cmd two"],
                           dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)),
               f"run once, as a set -eu script: {run}")
         check("status" in ids.kinds(),

@@ -53,14 +53,17 @@ MOVED = ("TenantReleaseStatus", "tenant_release_deploy_command", "tenant_release
          "tenant_release_unit_install_command", "release_update_blocked", "_format_release_path", "report_tenant_release_upgrade",
          "OWNER_BOUNDARY_SCRIPT", "_owner_boundary_env_args", "capture_release_pointer", "deploy_release_in_transaction",
          "restore_release_pointer")
-LOCAL_IMPORTS = {"tenant_release_deploy_command": "from scripts.ticket_board.project_provision import readable_system_unit_path",
-                 "tenant_release_unit_install_command": "from scripts.ticket_board.project_provision import system_unit_proof_chain"}
+LOCAL_IMPORTS = {"tenant_release_deploy_command": ["from scripts.ticket_board.project_provision import readable_system_unit_path"],
+                 # SYRD-605: and the no-follow helper's argv, for the listener unit in the owner's home.
+                 "tenant_release_unit_install_command": ["from scripts.ticket_board.project_provision import system_unit_proof_chain",
+                                                        "from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv"]}
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
     'tenant_release_deploy_command': {'SWITCHYARD_RELEASE_MARKER_NAME': 1, '_owner_boundary_env_args': 2, '_quote_command': 2},
     'tenant_release_listener_command': {'_owner_boundary_env_args': 1, '_quote_command': 1},
     'recorded_rollout_command': {'_repo_root': 1, 'switchyard_shared_install_root': 1},
-    'tenant_release_unit_install_command': {'_quote_command': 5},
+    # SYRD-605: the listener's directories and its install are two helper lines where one install was.
+    'tenant_release_unit_install_command': {'_quote_command': 6},
     'report_tenant_release_upgrade': {'_format_release_path': 1, '_format_release_sha': 1, '_quote_command': 1, 'recorded_rollout_command': 3, 'release_update_blocked': 1, 'switchyard_privileged_provision_root': 1, 'tenant_release_deploy_command': 1, 'tenant_release_listener_command': 3, 'tenant_release_status': 1, 'tenant_release_unit_install_command': 1},
     '_owner_boundary_env_args': {'DEFAULT_PANE_BASE_PATH': 1, 'OWNER_BOUNDARY_SCRIPT': 1, '_owner_home_bin_dirs': 1, '_prepend_paths': 1},
     'capture_release_pointer': {'_tenant_board_root_from_config_or_plan': 1},
@@ -186,7 +189,7 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         expected = SEAMS.get(name, {})
         check(through == expected, f"{name}: each launcher name read through it exactly as often as before: {through}")
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
-        local = [LOCAL_IMPORTS[name]] if name in LOCAL_IMPORTS else []
+        local = LOCAL_IMPORTS.get(name, [])
         if expected:
             first = 1 if ast.get_docstring(node) is not None else 0
             check(imports == ["from scripts import team_launcher as launcher", *local] and ast.unparse(node.body[first]) == imports[0],
@@ -306,7 +309,12 @@ def test_the_unit_install_chain() -> None:
     expected = " && ".join([
         QUOTE(["sudo", "install", "-m", "0644", str(unit), "/etc/systemd/system/p379-ticket-board.service"]),
         QUOTE(["sudo", "install", "-m", "0644", "/nonexistent/priv/p379-ticket-board-canary.service", "/etc/systemd/system/p379-ticket-board-canary.service"]),
-        QUOTE(["sudo", "install", "-m", "0644", "-o", "p379-owner", "-g", "p379-owner", "/nonexistent/priv/p379-ticket-board-notify-listener.service",
+        # The owner's listener, through the no-follow helper of this release (SYRD-605): its directories, then the unit.
+        QUOTE(["sudo", sys.executable, "-I", str(ROOT / "scripts" / "tenant_paths.py"), "--root", "/nonexistent/home/p379 owner", "dir",
+               "--mode", "0755", "--owner", "p379-owner", "--group", "p379-owner", "/nonexistent/home/p379 owner/.config",
+               "/nonexistent/home/p379 owner/.config/systemd", "/nonexistent/home/p379 owner/.config/systemd/user"]),
+        QUOTE(["sudo", sys.executable, "-I", str(ROOT / "scripts" / "tenant_paths.py"), "--root", "/nonexistent/home/p379 owner", "install",
+               "--mode", "0644", "--owner", "p379-owner", "--group", "p379-owner", "/nonexistent/priv/p379-ticket-board-notify-listener.service",
                "/nonexistent/home/p379 owner/.config/systemd/user/p379-ticket-board-notify-listener.service"]),
         *system_unit_proof_chain("p379", QUOTE([str(unit)])),
         QUOTE(["sudo", "systemctl", "daemon-reload"])])

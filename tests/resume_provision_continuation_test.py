@@ -340,7 +340,8 @@ def privileged_cases() -> int:
         regenerated = (installed / "operator-commands.sh").read_text(encoding="utf-8")
         checkout = config_path.parent.parent.parent
         assert (
-            f"sudo install -d -m 0750 -o '{TENANT}' -g '{TENANT}' '{checkout}'" in regenerated
+            # Through the no-follow helper (SYRD-605), rooted at the tenant's home.
+            f"'dir' '--mode' '0750' '--owner' '{TENANT}' '--group' '{TENANT}' '{checkout}'" in regenerated
         ), regenerated[:600]
         assert "is not this tenant's tree to confine" not in regenerated, regenerated[:600]
         recorded_plan = json.loads((installed / "plan.json").read_text(encoding="utf-8"))

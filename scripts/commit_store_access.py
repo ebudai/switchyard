@@ -430,10 +430,9 @@ def grant_commands(closed: Sequence[Closed], roots: Sequence[str], principal: st
 def linked_components(path: str, root: str) -> list[str]:
     """Each component strictly below `root` on the way to `path` that is a link, without following any.
 
-    Root runs `install -d -o <tenant>` and `setfacl -R` on these paths, and
-    both act on what a link points at: a tenant who replaces its store, or
-    any other directory the phase names, with a link would have root re-own,
-    re-mode or grant whatever it chose (SYRD-604).
+    The boundary phase's grant is made through the no-follow helper, which
+    refuses a link on the way to the store (SYRD-605), so a store named
+    through one is not something the phase grants (SYRD-604).
     """
     if not _inside(root, path):
         return []
@@ -451,22 +450,6 @@ def linked_components(path: str, root: str) -> list[str]:
             linked.append(str(current))
             break
     return linked
-
-
-def linked_phase_paths(phase: Sequence[str], owner_home: str) -> list[str]:
-    """Every link on the path to anything inside the owner home that a boundary phase's lines name."""
-    found: list[str] = []
-    for line in phase:
-        try:
-            words = shlex.split(line)
-        except ValueError:
-            continue
-        for word in words:
-            if word.startswith("/"):
-                for link in linked_components(word.rstrip("/"), owner_home):
-                    if link not in found:
-                        found.append(link)
-    return found
 
 
 def phase_grants(plan: Any, store: str) -> Callable[[str], bool]:

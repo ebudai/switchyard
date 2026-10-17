@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+
 #: The markers around the identity selection this project manages. Everything
 #: between them is rewritten on every run; everything outside them is somebody
 #: else's and is preserved (SYRD-74).
@@ -315,20 +316,21 @@ def owner_github_identity_commands(
     config = f"{ssh_dir}/config"
     q_owner = provision.shell_quote(owner_user)
     q_key = provision.shell_quote(key)
-    q_dir = provision.shell_quote(ssh_dir)
-    q_config = provision.shell_quote(config)
     label = comment.strip() or f"{owner_user} switchyard"
     block = provision.github_identity_block(owner_home, key_name=key_name, host=host, host_alias=host_alias)
     return [
-        f"sudo install -d -m 0700 -o {q_owner} -g {q_owner} {q_dir}",
+        # Everything root changes under the owner's home goes through the
+        # no-follow helper: a key, a config or `.ssh` itself that the owner
+        # replaced with a link is refused, not followed (SYRD-605).
+        provision.directory_line(owner_home, "0700", owner_user, owner_user, ssh_dir),
         # Generated only when absent, and never printed. A second run finds it
         # and leaves it alone, which is what makes this safe to re-run.
         f"if [ ! -f {q_key} ]; then",
         f"    sudo -u {q_owner} ssh-keygen -t ed25519 -N '' -C {provision.shell_quote(label)} -f {q_key}",
         "fi",
-        f"sudo chown {q_owner}:{q_owner} {q_key} {q_key}.pub",
-        f"sudo chmod 0600 {q_key}",
-        f"sudo chmod 0644 {q_key}.pub",
+        provision.attrs_line(owner_home, key, f"{key}.pub", owner=owner_user, group=owner_user),
+        provision.attrs_line(owner_home, key, mode="0600"),
+        provision.attrs_line(owner_home, f"{key}.pub", mode="0644"),
         # The managed block replaces itself and preserves everything else, so an
         # operator's own stanzas survive an upgrade.
         # The managed block replaces itself and everything else is preserved,
@@ -349,8 +351,7 @@ def owner_github_identity_commands(
             'install -m 0600 "$tmp" "$config"; '
             'rm -f "$tmp"'
         ),
-        f"sudo chown {q_owner}:{q_owner} {q_config}",
-        f"sudo chmod 0600 {q_config}",
+        provision.attrs_line(owner_home, config, owner=owner_user, group=owner_user, mode="0600"),
     ]
 
 

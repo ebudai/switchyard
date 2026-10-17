@@ -86,9 +86,16 @@ def recovery_readiness_problems(
     )
     # A tenant whose repository boundary is open is not a finished recovery, and
     # saying it is would be the last place this could be missed (SYRD-175).
+    # An objection only another account can resolve carries its own remedy;
+    # offering the repair for it is how MEFP was sent to run one that could not
+    # close it (SYRD-604).
+    from scripts.commit_store_access import OperatorDependency
+
     for objection in launcher.repository_boundary_problems(plan, runner=runner):
         problems.append(
-            f"{objection} -- repair it with `pkexec switchyard repair-boundary "
+            objection
+            if isinstance(objection, OperatorDependency)
+            else f"{objection} -- repair it with `pkexec switchyard repair-boundary "
             f"{plan.project} --apply`"
         )
     # Liveness comes from the owner's own tmux server and the board's runtime
@@ -179,6 +186,11 @@ def repository_boundary_problems(
     bits, and a named entry to the socket group the board service must be in.
     Both are asked about here, of the filesystem rather than of a plan, because
     the question is what this host grants right now (SYRD-171, SYRD-175).
+
+    And the one thing the boundary must leave open: the board service's read of
+    each configured commit store, judged against the identity its unit runs
+    with. One the boundary phase cannot grant is an `OperatorDependency`
+    (SYRD-604).
     """
     from scripts import team_launcher as launcher
 
@@ -260,4 +272,10 @@ def repository_boundary_problems(
             problems.append(
                 f"{control} still grants {socket_group} -- the group the board service is in"
             )
+    # The other half of the boundary: what the board service must still reach.
+    # A boundary that closes everything, the commit store included, is not a
+    # repaired one (SYRD-604).
+    from scripts.commit_store_access import commit_store_problems
+
+    problems.extend(commit_store_problems(plan, runner=runner))
     return problems

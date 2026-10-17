@@ -67,7 +67,9 @@ def _apply(commands: list[str]) -> None:
         # The artifact is written for an operator with sudo; here the process is
         # already root, so the same command runs without it.
         stripped = command.replace("sudo ", "", 1)
-        result = subprocess.run(stripped, shell=True, capture_output=True, text=True)
+        # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+        environment = {**os.environ, "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")}
+        result = subprocess.run(stripped, shell=True, capture_output=True, text=True, env=environment)
         assert result.returncode == 0, (stripped, result.stderr)
 
 

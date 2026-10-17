@@ -49,6 +49,8 @@ from scripts.ticket_board.project_provision import (  # noqa: E402
 from resume_provision_test import SEAM, namespaces_available  # noqa: E402
 
 PROJECT = "demo"
+#: The release's no-follow helper, which the packet's boundary lines run (SYRD-605).
+HELPER = str(ROOT / "scripts" / "tenant_paths.py")
 OWNER_UID = 1500
 SERVICE_UID = 1600
 SOCKET_GID = 1900
@@ -112,7 +114,7 @@ def test_the_phase_is_fenced_and_carries_only_a_boundary() -> None:
         assert forbidden not in joined, (forbidden, joined)
     # And it is the SYRD-171 repair, named surface by surface.
     assert "/home/switchyard-agent/syrd-worktrees" in joined
-    assert "-x g:syrd-roles" in joined
+    assert "'--remove' 'g:syrd-roles'" in joined
     assert "control.git" in joined
     # The fence is in the packet, once, in order.
     begin = provisioning().REPOSITORY_BOUNDARY_BEGIN
@@ -157,12 +159,25 @@ def test_a_second_command_riding_on_a_boundary_line_is_refused() -> None:
         "sudo gpasswd -a boardsvc 'syrd-repo' >/etc/shadow",
         "sudo setfacl -m u:boardsvc:rx '/tmp/x",
     )
-    for line in smuggled:
+    # The same smuggling on the shape a current phase carries -- the no-follow
+    # helper (SYRD-605) -- which the grammar, not the prefix, has to stop.
+    front = 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/tmp\' \'dir\' \'/tmp/x\''
+    helper_smuggled = (
+        f"{front}; sudo systemctl restart syrd-ticket-board",
+        f"{front} && psql -c 'drop schema public cascade'",
+        'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" $(curl -s http://127.0.0.1/payload)',
+        f"{front} >/etc/shadow",
+        f"{front} '/tmp/y",
+        "sudo /usr/bin/python3 -I $switchyard_tenant_paths '--root' '/tmp' 'dir' '/tmp/x'",
+    )
+    for line in smuggled + helper_smuggled:
         phase, problem = provisioning().repository_boundary_phase(
             packet.replace(begin, f"{begin}\n{line}", 1)
         )
         assert phase == [], (line, phase)
-        assert "not part of one" in problem, (line, problem)
+        # A path change by path is refused as stale before the grammar is asked.
+        stale = "generated before those changes went through the no-follow helper" in problem
+        assert "not part of one" in problem or (stale and line not in helper_smuggled), (line, problem)
 
 
 def test_an_unprivileged_caller_is_told_how_this_is_run() -> None:
@@ -252,7 +267,9 @@ def sudo_recorder(root: Path) -> tuple[dict[str, str], Path]:
         encoding="utf-8",
     )
     (stubs / "sudo").chmod(0o755)
-    environment = {**os.environ, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}"}
+    environment = {**os.environ, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+                   # What the packet defines at its top (SYRD-605).
+                   "switchyard_tenant_paths": HELPER}
     return environment, log
 
 
@@ -286,7 +303,7 @@ def test_a_per_role_tenant_is_granted_its_repository_group_before_the_retirement
     repository = repository_group_name(plan.project)
     grants = [index for index, line in enumerate(phase) if f"g:{repository}" in line]
     retirements = [
-        index for index, line in enumerate(phase) if f"-x g:{roles_group_name(plan.project)}" in line
+        index for index, line in enumerate(phase) if f"'--remove' 'g:{roles_group_name(plan.project)}'" in line
     ]
     assert grants, joined
     assert retirements, joined
@@ -308,9 +325,16 @@ def test_a_host_without_the_legacy_group_retires_nothing() -> None:
     assert subprocess.run(
         ["getent", "group", roles_group_name(plan.project)], capture_output=True
     ).returncode != 0, "this case needs a group the host does not have"
-    # The install and the grants ran; not one removal did.
-    assert any("install" in line for line in recorded), recorded
-    assert not [line for line in recorded if line == "-x"], recorded
+    # The directories and the grants are made; every removal is the helper's, on
+    # condition that the group exists, which here it does not -- so it removes
+    # nothing (the helper's own refusal of an absent group is proved in
+    # tenant_paths_test).
+    assert any(line == "dir" for line in recorded), recorded
+    invocations = "\n".join(recorded).split("\n--\n")
+    removals = [call.splitlines() for call in invocations if "--remove" in call.splitlines()]
+    assert removals and all(
+        call[call.index("--if-group") + 1] == roles_group_name(plan.project) for call in removals
+    ), removals
 
 
 def test_paths_with_spaces_and_metacharacters_reach_the_tools_whole() -> None:
@@ -326,9 +350,10 @@ def test_paths_with_spaces_and_metacharacters_reach_the_tools_whole() -> None:
         assert base in recorded, recorded
         assert not (Path.cwd() / "pwned").exists() and not (root / "pwned").exists()
         assert Path(base).is_dir(), "the base was renamed or removed by the shell"
-        # Every path the tools were handed is inside this tenant's home.
+        # Every path the tools were handed is inside this tenant's home -- the
+        # interpreter and the helper that make the change aside (SYRD-605).
         for argument in recorded:
-            if argument.startswith("/"):
+            if argument.startswith("/") and argument not in ("/usr/bin/python3", HELPER):
                 assert str(root) in argument, (argument, recorded)
 
 

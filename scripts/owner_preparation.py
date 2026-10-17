@@ -149,9 +149,16 @@ def _owner_project_install_args(owner_user: str, project_dir: Path, *, shell: st
     ]
 
 
-def _owner_project_install_command(owner_user: str, directory: str) -> list[str]:
+def _owner_project_install_command(owner_user: str, directory: str, owner_home: str = "") -> list[str]:
     from scripts.ticket_board.project_provision import TENANT_SOURCE_MODE
+    from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
 
+    # Inside an existing owner's home the tenant could have planted a link at
+    # any of these names, so root makes them through the no-follow helper
+    # (SYRD-605).
+    if owner_home and Path(directory).is_relative_to(owner_home):
+        return tenant_paths_argv(owner_home, "dir", "--mode", TENANT_SOURCE_MODE, "--owner", owner_user,
+                                 "--group", owner_user, directory)
     return ["install", "-d", "-m", TENANT_SOURCE_MODE, "-o", owner_user, "-g", owner_user, directory]
 
 
@@ -178,7 +185,10 @@ def _owner_project_install_commands(
         )
     if not directories:
         directories = [str(project_dir)]
-    return [launcher._owner_project_install_command(owner_user, directory) for directory in directories]
+    return [
+        launcher._owner_project_install_command(owner_user, directory, str(owner_home) if owner_home else "")
+        for directory in directories
+    ]
 
 
 def _enable_owner_linger_args(owner_user: str) -> list[str]:
@@ -316,6 +326,7 @@ def _ensure_owner_user_and_project_dir(
         for install_args in install_commands:
             path = Path(install_args[-1])
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.mkdir(mode=int(install_args[3], 8), exist_ok=True)
+            flag = "--mode" if "--mode" in install_args else "-m"
+            path.mkdir(mode=int(install_args[install_args.index(flag) + 1], 8), exist_ok=True)
     launcher._verify_project_path_writable_by_owner(owner_user, project_dir, runner=runner)
     return launcher.OwnerUserProvisionResult(created=created_user, linger_enabled=linger_enabled, shell_path=shell_path)

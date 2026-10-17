@@ -118,6 +118,15 @@ LIVE = dict(uid_for_user=refuse("the passwd uid lookup"), home_dir_for_user=refu
             _group_ids_for_user=refuse("the group lookup"), _prompt_bool=refuse("the prompt"))
 
 
+#: What runs for a directory inside the owner's home: this release's no-follow helper (SYRD-605).
+HELPER = sys.executable
+
+
+def helper_dir(home: Path, mode: str, directory: Path) -> list[str]:
+    return [sys.executable, "-I", str(ROOT / "scripts" / "tenant_paths.py"), "--root", str(home), "dir", "--mode", mode,
+            "--owner", OWNER, "--group", OWNER, str(directory)]
+
+
 def recorder(answers: dict, calls: list):
     def run(argv, **kwargs):
         calls.append((list(argv), kwargs))
@@ -171,7 +180,9 @@ def test_the_seams_the_local_imports_and_the_classes() -> None:
     functions = {n.name: n for n in module.body if isinstance(n, ast.FunctionDef)}
     locals_ = {name: [ast.unparse(n) for n in ast.walk(functions[name]) if isinstance(n, ast.ImportFrom) and n.module != "scripts"]
                for name in ("_owner_project_install_command", "_owner_project_install_commands")}
-    check(locals_ == {"_owner_project_install_command": ["from scripts.ticket_board.project_provision import TENANT_SOURCE_MODE"],
+    check(locals_ == {"_owner_project_install_command": ["from scripts.ticket_board.project_provision import TENANT_SOURCE_MODE",
+                                                         # SYRD-605: inside the home, through the no-follow helper.
+                                                         "from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv"],
                       "_owner_project_install_commands": ["from scripts.ticket_board.project_provision import owned_ancestor_dirs"]},
           f"the provisioning helpers are still imported where they are used: {locals_}")
 
@@ -402,7 +413,7 @@ def test_a_new_owner_is_created_then_given_linger_then_the_tree() -> None:
         got, log, calls, project, home = prepare(Path(tmp), exists=False, id_rc=1)
         check(got == t.OwnerUserProvisionResult(created=True, linger_enabled=True, shell_path="/resolved/zsh"), f"created, lingering, its shell: {got}")
         check([c[0] for c in calls] == [["id", "-u", OWNER], ["useradd", "-m", "-s", "/resolved/zsh", OWNER], ["loginctl", "enable-linger", OWNER],
-                                       *[["install", "-d", "-m", TENANT_SOURCE_MODE, "-o", OWNER, "-g", OWNER, str(d)]
+                                       *[helper_dir(home, TENANT_SOURCE_MODE, d)
                                          for d in (home / "Projects", home / "Projects" / "syrd", project)]]
               and calls[0][1] == {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL},
               f"id, useradd, linger, then one install per directory, outermost first: {[c[0] for c in calls]}")
@@ -428,7 +439,7 @@ def test_an_existing_owner_is_never_modified() -> None:
               and [c[0][0] for c in calls] == ["id"] and not project.exists(), f"no linger: refused before anything is created: {got!r}")
     with tempfile.TemporaryDirectory() as tmp:
         got, log, calls, project, home = prepare(Path(tmp), exists=False, id_rc=0)
-        check(got.created is False and [c[0][0] for c in calls] == ["id", "install", "install", "install"] and project.is_dir(),
+        check(got.created is False and [c[0][0] for c in calls] == ["id", HELPER, HELPER, HELPER] and project.is_dir(),
               "existing owner, missing project: only the tree is installed")
 
 
@@ -445,7 +456,7 @@ def test_existence_is_read_before_the_precheck() -> None:
                      _verify_project_path_writable_by_owner=lambda owner, path, *, runner: None)
         with patched(t, **seams):
             judged(t._ensure_owner_user_and_project_dir, OWNER, project, runner=recorder({"id": 0}, calls), owner_home=home)
-        check([c[0][0] for c in calls] == ["id", "install", "install"], f"existence is read before the precheck runs: {calls}")
+        check([c[0][0] for c in calls] == ["id", HELPER, HELPER], f"existence is read before the precheck runs: {calls}")
 
 
 def test_every_failure_stops_in_order() -> None:
@@ -457,9 +468,9 @@ def test_every_failure_stops_in_order() -> None:
             check(isinstance(got, SystemExit) and str(got) == message and [c[0][0] for c in calls] == ran and not project.exists()
                   and [e[0] for e in log] == ["precheck"], f"{answers}: {got!r} {calls}")
     with tempfile.TemporaryDirectory() as tmp:
-        got, log, calls, project, home = prepare(Path(tmp), exists=False, id_rc=0, answers={"install": 9})
+        got, log, calls, project, home = prepare(Path(tmp), exists=False, id_rc=0, answers={HELPER: 9})
         check(isinstance(got, SystemExit) and str(got) == f"switchyard: failed to create project directory {home / 'Projects'}"
-              and [c[0][0] for c in calls] == ["id", "install"] and not (home / "Projects").exists(),
+              and [c[0][0] for c in calls] == ["id", HELPER] and not (home / "Projects").exists(),
               f"the first failed install stops it, and nothing is created: {got!r}")
 
 

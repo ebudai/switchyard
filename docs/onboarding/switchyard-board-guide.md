@@ -338,6 +338,28 @@ EOF
 
 ---
 
+## A ticket routed to the wrong implementer
+
+A project may run an optional **Router**: a low-cost role that picks which
+implementer owns work the Director has admitted to Implementation, or hands it
+back to the Director's triage with a reason. Router can do nothing else, and it
+holds no implementer slot, so any number of tickets can wait on it.
+
+If Router (or anyone) gives you a ticket that belongs to another implementation
+specialty, or that needs a Director decision first, do not proceed because the
+error is rare. Use `implementer_kick_back` with a one-sentence reason:
+
+```bash
+ticket-board-write implementer-kick-back <id> --reason "This is app's renderer, not main's."
+```
+
+The ticket goes to Analysis for the Director, never straight back through
+Router. You do not pick the next owner or change anything else. The board
+records it as a Router misroute, which is how Router's model is evaluated: a
+wrong assignment costs your interruption and the Director's correction.
+
+---
+
 ## Talking to panes: directorctl
 
 `directorctl` types into another pane's terminal. It is the delivery mechanism behind

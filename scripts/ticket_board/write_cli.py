@@ -331,12 +331,25 @@ def _build_parser() -> argparse.ArgumentParser:
     route = subparsers.add_parser("route")
     route.add_argument("ticket_id")
     route.add_argument("--state", required=True)
-    route.add_argument("--assignee", required=True)
+    # SYRD-599: where a workflow runs Router, omitting the owner routes through it;
+    # naming one is the Director's direct route. Elsewhere the board decides as before.
+    route.add_argument("--assignee", default=None)
 
     reassign = subparsers.add_parser("reassign")
     reassign.add_argument("ticket_id")
     reassign.add_argument("--assignee", required=True)
     add_free_text_argument(reassign, "--reason", required=True)
+
+    # SYRD-599: Router's two writes. The revision is the one its single read returned.
+    router_assign = subparsers.add_parser("router-assign")
+    router_assign.add_argument("ticket_id")
+    router_assign.add_argument("--assignee", required=True)
+    router_assign.add_argument("--revision", required=True)
+
+    router_return = subparsers.add_parser("router-return")
+    router_return.add_argument("ticket_id")
+    add_free_text_argument(router_return, "--reason", required=True)
+    router_return.add_argument("--revision", required=True)
 
     request_publication = subparsers.add_parser("request-publication")
     request_publication.add_argument("ticket_id")
@@ -569,6 +582,12 @@ def main(argv: list[str] | None = None) -> int:
             raise write_client.TicketBoardWriteError(
                 "ticket board caller role required; pass --caller-role or set TICKET_BOARD_CALLER_ROLE"
             )
+        # SYRD-599: Router is offered its two writes and nothing else. The board refuses the rest
+        # regardless; this only says so before asking it.
+        if args.caller_role.strip().lower() == "router" and command not in {"router_assign", "router_return"}:
+            raise write_client.TicketBoardWriteError(
+                "router may use only router-assign and router-return; leave everything else to the Director"
+            )
         resolved_url, resolved_socket = write_client.resolve_endpoint(args.board_url, args.socket_path)
         args.board_url, args.socket_path = resolved_url, resolved_socket
         # The CLI knows what was SUPPLIED; the client cannot. Saying "no socket"
@@ -635,6 +654,10 @@ def main(argv: list[str] | None = None) -> int:
             response = client.route(args.ticket_id, state=args.state, assignee=args.assignee)
         elif command == "reassign":
             response = client.reassign(args.ticket_id, assignee=args.assignee, reason=args.reason)
+        elif command == "router_assign":
+            response = client.router_assign(args.ticket_id, assignee=args.assignee, revision=args.revision)
+        elif command == "router_return":
+            response = client.router_return(args.ticket_id, reason=args.reason, revision=args.revision)
         elif command == "director_edit":
             patch: dict[str, Any] = {}
             for assignment in args.set:

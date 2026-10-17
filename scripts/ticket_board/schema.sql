@@ -844,6 +844,25 @@ AS $$
     );
 $$;
 
+-- SYRD-599: Router is a legal Implementation assignee without owning the stage.
+-- Owning it is what makes a role an implementer (ticket_is_implementer_assignee,
+-- serial_queue, the reservation), so Router never takes a serial slot and any
+-- number of tickets can wait on it. `p_stage` NULL asks only whether the role
+-- is the active router. plpgsql, so the LANGUAGE sql callers above the
+-- functions it reads can still be created first.
+CREATE OR REPLACE FUNCTION ticket_board.router_holds(p_stage text, p_assignee text)
+RETURNS boolean LANGUAGE plpgsql STABLE AS $$
+DECLARE cfg jsonb := ticket_board.declared_workflow();
+BEGIN
+    IF cfg IS NULL THEN RETURN false; END IF;
+    RETURN EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') r
+                   WHERE r->>'name' = btrim(lower(coalesce(p_assignee, ''))) AND r->>'kind' = 'router'
+                     AND (r->>'active')::boolean)
+       AND (p_stage IS NULL OR EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') s
+                                       WHERE s->>'name' = p_stage AND s->>'kind' = 'implementation'));
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.ticket_valid_assignee(p_assignee text)
 RETURNS boolean
 LANGUAGE sql
@@ -859,6 +878,7 @@ AS $$
             FROM ticket_board.workflow_stages ws
             WHERE role = ANY(ws.owner_roles)
         )
+        OR ticket_board.router_holds(NULL, role)
     FROM normalized;
 $$;
 
@@ -880,7 +900,8 @@ BEGIN
         RETURN;
     END IF;
 
-    IF normalized_assignee = 'unassigned' OR normalized_assignee = ANY(owners) THEN
+    IF normalized_assignee = 'unassigned' OR normalized_assignee = ANY(owners)
+       OR ticket_board.router_holds(p_state, normalized_assignee) THEN
         RETURN;
     END IF;
 
@@ -2256,6 +2277,8 @@ BEGIN
        AND NOT coalesce(OLD.manually_controlled, false)
        AND NOT coalesce(NEW.manually_controlled, false)
        AND ticket_board.stage_entry_assignee(NEW.state, NEW.assignee, NEW.id) IS NOT NULL
+       -- SYRD-599: work the Director routed to Router stays Router's.
+       AND NOT ticket_board.router_holds(NEW.state, NEW.assignee)
        AND (
            NEW.state <> 'analysis'
            OR NEW.assignee IS NULL
@@ -7625,6 +7648,70 @@ RETURNS text[] LANGUAGE sql IMMUTABLE AS $$
                     ARRAY[]::text[]);
 $$;
 
+-- SYRD-599: what a document must say for Router to exist, checked here and by
+-- workflow_config independently (router_role.validate_router). Router is one
+-- role, named `router`, of its own kind. It holds `router_assign` and nothing
+-- else; nobody else holds it. It owns no stage, so it is never an
+-- implementer. Its one move is `router_return`, to the Director's triage. When
+-- it is active it must be reachable (a pane target), the Implementation stage
+-- must notify its assignee, triage must be the Director's alone, and every
+-- Implementation owner must be able to hand a misrouted ticket back with
+-- `implementer_kick_back`.
+CREATE OR REPLACE FUNCTION ticket_board.validate_router_declaration(cfg jsonb)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE router jsonb; impl jsonb; triage jsonb;
+BEGIN
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') r WHERE r->>'kind'='router' AND r->>'name'<>'router') THEN
+        RAISE EXCEPTION 'invalid router role: only the role named router may be of kind router'; END IF;
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'roles') r WHERE r->'capabilities' ? 'router_assign' AND r->>'kind'<>'router') THEN
+        RAISE EXCEPTION 'invalid router role: router_assign belongs to the router role alone'; END IF;
+    SELECT r INTO router FROM jsonb_array_elements(cfg->'roles') r WHERE r->>'kind'='router';
+    IF router IS NULL THEN
+        IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') t WHERE t->>'action'='router_return') THEN
+            RAISE EXCEPTION 'invalid router role: router_return needs the router role'; END IF;
+        RETURN;
+    END IF;
+    SELECT s INTO impl FROM jsonb_array_elements(cfg->'stages') s WHERE s->>'kind'='implementation';
+    IF (SELECT coalesce(array_agg(c ORDER BY c), ARRAY[]::text[]) FROM jsonb_array_elements_text(router->'capabilities') c)
+       IS DISTINCT FROM ARRAY['router_assign'] THEN
+        RAISE EXCEPTION 'invalid router role: its capabilities are exactly router_assign'; END IF;
+    IF router ? 'serial' AND (router->>'serial')::boolean THEN
+        RAISE EXCEPTION 'invalid router role: router never holds a serial slot'; END IF;
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'stages') s
+               WHERE s->'owners' ? 'router' OR (s->'notify'->>'kind'='fixed_role' AND s->'notify'->>'role'='router')) THEN
+        RAISE EXCEPTION 'invalid router role: router owns no stage'; END IF;
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') t
+               WHERE (t->'actors' ? 'router' OR t->>'relays_decision_of'='router') AND t->>'action'<>'router_return') THEN
+        RAISE EXCEPTION 'invalid router role: router_return is its only move'; END IF;
+    IF EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') t WHERE t->>'action'='router_return' AND NOT (
+            t->'actors' = '["router"]'::jsonb AND t->>'from' = impl->>'name' AND t->>'to' = 'analysis'
+            AND t->>'primitive' = 'move' AND (t->>'owner_scoped')::boolean AND (t->>'require_reason')::boolean
+            AND NOT (t->>'require_commit')::boolean AND NOT coalesce((t->>'allow_no_code')::boolean, false)
+            AND t->'clear_signoffs' = '[]'::jsonb
+            AND coalesce(jsonb_typeof(t->'relays_decision_of'), 'null') = 'null')) THEN
+        RAISE EXCEPTION 'invalid router role: router_return moves Implementation to analysis, router alone, owner-scoped, with a reason, and changes nothing else'; END IF;
+    IF NOT (router->>'active')::boolean THEN
+        RETURN;
+    END IF;
+    IF router->>'target' IS NULL THEN
+        RAISE EXCEPTION 'invalid router role: an active router needs a runtime and pane target to be told about work'; END IF;
+    IF impl->'notify'->>'kind' NOT IN ('assignee','stage_owner_fallback') THEN
+        RAISE EXCEPTION 'invalid router role: Implementation must notify its assignee for router to be told'; END IF;
+    SELECT s INTO triage FROM jsonb_array_elements(cfg->'stages') s WHERE s->>'name'='analysis';
+    IF triage IS NULL OR (triage->>'terminal')::boolean OR triage->'owners' IS DISTINCT FROM '["director"]'::jsonb
+       OR triage->'notify'->>'kind' NOT IN ('assignee','stage_owner_fallback') THEN
+        RAISE EXCEPTION 'invalid router role: router returns work to analysis, which must be the director''s alone and announced'; END IF;
+    IF (SELECT count(*) FROM jsonb_array_elements(cfg->'transitions') t WHERE t->>'action'='router_return') <> 1 THEN
+        RAISE EXCEPTION 'invalid router role: an active router needs its router_return'; END IF;
+    IF NOT EXISTS (SELECT FROM jsonb_array_elements(cfg->'transitions') t
+        WHERE t->>'action'='implementer_kick_back' AND t->>'from'=impl->>'name' AND t->>'to'='analysis'
+          AND t->>'primitive'='move' AND (t->>'owner_scoped')::boolean AND (t->>'require_reason')::boolean
+          AND (SELECT array_agg(a ORDER BY a) FROM jsonb_array_elements_text(t->'actors') a)
+              = (SELECT array_agg(o ORDER BY o) FROM jsonb_array_elements_text(impl->'owners') o)) THEN
+        RAISE EXCEPTION 'invalid router role: every Implementation owner needs implementer_kick_back to analysis, owner-scoped with a reason, to hand back a misrouted ticket'; END IF;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION ticket_board.validate_declared_workflow(cfg jsonb)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE r jsonb; s jsonb; tr jsonb; f record; cursor_name text; visited text[];
@@ -7658,13 +7745,13 @@ BEGIN
         IF jsonb_typeof(r->'name') IS DISTINCT FROM 'string' OR jsonb_typeof(r->'label') IS DISTINCT FROM 'string' OR jsonb_typeof(r->'kind') IS DISTINCT FROM 'string' OR jsonb_typeof(r->'active') IS DISTINCT FROM 'boolean' OR jsonb_typeof(r->'capabilities') IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'role fields must have explicit types'; END IF;
         IF NOT r ?& ARRAY['name','label','kind','active','capabilities']
            OR (r->>'name') !~ '^[a-z][a-z0-9_-]{0,63}$' OR btrim(r->>'label') = ''
-           OR r->>'kind' NOT IN ('system','draft','implementer','reviewer','support','user')
+           OR r->>'kind' NOT IN ('system','draft','implementer','reviewer','support','user','router')
            OR jsonb_typeof(r->'active') <> 'boolean' OR jsonb_typeof(r->'capabilities') <> 'array'
            OR EXISTS (SELECT FROM jsonb_array_elements_text(r->'capabilities') c WHERE c NOT IN
                ('create_ticket','file_bug','add_comment','edit_fields','await_role','clear_awaiting_role',
                 'set_blockers','set_manually_controlled','crop_attachment','merge','dismiss_notification',
                 'reassign','director_edit','request_publication','resolve_publication',
-                'recover_stalled_ticket')) THEN
+                'recover_stalled_ticket','router_assign')) THEN
             RAISE EXCEPTION 'invalid role policy: %', r->>'name';
         END IF;
         IF (r->>'runtime' IS NULL) <> (r->>'target' IS NULL)
@@ -7923,6 +8010,7 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'deferred work must have an ordinary way back';
     END IF;
+    PERFORM ticket_board.validate_router_declaration(cfg);  -- SYRD-599
 END;
 $$;
 
@@ -8017,7 +8105,8 @@ BEGIN
         UPDATE ticket_board.tickets SET assignee=item.value WHERE state=item.key AND assignee<>item.value;
     END LOOP;
     IF EXISTS (SELECT FROM ticket_board.tickets t JOIN ticket_board.workflow_stages ws ON ws.name=t.state
-       WHERE cardinality(ws.owner_roles)>0 AND t.assignee<>'unassigned' AND NOT t.assignee=ANY(ws.owner_roles)) THEN
+       WHERE cardinality(ws.owner_roles)>0 AND t.assignee<>'unassigned' AND NOT t.assignee=ANY(ws.owner_roles)
+         AND NOT ticket_board.router_holds(t.state,t.assignee)) THEN
         RAISE EXCEPTION 'configuration would orphan live ticket ownership; supply deliberate reassignment'; END IF;
     IF EXISTS (SELECT FROM ticket_board.tickets t JOIN ticket_board.workflow_roles r ON r.name=t.assignee
         JOIN ticket_board.workflow_stages ws ON ws.name=t.state WHERE NOT ws.is_terminal AND NOT (r.definition->>'active')::boolean AND t.assignee<>'unassigned') THEN
@@ -8157,8 +8246,16 @@ BEGIN
     IF nullif(current_setting('ticket_board.director_edit_target', true), '') = previous.id THEN
         RETURN proposed;
     END IF;
+    -- SYRD-599: a Router operation's window names one ticket and one statement,
+    -- and admits exactly its own change (require_router_change). Everything
+    -- after this still applies to it: the stage-owner check, serial focus, the
+    -- declared transition and its bookkeeping.
+    IF nullif(current_setting('ticket_board.router_ticket', true), '') = previous.id THEN
+        PERFORM ticket_board.require_router_change(previous, proposed, actor);
+    END IF;
     IF previous.state=proposed.state THEN
-        IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director' THEN
+        IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director'
+           AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id THEN
             RAISE EXCEPTION 'only director may reassign without transition' USING ERRCODE='42501'; END IF;
         PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
         FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
@@ -8183,6 +8280,14 @@ BEGIN
                AND ticket_board.ticket_is_implementer_assignee(proposed.assignee)
                AND NOT proposed.manually_controlled
                AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL THEN
+                -- SYRD-599: Router changes the owner and nothing else. Diverting its
+                -- pick into the ready stage would move the ticket it was told to
+                -- leave where it is, so it is refused instead: Router chooses a
+                -- free owner or hands the ticket back.
+                IF nullif(current_setting('ticket_board.router_ticket', true), '') = previous.id THEN
+                    RAISE EXCEPTION '% already has % active; on this pull-scheduled board Router cannot queue work behind it: choose an owner with no active ticket, or return % to the Director',
+                        proposed.assignee, ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id), previous.id
+                        USING ERRCODE='42501'; END IF;
                 IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN
                     RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
                 queued_for:=proposed.assignee;
@@ -8211,6 +8316,12 @@ BEGIN
       WHERE x->>'from'=previous.state AND x->>'to'=proposed.state AND x->>'action'=action_name;
     IF tr IS NULL OR NOT ticket_board.transition_allows_actor(cfg,tr,actor) OR ((tr->>'owner_scoped')::boolean AND previous.assignee<>actor) THEN
         RAISE EXCEPTION 'unauthorized configured transition: % / %',actor,action_name USING ERRCODE='42501'; END IF;
+    -- SYRD-599: router_return is declared so it is visible, owner-scoped and
+    -- bookkept like any move, but only its own operation may take it: it
+    -- carries the revision check and the Director's handoff.
+    IF tr->>'action'='router_return'
+       AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id THEN
+        RAISE EXCEPTION 'router_return is taken only through ticket_board.router_return' USING ERRCODE='42501'; END IF;
     SELECT x INTO source_stage FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=previous.state;
     IF (source_stage->>'terminal')::boolean AND tr->>'primitive'<>'reopen' THEN RAISE EXCEPTION 'terminal exit requires reopen'; END IF;
     -- A blocker stops work going FORWARD. Putting work down is not going
@@ -8228,6 +8339,8 @@ BEGIN
     IF tr->>'primitive' NOT IN ('return','reopen')
        AND NOT ticket_board.declared_parking_stage(tr->>'to')
        AND NOT ticket_board.declared_review_return(cfg, previous.state, tr->>'to')
+       -- SYRD-599: Router handing work back to triage promotes nothing.
+       AND tr->>'action'<>'router_return'
        -- SYRD-568: placing blocked work in its implementer's queue promotes
        -- nothing either -- it holds no slot and is handed to nobody until its
        -- blockers resolve and it is the active ticket. Submitting it still is.
@@ -8300,12 +8413,27 @@ BEGIN
         IF loops>jsonb_array_length(cfg->'stages') THEN RAISE EXCEPTION 'gate cycle'; END IF;
     END LOOP;
     owners:=ARRAY(SELECT jsonb_array_elements_text(dest->'owners'));
+    -- SYRD-599: on a Router-enabled board the Director's ordinary route into
+    -- Implementation is Router's, unless the Director names an Implementation
+    -- owner: that is the direct route, and every rule below applies to it. A
+    -- Router that cannot be told is refused, never replaced by an implementer:
+    -- going direct is the Director's choice, not a fallback.
+    IF dest->>'kind'='implementation' AND actor='director' AND tr->>'primitive'='move'
+       AND source_stage->>'kind' NOT IN ('implementation','review')
+       AND ticket_board.router_holds(NULL,'router') AND NOT proposed.assignee=ANY(owners) THEN
+        IF NOT ticket_board.router_available() THEN
+            RAISE EXCEPTION 'Router is not running, so % cannot be routed through it; route it to an Implementation owner directly (%), or start Router',
+                previous.id, array_to_string(owners, ', ') USING ERRCODE='55000';
+        END IF;
+        proposed.assignee:='router';
+    END IF;
     IF dest->>'signoff' IS NOT NULL THEN doc:=ticket_board.set_workflow_flag(doc,dest->>'signoff',false); END IF;
     IF tr->>'primitive'='return' THEN
         SELECT last_implementer_assignee INTO fallback FROM ticket_board.ticket_notification_state WHERE ticket_id=previous.id;
         IF fallback=ANY(owners) THEN proposed.assignee:=fallback; END IF;
     END IF;
-    IF cardinality(owners)>0 AND NOT proposed.assignee=ANY(owners) THEN proposed.assignee:=owners[1]; END IF;
+    IF cardinality(owners)>0 AND NOT proposed.assignee=ANY(owners)
+       AND NOT ticket_board.router_holds(target,proposed.assignee) THEN proposed.assignee:=owners[1]; END IF;
     IF previous.manually_controlled AND tr->>'primitive'='approve' THEN
         -- Record the decision but retain the deliberate stage/owner hold. The
         -- executor creates the durable handoff after activity triggers finish.
@@ -8332,7 +8460,8 @@ BEGIN
     -- pull policy keeps its ready stage as the queue (SYRD-539): there the
     -- move is still diverted, pinned to the busy author.
     IF ticket_board.declared_scheduling() IS NOT NULL
-       AND dest->>'kind'='implementation' AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
+       AND dest->>'kind'='implementation' AND NOT ticket_board.router_holds(dest->>'name',proposed.assignee)
+       AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
         IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
         queued_for:=proposed.assignee;
         reserved_by:=ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id);
@@ -9029,8 +9158,8 @@ BEGIN
     owners:=ARRAY(SELECT jsonb_array_elements_text(s->'owners'));
     RETURN CASE s->'notify'->>'kind'
       WHEN 'none' THEN NULL WHEN 'fixed_role' THEN s->'notify'->>'role'
-      WHEN 'assignee' THEN CASE WHEN p_assignee=ANY(owners) THEN p_assignee END
-      WHEN 'stage_owner_fallback' THEN CASE WHEN p_assignee=ANY(owners) THEN p_assignee ELSE owners[1] END
+      WHEN 'assignee' THEN CASE WHEN p_assignee=ANY(owners) OR ticket_board.router_holds(p_state,p_assignee) THEN p_assignee END
+      WHEN 'stage_owner_fallback' THEN CASE WHEN p_assignee=ANY(owners) OR ticket_board.router_holds(p_state,p_assignee) THEN p_assignee ELSE owners[1] END
       ELSE NULL END;
 END;
 $$;
@@ -9168,7 +9297,8 @@ $$;
 CREATE OR REPLACE FUNCTION ticket_board.remember_declared_implementer()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
- IF ticket_board.declared_stage_kind(NEW.state)='implementation' THEN
+ -- SYRD-599: Router is never anybody's implementer, so it is never remembered as one.
+ IF ticket_board.declared_stage_kind(NEW.state)='implementation' AND NOT ticket_board.router_holds(NEW.state,NEW.assignee) THEN
    UPDATE ticket_board.ticket_notification_state SET last_implementer_assignee=NEW.assignee WHERE ticket_id=NEW.id;
  END IF;
  RETURN NULL;
@@ -16335,3 +16465,307 @@ REVOKE EXECUTE ON FUNCTION ticket_board.close_role_stall(bigint, text) FROM PUBL
 REVOKE EXECUTE ON FUNCTION ticket_board.role_generation_at(text, timestamptz) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) FROM PUBLIC;
+
+-- SYRD-599: the Router role. A low-cost role whose only job is to choose the
+-- implementation owner for work the Director has already admitted to
+-- Implementation, or to hand it back to the Director's triage with a reason.
+-- Its authority is two purpose-built operations, never the Director's generic
+-- ones: `router_assign` (an assignee-only change to an Implementation owner)
+-- and `router_return` (the declared transition back to `analysis`). Each opens
+-- a one-ticket window that the declared-update trigger checks, so a crafted
+-- statement or a generic executor cannot take either move. Router is a legal
+-- Implementation assignee without owning the stage, so it is never an
+-- implementer: it holds no serial slot and any number of tickets can wait on
+-- it (router_holds, below).
+CREATE TABLE IF NOT EXISTS ticket_board.router_decisions (
+    decision_id bigserial PRIMARY KEY,
+    ticket_id text NOT NULL REFERENCES ticket_board.tickets(id) ON DELETE CASCADE,
+    router_role text NOT NULL,
+    decision text NOT NULL CHECK (decision IN ('assign', 'return')),
+    assignee text NOT NULL DEFAULT '',
+    reason text NOT NULL DEFAULT '',
+    classified_revision text NOT NULL CHECK (classified_revision ~ '^[0-9a-f]{32}$'),
+    decided_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    -- What became of an assignment: the implementer handed it back as not
+    -- theirs (`misroute`), or the Director moved it to somebody else
+    -- (`director_correction`). Null while it stands. The canary prices both.
+    outcome text CHECK (outcome IS NULL OR outcome IN ('misroute', 'director_correction')),
+    outcome_role text,
+    outcome_reason text,
+    outcome_at timestamptz,
+    CHECK ((decision = 'assign') = (assignee <> '')),
+    CHECK ((decision = 'return') = (reason <> '')),
+    CHECK ((outcome IS NULL) = (outcome_at IS NULL)),
+    CHECK (outcome IS NULL OR decision = 'assign')
+);
+CREATE INDEX IF NOT EXISTS router_decisions_ticket ON ticket_board.router_decisions (ticket_id, decision_id);
+
+-- The ticket as Router classified it: everything its one read shows -- every
+-- field but the bookkeeping a write stamps, the blockers, the comments (where
+-- an ownership decision is often written) and the attachments -- and the
+-- assignment round. Anything added or changed after Router read it, a
+-- Director's comment included, is a different revision, and the stale decision
+-- is refused rather than applied to work Router never saw.
+CREATE OR REPLACE FUNCTION ticket_board.router_ticket_revision(p_ticket_id text)
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT md5(jsonb_build_object(
+        'ticket', to_jsonb(t) - ARRAY['updated_at', 'updated_text', 'row_updated_at', 'source_json', 'imported_at',
+                                      'ticket_number'],
+        'blockers', coalesce((SELECT jsonb_agg(jsonb_build_array(b.blocker_ticket_id, b.resolved) ORDER BY b.position)
+            FROM ticket_board.ticket_blockers b WHERE b.ticket_id = t.id), '[]'::jsonb),
+        'comments', coalesce((SELECT jsonb_agg(jsonb_build_array(c.id, c.who, c.text, c.urgent) ORDER BY c.id)
+            FROM ticket_board.ticket_comments c WHERE c.ticket_id = t.id), '[]'::jsonb),
+        'attachments', coalesce((SELECT jsonb_agg(jsonb_build_array(a.path, a.is_primary, a.metadata) ORDER BY a.position)
+            FROM ticket_board.ticket_attachments a WHERE a.ticket_id = t.id), '[]'::jsonb),
+        'round', (SELECT ns.current_assignment_at FROM ticket_board.ticket_notification_state ns WHERE ns.ticket_id = t.id)
+    )::text)
+    FROM ticket_board.tickets t WHERE t.id = p_ticket_id;
+$$;
+
+-- Whether Router can be told about work: an active router whose pane has
+-- registered the runtime and target the document declares. Without one, its
+-- notice would requeue for ever and the ticket would sit with nobody working it,
+-- so the automatic route refuses instead (see enforce_declared_ticket_update).
+CREATE OR REPLACE FUNCTION ticket_board.router_available()
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT EXISTS (SELECT FROM ticket_board.role_runtime_assignments a
+                   JOIN ticket_board.workflow_roles r ON r.name = a.role
+                   WHERE r.definition->>'kind' = 'router' AND (r.definition->>'active')::boolean
+                     AND r.definition->>'runtime' = a.runtime AND r.definition->>'target' = a.actual_target);
+$$;
+
+-- The declared Implementation stage and its active owners: the only roles
+-- Router may choose, and never Router itself (it owns no stage).
+CREATE OR REPLACE FUNCTION ticket_board.router_assignable_roles()
+RETURNS text[] LANGUAGE sql STABLE AS $$
+    SELECT coalesce(array_agg(o ORDER BY o), ARRAY[]::text[])
+    FROM jsonb_array_elements(ticket_board.declared_workflow()->'stages') s,
+         jsonb_array_elements_text(s->'owners') o
+    WHERE s->>'kind' = 'implementation'
+      AND EXISTS (SELECT FROM jsonb_array_elements(ticket_board.declared_workflow()->'roles') r
+                  WHERE r->>'name' = o AND (r->>'active')::boolean AND r->>'kind' = 'implementer');
+$$;
+
+-- Who may call a Router operation, and on what. Both checks are the database's
+-- own: the HTTP layer asks the same questions, and neither trusts the other.
+CREATE OR REPLACE FUNCTION ticket_board.require_router_ticket(
+    p_ticket ticket_board.tickets, p_actor text, p_operation text, p_revision text)
+RETURNS void LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    IF ticket_board.current_actor_role() <> 'ticket_board_service' THEN
+        RAISE EXCEPTION 'role % cannot call %', ticket_board.current_actor_role(), p_operation USING ERRCODE = '42501';
+    END IF;
+    IF ticket_board.declared_workflow() IS NULL OR NOT ticket_board.router_holds(NULL, p_actor) THEN
+        RAISE EXCEPTION 'role % cannot call %: only the active router role may', coalesce(p_actor, '<none>'), p_operation
+            USING ERRCODE = '42501';
+    END IF;
+    IF p_ticket.id IS NULL THEN
+        RAISE EXCEPTION 'ticket not found';
+    END IF;
+    IF NOT ticket_board.router_holds(p_ticket.state, p_ticket.assignee) OR p_ticket.assignee IS DISTINCT FROM p_actor THEN
+        RAISE EXCEPTION '% is not % work: it is % / % (router acts only on Implementation tickets assigned to it)',
+            p_ticket.id, p_actor, p_ticket.state, p_ticket.assignee USING ERRCODE = '42501';
+    END IF;
+    IF p_ticket.manually_controlled THEN
+        RAISE EXCEPTION '% is held by the Director; router does not act on it', p_ticket.id USING ERRCODE = '42501';
+    END IF;
+    IF btrim(coalesce(p_revision, '')) = '' THEN
+        RAISE EXCEPTION '% requires the ticket revision router classified', p_operation;
+    END IF;
+    IF p_revision IS DISTINCT FROM ticket_board.router_ticket_revision(p_ticket.id) THEN
+        RAISE EXCEPTION 'stale revision for %: the ticket changed after router read it; read it again', p_ticket.id
+            USING ERRCODE = '40001';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.router_assign(id text, assignee text, revision text)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    actor text := ticket_board.current_app_actor();
+    target text := btrim(lower(coalesce(router_assign.assignee, '')));
+    ticket_row ticket_board.tickets%ROWTYPE;
+    classified text := btrim(coalesce(router_assign.revision, ''));
+    message text;
+BEGIN
+    SELECT * INTO ticket_row FROM ticket_board.tickets t WHERE t.id = router_assign.id FOR UPDATE;
+    PERFORM ticket_board.require_router_ticket(ticket_row, actor, 'router_assign', classified);
+    PERFORM ticket_board.require_actor(ARRAY[]::text[], 'router_assign');
+    IF target = actor OR NOT target = ANY(ticket_board.router_assignable_roles()) THEN
+        RAISE EXCEPTION 'router may assign only to an active owner of Implementation (%), not %',
+            array_to_string(ticket_board.router_assignable_roles(), ', '), coalesce(nullif(target, ''), '<empty>')
+            USING ERRCODE = '42501';
+    END IF;
+    PERFORM set_config('ticket_board.router_ticket', ticket_row.id, true);
+    PERFORM set_config('ticket_board.router_action', 'assign', true);
+    UPDATE ticket_board.tickets t SET assignee = target WHERE t.id = ticket_row.id;
+    PERFORM set_config('ticket_board.router_ticket', '', true);
+    PERFORM set_config('ticket_board.router_action', '', true);
+    INSERT INTO ticket_board.router_decisions (ticket_id, router_role, decision, assignee, classified_revision)
+    VALUES (ticket_row.id, actor, 'assign', target, classified);
+
+    -- The same one notification `reassign` gives, and withheld for the same
+    -- reasons: the existing queue decides when the implementer works it.
+    SELECT * INTO ticket_row FROM ticket_board.tickets t WHERE t.id = router_assign.id;
+    IF ticket_row.queued_for_assignee <> '' OR ticket_board.ticket_has_unresolved_blockers(ticket_row.id)
+       OR ticket_board.ticket_serial_waiting(ticket_row.id) THEN
+        RETURN;
+    END IF;
+    message := ticket_row.id || CASE WHEN ticket_row.title <> '' THEN ' -- ' || ticket_row.title ELSE '' END
+        || ' is now assigned to you';
+    PERFORM ticket_board.enqueue_transition_notification(ticket_row.id, ticket_row.title, ticket_row.state,
+        ticket_row.state, ticket_row.assignee, ticket_row.updated_at, ticket_row.ticket_number, message);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.router_return(id text, reason text, revision text)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    actor text := ticket_board.current_app_actor();
+    ticket_row ticket_board.tickets%ROWTYPE;
+    classified text := btrim(coalesce(router_return.revision, ''));
+    normalized_reason text := btrim(coalesce(router_return.reason, ''));
+    tr jsonb;
+BEGIN
+    SELECT * INTO ticket_row FROM ticket_board.tickets t WHERE t.id = router_return.id FOR UPDATE;
+    PERFORM ticket_board.require_router_ticket(ticket_row, actor, 'router_return', classified);
+    IF normalized_reason = '' THEN
+        RAISE EXCEPTION 'router_return requires a non-empty reason';
+    END IF;
+    IF length(normalized_reason) > 2000 THEN
+        RAISE EXCEPTION 'router_return reason is limited to 2000 characters';
+    END IF;
+    SELECT x INTO tr FROM jsonb_array_elements(ticket_board.declared_workflow()->'transitions') x
+    WHERE x->>'action' = 'router_return' AND x->>'from' = ticket_row.state AND x->'actors' ? actor;
+    IF tr IS NULL THEN
+        RAISE EXCEPTION 'this workflow declares no router_return for %', actor USING ERRCODE = '42501';
+    END IF;
+    PERFORM ticket_board.append_ticket_comment(ticket_row.id, actor,
+        'Router returned this to the Director''s triage. Reason: ' || normalized_reason);
+    PERFORM set_config('ticket_board.router_ticket', ticket_row.id, true);
+    PERFORM set_config('ticket_board.router_action', 'return', true);
+    PERFORM set_config('ticket_board.workflow_action', 'router_return', true);
+    UPDATE ticket_board.tickets t SET state = tr->>'to', assignee = 'director' WHERE t.id = ticket_row.id;
+    PERFORM set_config('ticket_board.workflow_action', '', true);
+    PERFORM set_config('ticket_board.router_ticket', '', true);
+    PERFORM set_config('ticket_board.router_action', '', true);
+    INSERT INTO ticket_board.router_decisions (ticket_id, router_role, decision, reason, classified_revision)
+    VALUES (ticket_row.id, actor, 'return', normalized_reason, classified);
+END;
+$$;
+
+-- The trigger's half of the window: whatever statement runs inside it may make
+-- exactly the one change its operation is for, by router, on router's ticket.
+CREATE OR REPLACE FUNCTION ticket_board.require_router_change(
+    previous ticket_board.tickets, proposed ticket_board.tickets, actor text)
+RETURNS void LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    operation text := current_setting('ticket_board.router_action', true);
+    -- What the window may move, and what the row records about any write.
+    -- `ticket_number` is generated, so a BEFORE trigger sees it unset.
+    bookkeeping text[] := ARRAY['state', 'assignee', 'updated_at', 'updated_text', 'row_updated_at', 'source_json',
+        'queued_for_assignee', 'queued_behind_ticket', 'parked', 'ticket_number'];
+    changed text;
+BEGIN
+    IF NOT ticket_board.router_holds(previous.state, actor) OR previous.assignee IS DISTINCT FROM actor THEN
+        RAISE EXCEPTION 'the router window is router''s, on its own Implementation ticket' USING ERRCODE = '42501';
+    END IF;
+    SELECT string_agg(o.key, ', ' ORDER BY o.key) INTO changed
+    FROM jsonb_each(to_jsonb(previous) - bookkeeping) o
+    WHERE o.value IS DISTINCT FROM (to_jsonb(proposed) - bookkeeping) -> o.key;
+    IF changed IS NOT NULL THEN
+        RAISE EXCEPTION 'router may change only who owns %, not %', previous.id, changed USING ERRCODE = '42501';
+    END IF;
+    IF operation = 'assign' THEN
+        IF proposed.state IS DISTINCT FROM previous.state OR proposed.assignee = actor
+           OR NOT proposed.assignee = ANY(ticket_board.router_assignable_roles()) THEN
+            RAISE EXCEPTION 'router_assign changes only the assignee, to an Implementation owner' USING ERRCODE = '42501';
+        END IF;
+    ELSIF operation = 'return' THEN
+        IF proposed.state = previous.state OR proposed.assignee IS DISTINCT FROM 'director'
+           OR current_setting('ticket_board.workflow_action', true) IS DISTINCT FROM 'router_return' THEN
+            RAISE EXCEPTION 'router_return goes to the Director''s triage and nowhere else' USING ERRCODE = '42501';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'unknown router operation' USING ERRCODE = '42501';
+    END IF;
+END;
+$$;
+
+-- What Router needs from its one read of a ticket: the revision to classify
+-- against and the owners it may choose. Null unless router holds the ticket
+-- and it has no history; the history is the Director's record of each decision
+-- and what became of it.
+CREATE OR REPLACE FUNCTION ticket_board.ticket_routing(p_ticket_id text)
+RETURNS jsonb LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    WITH t AS (SELECT * FROM ticket_board.tickets WHERE id = p_ticket_id),
+    history AS (
+        SELECT jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+            'router', d.router_role, 'decision', d.decision, 'assignee', nullif(d.assignee, ''),
+            'reason', nullif(d.reason, ''), 'revision', d.classified_revision,
+            'decided_at', ticket_board.utc_text(d.decided_at), 'outcome', d.outcome,
+            'outcome_role', d.outcome_role, 'outcome_reason', d.outcome_reason,
+            'outcome_at', CASE WHEN d.outcome_at IS NOT NULL THEN ticket_board.utc_text(d.outcome_at) END))
+            ORDER BY d.decision_id) AS decisions
+        FROM ticket_board.router_decisions d WHERE d.ticket_id = p_ticket_id)
+    SELECT CASE WHEN ticket_board.router_holds(t.state, t.assignee) OR history.decisions IS NOT NULL THEN
+        jsonb_strip_nulls(jsonb_build_object(
+            'holder', CASE WHEN ticket_board.router_holds(t.state, t.assignee) THEN t.assignee END,
+            'revision', CASE WHEN ticket_board.router_holds(t.state, t.assignee)
+                             THEN ticket_board.router_ticket_revision(t.id) END,
+            'assignable', CASE WHEN ticket_board.router_holds(t.state, t.assignee)
+                               THEN to_jsonb(ticket_board.router_assignable_roles()) END,
+            'decisions', history.decisions))
+    END
+    FROM t, history;
+$$;
+
+-- What became of an assignment, recorded as it happens. An implementer handing
+-- Router's pick back with implementer_kick_back is a misroute; the Director
+-- moving it to somebody else is a correction. Both are priced by the canary.
+CREATE OR REPLACE FUNCTION ticket_board.note_router_outcome()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    open_id bigint;
+    actor text := coalesce(nullif(current_setting('ticket_board.workflow_actor', true), ''),
+                           nullif(current_setting('ticket_board.caller_role', true), ''));
+    kind text;
+    said text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL
+       OR ticket_board.declared_stage_kind(OLD.state) IS DISTINCT FROM 'implementation'
+       OR OLD.assignee IS NOT DISTINCT FROM NEW.assignee AND OLD.state IS NOT DISTINCT FROM NEW.state THEN
+        RETURN NULL;
+    END IF;
+    SELECT d.decision_id INTO open_id FROM ticket_board.router_decisions d
+    WHERE d.ticket_id = OLD.id AND d.decision = 'assign' AND d.assignee = OLD.assignee AND d.outcome IS NULL
+      AND d.decision_id = (SELECT max(x.decision_id) FROM ticket_board.router_decisions x WHERE x.ticket_id = OLD.id);
+    IF open_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+    IF OLD.state IS DISTINCT FROM NEW.state
+       AND current_setting('ticket_board.workflow_action', true) = 'implementer_kick_back' THEN
+        kind := 'misroute';
+        SELECT c.text INTO said FROM ticket_board.ticket_comments c
+        WHERE c.ticket_id = OLD.id AND c.who = OLD.assignee ORDER BY c.id DESC LIMIT 1;
+    ELSIF OLD.state IS NOT DISTINCT FROM NEW.state AND actor = 'director' THEN
+        kind := 'director_correction';
+    ELSE
+        RETURN NULL;
+    END IF;
+    UPDATE ticket_board.router_decisions
+    SET outcome = kind, outcome_role = coalesce(actor, OLD.assignee), outcome_reason = said, outcome_at = clock_timestamp()
+    WHERE decision_id = open_id;
+    RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS tickets_zz_router_outcome ON ticket_board.tickets;
+CREATE TRIGGER tickets_zz_router_outcome AFTER UPDATE ON ticket_board.tickets
+FOR EACH ROW EXECUTE FUNCTION ticket_board.note_router_outcome();
+
+REVOKE ALL ON ticket_board.router_decisions FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.router_assign(text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.router_return(text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.require_router_change(ticket_board.tickets, ticket_board.tickets, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.require_router_ticket(ticket_board.tickets, text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.note_router_outcome() FROM PUBLIC;

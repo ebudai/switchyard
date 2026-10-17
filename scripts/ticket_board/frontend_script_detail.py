@@ -248,10 +248,19 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
           });
           workflowActions.appendChild(label);
         }
+        // SYRD-599: where Router runs, the Director's ordinary route into Implementation
+        // is Router's; naming an owner is a separate, deliberate direct route.
+        const workflowRoles = state.workflow.roles || [];
+        const routerActive = workflowRoles.some((role) => role.kind === 'router' && role.active);
+        const implementationStage = (state.workflow.stages || []).find((stage) => stage.kind === 'implementation');
+        const stageKind = (name) => (state.workflow.stages || []).find((stage) => stage.name === name)?.kind;
         for (const action of ticket.workflow_actions || []) {
           const button = document.createElement('button');
           button.type = 'button';
-          button.textContent = action.label;
+          const throughRouter = routerActive && action.to === implementationStage?.name && action.primitive === 'move'
+            && action.actors.includes('director') && !['implementation', 'review'].includes(stageKind(action.from));
+          button.textContent = throughRouter ? 'Route through Router' : action.label;
+          if (action.action === 'router_return') button.dataset.routerAction = '1';
           const updateEnabled = () => {
             button.disabled = !action.actors.includes(commentWho.value) || (action.owner_scoped && ticket.assignee !== commentWho.value);
             button.title = `Allowed: ${action.actors.join(', ')}`;
@@ -260,12 +269,66 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
           commentWho.addEventListener('change', updateEnabled);
           button.addEventListener('click', async () => {
             try {
+              if (action.action === 'router_return') {
+                // SYRD-599: exactly its reason and the revision this view read; the board refuses anything else.
+                if (!commentText.value.trim()) throw new Error('Enter the reason in the comment box.');
+                await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/router_return`,
+                  { reason: commentText.value.trim(), revision: ticket.routing?.revision || '' }, commentWho.value);
+                await requestBoardReload();
+                return;
+              }
               const payload = { target: action.to };
               if (commentText.value.trim()) payload.text = commentText.value.trim();
               if (action.require_reason && !payload.text) throw new Error('Enter the reason in the comment box.');
               if (commitHashInput.value.trim()) payload.commit_hash = commitHashInput.value.trim();
               if (action.require_commit && !ticket.commit_exempt && !payload.commit_hash) throw new Error('Enter the implementation commit.');
               await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/${encodeURIComponent(action.action)}`, payload, commentWho.value);
+              await requestBoardReload();
+            } catch (error) { setCreateStatus(error.message, true); }
+          });
+          workflowActions.appendChild(button);
+          if (throughRouter) {
+            const owner = document.createElement('select');
+            owner.setAttribute('aria-label', 'Implementation owner');
+            for (const name of implementationStage.owners || []) {
+              if (workflowRoles.some((role) => role.name === name && role.active)) buildOption(owner, name, roleLabel(name));
+            }
+            // A board refresh re-renders this panel, and one already in flight when the owner is chosen
+            // would drop a draft; the choice is kept in page state so it is never reset to the first owner.
+            const choiceKey = `${ticket.id}:${action.action}`;
+            const chosen = (state.directOwners ||= {})[choiceKey];
+            if (chosen && [...owner.options].some((option) => option.value === chosen)) owner.value = chosen;
+            owner.addEventListener('change', () => { state.directOwners[choiceKey] = owner.value; });
+            const direct = document.createElement('button');
+            direct.type = 'button';
+            direct.textContent = 'Assign directly';
+            const updateDirect = () => { direct.disabled = owner.disabled = !action.actors.includes(commentWho.value); };
+            updateDirect();
+            commentWho.addEventListener('change', updateDirect);
+            direct.addEventListener('click', async () => {
+              try {
+                const payload = { target: action.to, assignee: owner.value };
+                if (commentText.value.trim()) payload.text = commentText.value.trim();
+                await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/${encodeURIComponent(action.action)}`, payload, commentWho.value);
+                await requestBoardReload();
+              } catch (error) { setCreateStatus(error.message, true); }
+            });
+            workflowActions.append(owner, direct);
+          }
+        }
+        // SYRD-599: Router's other write, to an owner the board offered for this revision.
+        for (const owner of ticket.routing?.holder ? (ticket.routing.assignable || []) : []) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = `Assign to ${owner}`;
+          button.dataset.routerAction = '1';
+          const updateEnabled = () => { button.disabled = commentWho.value !== ticket.routing.holder; button.title = 'Router only'; };
+          updateEnabled();
+          commentWho.addEventListener('change', updateEnabled);
+          button.addEventListener('click', async () => {
+            try {
+              await postTicketAction(`/api/tickets/${encodeURIComponent(ticket.id)}/actions/router_assign`,
+                { assignee: owner, revision: ticket.routing.revision }, commentWho.value);
               await requestBoardReload();
             } catch (error) { setCreateStatus(error.message, true); }
           });
@@ -1023,6 +1086,29 @@ SCRIPT_DETAIL = """    // SYRD-83: the fields a Director edit may move. The data
         comments.appendChild(empty);
       }
       box.appendChild(comments);
+
+      // SYRD-599: with Router as the author, its two writes (and the comment box
+      // that holds a return's reason) are the only controls on offer. Only what
+      // this lock disabled is re-enabled when the author changes; every other
+      // control keeps its own rule, which has already run by then.
+      const routerRole = (state.workflow?.roles || []).find((role) => role.kind === 'router')?.name;
+      if (routerRole) {
+        const lockedForRouter = new Set();
+        const lockForRouter = () => {
+          if (commentWho.value === routerRole) {
+            for (const control of box.querySelectorAll('button, input, select, textarea')) {
+              if (control === commentWho || control === commentText || control.dataset.routerAction || control.disabled) continue;
+              control.disabled = true;
+              lockedForRouter.add(control);
+            }
+          } else {
+            for (const control of lockedForRouter) control.disabled = false;
+            lockedForRouter.clear();
+          }
+        };
+        lockForRouter();
+        commentWho.addEventListener('change', lockForRouter);
+      }
 
       detailContentEl.appendChild(box);
       restoreDetailDraft(ticket.id, draftFields);

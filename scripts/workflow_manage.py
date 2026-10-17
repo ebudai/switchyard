@@ -117,6 +117,22 @@ def _document_with_design_stage(current: dict, parser: argparse.ArgumentParser) 
     return document
 
 
+def _document_with_router(current: dict, args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """SYRD-599: the tenant's own document with Router turned on or off."""
+    from scripts.ticket_board.router_setup import with_router, without_router
+
+    if not current.get("document"):
+        parser.error("no workflow configuration is active for this board")
+    try:
+        if args.operation == "disable-router":
+            return without_router(current["document"])
+        if not args.runtime:
+            parser.error("enable-router requires --runtime")
+        return with_router(current["document"], runtime=args.runtime, template_role=args.template_role)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
 def _project_dir_for(config_path: Path, document: dict) -> Path | None:
     """Where this tenant's project lives, from the artifact the projection already knows."""
     project = document.get("project")
@@ -300,6 +316,8 @@ def main(argv=None):
             "clear-role-prompt",
             "migrate-director-onboarding",
             "add-design-stage",
+            "enable-router",
+            "disable-router",
         ],
     )
     parser.add_argument("--document", type=Path)
@@ -331,6 +349,8 @@ def main(argv=None):
         "--journal", type=Path, help="saved apply journal (required for rollback)"
     )
     parser.add_argument("--role")
+    parser.add_argument("--runtime", help="enable-router: the agent CLI Router runs on")
+    parser.add_argument("--template-role", help="enable-router: the role whose launcher model Router starts from")
     parser.add_argument("--prompt", help="onboarding prompt text for set-role-prompt")
     parser.add_argument(
         "--prompt-file",
@@ -478,6 +498,10 @@ def main(argv=None):
         # command, and everything below (board dry-run, expected revision, journal,
         # projection) is apply's own (SYRD-567).
         cfg = _document_with_design_stage(current, parser)
+        files = projection_files(args.config, cfg)
+    elif args.operation in {"enable-router", "disable-router"}:
+        # The same path again: a reviewed shape, applied as apply applies (SYRD-599).
+        cfg = _document_with_router(current, args, parser)
         files = projection_files(args.config, cfg)
     else:
         if not args.document:

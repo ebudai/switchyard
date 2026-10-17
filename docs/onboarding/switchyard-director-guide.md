@@ -153,6 +153,17 @@ leave it. Analysis is yours; a ticket sitting there looks like work in progress.
 route it to an implementer for code. An implementer refusing work it was told not to start
 is doing its job — that refusal is a signal you routed wrongly.
 
+**Router is for the obvious cases; you keep the hard ones.** A project may run an optional
+Router role (`switchyard router-role`) that picks the Implementation owner for work you
+admit, or hands it back to you with a reason. Where it runs it is the default: an ordinary
+route with no owner named goes to Router, and is refused if Router is not running. Name an
+owner (`--assignee`, or "Assign directly") when you already know it or need to recover;
+that direct route is ordinary, never a fallback. Keep in triage what needs a decision. A Router abstention is cheap: one handoff to you. A wrong
+assignment is not: an implementer's interruption, their `implementer_kick_back`, and
+your correction. So judge it by its misroutes and corrections, which the board records
+against each decision, not by how much it routes, and run `scripts/router_canary.py`
+before trusting a new model (SYRD-599).
+
 **Recover a stalled ticket rather than overriding it.** When an owner reports
 completion or a dependency and does not transition, `recover-stalled-ticket <id>
 --reason "..."` takes the one declared no-code transition that owner could have

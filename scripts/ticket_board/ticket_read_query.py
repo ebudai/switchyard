@@ -44,17 +44,23 @@ def select_ticket_rows(conn: Any, ticket_id: str | None = None) -> list[dict[str
         "SELECT to_regprocedure('ticket_board.ticket_reminder_snooze(text,timestamptz)') IS NOT NULL AS snooze, "
         "to_regprocedure('ticket_board.ticket_size_review(text)') IS NOT NULL AS size_review, "
         "to_regprocedure('ticket_board.serial_queue()') IS NOT NULL AS serial_queue, "
-        "to_regprocedure('ticket_board.ticket_privileged_jobs(text)') IS NOT NULL AS privileged_jobs"
+        "to_regprocedure('ticket_board.ticket_privileged_jobs(text)') IS NOT NULL AS privileged_jobs, "
+        "to_regprocedure('ticket_board.ticket_routing(text)') IS NOT NULL AS routing"
     ).fetchone()
     present = (dict(probe) if isinstance(probe, dict)
                else {"snooze": probe[0], "size_review": probe[1], "serial_queue": probe[2],
-                     "privileged_jobs": probe[3]} if probe is not None else {})
+                     "privileged_jobs": probe[3], "routing": probe[4]} if probe is not None else {})
     snooze_sql = (
         "ticket_board.ticket_reminder_snooze(t.id, clock_timestamp())" if present.get("snooze") else "NULL::jsonb"
     )
     size_sql = "ticket_board.ticket_size_review(t.id)" if present.get("size_review") else "NULL::jsonb"
     # SYRD-113: root's privileged jobs for the ticket; none on an older board.
     jobs_sql = "ticket_board.ticket_privileged_jobs(t.id)" if present.get("privileged_jobs") else "'[]'::jsonb"
+    # SYRD-599: what Router classifies against, and the record of its decisions. Asked only of a
+    # ticket Router holds or has decided, so a board read does not read the workflow once per ticket.
+    routing_sql = ("CASE WHEN t.assignee = 'router' OR EXISTS (SELECT 1 FROM ticket_board.router_decisions d "
+                   "WHERE d.ticket_id = t.id) THEN ticket_board.ticket_routing(t.id) END"
+                   if present.get("routing") else "NULL::jsonb")
     # SYRD-568: each implementer's queue, read once per query. A board older
     # than the queue has none, and every ticket reads as not queued.
     queue_sql = (
@@ -249,6 +255,7 @@ SELECT
     {snooze_sql} AS reminder_snooze,
     {size_sql} AS size_review,
     {jobs_sql} AS privileged_jobs,
+    {routing_sql} AS routing,
     COALESCE(
         (SELECT array_agg(b.blocker_ticket_id ORDER BY b.position)
          FROM ticket_board.ticket_blockers b

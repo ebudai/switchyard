@@ -141,6 +141,36 @@ tells you. The new owner is not notified, because nothing is theirs to do yet. I
 rather than queued, hold it deliberately (below) and say why; do not defeat
 serial focus by forcing state.
 
+## Router, when the project runs one
+
+A project may run an optional **Router**: a low-cost role that picks the
+Implementation owner for work you have already admitted, or hands it back to
+you. It is a usability tool, not a delegate: everything else stays yours.
+
+- `switchyard router-role <project> enable --runtime <cli>` declares it,
+  detached, with its own prompt and the model of `--template-role` (the first
+  Implementation owner by default). Choose a cheap model with
+  `switchyard set-role-runtime <project> router --model <model>`. `disable`
+  turns it off once it holds no work; the board refuses while it does.
+- It is the default: `route <id> --state <Implementation stage>` with no
+  `--assignee` sends the ticket to Router, and the UI's normal button says
+  "Route through Router". It holds no implementer slot, so any number can wait
+  on it, and it is told about each once. If Router is not running, that route
+  is refused rather than given to an implementer.
+- Routing directly stays yours: `--assignee <owner>` (the UI's "Assign
+  directly") is an ordinary route with the usual queue rules, for a decision
+  you have already made or for recovery. It records no Router decision.
+- It makes exactly one write per ticket: `router-assign` to an active
+  Implementation owner (the owner's queue then applies as usual), or
+  `router-return` to `analysis` with a reason, which reaches you as one
+  handoff. The board refuses it everything else, whatever it sends.
+- An implementer handed the wrong ticket uses `implementer_kick_back`: it comes
+  back to you, not to Router, and is recorded as a misroute. Your `reassign`
+  of Router's pick is recorded as a correction. Each ticket's `routing` field
+  (`ticket-board-read ticket <id> --json`) carries the history.
+- `scripts/router_canary.py seed|report|finish` measures it on bounded
+  fixtures, priced with your corrections and implementers' interruptions.
+
 ## Gate flags
 
 Gate flags decide which review stages a ticket passes through; the workflow

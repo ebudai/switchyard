@@ -732,8 +732,20 @@ class TicketBoardWriteClient:
         return self._post("/actions/set_report_intake", {"backlog_requests": backlog_requests, "reason": reason},
                           caller_role=caller_role)
 
-    def route(self, ticket_id: str, *, state: str, assignee: str, caller_role: str | None = None) -> dict[str, Any]:
-        return self._ticket_action(ticket_id, "route", {"state": state, "assignee": assignee}, caller_role=caller_role)
+    def route(self, ticket_id: str, *, state: str, assignee: str | None = None,
+              caller_role: str | None = None) -> dict[str, Any]:
+        payload = {"state": state} if assignee is None else {"state": state, "assignee": assignee}
+        return self._ticket_action(ticket_id, "route", payload, caller_role=caller_role)
+
+    def router_assign(self, ticket_id: str, *, assignee: str, revision: str, caller_role: str | None = None) -> dict[str, Any]:
+        """SYRD-599: Router's choice of Implementation owner, for the revision it read."""
+        return self._ticket_action(ticket_id, "router_assign", {"assignee": assignee, "revision": revision},
+                                   caller_role=caller_role)
+
+    def router_return(self, ticket_id: str, *, reason: str, revision: str, caller_role: str | None = None) -> dict[str, Any]:
+        """SYRD-599: Router hands the ticket back to the Director's triage, with its reason."""
+        return self._ticket_action(ticket_id, "router_return", {"reason": reason, "revision": revision},
+                                   caller_role=caller_role)
 
     def reassign(
         self,

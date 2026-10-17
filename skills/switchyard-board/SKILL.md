@@ -12,6 +12,11 @@ Nothing in this skill names a project, a port, a role, a stage, or a database.
 All of that is per-project and is discovered at runtime. If you find yourself
 typing a literal prefix or address, you are guessing.
 
+**If `TICKET_BOARD_CALLER_ROLE` is `router`, stop here: this skill is not
+yours.** Router's whole remit is its onboarding prompt - one read of the ticket
+it was told about, then `router-assign` or `router-return` - and nothing below
+applies to it.
+
 ## What the environment already tells you
 
 Every Switchyard pane is launched with its board address and identity:
@@ -182,6 +187,21 @@ workflow: it means somebody has to come and find out what you meant. Your own
 submission is owner-scoped, so nobody else can take it for you - a director can
 only recover the ticket to its next required gate, and that is a repair, not the
 path.
+
+## A ticket that is not yours
+
+When a project runs a Router, an implementer can be handed work that belongs to
+another implementation specialty, or that needs a Director decision before
+anyone builds it. Do not start it because misroutes are rare. Hand it back:
+
+```bash
+ticket-board-write implementer-kick-back <id> --reason "<whose it is, or what needs deciding, in a sentence>"
+```
+
+It goes to the Director's triage, never back through Router, and the board
+records it as a Router misroute. You do not choose who gets it next or change
+anything else about it; the reason is what the Director reads. It is listed in
+the ticket's `workflow_actions` where the workflow declares it.
 
 ## Background commands
 

@@ -1,0 +1,23 @@
+{
+  "about": "SYRD-599 Router canary fixtures. Bounded and project-neutral: each names an implementation specialty by what the work touches, or is work Router should hand back. `expect` is an Implementation owner, or `return`. Expectations stay in the run file, never on the ticket, so Router cannot read the answer.",
+  "fixtures": [
+    {"expect": "main", "title": "Ticket numbers with leading zeros parse to the wrong ticket",
+     "body": "`ticket_number('PGU-0042')` returns 42 but the board stores the id as typed, so lookups by number miss it. The parser and its callers live in the core ticket model. Fix the parsing and the lookup together."},
+    {"expect": "main", "title": "A merged ticket keeps its blockers' unblock notices",
+     "body": "When a ticket is merged into another, the dependents it blocked are never told it resolved. The merge operation and the blocker resolution trigger are core board logic. Make merge resolve the source's blockers the way done does."},
+    {"expect": "app", "title": "The ticket detail panel overflows on a narrow window",
+     "body": "In the web UI, the action buttons under a ticket wrap off the right edge below about 700px wide and cannot be clicked. Only the front-end layout and styles are involved."},
+    {"expect": "app", "title": "Blocked badges are unreadable in dark mode",
+     "body": "The red 'blocked' badge on board cards has almost no contrast against the dark theme's card background. Adjust the browser UI's colour tokens so it meets contrast guidelines in both themes."},
+    {"expect": "ops", "title": "The board service restarts in a loop after a host reboot",
+     "body": "After a reboot the board's systemd unit starts before PostgreSQL accepts connections, fails, and is restarted until the start limit. The unit ordering and its restart policy need fixing; no application code changes."},
+    {"expect": "ops", "title": "Listener logs grow without bound",
+     "body": "The notify listener's log file on the host has reached several gigabytes. Configure rotation and a size cap for it in the service's deployment, and say where the old logs go."},
+    {"expect": "return", "title": "Should each tenant get its own board database?",
+     "body": "We have discussed splitting the shared PostgreSQL cluster per tenant. Before anyone builds anything, decide whether we should, weighing backup, upgrade and cost. The deliverable is the decision."},
+    {"expect": "return", "title": "Write the specification for multi-board search",
+     "body": "Users want to search tickets across every project's board. The first deliverable is a specification of the query language and permissions model for review; implementation comes later, possibly split across several roles."},
+    {"expect": "return", "title": "Make the board faster",
+     "body": "It feels slow sometimes, both the web page and some commands. Please look into it."}
+  ]
+}

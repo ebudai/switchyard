@@ -325,10 +325,12 @@ def switchyard_main(argv: list[str] | None = None) -> int:
         from scripts import paste_image
 
         return paste_image.main(argv[1:])
-    # `design-stage` shares this block: like role-prompt it writes the tenant's own
-    # declared workflow through workflow_manage as the caller (SYRD-567).
-    if argv[0].casefold() in ("role-prompt", "design-stage"):
+    # `design-stage` and `router-role` share this block: like role-prompt they write
+    # the tenant's own declared workflow through workflow_manage as the caller
+    # (SYRD-567, SYRD-599).
+    if argv[0].casefold() in ("role-prompt", "design-stage", "router-role"):
         design_stage = argv[0].casefold() == "design-stage"
+        router = argv[0].casefold() == "router-role"
         parser = argparse.ArgumentParser(
             prog=f"switchyard {argv[0].casefold()}",
             description=(
@@ -336,13 +338,22 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                 "owns design work and submits it to the Director's design review, which returns "
                 "it or accepts it into triage. release_draft is unchanged."
             ) if design_stage else (
+                "Turn the optional Router role on or off. Router chooses the implementation owner "
+                "for work the Director routes to it, or hands it back to triage with a reason; "
+                "implementers get implementer_kick_back for a misroute. Choose its model with "
+                "switchyard set-role-runtime <project> router."
+            ) if router else (
                 "Show, set, or clear the onboarding prompt a role receives when its next "
                 "conversation starts fresh. A running conversation is never interrupted or "
                 "rewritten: a changed prompt is used by the next fresh session or an "
                 "explicit role restart."
             ),
         )
-        if design_stage:
+        if router:
+            parser.add_argument("action", choices=("enable", "disable"))
+            parser.add_argument("--runtime", help="enable: the agent CLI Router runs on")
+            parser.add_argument("--template-role", help="enable: the role whose model Router starts from")
+        if design_stage or router:
             parser.add_argument(
                 "--dry-run", action="store_true",
                 help="print the document and projection it would apply, and change nothing",
@@ -355,7 +366,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             default=os.environ.get("TICKET_BOARD_PROJECT", ""),
             help="project name or slug; defaults to TICKET_BOARD_PROJECT in the caller's pane",
         )
-        if not design_stage:
+        if not (design_stage or router):
             parser.add_argument("--prompt", help="prompt text; use --prompt-file for anything long")
             parser.add_argument(
                 "--prompt-file",
@@ -374,6 +385,11 @@ def switchyard_main(argv: list[str] | None = None) -> int:
 
         if design_stage:
             forwarded = ["add-design-stage", "--board-url", config.board_url, "--config", str(entry.config_path)]
+            return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
+        if router:
+            forwarded = [f"{args.action}-router", "--board-url", config.board_url, "--config", str(entry.config_path)]
+            forwarded += ["--runtime", args.runtime] if args.runtime else []
+            forwarded += ["--template-role", args.template_role] if args.template_role else []
             return workflow_manage.main(forwarded + (["--dry-run"] if args.dry_run else []))
         forwarded = [
             f"{args.action}-role-prompt",

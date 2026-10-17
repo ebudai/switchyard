@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import os
 import shlex
 import subprocess
@@ -199,6 +200,9 @@ def main() -> int:
     def shape(run: dict) -> dict:
         """A run's outcomes with its own scratch commit hashes named by role, so main's and this tree's compare."""
         text = json.dumps({k: run[k] for k in ("declared", "legacy")})
+        # Where in a PL/pgSQL body a refusal is raised is not an answer: any edit to that
+        # function moves it, and the refusal is the same (SYRD-599 moved this one).
+        text = re.sub(r"\bline \d+ at\b", "line N at", text)
         hashes = sorted({row["commit_hash"] for section in ("declared",) for row in run[section].values()
                          if isinstance(row, dict) and row.get("commit_hash")}, key=text.index)
         for name, value in zip(("<approved>", "<correction>"), hashes):

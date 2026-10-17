@@ -305,4 +305,13 @@ REVOKE EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text,
 GRANT EXECUTE ON FUNCTION ticket_board.note_role_stall(jsonb, integer, interval, timestamptz) TO ticket_board_listener;
 GRANT EXECUTE ON FUNCTION ticket_board.role_stall_notice_is_current(text, text, jsonb) TO ticket_board_listener;
 
+-- SYRD-599: Router's two operations, its read, and the predicate the stage and
+-- notification helpers the service calls directly now ask.
+REVOKE ALL ON ticket_board.router_decisions FROM PUBLIC;
+GRANT SELECT ON ticket_board.router_decisions TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.router_assign(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.router_return(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ticket_routing(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.router_holds(text, text) TO ticket_board_service, ticket_board_listener;
+
 COMMIT;

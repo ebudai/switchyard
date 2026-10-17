@@ -7,10 +7,12 @@ import json
 import re
 from typing import Any
 
+from .router_role import router_holds, validate_router
+
 SCHEMA = "switchyard.workflow.v1"
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 ROLE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
-KINDS = {"system", "draft", "implementer", "reviewer", "support", "user"}
+KINDS = {"system", "draft", "implementer", "reviewer", "support", "user", "router"}  # router: SYRD-599
 PRIMITIVES = {"move", "approve", "return", "reopen"}
 RUNTIMES = {"claude", "codex", "agy", "hermes"}
 # The director is a structural role of this model, not a tenant-chosen name: a
@@ -52,6 +54,8 @@ CAPABILITIES = {
     # SYRD-133: taking the transition a stalled ticket's owner did not take,
     # bounded to the one declared step that owner could have taken.
     "recover_stalled_ticket",
+    # SYRD-599: the router role's one operation, and nobody else's (router_role).
+    "router_assign",
 }
 # The control floor: what a declarative document may never take away from the
 # director, and what it may never give. A tenant configures its own pipeline;
@@ -1074,6 +1078,7 @@ def validate(document: Any, *, project: str | None = None) -> dict[str, Any]:
         ),
         "invalid deliberate stage reassignment",
     )
+    validate_router(cfg, need)
     return cfg
 
 
@@ -1210,7 +1215,7 @@ def notification_role(cfg: dict[str, Any], state: str, assignee: str) -> str | N
     if policy["kind"] == "fixed_role":
         return policy["role"]
     if policy["kind"] in {"assignee", "stage_owner_fallback"}:
-        if assignee in owners:
+        if assignee in owners or router_holds(cfg, state, assignee):
             return assignee
         if policy["kind"] == "stage_owner_fallback" and owners:
             return owners[0]

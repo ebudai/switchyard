@@ -707,6 +707,7 @@ def _prepare_new_project_board(
     provision_dir: Path,
     upstream_report_url: str = "",
     upstream_report_token_file: str = "",
+    board_ui_users: Sequence[str] = (),
 ) -> NewProjectBoard | int:
     from scripts import team_launcher as launcher
 
@@ -744,6 +745,12 @@ def _prepare_new_project_board(
     config = launcher.load_project_config(resolved_slug, config_path)
     config = launcher.prepare_project_desktop(config, runner=runner)
     launcher._register_switchyard_project(config_path, registry_dir=registry_dir)
+    # SYRD-598: root records who may confirm Director operations in the board UI, beside the registration.
+    from scripts.board_ui_record import record_board_ui_users
+
+    for problem in record_board_ui_users(config, registry_dir=registry_dir, operator_users=board_ui_users,
+                                         print_func=print_func):
+        print_func(f"switchyard: {problem}")
     if upstream_report_url.strip():
         config = _connect_new_project_for_reports(
             config, config_path=config_path, upstream_report_url=upstream_report_url,

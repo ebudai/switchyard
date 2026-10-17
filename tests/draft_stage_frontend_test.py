@@ -19,7 +19,8 @@ def main() -> int:
     assert "initial_state: createDraftInput.checked ? 'draft'" in HTML
     assert "createDraftInput.checked = false;" in HTML
     assert "createDraftInput.addEventListener('keydown', submitCreateOnEnter);" in HTML
-    assert "if (ticket.state === 'draft') {\n        return 'analysis';" in HTML
+    # SYRD-598: the page keeps no advance table; releasing a draft stays the User's own action.
+    assert "function defaultAdvanceState(ticket)" not in HTML
     assert "releaseButton.textContent = 'Release to Triage';" in HTML
     assert "await updateTicketAction(ticketId, 'release_draft', {}, normalizedCaller);" in HTML
     assert "detail-stage-draft" in HTML

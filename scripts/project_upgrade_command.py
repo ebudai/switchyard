@@ -56,6 +56,9 @@ def upgrade_project_command(
     # What a role keeps when its own session last ran another model than its
     # configuration: "running", "configured", or "" to refuse (SYRD-579).
     role_models: str = "",
+    # Stated by an operator (SYRD-598): human accounts that may confirm Director operations in the board
+    # UI. Without it the host's approved desktop owner is recorded; a headless host records nobody.
+    board_ui_users: list[str] | tuple[str, ...] = (),
     registry_dir: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     print_func: Callable[[str], None] = print,
@@ -136,6 +139,7 @@ def upgrade_project_command(
         source_repo=source_repo,
         upstream_report_token_file=upstream_report_token_file,
         upstream_report_url=upstream_report_url,
+        board_ui_users=board_ui_users,
     )
     tooling_staged = launcher._stage_upgrade_tooling(
         config,

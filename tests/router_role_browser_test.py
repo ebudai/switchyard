@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""SYRD-599: in the board's own web UI, Router can do its two writes and nothing else.
+"""SYRD-599: in the board's own web UI, Router's two writes are not offered, and the Director's routes are.
 
 A production-built Router board, the real server and its real page in headless
-Chromium. With Router chosen as the author of a ticket Router holds, its
-assign-to-owner buttons and `Return to triage` are the only enabled actions;
-with the Director chosen, none of Router's are. Each click goes through the
-same HTTP path and checks as the CLI.
+Chromium. Since SYRD-598 the page is the User's and asserts no role: Router
+writes from its own pane, through the board's Unix socket, so a ticket Router
+holds shows none of Router's assign-to-owner or return buttons. The Director's
+two ways into Implementation -- Route through Router, and Assign directly to a
+chosen owner -- are what the board describes for a triage ticket, and the User
+confirms each; it then runs through the same HTTP path and checks as the CLI,
+under a single-use grant the User's decision is recorded with.
 """
 
 from __future__ import annotations
@@ -22,9 +25,12 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 
 import router_role_board_test as rb  # noqa: E402
 from blocked_by_frontend_browser_test import load_playwright  # noqa: E402
+from board_ui_user_record import trust_board_ui_users  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 CHECKS = 0
+#: The approved board UI user's uid, as root records it; every page connection is taken to be this account's.
+UI_UID = 4242599
 
 
 def check(condition: object, detail: str) -> None:
@@ -77,12 +83,32 @@ def settle(page) -> None:
         page.remove_listener("request", note)
 
 
-def open_as(page, base: str, ticket: str, author: str) -> None:
+def open_ticket(page, base: str, ticket: str) -> None:
     page.goto(base + "/", wait_until="domcontentloaded")
     settle(page)
     page.locator(".card", has=page.locator(".card-id", has_text=ticket)).first.click()
     page.locator(".detail-modal").wait_for(timeout=5000)
-    page.get_by_label("Comment author").select_option(author)
+    page.locator(".detail-modal [data-board-ui-op]").first.wait_for(timeout=10000)
+
+
+def offered(page) -> list[list[str]]:
+    """The operations the open ticket's panel offers: operation, variant and label."""
+    return page.evaluate("""() => [...document.querySelectorAll('.detail-modal [data-board-ui-op]')].map(
+        (b) => [b.getAttribute('data-board-ui-op'), b.getAttribute('data-board-ui-variant') || '', b.textContent.trim()])""")
+
+
+def confirm(page, variant: str, **choices: str) -> None:
+    """Choose the operation, fill its fields, review the concrete values and confirm, as the User does."""
+    page.locator(f".detail-modal [data-board-ui-variant='{variant}']").click()
+    dialog = page.locator("[data-board-ui-dialog]")
+    dialog.locator("[data-board-ui-review], [data-board-ui-confirm]").first.wait_for(timeout=5000)
+    for name, value in choices.items():
+        dialog.locator(f"[data-board-ui-field='{name}']").select_option(value)
+    if dialog.locator("[data-board-ui-review]").count():  # nothing to fill opens on the confirmation itself
+        dialog.locator("[data-board-ui-review]").click()
+    dialog.locator("[data-board-ui-confirm]").click()
+    page.wait_for_function("() => /: done for |refused/.test(document.getElementById('createStatus').textContent)",
+                           timeout=10000)
 
 
 def scenario() -> dict:
@@ -91,49 +117,39 @@ def scenario() -> dict:
     seen: dict = {}
     sync_playwright = load_playwright()
     with temporary_cluster(prefix="syrd599b-", shutdown="immediate") as cluster:
+        trust_board_ui_users(cluster.root / "registry", [{"account": "syrd599-user", "uid": UI_UID}], peer_uid=UI_UID)
         board = rb.Board(cluster, "browser", rb.example(router=True))
         try:
-            for ticket in ("PGU-951", "PGU-952", "PGU-953", "PGU-954"):
+            for ticket in ("PGU-951", "PGU-953", "PGU-954"):
                 rb.fixture.seed_postgres_ticket(board.admin, ticket, title=ticket, state="analysis", assignee="director",
                                                 commit_exempt=True)
-            for ticket in ("PGU-951", "PGU-952"):
-                board.act(ticket, "route", "director", state="in_progress")
+            board.act("PGU-951", "route", "director", state="in_progress")
             with sync_playwright() as playwright:
                 browser = launch(playwright)
                 try:
                     page = browser.new_page(viewport={"width": 1400, "height": 1000})
                     errors: list[str] = []
                     page.on("pageerror", lambda error: errors.append(str(error)))
-                    open_as(page, board.base, "PGU-951", "router")
-                    seen["as_router"] = enabled_buttons(page)
-                    page.get_by_label("Comment author").select_option("director")
-                    seen["as_director"] = enabled_buttons(page)
-                    page.get_by_label("Comment author").select_option("router")
-                    page.locator(".detail-modal").get_by_role("button", name="Assign to ops").click()
-                    page.wait_for_timeout(500)
-                    seen["assigned"] = board.where("PGU-951")
-                    open_as(page, board.base, "PGU-952", "router")
-                    page.get_by_placeholder("Add a comment or bounce-back note").fill("Needs a Director decision first.")
-                    page.locator(".detail-modal").get_by_role("button", name="Return to triage").click()
-                    page.wait_for_timeout(500)
-                    seen["returned"] = board.where("PGU-952")
-                    seen["reason"] = board.sql("SELECT text FROM ticket_board.ticket_comments WHERE ticket_id = 'PGU-952' "
-                                               "ORDER BY id DESC LIMIT 1;")
+                    open_ticket(page, board.base, "PGU-951")
+                    seen["router_holds"] = board.where("PGU-951")
+                    seen["router_held"] = offered(page)
+                    seen["router_held_controls"] = enabled_buttons(page)
                     # The Director's two ways into Implementation, as the triage view offers them.
-                    open_as(page, board.base, "PGU-953", "director")
-                    seen["director_triage"] = enabled_buttons(page)
-                    # Clicked only if offered, so a missing control fails the named check below, not a timeout here.
-                    if seen["director_triage"].get("Route through Router"):
-                        page.locator(".detail-modal").get_by_role("button", name="Route through Router").click()
-                        page.wait_for_timeout(500)
+                    open_ticket(page, board.base, "PGU-953")
+                    seen["director_triage"] = offered(page)
+                    # Confirmed only if offered, so a missing control fails the named check below, not a timeout here.
+                    if any(variant == "router" for _op, variant, _label in seen["director_triage"]):
+                        confirm(page, "router")
                     seen["through_router"] = board.where("PGU-953")
-                    open_as(page, board.base, "PGU-954", "director")
-                    page.get_by_label("Implementation owner").select_option("ops")
-                    page.locator(".detail-modal").get_by_role("button", name="Assign directly").click()
-                    page.wait_for_timeout(500)
+                    open_ticket(page, board.base, "PGU-954")
+                    if any(variant == "direct" for _op, variant, _label in offered(page)):
+                        confirm(page, "direct", assignee="ops")
                     seen["assigned_directly"] = board.where("PGU-954")
                     seen["direct_decisions"] = board.sql("SELECT count(*) FROM ticket_board.router_decisions "
                                                          "WHERE ticket_id = 'PGU-954';")
+                    seen["grants"] = board.sql(
+                        "SELECT string_agg(ticket_id || ':' || decided_by || ':' || authority || ':' "
+                        "|| (consumed_at IS NOT NULL)::text, ',' ORDER BY id) FROM ticket_board.ui_delegations;")
                     seen["errors"] = errors
                 finally:
                     browser.close()
@@ -143,26 +159,22 @@ def scenario() -> dict:
 
 
 def verify(seen: dict) -> None:
-    mine = {"Assign to app", "Assign to main", "Assign to ops", "Return to triage"}
-    authoring = {"Comment author", "Add a comment or bounce-back note", "×"}  # and closing the panel
-    as_router = seen["as_router"]
-    check({label for label, on in as_router.items() if on} == mine | authoring,
-          f"Router can use its two writes, and the reason box, and nothing else: "
-          f"{sorted(label for label, on in as_router.items() if on)}")
-    on_for_director = {label for label, on in seen["as_director"].items() if on}
-    check(on_for_director & mine == set() and {"Save Title", "Add Blocker", "Add Comment", "Defer"} <= on_for_director,
-          f"none of them is the Director's, whose own controls come back: {sorted(on_for_director)}")
-    check(seen["assigned"] == ["in_progress", "ops"], f"the assign button assigns: {seen['assigned']}")
-    check(seen["returned"] == ["analysis", "director"]
-          and seen["reason"].endswith("Reason: Needs a Director decision first."),
-          f"the return button returns, with the reason: {seen['returned']} {seen['reason']}")
-    triage = seen["director_triage"]
-    check(triage.get("Route through Router") is True and triage.get("Assign directly") is True
-          and triage.get("Implementation owner") is True and "Route" not in triage,
-          f"the Director's normal route says Router chooses, beside a distinct direct one: {sorted(triage)}")
+    check(seen["router_holds"] == ["in_progress", "router"], f"Router holds the ticket: {seen['router_holds']}")
+    router_ops = [entry for entry in seen["router_held"] if "router" in entry[0] or entry[1]]
+    labels = set(seen["router_held_controls"])
+    check(router_ops == [] and not {label for label in labels if label.startswith("Assign to ")}
+          and "Return to triage" not in labels and "Comment author" not in labels,
+          f"the page offers none of Router's writes, and no role to write as: {seen['router_held']} {sorted(labels)}")
+    triage = {variant: (op, label) for op, variant, label in seen["director_triage"] if variant}
+    check(set(triage) == {"router", "direct"} and triage["router"][1] == "Route through Router"
+          and triage["direct"][1] == "Assign directly" and triage["router"][0] == triage["direct"][0]
+          and not [label for _op, variant, label in seen["director_triage"] if not variant and label == "Route"],
+          f"the Director's normal route says Router chooses, beside a distinct direct one: {seen['director_triage']}")
     check(seen["through_router"] == ["in_progress", "router"], f"Route through Router: {seen['through_router']}")
     check(seen["assigned_directly"] == ["in_progress", "ops"] and seen["direct_decisions"] == "0",
           f"Assign directly, to the owner chosen, with no Router decision: {seen['assigned_directly']}")
+    check(seen["grants"] == "PGU-953:user:director:true,PGU-954:user:director:true",
+          f"each was the User's decision, under a grant of the Director's permission, used once: {seen['grants']}")
     check(seen["errors"] == [], f"the page raised nothing: {seen['errors']}")
 
 

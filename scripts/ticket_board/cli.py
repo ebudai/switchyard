@@ -61,11 +61,22 @@ def parse_args() -> argparse.Namespace:
         help="Enable tenant upstream report filing with this shared HTTP token. Default: TICKET_BOARD_TENANT_REPORT_TOKEN.",
     )
     parser.add_argument("--open-browser", action="store_true", help="Open the board URL automatically.")
+    parser.add_argument(
+        "--board-ui-record",
+        default="",
+        help="The project's root-owned record of approved board UI users (SYRD-598). On the command line, never "
+             "from the environment: the tenant's EnvironmentFile can override that. Without it the board UI lends "
+             "no Director operation.",
+    )
     return parser.parse_args()
 
 
 def run_server(args: argparse.Namespace) -> int:
     commit_git_dir_arg = str(getattr(args, "commit_git_dir", "") or "")
+    if getattr(args, "board_ui_record", ""):
+        from . import ui_user_identity
+
+        ui_user_identity.RECORD_PATH = Path(args.board_ui_record)
     app = TicketBoardApp(
         frame_dir=Path(args.frames),
         asset_dir=Path(args.assets),

@@ -28,8 +28,8 @@ def run_browser_check(playwright: Any, harness: BoardHarness) -> None:
         modal = page.locator(".detail-modal")
         modal.wait_for(timeout=5000)
 
-        author = modal.get_by_role("combobox", name="Comment author")
-        assert author.input_value() == "user"
+        # SYRD-598: the board page acts as the User; there is no author to pick.
+        assert modal.locator("[data-comment-author='user']").count() == 1
         assert modal.get_by_placeholder("Add a comment or bounce-back note").input_value() == ""
         modal.get_by_role("button", name="Return for Rework").click()
 

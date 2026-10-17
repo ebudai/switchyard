@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import attachment_store, commit_cache, extension_operations, new_asset_files, workflow_locking
+from . import attachment_store, commit_cache, extension_operations, new_asset_files, ui_delegation, workflow_locking
 from .commit_cache import COMMIT_REFRESH_TIMEOUT_SECONDS, PUBLISHABLE_REF, PUBLISHED_REF_NAMESPACE
 from .commit_repos import commit_git_dirs_for_project
 from .image_asset_policy import (  # re-exported: callers import these from the app
@@ -868,7 +868,7 @@ WHERE (r.definition->>'active')::boolean
 
     def merge_tickets(self, source_ticket_id: str, target_ticket_id: str, *, actor: str) -> dict[str, dict[str, Any]]:
         actor_normalized = str(actor).strip().lower()
-        if actor_normalized != "director":
+        if actor_normalized != "director" and not ui_delegation.confirmed("merge"):  # SYRD-598: or the User's confirmation
             raise ValueError("ticket merge requires actor=director")
         source_id = str(source_ticket_id).strip().upper()
         target_id = str(target_ticket_id).strip().upper()
@@ -1635,7 +1635,7 @@ ORDER BY rank;
         conn.execute(sql, params)
 
     def _pg_set_caller_role(self, conn: Any, caller_role: str) -> None:
-        conn.execute("SELECT set_config('ticket_board.caller_role', %s, true);", (caller_role,))
+        conn.execute("SELECT set_config('ticket_board.caller_role', %s, true);", (caller_role,)); ui_delegation.consume_pending(conn, caller_role)  # SYRD-598
 
     def _pg_set_notification_source_role(self, conn: Any, notification_source_role: str) -> None:
         conn.execute(

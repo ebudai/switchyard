@@ -1183,6 +1183,10 @@ class TicketBoardWriteClient:
         payload = {"path": path, "rationale": rationale, "standing": standing, "apply": apply}
         return self._ticket_action(ticket_id, "approve_size_exception", payload, caller_role=caller_role)
 
+    def withdraw_signoff(self, ticket_id: str, *, signoff: str, reason: str, caller_role: str | None = None) -> dict[str, Any]:
+        """Lower one named sign-off that is given, with why (SYRD-598). The control role's; never raises one."""
+        return self._ticket_action(ticket_id, "withdraw_signoff", {"signoff": signoff, "reason": reason}, caller_role=caller_role)
+
     def measure_size(self, ticket_id: str, *, commit: str, caller_role: str | None = None) -> dict[str, Any]:
         """The Director's recheck of an integration commit before pushing main (SYRD-541). Moves nothing."""
         return self._ticket_action(ticket_id, "measure_size", {"commit": commit}, caller_role=caller_role)

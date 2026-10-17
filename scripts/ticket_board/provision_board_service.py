@@ -108,6 +108,11 @@ def render_board_unit(plan: ProjectBoardProvision) -> str:
     # failed starts in five minutes leave it failed rather than flapping. Fixed
     # settings, not `RestartSteps=`: that needs systemd 254, and an Ubuntu
     # 22.04-based host ships 249.
+    #
+    # The project's root-owned registry record (team_launcher.DEFAULT_SWITCHYARD_REGISTRY_DIR), where root
+    # records who may use the board UI's Director operations, is on the command line for the same reason:
+    # the owner's file must not name another (SYRD-598).
+    ui_record = f"/etc/switchyard/projects/{plan.project}.json"
     return f"""[Unit]
 Description={plan.project} Ticket Board
 After=network.target postgresql.service
@@ -120,7 +125,7 @@ User={plan.service_user}
 {tenant_group_line}WorkingDirectory={plan.board_current}
 RuntimeDirectory={plan.runtime_directory}
 RuntimeDirectoryMode=0750
-ExecStart={provision.default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir} --commit-git-dir {plan.commit_git_dir}
+ExecStart={provision.default_ticket_board_python()} {plan.board_current}/scripts/ticket-board.py --host 127.0.0.1 --port {plan.port} --unix-socket {plan.socket_path} --frames {plan.frame_dir} --assets {plan.asset_dir} --commit-git-dir {plan.commit_git_dir} --board-ui-record {ui_record}
 Restart=on-failure
 RestartSec=30s
 EnvironmentFile=-{plan.owner_home}/.config/{plan.project}/ticket-board.env

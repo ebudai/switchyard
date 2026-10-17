@@ -64,7 +64,7 @@ def check(condition: object, message: str) -> None:
 FIXTURE_BOARD = r'''
 import argparse, http.server, json, os, signal, socket, sys, threading, urllib.parse
 parser = argparse.ArgumentParser()
-for name in ("--host", "--unix-socket", "--frames", "--assets", "--commit-git-dir"):
+for name in ("--host", "--unix-socket", "--frames", "--assets", "--commit-git-dir", "--board-ui-record"):
     parser.add_argument(name, default="")
 parser.add_argument("--port", type=int)
 args = parser.parse_args()

@@ -716,6 +716,7 @@ def _refresh_upgrade_artifacts(
     source_repo: Path | None,
     upstream_report_token_file: str,
     upstream_report_url: str,
+    board_ui_users: list[str] | tuple[str, ...] = (),
 ) -> ProjectConfig:
     """U3 of `upgrade_project_command`, unchanged: the generated layout, runtime
     artifacts, onboarding documents, board skill and repository hooks refreshed,
@@ -794,6 +795,14 @@ def _refresh_upgrade_artifacts(
             f"switchyard: {config.project} keeps the report credential it had; nothing else "
             "about this upgrade depends on it."
         )
+    # SYRD-598: who may confirm Director operations in the board UI, recorded by root beside the CLIs:
+    # the operator's --board-ui-user, else the host's approved desktop owner (never the tenant's config).
+    from scripts.board_ui_record import record_board_ui_users
+
+    for problem in record_board_ui_users(
+        config, registry_dir=registry_dir, operator_users=board_ui_users, dry_run=dry_run, print_func=print_func,
+    ):
+        print_func(f"switchyard: {problem}")
     return config
 
 

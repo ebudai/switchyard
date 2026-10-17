@@ -34,7 +34,8 @@ def run_success_check(playwright: Any) -> None:
 
             page.goto(harness.url, wait_until="domcontentloaded")
             modal = open_ticket(page, "PGU-515")
-            assert modal.get_by_role("combobox", name="Comment author").input_value() == "director"
+            # SYRD-598: the board page acts as the User, who may release a draft.
+            assert modal.locator("[data-comment-author='user']").count() == 1
             assert modal.get_by_placeholder("Add a comment or bounce-back note").input_value() == ""
             modal.get_by_role("button", name="Release to Triage").click()
 
@@ -46,8 +47,8 @@ def run_success_check(playwright: Any) -> None:
             )
             page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
             assert page_errors == []
-            assert harness.app.operation_log == [("release_draft", "PGU-515", "director", {})]
-            assert harness.app.action_log == [("PGU-515", "director", {"state": "analysis", "assignee": "unassigned"})]
+            assert harness.app.operation_log == [("release_draft", "PGU-515", "user", {})]
+            assert harness.app.action_log == [("PGU-515", "user", {"state": "analysis", "assignee": "unassigned"})]
         finally:
             browser.close()
 
@@ -62,11 +63,16 @@ def run_rbac_reject_check(playwright: Any) -> None:
             page.on("pageerror", lambda error: page_errors.append(str(error)))
 
             page.goto(harness.url, wait_until="domcontentloaded")
-            modal = open_ticket(page, "PGU-516")
-            modal.get_by_role("combobox", name="Comment author").select_option("ops")
-            modal.get_by_role("button", name="Release to Triage").click()
-
-            page.locator("#createStatus", has_text="ops cannot call release_draft").wait_for(timeout=5000)
+            open_ticket(page, "PGU-516")
+            # SYRD-598: the page has no role to pick, and a request naming another role over HTTP is refused.
+            assert page.evaluate("ticketWriteHeaders('ops')['X-Ticket-Board-Caller-Role']") == "user"
+            refused = page.evaluate("""async () => {
+              const headers = { ...ticketWriteHeaders(), 'X-Ticket-Board-Caller-Role': 'ops' };
+              const response = await fetch('/api/tickets/PGU-516/actions/release_draft',
+                                           { method: 'POST', headers, body: '{}' });
+              return [response.status, await response.text()];
+            }""")
+            assert refused[0] == 403 and "over HTTP a request acts as the User, not ops" in refused[1], refused
             wait_for_ticket_field(page, harness.url, "PGU-516", "ticket.state === 'draft' && ticket.assignee === 'unassigned'")
             assert page_errors == []
             assert harness.app.operation_log == []

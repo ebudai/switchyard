@@ -85,6 +85,8 @@ def test_server_keeps_identical_aliases_and_no_reverse_import() -> None:
         "measure_size": frozenset({"merge"}),
         # SYRD-548: where a report asking for Backlog lands takes the Director's edit authority.
         "set_report_intake": frozenset({"director_edit"}),
+        # SYRD-598: withdrawing a sign-off takes the hold's and the integrator's capability, never director_edit.
+        "withdraw_signoff": frozenset({"set_manually_controlled", "merge"}),
     }
 
 
@@ -103,7 +105,9 @@ def test_default_environment() -> None:
     # SYRD-541 added approve_size_exception, enable_size_review and measure_size, Director only.
     assert table["approve_size_exception"] == ["director"] and table["enable_size_review"] == ["director"]
     assert table["measure_size"] == ["director"]
-    assert len(table) == 45, len(table)  # SYRD-548: set_report_intake
+    # SYRD-598 added withdraw_signoff, the control role's (and a confirmed board-UI action's).
+    assert table["withdraw_signoff"] == ["director"]
+    assert len(table) == 46, len(table)  # SYRD-548: set_report_intake; SYRD-598: withdraw_signoff
 
 
 def test_role_environment_is_read_at_import() -> None:

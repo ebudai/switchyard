@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""SYRD-83: the Director's generic edit is reachable, and bounded, from the board.
+"""SYRD-83, narrowed by SYRD-598: the Director's generic edit is the Director pane's, never the board page's.
 
-The operation, the API and the CLI are covered against a real cluster elsewhere.
-What this covers is the surface a human actually uses: that the panel offers one
-Director-only control, that using it sends exactly one authenticated
-`director_edit` action carrying the fields and the reason -- rather than the
-decomposition into workflow actions every other field in that panel goes through
--- and that a refusal from the database is surfaced rather than swallowed.
+SYRD-83 put a generic Director Edit on the board page. SYRD-598 makes the page act
+as the User only, and the Director ruled the generic edit never delegable: it can
+move any field at any stage, which no confirmation of a concrete action bounds.
+What this covers is the surface a human actually uses: the page offers no
+Director Edit, its own request for one is the User's and refused, and naming the
+Director in the request does not make it the Director's. The operation, the API
+and the CLI through the Director's own pane are covered against a real cluster
+elsewhere.
 """
 
 from __future__ import annotations
@@ -142,62 +144,35 @@ def run_browser_check(playwright: object, server_port: int, app: DirectorEditBoa
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-601")).click()
         page.locator(".detail-modal").wait_for(timeout=5000)
 
-        control = page.locator(".detail-modal .director-edit")
-        control.wait_for(timeout=5000)
-        select = control.locator("select")
-        value = control.locator("[data-director-edit-value]")
-        reason = control.locator("[data-director-edit-reason]")
-        apply_button = control.locator("[data-director-edit-apply]")
+        page.locator("[data-board-ui-actions='PGU-601']").wait_for(timeout=5000)
+        assert page.locator(".detail-modal .director-edit, [data-director-edit-apply]").count() == 0
 
-        # A reason is not optional, and nothing is sent without one.
-        select.select_option("assignee")
-        value.fill("ops")
-        apply_button.click()
-        page.wait_for_timeout(200)
-        assert app.edits == [], app.edits
+        def post(caller: str) -> list:
+            return page.evaluate("""async (caller) => {
+              const headers = { ...ticketWriteHeaders(), 'X-Ticket-Board-Caller-Role': caller };
+              const response = await fetch('/api/tickets/PGU-601/actions/director_edit', { method: 'POST', headers,
+                body: JSON.stringify({ patch: { assignee: 'ops' }, reason: 'reworking after the audit' }) });
+              return [response.status, await response.text()];
+            }""", caller)
 
-        reason.fill("reworking after the audit found the wrong scope")
-        apply_button.click()
-        page.wait_for_function(
-            "() => document.querySelectorAll('.detail-modal .director-edit').length > 0",
-            timeout=5000,
-        )
-        page.wait_for_timeout(300)
-
-        # Exactly one authenticated action, carrying the field and the reason --
-        # and not the decomposition every other field in this panel takes.
-        assert len(app.edits) == 1, app.edits
-        ticket_id, patch, why, caller = app.edits[0]
-        assert ticket_id == "PGU-601", app.edits
-        assert patch == {"assignee": "ops"}, patch
-        assert why == "reworking after the audit found the wrong scope", why
-        assert caller == "director", caller
-        assert app.update_calls == [], app.update_calls
-        assert app.tickets[0]["assignee"] == "ops"
-
-        # And the boundary holds through this surface too: raising a sign-off is
-        # refused, the ticket is unchanged, and the refusal is shown.
-        select.select_option("audit_signoff")
-        value.fill("true")
-        reason.fill("trying to approve my own rework")
-        apply_button.click()
-        page.wait_for_timeout(400)
-        assert len(app.edits) == 2, app.edits
-        assert app.edits[1][1] == {"audit_signoff": True}, app.edits[1]
-        assert app.tickets[0]["audit_signoff"] is True, app.tickets[0]
-        status = page.locator(".create-status, .status, [data-status]").first
-        assert "sign-off" in (status.text_content() or "").lower(), status.text_content()
+        # The page's own request is the User's, and the User has no generic edit.
+        as_user = post("user")
+        assert as_user[0] == 403 and "user cannot call director_edit" in as_user[1], as_user
+        # Naming the Director over HTTP does not make the request the Director's.
+        as_director = post("director")
+        assert as_director[0] == 403 and "over HTTP a request acts as the User, not director" in as_director[1], as_director
+        assert app.edits == [] and app.update_calls == [], (app.edits, app.update_calls)
+        assert app.tickets[0]["assignee"] == "audit"
     finally:
         browser.close()
 
 
 def main() -> int:
-    # The control exists in the served document, and it is the generic edit
-    # rather than another workflow action wearing a field's clothes.
-    assert "DIRECTOR_EDITABLE_FIELDS" in HTML
-    assert "data-director-edit-apply" in HTML
-    assert "'director_edit'," in HTML
-    assert "a Director edit requires a reason" in HTML
+    # The served document has no generic edit, and no path that would send one.
+    assert "DIRECTOR_EDITABLE_FIELDS" not in HTML
+    assert "data-director-edit-apply" not in HTML
+    assert "'director_edit'," not in HTML
+    assert "a Director edit requires a reason" not in HTML
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="director-edit-browser.") as tmpdir:
         root = Path(tmpdir)

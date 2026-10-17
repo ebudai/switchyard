@@ -93,7 +93,7 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         setCreateStatus(`Attached ${label} to ${ticket.id}.`);
         await updateTicket(ticket.id, {
           screenshots: uniquePaths([...ticketScreenshotPaths(ticket), ...uploadedPaths]),
-        }, 'director');
+        }, 'user');
         setCreateStatus(`Attached ${label} to ${ticket.id}.`);
         return;
       }
@@ -154,7 +154,7 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         }
         await updateTicket(ticket.id, {
           screenshots: uniquePaths([...ticketScreenshotPaths(ticket), uploaded.path]),
-        }, 'director');
+        }, 'user');
         setCreateStatus(`Attached pasted image to ${ticket.id}.`);
         return;
       }
@@ -272,22 +272,18 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
         screenshot: state.pendingCreateScreenshots[0] || null,
         screenshots: state.pendingCreateScreenshots,
         needs_user_signoff: needsUserInput.checked,
-        needs_inspection: needsInspectionInput.checked,
-        needs_audit: needsAuditInput.checked,
         regression: createRegressionInput.checked,
       };
       // A draft takes no assignee: the board places it (SYRD-521).
       if (!createDraftInput.checked) {
         payload.assignee = assigneeInput.value;
       }
-      const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'director');
+      const result = await postTicketAction('/api/tickets/actions/create_ticket', payload, 'user');
       titleInput.value = '';
       bodyInput.value = '';
       createDraftInput.checked = false;
       createBacklogInput.checked = false;
       needsUserInput.checked = false;
-      needsInspectionInput.checked = false;
-      needsAuditInput.checked = true;
       createRegressionInput.checked = false;
       state.pendingCreateScreenshots = [];
       renderCreatePreview();
@@ -295,15 +291,17 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       await requestBoardReload();
     }
 
-    function ticketWriteHeaders(callerRole = null) {
-      const headers = { 'Content-Type': 'application/json' };
+    // SYRD-598: the board page acts as the User, whatever a caller passes. A
+    // Director operation is the User's, confirmed, carrying the single-use grant
+    // the server issued for exactly it.
+    function ticketWriteHeaders(_callerRole = null, delegation = '') {
+      const headers = { 'Content-Type': 'application/json', 'X-Ticket-Board-Caller-Role': 'user' };
       const writeToken = ticketBoardWriteToken();
       if (writeToken) {
         headers['X-Ticket-Board-Write-Token'] = writeToken;
       }
-      const normalizedCaller = callerRole ? callerRole.trim().toLowerCase() : '';
-      if (normalizedCaller) {
-        headers['X-Ticket-Board-Caller-Role'] = normalizedCaller;
+      if (delegation) {
+        headers['X-Ticket-Board-UI-Delegation'] = delegation;
       }
       return headers;
     }
@@ -423,7 +421,8 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       }
       const response = await fetch(path, {
         method: 'POST',
-        headers: ticketWriteHeaders(callerRole),
+        headers: ticketWriteHeaders(callerRole, options.delegation || ''),
+        credentials: 'same-origin',
         body: JSON.stringify(payload || {}),
       });
       if (!response.ok) {
@@ -538,45 +537,8 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       const consumed = new Set();
       let consumedComment = false;
 
-      // SYRD-83: the Director's generic edit is one authenticated action, not a
-      // decomposition. Everything below turns a patch into the workflow action
-      // that would ordinarily carry each field, which is exactly what a
-      // Director editing across a stage or an owner has to be able to skip. The
-      // reason travels with it and the database records the old and new value
-      // of every field that actually moved.
-      // One action, not a field edit: the board decides a publication request,
-      // clears the wait and notifies the implementer in one step (SYRD-93).
-      // Publishing is not here: it needs a credential no browser can reach.
-      if (patch && patch.resolve_publication) {
-        const reason = actionReason(patch);
-        if (!reason) {
-          throw new Error('a publication decision requires a reason');
-        }
-        return updateTicketAction(
-          ticketId,
-          'resolve_publication',
-          { request_id: patch.request_id, outcome: patch.outcome || 'rejected', detail: reason },
-          normalizedCaller,
-        );
-      }
-      if (patch && patch.director_edit) {
-        const reason = actionReason(patch);
-        if (!reason) {
-          throw new Error('a Director edit requires a reason');
-        }
-        const fields = {};
-        Object.keys(patch).forEach((key) => {
-          if (['director_edit', 'comment', 'reason', 'text'].includes(key)) return;
-          fields[key] = patch[key];
-        });
-        return updateTicketAction(
-          ticketId,
-          'director_edit',
-          { patch: fields, reason },
-          normalizedCaller,
-        );
-      }
-
+      // SYRD-598: a Director edit or a publication decision is not a field edit the page makes;
+      // a publication is resolved through the confirmed board-UI action the server describes.
       if (Object.prototype.hasOwnProperty.call(patch, 'state')) {
         const nextState = String(patch.state || '').trim().toLowerCase();
         if (nextState === 'in_progress' && patch.comment && previousState === 'inspection') {
@@ -749,18 +711,6 @@ SCRIPT_APP = """    function ticketBoardWriteToken() {
       }
       markDetailDraftFieldsSaved(ticketId, savedDraftFieldsForPatch(patch, consumed));
       await requestBoardReload();
-    }
-
-    async function mergeTicket(sourceTicketId, targetTicketId) {
-      const result = await postTicketAction(
-        `/api/tickets/${encodeURIComponent(sourceTicketId)}/actions/merge`,
-        { target_id: targetTicketId },
-        'director',
-      );
-      clearDetailDraft(sourceTicketId);
-      state.selectedId = result.target.id;
-      await requestBoardReload();
-      setCreateStatus(`Merged ${sourceTicketId} into ${targetTicketId}.`);
     }
 
     async function submitComment(ticketId, who, text, nextState = null, urgent = false) {

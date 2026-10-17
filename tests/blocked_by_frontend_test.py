@@ -33,8 +33,8 @@ def main() -> int:
     assert "const blockedReasonValue = blockedReasonInput.value.trim() || `Waiting on ${blockerId}.`;" in HTML
     assert "persistDetailDraftField(" not in HTML
     assert "await updateTicket(ticket.id, {" in HTML
-    assert "blocked_by: nextBlockedBy," in HTML
-    assert "blocked_reason: blockedReasonValue," in HTML
+    # SYRD-598: setting blockers is a Director operation the User confirms through the board UI.
+    assert "await runBoardUiOperation(ticket, 'set_blockers', { blocked_by: nextBlockedBy, blocked_reason: blockedReasonValue });" in HTML
     assert "appendLinkedTicketText(body, text);" in HTML
     assert "appendLinkedTicketText(body, item.text);" in HTML
     assert "blocked_by" in HTML

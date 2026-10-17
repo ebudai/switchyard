@@ -5,7 +5,9 @@ The operations, the CLI and the privileged publisher are covered against a real
 cluster and a real remote elsewhere. What this covers is what a human sees: an
 implementer's ask is on the ticket, the control role is told exactly what it is
 being asked to validate and how to publish it, and refusing takes a reason and
-goes out as one authenticated action.
+goes out as one authenticated action -- since SYRD-598 the User's, confirmed,
+using the control role's permission for exactly that request (the grant itself
+needs the board's database; tests/board_ui_stub.py stands in for it here).
 
 Publishing itself is deliberately absent from this surface. It needs a
 credential no browser can reach, which is the whole point of the boundary.
@@ -35,6 +37,7 @@ from scripts.ticket_board.app import iso_now  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 from scripts.ticket_board.frontend import HTML  # noqa: E402
 from scripts.ticket_board.server import TicketBoardServer  # noqa: E402
+from board_ui_stub import field, stub_board_ui  # noqa: E402
 
 COMMIT = "9f1c2d3e4b5a69788796a5b4c3d2e1f0a1b2c3d4"
 BUNDLE = "/home/agent/.local/state/switchyard/publish-outbox/cerulean/PGU-602-9f1c2d3e4b5a.bundle"
@@ -92,6 +95,17 @@ def run_browser_check(playwright: object, server_port: int, app: PublicationBoar
     browser = playwright.chromium.launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": 1280, "height": 900})
+        resolve = {"operation": "resolve_publication", "label": "Resolve the publication request", "mode": "delegated",
+                   "fields": [field("request_id", "fixed", "Request", value=12),
+                              field("outcome", "choice", "Outcome", options=["rejected", "published"], required=True),
+                              field("detail", "text", "Detail", required=True)]}
+
+        def perform(_ticket_id: str, _operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            return app.resolve_publication(payload["request_id"], outcome=payload["outcome"], detail=payload["detail"],
+                                           caller_role="user")["ticket"]
+
+        stub_board_ui(page, lambda: app.tickets, lambda ticket: [resolve] if ticket.get("publication") else [],
+                      perform=perform)
         page.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-601")).click()
         page.locator(".detail-modal").wait_for(timeout=5000)
@@ -107,17 +121,23 @@ def run_browser_check(playwright: object, server_port: int, app: PublicationBoar
         command = (block.locator("[data-publication-command]").text_content() or "")
         assert "switchyard-publish PGU-601" in command, command
 
-        reason = block.locator("[data-publication-reject-reason]")
-        reject = block.locator("[data-publication-reject]")
-
         # Refusing takes a reason: without one, nothing is sent.
-        reject.click()
-        page.wait_for_timeout(200)
+        page.locator("[data-board-ui-op='resolve_publication']").click()
+        dialog = page.locator("[data-board-ui-dialog='resolve_publication']")
+        dialog.locator("[data-board-ui-field='outcome']").select_option("rejected")
+        dialog.locator("[data-board-ui-review]").click()
+        dialog.locator("[data-board-ui-error]", has_text="Detail is required.").wait_for(timeout=5000)
         assert app.resolutions == [], app.resolutions
 
-        reason.fill("the bundle carries a commit nobody reviewed")
-        reject.click()
-        page.wait_for_timeout(400)
+        dialog.locator("[data-board-ui-field='detail']").fill("the bundle carries a commit nobody reviewed")
+        dialog.locator("[data-board-ui-review]").click()
+        confirmation = dialog.locator("[data-board-ui-summary]")
+        confirmation.wait_for(timeout=5000)
+        shown = confirmation.inner_text()
+        assert "Request: 12" in shown and "Outcome: rejected" in shown, shown
+        assert "Detail: the bundle carries a commit nobody reviewed" in shown, shown
+        dialog.locator("[data-board-ui-confirm]").click()
+        page.locator("#createStatus", has_text="done for PGU-601").wait_for(timeout=5000)
 
         # One authenticated decision, naming the request and the outcome.
         assert len(app.resolutions) == 1, app.resolutions
@@ -125,7 +145,7 @@ def run_browser_check(playwright: object, server_port: int, app: PublicationBoar
         assert request_id == 12, app.resolutions
         assert outcome == "rejected", app.resolutions
         assert detail == "the bundle carries a commit nobody reviewed", app.resolutions
-        assert caller == "director", app.resolutions
+        assert caller == "user", app.resolutions
         # And not the ordinary field decomposition every other control takes.
         assert app.update_calls == [], app.update_calls
         assert app.edits == [], app.edits
@@ -135,9 +155,8 @@ def run_browser_check(playwright: object, server_port: int, app: PublicationBoar
 
 def main() -> int:
     # The surface exists in the served document, and publishing is not on it.
-    assert "data-publication-reject" in HTML
-    assert "'resolve_publication'," in HTML
-    assert "a publication decision requires a reason" in HTML
+    assert "data-publication-reject" not in HTML  # the decision is the confirmed action the server describes
+    assert "'resolve_publication'," not in HTML
     assert "switchyard-publish " in HTML
 
     sync_playwright = load_playwright()

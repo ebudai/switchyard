@@ -232,8 +232,12 @@ def new_until_sign_in(h, tmp: Path, **kwargs) -> tuple[object, list[str]]:
         return 7
 
     # P3 runs for real; only what it calls to provision the board stands in, and
-    # its configuration is the fixture tenant's, where P3 reads it.
+    # its configuration is the fixture tenant's, where P3 reads it. Registration
+    # and the board UI users recorded beside it (SYRD-598) are fenced alike.
+    from scripts import board_ui_record
+
     with patch.object(launcher, "_resolve_new_project_choices", lambda **_k: choices), \
+            patch.object(board_ui_record, "record_board_ui_users", lambda *_a, **_k: []), \
             patch.object(launcher, "_check_new_project_preflight", lambda **_k: preflight), \
             patch.object(launcher, "_prepare_new_project_accounts",
                          lambda **_k: SimpleNamespace(provision_dir=h.config_path.parent)), \

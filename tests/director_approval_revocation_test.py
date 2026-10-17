@@ -29,6 +29,7 @@ import io
 import json
 import re
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -110,7 +111,9 @@ def scenario(root: Path) -> dict:
                        "TICKET_BOARD_CALLER_ROLE": role}
                 done = subprocess.run([sys.executable, str(root / "scripts" / "ticket-board-write"), *args], env=env,
                                       cwd=str(repo), capture_output=True, text=True, timeout=120, check=False)
-                return "ok" if done.returncode == 0 else " ".join((done.stdout + done.stderr).split())[:300]
+                # A refusal's PL/pgSQL line is not part of the answer; dropping it first keeps the cut where it was.
+                said = re.sub(r"\bline \d+ at\b", "line N at", " ".join((done.stdout + done.stderr).split()))
+                return "ok" if done.returncode == 0 else said[:300]
 
             def row(b, ticket_id: str) -> dict:
                 return json.loads(t.psql(b.admin, "SELECT json_build_object('state', state, 'assignee', assignee, "
@@ -207,7 +210,8 @@ def main() -> int:
                          if isinstance(row, dict) and row.get("commit_hash")}, key=text.index)
         for name, value in zip(("<approved>", "<correction>"), hashes):
             text = text.replace(value, name)
-        return json.loads(text)
+        # A refusal's CONTEXT names the line in its PL/pgSQL function, which moves when a function above it grows.
+        return json.loads(re.sub(r"line \d+ at", "line N at", text))
 
     d, legacy = after["declared"], after["legacy"]
     refused_flag = "flag change requires authorized workflow action"

@@ -8,6 +8,7 @@ import json
 from .frontend_markup import MARKUP
 from .frontend_script_app import SCRIPT_APP
 from .frontend_script_core import SCRIPT_CORE
+from .frontend_script_delegation import SCRIPT_DELEGATION
 from .frontend_script_detail import SCRIPT_DETAIL
 from .frontend_style import STYLE
 
@@ -49,6 +50,7 @@ def render_html(*, project: str = "pgu", project_name: str = "PGU", ticket_prefi
         + f"    const BOARD_IDENTITY = Object.freeze({identity_script});\n"
         + SCRIPT_CORE
         + SCRIPT_DETAIL
+        + SCRIPT_DELEGATION
         + SCRIPT_APP
         + "  </script>\n"
         + "</body>\n"

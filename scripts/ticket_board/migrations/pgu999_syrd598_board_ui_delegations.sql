@@ -1,0 +1,1585 @@
+-- SYRD-598: the User's confirmed action in the board UI may use the control
+-- role's operation permission, for that one action, and is recorded as the
+-- User's.
+--
+-- The board UI used to act as the Director by saying so: its requests named
+-- `director` in a header the HTTP server trusts. This lends the permission
+-- instead, through a grant the server mints here when the User confirms a
+-- concrete action, and consumes in the transaction that performs it:
+--
+--   * a grant is single-use, short-lived, and bound to one ticket, one
+--     operation, the exact payload, and the ticket as the User saw it;
+--   * only operations with a meaningful UI control are lendable, never an
+--     approval, a relayed decision, a workflow bypass or a review gate;
+--   * the Director-only checks accept the User only for the operation a grant
+--     consumed in this same transaction names, so changing only the HTTP layer
+--     does not get past them;
+--   * the decision stays the User's: comments, field audits and "changed by"
+--     name the User, and the ticket's history says the board UI lent the
+--     control role's operation permission.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS ticket_board.ui_delegations (
+    id bigserial PRIMARY KEY,
+    -- The token is never stored; its digest is how a later request finds the grant.
+    token_sha256 text NOT NULL UNIQUE,
+    -- The board page session it was issued to, likewise as a digest.
+    session_sha256 text NOT NULL,
+    ticket_id text NOT NULL,
+    operation text NOT NULL,
+    payload jsonb NOT NULL,
+    -- The ticket as the User saw it when confirming (ui_ticket_version).
+    ticket_version text NOT NULL,
+    decided_by text NOT NULL,
+    -- The role whose operation permission is lent.
+    authority text NOT NULL,
+    issued_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    consumed_txid bigint,
+    -- Set by the lent operation's own function immediately before its authority
+    -- check, and cleared immediately after (enter_ui_delegation).
+    entered boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ui_delegations_consumed_txid ON ticket_board.ui_delegations (consumed_txid)
+    WHERE consumed_txid IS NOT NULL;
+
+-- The role whose operation permission a board-UI action may use: the declared
+-- control role, found by its capabilities (SYRD-49), or a legacy board's director.
+CREATE OR REPLACE FUNCTION ticket_board.ui_delegation_control_role()
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE WHEN ticket_board.declared_workflow() IS NULL THEN 'director' ELSE (
+        SELECT r.name FROM ticket_board.workflow_roles r
+        WHERE (r.definition->>'active')::boolean AND ticket_board.role_controls_project(r.name)
+        ORDER BY r.name LIMIT 1) END;
+$$;
+
+-- Whether an operation on a ticket may be lent at all. Only what the board UI has
+-- a meaningful control for, and never an approval, a relayed decision, a move
+-- that bypasses the workflow (force_move, override_move), a review gate, size
+-- review, or the workflow itself.
+CREATE OR REPLACE FUNCTION ticket_board.ui_delegable(p_ticket_id text, p_operation text)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE
+        WHEN ticket_board.declared_workflow() IS NULL THEN
+            p_operation IN ('route', 'reassign', 'set_blockers', 'release_external_blocker', 'set_manually_controlled',
+                            'dismiss_notification', 'cancel', 'defer', 'mark_done', 'merge', 'withdraw_signoff')
+        ELSE
+            p_operation IN ('reassign', 'set_blockers', 'release_external_blocker', 'set_manually_controlled',
+                            'recover_stalled_ticket', 'dismiss_notification', 'resolve_publication', 'merge',
+                            'withdraw_signoff')
+            OR EXISTS (
+                SELECT FROM ticket_board.tickets t,
+                     jsonb_array_elements(ticket_board.declared_workflow()->'transitions') tr
+                WHERE t.id = p_ticket_id AND tr->>'from' = t.state AND tr->>'action' = p_operation
+                  AND tr->'actors' ? ticket_board.ui_delegation_control_role()
+                  AND coalesce(tr->>'primitive', '') <> 'approve'
+                  AND tr->>'relays_decision_of' IS NULL
+                  -- A move that names a commit is measured first, in a transaction of its own (SYRD-541).
+                  AND NOT coalesce((tr->>'require_commit')::boolean, false))
+    END;
+$$;
+
+-- The SQL authority checks an operation runs: releasing an external blocker
+-- is checked as setting blockers.
+CREATE OR REPLACE FUNCTION ticket_board.ui_delegation_covers(p_operation text, p_action text)
+RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT p_action = p_operation OR (p_operation = 'release_external_blocker' AND p_action = 'set_blockers');
+$$;
+
+-- The ticket as the board shows it: its row, its blockers, the role it awaits
+-- and the workflow revision. Any change since the User confirmed refuses the action.
+CREATE OR REPLACE FUNCTION ticket_board.ui_ticket_version(p_ticket_id text)
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT md5(concat_ws('|',
+        (SELECT to_jsonb(t)::text FROM ticket_board.tickets t WHERE t.id = p_ticket_id),
+        (SELECT coalesce(jsonb_agg(to_jsonb(b) ORDER BY to_jsonb(b)::text), '[]'::jsonb)::text
+           FROM ticket_board.ticket_blockers b WHERE b.ticket_id = p_ticket_id),
+        (SELECT coalesce(ns.awaiting_role, '') FROM ticket_board.ticket_notification_state ns
+          WHERE ns.ticket_id = p_ticket_id),
+        (SELECT revision::text FROM ticket_board.workflow_configuration WHERE singleton)));
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.require_ui_delegation_caller()
+RETURNS void LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+BEGIN
+    IF ticket_board.current_actor_role() <> 'ticket_board_service'
+       OR nullif(current_setting('ticket_board.caller_role', true), '') IS DISTINCT FROM 'user' THEN
+        RAISE EXCEPTION 'board UI delegation is only for the User acting through the board service'
+            USING ERRCODE = '42501';
+    END IF;
+END;
+$$;
+
+-- Minted when the User confirms a concrete action in the board UI. Returns when it expires.
+CREATE OR REPLACE FUNCTION ticket_board.mint_ui_delegation(
+    p_token text, p_session text, p_ticket_id text, p_operation text, p_payload jsonb, p_ticket_version text,
+    p_ttl_seconds integer DEFAULT 120)
+RETURNS timestamptz LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    authority text := ticket_board.ui_delegation_control_role();
+    expires timestamptz := clock_timestamp() + make_interval(secs => least(greatest(coalesce(p_ttl_seconds, 120), 1), 300));
+BEGIN
+    PERFORM ticket_board.require_ui_delegation_caller();
+    IF length(coalesce(p_token, '')) < 32 OR length(coalesce(p_session, '')) < 32
+       OR jsonb_typeof(p_payload) IS DISTINCT FROM 'object' THEN
+        RAISE EXCEPTION 'a board UI delegation needs a token, a board session and a payload object'
+            USING ERRCODE = '22023';
+    END IF;
+    -- It lends permission for one ticket, so what it acts on must be that ticket's.
+    IF p_payload ? 'commit_hash' THEN
+        RAISE EXCEPTION 'a board UI delegation names no commit' USING ERRCODE = '42501';
+    END IF;
+    IF p_operation = 'resolve_publication' AND NOT EXISTS (
+        SELECT FROM ticket_board.publication_requests pr
+        WHERE pr.id::text = p_payload->>'request_id' AND pr.ticket_id = p_ticket_id) THEN
+        RAISE EXCEPTION 'publication request % is not %''s', p_payload->>'request_id', p_ticket_id
+            USING ERRCODE = '42501';
+    END IF;
+    IF p_operation = 'merge' AND NOT EXISTS (
+        SELECT FROM ticket_board.tickets WHERE id = upper(coalesce(p_payload->>'target_id', '')) AND id <> p_ticket_id) THEN
+        RAISE EXCEPTION 'a merge names another ticket to merge % into', p_ticket_id USING ERRCODE = '22023';
+    END IF;
+    IF p_operation = 'withdraw_signoff' AND (btrim(coalesce(p_payload->>'reason', '')) = ''
+       OR NOT coalesce(ticket_board.signoff_raised(p_ticket_id, p_payload->>'signoff'), false)) THEN
+        RAISE EXCEPTION 'withdrawing a sign-off names one that is given, and why' USING ERRCODE = '22023';
+    END IF;
+    IF p_operation = 'dismiss_notification'
+       AND (p_payload ? 'notification_id') = (p_payload ?| ARRAY['ticket_id', 'target_role', 'kind']) THEN
+        RAISE EXCEPTION 'a notice to dismiss is named by notification_id, or by ticket_id, target_role and kind: one, not both'
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_operation = 'dismiss_notification' AND NOT (
+        upper(coalesce(p_payload->>'ticket_id', '')) = p_ticket_id
+        OR EXISTS (SELECT FROM ticket_board.ticket_notification_queue q
+                   WHERE q.id::text = p_payload->>'notification_id' AND q.ticket_id = p_ticket_id)) THEN
+        RAISE EXCEPTION 'that notification is not %''s', p_ticket_id USING ERRCODE = '42501';
+    END IF;
+    IF NOT EXISTS (SELECT FROM ticket_board.tickets WHERE id = p_ticket_id) THEN
+        RAISE EXCEPTION 'ticket % not found', p_ticket_id USING ERRCODE = '22023';
+    END IF;
+    IF authority IS NULL OR NOT ticket_board.ui_delegable(p_ticket_id, p_operation) THEN
+        RAISE EXCEPTION 'the board UI cannot lend % for %', p_operation, p_ticket_id USING ERRCODE = '42501';
+    END IF;
+    IF p_ticket_version IS DISTINCT FROM ticket_board.ui_ticket_version(p_ticket_id) THEN
+        RAISE EXCEPTION '% changed since it was shown; reload it and confirm again', p_ticket_id USING ERRCODE = '40001';
+    END IF;
+    INSERT INTO ticket_board.ui_delegations
+        (token_sha256, session_sha256, ticket_id, operation, payload, ticket_version, decided_by, authority, expires_at)
+    VALUES (encode(sha256(convert_to(p_token, 'UTF8')), 'hex'), encode(sha256(convert_to(p_session, 'UTF8')), 'hex'),
+            p_ticket_id, p_operation, p_payload, p_ticket_version, 'user', authority, expires);
+    RETURN expires;
+END;
+$$;
+
+-- Consumed in the transaction that performs the action, before it runs. Once.
+CREATE OR REPLACE FUNCTION ticket_board.consume_ui_delegation(
+    p_token text, p_session text, p_ticket_id text, p_operation text, p_payload jsonb)
+RETURNS bigint LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    grant_row ticket_board.ui_delegations%ROWTYPE;
+BEGIN
+    PERFORM ticket_board.require_ui_delegation_caller();
+    SELECT * INTO grant_row FROM ticket_board.ui_delegations
+    WHERE token_sha256 = encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex') FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'unknown board UI confirmation' USING ERRCODE = '42501';
+    END IF;
+    IF grant_row.session_sha256 IS DISTINCT FROM encode(sha256(convert_to(coalesce(p_session, ''), 'UTF8')), 'hex') THEN
+        RAISE EXCEPTION 'this board UI confirmation belongs to another board session' USING ERRCODE = '42501';
+    END IF;
+    IF grant_row.consumed_at IS NOT NULL THEN
+        RAISE EXCEPTION 'this board UI confirmation was already used' USING ERRCODE = '42501';
+    END IF;
+    IF clock_timestamp() >= grant_row.expires_at THEN
+        RAISE EXCEPTION 'this board UI confirmation expired; confirm again' USING ERRCODE = '42501';
+    END IF;
+    IF grant_row.ticket_id IS DISTINCT FROM p_ticket_id OR grant_row.operation IS DISTINCT FROM p_operation THEN
+        RAISE EXCEPTION 'this board UI confirmation was for % on %, not % on %',
+            grant_row.operation, grant_row.ticket_id, p_operation, p_ticket_id USING ERRCODE = '42501';
+    END IF;
+    IF grant_row.payload IS DISTINCT FROM p_payload THEN
+        RAISE EXCEPTION 'the action changed since it was confirmed' USING ERRCODE = '42501';
+    END IF;
+    IF grant_row.ticket_version IS DISTINCT FROM ticket_board.ui_ticket_version(p_ticket_id) THEN
+        RAISE EXCEPTION '% changed since it was confirmed; reload it and confirm again', p_ticket_id
+            USING ERRCODE = '40001';
+    END IF;
+    IF grant_row.authority IS DISTINCT FROM ticket_board.ui_delegation_control_role()
+       OR NOT ticket_board.ui_delegable(p_ticket_id, p_operation) THEN
+        RAISE EXCEPTION 'the board UI can no longer lend % for %', p_operation, p_ticket_id USING ERRCODE = '42501';
+    END IF;
+    UPDATE ticket_board.ui_delegations SET consumed_at = clock_timestamp(), consumed_txid = txid_current()
+    WHERE id = grant_row.id;
+    -- The record says who decided, and whose operation permission was used.
+    PERFORM ticket_board.append_ticket_comment(
+        p_ticket_id, 'user',
+        format('Through the board UI the User confirmed %s %s, using the operation permission of %s. '
+               || 'The decision is the User''s.', p_operation, p_payload::text, grant_row.authority));
+    RETURN grant_row.id;
+END;
+$$;
+
+-- Whether a ticket's named sign-off is given now; NULL when the board has no such sign-off.
+CREATE OR REPLACE FUNCTION ticket_board.signoff_raised(p_ticket_id text, p_signoff text)
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT CASE
+        WHEN ticket_board.declared_workflow() IS NULL THEN
+            CASE WHEN p_signoff IN ('inspector_signoff', 'audit_signoff', 'user_signoff')
+                 THEN (to_jsonb(t)->>p_signoff)::boolean END
+        WHEN ticket_board.declared_workflow()->'flags'->p_signoff->>'kind' = 'signoff' THEN
+            ticket_board.workflow_flag(to_jsonb(t), p_signoff, ticket_board.declared_workflow())
+    END
+    FROM ticket_board.tickets t WHERE t.id = p_ticket_id;
+$$;
+
+-- Withdraw one sign-off, by name, with why. Only the control role (or the User's
+-- confirmed board-UI action lending its permission) may, and it can only lower:
+-- nothing here raises an approval, moves the ticket, or touches any other flag.
+CREATE OR REPLACE FUNCTION ticket_board.withdraw_signoff(p_ticket_id text, p_signoff text, p_reason text)
+RETURNS void LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    cfg jsonb := ticket_board.declared_workflow();
+    caller text := ticket_board.current_app_actor();
+    reason text := btrim(coalesce(p_reason, ''));
+    t ticket_board.tickets%ROWTYPE;
+    doc jsonb;
+BEGIN
+    IF ticket_board.current_actor_role() <> 'ticket_board_service'
+       OR NOT (ticket_board.role_controls_project(caller) OR coalesce(ticket_board.role_controls_project(
+               ticket_board.ui_delegated_authority('withdraw_signoff', p_ticket_id)), false)) THEN
+        RAISE EXCEPTION 'only the control role may withdraw a sign-off, not %', caller USING ERRCODE = '42501';
+    END IF;
+    IF reason = '' THEN
+        RAISE EXCEPTION 'withdrawing a sign-off requires a reason';
+    END IF;
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % not found', p_ticket_id;
+    END IF;
+    IF ticket_board.signoff_raised(p_ticket_id, p_signoff) IS NULL THEN
+        RAISE EXCEPTION 'this board has no sign-off named %', p_signoff;
+    END IF;
+    IF NOT ticket_board.signoff_raised(p_ticket_id, p_signoff) THEN
+        RAISE EXCEPTION '% has no % to withdraw', p_ticket_id, p_signoff;
+    END IF;
+    doc := CASE WHEN cfg IS NULL THEN jsonb_set(to_jsonb(t), ARRAY[p_signoff], 'false'::jsonb)
+                ELSE ticket_board.set_workflow_flag(to_jsonb(t), p_signoff, false) END;
+    t := jsonb_populate_record(t, doc);
+    PERFORM set_config('ticket_board.signoff_withdrawal', p_ticket_id || ':' || p_signoff, true);
+    UPDATE ticket_board.tickets
+    SET inspector_signoff = t.inspector_signoff, audit_signoff = t.audit_signoff, user_signoff = t.user_signoff,
+        workflow_flags = t.workflow_flags
+    WHERE id = p_ticket_id;
+    PERFORM set_config('ticket_board.signoff_withdrawal', '', true);
+    PERFORM ticket_board.append_ticket_comment(p_ticket_id, caller, format('Withdrew %s: %s', p_signoff, reason));
+END;
+$$;
+
+-- The role whose permission a delegation consumed in this transaction lends to
+-- the User for this authority check, or NULL.
+CREATE OR REPLACE FUNCTION ticket_board.ui_delegated_authority(p_action text, p_ticket_id text DEFAULT NULL)
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT g.authority FROM ticket_board.ui_delegations g
+    WHERE g.consumed_txid = txid_current()
+      AND nullif(current_setting('ticket_board.caller_role', true), '') = g.decided_by
+      AND ticket_board.ui_delegation_covers(g.operation, p_action)
+      AND (p_ticket_id IS NULL OR g.ticket_id = p_ticket_id)
+    ORDER BY g.id DESC LIMIT 1;
+$$;
+
+-- The grant consumed in this transaction for exactly p_operation, decided by
+-- this caller: its payload, after checking the object acted on is its ticket's
+-- (a NULL ticket is checked where the object is written); NULL when no grant
+-- lends the operation.
+CREATE OR REPLACE FUNCTION ticket_board.ui_delegation_for(p_operation text, p_ticket_id text, p_object text)
+RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    granted ticket_board.ui_delegations%ROWTYPE;
+BEGIN
+    SELECT g.* INTO granted FROM ticket_board.ui_delegations g
+    WHERE g.consumed_txid = txid_current()
+      AND nullif(current_setting('ticket_board.caller_role', true), '') = g.decided_by
+      AND g.operation = p_operation
+    ORDER BY g.id DESC LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF p_ticket_id IS NOT NULL AND granted.ticket_id IS DISTINCT FROM p_ticket_id THEN
+        RAISE EXCEPTION '% is %''s, not the ticket this board UI confirmation was for', p_object, p_ticket_id
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN granted.payload;
+END;
+$$;
+
+-- A lent operation's own function enters its grant immediately before its
+-- authority check and leaves it immediately after: require_actor lends the
+-- control role's permission only to an entered grant. Another function that
+-- checks the same action name (approve_size_exception and enable_size_review
+-- check merge, snooze_reminders and clear_reminder_snooze check
+-- set_manually_controlled) enters nothing and is lent nothing, and a grant
+-- for one ticket is never entered for another. The board service cannot call
+-- either; only the operations' own functions do.
+CREATE OR REPLACE FUNCTION ticket_board.enter_ui_delegation(p_operation text, p_ticket_id text, p_object text)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    granted jsonb := ticket_board.ui_delegation_for(p_operation, p_ticket_id, p_object);
+BEGIN
+    UPDATE ticket_board.ui_delegations SET entered = true
+    WHERE granted IS NOT NULL AND consumed_txid = txid_current() AND operation = p_operation;
+    RETURN granted;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.leave_ui_delegation()
+RETURNS void LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    UPDATE ticket_board.ui_delegations SET entered = false WHERE consumed_txid = txid_current() AND entered;
+$$;
+
+-- The role whose permission require_actor lends to this action: an entered
+-- grant's, whose operation covers it.
+CREATE OR REPLACE FUNCTION ticket_board.ui_entered_authority(p_action text)
+RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+    SELECT g.authority FROM ticket_board.ui_delegations g
+    WHERE g.consumed_txid = txid_current() AND g.entered
+      AND nullif(current_setting('ticket_board.caller_role', true), '') = g.decided_by
+      AND ticket_board.ui_delegation_covers(g.operation, p_action)
+    ORDER BY g.id DESC LIMIT 1;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.publication_request_ui_delegation_ticket()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = ticket_board, pg_temp AS $$
+DECLARE
+    granted jsonb := ticket_board.ui_delegation_for('resolve_publication', OLD.ticket_id,
+                                                    format('publication request %s', OLD.id));
+BEGIN
+    -- The request confirmed, decided as confirmed.
+    IF granted IS NOT NULL AND (btrim(coalesce(granted->>'request_id', '')) IS DISTINCT FROM OLD.id::text
+                                OR lower(btrim(coalesce(granted->>'outcome', ''))) IS DISTINCT FROM NEW.state) THEN
+        RAISE EXCEPTION 'publication request % (%) is not the decision this board UI confirmation was for', OLD.id, NEW.state
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS publication_requests_ui_delegation_ticket ON ticket_board.publication_requests;
+CREATE TRIGGER publication_requests_ui_delegation_ticket BEFORE UPDATE ON ticket_board.publication_requests
+    FOR EACH ROW EXECUTE FUNCTION ticket_board.publication_request_ui_delegation_ticket();
+
+REVOKE ALL ON ticket_board.ui_delegations FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ui_delegation_control_role() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ui_delegable(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ui_ticket_version(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.require_ui_delegation_caller() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.mint_ui_delegation(text, text, text, text, jsonb, text, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.consume_ui_delegation(text, text, text, text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ui_delegated_authority(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ui_delegation_for(text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.enter_ui_delegation(text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.leave_ui_delegation() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.ui_entered_authority(text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.publication_request_ui_delegation_ticket() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.signoff_raised(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION ticket_board.withdraw_signoff(text, text, text) FROM PUBLIC;
+-- schema.sql stops here: the roles below do not exist yet when it runs, and rbac.sql grants the same.
+GRANT SELECT ON ticket_board.ui_delegations TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ui_delegable(text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.ui_ticket_version(text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.mint_ui_delegation(text, text, text, text, jsonb, text, integer) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.consume_ui_delegation(text, text, text, text, jsonb) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.withdraw_signoff(text, text, text) TO ticket_board_service;
+GRANT EXECUTE ON FUNCTION ticket_board.signoff_raised(text, text) TO ticket_board_service;
+
+-- The authority checks that lend the control role's permission, and the owner's notice that
+-- names the board UI. schema.sql's copies are this text.
+
+CREATE OR REPLACE FUNCTION ticket_board.require_actor(
+    p_allowed_roles text[],
+    p_action text
+)
+RETURNS text
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    caller_role text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NOT NULL THEN
+        actor := ticket_board.current_actor_role();
+        caller_role := ticket_board.current_app_actor();
+        -- SYRD-598: the User's confirmed board-UI action may use the control
+        -- role's permission, in its own operation's function, which entered
+        -- the grant consumed in this transaction, and for nothing else.
+        IF actor <> 'ticket_board_service' OR NOT EXISTS (
+            SELECT FROM ticket_board.workflow_roles r
+            WHERE r.name IN (caller_role, ticket_board.ui_entered_authority(p_action))
+              AND (r.definition->>'active')::boolean
+              AND (
+                  r.definition->'capabilities' ? CASE p_action
+                      WHEN 'set_awaiting_role' THEN 'await_role' ELSE p_action END
+                  -- A narrated override is not an ordinary stage capability.
+                  -- These two exist to move a ticket the declared workflow
+                  -- will not, so a workflow that declared them as capabilities
+                  -- would be declaring its own bypass -- and every project
+                  -- would need a document migration before its Director could
+                  -- use an operation the API has always advertised. The
+                  -- authority is the control role, derived from the
+                  -- capabilities that define one rather than from the name
+                  -- 'director', so a project whose control role is called
+                  -- something else is answered the same way (SYRD-49,
+                  -- SYRD-78). Every other role is refused here, before any of
+                  -- the operation's own safety checks run.
+                  OR (
+                      p_action = ANY (ticket_board.control_override_actions())
+                      AND r.definition->'capabilities' ?& ticket_board.control_capabilities()
+                  )
+              )
+        ) THEN
+            RAISE EXCEPTION 'role % cannot call %', caller_role,p_action USING ERRCODE='42501';
+        END IF;
+        RETURN actor;
+    END IF;
+    actor := ticket_board.current_actor_role();
+    IF actor <> 'ticket_board_service' THEN
+        RAISE EXCEPTION 'role % cannot call %; ticket_board_service is the only database writer', actor, p_action
+            USING ERRCODE = '42501';
+    END IF;
+    caller_role := nullif(current_setting('ticket_board.caller_role', true), '');
+    IF caller_role IS NOT NULL
+       AND cardinality(coalesce(p_allowed_roles, ARRAY[]::text[])) > 0
+       AND caller_role <> ALL(p_allowed_roles)
+       AND NOT coalesce(ticket_board.ui_entered_authority(p_action) = ANY(p_allowed_roles), false)  -- SYRD-598
+       AND NOT (
+           p_allowed_roles && ARRAY['main', 'app', 'ops', 'perf', 'research']::text[]
+           AND ticket_board.ticket_is_implementer_assignee(caller_role)
+       ) THEN
+        RAISE EXCEPTION 'role % cannot call %', caller_role, p_action
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN actor;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.require_workflow_transition_actor(
+    p_action_name text,
+    p_ticket_id text DEFAULT NULL,
+    p_ticket_assignee text DEFAULT NULL
+)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    resolved_assignee text := p_ticket_assignee;
+BEGIN
+    actor := ticket_board.current_app_actor();
+    IF actor IS NULL THEN
+        RAISE EXCEPTION 'missing ticket_board.caller_role for %', p_action_name
+            USING ERRCODE = '42501';
+    END IF;
+
+    IF resolved_assignee IS NULL AND p_ticket_id IS NOT NULL THEN
+        SELECT t.assignee
+        INTO resolved_assignee
+        FROM ticket_board.tickets t
+        WHERE t.id = p_ticket_id;
+    END IF;
+
+    IF NOT ticket_board.workflow_transition_rbac_allowed_config(
+        p_action_name,
+        actor,
+        resolved_assignee
+    -- SYRD-598: or the control role's, lent by the User's confirmed board-UI action on this ticket.
+    ) AND NOT coalesce(ticket_board.workflow_transition_rbac_allowed_config(
+        p_action_name,
+        ticket_board.ui_delegated_authority(p_action_name, p_ticket_id),
+        resolved_assignee
+    ), false) THEN
+        RAISE EXCEPTION 'role % cannot call %', actor, p_action_name
+            USING ERRCODE = '42501';
+    END IF;
+
+    RETURN actor;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.perform_workflow_action(id text, action text, payload jsonb DEFAULT '{}'::jsonb)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=ticket_board,pg_temp AS $$
+DECLARE authority text := ticket_board.ui_delegated_authority(action, id);
+BEGIN
+    IF authority IS NOT NULL THEN
+        -- SYRD-598: checked against the control role whose permission the
+        -- User's confirmed board-UI action used, and narrated as the User.
+        PERFORM ticket_board.perform_workflow_action_as(authority, ticket_board.current_app_actor(), id, action, payload);
+        RETURN;
+    END IF;
+    PERFORM ticket_board.perform_workflow_action_as(
+        ticket_board.current_app_actor(), NULL, id, action, payload);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.reassign(
+    id text,
+    assignee text,
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text := ticket_board.current_app_actor();
+    current_state text;
+    current_assignee text;
+    normalized_assignee text := btrim(lower(coalesce(reassign.assignee, '')));
+    normalized_reason text := btrim(coalesce(reassign.reason, ''));
+    ticket_row ticket_board.tickets%ROWTYPE;
+    message text;
+BEGIN
+    -- Director-only at the database boundary, not merely at the API. A missing
+    -- caller role is a refusal here rather than a fallback to the service
+    -- identity: ownership changes are attributed or they do not happen.
+    IF ticket_board.current_actor_role() <> 'ticket_board_service' OR (actor IS DISTINCT FROM 'director'
+       AND ticket_board.ui_delegated_authority('reassign', reassign.id) IS DISTINCT FROM 'director') THEN  -- SYRD-598
+        RAISE EXCEPTION 'role % cannot call reassign',
+            coalesce(nullif(actor, ''), ticket_board.current_actor_role())
+            USING ERRCODE = '42501';
+    END IF;
+    IF normalized_reason = '' THEN
+        RAISE EXCEPTION 'reassign requires a reason';
+    END IF;
+    IF NOT ticket_board.ticket_valid_assignee(normalized_assignee) THEN
+        RAISE EXCEPTION 'invalid assignee: %', reassign.assignee;
+    END IF;
+
+    SELECT tickets.state, tickets.assignee
+    INTO current_state, current_assignee
+    FROM ticket_board.tickets
+    WHERE tickets.id = reassign.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    IF current_state = 'draft' THEN
+        RAISE EXCEPTION 'draft tickets must be released with release_draft';
+    END IF;
+    IF current_assignee = normalized_assignee THEN
+        RAISE EXCEPTION 'ticket % is already assigned to %', id, normalized_assignee;
+    END IF;
+    -- Refuse an owner the stage cannot have instead of moving the ticket to
+    -- suit the owner.
+    PERFORM ticket_board.require_stage_owner_assignee(current_state, normalized_assignee);
+
+    -- Recorded before the write, so the reason survives even when the serial
+    -- reservation then redirects the ticket and appends its own notice.
+    PERFORM ticket_board.append_ticket_comment(
+        id,
+        actor,
+        'Director reassignment in ' || current_state || ': '
+        || current_assignee || ' -> ' || normalized_assignee
+        || '. Reason: ' || normalized_reason
+    );
+
+    -- SYRD-598: the declared update rule checks the role whose permission is used.
+    PERFORM set_config('ticket_board.workflow_actor',
+                       coalesce(ticket_board.ui_delegated_authority('reassign', reassign.id), ''), true);
+    UPDATE ticket_board.tickets
+    SET assignee = normalized_assignee
+    WHERE tickets.id = reassign.id;
+    PERFORM set_config('ticket_board.workflow_actor', '', true);
+
+    SELECT * INTO ticket_row FROM ticket_board.tickets WHERE tickets.id = reassign.id;
+    -- Serial focus held it. The queue announcement has already told the
+    -- director, and the target implementer has no actionable work yet, so a
+    -- second notification here would be wrong rather than merely noisy.
+    IF ticket_row.state IS DISTINCT FROM current_state OR ticket_row.queued_for_assignee <> '' THEN
+        RETURN;
+    END IF;
+    -- Held or blocked work is not actionable either. It stays reassigned; the
+    -- existing unblock and release paths announce it when it becomes real work.
+    -- SYRD-568: a ticket now waiting in its new owner's queue is not theirs to act on yet.
+    IF coalesce(ticket_row.manually_controlled, false) OR ticket_board.ticket_has_unresolved_blockers(id)
+       OR ticket_board.ticket_serial_waiting(id) THEN
+        RETURN;
+    END IF;
+    message := id
+        || CASE WHEN ticket_row.title <> '' THEN ' -- ' || ticket_row.title ELSE '' END
+        || ' is now assigned to you';
+    -- One notification, through the same durable queue every other handoff
+    -- uses: it dedupes per transaction, suppresses a director self-handoff, and
+    -- stays silent for stages that declare no notification.
+    PERFORM ticket_board.enqueue_transition_notification(
+        id,
+        ticket_row.title,
+        current_state,
+        ticket_row.state,
+        ticket_row.assignee,
+        ticket_row.updated_at,
+        ticket_row.ticket_number,
+        message
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.recover_stalled_ticket(
+    p_ticket text,
+    p_reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    caller text;
+    reason text := btrim(coalesce(p_reason, ''));
+    cfg jsonb := ticket_board.declared_workflow();
+    t ticket_board.tickets%ROWTYPE;
+    candidates integer;
+    chosen text;
+    pending text;
+BEGIN
+    IF cfg IS NULL THEN
+        RAISE EXCEPTION 'recovery requires a declared workflow; this board has none'
+            USING ERRCODE = '42501';
+    END IF;
+    PERFORM ticket_board.enter_ui_delegation('recover_stalled_ticket', p_ticket, format('ticket %s', p_ticket));  -- SYRD-598
+    PERFORM ticket_board.require_actor(ARRAY[]::text[], 'recover_stalled_ticket');
+    PERFORM ticket_board.leave_ui_delegation();
+    caller := ticket_board.current_app_actor();
+    -- Control authority decides, derived from capabilities. A tenant that hands
+    -- the capability to a second role still gets one recoverer, and no rule
+    -- here spells the name `director` (SYRD-49).
+    IF NOT ticket_board.role_controls_project(caller) AND NOT coalesce(ticket_board.role_controls_project(
+           ticket_board.ui_delegated_authority('recover_stalled_ticket', p_ticket)), false) THEN  -- SYRD-598
+        RAISE EXCEPTION 'only the control role may recover a stalled ticket, not %', caller
+            USING ERRCODE = '42501';
+    END IF;
+    IF reason = '' THEN
+        RAISE EXCEPTION 'recovering a stalled ticket requires a reason';
+    END IF;
+    SELECT * INTO t FROM ticket_board.tickets WHERE id = p_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % not found', p_ticket;
+    END IF;
+    -- A completed review that a hold deferred is not a stalled owner. Recovery
+    -- takes the one declared step the owner could have taken (SYRD-133); here
+    -- that is the step they DID take, so pay it rather than asking the reviewer
+    -- to sign off a second time -- and when it cannot be paid yet, refuse naming
+    -- what is actually in the way, without consuming the approval. Sending the
+    -- Director to route/reassign/defer was the advice SYRD-146 followed into a
+    -- dead end (SYRD-180).
+    pending := ticket_board.pending_held_review(t.id);
+    IF pending IS NOT NULL THEN
+        IF t.manually_controlled THEN
+            RAISE EXCEPTION
+                '%/% has already recorded %; it is waiting on its hold, not on its owner. '
+                'Release the hold to finish it: set_manually_controlled(''%'', false)',
+                t.state, t.assignee, pending, t.id
+                USING ERRCODE = '42501';
+        END IF;
+        IF ticket_board.ticket_has_unresolved_blockers(t.id) THEN
+            RAISE EXCEPTION
+                '%/% has already recorded %; it is waiting on an unresolved blocker, not on its '
+                'owner. Resolve the blocker and recovery finishes it', t.state, t.assignee, pending
+                USING ERRCODE = '42501';
+        END IF;
+        IF ticket_board.reconcile_released_hold(t.id) IS NOT NULL THEN
+            PERFORM ticket_board.append_ticket_comment(t.id, caller, reason);
+            RETURN;
+        END IF;
+    END IF;
+    SELECT count(*) INTO candidates
+      FROM jsonb_array_elements(cfg->'transitions') x
+     WHERE x->>'from' = t.state
+       AND coalesce((x->>'allow_no_code')::boolean, false)
+       AND x->'actors' ? t.assignee;
+    IF candidates = 0 THEN
+        RAISE EXCEPTION
+            'no no-code transition out of %/% is available to its owner, so there is nothing to '
+            'recover: route, reassign or defer it instead', t.state, t.assignee
+            USING ERRCODE = '42501';
+    END IF;
+    IF candidates > 1 THEN
+        RAISE EXCEPTION
+            '%/% offers % no-code transitions to its owner; recovery will not choose between them',
+            t.state, t.assignee, candidates
+            USING ERRCODE = '42501';
+    END IF;
+    SELECT x->>'action' INTO chosen
+      FROM jsonb_array_elements(cfg->'transitions') x
+     WHERE x->>'from' = t.state
+       AND coalesce((x->>'allow_no_code')::boolean, false)
+       AND x->'actors' ? t.assignee;
+    -- The owner's transition, authorized and narrated by the control role. Every
+    -- gate the owner would have met is met here, because this is the same
+    -- executor taking the same declared step.
+    PERFORM ticket_board.perform_workflow_action_as(
+        t.assignee, caller, t.id, chosen,
+        jsonb_build_object('reason', reason));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.require_publication_control()
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    caller text;
+BEGIN
+    IF ticket_board.declared_workflow() IS NULL THEN
+        RAISE EXCEPTION 'publication requires a declared workflow; this board has none'
+            USING ERRCODE = '42501';
+    END IF;
+    -- SYRD-598: only resolve_publication calls this; its request is bound as it is written
+    -- (publication_requests_ui_delegation_ticket).
+    PERFORM ticket_board.enter_ui_delegation('resolve_publication', NULL, NULL);
+    PERFORM ticket_board.require_actor(ARRAY[]::text[], 'resolve_publication');
+    PERFORM ticket_board.leave_ui_delegation();
+    caller := ticket_board.current_app_actor();
+    -- The capability admits the caller; control authority is what decides. A
+    -- tenant that hands this capability to a second role still gets one
+    -- publisher.
+    IF NOT ticket_board.role_controls_project(caller) AND NOT coalesce(ticket_board.role_controls_project(
+           ticket_board.ui_delegated_authority('resolve_publication')), false) THEN  -- SYRD-598
+        RAISE EXCEPTION 'only the control role may resolve a publication request, not %', caller
+            USING ERRCODE = '42501';
+    END IF;
+    RETURN caller;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.enforce_declared_ticket_update(previous ticket_board.tickets, proposed ticket_board.tickets)
+RETURNS ticket_board.tickets LANGUAGE plpgsql AS $$
+DECLARE cfg jsonb:=ticket_board.declared_workflow(); doc jsonb:=to_jsonb(proposed); tr jsonb; source_stage jsonb; dest jsonb;
+    action_name text:=current_setting('ticket_board.workflow_action',true);
+    -- Whose transition this is. Normally the caller's own; on a recovery the
+    -- executor names the OWNER here, because the step being taken has to be one
+    -- the owner could have taken and this trigger asks exactly that question
+    -- (SYRD-133). Set transaction-locally by the executor immediately before the
+    -- update, in the same way `workflow_action` already is, and cleared after.
+    actor text:=coalesce(
+        nullif(current_setting('ticket_board.workflow_actor',true),''),
+        ticket_board.current_app_actor()); target text;
+    reset text; flag record; owners text[]; fallback text; loops int:=0;
+    queued_for text; reserved_by text;
+BEGIN
+    IF actor IS NULL THEN RAISE EXCEPTION 'configured ticket writes require a registered actor' USING ERRCODE='42501'; END IF;
+    -- A narrated override moves a ticket the declared workflow will not: that
+    -- is what it is for, and the transition table cannot describe it without
+    -- describing its own bypass. Only ticket_board.force_move sets this, it is
+    -- transaction-local, and reaching it already required the control role's
+    -- capabilities. The legacy trigger has always had this escape; the
+    -- declarative one did not, so the operation was refused here even after the
+    -- capability layer let it through (SYRD-78).
+    --
+    -- It does not license a sign-off. An override that raised one would be
+    -- manufacturing the review it exists to route around, so a sign-off flag
+    -- that moves under it is refused rather than written.
+    IF current_setting('ticket_board.force_move', true) = 'on' THEN
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF flag.value->>'kind'='signoff'
+               AND ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg)
+                   IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg) THEN
+                RAISE EXCEPTION 'a forced move cannot change sign-off %', flag.key USING ERRCODE='42501';
+            END IF;
+        END LOOP;
+        RETURN proposed;
+    END IF;
+
+    -- Merge closes its own source, and only its own source. The window is one
+    -- ticket, named by the operation itself, and one statement: it is opened
+    -- immediately before the close and shut immediately after, so nothing else
+    -- in the transaction can travel through it. The destination has to be a
+    -- stage the workflow declares terminal, and no sign-off may move -- a merge
+    -- that raised one would be manufacturing the review the target still owes
+    -- (SYRD-79).
+    IF nullif(current_setting('ticket_board.merge_source', true), '') = previous.id THEN
+        IF NOT coalesce((
+            SELECT (x->>'terminal')::boolean FROM jsonb_array_elements(cfg->'stages') x
+            WHERE x->>'name' = proposed.state
+        ), false) THEN
+            RAISE EXCEPTION 'merge may only close its source into a terminal stage, not %', proposed.state
+                USING ERRCODE='42501';
+        END IF;
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF flag.value->>'kind'='signoff'
+               AND ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg)
+                   IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg) THEN
+                RAISE EXCEPTION 'a merge cannot change sign-off %', flag.key USING ERRCODE='42501';
+            END IF;
+        END LOOP;
+        RETURN proposed;
+    END IF;
+    -- A Director edit changes fields the transition table has nothing to say
+    -- about, at whatever stage the ticket is in. The window names one ticket
+    -- and is open for one statement. It carries no sign-off: ticket_board
+    -- .director_edit, the only operation that opens this window, refuses to
+    -- raise one before it writes anything (SYRD-83).
+    IF nullif(current_setting('ticket_board.director_edit_target', true), '') = previous.id THEN
+        RETURN proposed;
+    END IF;
+    -- SYRD-598: withdrawing one named sign-off. ticket_board.withdraw_signoff,
+    -- the only operation that opens this window, names one ticket and one
+    -- sign-off for one statement, and only that sign-off may fall: no stage,
+    -- owner or other flag moves through it, and nothing is raised.
+    IF split_part(nullif(current_setting('ticket_board.signoff_withdrawal', true), ''), ':', 1) = previous.id THEN
+        IF previous.state IS DISTINCT FROM proposed.state OR previous.assignee IS DISTINCT FROM proposed.assignee THEN
+            RAISE EXCEPTION 'withdrawing a sign-off moves nothing' USING ERRCODE='42501';
+        END IF;
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg) IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg)
+               AND NOT (flag.key = split_part(current_setting('ticket_board.signoff_withdrawal', true), ':', 2)
+                        AND NOT ticket_board.workflow_flag(doc,flag.key,cfg)) THEN
+                RAISE EXCEPTION 'withdrawing a sign-off changes only that sign-off, not %', flag.key USING ERRCODE='42501';
+            END IF;
+        END LOOP;
+        RETURN proposed;
+    END IF;
+    -- SYRD-599: a Router operation's window names one ticket and one statement,
+    -- and admits exactly its own change (require_router_change). Everything
+    -- after this still applies to it: the stage-owner check, serial focus, the
+    -- declared transition and its bookkeeping.
+    IF nullif(current_setting('ticket_board.router_ticket', true), '') = previous.id THEN
+        PERFORM ticket_board.require_router_change(previous, proposed, actor);
+    END IF;
+    IF previous.state=proposed.state THEN
+        IF previous.assignee IS DISTINCT FROM proposed.assignee AND actor<>'director'
+           AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id THEN
+            RAISE EXCEPTION 'only director may reassign without transition' USING ERRCODE='42501'; END IF;
+        PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg) IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg)
+               AND (flag.value->>'kind'='signoff' OR actor<>'director') THEN
+                RAISE EXCEPTION 'flag change requires authorized workflow action'; END IF;
+        END LOOP;
+        -- SYRD-77: an owner change that is not a transition never reached the
+        -- serial-focus redirect below, so a same-stage reassignment could leave
+        -- one implementer holding two implementation tickets -- exactly the
+        -- reservation the queue exists to protect. Resolving it here rather
+        -- than in the caller means no write path can hand an implementer
+        -- reserved work by declining to ask.
+        --
+        -- SYRD-568: only a pull policy still diverts, into its ready stage
+        -- pinned to the busy author. A Director-dispatched board leaves the
+        -- ticket where it was put, assigned, waiting in that implementer's
+        -- queue; only the active ticket holds the slot.
+        IF previous.assignee IS DISTINCT FROM proposed.assignee THEN
+            IF ticket_board.declared_scheduling() IS NOT NULL
+               AND ticket_board.declared_stage_kind(proposed.state)='implementation'
+               AND ticket_board.ticket_is_implementer_assignee(proposed.assignee)
+               AND NOT proposed.manually_controlled
+               AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL THEN
+                -- SYRD-599: Router changes the owner and nothing else. Diverting its
+                -- pick into the ready stage would move the ticket it was told to
+                -- leave where it is, so it is refused instead: Router chooses a
+                -- free owner or hands the ticket back.
+                IF nullif(current_setting('ticket_board.router_ticket', true), '') = previous.id THEN
+                    RAISE EXCEPTION '% already has % active; on this pull-scheduled board Router cannot queue work behind it: choose an owner with no active ticket, or return % to the Director',
+                        proposed.assignee, ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id), previous.id
+                        USING ERRCODE='42501'; END IF;
+                IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN
+                    RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
+                queued_for:=proposed.assignee;
+                reserved_by:=ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id);
+                proposed.state:=cfg->'queue'->>'stage'; proposed.assignee:=cfg->'queue'->>'assignee';
+                PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
+                proposed.queued_for_assignee:=queued_for;
+                proposed.queued_behind_ticket:=coalesce(reserved_by,'');
+                PERFORM set_config('ticket_board.serial_focus_queued',
+                    jsonb_build_object('queued_for',queued_for,'reserved_by',reserved_by,
+                        'stage',proposed.state,'assignee',proposed.assignee)::text,true);
+            ELSE
+                -- A deliberate new owner ends the hold that named the old one,
+                -- so the marker never outlives the reservation that set it.
+                proposed.queued_for_assignee:='';
+                proposed.queued_behind_ticket:='';
+            END IF;
+        END IF;
+        RETURN proposed;
+    END IF;
+    FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+        IF ticket_board.workflow_flag(to_jsonb(previous),flag.key,cfg) IS DISTINCT FROM ticket_board.workflow_flag(doc,flag.key,cfg) THEN
+            RAISE EXCEPTION 'flags cannot be patched alongside a transition'; END IF;
+    END LOOP;
+    SELECT x INTO tr FROM jsonb_array_elements(cfg->'transitions') x
+      WHERE x->>'from'=previous.state AND x->>'to'=proposed.state AND x->>'action'=action_name;
+    IF tr IS NULL OR NOT ticket_board.transition_allows_actor(cfg,tr,actor) OR ((tr->>'owner_scoped')::boolean AND previous.assignee<>actor) THEN
+        RAISE EXCEPTION 'unauthorized configured transition: % / %',actor,action_name USING ERRCODE='42501'; END IF;
+    -- SYRD-599: router_return is declared so it is visible, owner-scoped and
+    -- bookkept like any move, but only its own operation may take it: it
+    -- carries the revision check and the Director's handoff.
+    IF tr->>'action'='router_return'
+       AND nullif(current_setting('ticket_board.router_ticket', true), '') IS DISTINCT FROM previous.id THEN
+        RAISE EXCEPTION 'router_return is taken only through ticket_board.router_return' USING ERRCODE='42501'; END IF;
+    SELECT x INTO source_stage FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=previous.state;
+    IF (source_stage->>'terminal')::boolean AND tr->>'primitive'<>'reopen' THEN RAISE EXCEPTION 'terminal exit requires reopen'; END IF;
+    -- A blocker stops work going FORWARD. Putting work down is not going
+    -- forward: a parking stage is not terminal, owns nobody and notifies
+    -- nobody, so nothing is promoted by landing there and the blocker is
+    -- exactly the reason to park. Refusing it forced the director to clear the
+    -- blocker, defer, and restore it -- three writes, a window where the ticket
+    -- looked unblocked, and a blocked ticket holding an implementer's serial
+    -- slot in the meantime (SYRD-192).
+    --
+    -- Keyed on the DESTINATION's shape rather than on an action name, because
+    -- the name is the tenant's: `declared_parking_stage` is the same predicate
+    -- `workflow_config.parking_stage_names` uses, so a tenant that calls it
+    -- something other than `backlog` gets this for free.
+    IF tr->>'primitive' NOT IN ('return','reopen')
+       AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       AND NOT ticket_board.declared_review_return(cfg, previous.state, tr->>'to')
+       -- SYRD-599: Router handing work back to triage promotes nothing.
+       AND tr->>'action'<>'router_return'
+       -- SYRD-568: placing blocked work in its implementer's queue promotes
+       -- nothing either -- it holds no slot and is handed to nobody until its
+       -- blockers resolve and it is the active ticket. Submitting it still is.
+       -- A pull policy queues in its ready stage instead, as before.
+       AND NOT (ticket_board.declared_stage_kind(tr->>'to') = 'implementation'
+                AND ticket_board.declared_scheduling() IS NULL)
+       AND ticket_board.ticket_has_unresolved_blockers(previous.id) THEN
+        RAISE EXCEPTION 'unresolved blocker prevents forward promotion: %',
+            ticket_board.unresolved_blocker_list(previous.id); END IF;
+    -- SYRD-568: a ticket waiting in its implementer's queue is not that
+    -- implementer's work yet, so it cannot be submitted for review. Putting it
+    -- down, routing it back or cancelling it are not submissions.
+    IF source_stage->>'kind'='implementation'
+       AND (ticket_board.declared_stage_kind(tr->>'to')='review'
+            OR coalesce((tr->>'require_commit')::boolean,false) OR coalesce((tr->>'allow_no_code')::boolean,false))
+       AND ticket_board.ticket_serial_waiting(previous.id) THEN
+        RAISE EXCEPTION '% is waiting in %''s queue behind %; it can be submitted once it is the active ticket',
+            previous.id, previous.assignee, coalesce(ticket_board.ticket_current_reserved_ticket(previous.assignee),'its blockers')
+            USING ERRCODE='42501'; END IF;
+    IF (tr->>'require_commit')::boolean AND btrim(proposed.commit_hash)='' AND NOT proposed.commit_exempt THEN
+        RAISE EXCEPTION 'commit required'; END IF;
+    -- A declared return out of review hands the work back: it needs no
+    -- verdict, and the sign-off stays exactly as it was (SYRD-536). Its own
+    -- branch, so SYRD-263's parking exemption below is unchanged.
+    IF tr->>'primitive' NOT IN ('approve','return','reopen')
+       AND ticket_board.declared_review_return(cfg, previous.state, tr->>'to') THEN
+        NULL;
+    ELSIF tr->>'primitive'='approve' THEN doc:=ticket_board.set_workflow_flag(doc,source_stage->>'signoff',true);
+    -- A sign-off gates leaving a review FORWARD. Parking is not a verdict: the
+    -- stage owns nobody, notifies nobody and promotes nothing, and the review's
+    -- record rides along untouched -- no sign-off is granted, none is cleared,
+    -- the commit stays. Requiring the missing sign-off made an unaccepted User
+    -- Review impossible to put down without deciding it (SYRD-263). Keyed on
+    -- the destination's shape, like the blocker exemption above (SYRD-192).
+    ELSIF source_stage->>'signoff' IS NOT NULL AND tr->>'primitive' NOT IN ('return','reopen')
+       AND NOT ticket_board.declared_parking_stage(tr->>'to')
+       AND NOT ticket_board.workflow_flag(doc,source_stage->>'signoff',cfg) THEN RAISE EXCEPTION 'stage signoff required'; END IF;
+    FOR reset IN SELECT jsonb_array_elements_text(tr->'clear_signoffs') LOOP
+        doc:=ticket_board.set_workflow_flag(doc,reset,false);
+    END LOOP;
+    IF tr->>'primitive' IN ('return','reopen') THEN doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',false); END IF;
+    IF (tr->>'allow_no_code')::boolean THEN doc:=doc||jsonb_build_object('commit_hash','','commit_exempt',true); END IF;
+    -- A sign-off is a review of one commit (SYRD-271). MEFP-4 was approved for
+    -- one commit, routed back by a plain `move` that clears nothing, and
+    -- resubmitted with another -- and the audit stage, already signed, was
+    -- skipped: the old verdict stood in for a review nobody had done. So when
+    -- work leaves implementation carrying a different commit, every review
+    -- sign-off is cleared here, before the gates are walked, and it enters
+    -- review for exactly the commit it carries.
+    -- The same commit resubmitted keeps its review: that exact work was seen.
+    -- A no-code submission has no commit to show it is the same work, so it
+    -- is always reviewed as new.
+    IF source_stage->>'kind' = 'implementation'
+       AND ((tr->>'allow_no_code')::boolean
+            OR (btrim(coalesce(doc->>'commit_hash','')) <> ''
+                AND (doc->>'commit_hash') IS DISTINCT FROM previous.commit_hash)) THEN
+        FOR flag IN SELECT * FROM jsonb_each(cfg->'flags') LOOP
+            IF flag.value->>'kind' = 'signoff' THEN
+                doc:=ticket_board.set_workflow_flag(doc,flag.key,false);
+            END IF;
+        END LOOP;
+    END IF;
+    target:=proposed.state;
+    LOOP
+        SELECT x INTO dest FROM jsonb_array_elements(cfg->'stages') x WHERE x->>'name'=target;
+        IF dest IS NULL THEN RAISE EXCEPTION 'missing target stage'; END IF;
+        EXIT WHEN (dest->>'gate' IS NULL OR ticket_board.workflow_flag(doc,dest->>'gate',cfg))
+          AND NOT (dest->>'signoff' IS NOT NULL AND dest->>'skip_to' IS NOT NULL AND ticket_board.workflow_flag(doc,dest->>'signoff',cfg));
+        target:=dest->>'skip_to'; loops:=loops+1;
+        IF loops>jsonb_array_length(cfg->'stages') THEN RAISE EXCEPTION 'gate cycle'; END IF;
+    END LOOP;
+    owners:=ARRAY(SELECT jsonb_array_elements_text(dest->'owners'));
+    -- SYRD-599: on a Router-enabled board the Director's ordinary route into
+    -- Implementation is Router's, unless the Director names an Implementation
+    -- owner: that is the direct route, and every rule below applies to it. A
+    -- Router that cannot be told is refused, never replaced by an implementer:
+    -- going direct is the Director's choice, not a fallback.
+    IF dest->>'kind'='implementation' AND actor='director' AND tr->>'primitive'='move'
+       AND source_stage->>'kind' NOT IN ('implementation','review')
+       AND ticket_board.router_holds(NULL,'router') AND NOT proposed.assignee=ANY(owners) THEN
+        IF NOT ticket_board.router_available() THEN
+            RAISE EXCEPTION 'Router is not running, so % cannot be routed through it; route it to an Implementation owner directly (%), or start Router',
+                previous.id, array_to_string(owners, ', ') USING ERRCODE='55000';
+        END IF;
+        proposed.assignee:='router';
+    END IF;
+    IF dest->>'signoff' IS NOT NULL THEN doc:=ticket_board.set_workflow_flag(doc,dest->>'signoff',false); END IF;
+    IF tr->>'primitive'='return' THEN
+        SELECT last_implementer_assignee INTO fallback FROM ticket_board.ticket_notification_state WHERE ticket_id=previous.id;
+        IF fallback=ANY(owners) THEN proposed.assignee:=fallback; END IF;
+    END IF;
+    IF cardinality(owners)>0 AND NOT proposed.assignee=ANY(owners)
+       AND NOT ticket_board.router_holds(target,proposed.assignee) THEN proposed.assignee:=owners[1]; END IF;
+    IF previous.manually_controlled AND tr->>'primitive'='approve' THEN
+        -- Record the decision but retain the deliberate stage/owner hold. The
+        -- executor creates the durable handoff after activity triggers finish.
+        PERFORM set_config('ticket_board.held_review_target',coalesce(nullif(ticket_board.transition_target_role(target,proposed.assignee),actor),'director'),true);
+        -- And keep the transition the approval earned, instead of discarding it
+        -- with the stage. A hold defers a decision; releasing it replays this
+        -- exact step, as this actor, once (SYRD-180).
+        INSERT INTO ticket_board.ticket_deferred_review(ticket_id,action_name,actor,to_stage)
+        VALUES(previous.id,action_name,actor,tr->>'to')
+        ON CONFLICT (ticket_id) DO UPDATE SET action_name=EXCLUDED.action_name,
+            actor=EXCLUDED.actor,to_stage=EXCLUDED.to_stage,deferred_at=clock_timestamp();
+        target:=previous.state; proposed.assignee:=previous.assignee;
+    ELSE
+        -- A move that actually happens leaves nothing owed, including the move
+        -- that pays a deferral: nothing may be replayed twice.
+        DELETE FROM ticket_board.ticket_deferred_review WHERE ticket_id=previous.id;
+    END IF;
+    doc:=doc||jsonb_build_object('state',target,'assignee',proposed.assignee);
+    proposed:=jsonb_populate_record(proposed,doc);
+    PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
+    -- SYRD-568: on a Director-dispatched board a move into an implementation
+    -- stage lands there, assigned, even when that implementer already has
+    -- active work, and waits in their queue until it is the active ticket. A
+    -- pull policy keeps its ready stage as the queue (SYRD-539): there the
+    -- move is still diverted, pinned to the busy author.
+    IF ticket_board.declared_scheduling() IS NOT NULL
+       AND dest->>'kind'='implementation' AND NOT ticket_board.router_holds(dest->>'name',proposed.assignee)
+       AND ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id) IS NOT NULL AND NOT proposed.manually_controlled THEN
+        IF cfg->'queue' IS NULL OR cfg->'queue'='null'::jsonb THEN RAISE EXCEPTION 'implementer already owns reserved work; configure a holding destination'; END IF;
+        queued_for:=proposed.assignee;
+        reserved_by:=ticket_board.ticket_current_reserved_ticket(proposed.assignee,proposed.id);
+        proposed.state:=cfg->'queue'->>'stage'; proposed.assignee:=cfg->'queue'->>'assignee';
+        PERFORM ticket_board.require_stage_owner_assignee(proposed.state,proposed.assignee);
+        -- Serial focus still holds the ticket, but the outcome is now legible.
+        -- The queue destination is frequently the stage the ticket came from,
+        -- so without these the caller sees an unchanged ticket and a success.
+        proposed.queued_for_assignee:=queued_for;
+        proposed.queued_behind_ticket:=coalesce(reserved_by,'');
+        PERFORM set_config('ticket_board.serial_focus_queued',
+            jsonb_build_object('queued_for',queued_for,'reserved_by',reserved_by,
+                'stage',proposed.state,'assignee',proposed.assignee)::text,true);
+    ELSE
+        -- Any move that is not held clears the marker, so it never outlives the
+        -- reservation that caused it.
+        proposed.queued_for_assignee:='';
+        proposed.queued_behind_ticket:='';
+    END IF;
+    -- Deferring is putting work down, so it has to stop looking like work
+    -- somebody has. An owner left on a parked ticket keeps its implementer's
+    -- serial reservation and keeps the board highlighting it as current, which
+    -- is how a deferral would quietly go on nudging the person who deferred it.
+    -- Everything the ticket is -- content, hierarchy, blockers, gates,
+    -- sign-offs, comments -- is untouched; only who holds it changes (SYRD-92).
+    IF ticket_board.declared_parking_stage(proposed.state) THEN
+        -- queued_for is set only by the serial-focus redirect just above, whose
+        -- holding destination is frequently this same stage. That ticket is
+        -- waiting on a busy implementer rather than being put down, and its
+        -- queue bookkeeping is what makes the outcome legible, so it is left
+        -- exactly as it was.
+        IF queued_for IS NULL THEN
+            proposed.assignee:='unassigned';
+            proposed.parked:=true;
+            proposed.queued_for_assignee:='';
+            proposed.queued_behind_ticket:='';
+        END IF;
+    ELSIF ticket_board.declared_parking_stage(previous.state) THEN
+        -- Reviving it: the hold ends with the stage that carried it.
+        proposed.parked:=false;
+    END IF;
+    RETURN proposed;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.notify_ticket_owner_in_place_change(
+    p_ticket_id text,
+    p_change_summary text DEFAULT NULL
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    ticket_row ticket_board.tickets%ROWTYPE;
+    actor text;
+    target_role text;
+    change_summary text := nullif(btrim(coalesce(p_change_summary, '')), '');
+    message text;
+BEGIN
+    actor := ticket_board.current_app_actor();
+    -- SYRD-598: the User decided; the board UI lent the control role's operation permission.
+    IF EXISTS (SELECT FROM ticket_board.ui_delegations g WHERE g.consumed_txid = txid_current()
+               AND g.decided_by = actor) THEN
+        actor := actor || ' (through the board UI, using the control role''s operation permission)';
+    END IF;
+    SELECT *
+    INTO ticket_row
+    FROM ticket_board.tickets
+    WHERE id = p_ticket_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', p_ticket_id;
+    END IF;
+
+    target_role := ticket_board.transition_target_role(ticket_row.state, ticket_row.assignee);
+    IF target_role IS NULL OR actor IS NULL OR actor = target_role THEN
+        RETURN;
+    END IF;
+    -- SYRD-582: a ticket queued behind its implementer's active work is not
+    -- their work yet. A comment, edit or reassignment on it woke them with it
+    -- anyway (Otto's OTTO-134: the Director's routing comment arrived as work
+    -- the board then refused to accept). It is handed over once, when it
+    -- becomes active, and the ticket it hands over carries every change. A
+    -- ticket held back by its own blocker still tells its owner what changed,
+    -- as before: it cannot be submitted, and the change may be what frees it.
+    IF ticket_board.ticket_serial_waiting(p_ticket_id)
+       AND NOT ticket_board.ticket_has_unresolved_blockers(p_ticket_id) THEN
+        RETURN;
+    END IF;
+
+    message := ticket_board.ticket_update_message(
+        p_ticket_id,
+        ticket_row.title,
+        ticket_row.state,
+        actor,
+        change_summary
+    );
+
+    PERFORM ticket_board.enqueue_notification(
+        p_ticket_id,
+        'ticket_update',
+        target_role,
+        message,
+        jsonb_build_object(
+            'kind', 'ticket_update',
+            'id', p_ticket_id,
+            'title', ticket_row.title,
+            'state', ticket_row.state,
+            'assignee', ticket_row.assignee,
+            'updated_at', ticket_row.updated_at,
+            'ticket_number', ticket_row.ticket_number,
+            'target_role', target_role,
+            'message', message,
+            'actor', actor,
+            'change_summary', change_summary
+        ),
+        -- SYRD-159: the wake is identified by what it is about -- this ticket,
+        -- this role -- not by the transaction that happened to raise it. Keyed
+        -- on pg_current_xact_id(), one user-visible change delivered as two
+        -- writes (set the blockers, then say why) minted two rows with two keys
+        -- and woke the assignee twice for one thing to read. The queue already
+        -- knows how to collapse: ON CONFLICT refreshes the pending row's message
+        -- and re-arms it, and a delivered row is deleted by ack_notification, so
+        -- a stable key means "at most one unread wake per ticket per role" and
+        -- the next change after delivery still mints its own.
+        --
+        -- The role belongs in the key for a second reason: without it, two
+        -- notifications raised in one transaction for two different roles
+        -- collide, and ON CONFLICT ... SET target_role = EXCLUDED.target_role
+        -- would silently retarget the first role's wake to the second.
+        'ticket_update:' || p_ticket_id || ':' || target_role
+    );
+END;
+$$;
+
+-- The operations whose authority check is require_actor's, which cannot know
+-- the ticket, enter the grant consumed for them with the ticket they act on
+-- (enter_ui_delegation), so the control role's permission is lent to that
+-- operation's own function, for that ticket, and to nothing else. A merge also
+-- checks its destination against the grant's. schema.sql's copies are this text.
+
+CREATE OR REPLACE FUNCTION ticket_board.set_manually_controlled(
+    id text,
+    manually_controlled boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+BEGIN
+    PERFORM ticket_board.enter_ui_delegation('set_manually_controlled', set_manually_controlled.id,
+                                             format('ticket %s', set_manually_controlled.id));  -- SYRD-598
+    actor := ticket_board.require_actor(ARRAY['director'], 'set_manually_controlled');
+    PERFORM ticket_board.leave_ui_delegation();
+    UPDATE ticket_board.tickets
+    SET manually_controlled = set_manually_controlled.manually_controlled
+    WHERE tickets.id = set_manually_controlled.id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+    PERFORM ticket_board.touch_ticket(id);
+    -- Releasing the hold pays what the hold deferred, and pays it once: the
+    -- record is retired with the move, so a second release finds nothing owed
+    -- (SYRD-180).
+    IF NOT set_manually_controlled.manually_controlled THEN
+        PERFORM ticket_board.reconcile_released_hold(id);
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.set_blockers(
+    id text,
+    ids text[],
+    reason text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    current_blockers text[];
+    current_reason text;
+    next_blockers text[];
+    next_reason text := coalesce(reason, '');
+BEGIN
+    PERFORM ticket_board.enter_ui_delegation('set_blockers', set_blockers.id, format('ticket %s', set_blockers.id));  -- SYRD-598
+    actor := ticket_board.require_actor(ARRAY['director'], 'set_blockers');
+    PERFORM ticket_board.leave_ui_delegation();
+    SELECT tickets.blocked_reason
+    INTO current_reason
+    FROM ticket_board.tickets
+    WHERE tickets.id = set_blockers.id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', id;
+    END IF;
+
+    SELECT COALESCE(array_agg(blocker_ticket_id ORDER BY position), ARRAY[]::text[])
+    INTO current_blockers
+    FROM ticket_board.ticket_blockers
+    WHERE ticket_id = set_blockers.id;
+
+    SELECT COALESCE(array_agg(blocker_id ORDER BY first_ord), ARRAY[]::text[])
+    INTO next_blockers
+    FROM (
+        SELECT ticket_board.normalize_blocker_ref(raw_id) AS blocker_id, min(ord) AS first_ord
+        FROM unnest(coalesce(ids, ARRAY[]::text[])) WITH ORDINALITY AS input(raw_id, ord)
+        GROUP BY ticket_board.normalize_blocker_ref(raw_id)
+    ) AS normalized;
+
+    PERFORM ticket_board.apply_blockers(id, ids, reason);
+    PERFORM ticket_board.touch_ticket(id);
+    IF current_blockers IS DISTINCT FROM next_blockers OR coalesce(current_reason, '') IS DISTINCT FROM next_reason THEN
+        PERFORM ticket_board.notify_ticket_owner_in_place_change(id, 'blockers');
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.release_external_blocker(
+    p_ticket text,
+    p_ref text,
+    p_reason text,
+    p_evidence text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    v_ticket text := upper(btrim(coalesce(p_ticket, '')));
+    ref text := ticket_board.normalize_blocker_ref(p_ref);
+    reason text := btrim(coalesce(p_reason, ''));
+    evidence text := btrim(coalesce(p_evidence, ''));
+    released_text text;
+BEGIN
+    -- The authority that sets a blocker is the one that releases it: the
+    -- Director's, or on a declared board whoever holds set_blockers.
+    PERFORM ticket_board.enter_ui_delegation('release_external_blocker', v_ticket, format('ticket %s', v_ticket));  -- SYRD-598
+    actor := ticket_board.require_actor(ARRAY['director'], 'set_blockers');
+    PERFORM ticket_board.leave_ui_delegation();
+    IF reason = '' THEN
+        RAISE EXCEPTION 'releasing an external blocker requires a reason';
+    END IF;
+    IF NOT ticket_board.is_external_blocker(ref) THEN
+        RAISE EXCEPTION 'not an external blocker: %; a blocker on this board resolves when its ticket is done', p_ref;
+    END IF;
+    PERFORM 1 FROM ticket_board.tickets t WHERE t.id = v_ticket FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', v_ticket;
+    END IF;
+
+    DELETE FROM ticket_board.ticket_blockers b
+    WHERE b.ticket_id = v_ticket
+      AND b.blocker_ticket_id = ref;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket % has no external blocker %', v_ticket, ref;
+    END IF;
+    IF NOT EXISTS (SELECT FROM ticket_board.ticket_blockers b
+                   WHERE b.ticket_id = v_ticket) THEN
+        UPDATE ticket_board.tickets t SET blocked_reason = '' WHERE t.id = v_ticket;
+    END IF;
+
+    -- The release is on the record, with why and, where the caller verified
+    -- one, what this board itself now recognizes.
+    released_text := format('External blocker %s released: %s', ref, reason);
+    IF evidence <> '' THEN
+        released_text := released_text || E'\n' || evidence;
+    END IF;
+    PERFORM ticket_board.append_ticket_comment(v_ticket, ticket_board.current_app_actor(), released_text, false);
+    PERFORM ticket_board.touch_ticket(v_ticket);
+    PERFORM ticket_board.refresh_ticket_source_json(v_ticket);
+    -- The owner is told, as for any change to the ticket's blockers. Nothing is
+    -- moved: whatever the wait was holding back still goes through its gates.
+    PERFORM ticket_board.notify_ticket_owner_in_place_change(v_ticket, 'external blocker released');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.merge(
+    source_id text,
+    target_id text
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    granted jsonb;
+    source_ticket ticket_board.tickets%ROWTYPE;
+    target_ticket ticket_board.tickets%ROWTYPE;
+    next_position integer;
+    next_attachment_position integer;
+BEGIN
+    -- SYRD-598: on a board-UI confirmation, the ticket confirmed merges into the ticket confirmed.
+    granted := ticket_board.enter_ui_delegation('merge', upper(btrim(coalesce(source_id, ''))),
+                                                format('ticket %s', upper(btrim(coalesce(source_id, '')))));
+    actor := ticket_board.require_actor(ARRAY['director'], 'merge');
+    PERFORM ticket_board.leave_ui_delegation();
+    IF granted IS NOT NULL
+       AND upper(btrim(coalesce(granted->>'target_id', ''))) IS DISTINCT FROM upper(btrim(coalesce(target_id, ''))) THEN
+        RAISE EXCEPTION 'merging into % is not what this board UI confirmation was for', target_id
+            USING ERRCODE = '42501';
+    END IF;
+    source_id := upper(btrim(coalesce(source_id, '')));
+    target_id := upper(btrim(coalesce(target_id, '')));
+    IF source_id = '' OR target_id = '' THEN
+        RAISE EXCEPTION 'merge requires both source and target ticket IDs';
+    END IF;
+    IF source_id = target_id THEN
+        RAISE EXCEPTION 'cannot merge a ticket into itself';
+    END IF;
+
+    SELECT * INTO source_ticket FROM ticket_board.tickets WHERE id = source_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', source_id;
+    END IF;
+    SELECT * INTO target_ticket FROM ticket_board.tickets WHERE id = target_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'ticket not found: %', target_id;
+    END IF;
+
+    SELECT COALESCE(max(position), -1) + 1
+    INTO next_position
+    FROM ticket_board.ticket_comments
+    WHERE ticket_id = target_id;
+
+    INSERT INTO ticket_board.ticket_comments (ticket_id, position, who, ts_text, ts, text, source_json)
+    SELECT
+        target_id,
+        next_position + row_number() OVER (ORDER BY position)::integer - 1,
+        who,
+        ts_text,
+        ts,
+        '[merged from ' || source_id || '] ' || text,
+        jsonb_build_object('who', who, 'ts', ts_text, 'text', '[merged from ' || source_id || '] ' || text)
+    FROM ticket_board.ticket_comments
+    WHERE ticket_id = source_id
+    ORDER BY position;
+
+    PERFORM ticket_board.append_ticket_comment(target_id, 'director', 'Merged in ' || source_id || ': ' || source_ticket.title);
+
+    SELECT COALESCE(max(position), -1) + 1
+    INTO next_attachment_position
+    FROM ticket_board.ticket_attachments
+    WHERE ticket_id = target_id;
+
+    INSERT INTO ticket_board.ticket_attachments (ticket_id, position, path, is_primary, source_field, metadata)
+    SELECT target_id,
+           next_attachment_position + row_number() OVER (ORDER BY position)::integer - 1,
+           source.path,
+           false,
+           source.source_field,
+           source.metadata
+    FROM ticket_board.ticket_attachments AS source
+    WHERE source.ticket_id = source_id
+      AND NOT EXISTS (
+          SELECT 1
+          FROM ticket_board.ticket_attachments AS existing
+          WHERE existing.ticket_id = target_id
+            AND existing.path = source.path
+      )
+    ORDER BY source.position;
+
+    UPDATE ticket_board.tickets
+    SET manually_controlled = true
+    WHERE id = source_id;
+    -- Merge's own terminal close, named for exactly one ticket and only for
+    -- the statement that performs it. Without this the update is rechecked as
+    -- an ordinary configured transition carrying no action, which no
+    -- transition table can match, and a merge that had already copied the
+    -- comments and attachments failed half-done (SYRD-79).
+    PERFORM set_config('ticket_board.merge_source', source_id, true);
+    UPDATE ticket_board.tickets
+    SET state = 'done',
+        commit_exempt = true,
+        manually_controlled = source_ticket.manually_controlled,
+        parked = false
+    WHERE id = source_id;
+    -- Closed immediately, so nothing later in this transaction inherits it.
+    PERFORM set_config('ticket_board.merge_source', '', true);
+    PERFORM ticket_board.append_ticket_comment(source_id, 'director', 'Merged into ' || target_id);
+    PERFORM ticket_board.touch_ticket(source_id);
+    PERFORM ticket_board.touch_ticket(target_id);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.dismiss_notification(
+    p_notification_id bigint,
+    p_reason text DEFAULT ''
+)
+RETURNS void
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    actor text;
+    notice ticket_board.ticket_notification_queue%ROWTYPE;
+    granted jsonb;
+BEGIN
+    -- SYRD-598: a notice dismissed on a board-UI confirmation is the one confirmed: that ticket's, and
+    -- named by its id or by its ticket, target role and kind, normalised as dismiss_notification_by_key does.
+    SELECT * INTO notice FROM ticket_board.ticket_notification_queue WHERE id = p_notification_id;
+    IF FOUND THEN
+        granted := ticket_board.enter_ui_delegation('dismiss_notification', notice.ticket_id,
+                                                    format('notification %s', notice.id));
+    END IF;
+    actor := ticket_board.require_actor(ARRAY['director'], 'dismiss_notification');
+    PERFORM ticket_board.leave_ui_delegation();
+    IF granted IS NOT NULL AND NOT coalesce(CASE WHEN granted ? 'notification_id'
+            THEN btrim(granted->>'notification_id') = notice.id::text
+            ELSE upper(btrim(coalesce(granted->>'ticket_id', ''))) = notice.ticket_id
+                 AND lower(btrim(coalesce(granted->>'target_role', ''))) = notice.target_role
+                 AND lower(coalesce(nullif(btrim(granted->>'kind'), ''), 'transition')) = notice.kind END, false) THEN
+        RAISE EXCEPTION 'notification % is not the notice this board UI confirmation was for', notice.id
+            USING ERRCODE = '42501';
+    END IF;
+
+    PERFORM ticket_board.record_notification_trace(
+        q.ticket_id,
+        q.id,
+        q.target_role,
+        q.kind,
+        'director_dismiss',
+        NULL,
+        coalesce(nullif(btrim(p_reason), ''), 'director dismissed notification'),
+        NULL,
+        jsonb_build_object(
+            'actor', nullif(current_setting('ticket_board.caller_role', true), ''),
+            'reason', p_reason,
+            'attempts', q.attempts,
+            'last_error', q.last_error,
+            'terminal_reason', q.terminal_reason,
+            'dead_lettered_at', q.dead_lettered_at,
+            'payload', q.payload
+        )
+    )
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.id = p_notification_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'notification % not found', p_notification_id;
+    END IF;
+
+    DELETE FROM ticket_board.ticket_notification_queue
+    WHERE id = p_notification_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ticket_board.dismiss_notification_by_key(
+    p_ticket_id text,
+    p_target_role text,
+    p_kind text DEFAULT 'transition',
+    p_reason text DEFAULT ''
+)
+RETURNS bigint
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = ticket_board, pg_temp
+AS $$
+DECLARE
+    notification_id bigint;
+    normalized_ticket_id text := upper(btrim(coalesce(p_ticket_id, '')));
+    normalized_target_role text := lower(btrim(coalesce(p_target_role, '')));
+    normalized_kind text := lower(coalesce(nullif(btrim(p_kind), ''), 'transition'));
+BEGIN
+    PERFORM ticket_board.enter_ui_delegation('dismiss_notification', normalized_ticket_id,
+                                             format('a notice for %s', normalized_ticket_id));  -- SYRD-598
+    PERFORM ticket_board.require_actor(ARRAY['director'], 'dismiss_notification');
+    PERFORM ticket_board.leave_ui_delegation();
+    IF normalized_ticket_id = '' THEN
+        RAISE EXCEPTION 'dismiss_notification_by_key requires a non-empty ticket_id';
+    END IF;
+    IF normalized_target_role = '' THEN
+        RAISE EXCEPTION 'dismiss_notification_by_key requires a non-empty target_role';
+    END IF;
+
+    SELECT q.id
+    INTO notification_id
+    FROM ticket_board.ticket_notification_queue q
+    WHERE q.ticket_id = normalized_ticket_id
+      AND q.target_role = normalized_target_role
+      AND q.kind = normalized_kind
+    ORDER BY q.dead_lettered_at NULLS LAST, q.created_at, q.id
+    LIMIT 1
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'notification for ticket %, target %, kind % not found',
+            normalized_ticket_id,
+            normalized_target_role,
+            normalized_kind;
+    END IF;
+
+    PERFORM ticket_board.dismiss_notification(notification_id, p_reason);
+    RETURN notification_id;
+END;
+$$;
+
+COMMIT;

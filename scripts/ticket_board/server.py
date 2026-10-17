@@ -66,7 +66,7 @@ from .operation_role_policy import (
     TASK_ROLES,
 )
 from .peer_identity import SessionIdentity
-from . import extension_operations, pull_queue, report_confirmation
+from . import extension_operations, pull_queue, report_confirmation, ui_delegation
 from .workflow_config import DIRECTOR_IDENTIFYING_CAPABILITIES, LEGACY_ASSIGNEE_SCOPED_OPERATIONS
 
 LOGGER = logging.getLogger(__name__)
@@ -281,7 +281,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             raise ValueError(f"missing {CALLER_ROLE_HEADER}")
         if role not in getattr(self.app, "workflow_roles", lambda: list(CALLER_ROLES))():
             raise ValueError(f"invalid caller role: {raw}")
-        return role
+        return ui_delegation.http_role(self, role)  # SYRD-598: over HTTP, only the User
 
     def require_http_write_token(self) -> None:
         if self.role_authority is not None:
@@ -563,7 +563,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             return
         if operation in pull_queue.OPERATIONS and ticket_id is None:  # SYRD-539: the database authorises a self-claim
             return self.send_json(pull_queue.perform(self.app, operation, payload, caller_role=caller))
-        self.require_operation_allowed(operation, caller, ticket_id)
+        self.require_operation_allowed(operation, ui_delegation.authority_for(self, operation, caller, ticket_id, payload), ticket_id)
         if operation in extension_operations.OPERATIONS:  # SYRD-537, SYRD-541
             self.send_json(extension_operations.perform(self.app, operation, payload, caller_role=caller, ticket_id=ticket_id))
             return
@@ -595,6 +595,10 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
 
         if operation == "dismiss_notification":
             raw_notification_id = payload.get("notification_id")
+            if raw_notification_id not in (None, "") and any(payload.get(k) not in (None, "")
+                                                             for k in ("ticket_id", "target_role", "kind")):
+                raise ValueError("a notice to dismiss is named by notification_id, or by ticket_id, target_role "
+                                 "and kind: one, not both")  # SYRD-598: what is checked is what is dismissed
             if raw_notification_id not in (None, ""):
                 dismissed = self.app.dismiss_notification(
                     int(raw_notification_id),
@@ -917,7 +921,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         self.send_json({"ticket": updated})
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urllib.parse.urlparse(self.path); ui_delegation.begin_request()  # SYRD-598
         if parsed.path == "/":
             token_script = (
                 f"  <script>window.TICKET_BOARD_WRITE_TOKEN = {json.dumps(self.write_token)};"
@@ -933,7 +937,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
             body = page.replace("  <script>\n", token_script + "  <script>\n", 1).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_no_cache_headers()
+            self.send_no_cache_headers(); ui_delegation.issue_session(self)  # SYRD-598
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1102,7 +1106,7 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
         return reason
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urllib.parse.urlparse(self.path); ui_delegation.begin_request()  # SYRD-598
         try:
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
@@ -1127,8 +1131,8 @@ class TicketBoardHandler(BaseHTTPRequestHandler):
                 self.send_json({"image": uploaded}, HTTPStatus.CREATED)
                 return
             payload = json.loads(body or b"{}")
-            if parsed.path == "/api/register-caller":
-                self.handle_register_caller(payload)
+            if parsed.path in ("/api/register-caller", "/api/ui/delegations"):  # SYRD-598: the board UI's confirmations
+                self.send_json(ui_delegation.mint(self, payload)) if parsed.path.endswith("/delegations") else self.handle_register_caller(payload)
                 return
             if parsed.path == "/api/workflow":
                 caller = self.caller_role()

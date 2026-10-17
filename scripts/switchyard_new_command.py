@@ -52,6 +52,7 @@ def switchyard_new_command(
     desktop_policy: Path | None = None,
     headless: bool = False,
     desktop_gui_user: str | None = None,
+    board_ui_users: Sequence[str] = (),
     desktop_approval_settings_path: Path | None = None,
     allow_existing_owner_user: bool = False,
     agy_credential_source: str | None = None,
@@ -223,6 +224,7 @@ def switchyard_new_command(
         provision_dir=provision_dir,
         upstream_report_url=upstream_report_url,
         upstream_report_token_file=upstream_report_token_file,
+        board_ui_users=board_ui_users,
     )
     if not isinstance(new_project_board, launcher.NewProjectBoard):
         return new_project_board

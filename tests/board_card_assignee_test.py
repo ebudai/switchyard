@@ -21,7 +21,9 @@ def main() -> int:
     assert "function roleLabel(role)" in HTML
     assert "assigneeValue.textContent = roleLabel(ticket.assignee);" in HTML
     assert "buildOption(assigneeInput, assignee, roleLabel(assignee))" in HTML
-    assert "buildOption(assigneeSelect, assignee, roleLabel(assignee))" in HTML
+    # SYRD-598: the detail shows the owner; changing it is a confirmed reassignment, not a select.
+    assert "buildOption(assigneeSelect, assignee, roleLabel(assignee))" not in HTML
+    assert "assigneeValue.setAttribute('data-detail-assignee', ticket.assignee);" in HTML
     assert "titleWrap.append(idEl, titleEl);" in HTML
     assert "if (ticket.state === 'in_progress') {" in HTML
     assert "titleWrap.appendChild(assigneeLine);" in HTML

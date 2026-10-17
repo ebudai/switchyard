@@ -1211,11 +1211,12 @@ class Artifacts:
 
 def u3(art: Artifacts, *, dry_run: bool = False, commit_git_dir: object = "syrd349-commit",
        source_repo: object = GIVEN_SOURCE, owner: object = "syrd349-owner"):
-    from scripts import team_launcher, upgrade_phases
+    from scripts import board_ui_record, team_launcher, upgrade_phases
 
     said: list[str] = []
     config = SimpleNamespace(project=PROJECT, run_as_user=owner, name="incoming")
-    with patched(team_launcher, **art.names()):
+    with patched(team_launcher, **art.names()), patched(board_ui_record, record_board_ui_users=lambda c, **k: art.log.append(
+            ("board-ui", c, k)) or []):  # SYRD-598: U3 records the board UI users last (board_ui_record_test)
         result = upgrade_phases._refresh_upgrade_artifacts(
             config, commit_git_dir=commit_git_dir, config_path=CONFIG_PATH, dry_run=dry_run,
             effective_source_repo=SOURCE, print_func=said.append, registry_dir=Path("/nonexistent/syrd349/registry"),
@@ -1257,9 +1258,7 @@ def test_u3_in_order_with_an_unchanged_layout() -> None:
     art = Artifacts(plan={"commit_git_dir": "  plan-cache  "})
     result, said, config = u3(art)
     check(art.kinds() == ["stale?", "layout", "runtime", "project-dir", "onboarding", "board-skill", "hooks", "link",
-                          "credential", "clis"],
-          f"warning, layout, runtime, onboarding, board skill, hooks, then the report link, credential and CLIs: "
-          f"{art.kinds()}")
+                          "credential", "clis", "board-ui"], f"each step in order, the board UI users last: {art.kinds()}")
     check(art.log[0] == ("stale?", config, dict(source_repo=SOURCE, runner=refusing_runner, print_func=said.append))
           and SOURCE != GIVEN_SOURCE
           and art.log[1] == ("layout", config, dict(config_path=CONFIG_PATH, dry_run=False, runner=refusing_runner)),
@@ -1297,7 +1296,7 @@ def test_u3_reloads_only_when_the_layout_changed_for_real() -> None:
     check("reload" not in art.kinds() and art.log[2][2]["dry_run"] is True, "a dry run never reloads")
     dry = {e[0]: e[-1].get("dry_run") for e in art.log if isinstance(e[-1], dict) and "dry_run" in e[-1]}
     check(dry == {"layout": True, "runtime": True, "onboarding": True, "board-skill": True, "hooks": True, "link": True,
-                  "credential": True, "clis": True},
+                  "credential": True, "clis": True, "board-ui": True},
           f"and every step it drives is told it is a dry run: {dry}")
 
 
@@ -1358,11 +1357,12 @@ def test_the_upgrade_keeps_the_report_config_from_before_u3() -> None:
     new = SimpleNamespace(name="u3 config")
     asked: list[tuple] = []
     namespace = {"Path": Path, "_refresh_upgrade_artifacts": lambda config, **k: asked.append((config, k)) or new}
+    namespace["board_ui_users"] = ["syrd598-user"]  # SYRD-598: the operator's --board-ui-user, handed on to U3
     exec(compile(ast.fix_missing_locations(code), "upgrade_project_command", "exec"), namespace)
     incoming = SimpleNamespace(name="incoming")
     result = namespace["wiring"](incoming, "c", CONFIG_PATH, False, SOURCE, print, None, refusing_runner, None, "t", "u")
     check(result == (new, incoming, None, "") and result[1] is incoming and asked[0][0] is incoming
-          and asked[0][1]["upstream_report_url"] == "u",
+          and asked[0][1]["upstream_report_url"] == "u" and asked[0][1]["board_ui_users"] == ["syrd598-user"],
           f"U3's config goes on, while the report config stays the one from before U3: {result}")
 
 

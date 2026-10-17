@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Regression test: failed audit sign-off toggles revert and show an error."""
+"""Regression test: a failed detail toggle reverts and shows an error.
+
+SYRD-598 removed the Audit sign-off toggle from the board page (a sign-off is its
+reviewer's, from its own pane), so the toggle exercised is one the User keeps.
+"""
 
 from __future__ import annotations
 
@@ -92,7 +96,8 @@ class ToggleFailureBoardApp:
 
     def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         self.update_calls += 1
-        raise AssertionError(f"empty audit signoff should be rejected before update_ticket: {ticket_id} {patch} {caller_role}")
+        assert (ticket_id, patch, caller_role) == ("PGU-279", {"regression": True}, "user"), (ticket_id, patch, caller_role)
+        raise ValueError("regression cannot change while PGU-279 is in audit")
 
 
 def run_browser_check(playwright: object, server_port: int, app: ToggleFailureBoardApp) -> None:
@@ -103,32 +108,31 @@ def run_browser_check(playwright: object, server_port: int, app: ToggleFailureBo
         page.locator(".column-title", has_text="Audit").wait_for(timeout=5000)
         page.locator(".card", has_text="PGU-279").click()
 
-        audit_toggle = page.locator(".detail-modal label", has_text=re.compile(r"^Audit signoff$")).locator("input")
-        audit_toggle.wait_for(timeout=5000)
-        assert audit_toggle.is_checked() is False
+        regression = page.locator(".detail-modal label", has_text=re.compile(r"^Regression$")).locator("input")
+        regression.wait_for(timeout=5000)
+        assert page.locator(".detail-modal label", has_text=re.compile(r"^Audit signoff$")).count() == 0
+        assert regression.is_checked() is False
 
-        audit_toggle.click()
+        regression.click()
         page.wait_for_function(
-            "() => document.getElementById('createStatus')?.innerText.includes('audit_sign_off requires a non-empty comment')",
+            "() => document.getElementById('createStatus')?.innerText.includes('regression cannot change while PGU-279 is in audit')",
             timeout=5000,
         )
         page.wait_for_function(
             """() => Array.from(document.querySelectorAll('.detail-modal label'))
-              .find((label) => label.textContent.trim() === 'Audit signoff')
+              .find((label) => label.textContent.trim() === 'Regression')
               ?.querySelector('input')
               ?.checked === false""",
             timeout=5000,
         )
-        assert audit_toggle.is_checked() is False
-        assert app.tickets[0]["audit_signoff"] is False
-        assert app.update_calls == 0
+        assert regression.is_checked() is False
+        assert app.update_calls == 1
     finally:
         browser.close()
 
 
 def main() -> int:
-    assert "await updateTicketAction(ticketId, 'audit_sign_off', { text: actionReason(patch) }, normalizedCaller);" in HTML
-    assert "await updateTicketAction(ticketId, 'audit_sign_off', {}, normalizedCaller);" not in HTML
+    assert "toggleControl('Audit signoff'" not in HTML
     assert "input.checked = previousChecked;" in HTML
 
     sync_playwright = load_playwright()

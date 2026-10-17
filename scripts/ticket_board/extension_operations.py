@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import pull_queue, reminder_snooze, report_intake, router_role, size_review
+from . import pull_queue, reminder_snooze, report_intake, router_role, size_review, ui_delegation
 
 OPERATIONS = (reminder_snooze.OPERATIONS | size_review.OPERATIONS | report_intake.OPERATIONS
-              | router_role.OPERATIONS)
+              | router_role.OPERATIONS | ui_delegation.OPERATIONS)
 
 
 def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: str,
@@ -26,6 +26,8 @@ def perform(app: Any, operation: str, payload: dict[str, Any], *, caller_role: s
         if ticket_id is not None:
             raise ValueError(f"{operation} is a board policy, not a ticket's")
         return report_intake.perform(app, operation, payload, caller_role=caller_role)
+    if operation in ui_delegation.OPERATIONS:  # SYRD-598
+        return ui_delegation.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
     return size_review.perform(app, operation, payload, caller_role=caller_role, ticket_id=ticket_id)
 
 

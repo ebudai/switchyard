@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Regression test: failed workflow advances surface backend errors in the UI."""
+"""Regression test: failed workflow advances surface backend errors in the UI.
+
+SYRD-598: moving a ticket on is a Director operation the User confirms in the board UI (Route, with its
+stage and owner); the confirmed request carries the grant (tests/board_ui_stub.py stands in for it). When
+the board refuses the move, the page says the board's reason and the ticket stays where it was.
+"""
 
 from __future__ import annotations
 
@@ -11,44 +16,47 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests.board_ui_stub import field, stub_board_ui  # noqa: E402
 from tests.ticket_board_ui_harness import (  # noqa: E402
     BoardHarness,
-    InMemoryTicketBoardApp,
     load_playwright,
     ticket_payload,
 )
 
 
-class FailingAdvanceApp(InMemoryTicketBoardApp):
-    def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
-        if patch == {"state": "in_progress"}:
-            self.operation_log.append(("start_work", str(ticket_id).strip().upper(), caller_role, {}))
-            raise ValueError("backend refused this workflow transition")
-        return super().update_ticket(ticket_id, patch, caller_role=caller_role)
-
-
-class FailingAdvanceHarness(BoardHarness):
-    def __init__(self, tickets: list[dict[str, Any]]) -> None:
-        super().__init__(tickets)
-        self.app = FailingAdvanceApp(tickets, frame_dir=self.frames, asset_dir=self.assets)
-        self.server.app = self.app
+def route_op(ticket: dict[str, Any]) -> dict[str, Any]:
+    return {"operation": "route", "label": "Route", "mode": "delegated",
+            "fields": [field("state", "choice", "To", options=["in_progress"], required=True),
+                       field("assignee", "choice", "Assignee", options=["app", "ops"], required=True)]}
 
 
 def run_browser_check(playwright: Any) -> None:
     tickets = [ticket_payload("PGU-789", "Transition failure", state="analysis", assignee="ops")]
-    with FailingAdvanceHarness(tickets) as harness:
+    with BoardHarness(tickets) as harness:
+        attempts: list[tuple[str, str, dict[str, Any]]] = []
+
+        def refuse(ticket_id: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            attempts.append((ticket_id, operation, payload))
+            raise ValueError("backend refused this workflow transition")
+
         browser = playwright.chromium.launch(headless=True)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 800})
             page_errors: list[str] = []
             page.on("pageerror", lambda error: page_errors.append(str(error)))
+            stub_board_ui(page, lambda: list(harness.app.tickets.values()), lambda ticket: [route_op(ticket)], perform=refuse)
 
             page.goto(harness.url, wait_until="domcontentloaded")
             page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
             page.locator(".card", has=page.locator(".card-id", has_text="PGU-789")).click()
             modal = page.locator(".detail-modal")
             modal.wait_for(timeout=5000)
-            modal.get_by_role("button", name="Advance -> Implementation").click()
+            modal.locator("[data-board-ui-op='route']").click()
+            dialog = page.locator("[data-board-ui-dialog='route']")
+            dialog.locator("[data-board-ui-field='state']").select_option("in_progress")
+            dialog.locator("[data-board-ui-field='assignee']").select_option("app")
+            dialog.locator("[data-board-ui-review]").click()
+            dialog.locator("[data-board-ui-confirm]").click()
 
             page.wait_for_function(
                 "() => document.getElementById('createStatus')?.innerText.includes('backend refused this workflow transition')",
@@ -56,7 +64,7 @@ def run_browser_check(playwright: Any) -> None:
             )
             page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
             assert harness.ticket("PGU-789")["state"] == "analysis"
-            assert harness.app.operation_log == [("start_work", "PGU-789", "ops", {})]
+            assert attempts == [("PGU-789", "route", {"state": "in_progress", "assignee": "app"})], attempts
             assert page_errors == []
         finally:
             browser.close()

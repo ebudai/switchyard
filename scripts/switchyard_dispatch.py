@@ -68,6 +68,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             desktop_policy=args.desktop_policy,
             headless=args.headless,
             desktop_gui_user=args.desktop_gui_user,
+            board_ui_users=args.board_ui_users,
             allow_existing_owner_user=args.allow_existing_owner_user,
             agy_credential_source=args.agy_credential_source,
             no_agy_credential=args.no_agy_credential,
@@ -215,6 +216,7 @@ def switchyard_main(argv: list[str] | None = None) -> int:
             upstream_report_token_file=getattr(args, "upstream_report_token_file", "") or "",
             only=args.only,
             role_models=args.role_models,
+            board_ui_users=args.board_ui_users,
         )
     if argv[0].casefold() == "install-shared-release":
         args = launcher._build_switchyard_install_shared_release_parser().parse_args(argv[1:])

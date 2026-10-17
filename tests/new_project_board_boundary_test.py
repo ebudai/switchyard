@@ -41,6 +41,7 @@ if str(ROOT) not in sys.path:
 
 from scripts import team_launcher as t  # noqa: E402
 from scripts import new_project_phases as m  # noqa: E402
+from scripts import board_ui_record  # noqa: E402
 
 from launcher_main_view import launcher_body  # noqa: E402
 
@@ -54,7 +55,8 @@ FROM_P0 = ("artifact_path", "director_onboarding", "owner_user", "project_dir", 
            "selected_role_efforts", "selected_role_models", "stages")
 FROM_P2 = ("provision_dir",)
 #: SYRD-548: the report link `switchyard new --upstream-report-url` hands P3, defaulting to none.
-FROM_COMMAND = ("upstream_report_url", "upstream_report_token_file")
+#: SYRD-598: the operator's `--board-ui-user`, recorded beside the registration, defaulting to none.
+FROM_COMMAND = ("upstream_report_url", "upstream_report_token_file", "board_ui_users")
 OUTPUTS = ("config", "config_path")
 OWNER = "syrd372-agent"
 
@@ -116,6 +118,8 @@ class World:
     def __init__(self, *, status: object = 0, fail: str | None = None) -> None:
         self.status, self.fail, self.log = status, fail, []
         self.loaded, self.prepared = SimpleNamespace(name="loaded"), SimpleNamespace(name="prepared")
+        # SYRD-598: root records the board UI users beside the registration; this run's step, not a record.
+        board_ui_record.record_board_ui_users = lambda config, **kw: self.step("board_ui", config, kw) or []
 
     def step(self, name: str, *detail: object) -> None:
         self.log.append((name, *detail))
@@ -255,7 +259,7 @@ def test_the_interface_and_the_result() -> None:
     check(not args.args and not args.posonlyargs and not args.vararg and not args.kwarg
           and tuple(a.arg for a in args.kwonlyargs) == PARAMETERS + FROM_P0 + FROM_P2 + FROM_COMMAND
           and all(d is None for d in args.kw_defaults[:-len(FROM_COMMAND)])
-          and [ast.literal_eval(d) for d in args.kw_defaults[-len(FROM_COMMAND):]] == ["", ""],
+          and [ast.literal_eval(d) for d in args.kw_defaults[-len(FROM_COMMAND):]] == ["", "", ()],
           f"keyword-only: the command's parameters, P0's values, P2's; no defaults: {[a.arg for a in args.kwonlyargs]}")
     theirs = {a.arg: ast.unparse(a.annotation) for a in command_def().args.kwonlyargs}
     for cls in ("NewProjectChoices", "NewProjectAccounts"):
@@ -302,10 +306,10 @@ def test_provisioning_its_arguments_and_the_steps_after_it() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd372.") as tmp:
         tmp = Path(tmp)
         world = World()
-        values = inputs(tmp, world)
+        values = inputs(tmp, world, board_ui_users=["syrd598-user"])
         got = run(world, values)
         check(isinstance(got, m.NewProjectBoard), f"it goes on: {got!r}")
-        check(world.names() == ["begin", "provision", "commit", "load", "desktop", "register", "worktrees"], f"the order: {world.names()}")
+        check(world.names() == ["begin", "provision", "commit", "load", "desktop", "register", "board_ui", "worktrees"], f"the order: {world.names()}")
         slug, kw = world.log[1][1:]
         check(slug == "s372" and kw == dict(from_artifact=values["artifact_path"], owner_home=tmp / "homes" / OWNER,
                                             source_repo=values["source_repo"], workflow_config=values["workflow_config"],
@@ -327,7 +331,10 @@ def test_provisioning_its_arguments_and_the_steps_after_it() -> None:
         check(world.log[3] == ("load", "s372", path), "the slug's configuration loaded from the provisioning directory")
         check(world.log[4][1] is world.loaded and world.log[4][2] is values["runner"], "its desktop prepared")
         check(world.log[5] == ("register", path, tmp / "registry"), "registered in the caller's registry")
-        check(world.log[6][1] is world.prepared and world.log[6][2] is values["runner"], "the prepared configuration's worktrees")
+        check(world.log[6][1] is world.prepared and world.log[6][2] == dict(
+            registry_dir=tmp / "registry", operator_users=["syrd598-user"], print_func=values["print_func"]),
+              f"the prepared configuration's board UI users, as the operator named them, in the same registry: {world.log[6]}")
+        check(world.log[7][1] is world.prepared and world.log[7][2] is values["runner"], "the prepared configuration's worktrees")
         check(got.config is world.prepared and got.config_path == path, "and the desktop's configuration is the one returned")
 
 
@@ -372,7 +379,7 @@ def test_a_status_equal_to_zero_goes_on_and_is_asked_once() -> None:
 
 
 def test_every_later_refusal_stops_what_follows() -> None:
-    order = ["begin", "provision", "commit", "load", "desktop", "register", "worktrees"]
+    order = ["begin", "provision", "commit", "load", "desktop", "register", "board_ui", "worktrees"]
     for step in order[1:]:
         with tempfile.TemporaryDirectory(prefix="syrd372.") as tmp:
             tmp = Path(tmp)
@@ -501,7 +508,7 @@ def test_the_real_phase_between_p2_and_p4() -> None:
         provision = next(e for e in log if e[0] == "provision")[2]
         check(provision["source_repo"] == tmp / "original" and provision["output_dir"] is p2.provision_dir and provision["runner"] is p0.runner,
               "provisioned from the command's own source, into P2's directory, with P0's runner")
-        check([e[0] for e in log] == ["begin", "provision", "commit", "load", "desktop", "register", "worktrees", "begin"]
+        check([e[0] for e in log] == ["begin", "provision", "commit", "load", "desktop", "register", "board_ui", "worktrees", "begin"]
               and log[-1] == ("begin", "provider sign-in and folder trust"), f"P3, then P4's stage: {[e[0] for e in log]}")
 
 

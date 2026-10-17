@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests.board_ui_stub import blockers_op, cancel_op, field, stub_board_ui
 from tests.ticket_board_ui_harness import (
     BoardHarness,
     create_clipboard_png_payload,
@@ -96,13 +97,45 @@ def add_blocker_with_picker(page: Any, blocked_by_field: Any, blocker_id: str) -
                 arg=add_button.element_handle(timeout=5000),
                 timeout=1000,
             )
-            reset_update_ticket_tracker(page)
             add_button.click()
-            wait_for_last_update_ticket(page)
+            confirm_board_ui(page, "set_blockers")
             return
         except Exception as exc:  # noqa: BLE001 - include Playwright timeout/detach errors in retry diagnostics.
             last_error = str(exc)
     raise AssertionError(f"Add Blocker did not persist {blocker_id}: {last_error}")
+
+
+def confirm_board_ui(page: Any, operation: str, fields: dict[str, str] | None = None) -> None:
+    """SYRD-598: a Director operation is the User's, confirmed: fill what it asks, review, confirm."""
+    dialog = page.locator(f"[data-board-ui-dialog='{operation}']")
+    dialog.wait_for(timeout=5000)
+    for name, value in (fields or {}).items():
+        control = dialog.locator(f"[data-board-ui-field='{name}']")
+        if control.evaluate("(element) => element.tagName") == "SELECT":
+            control.select_option(value)
+        else:
+            control.fill(value)
+    if fields:
+        dialog.locator("[data-board-ui-review]").click()
+    dialog.locator("[data-board-ui-confirm]").click()
+    dialog.wait_for(state="detached", timeout=5000)
+
+
+def board_ui_operations(ticket: dict[str, Any]) -> list[dict[str, Any]]:
+    """What the server would describe for a legacy board's ticket here (the harness stands in for it)."""
+    route = {"operation": "route", "label": "Route", "mode": "delegated",
+             "fields": [field("state", "choice", "To", options=["in_progress"], required=True),
+                        field("assignee", "choice", "Assignee", options=["app", "main", "ops"], required=True)]}
+    return [route, cancel_op(ticket), blockers_op(ticket)]
+
+
+def perform_board_ui(harness: BoardHarness, ticket_id: str, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if operation == "route":
+        return harness.app.route_ticket(ticket_id, payload["state"], payload["assignee"], caller_role="user")
+    if operation == "cancel":
+        return harness.app.update_ticket(ticket_id, {"state": "cancelled", "comment": {"who": "user", "text": payload["reason"]}},
+                                         caller_role="user")
+    return harness.app.update_ticket(ticket_id, payload, caller_role="user")
 
 
 def wait_for_blocker_card_render(page: Any, ticket_id: str, blocker_id: str, *, blocked: bool) -> None:
@@ -146,22 +179,9 @@ def get_ticket(page: Any, base_url: str, ticket_id: str) -> dict[str, Any]:
     )
 
 
-def complete_task_from_browser(page: Any, ticket_id: str, caller_role: str, text: str) -> None:
-    page.evaluate(
-        """async ([ticketId, callerRole, text]) => {
-          const response = await fetch(`/api/tickets/${ticketId}/actions/complete_task`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Ticket-Board-Caller-Role': callerRole,
-              'X-Ticket-Board-Write-Token': ticketBoardWriteToken(),
-            },
-            body: JSON.stringify({ text }),
-          });
-          if (!response.ok) throw new Error(await response.text());
-        }""",
-        [ticket_id, caller_role, text],
-    )
+def complete_task_from_pane(harness: BoardHarness, ticket_id: str, caller_role: str, text: str) -> None:
+    """The implementer finishing its own work, from its own pane (SYRD-598: the board page acts only as the User)."""
+    harness.app.complete_task(ticket_id, text, caller_role=caller_role)
 
 
 def seed_tickets() -> list[dict[str, Any]]:
@@ -257,6 +277,9 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
     browser = playwright.chromium.launch(headless=True)
     try:
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        # SYRD-598: the confirmations' grants need the board's database; tests/board_ui_stub.py stands in.
+        stub_board_ui(page, lambda: list(harness.app.tickets.values()), board_ui_operations,
+                      perform=lambda ticket_id, operation, payload: perform_board_ui(harness, ticket_id, operation, payload))
         page.goto(harness.url, wait_until="domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
         install_update_ticket_tracker(page)
@@ -363,11 +386,10 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         page.locator("#bodyInput").fill("Created through Playwright file upload path.")
         page.locator("#assigneeInput").select_option("app")
         page.locator("#needsUserInput").check()
-        page.locator("#needsInspectionInput").check()
         page.locator("#createRegressionInput").check()
         page.locator("#createBtn").click()
         page.locator("#createStatus", has_text="Created PGU-513.").wait_for(timeout=5000)
-        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 3 && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source-2.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__unsafe-proof.png')) && ticket.needs_user_signoff && ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
+        wait_for_ticket_field(page, harness.url, "PGU-513", "ticket.screenshots.length === 3 && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__upload-source-2.png')) && ticket.screenshots.some((path) => path.includes('feedback-007-phone-proof__unsafe-proof.png')) && ticket.needs_user_signoff && !ticket.needs_inspection && ticket.regression && ticket.assignee === 'app'")
 
         page.evaluate(create_clipboard_png_payload())
         page.locator("#createStatus", has_text="Pasted image attached to the new ticket.").wait_for(timeout=5000)
@@ -389,9 +411,8 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.includes('PGU-502') && ticket.blocked_reason === 'Waiting on PGU-502.'")
         wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=True)
 
-        reset_update_ticket_tracker(page)
         blocked_by.get_by_role("button", name="Remove Blocker PGU-502").click()
-        wait_for_last_update_ticket(page)
+        confirm_board_ui(page, "set_blockers")
         wait_for_ticket_field(page, harness.url, "PGU-503", "ticket.blocked_by.length === 0")
         wait_for_blocker_card_render(page, "PGU-503", "PGU-502", blocked=False)
 
@@ -564,11 +585,10 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
         refresh_open_detail_from_server(page, "PGU-512")
         modal.get_by_label("Requires UAT").check()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_user_signoff")
-        modal.get_by_label("Needs inspection").check()
-        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_inspection")
+        assert modal.get_by_label("Needs inspection").count() == 0  # SYRD-598: a review gate is not the page's
         modal.get_by_label("Regression").check()
         wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.regression")
-        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_user_signoff && ticket.needs_inspection && ticket.regression && ticket.implementation.includes('PGU-503') && ticket.audit_prompt.includes('PGU-503')")
+        wait_for_ticket_field(page, harness.url, "PGU-512", "ticket.needs_user_signoff && !ticket.needs_inspection && ticket.regression && ticket.implementation.includes('PGU-503') && ticket.audit_prompt.includes('PGU-503')")
         refresh_open_detail_from_server(page, "PGU-512")
         modal.locator(".detail-ticket-headline strong", has_text="PGU-512").wait_for(timeout=5000)
 
@@ -618,20 +638,22 @@ def run_desktop_audit(playwright: Any, harness: BoardHarness) -> None:
 
         close_detail(page)
         modal = open_detail(page, "PGU-508")
-        modal.get_by_role("button", name="Advance -> Implementation").click()
+        modal.locator("[data-board-ui-op='route']").click()
+        confirm_board_ui(page, "route", {"state": "in_progress", "assignee": "ops"})
         wait_for_ticket_field(page, harness.url, "PGU-508", "ticket.state === 'in_progress' && ticket.assignee === 'ops'")
 
         close_detail(page)
         modal = open_detail(page, "PGU-511")
-        modal.get_by_placeholder("Add a comment or bounce-back note").fill("No longer needed.")
-        modal.get_by_role("button", name="Cancel Ticket").click()
+        modal.locator("[data-board-ui-op='cancel']").click()
+        confirm_board_ui(page, "cancel", {"reason": "No longer needed."})
         wait_for_ticket_field(page, harness.url, "PGU-511", "ticket.state === 'cancelled' && ticket.comments.some((comment) => comment.text === 'No longer needed.')")
 
         close_detail(page)
         modal = open_detail(page, "PGU-502")
-        modal.get_by_role("button", name="Advance -> Implementation").click()
+        modal.locator("[data-board-ui-op='route']").click()
+        confirm_board_ui(page, "route", {"state": "in_progress", "assignee": "app"})
         wait_for_ticket_field(page, harness.url, "PGU-502", "ticket.state === 'backlog' && ticket.assignee === 'app'")
-        complete_task_from_browser(page, "PGU-501", "app", "Free app serial focus slot.")
+        complete_task_from_pane(harness, "PGU-501", "app", "Free app serial focus slot.")
         wait_for_ticket_field(page, harness.url, "PGU-502", "ticket.state === 'in_progress' && ticket.assignee === 'app'")
 
         ticket_512 = get_ticket(page, harness.url, "PGU-512")

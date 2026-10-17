@@ -112,6 +112,17 @@ def _build_switchyard_new_parser() -> argparse.ArgumentParser:
             "otherwise the single active Wayland session is used"
         ),
     )
+    parser.add_argument(
+        "--board-ui-user",
+        action="append",
+        default=[],
+        dest="board_ui_users",
+        metavar="ACCOUNT",
+        help=(
+            "a human account that may confirm Director operations in the board UI; repeat for more. "
+            "Without it the host's approved desktop owner is recorded, and a headless host records nobody"
+        ),
+    )
     parser.add_argument("--workflow-config", type=Path, help="declarative roles/stages JSON for the new project")
     parser.add_argument(
         "--upstream-report-url",
@@ -241,6 +252,17 @@ def _build_switchyard_upgrade_parser() -> argparse.ArgumentParser:
         help="replace and persist the git repository path(s) used to verify board commit hashes",
     )
     parser.add_argument("--desktop-policy", type=Path, help="headless, or a JSON file recording scoped Wayland consent; installed before role launch")
+    parser.add_argument(
+        "--board-ui-user",
+        action="append",
+        default=[],
+        dest="board_ui_users",
+        metavar="ACCOUNT",
+        help=(
+            "a human account that may confirm Director operations in the board UI; repeat for more. "
+            "Without it the host's approved desktop owner is recorded, and a headless host records nobody"
+        ),
+    )
     parser.add_argument(
         "--upstream-report-url",
         default="",

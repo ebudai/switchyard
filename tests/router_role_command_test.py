@@ -5,8 +5,8 @@
   workflow_config (the app's check) and by the board's own
   validate_declared_workflow, called directly so the app cannot answer for it,
   on a schema.sql board and on a board after the real ticket-board-migrate.
-* schema.sql's final copy of every function the migration changes is the
-  migration's copy, so a fresh board and an upgraded one run the same code.
+* schema.sql's final copy of every function the migration changes is the copy of
+  the last migration to define it, so a fresh board and an upgraded one run the same code.
 * `switchyard router-role enable|disable`, against a board and a real tenant
   projection: the role lands detached, with its own runtime and prompt, under
   the project account, and turns off again.
@@ -192,16 +192,18 @@ def test_router_is_told_two_operations_and_nothing_else() -> None:
 
 def drift_check() -> None:
     """Run last, so a planted fault in one copy is caught by what it changes before this sees the copies differ."""
-    schema, migration = SCHEMA.read_text(), MIGRATION.read_text()
+    schema = SCHEMA.read_text()
     for signature in CHANGED:
         starts = [m.start() for m in re.finditer(r"^CREATE OR REPLACE FUNCTION ticket_board\." + re.escape(signature),
                                                 schema, re.M)]
         final = schema[starts[-1]:schema.index("\n$$;\n", starts[-1]) + 5]
-        check(final in migration, f"schema.sql's final {signature} is pgu997's copy")
-    # Not "no migration comes after pgu997" -- every later ticket adds one -- but none redefines what it ships.
-    later = [(p.name, s) for p in sorted(MIGRATION.parent.glob("*.sql")) if p.name > MIGRATION.name for s in CHANGED
-             if f"CREATE OR REPLACE FUNCTION ticket_board.{s}" in p.read_text()]
-    check(later == [], f"no later migration redefines what pgu997 ships: {later}")
+        # A later migration may define it again (SYRD-598's pgu999 redefines enforce_declared_ticket_update);
+        # then schema.sql's final copy is that migration's, which must carry pgu997's change along.
+        definers = [p for p in sorted(MIGRATION.parent.glob("*.sql")) if p.name >= MIGRATION.name
+                    and re.search(r"^CREATE OR REPLACE FUNCTION ticket_board\." + re.escape(signature), p.read_text(), re.M)]
+        check(definers and final in definers[-1].read_text(),
+              f"schema.sql's final {signature} is the copy of the last migration to define it: "
+              f"{[p.name for p in definers]}")
 
 
 class Board:

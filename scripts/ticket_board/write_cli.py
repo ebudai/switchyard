@@ -512,6 +512,13 @@ def _build_parser() -> argparse.ArgumentParser:
     size_exception.add_argument("--standing", action="store_true",
                                 help="the file's allowance on later tickets too, not this ticket only")
     size_exception.add_argument("--apply", action="store_true", help="record it; without it nothing is written")
+    withdraw = subparsers.add_parser(
+        "withdraw-signoff",
+        help="control role: withdraw one named sign-off that is given, with a reason; never raises one (SYRD-598)",
+    )
+    withdraw.add_argument("ticket_id")
+    withdraw.add_argument("--signoff", required=True, help="the sign-off to withdraw, e.g. audit_signoff")
+    add_free_text_argument(withdraw, "--reason", required=True, help="why it no longer stands")
     measure_size = subparsers.add_parser(
         "measure-size",
         help="Director: measure an integration commit for a ticket before pushing main; moves nothing (SYRD-541)",
@@ -785,6 +792,8 @@ def main(argv: list[str] | None = None) -> int:
             response = client.approve_size_exception(
                 args.ticket_id, path=args.path, rationale=args.rationale, standing=args.standing, apply=args.apply
             )
+        elif command == "withdraw_signoff":
+            response = client.withdraw_signoff(args.ticket_id, signoff=args.signoff, reason=args.reason)
         elif command == "measure_size":
             response = client.measure_size(args.ticket_id, commit=args.commit)
         elif command == "enable_size_review":

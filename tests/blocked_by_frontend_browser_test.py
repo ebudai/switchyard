@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Regression test: Add Blocker persists from the real browser detail UI."""
+"""Regression test: Add Blocker persists from the real browser detail UI, as a confirmed set_blockers (SYRD-598)."""
 
 from __future__ import annotations
 
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ if str(ROOT) not in sys.path:
 from scripts.ticket_board.app import ASSIGNEES, STATES, iso_now
 from scripts.ticket_board.frontend import HTML
 from scripts.ticket_board.server import DirectorNotifier, TicketBoardServer
+from tests.board_ui_stub import blockers_op, stub_board_ui
 
 
 def load_playwright() -> object:
@@ -101,7 +103,7 @@ class BlockerBoardApp:
     def update_ticket(self, ticket_id: str, patch: dict[str, Any], *, caller_role: str | None = None) -> dict[str, Any]:
         self.update_calls.append((ticket_id, patch, caller_role))
         assert ticket_id == "PGU-503", ticket_id
-        assert caller_role == "director", caller_role
+        assert caller_role == "user", caller_role  # SYRD-598: the User, confirming a Director operation
         ticket = next(item for item in self.tickets if item["id"] == ticket_id)
         if len(self.update_calls) == 1:
             assert patch == {"blocked_by": ["PGU-502"], "blocked_reason": "Waiting on PGU-502."}, patch
@@ -128,15 +130,35 @@ def run_browser_check(playwright: object, server_port: int, app: BlockerBoardApp
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page_errors: list[str] = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
+        board_loads: list[str] = []
+        page.on("requestfinished", lambda request: board_loads.append(request.url) if request.url.endswith("/api/board") else None)
+
+        seen = stub_board_ui(page, lambda: app.tickets, lambda ticket: [blockers_op(ticket)],
+                             perform=lambda ticket_id, _op, payload: app.update_ticket(ticket_id, payload, caller_role="user"))
+
+        def confirm(expected: str) -> None:
+            dialog = page.locator("[data-board-ui-dialog='set_blockers']")
+            dialog.locator("[data-board-ui-summary]").wait_for(timeout=5000)
+            text = dialog.locator("[data-board-ui-summary]").inner_text()
+            assert expected in text, text
+            dialog.locator("[data-board-ui-confirm]").click()
 
         page.goto(f"http://127.0.0.1:{server_port}/", wait_until="domcontentloaded")
         page.locator(".column-title", has_text="Triage").wait_for(timeout=5000)
+        # The page loads the board at boot and again when its event stream opens; a detail opened between
+        # the two is redrawn by the second load, which clears a blocker already chosen. Open it after both.
+        deadline = time.monotonic() + 5
+        while len(board_loads) < 2 and time.monotonic() < deadline:
+            page.wait_for_timeout(20)
+        assert len(board_loads) >= 2, board_loads
+        page.wait_for_function("() => !state.loadInFlight", timeout=5000)
         page.locator(".card", has=page.locator(".card-id", has_text="PGU-503")).click()
         page.locator(".detail-modal").wait_for(timeout=5000)
 
         blocker_picker = page.locator(".detail-modal select", has=page.locator("option[value='PGU-502']"))
         blocker_picker.select_option("PGU-502")
         page.locator(".detail-modal").get_by_role("button", name="Add Blocker").click()
+        confirm("Blocked by: PGU-502")
 
         page.wait_for_function(
             "() => document.querySelector('.detail-modal')?.textContent.includes('Waiting on PGU-502.')",
@@ -153,6 +175,7 @@ def run_browser_check(playwright: object, server_port: int, app: BlockerBoardApp
 
         blocker_picker.select_option("PGU-501")
         page.locator(".detail-modal").get_by_role("button", name="Add Blocker").click()
+        confirm("Blocked by: PGU-502, PGU-501")
         page.wait_for_function(
             "() => document.querySelector('.detail-modal')?.textContent.includes('Remove Blocker PGU-501')",
             timeout=5000,
@@ -164,6 +187,7 @@ def run_browser_check(playwright: object, server_port: int, app: BlockerBoardApp
 
         page.get_by_role("textbox", name="Why this ticket is blocked").fill("")
         page.locator(".detail-modal").get_by_role("button", name="Remove Blocker PGU-502").click()
+        confirm("Blocked reason: Waiting on PGU-502.")
         page.wait_for_function(
             "() => !document.querySelector('.detail-modal')?.textContent.includes('Remove Blocker PGU-502')"
             " && document.querySelector('.detail-modal')?.textContent.includes('Remove Blocker PGU-501')",
@@ -173,16 +197,17 @@ def run_browser_check(playwright: object, server_port: int, app: BlockerBoardApp
         assert len(app.update_calls) == 3
         assert app.tickets[0]["blocked_by"] == ["PGU-501"]
         assert app.tickets[0]["blocked_reason"] == "Waiting on PGU-502."
+        assert [(s["action"], s["caller"]) for s in seen if "action" in s] == [("set_blockers", "user")] * 3
     finally:
         browser.close()
 
 
 def main() -> int:
     assert "persistDetailDraftField(" not in HTML
-    assert "await updateTicket(ticket.id, {" in HTML
-    assert "blocked_by: nextBlockedBy," in HTML
-    assert "blocked_reason: nextBlockedBy.length" not in HTML
-    assert "blocked_reason: blockedReasonValue," in HTML
+    # Removing a blocker keeps the reason while anything is still awaited, and clears it with the last one:
+    # the board refuses a reason with nothing to wait on (SYRD-285).
+    assert "const remainingReason = nextBlockedBy.length === 0 ? '' : (ticket.blocked_reason || '');" in HTML
+    assert "await runBoardUiOperation(ticket, 'set_blockers', { blocked_by: nextBlockedBy, blocked_reason: blockedReasonValue });" in HTML
     sync_playwright = load_playwright()
     with tempfile.TemporaryDirectory(prefix="blocked-by-browser.") as tmpdir:
         root = Path(tmpdir)

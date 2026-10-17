@@ -113,7 +113,9 @@ def _apply(commands: list[str], *, binaries: Path) -> None:
     subprocess.run(
         ["bash", "-c", "\n".join(["set -euo pipefail", *commands])],
         check=True,
-        env={**os.environ, "PATH": f"{binaries}:{os.environ.get('PATH', '')}"},
+        env={**os.environ, "PATH": f"{binaries}:{os.environ.get('PATH', '')}",
+             # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+             "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")},
         capture_output=True,
     )
 

@@ -198,6 +198,7 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
     from scripts import team_launcher as launcher
 
     from scripts.ticket_board.project_provision import system_unit_proof_chain
+    from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
 
     if status.provisioned_system_unit is None:
         return ""
@@ -210,18 +211,25 @@ def tenant_release_unit_install_command(status: TenantReleaseStatus, project: st
         [
             launcher._quote_command(["sudo", "install", "-m", "0644", str(board_unit), f"/etc/systemd/system/{board_unit.name}"]),
             launcher._quote_command(["sudo", "install", "-m", "0644", str(canary_unit), f"/etc/systemd/system/{canary_unit.name}"]),
+            # Into the owner's home, so through the no-follow helper: a link
+            # the owner left at the unit's name or above it is refused, not
+            # written through (SYRD-605).
             launcher._quote_command(
                 [
                     "sudo",
-                    "install",
-                    "-m",
-                    "0644",
-                    "-o",
-                    status.owner_user,
-                    "-g",
-                    status.owner_user,
-                    str(listener_unit),
-                    str(listener_target),
+                    *tenant_paths_argv(str(status.owner_home), "dir", "--mode", "0755", "--owner",
+                                       status.owner_user, "--group", status.owner_user,
+                                       str(status.owner_home / ".config"),
+                                       str(status.owner_home / ".config" / "systemd"),
+                                       str(listener_target.parent)),
+                ]
+            ),
+            launcher._quote_command(
+                [
+                    "sudo",
+                    *tenant_paths_argv(str(status.owner_home), "install", "--mode", "0644", "--owner",
+                                       status.owner_user, "--group", status.owner_user,
+                                       str(listener_unit), str(listener_target)),
                 ]
             ),
             # The same reviewed bytes, published where the unprivileged

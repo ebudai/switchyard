@@ -318,15 +318,20 @@ def render_role_account_migration(
         role_tooling_staging_commands,
         roles_group_name,
         shell_quote,
+        tenant_paths_definition,
     )
 
     owner = config.run_as_user or launcher.current_user_name()
+    shared_current = str(launcher.switchyard_shared_install_root() / "current")
     group = roles_group_name(config.project)
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         f"# Migrate {config.project} onto one Unix account per role (SYRD-39).",
         "# Safe to re-run: every creating step is guarded.",
+        # Root's changes inside a tenant's or a role's home go through the
+        # no-follow helper of the pinned shared release (SYRD-605).
+        tenant_paths_definition(shared_current),
         f"if ! getent group {shell_quote(group)} >/dev/null 2>&1; then",
         f"    sudo groupadd -r {shell_quote(group)}",
         "fi",
@@ -348,9 +353,7 @@ def render_role_account_migration(
     # From the pinned shared release, not the tenant's deployed board: the
     # deployed one is the release being replaced (SYRD-45).
     lines.extend(
-        role_tooling_staging_commands(
-            config.project, str(launcher.switchyard_shared_install_root() / "current")
-        )
+        role_tooling_staging_commands(config.project, shared_current)
     )
     # Owning a worktree is not reaching it: the owner home above it is 0710.
     # These grant traversal and the shared git metadata, and nothing else

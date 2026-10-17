@@ -298,6 +298,7 @@ def _upgrade_identities_and_accounts(
         owner_github_identity_commands,
         owner_github_key_path,
         resolve_owner_github_identity,
+        tenant_paths_definition,
     )
 
     # Which key this tenant publishes with, before anything is rendered from it.
@@ -359,7 +360,10 @@ def _upgrade_identities_and_accounts(
             f"from {selected_identity.source}"
         )
     if github_applies is not False and selected_identity.resolved and not dry_run and os.geteuid() == 0:
-        identity_script = "set -eu\n" + "\n".join(
+        # The identity lines change paths in the owner's home through the
+        # no-follow helper (SYRD-605); this run names the helper of the
+        # release it is running from.
+        identity_script = "set -eu\n" + tenant_paths_definition(str(Path(__file__).resolve().parents[1])) + "\n" + "\n".join(
             owner_github_identity_commands(
                 owner_for_identity,
                 str(owner_home_for_identity),

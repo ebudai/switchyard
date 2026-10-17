@@ -38,7 +38,9 @@ from scripts.ticket_board.project_provision import (
 )
 
 #: Every principal form an ACL entry can carry, default entries included.
-ACL_PRINCIPAL = re.compile(r"(?:^|[\s,])(?:d:)?(u|g):([A-Za-z0-9_][A-Za-z0-9_.-]*):")
+# SYRD-605: an ACL change is now the no-follow helper's `acl`, its entry quoted ('u:name:rwX').
+ACL_PRINCIPAL = re.compile(r"(?:^|[\s,'])(?:d:)?(u|g):([A-Za-z0-9_][A-Za-z0-9_.-]*):")
+ACL_LINE = re.compile(r"\bsetfacl\b|'acl' '--(?:modify|remove)'")
 CREATES_USER = re.compile(r"\buseradd\b.*?'([A-Za-z0-9_][A-Za-z0-9_.-]*)'\s*$")
 CREATES_GROUP = re.compile(r"\bgroupadd\b.*?'([A-Za-z0-9_][A-Za-z0-9_.-]*)'\s*$")
 
@@ -96,6 +98,33 @@ if name == "sudo":
         if option in ("-u", "-g", "-p", "-C", "--user", "--group") and args:
             args.pop(0)
     if not args:
+        sys.exit(0)
+    if len(args) > 2 and args[0].endswith("python3") and args[1] == "-I" and args[2].endswith("tenant_paths.py"):
+        # SYRD-605: root's changes in a home are the no-follow helper. Its ACL
+        # entries name principals exactly as setfacl's did, and an unknown one
+        # fails the same way; a removal it is told to make only if a group
+        # exists is skipped when the group does not.
+        words = args[3:]
+        state["log"].append({"program": "tenant_paths", "args": words, "status": 0})
+        if "acl" in words:
+            group = words[words.index("--if-group") + 1] if "--if-group" in words else ""
+            if group and group not in state["groups"]:
+                save()
+                sys.exit(0)
+            flag = "--modify" if "--modify" in words else "--remove"
+            for entry in words[words.index(flag) + 1].split(","):
+                parts = entry.split(":")
+                if parts and parts[0] == "d":
+                    parts = parts[1:]
+                if len(parts) < 2 or parts[0] not in ("u", "g"):
+                    continue
+                table = "users" if parts[0] == "u" else "groups"
+                if parts[1] and parts[1] not in state[table]:
+                    sys.stderr.write("tenant_paths: %s is not %s on this host\n" % (parts[1], "an account" if table == "users" else "a group"))
+                    save()
+                    sys.exit(2)
+            state["acls"].append(" ".join(words))
+        save()
         sys.exit(0)
     try:
         os.execvp(args[0], args)
@@ -276,7 +305,7 @@ def _ordering_violations(script: str) -> list[str]:
         for match in (CREATES_USER.search(stripped), CREATES_GROUP.search(stripped)):
             if match:
                 created.setdefault(match.group(1), index)
-        if "setfacl" in stripped:
+        if ACL_LINE.search(stripped):
             for _kind, principal in ACL_PRINCIPAL.findall(stripped):
                 granted.setdefault(principal, index)
     violations = []
@@ -310,7 +339,7 @@ def test_the_grant_names_the_capability_derived_control_role() -> None:
         principals = {
             principal
             for line in migration.splitlines()
-            if "setfacl" in line
+            if ACL_LINE.search(line)
             for kind, principal in ACL_PRINCIPAL.findall(line)
             if kind == "u"
         }
@@ -392,7 +421,7 @@ def executes_the_generated_sequence() -> None:
         granted_at = [
             index
             for index, entry in enumerate(state["log"])
-            if entry["program"] == "setfacl"
+            if entry["program"] in ("setfacl", "tenant_paths")  # SYRD-605: the helper's ACL lines
             and any(f"u:{control_account}:" in argument for argument in entry["args"])
         ]
         assert granted_at, state["log"]

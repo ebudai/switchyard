@@ -36,13 +36,21 @@ REPOSITORY_BOUNDARY_END = "# <<< switchyard repository boundary"
 
 #: What a line inside that fence may start with. The fence says where the phase
 #: is; this says what a phase is allowed to be, so a packet that grew a deploy
-#: inside the markers is refused rather than run.
+#: inside the markers is refused rather than run. Every change to a path is the
+#: no-follow helper; only the group commands, which name no path, stay shell
+#: (SYRD-605).
 REPOSITORY_BOUNDARY_ALLOWED = (
+    'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ',  # provision_tenant_paths.TENANT_PATHS_PREFIX
+    "sudo groupadd ",
+    "sudo gpasswd ",
+)
+
+#: How a phase rendered before SYRD-605 changed paths: as root, by path, so a
+#: link there was followed. A packet carrying one is not repaired from.
+REPOSITORY_BOUNDARY_RETIRED = (
     "sudo install -d ",
     "sudo setfacl ",
     "sudo find ",
-    "sudo groupadd ",
-    "sudo gpasswd ",
 )
 
 
@@ -53,7 +61,6 @@ REPOSITORY_BOUNDARY_ALLOWED = (
 _QUOTED = r"(?:'[^']*'|\"'\")+"
 REPOSITORY_BOUNDARY_GUARDS = (
     re.compile(rf"^if (?:! )?getent group {_QUOTED} >/dev/null 2>&1; then$"),
-    re.compile(rf"^if \[ -d {_QUOTED} \]; then$"),
 )
 
 
@@ -158,6 +165,12 @@ def repository_boundary_phase(packet: str) -> tuple[list[str], str]:
         )
     phase = [line for line in lines[start + 1 : end] if line.strip()]
     for line in phase:
+        if line.strip().startswith(provision.REPOSITORY_BOUNDARY_RETIRED):
+            return [], (
+                "this packet's repository boundary phase changes paths as root by path "
+                f"({line.strip()!r}), which follows a link a tenant planted; it was generated "
+                "before those changes went through the no-follow helper"
+            )
         if not provision._is_boundary_line(line):
             return [], (
                 f"the repository boundary phase of this packet contains a line that is not "

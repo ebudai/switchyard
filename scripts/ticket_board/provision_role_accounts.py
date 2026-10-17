@@ -27,6 +27,7 @@ from pathlib import PurePosixPath
 from typing import Sequence
 
 
+
 # Roles that never run a local process: the human uses the browser or the
 # authenticated HTTP path, so no Unix account is created for them.
 NON_PROCESS_ROLES = frozenset({"user", "unassigned"})
@@ -109,7 +110,8 @@ def role_accounts_command(plan: ProjectBoardProvision) -> str:
     )
     for role, account in plan.role_accounts:
         q_account = provision.shell_quote(account)
-        q_home = provision.shell_quote(provision.role_account_home(plan, role))
+        home = provision.role_account_home(plan, role)
+        q_home = provision.shell_quote(home)
         lines.extend(
             [
                 f"if ! getent passwd {q_account} >/dev/null 2>&1; then",
@@ -118,8 +120,9 @@ def role_accounts_command(plan: ProjectBoardProvision) -> str:
                 f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
                 # 0700 and the role's own group: the roles group exists for
                 # the board socket, and must not make one role's home readable
-                # to another (SYRD-39).
-                f"sudo install -d -m 0700 -o {q_account} -g {q_account} {q_home}",
+                # to another (SYRD-39). Through the no-follow helper, rooted at
+                # the home itself (SYRD-605).
+                provision.directory_line(home, "0700", account, account, home),
                 f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
             ]
         )
@@ -162,6 +165,7 @@ def role_runtime_command(plan: ProjectBoardProvision) -> str:
                 account=account,
                 home=provision.role_account_home(plan, role),
                 worktree=worktrees.get(role, ""),
+                owner_home=plan.owner_home,
             )
         )
     return "\n".join(lines)
@@ -189,6 +193,7 @@ def role_runtime_commands(
     account: str,
     home: str,
     worktree: str,
+    owner_home: str = "",
 ) -> list[str]:
     """Everything one role needs to run as its own account.
 
@@ -212,24 +217,26 @@ def role_runtime_commands(
         f"sudo gpasswd -a {q_account} {q_group} >/dev/null",
         # 0700 and the role's own group. Membership of the roles group is for
         # reaching the board socket; it must never make one role's home
-        # readable to another (SYRD-39).
-        f"sudo install -d -m 0700 -o {q_account} -g {q_account} {q_home}",
+        # readable to another (SYRD-39). Everything root does in the role's
+        # home goes through the no-follow helper rooted there (SYRD-605).
+        provision.directory_line(home, "0700", account, account, home),
         f"sudo loginctl enable-linger {q_account} >/dev/null 2>&1 || true",
     ]
     if worktree:
-        # Guarded: on a fresh project the launcher has not created it yet, and
-        # the rerun after first launch completes the handover.
-        q_worktree = provision.shell_quote(worktree)
-        commands.append(f"if [ -d {q_worktree} ]; then sudo chown -R {q_account}: {q_worktree}; fi")
+        # Skipped when missing: on a fresh project the launcher has not created
+        # it yet, and the rerun after first launch completes the handover.
+        # Rooted at the owner's home when the caller names it, else at the
+        # worktree itself -- the helper reaches either from `/` without
+        # following a link -- and a link inside is changed as a link, never
+        # followed (SYRD-605).
+        commands.append(provision.chown_tree_line(owner_home or worktree, account, worktree, if_exists=True))
     runtime_dirs = [
         f"{home}/.local/bin",
         f"{home}/.local/state/{runtime_directory}/pane-sessions",
         f"{home}/.config",
     ]
     for directory in runtime_dirs:
-        commands.append(
-            f"sudo install -d -m 0700 -o {q_account} -g {q_account} {provision.shell_quote(directory)}"
-        )
+        commands.append(provision.directory_line(home, "0700", account, account, directory))
     # Staged by root at a shared, world-readable path. A role account is only a
     # member of the roles group; the owner's home stays 0700/0710 and holds the
     # owner's credentials, so a role cannot -- and must not -- traverse it to
@@ -242,7 +249,7 @@ def role_runtime_commands(
     session_dir = provision.shell_quote(f"{home}/.local/state/{runtime_directory}/pane-sessions")
     commands.extend(
         [
-            f"sudo install -m 0755 -o {q_account} -g {q_account} {hook_source} {hook_bin}",
+            provision.install_line(home, "0755", account, account, hook_source, f"{home}/.local/bin/ticket-board-pane-idle-hook"),
             # Run as the role account so the hook configuration lands in that
             # role's own CLI config and points at that role's own state, not the
             # owner's.
@@ -304,6 +311,9 @@ def role_account_commands(
     resolved_runtime = runtime_directory or f"{project}-ticket-board"
     resolved_board_current = board_current or f"/home/{owner_user}/{project}-ticketboard-live/current"
     lines = [
+        # What the lines below run for every change inside a home (SYRD-605):
+        # the shared release's helper, which these commands already stage from.
+        provision.tenant_paths_definition(provision.SHARED_RELEASE_CURRENT),
         f"if ! getent group {provision.shell_quote(group)} >/dev/null 2>&1; then",
         f"    sudo groupadd -r {provision.shell_quote(group)}",
         "fi",
@@ -320,6 +330,7 @@ def role_account_commands(
             account=account,
             home=f"/home/{account}",
             worktree=worktree,
+            owner_home=owner_home or f"/home/{owner_user}",
         )
     )
     resolved_owner_home = owner_home or f"/home/{owner_user}"

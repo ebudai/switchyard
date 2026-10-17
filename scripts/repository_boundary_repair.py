@@ -27,6 +27,7 @@ imports, the same objects. This module never imports `team_launcher` at its top.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -63,7 +64,8 @@ def switchyard_repair_boundary_command(
         repository_boundary_statements,
     )
     from scripts.ticket_board.rollout_journal import Attempt, resolve_operator
-    from scripts.commit_store_access import OperatorDependency, linked_phase_paths
+    from scripts.commit_store_access import OperatorDependency
+    from scripts.ticket_board.provision_tenant_paths import TENANT_PATHS_PREFIX
 
     slug = launcher._validate_project_slug(slug)
     said: list[str] = []
@@ -178,21 +180,26 @@ def switchyard_repair_boundary_command(
         say(f"switchyard: the repair, taken from {packet_path}:")
         for line in phase:
             say(f"    {line}")
-        # The phase is root's `install -d -o <tenant>` and `setfacl -R` on
-        # paths inside the tenant's home, and both act on what a link points
-        # at. A link anywhere on those paths would have root re-own, re-mode
-        # or grant a tree the tenant chose, so nothing runs (SYRD-604).
-        linked = linked_phase_paths(phase, str(getattr(plan, "owner_home", "") or ""))
-        if linked:
-            for link in linked:
-                say(f"switchyard: {link} is a link (to {os.path.realpath(link)}).")
-            say(
-                "switchyard: the repair runs as root and would change whatever those links point "
-                f"at, so it refuses. Nothing was changed. Replace the links with the directories "
-                f"{slug}'s plan names, then run this again."
-            )
-            detail = "refused: linked path"
-            return 1
+        # Every change to a path is the no-follow helper, run here in-process
+        # rather than by `sh`. It is previewed whole first, in the dry run and
+        # the apply alike, so both name the same paths and meet the same
+        # refusal -- a link, a mount or a replaced component -- before anything
+        # changes; the apply then meets it again on the descriptors it holds,
+        # which is what a swap after the preview cannot get past (SYRD-605).
+        statements = repository_boundary_statements(phase)
+        planned: set[str] = set()
+        say("switchyard: what the repair changes:" if apply else "switchyard: what the repair would change:")
+        for statement in statements:
+            refusal = _run_helper(statement, TENANT_PATHS_PREFIX, preview=True, planned=planned, say=say)
+            if refusal:
+                say(f"switchyard: refused: {refusal}")
+                say(
+                    "switchyard: the repair runs as root and does not follow a link, cross a mount or "
+                    f"act on a replaced directory, so it refuses. Nothing was changed. Put back what "
+                    f"{slug}'s plan names there, then run this again."
+                )
+                detail = f"refused: {refusal}"
+                return 1
         if dependencies:
             say(
                 f"switchyard: {len(dependencies)} of those need an operator outside {slug}'s "
@@ -220,7 +227,18 @@ def switchyard_repair_boundary_command(
             detail = "commit store unreachable"
             return 1
 
-        for statement in repository_boundary_statements(phase):
+        for statement in statements:
+            if statement[0].strip().startswith(TENANT_PATHS_PREFIX):
+                refusal = _run_helper(statement, TENANT_PATHS_PREFIX, preview=False, planned=set(), say=say)
+                if refusal:
+                    say(f"switchyard: refused: {refusal}")
+                    say(
+                        "switchyard: the repair stopped there, on a path that changed after the "
+                        "preview. What ran before it stands; nothing was followed."
+                    )
+                    detail = f"refused: {refusal}"
+                    return 1
+                continue
             script = "\n".join(statement)
             done = runner(["sh", "-c", script], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True)
@@ -264,3 +282,32 @@ def switchyard_repair_boundary_command(
     finally:
         attempt.write("stdout", "\n".join(said) + "\n")
         attempt.close(status=status, exit_status=exit_status, detail=detail)
+
+
+def _run_helper(statement: list[str], prefix: str, *, preview: bool, planned: set[str],
+                say: Callable[[str], None]) -> str:
+    """Run one phase statement that is a no-follow helper line; its refusal, or "".
+
+    Anything else in the phase -- the group commands -- changes no path and is
+    left to the apply's `sh`. A helper line is only `dir`, `acl` or
+    `close-children` here: those are what a boundary is made of.
+    """
+    from scripts import tenant_paths
+
+    line = statement[0].strip()
+    if len(statement) != 1 or not line.startswith(prefix):
+        return ""
+    words = shlex.split(line)[4:]
+    operation = words[2] if len(words) > 2 and words[0] == "--root" else ""
+    if operation not in ("dir", "acl", "close-children"):
+        return f"{line!r} is not a change a boundary phase makes"
+    refusals: list[str] = []
+    lead = "    would " if preview else "    "
+    try:
+        status = tenant_paths.run(words, report=lambda text: say(lead + text), refuse=refusals.append,
+                                  preview=preview, planned=planned)
+    except SystemExit as exc:
+        return f"{line!r} could not be run: {exc}"
+    if status != 0:
+        return refusals[0].removeprefix("refused: ") if refusals else f"{line!r} exited {status}"
+    return ""

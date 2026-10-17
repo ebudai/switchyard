@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import pwd
+
 from team_launcher_test_helpers import *
+from scripts import owner_writes  # noqa: E402
 
 def test_upgrade_refreshes_legacy_generated_provision_layout() -> None:
     with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade.") as tmp:
@@ -217,11 +220,19 @@ def test_upgrade_repairs_generated_runtime_session_dir_to_durable_owner_state() 
     original_uid_for_user = team_launcher.uid_for_user
     original_geteuid = team_launcher.os.geteuid
     original_current_user_name = team_launcher.current_user_name
+    original_getpwnam, original_owner_home = pwd.getpwnam, owner_writes.owner_home
     try:
         team_launcher.uid_for_user = lambda user_name: 1005 if user_name == "otto-agent" else original_uid_for_user(user_name)
         team_launcher.os.geteuid = lambda: 0  # type: ignore[method-assign]
         team_launcher.current_user_name = lambda: "root"
         with tempfile.TemporaryDirectory(prefix="pgu-launcher-upgrade-session.") as tmp:
+            # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608):
+            # here the scratch directory stands in for that home, and the owner's ids are this test's own, so
+            # nothing needs root.
+            owner_writes.owner_home = lambda name: tmp if name == "otto-agent" else original_owner_home(name)
+            pwd.getpwnam = lambda name: (
+                pwd.struct_passwd(("otto-agent", "x", os.getuid(), os.getgid(), "", "/home/otto-agent", "/bin/sh"))
+                if name == "otto-agent" else original_getpwnam(name))
             provision_dir = Path(tmp) / ".switchyard" / "provision"
             provision_dir.mkdir(parents=True)
             layout_path = provision_dir / "otto-konsole-layout.json"
@@ -239,15 +250,17 @@ def test_upgrade_repairs_generated_runtime_session_dir_to_durable_owner_state() 
 
             result = team_launcher.upgrade_generated_project_layout(config, config_path=config_path, runner=runner)
             upgraded = json.loads(config_path.read_text(encoding="utf-8"))
+            handoff = team_launcher.chown_owner_file_args(config, config_path)
     finally:
         team_launcher.uid_for_user = original_uid_for_user
         team_launcher.os.geteuid = original_geteuid  # type: ignore[method-assign]
         team_launcher.current_user_name = original_current_user_name
+        pwd.getpwnam, owner_writes.owner_home = original_getpwnam, original_owner_home
 
     assert result.changed
     assert "upgraded session dir" in result.message
     assert upgraded["session_dir"] == "/home/otto-agent/.local/state/otto-ticket-board/pane-sessions"
-    assert team_launcher.chown_owner_file_args(config, config_path) in runner.calls
+    assert handoff in runner.calls
 
 def test_launch_auto_upgrades_generated_session_dir_before_starting_panes() -> None:
     current_user = team_launcher.current_user_name()

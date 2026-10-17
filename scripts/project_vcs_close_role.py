@@ -91,9 +91,9 @@ def _write_vcs_close_role_artifacts(
     plan_path = provision_dir / "plan.json"
     board_unit_path = provision_dir / plan.board_unit
     workflow_sql_path = provision_dir / f"{plan.project}-vcs-close-role.sql"
-    launcher._write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
-    board_unit_path.write_text(launcher.render_board_unit(plan), encoding="utf-8")
-    workflow_sql_path.write_text(launcher.render_vcs_close_role_sql(plan), encoding="utf-8")
+    launcher._write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()}, owner_user=config.run_as_user)
+    launcher.write_owner_file(config.run_as_user, board_unit_path, launcher.render_board_unit(plan))
+    launcher.write_owner_file(config.run_as_user, workflow_sql_path, launcher.render_vcs_close_role_sql(plan))
     for path in (plan_path, board_unit_path, workflow_sql_path):
         launcher.ensure_owner_file(config, path, runner=runner)
     return plan_path, board_unit_path, workflow_sql_path

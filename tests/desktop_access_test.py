@@ -258,6 +258,12 @@ def test_exported_new_project_before_first_role():
             stack.enter_context(patch.object(mod.pwd, 'getpwnam',
                 side_effect=lambda name: fixture_owner if name == 'cerulean-worker' else real_getpwnam(name)))
             stack.enter_context(patch.object(mod.os,'geteuid',return_value=0))
+            # Root writes the owner's files by descriptor from the owner's home and refuses a path outside it (SYRD-608):
+            # here, the scratch root that holds the project.
+            from scripts import owner_writes
+            real_owner_home = owner_writes.owner_home
+            stack.enter_context(patch.object(owner_writes, 'owner_home',
+                side_effect=lambda name: str(root) if name == 'cerulean-worker' else real_owner_home(name)))
             for name in ['_precheck_project_path_before_mutating','precheck_new_project','_chown_switchyard_project_files',
                          '_install_switchyard_onboarding_docs','_require_existing_project_git_repository',
                          '_commit_project_git_changes','_prepare_first_run_auth_worktrees','report_launch_session_records']:

@@ -217,7 +217,7 @@ def migrate_legacy_presentation(
     if dry_run:
         print_func(f"switchyard: would give {config.project} {migration.describe()}; nothing written")
         return config, True
-    payload = launcher._load_json(config_path)
+    payload = launcher.read_owner_json(config.run_as_user or launcher.current_user_name(), config_path)
     if payload.get("project") != config.project:
         print_func(
             f"switchyard: {config_path} names project {payload.get('project')!r}, not "

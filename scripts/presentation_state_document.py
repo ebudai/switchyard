@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import fcntl
 import json
+import pwd
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,7 +22,7 @@ def presentation_state_path(config: team_launcher.ProjectConfig, *, config_path:
 
 
 def _configured_presentation(config: team_launcher.ProjectConfig, config_path: Path) -> dict[str, Any]:
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw = team_launcher.read_owner_json(config.run_as_user, config_path)
     value = raw.get("presentation", {})
     if value is None:
         return {}
@@ -171,11 +172,12 @@ def validate_presentation_document(
 
 
 def _read_state(path: Path, *, config: team_launcher.ProjectConfig, config_path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return default_presentation_document(config, config_path=config_path)
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        data = team_launcher.read_owner_bytes(config.run_as_user, path)
+        if data is None:
+            return default_presentation_document(config, config_path=config_path)
+        value = json.loads(data.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"switchyard: cannot read presentation state {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise SystemExit(f"switchyard: presentation state {path} must contain a JSON object")
@@ -230,10 +232,28 @@ def _locked_state(
     config: team_launcher.ProjectConfig,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    team_launcher.ensure_layout_output_owner(config, path, runner=runner)
     lock_path = path.with_suffix(path.suffix + ".lock")
-    with lock_path.open("a+", encoding="utf-8") as handle:
+    owner = config.run_as_user
+    if team_launcher.root_writes_for(owner):
+        # As root, by descriptor from the owner's home: a link the tenant left
+        # at the lock, or at a directory above it, is refused rather than
+        # followed, opened or handed to the tenant (SYRD-608).
+        from scripts import tenant_paths
+
+        account = pwd.getpwnam(owner)
+        try:
+            descriptor = tenant_paths.open_file(
+                str(team_launcher.home_dir_for_user(owner)), str(lock_path), uid=account.pw_uid,
+                gid=account.pw_gid, mode=0o600, parents=(0o755, account.pw_uid, account.pw_gid))
+        except (tenant_paths.Refused, SystemExit) as refusal:
+            raise SystemExit(f"switchyard: refusing to lock presentation state {path} for {owner}: {refusal}") from None
+        opened = open(descriptor, "rb")
+        team_launcher.ensure_layout_output_owner(config, path, runner=runner)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        team_launcher.ensure_layout_output_owner(config, path, runner=runner)
+        opened = lock_path.open("a+", encoding="utf-8")
+    with opened as handle:
         team_launcher.ensure_owner_file(config, lock_path, runner=runner)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
@@ -249,5 +269,5 @@ def _write_state(
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
-    team_launcher._write_private_json_atomic(state_path, state)
+    team_launcher._write_private_json_atomic(state_path, state, owner_user=config.run_as_user)
     team_launcher.ensure_owner_file(config, state_path, runner=runner)

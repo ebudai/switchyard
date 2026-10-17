@@ -44,6 +44,12 @@ from types import SimpleNamespace
 tree, tmp, scenario = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 sys.path.insert(0, str(tree))
 from scripts import team_launcher as launcher
+import pwd
+# The owner is a stand-in account whose home is the scratch directory, owned by namespace root (SYRD-608: root
+# writes for an owner by descriptor from that home, and refuses a path outside it).
+_getpwnam = pwd.getpwnam
+pwd.getpwnam = lambda name: (pwd.struct_passwd((name, "x", 0, 0, "", str(tmp), "/bin/sh"))
+                             if name == "''' + OWNER + r'''" else _getpwnam(name))
 
 provision = tmp / "provision"
 provision.mkdir(mode=0o755)
@@ -115,8 +121,15 @@ def roles_pinned(got: dict) -> list[str | None]:
 
 
 def chown(got: dict) -> list[str]:
-    """The ownership step the shipped `ensure_owner_file` takes for this tenant's config."""
+    """The ownership step `ensure_owner_file` took for this tenant's config on main `BEFORE`."""
     return ["chown", f"{OWNER}:{OWNER}", got["config"]]
+
+
+def handoff(got: dict) -> list[str]:
+    """The ownership step it takes now: the descriptor helper, rooted at the owner's home (SYRD-608)."""
+    home = str(Path(got["config"]).parent.parent)
+    return [sys.executable, "-I", str(ROOT / "scripts" / "tenant_paths.py"), "--root", home, "attrs", "--owner", OWNER,
+            "--group", OWNER, got["config"]]
 
 
 def test_main_wrote_the_pin_in_a_dry_run() -> None:
@@ -149,7 +162,7 @@ def test_the_upgrade_still_writes_the_pin_and_hands_it_to_the_owner() -> None:
     check(roles_pinned(got) == [got["pin"]] * 2, f"every role is pinned: {roles_pinned(got)}")
     kept = json.loads(got["after"]["p418.json"]["bytes"])["roles"]
     check(all(role["env"]["KEEP"] == "1" for role in kept), "and keeps its own env")
-    check(got["ran"] == [chown(got)], f"and the config, only, is handed to its owner: {got['ran']}")
+    check(got["ran"] == [handoff(got)], f"and the config, only, is handed to its owner: {got['ran']}")
     check(got["after"][got["layout"]] == got["before"][got["layout"]], "the current layout template is not touched")
 
 

@@ -126,7 +126,7 @@ def upgrade_generated_project_config(
         elif dry_run:
             changed_messages.append(f"layout template can be upgraded: {config.layout}")
         else:
-            config.layout.write_text(json.dumps(current_layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            launcher.write_owner_file(config.run_as_user, config.layout, json.dumps(current_layout, indent=2, sort_keys=True) + "\n")
             launcher.ensure_owner_file(config, config.layout, runner=runner)
             changed_messages.append(f"upgraded generated layout template: {config.layout}")
     elif not changed_messages:
@@ -161,7 +161,7 @@ def upgrade_generated_project_config(
         # an upgrade would, but neither writes the document nor hands it to
         # its owner (SYRD-418).
         if not dry_run:
-            launcher._write_json_atomic(config_path, raw_config)
+            launcher._write_json_atomic(config_path, raw_config, owner_user=config.run_as_user)
             launcher.ensure_owner_file(config, config_path, runner=runner)
     return launcher.LauncherUpgradeResult(
         changed=not dry_run,

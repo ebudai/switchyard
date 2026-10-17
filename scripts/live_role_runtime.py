@@ -216,7 +216,7 @@ def sync_reload_config_to_live_sessions(
 ) -> ProjectConfig:
     from scripts import team_launcher as launcher
 
-    raw_config = launcher._load_json(config_path)
+    raw_config = launcher.read_owner_json(config.run_as_user, config_path)
     raw_roles = raw_config.get("roles")
     if not isinstance(raw_roles, list):
         return config
@@ -258,5 +258,5 @@ def sync_reload_config_to_live_sessions(
         updated_roles.append(next_role)
     if not changed:
         return config
-    launcher._write_json_atomic(config_path, raw_config)
+    launcher._write_json_atomic(config_path, raw_config, owner_user=config.run_as_user)
     return replace(config, roles=updated_roles)

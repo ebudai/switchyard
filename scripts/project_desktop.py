@@ -98,9 +98,9 @@ def configure_project_desktop(config: ProjectConfig, *, config_path: Path,
             desktop.install(policy, helper=helper or Path(__file__).resolve().with_name("desktop_access.py"))
             installed_new = previous != policy
         configured = launcher.prepare_project_desktop(replace(config, desktop_access=policy), runner=runner)
-        payload = launcher._load_json(config_path)
-        payload["desktop_access"] = policy
         owner_user = config.run_as_user or launcher.current_user_name()
+        payload = launcher.read_owner_json(owner_user, config_path)
+        payload["desktop_access"] = policy
         launcher._write_json_atomic(config_path, payload, owner_user=owner_user)
         launcher._write_json_atomic(config_path.parent / "desktop-policy.json", policy, owner_user=owner_user)
         return configured

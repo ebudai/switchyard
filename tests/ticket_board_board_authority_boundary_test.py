@@ -98,9 +98,11 @@ def _as(uid: int, argv: list[str], *, groups: list[int] | None = None) -> bool:
 
 
 def _run(lines: list[str], cwd: Path) -> None:
+    # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+    environment = {**os.environ, "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")}
     for command in lines:
         stripped = command.strip().removeprefix("sudo ")
-        done = subprocess.run(stripped, shell=True, cwd=cwd, capture_output=True, text=True)
+        done = subprocess.run(stripped, shell=True, cwd=cwd, capture_output=True, text=True, env=environment)
         assert done.returncode == 0, (stripped, done.stderr)
 
 
@@ -434,16 +436,18 @@ def test_the_packet_grants_the_service_read_only_on_the_store_it_configures() ->
     )
     lines = render_operator_commands(plan).splitlines()
     store = str(plan.commit_git_dir)
-    read = [l for l in lines if f"u:boardsvc:rX {store!r}".replace("'", "'") in l or (f"setfacl -R -m u:boardsvc:rX" in l and store in l)]
+    # SYRD-605: an ACL change is the no-follow helper's `acl`, a directory its `dir`.
+    grant_shape = "'acl' '--modify' 'u:boardsvc:rX' '--recursive'"
+    read = [l for l in lines if grant_shape in l and store in l]
     assert read, lines
     for line in lines:
-        if "setfacl" not in line or store not in line:
+        if ("setfacl" not in line and "' 'acl' '" not in line) or store not in line:
             continue
         assert "u:boardsvc:rwx" not in line.lower(), line
         assert f"g:{roles_group_name(PROJECT)}" not in line, line
     # And the store is closed before it is granted, or the mask would clip it.
-    confine = next(i for i, l in enumerate(lines) if "install -d" in l and store in l)
-    grant = next(i for i, l in enumerate(lines) if "setfacl -R -m u:boardsvc:rX" in l and store in l)
+    confine = next(i for i, l in enumerate(lines) if "' 'dir' '" in l and store in l)
+    grant = next(i for i, l in enumerate(lines) if grant_shape in l and store in l)
     assert confine < grant, (confine, grant)
 
 
@@ -471,7 +475,7 @@ def test_the_grant_is_built_from_the_store_and_not_from_the_release() -> None:
     assert store.startswith("/home/demo-agent/"), store
     granted = [
         line for line in render_operator_commands(plan).splitlines()
-        if "setfacl -R -m u:boardsvc:rX" in line
+        if "'acl' '--modify' 'u:boardsvc:rX' '--recursive'" in line  # the no-follow helper (SYRD-605)
     ]
     assert granted, "the packet granted the service no commit store at all"
     for line in granted:
@@ -481,8 +485,8 @@ def test_the_grant_is_built_from_the_store_and_not_from_the_release() -> None:
     for line in render_operator_commands(plan).splitlines():
         if "/opt/switchyard/releases/" not in line:
             continue
-        assert "setfacl" not in line, line
-        assert "install -d" not in line, line
+        assert "setfacl" not in line and "' 'acl' '" not in line, line
+        assert "install -d" not in line and "' 'dir' '" not in line, line
 
 
 def test_the_repair_artifact_retires_the_old_group_grant() -> None:

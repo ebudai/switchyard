@@ -83,8 +83,9 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_CALLER_ROLES=director,designer,app,main,audit,user" in combined
     assert "TICKET_BOARD_OPERATION_ALLOWED_ROLES=" not in combined
     assert "EnvironmentFile=-/home/stellaris-agent/.config/stellaris/ticket-board.env" in combined
-    assert "sudo install -d -m 0755 -o 'stellaris-agent' -g 'stellaris-agent' '/home/stellaris-agent/.config'" in combined
-    assert "sudo install -d -m 0700 -o 'stellaris-agent' -g 'stellaris-agent' '/home/stellaris-agent/.config/stellaris'" in combined
+    owner = ("--owner", "stellaris-agent", "--group", "stellaris-agent")
+    assert helper("/home/stellaris-agent", "dir", "--mode", "0755", *owner, "/home/stellaris-agent/.config") in combined
+    assert helper("/home/stellaris-agent", "dir", "--mode", "0700", *owner, "/home/stellaris-agent/.config/stellaris") in combined
     assert "if ! sudo -u 'stellaris-agent' test -s '/home/stellaris-agent/.config/stellaris/ticket-board.env'; then" in combined
     assert "TICKET_BOARD_TENANT_REPORT_TOKEN=%s" in combined
     assert "sudo -u 'stellaris-agent' chmod 0600 '/home/stellaris-agent/.config/stellaris/ticket-board.env'" in combined
@@ -125,7 +126,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert "TICKET_BOARD_SKIP_MIGRATIONS=1" in combined
     assert "if ! getent passwd 'boardsvc' >/dev/null 2>&1; then" in combined
     assert "sudo useradd -r -M -d /nonexistent -s \"$service_shell\" 'boardsvc'" in combined
-    assert combined.index("if ! getent passwd 'boardsvc'") < combined.index("setfacl -R -m u:boardsvc:rx")
+    assert combined.index("if ! getent passwd 'boardsvc'") < combined.index("'acl' '--modify' 'u:boardsvc:rx' '--recursive'")
     peer_auth_command = (
         f"sudo env PG_DATABASE='stellaris_ticket_board' PG_IDENT_MAP='pgu_ticket_board_service' "
         f"SERVICE_USER='boardsvc' SERVICE_ROLE='ticket_board_service' "
@@ -170,7 +171,7 @@ def test_non_pgu_project_is_fully_parameterized() -> None:
     assert 'subject.user !== "stellaris-agent"' in combined
     assert "Do NOT add org.freedesktop.systemd1.manage-unit-files here" in combined
     assert "reload-daemon cannot be scoped to a unit" in combined
-    assert "setfacl -R -m u:boardsvc:rx '/home/stellaris-agent/stellaris-ticketboard-live'" in combined
+    assert helper("/home/stellaris-agent", "acl", "--modify", "u:boardsvc:rx", "--recursive", "/home/stellaris-agent/stellaris-ticketboard-live") in combined
     assert "ticket_has_unresolved_blockers" not in combined
     assert "/tmp/pgu-frames" not in combined
     assert "/home/agent/.claude/pgu-tickets-assets" not in combined
@@ -472,10 +473,16 @@ def test_operator_commands_use_peer_portable_postgres_admin_invocations() -> Non
     assert "sudo -u postgres psql -X -v ON_ERROR_STOP=1 'postgresql:///stellaris_ticket_board?host=/var/run/postgresql' -f '/home/stellaris-agent/stellaris-ticketboard-live/current/scripts/ticket_board/rbac.sql'" not in commands
 
 
+def helper(root: str, *words: str) -> str:
+    """A change root makes inside a home, through the no-follow helper (SYRD-605), spelled out."""
+    return 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ' + " ".join(f"'{w}'" for w in ("--root", root, *words))
+
+
 def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
     plan = build_plan(project="otto", owner_user="otto-agent", port=8873)
     commands = render_operator_commands(plan)
-    board_root = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/otto-ticketboard-live'"
+    owner = ("--owner", "otto-agent", "--group", "otto-agent")
+    board_root = helper("/home/otto-agent", "dir", "--mode", "0755", *owner, "/home/otto-agent/otto-ticketboard-live")
     deploy = (
         "sudo -u 'otto-agent' -H env HOME='/home/otto-agent' "
         "TICKET_BOARD_OWNER_HOME='/home/otto-agent' TICKET_BOARD_PROJECT='otto' "
@@ -484,21 +491,14 @@ def test_operator_commands_create_owned_parents_before_systemd_paths() -> None:
         f"SOURCE_REPO='{ROOT}' "
         "BOARD_ROOT='/home/otto-agent/otto-ticketboard-live'"
     )
-    claude_parent = "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' '/home/otto-agent/.claude'"
-    asset_frame_leaf = (
-        "sudo install -d -m 0775 -o 'otto-agent' -g 'otto-agent' "
-        "'/home/otto-agent/.claude/otto-tickets-assets' "
-        "'/home/otto-agent/.claude/otto-ticket-frames'"
-    )
-    config_parents = (
-        "sudo install -d -m 0755 -o 'otto-agent' -g 'otto-agent' "
-        "'/home/otto-agent/.config' "
-        "'/home/otto-agent/.config/systemd' "
-        "'/home/otto-agent/.config/systemd/user'"
-    )
+    claude_parent = helper("/home/otto-agent", "dir", "--mode", "0755", *owner, "/home/otto-agent/.claude")
+    asset_frame_leaf = helper("/home/otto-agent", "dir", "--mode", "0775", *owner,
+                              "/home/otto-agent/.claude/otto-tickets-assets", "/home/otto-agent/.claude/otto-ticket-frames")
+    config_parents = helper("/home/otto-agent", "dir", "--mode", "0755", *owner, "/home/otto-agent/.config",
+                            "/home/otto-agent/.config/systemd", "/home/otto-agent/.config/systemd/user")
     listener_install = (
-        "sudo install -m 0644 -o 'otto-agent' -g 'otto-agent' "
-        "\"$provision_dir\"/'otto-ticket-board-notify-listener.service' "
+        helper("/home/otto-agent", "install", "--mode", "0644", *owner)
+        + " \"$provision_dir\"/'otto-ticket-board-notify-listener.service' "
         "'/home/otto-agent/.config/systemd/user/otto-ticket-board-notify-listener.service'"
     )
 
@@ -584,16 +584,16 @@ def test_board_service_traversal_capability_controls_owner_home_acls() -> None:
 
     assert grant_plan.board_service_traversal is True
     assert deny_plan.board_service_traversal is False
-    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent'" in grant_commands
-    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent/.claude'" in grant_commands
-    assert "sudo setfacl -R -m u:boardsvc:rx '/home/zeta-agent/zeta-ticketboard-live'" in grant_commands
-    assert "sudo setfacl -R -m u:boardsvc:rwx '/home/zeta-agent/.claude/zeta-tickets-assets'" in grant_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:--x", "/home/zeta-agent") in grant_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:--x", "/home/zeta-agent/.claude") in grant_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:rx", "--recursive", "/home/zeta-agent/zeta-ticketboard-live") in grant_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:rwx", "--recursive", "/home/zeta-agent/.claude/zeta-tickets-assets") in grant_commands
     assert "if ! getent passwd 'boardsvc' >/dev/null 2>&1; then" in deny_commands
     assert "sudo useradd -r -M -d /nonexistent -s \"$service_shell\" 'boardsvc'" in deny_commands
-    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent'" not in deny_commands
-    assert "sudo setfacl -m u:boardsvc:--x '/home/zeta-agent/.claude'" not in deny_commands
-    assert "sudo setfacl -R -m u:boardsvc:rx '/home/zeta-agent/zeta-ticketboard-live'" not in deny_commands
-    assert "sudo setfacl -R -m u:boardsvc:rwx '/home/zeta-agent/.claude/zeta-tickets-assets'" not in deny_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:--x", "/home/zeta-agent") not in deny_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:--x", "/home/zeta-agent/.claude") not in deny_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:rx", "--recursive", "/home/zeta-agent/zeta-ticketboard-live") not in deny_commands
+    assert helper("/home/zeta-agent", "acl", "--modify", "u:boardsvc:rwx", "--recursive", "/home/zeta-agent/.claude/zeta-tickets-assets") not in deny_commands
     assert "board_service_traversal=false" in deny_commands
     assert "board health check will fail" in deny_commands
 
@@ -656,8 +656,10 @@ def test_pgu_project_render_matches_live_port_database_and_frame_dir() -> None:
     assert "sudo install -d -m 1777 -o root -g root '/tmp/pgu-frames'" in commands
     assert "-workflow.sql" not in commands
     assert "keeps the full workflow seeded by schema.sql" in render_workflow_sql(plan)
-    assert "sudo install -d -m 0775 -o 'agent' -g 'agent' '/home/agent/.claude/pgu-tickets-assets' '/tmp/pgu-frames'" not in commands
-    assert "sudo setfacl -R -m u:boardsvc:rwx '/home/agent/.claude/pgu-tickets-assets' '/tmp/pgu-frames'" not in commands
+    # The assets are the tenant's, through the no-follow helper (SYRD-605); the frames are root's own, as before.
+    assert helper("/home/agent", "dir", "--mode", "0775", "--owner", "agent", "--group", "agent", "/home/agent/.claude/pgu-tickets-assets") in commands
+    assert helper("/home/agent", "acl", "--modify", "u:boardsvc:rwx", "--recursive", "/home/agent/.claude/pgu-tickets-assets") in commands
+    assert "'/tmp/pgu-frames'" not in "\n".join(line for line in commands.splitlines() if "switchyard_tenant_paths\" " in line)
 
 
 def test_database_sql_bootstraps_schema_compatible_roles_and_project_database() -> None:

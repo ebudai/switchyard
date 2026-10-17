@@ -158,12 +158,17 @@ def tenant_lines(plan, home: Path, *, socket_gid: int, repo_gid: int) -> list[st
         # `sudo chmod` is deliberately not here: the sweep this suite is about
         # is `sudo find ... -exec chmod`, and the bare chmods in the packet
         # belong to the owner's SSH identity, which this fixture has none of.
-        if not stripped.startswith(("sudo install -d", "sudo setfacl", "sudo find")):
+        # The no-follow helper's directory and ACL lines (SYRD-605) -- what
+        # `install -d`, `setfacl` and `find` were.
+        prefix = 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" '
+        if not stripped.startswith(prefix) or stripped.split("' '", 2)[-1].split("'", 1)[0] not in ("dir", "acl", "close-children"):
             continue
         if str(home) not in stripped:
             continue
         stripped = stripped.replace(f"g:{roles_group_name(PROJECT)}", f"g:{socket_gid}")
         stripped = stripped.replace(f"g:{repository_group_name(PROJECT)}", f"g:{repo_gid}")
+        # The removals are conditional on the group existing, which here it does as a number.
+        stripped = stripped.replace(f"'--if-group' '{roles_group_name(PROJECT)}'", f"'--if-group' '{socket_gid}'")
         wanted.append(stripped.removeprefix("sudo "))
     assert wanted, "the packet touched nothing inside this tenant's home"
     return wanted
@@ -225,7 +230,9 @@ def _grant_socket_group(home: Path, base: Path, control: Path) -> None:
 
 
 def _run(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    done = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+    environment = {**os.environ, "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")}
+    done = subprocess.run(args, cwd=cwd, capture_output=True, text=True, env=environment)
     assert done.returncode == 0, (args, done.stdout, done.stderr)
     return done
 
@@ -477,13 +484,18 @@ def test_a_shared_account_tenant_gets_the_repair_and_no_invented_accounts() -> N
 
     base = f"{home}/syrd-worktrees"
     control = f"{home}/.local/state/switchyard/projects/syrd/control.git"
+    # Through the no-follow helper rooted at the home (SYRD-605), spelled out here.
+    def helper(*words: str) -> str:
+        return 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ' + " ".join(f"'{w}'" for w in ("--root", str(home), *words))
+
+    retire = ("--if-exists", "--if-group", "syrd-roles")
     assert (
-        f"sudo install -d -m 0750 -o 'switchyard-agent' -g 'switchyard-agent' '{base}'" in packet
+        helper("dir", "--mode", "0750", "--owner", "switchyard-agent", "--group", "switchyard-agent", base) in packet
     ), packet[:400]
-    assert f"sudo find '{base}' -mindepth 1 -maxdepth 1 -type d -exec chmod o-rwx {{}} +" in packet
-    assert f"sudo setfacl -x g:syrd-roles '{base}'" in packet
-    assert f"sudo setfacl -R -x g:syrd-roles '{control}'" in packet
-    assert f"sudo setfacl -R -x d:g:syrd-roles '{control}'" in packet
+    assert helper("close-children", base) in packet
+    assert helper("acl", "--remove", "g:syrd-roles", *retire, base) in packet
+    assert helper("acl", "--remove", "g:syrd-roles", "--recursive", *retire, control) in packet
+    assert helper("acl", "--remove", "d:g:syrd-roles", "--recursive", *retire, control) in packet
     # Nothing invents role accounts or a repository group for a tenant that has
     # neither, and the socket group itself is never removed or emptied.
     assert "syrd-repo" not in packet, packet
@@ -505,7 +517,7 @@ def test_the_repository_group_is_granted_before_the_socket_group_is_retired() ->
     )
     packet = render_operator_commands(plan)
     grant = packet.index("g:demo-repo:rwX")
-    retire = packet.index("-x g:demo-roles")
+    retire = packet.index("'--remove' 'g:demo-roles'")
     assert grant < retire, packet[min(grant, retire) : max(grant, retire)][:400]
     assert "groupadd -r 'demo-repo'" in packet or "groupadd -r demo-repo" in packet, packet
 
@@ -515,15 +527,11 @@ def test_the_retirement_is_guarded_on_the_group_existing() -> None:
     home = Path("/home/demo-agent")
     plan = build_plan(project="demo", owner_user="demo-agent", owner_home=home)
     packet = render_operator_commands(plan)
-    lines = packet.splitlines()
-    retire = next(index for index, line in enumerate(lines) if "-x g:demo-roles" in line)
-    guard = next(
-        index
-        for index in range(retire, -1, -1)
-        if lines[index].startswith("if getent group 'demo-roles'")
-    )
-    assert guard < retire, lines[guard : retire + 1]
-    assert any(line.strip() == "fi" for line in lines[retire:retire + 6]), lines[retire:retire + 6]
+    # The condition travels with each removal now: the helper does nothing for a
+    # group the host does not have (SYRD-605), where a shell `getent` guard used to.
+    removals = [line for line in packet.splitlines() if "'--remove' 'g:demo-roles'" in line or "'--remove' 'd:g:demo-roles'" in line]
+    assert len(removals) == 4, removals
+    assert all("'--if-group' 'demo-roles'" in line for line in removals), removals
 
 
 def test_the_service_keeps_the_socket_and_its_named_read_grants() -> None:
@@ -538,9 +546,14 @@ def test_the_service_keeps_the_socket_and_its_named_read_grants() -> None:
     packet = render_operator_commands(plan)
     # The commit store stays readable to the service by NAME, independent of
     # any group, and so does the board release.
-    assert f"sudo setfacl -R -m u:boardsvc:rX '{home}/syrd-source-cache.git'" in packet
-    assert f"sudo setfacl -R -m d:u:boardsvc:rX '{home}/syrd-source-cache.git'" in packet
-    assert f"sudo setfacl -R -m u:boardsvc:rx '{plan.board_root}'" in packet
+    # Through the no-follow helper rooted at the home (SYRD-605), spelled out here.
+    def acl(spec: str, path: str) -> str:
+        words = ("--root", str(home), "acl", "--modify", spec, "--recursive", path)
+        return 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ' + " ".join(f"'{w}'" for w in words)
+
+    assert acl("u:boardsvc:rX", f"{home}/syrd-source-cache.git") in packet
+    assert acl("d:u:boardsvc:rX", f"{home}/syrd-source-cache.git") in packet
+    assert acl("u:boardsvc:rx", str(plan.board_root)) in packet
     # And nothing takes the service out of the socket group, which is the one
     # thing that group is for.
     assert "gpasswd -d" not in packet

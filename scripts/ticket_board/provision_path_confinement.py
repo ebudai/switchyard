@@ -29,6 +29,7 @@ from pathlib import PurePosixPath
 from typing import Sequence
 
 
+
 def _is_within(root: str, candidate: str) -> bool:
     """Containment by path components, not by string prefix.
 
@@ -104,7 +105,7 @@ def owner_home_traversal_commands(owner_home: str, principal: str) -> list[str]:
         import project_provision as provision
 
     provision._refuse_unnormalized(owner_home, what="the owner home")
-    return [f"sudo setfacl -m {principal}:--x {provision.shell_quote(owner_home)}"]
+    return [provision.acl_line(owner_home, f"{principal}:--x", owner_home)]
 
 
 #: The tenant's own tree, closed to everything but the tenant. Not 0700: the
@@ -162,10 +163,8 @@ def tenant_source_confinement_commands(
     provision._refuse_unnormalized(checkout, what="the project checkout")
     provision._refuse_prefix_coincidence(owner_home, checkout)
     directories = provision.owned_ancestor_dirs(owner_home, checkout, include_target=True)
-    quoted_owner = provision.shell_quote(owner_user)
     return [
-        f"sudo install -d -m {provision.TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
-        f"{provision.shell_quote(directory)}"
+        provision.directory_line(owner_home, provision.TENANT_SOURCE_MODE, owner_user, owner_user, directory)
         for directory in directories
     ]
 
@@ -205,12 +204,11 @@ def commit_store_read_commands(
     principal = f"u:{service_user}"
     commands = provision.owner_home_traversal_commands(owner_home, principal)
     for directory in provision._interior_directories(owner_home, commit_git_dir):
-        command = f"sudo setfacl -m {principal}:--x {provision.shell_quote(directory)}"
+        command = provision.acl_line(owner_home, f"{principal}:--x", directory)
         if command not in commands:
             commands.append(command)
-    quoted = provision.shell_quote(commit_git_dir)
-    commands.append(f"sudo setfacl -R -m {principal}:rX {quoted}")
-    commands.append(f"sudo setfacl -R -m d:{principal}:rX {quoted}")
+    commands.append(provision.acl_line(owner_home, f"{principal}:rX", commit_git_dir, recursive=True))
+    commands.append(provision.acl_line(owner_home, f"d:{principal}:rX", commit_git_dir, recursive=True))
     return commands
 
 
@@ -242,15 +240,11 @@ def repository_copy_confinement_commands(
         import project_provision as provision
 
     provision._refuse_unnormalized(owner_home, what="the owner home")
-    quoted_owner = provision.shell_quote(owner_user)
     resolved_mode = mode or provision.REPOSITORY_COPY_MODE
     commands: list[str] = []
 
     def add(directory: str, directory_mode: str) -> None:
-        command = (
-            f"sudo install -d -m {directory_mode} -o {quoted_owner} -g {quoted_owner} "
-            f"{provision.shell_quote(directory)}"
-        )
+        command = provision.directory_line(owner_home, directory_mode, owner_user, owner_user, directory)
         if command not in commands:
             commands.append(command)
 
@@ -308,10 +302,8 @@ def tenant_worktree_confinement_commands(
     directories = provision.owned_ancestor_dirs(owner_home, worktree_base, include_target=True)
     if not directories:
         return []
-    quoted_owner = provision.shell_quote(owner_user)
     commands = [
-        f"sudo install -d -m {provision.TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
-        f"{provision.shell_quote(directory)}"
+        provision.directory_line(owner_home, provision.TENANT_SOURCE_MODE, owner_user, owner_user, directory)
         for directory in directories
     ]
     for worktree in worktrees:
@@ -320,23 +312,18 @@ def tenant_worktree_confinement_commands(
         provision._refuse_unnormalized(worktree, what="a role worktree")
         if not provision._is_within(worktree_base, worktree):
             continue
-        command = (
-            f"sudo install -d -m {provision.TENANT_SOURCE_MODE} -o {quoted_owner} -g {quoted_owner} "
-            f"{provision.shell_quote(worktree)}"
-        )
+        command = provision.directory_line(owner_home, provision.TENANT_SOURCE_MODE, owner_user, owner_user, worktree)
         if command not in commands:
             commands.append(command)
     # Everything already in the base, including the ticket worktrees no plan
     # names. `o-rwx` rather than a mode: this takes the world away and leaves
     # whatever else the tenant has arranged alone.
-    # Guarded on the base existing: the line above creates it, so in a whole
-    # packet run it always does, and a partial or interrupted run must not die
-    # on a directory that has not been made yet.
-    commands.append(f"if [ -d {provision.shell_quote(worktree_base)} ]; then")
-    commands.append(
-        f"    sudo find {provision.shell_quote(worktree_base)} -mindepth 1 -maxdepth 1 -type d "
-        "-exec chmod o-rwx {} +"
-    )
+    # The helper does nothing to a base that does not exist: the line above
+    # creates it, so in a whole packet run it always does, and a partial or
+    # interrupted run must not die on a directory that has not been made yet.
+    # It is no longer a shell `[ -d ]` in front of `find`: the tenant could
+    # swap the base for a link between the test and the sweep (SYRD-605).
+    commands.append(provision.close_children_line(owner_home, worktree_base))
     # And what the base does to the NEXT tree, not only to the ones already in
     # it. The sweep closes what is there; the next `git worktree add` -- a role
     # pane being created, or an implementer starting a ticket -- makes a
@@ -347,13 +334,11 @@ def tenant_worktree_confinement_commands(
     # A default ACL is the only thing that holds without the creator
     # cooperating: the kernel intersects it with whatever mode the caller asks
     # for, so anything created here is closed to the world whoever creates it
-    # and however. Inside the same guard as the sweep, for the same reason: a
-    # partial run must not die on a base that has not been made yet (SYRD-181).
+    # and however. Skipped when the base is missing, for the same reason as the
+    # sweep: a partial run must not die on a base not made yet (SYRD-181).
     commands.append(
-        f"    sudo setfacl -m {provision.shell_quote(provision.INHERITED_WORKTREE_CLOSURE)} "
-        f"{provision.shell_quote(worktree_base)}"
+        provision.acl_line(owner_home, provision.INHERITED_WORKTREE_CLOSURE, worktree_base, if_exists=True)
     )
-    commands.append("fi")
     return commands
 
 
@@ -409,19 +394,14 @@ def socket_group_retirement_commands(
         provision._refuse_unnormalized(surface, what="a repository surface")
         if not provision._is_within(owner_home, surface):
             continue
-        scope = "-R " if recursive else ""
-        removals.append(f"    sudo setfacl {scope}-x d:{stale} {provision.shell_quote(surface)}")
-        removals.append(f"    sudo setfacl {scope}-x {stale} {provision.shell_quote(surface)}")
-    if not removals:
-        return []
-    # Guarded on the group existing at all. Removing an entry that is already
-    # gone succeeds; naming a group this host does not have is an `Invalid
-    # argument` and would stop the packet on a tenant that never had one.
-    return [
-        f"if getent group {provision.shell_quote(group)} >/dev/null 2>&1; then",
-        *removals,
-        "fi",
-    ]
+        # Only when the group exists at all, and only on a surface that does:
+        # removing an entry that is already gone succeeds, but naming a group
+        # this host does not have would stop the packet on a tenant that never
+        # had one.
+        for entry in (f"d:{stale}", stale):
+            removals.append(provision.acl_line(owner_home, entry, surface, remove=True, recursive=recursive,
+                                     if_exists=True, if_group=group))
+    return removals
 
 
 def role_worktree_access_commands(
@@ -473,14 +453,14 @@ def role_worktree_access_commands(
     if provision._is_within(owner_home, worktree_base) or provision._is_within(owner_home, control_repository):
         commands.extend(provision.owner_home_traversal_commands(owner_home, group))
     for directory in interior + [worktree_base]:
-        command = f"sudo setfacl -m {group}:--x {provision.shell_quote(directory)}"
+        command = provision.acl_line(owner_home, f"{group}:--x", directory)
         if command not in commands:
             commands.append(command)
     # The repository itself is shared: a commit made in any role's worktree
     # writes objects, refs and logs here. Default entries so the objects git
     # creates later inherit the same access.
-    commands.append(f"sudo setfacl -R -m {group}:rwX {provision.shell_quote(control_repository)}")
-    commands.append(f"sudo setfacl -R -m d:{group}:rwX {provision.shell_quote(control_repository)}")
+    commands.append(provision.acl_line(owner_home, f"{group}:rwX", control_repository, recursive=True))
+    commands.append(provision.acl_line(owner_home, f"d:{group}:rwX", control_repository, recursive=True))
     for retired in retired_groups:
         if not retired or retired == repository_group:
             continue
@@ -491,8 +471,8 @@ def role_worktree_access_commands(
         # pane that is RUNNING keeps the supplementary groups it started with --
         # taking traversal away underneath it would break live work to tidy up
         # an entry that is not the one doing harm.
-        commands.append(f"sudo setfacl -R -x d:{stale} {provision.shell_quote(control_repository)}")
-        commands.append(f"sudo setfacl -R -x {stale} {provision.shell_quote(control_repository)}")
+        for entry in (f"d:{stale}", stale):
+            commands.append(provision.acl_line(owner_home, entry, control_repository, remove=True, recursive=True))
     return commands
 
 
@@ -527,17 +507,18 @@ def director_control_access_commands(
     if provision._is_within(owner_home, provision_dir):
         commands.extend(provision.owner_home_traversal_commands(owner_home, principal))
     for directory in interior:
-        command = f"sudo setfacl -m {principal}:--x {provision.shell_quote(directory)}"
+        command = provision.acl_line(owner_home, f"{principal}:--x", directory)
         if command not in commands:
             commands.append(command)
     provision._refuse_prefix_coincidence(owner_home, project_dir)
-    project_grant = f"sudo setfacl -m {principal}:--x {provision.shell_quote(project_dir)}"
-    if project_dir and provision._is_within(owner_home, project_dir) and project_grant not in commands:
-        commands.append(project_grant)
-    commands.append(f"sudo setfacl -R -m {principal}:rwX {provision.shell_quote(provision_dir)}")
+    if project_dir and provision._is_within(owner_home, project_dir):
+        project_grant = provision.acl_line(owner_home, f"{principal}:--x", project_dir)
+        if project_grant not in commands:
+            commands.append(project_grant)
+    commands.append(provision.acl_line(owner_home, f"{principal}:rwX", provision_dir, recursive=True))
     # Default entries so an atomically written replacement keeps the contract:
     # every projection writes a new file and renames it into place.
-    commands.append(f"sudo setfacl -R -m d:{principal}:rwX {provision.shell_quote(provision_dir)}")
+    commands.append(provision.acl_line(owner_home, f"d:{principal}:rwX", provision_dir, recursive=True))
     return commands
 
 

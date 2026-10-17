@@ -63,12 +63,12 @@ from scripts.ticket_board import project_provision as t  # noqa: E402,I001
 from scripts.ticket_board import provision_repository_boundary as m  # noqa: E402
 
 CHECKS = 0
-MOVED = ('REPOSITORY_BOUNDARY_BEGIN', 'REPOSITORY_BOUNDARY_END', 'REPOSITORY_BOUNDARY_ALLOWED', '_QUOTED', 'REPOSITORY_BOUNDARY_GUARDS', '_SHELL_METACHARACTERS', '_outside_quotes', '_is_boundary_line', 'repository_boundary_statements', 'repository_boundary_phase')
+MOVED = ('REPOSITORY_BOUNDARY_BEGIN', 'REPOSITORY_BOUNDARY_END', 'REPOSITORY_BOUNDARY_ALLOWED', 'REPOSITORY_BOUNDARY_RETIRED', '_QUOTED', 'REPOSITORY_BOUNDARY_GUARDS', '_SHELL_METACHARACTERS', '_outside_quotes', '_is_boundary_line', 'repository_boundary_statements', 'repository_boundary_phase')
 #: Measured on the baseline project_provision: each moved body's call-time reads of its globals, siblings included.
 SEAMS = {
     '_outside_quotes': {'_SHELL_METACHARACTERS': 1},
     '_is_boundary_line': {'REPOSITORY_BOUNDARY_ALLOWED': 1, 'REPOSITORY_BOUNDARY_GUARDS': 1, '_SHELL_METACHARACTERS': 1, '_outside_quotes': 1},
-    'repository_boundary_phase': {'REPOSITORY_BOUNDARY_BEGIN': 1, 'REPOSITORY_BOUNDARY_END': 1, '_is_boundary_line': 1},
+    'repository_boundary_phase': {'REPOSITORY_BOUNDARY_BEGIN': 1, 'REPOSITORY_BOUNDARY_END': 1, 'REPOSITORY_BOUNDARY_RETIRED': 1, '_is_boundary_line': 1},
 }
 #: Measured on the baseline: every project_provision definition outside the ten that names them, and how often.
 DISPATCH = {'render_operator_commands': {'REPOSITORY_BOUNDARY_BEGIN': 1, 'REPOSITORY_BOUNDARY_END': 1}}
@@ -91,22 +91,22 @@ GOLDEN = {
     "boundary line: '#no space'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     'boundary line: "if getent group \'p472\' >/dev/null 2>&1; then"': {'result': {'type': 'bool', 'value': True}, 'calls': {}},
     'boundary line: "if ! getent group \'p472-repo\' >/dev/null 2>&1; then"': {'result': {'type': 'bool', 'value': True}, 'calls': {}},
-    'boundary line: "if [ -d \'/p472/repo\' ]; then"': {'result': {'type': 'bool', 'value': True}, 'calls': {}},
+    'boundary line: "if [ -d \'/p472/repo\' ]; then"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     "boundary line: 'if [ -d /p472/repo ]; then'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     "boundary line: 'if getent group p472 >/dev/null 2>&1; then'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
-    'boundary line: "sudo install -d -m 0750 \'/p472/repo\'"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
-    'boundary line: "sudo setfacl -R -m \'g:p472:rwX\' \'/p472/repo\'"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
-    'boundary line: "sudo find \'/p472/repo\' -type d -exec true {} +"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: "sudo install -d -m 0750 \'/p472/repo\'"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
+    'boundary line: "sudo setfacl -R -m \'g:p472:rwX\' \'/p472/repo\'"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
+    'boundary line: "sudo find \'/p472/repo\' -type d -exec true {} +"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     'boundary line: "sudo groupadd -r \'p472-repo\'"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
     'boundary line: "sudo gpasswd -a \'p472\' \'p472-repo\' >/dev/null"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
     'boundary line: "sudo gpasswd -a \'p472\' \'p472-repo\' >/dev/null 2>&1"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
     'boundary line: "sudo gpasswd -a \'p472\' \'p472-repo\' > /tmp/x"': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
-    'boundary line: "sudo install -d \'/p472\'; rm -rf /"': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
-    'boundary line: "sudo install -d \'/p472\' && reboot"': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
-    "boundary line: 'sudo install -d $(evil)'": {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
-    'boundary line: "sudo install -d \'/p472;ok\'"': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: "sudo install -d \'/p472\'; rm -rf /"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
+    'boundary line: "sudo install -d \'/p472\' && reboot"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
+    "boundary line: 'sudo install -d $(evil)'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
+    'boundary line: "sudo install -d \'/p472;ok\'"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     "boundary line: 'sudo systemctl restart x'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
-    'boundary line: "sudo install -d \'unbalanced"': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: "sudo install -d \'unbalanced"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     "boundary line: 'sudo chown x /p472'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     "boundary line: 'then'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
     "boundary line: 'else'": {'result': {'type': 'bool', 'value': False}, 'calls': {}},
@@ -122,19 +122,31 @@ GOLDEN = {
     'statements: stray fi': {'result': {'type': 'list', 'value': [['fi'], ["sudo install -d '/a'"]]}, 'calls': {}},
     'statements: empty': {'result': {'type': 'list', 'value': []}, 'calls': {}},
     'phase: no fence': {'result': {'type': 'tuple', 'value': [[], 'this packet has no repository boundary phase in it, so it was generated before that phase existed']}, 'calls': {}},
-    'phase: a clean phase': {'result': {'type': 'tuple', 'value': [["sudo install -d '/a'", "if [ -d '/a' ]; then", "sudo find '/a'", 'fi'], '']}, 'calls': {'_is_boundary_line': 4, '_outside_quotes': 2}},
-    'phase: a deploy inside the fence': {'result': {'type': 'tuple', 'value': [[], "the repository boundary phase of this packet contains a line that is not part of one: 'sudo systemctl restart board'"]}, 'calls': {'_is_boundary_line': 2, '_outside_quotes': 1}},
-    'phase: a second command riding along': {'result': {'type': 'tuple', 'value': [[], 'the repository boundary phase of this packet contains a line that is not part of one: "sudo install -d \'/a\'; curl evil"']}, 'calls': {'_is_boundary_line': 1, '_outside_quotes': 1}},
+    'phase: a clean phase': {'result': {'type': 'tuple', 'value': [[], 'this packet\'s repository boundary phase changes paths as root by path ("sudo install -d \'/a\'"), which follows a link a tenant planted; it was generated before those changes went through the no-follow helper']}, 'calls': {}},
+    'phase: a deploy inside the fence': {'result': {'type': 'tuple', 'value': [[], 'this packet\'s repository boundary phase changes paths as root by path ("sudo install -d \'/a\'"), which follows a link a tenant planted; it was generated before those changes went through the no-follow helper']}, 'calls': {}},
+    'phase: a second command riding along': {'result': {'type': 'tuple', 'value': [[], 'this packet\'s repository boundary phase changes paths as root by path ("sudo install -d \'/a\'; curl evil"), which follows a link a tenant planted; it was generated before those changes went through the no-follow helper']}, 'calls': {}},
     'phase: the end before the begin': {'result': {'type': 'tuple', 'value': [[], 'this packet has no repository boundary phase in it, so it was generated before that phase existed']}, 'calls': {}},
     'phase: only a begin': {'result': {'type': 'tuple', 'value': [[], 'this packet has no repository boundary phase in it, so it was generated before that phase existed']}, 'calls': {}},
     'phase: an empty fence': {'result': {'type': 'tuple', 'value': [[], '']}, 'calls': {}},
-    'phase: two fences': {'result': {'type': 'tuple', 'value': [["sudo install -d '/a'"], '']}, 'calls': {'_is_boundary_line': 1, '_outside_quotes': 1}},
+    'phase: two fences': {'result': {'type': 'tuple', 'value': [[], 'this packet\'s repository boundary phase changes paths as root by path ("sudo install -d \'/a\'"), which follows a link a tenant planted; it was generated before those changes went through the no-follow helper']}, 'calls': {}},
     'phase: other markers': {'result': {'type': 'tuple', 'value': [[], 'this packet has no repository boundary phase in it, so it was generated before that phase existed']}, 'calls': {}},
-    'phase: the markers rebound on project_provision': {'result': {'type': 'tuple', 'value': [["sudo install -d '/a'"], '']}, 'calls': {'_is_boundary_line': 1, '_outside_quotes': 1}},
-    'phase: the line check rebound on project_provision': {'result': {'type': 'tuple', 'value': [["sudo install -d '/a'", 'sudo systemctl restart board'], '']}, 'calls': {'_is_boundary_line rebound': 2}},
-    "phase: the operator script's own": {'result': {'type': 'tuple', 'value': [["sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local'", "sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state'", "sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard'", "sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard/projects'", "sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard/projects/p472'", "sudo install -d -m 0770 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard/projects/p472/control.git'", "sudo setfacl -m u:boardsvc:--x '/p472/home'", "sudo setfacl -m u:boardsvc:--x '/p472/home/.local'", "sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state'", "sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state/switchyard'", "sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state/switchyard/projects'", "sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state/switchyard/projects/p472'", "sudo setfacl -R -m u:boardsvc:rX '/p472/home/.local/state/switchyard/projects/p472/control.git'", "sudo setfacl -R -m d:u:boardsvc:rX '/p472/home/.local/state/switchyard/projects/p472/control.git'", "sudo install -d -m 0750 -o 'p472-owner' -g 'p472-owner' '/p472/home/p472-worktrees'", "if [ -d '/p472/home/p472-worktrees' ]; then", "    sudo find '/p472/home/p472-worktrees' -mindepth 1 -maxdepth 1 -type d -exec chmod o-rwx {} +", "    sudo setfacl -m 'd:u::rwx,d:g::r-x,d:o::---' '/p472/home/p472-worktrees'", 'fi', "if getent group 'p472-roles' >/dev/null 2>&1; then", "    sudo setfacl -x d:g:p472-roles '/p472/home/p472-worktrees'", "    sudo setfacl -x g:p472-roles '/p472/home/p472-worktrees'", "    sudo setfacl -R -x d:g:p472-roles '/p472/home/.local/state/switchyard/projects/p472/control.git'", "    sudo setfacl -R -x g:p472-roles '/p472/home/.local/state/switchyard/projects/p472/control.git'", 'fi'], '']}, 'calls': {'_is_boundary_line': 25, '_outside_quotes': 21}},
-    "statements: the operator script's own phase": {'result': {'type': 'list', 'value': [["sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local'"], ["sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state'"], ["sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard'"], ["sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard/projects'"], ["sudo install -d -m 0755 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard/projects/p472'"], ["sudo install -d -m 0770 -o 'p472-owner' -g 'p472-owner' '/p472/home/.local/state/switchyard/projects/p472/control.git'"], ["sudo setfacl -m u:boardsvc:--x '/p472/home'"], ["sudo setfacl -m u:boardsvc:--x '/p472/home/.local'"], ["sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state'"], ["sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state/switchyard'"], ["sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state/switchyard/projects'"], ["sudo setfacl -m u:boardsvc:--x '/p472/home/.local/state/switchyard/projects/p472'"], ["sudo setfacl -R -m u:boardsvc:rX '/p472/home/.local/state/switchyard/projects/p472/control.git'"], ["sudo setfacl -R -m d:u:boardsvc:rX '/p472/home/.local/state/switchyard/projects/p472/control.git'"], ["sudo install -d -m 0750 -o 'p472-owner' -g 'p472-owner' '/p472/home/p472-worktrees'"], ["if [ -d '/p472/home/p472-worktrees' ]; then", "    sudo find '/p472/home/p472-worktrees' -mindepth 1 -maxdepth 1 -type d -exec chmod o-rwx {} +", "    sudo setfacl -m 'd:u::rwx,d:g::r-x,d:o::---' '/p472/home/p472-worktrees'", 'fi'], ["if getent group 'p472-roles' >/dev/null 2>&1; then", "    sudo setfacl -x d:g:p472-roles '/p472/home/p472-worktrees'", "    sudo setfacl -x g:p472-roles '/p472/home/p472-worktrees'", "    sudo setfacl -R -x d:g:p472-roles '/p472/home/.local/state/switchyard/projects/p472/control.git'", "    sudo setfacl -R -x g:p472-roles '/p472/home/.local/state/switchyard/projects/p472/control.git'", 'fi']]}, 'calls': {}},
-    'constants': {'result': {'type': 'list', 'value': ['# >>> switchyard repository boundary', '# <<< switchyard repository boundary', ['sudo install -d ', 'sudo setfacl ', 'sudo find ', 'sudo groupadd ', 'sudo gpasswd '], ['^if (?:! )?getent group (?:\'[^\']*\'|\\"\'\\")+ >/dev/null 2>&1; then$', '^if \\[ -d (?:\'[^\']*\'|\\"\'\\")+ \\]; then$'], ';&|`$<>()\n']}, 'calls': {}},
+    'phase: the markers rebound on project_provision': {'result': {'type': 'tuple', 'value': [['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/h\' \'dir\' \'/h/a\''], '']}, 'calls': {'_is_boundary_line': 1, '_outside_quotes': 1}},
+    'phase: the line check rebound on project_provision': {'result': {'type': 'tuple', 'value': [['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/h\' \'dir\' \'/h/a\'', 'sudo systemctl restart board'], '']}, 'calls': {'_is_boundary_line rebound': 2}},
+    "phase: the operator script's own": {'result': {'type': 'tuple', 'value': [['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard/projects\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard/projects/p472\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0770\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state/switchyard\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state/switchyard/projects\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state/switchyard/projects/p472\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:rX\' \'--recursive\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'d:u:boardsvc:rX\' \'--recursive\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0750\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/p472-worktrees\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'close-children\' \'/p472/home/p472-worktrees\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'d:u::rwx,d:g::r-x,d:o::---\' \'--if-exists\' \'/p472/home/p472-worktrees\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'d:g:p472-roles\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/p472-worktrees\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'g:p472-roles\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/p472-worktrees\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'d:g:p472-roles\' \'--recursive\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'g:p472-roles\' \'--recursive\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\''], '']}, 'calls': {'_is_boundary_line': 21, '_outside_quotes': 21}},
+    "statements: the operator script's own phase": {'result': {'type': 'list', 'value': [['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard/projects\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0755\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard/projects/p472\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0770\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state/switchyard\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state/switchyard/projects\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:--x\' \'/p472/home/.local/state/switchyard/projects/p472\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'u:boardsvc:rX\' \'--recursive\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'d:u:boardsvc:rX\' \'--recursive\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'dir\' \'--mode\' \'0750\' \'--owner\' \'p472-owner\' \'--group\' \'p472-owner\' \'/p472/home/p472-worktrees\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'close-children\' \'/p472/home/p472-worktrees\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--modify\' \'d:u::rwx,d:g::r-x,d:o::---\' \'--if-exists\' \'/p472/home/p472-worktrees\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'d:g:p472-roles\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/p472-worktrees\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'g:p472-roles\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/p472-worktrees\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'d:g:p472-roles\' \'--recursive\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\''], ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/p472/home\' \'acl\' \'--remove\' \'g:p472-roles\' \'--recursive\' \'--if-exists\' \'--if-group\' \'p472-roles\' \'/p472/home/.local/state/switchyard/projects/p472/control.git\'']]}, 'calls': {}},
+    'constants': {'result': {'type': 'list', 'value': ['# >>> switchyard repository boundary', '# <<< switchyard repository boundary', ['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ', 'sudo groupadd ', 'sudo gpasswd '], ['^if (?:! )?getent group (?:\'[^\']*\'|\\"\'\\")+ >/dev/null 2>&1; then$'], ';&|`$<>()\n']}, 'calls': {}},
+    'boundary line: \'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \\\'--root\\\' \\\'/p472\\\' \\\'dir\\\' \\\'--mode\\\' \\\'0750\\\' \\\'--owner\\\' \\\'p472\\\' \\\'--group\\\' \\\'p472\\\' \\\'/p472/repo\\\'\'': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: \'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \\\'--root\\\' \\\'/p472\\\' \\\'acl\\\' \\\'--modify\\\' \\\'g:p472:rwX\\\' \\\'--recursive\\\' \\\'/p472/repo\\\'\'': {'result': {'type': 'bool', 'value': True}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: \'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \\\'--root\\\' \\\'/p472\\\' \\\'dir\\\' \\\'/p472\\\'; rm -rf /\'': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: \'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \\\'--root\\\' \\\'/p472\\\' \\\'dir\\\' \\\'/p472\\\' && reboot\'': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: \'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \\\'--root\\\' $(evil) \\\'dir\\\'\'': {'result': {'type': 'bool', 'value': False}, 'calls': {'_outside_quotes': 1}},
+    'boundary line: "sudo /usr/bin/python3 -I $switchyard_tenant_paths \'--root\' \'/p472\' \'dir\'"': {'result': {'type': 'bool', 'value': False}, 'calls': {}},
+    'phase: a clean helper phase': {'result': {'type': 'tuple', 'value': [['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/h\' \'dir\' \'/h/a\'', 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/h\' \'close-children\' \'/h/a\''], '']}, 'calls': {'_is_boundary_line': 2, '_outside_quotes': 2}},
+    'phase: a deploy inside a helper fence': {'result': {'type': 'tuple', 'value': [[], "the repository boundary phase of this packet contains a line that is not part of one: 'sudo systemctl restart board'"]}, 'calls': {'_is_boundary_line': 2, '_outside_quotes': 1}},
+    'phase: a second command riding on a helper line': {'result': {'type': 'tuple', 'value': [[], 'the repository boundary phase of this packet contains a line that is not part of one: \'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \\\'--root\\\' \\\'/h\\\' \\\'dir\\\' \\\'/h/a\\\'; curl evil\'']}, 'calls': {'_is_boundary_line': 1, '_outside_quotes': 1}},
+    'phase: two fences of helper lines': {'result': {'type': 'tuple', 'value': [['sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \'--root\' \'/h\' \'dir\' \'/h/a\''], '']}, 'calls': {'_is_boundary_line': 1, '_outside_quotes': 1}},
+    'phase: other markers around a helper line': {'result': {'type': 'tuple', 'value': [[], 'this packet has no repository boundary phase in it, so it was generated before that phase existed']}, 'calls': {}},
+    'phase: the retired shapes rebound on project_provision': {'result': {'type': 'tuple', 'value': [[], 'the repository boundary phase of this packet contains a line that is not part of one: "sudo install -d \'/a\'"']}, 'calls': {'_is_boundary_line': 1}},
 }
 REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- its package, nothing else.
@@ -147,12 +159,18 @@ PACKET_FILES = {'default': 10, 'shaped': 10, 'lean': 10, 'roles': 10}
 # `project_provision`'s helpers (recorded there and passed through). Lines and packets are synthetic; one case takes the
 # phase of the operator script `project_provision` renders for a synthetic plan, with TICKET_BOARD_PYTHON pinned so no
 # host path is checked. A case may rebind a `project_provision` name to show it is read there when the function runs.
+HELPER = 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" '
 LINES = ["fi", "  fi  ", "# a comment", "#no space", "if getent group 'p472' >/dev/null 2>&1; then", "if ! getent group 'p472-repo' >/dev/null 2>&1; then",
          "if [ -d '/p472/repo' ]; then", "if [ -d /p472/repo ]; then", "if getent group p472 >/dev/null 2>&1; then",
          "sudo install -d -m 0750 '/p472/repo'", "sudo setfacl -R -m 'g:p472:rwX' '/p472/repo'", "sudo find '/p472/repo' -type d -exec true {} +",
          "sudo groupadd -r 'p472-repo'", "sudo gpasswd -a 'p472' 'p472-repo' >/dev/null", "sudo gpasswd -a 'p472' 'p472-repo' >/dev/null 2>&1",
          "sudo gpasswd -a 'p472' 'p472-repo' > /tmp/x", "sudo install -d '/p472'; rm -rf /", "sudo install -d '/p472' && reboot", "sudo install -d $(evil)",
-         "sudo install -d '/p472;ok'", "sudo systemctl restart x", "sudo install -d 'unbalanced", "sudo chown x /p472", "then", "else"]
+         "sudo install -d '/p472;ok'", "sudo systemctl restart x", "sudo install -d 'unbalanced", "sudo chown x /p472", "then", "else",
+         # SYRD-605: what a path change in the phase is now -- the no-follow helper -- and the same smuggling on it.
+         HELPER + "'--root' '/p472' 'dir' '--mode' '0750' '--owner' 'p472' '--group' 'p472' '/p472/repo'",
+         HELPER + "'--root' '/p472' 'acl' '--modify' 'g:p472:rwX' '--recursive' '/p472/repo'",
+         HELPER + "'--root' '/p472' 'dir' '/p472'; rm -rf /", HELPER + "'--root' '/p472' 'dir' '/p472' && reboot",
+         HELPER + "'--root' $(evil) 'dir'", HELPER.replace('"$switchyard_tenant_paths"', "$switchyard_tenant_paths") + "'--root' '/p472' 'dir'"]
 QUOTING = ["sudo install -d /p472", "sudo setfacl -m 'g:x:rwx' '/p472;x'", "echo 'a' ; rm", "say \"it's\" > out", "unbalanced 'quote", 'a "b\'c" d', "x `y`", "$(z)"]
 PHASES = {
     "flat": ["sudo install -d '/a'", "sudo groupadd -r 'g'"],
@@ -173,6 +191,12 @@ PACKETS = {
     "an empty fence": f"{B}\n{E}\n",
     "two fences": f"{B}\nsudo install -d '/a'\n{E}\n{B}\nsudo reboot\n{E}\n",
     "other markers": "# >>> p472\nsudo install -d '/a'\n# <<< p472\n",
+    # SYRD-605: the same refusals for a phase of helper lines, which is what a current packet carries.
+    "a clean helper phase": f"#!/bin/sh\necho before\n{B}\n{HELPER}'--root' '/h' 'dir' '/h/a'\n\n{HELPER}'--root' '/h' 'close-children' '/h/a'\n{E}\necho after\n",
+    "a deploy inside a helper fence": f"{B}\n{HELPER}'--root' '/h' 'dir' '/h/a'\nsudo systemctl restart board\n{E}\n",
+    "a second command riding on a helper line": f"{B}\n{HELPER}'--root' '/h' 'dir' '/h/a'; curl evil\n{E}\n",
+    "two fences of helper lines": f"{B}\n{HELPER}'--root' '/h' 'dir' '/h/a'\n{E}\n{B}\nsudo reboot\n{E}\n",
+    "other markers around a helper line": f"# >>> p472\n{HELPER}'--root' '/h' 'dir' '/h/a'\n# <<< p472\n",
 }
 CASES = {
     **{f"outside quotes: {line!r}": {"call": "_outside_quotes", "args": [line]} for line in QUOTING},
@@ -182,21 +206,24 @@ CASES = {
                                                                         "rebind": {"REPOSITORY_BOUNDARY_ALLOWED": ("sudo systemctl ",)}},
     "boundary line: the guards rebound on project_provision": {"call": "_is_boundary_line", "args": ["if true; then"], "rebind": {"REPOSITORY_BOUNDARY_GUARDS": "true"}},
     "boundary line: a guard is matched from the start of the line": {"call": "_is_boundary_line", "args": ["if true; then"], "rebind": {"REPOSITORY_BOUNDARY_GUARDS": "unanchored"}},
-    "boundary line: the metacharacters rebound on project_provision": {"call": "_is_boundary_line", "args": ["sudo install -d '/p472' && reboot"],
+    "boundary line: the metacharacters rebound on project_provision": {"call": "_is_boundary_line", "args": [HELPER + "'--root' '/p472' 'dir' '/p472' && reboot"],
                                                                        "rebind": {"_SHELL_METACHARACTERS": "#"}},
-    "boundary line: the quoting rebound on project_provision": {"call": "_is_boundary_line", "args": ["sudo install -d '/p472'"], "rebind": {"_outside_quotes": True}},
+    "boundary line: the quoting rebound on project_provision": {"call": "_is_boundary_line", "args": [HELPER + "'--root' '/p472' 'dir' '/p472'"], "rebind": {"_outside_quotes": True}},
     **{f"statements: {label}": {"call": "repository_boundary_statements", "args": [phase]} for label, phase in PHASES.items()},
     **{f"phase: {label}": {"call": "repository_boundary_phase", "args": [packet]} for label, packet in PACKETS.items()},
-    "phase: the markers rebound on project_provision": {"call": "repository_boundary_phase", "args": [PACKETS["other markers"]],
+    "phase: the markers rebound on project_provision": {"call": "repository_boundary_phase", "args": [PACKETS["other markers around a helper line"]],
                                                         "rebind": {"REPOSITORY_BOUNDARY_BEGIN": "# >>> p472", "REPOSITORY_BOUNDARY_END": "# <<< p472"}},
-    "phase: the line check rebound on project_provision": {"call": "repository_boundary_phase", "args": [PACKETS["a deploy inside the fence"]], "rebind": {"_is_boundary_line": True}},
+    "phase: the line check rebound on project_provision": {"call": "repository_boundary_phase", "args": [PACKETS["a deploy inside a helper fence"]], "rebind": {"_is_boundary_line": True}},
+    "phase: the retired shapes rebound on project_provision": {"call": "repository_boundary_phase", "args": [PACKETS["a clean phase"]],
+                                                               "rebind": {"REPOSITORY_BOUNDARY_RETIRED": ()}},
     "phase: the operator script's own": {"call": "repository_boundary_phase", "operator": True},
     "statements: the operator script's own phase": {"call": "repository_boundary_statements", "operator": True},
     "constants": {"call": None},
 }
 FUNCTIONS = ("_outside_quotes", "_is_boundary_line", "repository_boundary_statements", "repository_boundary_phase")
 PASSED = ("_outside_quotes", "_is_boundary_line")
-REBINDABLE = ("REPOSITORY_BOUNDARY_BEGIN", "REPOSITORY_BOUNDARY_END", "REPOSITORY_BOUNDARY_ALLOWED", "REPOSITORY_BOUNDARY_GUARDS", "_SHELL_METACHARACTERS")
+REBINDABLE = ("REPOSITORY_BOUNDARY_BEGIN", "REPOSITORY_BOUNDARY_END", "REPOSITORY_BOUNDARY_ALLOWED", "REPOSITORY_BOUNDARY_RETIRED", "REPOSITORY_BOUNDARY_GUARDS",
+              "_SHELL_METACHARACTERS")
 
 
 def run_case(t, holder, spec, reached):
@@ -339,7 +366,7 @@ def test_the_guard_itself_refuses_a_spawn_an_exec_a_lookup_and_a_connection() ->
 #: What the four read on project_provision when they run: only each other and the slice's own constants -- nothing it keeps.
 KEPT = ()
 #: The six constants, as the baseline wrote them: (annotation, value). Measured on the baseline, not typed.
-CONSTANT_TEXT = {'REPOSITORY_BOUNDARY_BEGIN': (None, "'# >>> switchyard repository boundary'"), 'REPOSITORY_BOUNDARY_END': (None, "'# <<< switchyard repository boundary'"), 'REPOSITORY_BOUNDARY_ALLOWED': (None, "('sudo install -d ', 'sudo setfacl ', 'sudo find ', 'sudo groupadd ', 'sudo gpasswd ')"), '_QUOTED': (None, '\'(?:\\\'[^\\\']*\\\'|\\\\"\\\'\\\\")+\''), 'REPOSITORY_BOUNDARY_GUARDS': (None, "(re.compile(f'^if (?:! )?getent group {_QUOTED} >/dev/null 2>&1; then$'), re.compile(f'^if \\\\[ -d {_QUOTED} \\\\]; then$'))"), '_SHELL_METACHARACTERS': (None, "';&|`$<>()\\n'")}
+CONSTANT_TEXT = {'REPOSITORY_BOUNDARY_BEGIN': (None, "'# >>> switchyard repository boundary'"), 'REPOSITORY_BOUNDARY_END': (None, "'# <<< switchyard repository boundary'"), 'REPOSITORY_BOUNDARY_ALLOWED': (None, '(\'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" \', \'sudo groupadd \', \'sudo gpasswd \')'), 'REPOSITORY_BOUNDARY_RETIRED': (None, "('sudo install -d ', 'sudo setfacl ', 'sudo find ')"), '_QUOTED': (None, '\'(?:\\\'[^\\\']*\\\'|\\\\"\\\'\\\\")+\''), 'REPOSITORY_BOUNDARY_GUARDS': (None, "(re.compile(f'^if (?:! )?getent group {_QUOTED} >/dev/null 2>&1; then$'),)"), '_SHELL_METACHARACTERS': (None, "';&|`$<>()\\n'")}
 #: The call-time import every function that reads project_provision starts with, with the direct-script fallback.
 CALL_TIME_IMPORT = ("try:\n    from . import project_provision as provision\n"
                     "except ImportError:\n    import project_provision as provision")
@@ -498,11 +525,11 @@ def test_the_seams_read_through_project_provision_and_nothing_bound() -> None:
     check(top == ["from __future__ import annotations", "import re"]
           and not [n for n in tree.body if isinstance(n, (ast.If, ast.Try, ast.ClassDef))], f"the standard library only, at load: {top}")
     consts = {top_name(n): (ast.unparse(n.annotation) if isinstance(n, ast.AnnAssign) else None, ast.unparse(n.value)) for n in tree.body if isinstance(n, (ast.Assign, ast.AnnAssign))}
-    check(consts == CONSTANT_TEXT, f"the six constants are the baseline's: {consts}")
+    check(consts == CONSTANT_TEXT, f"the seven constants: the baseline's, with SYRD-605's helper prefix, retired shapes and one guard: {consts}")
     defaults = {n.name: [ast.unparse(d) for d in n.args.defaults + [d for d in n.args.kw_defaults if d is not None]] for n in tree.body if isinstance(n, ast.FunctionDef)}
     check(defaults == DEFAULTS, f"the defaults are the baseline's: {defaults}")
     names = [top_name(n) for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef, ast.Assign, ast.AnnAssign))]
-    check(names == list(MOVED), f"the ten, in project_provision's order, and nothing else: {names}")
+    check(names == list(MOVED), f"the eleven, in project_provision's order, and nothing else: {names}")
 
 
 def test_project_provision_reexports_them_and_its_readers_reach_them_there() -> None:
@@ -611,11 +638,16 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and value("outside quotes: \"unbalanced 'quote\"") == ";&|`$<>()\n" and value("outside quotes: the metacharacters rebound on project_provision") == "#",
           "outside quotes: what the shell reads as syntax, quoted text dropped; an unbalanced quote is every metacharacter -- read through project_provision")
     accepted = [line for line in LINES if value(f"boundary line: {line!r}") is True]
+    # SYRD-605: a path change by path -- install -d, setfacl, find, and the `[ -d ]` guard around them -- is no longer a boundary
+    # line; the helper is, and the same smuggling on it is refused.
+    retired = ["if [ -d '/p472/repo' ]; then", "sudo install -d -m 0750 '/p472/repo'", "sudo setfacl -R -m 'g:p472:rwX' '/p472/repo'",
+               "sudo find '/p472/repo' -type d -exec true {} +", "sudo install -d '/p472;ok'"]
     refused = ["#no space", "if [ -d /p472/repo ]; then", "if getent group p472 >/dev/null 2>&1; then", "sudo gpasswd -a 'p472' 'p472-repo' > /tmp/x",
                "sudo install -d '/p472'; rm -rf /", "sudo install -d '/p472' && reboot", "sudo install -d $(evil)", "sudo systemctl restart x",
-               "sudo install -d 'unbalanced", "sudo chown x /p472", "then", "else"]
-    check(accepted == [line for line in LINES if line not in refused] and len(accepted) == len(LINES) - len(refused) == 13,
-          f"a boundary line: fi, a comment, a whole quoted guard, or an allowed command with no metacharacter outside quotes but its one /dev/null: {accepted}")
+               "sudo install -d 'unbalanced", "sudo chown x /p472", "then", "else", *retired, *LINES[-4:]]
+    check(accepted == [line for line in LINES if line not in refused] and len(accepted) == len(LINES) - len(refused) == 10
+          and all(line.startswith(HELPER) for line in accepted[-2:]),
+          f"a boundary line: fi, a comment, a whole quoted getent guard, a group command, or the helper, with no metacharacter outside quotes but gpasswd's /dev/null: {accepted}")
     check(value("boundary line: the allowed prefixes rebound on project_provision") is True and value("boundary line: the guards rebound on project_provision") is True
           and value("boundary line: the metacharacters rebound on project_provision") is True and value("boundary line: the quoting rebound on project_provision") is False
           and value("boundary line: a guard is matched from the start of the line") is False,
@@ -625,21 +657,27 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and value("statements: empty") == [],
           "the statements: a guard and its body to the matching fi are one statement, nested guards included; an unclosed one is kept whole")
     no_phase = value("phase: no fence")[1]
+    helper_a = HELPER + "'--root' '/h' 'dir' '/h/a'"
+    stale = lambda label: value(label)[0] == [] and "generated before those changes went through the no-follow helper" in value(label)[1]
     check(no_phase.startswith("this packet has no repository boundary phase") and value("phase: the end before the begin")[1] == no_phase
           and value("phase: only a begin")[1] == no_phase and value("phase: other markers")[1] == no_phase
-          and value("phase: a clean phase") == [["sudo install -d '/a'", "if [ -d '/a' ]; then", "sudo find '/a'", "fi"], ""]
-          and value("phase: a deploy inside the fence")[0] == [] and "sudo systemctl restart board" in value("phase: a deploy inside the fence")[1]
-          and value("phase: a second command riding along")[0] == [] and value("phase: an empty fence") == [[], ""]
-          and value("phase: two fences") == [["sudo install -d '/a'"], ""],
-          "the phase: the non-blank lines between the first begin and the next end, every one a boundary line -- else none, and why")
-    check(value("phase: the markers rebound on project_provision") == [["sudo install -d '/a'"], ""]
-          and value("phase: the line check rebound on project_provision")[0] == ["sudo install -d '/a'", "sudo systemctl restart board"],
-          "the markers and the line check are read through project_provision when the phase is lifted")
+          and all(stale(f"phase: {label}") for label in ("a clean phase", "a deploy inside the fence", "a second command riding along", "two fences"))
+          and value("phase: a clean helper phase") == [[helper_a, HELPER + "'--root' '/h' 'close-children' '/h/a'"], ""]
+          and value("phase: a deploy inside a helper fence")[0] == [] and "sudo systemctl restart board" in value("phase: a deploy inside a helper fence")[1]
+          and value("phase: a second command riding on a helper line")[0] == [] and value("phase: an empty fence") == [[], ""]
+          and value("phase: two fences of helper lines") == [[helper_a], ""],
+          "the phase: the non-blank lines between the first begin and the next end, every one a boundary line -- else none, and why; "
+          "a phase that changes paths by path is stale and refused as such")
+    check(value("phase: the markers rebound on project_provision") == [[helper_a], ""]
+          and value("phase: the line check rebound on project_provision")[0] == [helper_a, "sudo systemctl restart board"]
+          and value("phase: the retired shapes rebound on project_provision")[0] == []
+          and "not part of one" in value("phase: the retired shapes rebound on project_provision")[1],
+          "the markers, the line check and the retired shapes are read through project_provision when the phase is lifted")
     own = value("phase: the operator script's own")
     check(isinstance(own, list) and own[1] == "" and len(own[0]) > 0 and calls("phase: the operator script's own")["_is_boundary_line"] == len(own[0]),
           "the operator script project_provision renders carries a phase the reader lifts and accepts, every line checked")
     check(value("constants")[:2] == ["# >>> switchyard repository boundary", "# <<< switchyard repository boundary"]
-          and len(value("constants")[2]) == 5 and all(p.startswith("sudo ") and p.endswith(" ") for p in value("constants")[2]) and value("constants")[4] == ";&|`$<>()\n",
+          and value("constants")[2] == [HELPER, "sudo groupadd ", "sudo gpasswd "] and len(value("constants")[3]) == 1 and value("constants")[4] == ";&|`$<>()\n",
           "the fence, the allowed prefixes and the metacharacters")
 
 

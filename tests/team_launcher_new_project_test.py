@@ -962,8 +962,10 @@ def test_add_role_prepares_the_new_role_before_it_can_be_started() -> None:
     )
     assert "if ! getent passwd 'otto-perf'" in commands
     assert "sudo gpasswd -a 'otto-perf' 'otto-roles'" in commands
-    # The tree it will work in becomes its own.
-    assert "sudo chown -R 'otto-perf': '/home/otto-agent/otto-worktrees/perf'" in commands
+    # The tree it will work in becomes its own -- through the no-follow helper,
+    # rooted at the owner's home, links changed as links (SYRD-605).
+    assert ("'--root' '/home/otto-agent' 'chown-tree' '--owner' 'otto-perf' '--if-exists' "
+            "'/home/otto-agent/otto-worktrees/perf'") in commands
     # The runtime paths the launcher will hand it.
     assert "/home/otto-perf/.local/state/otto-ticket-board/pane-sessions" in commands
     # Its own tooling, installed as itself.

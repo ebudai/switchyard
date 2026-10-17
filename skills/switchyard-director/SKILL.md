@@ -1,6 +1,6 @@
 ---
 name: switchyard-director
-description: "Director-only overlay on switchyard-board: triage and routing, gate flags, blockers and deliberate holds, runtime role and pane control, commit verification and integration, release and rollback coordination, UAT preparation, notification recovery, and narrated last-resort overrides. Load this ONLY when TICKET_BOARD_CALLER_ROLE is exactly director. In any other role it does not apply: do not follow it and do not answer questions about its controls - say the role check failed and use switchyard-board instead."
+description: "Director-only overlay on switchyard-board: triage and routing, gate flags, blockers and deliberate holds, runtime role and pane control, commit verification and integration, release and rollback coordination, UAT preparation, quota-safe monitoring (yield after routing; no nonstop pane or ticket polling), notification recovery, and narrated last-resort overrides. Load this ONLY when TICKET_BOARD_CALLER_ROLE is exactly director. In any other role it does not apply: do not follow it and do not answer questions about its controls - say the role check failed and use switchyard-board instead."
 ---
 
 # Switchyard director controls
@@ -241,10 +241,62 @@ These reshape the running team rather than a ticket, so they belong to you:
   `hide`, `focus`, `restore`, and `recover` for a worker that died.
 - `switchyard status` and `switchyard validate-models` report what is registered
   and whether configured models resolve, without starting anything.
-- `directorctl capture <target>` reads a pane; it is read-only and is the right
-  way to see what a pane is doing. `directorctl send` types into one - prefer
-  routing the ticket, which notifies without yanking a pane mid-work, and never
-  send into a busy pane.
+- `directorctl capture <target>` reads one pane, read-only, when one of the
+  reasons under "Yield after routing" below applies - never to watch.
+  `directorctl send` types into one - prefer routing the ticket, which notifies
+  without yanking a pane mid-work, and never send into a busy pane.
+
+## Yield after routing: quota-safe monitoring
+
+**After you route work, yield.** Silence from a working role is the normal
+state, not a symptom. The board tells you when something needs you: a
+submission or kick-back, a handoff or `request-dependency`, an `await-role`,
+the one stall escalation per stall (below), a ticket's leftover background
+process, or a request from the user. Wait for those. `ticket-board-read
+director` is the one read that answers "what needs me now".
+
+Your quota is shared operational capacity. Routing, integration and incident
+response all spend it, and every pane capture and ticket read lands in your
+context. Spending it on watching can stop coordination for the whole project
+while every implementer still has capacity to work.
+
+Do not:
+
+- capture panes continuously, or sweep every pane or terminal to see how work
+  is going;
+- re-read a ticket nothing has told you changed;
+- run a tight or open-ended status loop (`watch`, `while true`, a repeated
+  `sleep` and check) to follow progress;
+- leave a background poll running without an explicit deadline;
+- watch panes in place of the notifications and stall escalations. If those
+  failed, that is a defect: file it.
+
+Read **one** pane only for one of these reasons, and name it when you do:
+
+1. **Delivery failure.** A notification or transition should have reached a
+   role and there is concrete evidence it did not (Notification recovery,
+   below).
+2. **Suspected stuck process.** A stall escalation, or a leftover background
+   process the board named, and you need to see that pane to decide the
+   repair.
+3. **An explicit status request** from the user that the board cannot answer.
+   Answer from the board first.
+4. **A bounded incident investigation**, recorded on a ticket.
+
+Read a ticket when a notification, a handoff or a decision of yours needs it,
+not to see whether it moved.
+
+**When repeated observation is genuinely needed, bound it.** Before the first
+check, write down three things, on the ticket when it concerns one:
+
+- the condition you are waiting for;
+- the deadline;
+- the stop rule: stop when the condition holds, when the deadline passes, or
+  when the board reports it first.
+
+Check sparsely, check the one pane or ticket concerned rather than the fleet,
+and then yield again. A background check follows `switchyard-board`'s
+background-command rule: one process, a deadline, and an end.
 
 ## Commit verification and integration
 
@@ -365,7 +417,8 @@ told it.
 
 When a pane did not get told:
 
-1. Read the pane with `directorctl capture` before concluding anything.
+1. Read that one pane with `directorctl capture`, once, before concluding
+   anything. This is the delivery-failure reason above, not licence to watch it.
 2. Check the ticket is where you think it is and assigned to who you think.
 3. `dismiss-notification` clears a stuck or superseded notification; say on the
    ticket which one and why, because dismissing hides evidence.

@@ -364,7 +364,12 @@ pane that was scrolled up still receives and submits the message.
 - **An empty prompt does not mean idle.** A working pane still shows its input line. Read
   the pane's content, don't poke it.
 - **Never Ctrl-C a pane** unless you are certain it is stuck. You will destroy its context.
-- **`capture` is read-only** and is the right way to see what a pane is doing.
+- **`capture` is read-only** and is the right way to see what a pane is doing, when you
+  have a reason to look.
+- **Capture one pane for a reason, never to watch.** Repeated captures, fleet-wide sweeps
+  and status loops spend quota and duplicate what the board already reports. The board
+  reports transitions, handoffs and stalls. The Director guide's **After routing, yield**
+  lists the reasons that justify a capture, and how to bound one.
 
 ---
 

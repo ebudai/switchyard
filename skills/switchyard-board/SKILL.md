@@ -210,6 +210,13 @@ Your CLI's own background-task tools work too, if they tell you when the
 command exits. The board names a ticket's leftover processes to the director
 with their pid, and does not stop them itself.
 
+**Do not poll to watch progress.** A loop that keeps re-reading an unchanged
+ticket, the board, or another role's pane spends your model quota and tells you
+nothing the board will not. The board notifies you when a ticket moves, when a
+handoff names you, and when a stall needs you. Wait for that. When you genuinely
+must check again, name what you are waiting for, set a deadline and a stop rule,
+check the one thing concerned, and stop.
+
 ## Review sign-offs
 
 Review stages are gates, not implementation stages. A reviewer signs off or kicks

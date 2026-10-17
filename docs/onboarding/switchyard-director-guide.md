@@ -247,6 +247,63 @@ get rid of a stale approval: that removes the review itself (SYRD-280, from MEFP
 
 ---
 
+## After routing, yield: quota-safe monitoring
+
+**Silence after routing is normal.** When you have routed work, the next move is the
+worker's, then Audit's, and the board tells you when it is yours again. Workers and Audit
+report by transition; owners who need something raise a handoff or a dependency; the board
+escalates a stalled ticket to you once per stall and names a ticket's leftover background
+processes; the user asks when they want to know. Trust that and wait. `ticket-board-read
+director` answers "what needs me now" in one read.
+
+**Why this is a rule and not a preference.** Your model quota is a shared operational
+resource. Routing, integration and incident response all spend it, and every pane capture
+and ticket read lands in your context. Directors have repeatedly exhausted it by watching
+worker panes and re-reading tickets in a loop while waiting for progress. That buys no
+supervision the board does not already give, and when the quota runs out, coordination
+stops for the whole project while every implementer still has capacity (SYRD-597).
+
+**Prohibited:**
+
+- continuous pane capture, or sweeping every pane or terminal to see how work is going;
+- re-reading a ticket nothing has told you changed;
+- tight or indefinite status loops (`watch`, `while true`, a repeated `sleep` and check)
+  to follow progress;
+- a background poll left running without an explicit deadline;
+- pane watching as a substitute for notifications and stall escalation. If those failed,
+  the failure is a defect: file it, and do not cover it by watching.
+
+**Read one pane, for one of these reasons, and say which:**
+
+1. **A notification-delivery failure.** A transition or notification should have reached a
+   role and there is concrete evidence it did not. "When a pane did not get told" in the
+   Director skill gives the recovery steps.
+2. **A suspected stuck process.** A stall escalation or a named leftover process, where you
+   need to see that pane to choose the repair.
+3. **An explicit status request** from the user that the board cannot answer. Answer from
+   the board first.
+4. **A bounded incident investigation**, recorded on a ticket.
+
+Read a ticket when a notification, a handoff or a decision of yours needs it. Do not read
+it to see whether it moved; the board tells you when it moves.
+
+**When periodic observation is genuinely needed, bound it.** Before the first check, write
+down, on the ticket when it concerns one:
+
+- **the condition** you are waiting for;
+- **the deadline**;
+- **the stop rule**: stop at whichever comes first, the condition holding, the deadline
+  passing, or the board reporting it.
+
+Check sparsely, and check the one pane or ticket concerned rather than the fleet. A
+background check obeys the board skill's background-command rule: one process, a deadline,
+and an end. Then yield again.
+
+This does not change how you reach a role. Route the ticket and let its notification
+deliver; a manual `directorctl send` on top of a transition delivers the same thing twice.
+
+---
+
 ## Setting a role's onboarding prompt
 
 Each role can carry its own onboarding prompt: the remit it is given when its next
@@ -548,3 +605,8 @@ ignore the board.
 **Speculating instead of reading.** When something looks odd, read the pane, read the
 code, run the command. Diagnose from evidence; use traces and metrics to confirm a
 hypothesis, never to form one.
+
+**Watching instead of waiting.** "Something looks odd" is a reason to read once; nothing
+having happened yet is not. Re-capturing panes and re-reading unchanged tickets while
+work is in flight spends the quota coordination runs on. See **After routing, yield**,
+above.

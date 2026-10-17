@@ -117,8 +117,9 @@ def test_the_seams_the_local_imports_and_the_bindings() -> None:
     imports = [ast.unparse(n) for n in command.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     check(imports == ["from scripts import team_launcher as launcher",
                       "from scripts.ticket_board.project_provision import repository_boundary_phase, repository_boundary_statements",
-                      "from scripts.ticket_board.rollout_journal import Attempt, resolve_operator"],
-          f"the call-time import, then both of the command's own imports: {imports}")
+                      "from scripts.ticket_board.rollout_journal import Attempt, resolve_operator",
+                      "from scripts.commit_store_access import OperatorDependency"],
+          f"the call-time import, then the command's own imports, the SYRD-604 dependency marker last: {imports}")
     say = [n for n in ast.walk(command) if isinstance(n, ast.FunctionDef) and n.name == "say"]
     lam = [ast.unparse(n) for n in ast.walk(command) if isinstance(n, ast.Lambda)]
     check(len(say) == 1 and not [n for n in ast.walk(say[0]) if isinstance(n, ast.Attribute) and ast.unparse(n.value) == "launcher"]

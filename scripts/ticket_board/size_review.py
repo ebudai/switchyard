@@ -46,7 +46,8 @@ def _with_repair(app: Any, error: str) -> str:
     if "Permission denied" not in error and "cannot read its trusted commit cache" not in error:
         return error
     return (f"{error}. Repair: pkexec switchyard repair-boundary {getattr(app, 'project', '<project>')} --apply "
-            "grants the board service read access to its commit store")
+            "grants the board service read access to a commit store in the tenant's home, and names the "
+            "grant a store another account owns needs")
 
 
 def _present(reader: commit_cache_reader.CacheReader, ticket_id: str, raw: str, what: str) -> str:

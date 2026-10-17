@@ -136,7 +136,11 @@ def tenant_tree_lines(plan) -> list[str]:
         if line != line.lstrip():
             continue
         stripped = line.strip()
-        if not stripped.startswith(("sudo install -d", "sudo setfacl", "sudo find")):
+        # Every change root makes inside the home is the no-follow helper (SYRD-605);
+        # these are its directory and ACL lines, what `install -d`, `setfacl` and
+        # `find` were. The identity's key modes follow a key this fixture never makes.
+        prefix = 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" '
+        if not stripped.startswith(prefix) or stripped.split("' '", 2)[-1].split("'", 1)[0] not in ("dir", "acl", "close-children"):
             continue
         if home not in stripped:
             continue
@@ -192,8 +196,10 @@ def _snapshot(paths: list[Path]) -> list[str]:
 
 
 def _run(lines: list[str], cwd: Path) -> None:
+    # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+    environment = {**os.environ, "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")}
     for command in lines:
-        done = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
+        done = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True, env=environment)
         assert done.returncode == 0, (command, done.stderr)
 
 
@@ -429,6 +435,12 @@ def test_a_checkout_outside_the_home_is_left_alone() -> None:
     assert in_namespace("outside_home")["mode"] == "0o755"
 
 
+def directory_line(home: str, owner: str, path: str, mode: str = "0750") -> str:
+    """A directory made through the no-follow helper rooted at the home (SYRD-605), spelled out."""
+    words = ("--root", home, "dir", "--mode", mode, "--owner", owner, "--group", owner, path)
+    return 'sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ' + " ".join(f"'{w}'" for w in words)
+
+
 def test_every_directory_is_named_rather_than_created_on_the_way_past() -> None:
     """The parent is the half `install -d` would have left at root's umask."""
     commands = tenant_source_confinement_commands(
@@ -437,8 +449,8 @@ def test_every_directory_is_named_rather_than_created_on_the_way_past() -> None:
         checkout="/home/tenant/Projects/demo",
     )
     assert commands == [
-        "sudo install -d -m 0750 -o 'tenant' -g 'tenant' '/home/tenant/Projects'",
-        "sudo install -d -m 0750 -o 'tenant' -g 'tenant' '/home/tenant/Projects/demo'",
+        directory_line("/home/tenant", "tenant", "/home/tenant/Projects"),
+        directory_line("/home/tenant", "tenant", "/home/tenant/Projects/demo"),
     ], commands
     deeper = tenant_source_confinement_commands(
         owner_user="tenant",
@@ -493,7 +505,7 @@ def test_the_tree_is_closed_before_anything_is_granted_a_way_through_the_home() 
     traversal = [
         i
         for i, line in enumerate(lines)
-        if f"setfacl -m u:{SERVICE_UID}:--x '/home/tenant'" in line
+        if f"'acl' '--modify' 'u:{SERVICE_UID}:--x' '/home/tenant'" in line
     ]
     assert confine and traversal, lines
     assert max(confine) < min(traversal), (confine, traversal)
@@ -531,10 +543,10 @@ def test_the_fresh_checkout_is_created_closed() -> None:
         Path("/home/tenant/Projects/demo"),
         owner_home=Path("/home/tenant"),
     )
-    assert commands == [
-        ["install", "-d", "-m", TENANT_SOURCE_MODE, "-o", "tenant", "-g", "tenant", "/home/tenant/Projects"],
-        ["install", "-d", "-m", TENANT_SOURCE_MODE, "-o", "tenant", "-g", "tenant", "/home/tenant/Projects/demo"],
-    ], commands
+    # Inside the home, through the no-follow helper of this release (SYRD-605).
+    helper = [sys.executable, "-I", str(ROOT / "scripts" / "tenant_paths.py"), "--root", "/home/tenant", "dir",
+              "--mode", TENANT_SOURCE_MODE, "--owner", "tenant", "--group", "tenant"]
+    assert commands == [[*helper, "/home/tenant/Projects"], [*helper, "/home/tenant/Projects/demo"]], commands
     # Without a home to measure against, the leaf is still created closed.
     leaf_only = team_launcher._owner_project_install_commands("tenant", Path("/srv/demo"))
     assert leaf_only == [
@@ -590,17 +602,13 @@ def live_plan(**overrides):
 def test_the_live_packet_confines_the_checkout_and_never_the_release() -> None:
     """The rendered packet for the tenant this regression is about."""
     packet = render_operator_commands(live_plan())
-    confine_projects = (
-        f"sudo install -d -m 0750 -o '{LIVE_TENANT}' -g '{LIVE_TENANT}' '{LIVE_HOME}/Projects'"
-    )
-    confine_checkout = (
-        f"sudo install -d -m 0750 -o '{LIVE_TENANT}' -g '{LIVE_TENANT}' '{LIVE_CHECKOUT}'"
-    )
+    confine_projects = directory_line(LIVE_HOME, LIVE_TENANT, f"{LIVE_HOME}/Projects")
+    confine_checkout = directory_line(LIVE_HOME, LIVE_TENANT, LIVE_CHECKOUT)
     assert confine_projects in packet, packet[:400]
     assert confine_checkout in packet, packet[:400]
     # The release is what the artifacts are rendered FROM. It is root's, it is
     # outside every home, and nothing here may re-mode or re-own it.
-    assert f"-o '{LIVE_TENANT}' -g '{LIVE_TENANT}' '{RELEASE}'" not in packet, packet
+    assert f"'--owner' '{LIVE_TENANT}' '--group' '{LIVE_TENANT}' '{RELEASE}'" not in packet, packet
     assert "is not this tenant's tree to confine" not in packet, packet
     assert "does not record where this tenant's checkout is" not in packet, packet
 
@@ -609,7 +617,7 @@ def test_the_live_packet_confines_the_checkout_and_never_the_release() -> None:
     lines = packet.splitlines()
     traversal = next(
         index for index, line in enumerate(lines)
-        if "setfacl" in line and "boardsvc:--x" in line and f"'{LIVE_HOME}'" in line
+        if "'acl'" in line and "boardsvc:--x" in line and line.rstrip().endswith(f"'{LIVE_HOME}'")
     )
     confinement = max(index for index, line in enumerate(lines) if line.strip() == confine_checkout)
     assert confinement < traversal, (confinement, traversal, lines[confinement:traversal + 1])
@@ -655,11 +663,11 @@ def test_a_plan_with_no_checkout_recorded_confines_nothing_and_says_so() -> None
     packet = render_operator_commands(live_plan(project_repository=None))
     assert "does not record where this tenant's checkout is" in packet, packet
     assert "resume-provision" in packet and "upgrade" in packet, packet
-    assert f"-g '{LIVE_TENANT}' '{LIVE_CHECKOUT}'" not in packet, packet
+    assert f"'--group' '{LIVE_TENANT}' '{LIVE_CHECKOUT}'" not in packet, packet
     assert str(RELEASE) not in [
         line.strip().split()[-1].strip("'")
         for line in packet.splitlines()
-        if line.strip().startswith("sudo install -d")
+        if line.strip().startswith(('sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ', "sudo install -d"))
     ], packet
 
 

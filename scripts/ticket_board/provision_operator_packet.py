@@ -26,6 +26,7 @@ import os
 from typing import Sequence
 
 
+
 #: How the operator packet names a file that ships beside it.
 #:
 #: The packet is installed root-owned and run by absolute path -- from a
@@ -110,6 +111,10 @@ def owned_directory_command(plan: ProjectBoardProvision, dirs: Sequence[str], *,
     unique_dirs = provision._dedupe(tuple(dirs))
     if not unique_dirs:
         return ""
+    # Inside the owner home these are the tenant's directories, so root makes
+    # them through the no-follow helper (SYRD-605). Anywhere else is root's.
+    if all(provision._is_within(plan.owner_home, value) for value in unique_dirs):
+        return provision.directory_line(plan.owner_home, mode, plan.owner_user, plan.owner_user, *unique_dirs)
     quoted_dirs = " ".join(provision.shell_quote(value) for value in unique_dirs)
     return (
         f"sudo install -d -m {mode} -o {provision.shell_quote(plan.owner_user)} "
@@ -122,6 +127,24 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
         from . import project_provision as provision
     except ImportError:  # pragma: no cover - supports direct script execution
         import project_provision as provision
+
+    def service_grant(spec: str, paths: Sequence[str], *, recursive: bool = False,
+                      directories_only: bool = False) -> str:
+        """An ACL grant to the board service: through the no-follow helper inside the owner home (SYRD-605),
+        and as root's own command for a path outside it."""
+        inside = [path for path in paths if provision._is_within(plan.owner_home, path)]
+        outside = [path for path in paths if path not in inside]
+        lines = []
+        if inside:
+            lines.append(provision.acl_line(plan.owner_home, spec, *inside, recursive=recursive,
+                                            directories_only=directories_only))
+        if outside:
+            quoted = " ".join(provision.shell_quote(path) for path in outside)
+            if directories_only:
+                lines.append(f"sudo find {quoted} -type d -exec setfacl -m {spec} {{}} +")
+            else:
+                lines.append(f"sudo setfacl {'-R ' if recursive else ''}-m {spec} {quoted}")
+        return "\n".join(lines)
 
     q_asset = provision.shell_quote(plan.asset_dir)
     q_frame = provision.shell_quote(plan.frame_dir)
@@ -187,6 +210,11 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_listener_unit = provision.shell_quote(
         f"{plan.owner_home}/.config/systemd/user/{plan.listener_unit}"
     )
+    install_listener_unit = provision.install_line(
+        plan.owner_home, "0644", plan.owner_user, plan.owner_user,
+        provision.packet_companion(plan.listener_unit),
+        f"{plan.owner_home}/.config/systemd/user/{plan.listener_unit}",
+    )
     q_owner_home = provision.shell_quote(plan.owner_home)
     q_hook_installer = provision.shell_quote(f"{plan.board_current}/scripts/ticket-board-install-pane-hooks")
     q_hook_source = provision.shell_quote(f"{plan.board_current}/scripts/ticket-board-pane-idle-hook")
@@ -226,22 +254,23 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
             line
             for line in (
                 install_asset_frame_parent,
-                f"sudo install -d -m 0775 -o {provision.shell_quote(plan.owner_user)} -g {provision.shell_quote(plan.owner_user)} {q_asset}",
+                provision.owned_directory_command(plan, (plan.asset_dir,), mode="0775"),
                 f"sudo install -d -m 1777 -o root -g root {q_frame}",
             )
             if line
         )
-        grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset}"
+        grant_asset_frame = service_grant(f"u:{plan.service_user}:rwx", (plan.asset_dir,), recursive=True)
     else:
         install_asset_frame = "\n".join(
             line
             for line in (
                 install_asset_frame_parent,
-                f"sudo install -d -m 0775 -o {provision.shell_quote(plan.owner_user)} -g {provision.shell_quote(plan.owner_user)} {q_asset} {q_frame}",
+                provision.owned_directory_command(plan, (plan.asset_dir, plan.frame_dir), mode="0775"),
             )
             if line
         )
-        grant_asset_frame = f"sudo setfacl -R -m u:{plan.service_user}:rwx {q_asset} {q_frame}"
+        grant_asset_frame = service_grant(f"u:{plan.service_user}:rwx", (plan.asset_dir, plan.frame_dir),
+                                          recursive=True)
     install_listener_unit_parent = provision.owned_directory_command(
         plan,
         provision.owned_ancestor_dirs(
@@ -256,21 +285,23 @@ def render_operator_commands(plan: ProjectBoardProvision, *, enable_owner_linger
     q_board_env_dir = provision.shell_quote(f"{plan.owner_home}/.config/{plan.project}")
     install_board_env_parent = "\n".join(
         [
-            f"sudo install -d -m 0755 -o {q_owner_user} -g {q_owner_user} {q_owner_config_dir}",
-            f"sudo install -d -m 0700 -o {q_owner_user} -g {q_owner_user} {q_board_env_dir}",
+            provision.directory_line(plan.owner_home, "0755", plan.owner_user, plan.owner_user, f"{plan.owner_home}/.config"),
+            provision.directory_line(plan.owner_home, "0700", plan.owner_user, plan.owner_user,
+                           f"{plan.owner_home}/.config/{plan.project}"),
         ]
     )
     if plan.board_service_traversal:
         grant_board_root = "\n".join(
             [
-                f"sudo setfacl -R -m u:{plan.service_user}:rx {q_board_root}",
-                f"sudo find {q_board_root} -type d -exec setfacl -m d:u:{plan.service_user}:rx {{}} +",
+                service_grant(f"u:{plan.service_user}:rx", (plan.board_root,), recursive=True),
+                service_grant(f"d:u:{plan.service_user}:rx", (plan.board_root,), recursive=True,
+                              directories_only=True),
             ]
         )
         grant_home_traversal = "\n".join(
             [
-                f"sudo setfacl -m u:{plan.service_user}:--x {provision.shell_quote(plan.owner_home)}",
-                f"sudo setfacl -m u:{plan.service_user}:--x {provision.shell_quote(plan.owner_home + '/.claude')}",
+                provision.acl_line(plan.owner_home, f"u:{plan.service_user}:--x", plan.owner_home),
+                provision.acl_line(plan.owner_home, f"u:{plan.service_user}:--x", plan.owner_home + "/.claude"),
             ]
         )
         effective_grant_asset_frame = grant_asset_frame
@@ -404,6 +435,9 @@ set -euo pipefail
 
 # Review generated artifacts first. These commands require host privileges.
 provision_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+# Every change root makes to a path inside a tenant's home goes through this
+# helper, which never follows a link (SYRD-605).
+{provision.tenant_paths_definition(str(plan.source_repo))}
 system_unit_candidate="$provision_dir/{plan.board_unit}"
 canary_unit_candidate="$provision_dir/{plan.canary_unit}"
 # The deployer runs as the project account and has to read the reviewed unit to
@@ -458,7 +492,7 @@ sudo env TICKET_BOARD_ADMIN_DATABASE_URL={provision.shell_quote(plan.admin_datab
 sudo systemctl daemon-reload
 sudo systemctl enable --now {plan.board_unit}
 {install_listener_unit_parent}
-sudo install -m 0644 -o {q_owner_user} -g {q_owner_user} {provision.packet_companion(plan.listener_unit)} {q_listener_unit}
+{install_listener_unit}
 {owner_linger_step}
 owner_uid="$(id -u {q_owner_user})"
 owner_runtime_dir="/run/user/$owner_uid"

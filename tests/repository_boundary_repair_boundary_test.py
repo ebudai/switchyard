@@ -118,7 +118,8 @@ def test_the_seams_the_local_imports_and_the_bindings() -> None:
     check(imports == ["from scripts import team_launcher as launcher",
                       "from scripts.ticket_board.project_provision import repository_boundary_phase, repository_boundary_statements",
                       "from scripts.ticket_board.rollout_journal import Attempt, resolve_operator",
-                      "from scripts.commit_store_access import OperatorDependency, linked_phase_paths"],
+                      "from scripts.commit_store_access import OperatorDependency",
+                      "from scripts.ticket_board.provision_tenant_paths import TENANT_PATHS_PREFIX"],
           f"the call-time import, then the command's own imports, the SYRD-604 dependency marker last: {imports}")
     say = [n for n in ast.walk(command) if isinstance(n, ast.FunctionDef) and n.name == "say"]
     lam = [ast.unparse(n) for n in ast.walk(command) if isinstance(n, ast.Lambda)]
@@ -295,6 +296,8 @@ def test_a_dry_run_is_shown_and_journalled() -> None:
         check(fx.run(apply=False) == 0 and "run" not in fx.kinds(), "nothing runs")
         expected = [f"switchyard: {SLUG}'s repository boundary is open:", "    x is open",
                     f"switchyard: the repair, taken from {fx.dir / 'operator-commands.sh'}:", "    sudo setfacl a", "    sudo setfacl b",
+                    # SYRD-605: the preview of every helper line; these two are not helper lines, so it names nothing.
+                    "switchyard: what the repair would change:",
                     f"switchyard: dry run; nothing was changed. Apply it with `pkexec switchyard repair-boundary {SLUG} --apply`."]
         check(fx.said == expected and fx.log[-3] == ("journal-open",) and fx.log[-2] == ("journal-write", "stdout", "\n".join(expected) + "\n")
               and fx.log[-1] == ("journal-close", "completed", 0, "dry-run") and fx.journal.operator is OPERATOR,

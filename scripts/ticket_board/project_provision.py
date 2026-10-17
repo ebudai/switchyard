@@ -38,6 +38,10 @@ try:
         publication_uses_github,
         resolve_owner_github_identity,
     )
+    from .provision_tenant_paths import (  # SYRD-605: the no-follow helper's line builders
+        TENANT_PATHS_PREFIX, acl_line, attrs_line, chown_tree_line, close_children_line, directory_line, install_line,
+        tenant_paths_definition,
+    )
     from .provision_path_confinement import (
         INHERITED_WORKTREE_CLOSURE,
         INTERIOR_DIRECTORY_MODE,
@@ -170,16 +174,9 @@ try:
         tenant_primary_group,
     )
     from .provision_repository_boundary import (
-        REPOSITORY_BOUNDARY_ALLOWED,
-        REPOSITORY_BOUNDARY_BEGIN,
-        REPOSITORY_BOUNDARY_END,
-        REPOSITORY_BOUNDARY_GUARDS,
-        _QUOTED,
-        _SHELL_METACHARACTERS,
-        _is_boundary_line,
-        _outside_quotes,
-        repository_boundary_phase,
-        repository_boundary_statements,
+        REPOSITORY_BOUNDARY_ALLOWED, REPOSITORY_BOUNDARY_BEGIN, REPOSITORY_BOUNDARY_END, REPOSITORY_BOUNDARY_GUARDS,
+        REPOSITORY_BOUNDARY_RETIRED, _QUOTED, _SHELL_METACHARACTERS, _is_boundary_line, _outside_quotes,
+        repository_boundary_phase, repository_boundary_statements,
     )
     from .provision_root_trust import (
         acl_write_grants,
@@ -214,6 +211,10 @@ except ImportError:  # pragma: no cover - supports direct script execution
         publication_remote_host,
         publication_uses_github,
         resolve_owner_github_identity,
+    )
+    from provision_tenant_paths import (  # SYRD-605: the no-follow helper's line builders
+        TENANT_PATHS_PREFIX, acl_line, attrs_line, chown_tree_line, close_children_line, directory_line, install_line,
+        tenant_paths_definition,
     )
     from provision_path_confinement import (
         INHERITED_WORKTREE_CLOSURE,
@@ -347,16 +348,9 @@ except ImportError:  # pragma: no cover - supports direct script execution
         tenant_primary_group,
     )
     from provision_repository_boundary import (
-        REPOSITORY_BOUNDARY_ALLOWED,
-        REPOSITORY_BOUNDARY_BEGIN,
-        REPOSITORY_BOUNDARY_END,
-        REPOSITORY_BOUNDARY_GUARDS,
-        _QUOTED,
-        _SHELL_METACHARACTERS,
-        _is_boundary_line,
-        _outside_quotes,
-        repository_boundary_phase,
-        repository_boundary_statements,
+        REPOSITORY_BOUNDARY_ALLOWED, REPOSITORY_BOUNDARY_BEGIN, REPOSITORY_BOUNDARY_END, REPOSITORY_BOUNDARY_GUARDS,
+        REPOSITORY_BOUNDARY_RETIRED, _QUOTED, _SHELL_METACHARACTERS, _is_boundary_line, _outside_quotes,
+        repository_boundary_phase, repository_boundary_statements,
     )
     from provision_root_trust import (
         acl_write_grants,

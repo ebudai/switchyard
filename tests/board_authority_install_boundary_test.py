@@ -50,7 +50,8 @@ CHECKS = 0
 MOVED = ("install_board_authority_files", "install_board_authority")
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, the sibling included.
 SEAMS = {
-    'install_board_authority_files': {'authority_unit_installs': 1, 'current_user_name': 1, 'privileged_provision_dir': 1, 'switchyard_privileged_provision_root': 1},
+    # SYRD-605: the owner's home, to put the listener unit there through the no-follow helper.
+    'install_board_authority_files': {'authority_unit_installs': 1, 'current_user_name': 1, 'home_dir_for_user': 1, 'privileged_provision_dir': 1, 'switchyard_privileged_provision_root': 1},
     'install_board_authority': {'activate_board_authority': 1, 'install_board_authority_files': 1},
 }
 #: The BASELINE's own behaviour for the cases below (`gold401.py`, run on the baseline launcher under the guard).
@@ -540,6 +541,9 @@ def run(kind: str, *, staged=ALL, failing=(), reload_rc=0, owner="p401-owner", a
                 patched(t, switchyard_privileged_provision_root=seam("switchyard_privileged_provision_root", lambda: log.append(["provision root"]) or provision),
                         privileged_provision_dir=seam("privileged_provision_dir", lambda project, *, root: log.append(["provision dir", project, n(root)]) or (Path(root) / project)),
                         current_user_name=seam("current_user_name", lambda: log.append(["current user"]) or "p401-current"),
+                        # SYRD-605: no home known here, so every unit takes the old path; the in-home
+                        # listener through the no-follow helper is tenant_paths_test's.
+                        home_dir_for_user=seam("home_dir_for_user", lambda user: None),
                         authority_unit_installs=seam("authority_unit_installs", lambda config, *, config_path=None: log.append(["units", config.project, n(config_path)])
                                                      or [(u, Path(d), list(o)) for u, d, o in UNITS]),
                         activate_board_authority=seam("activate_board_authority", lambda config, *, runner, restart, print_func:
@@ -590,7 +594,9 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         check(through == expected, f"{name}: each launcher name read through it exactly as often as before: {through}")
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         first = 1 if ast.get_docstring(node) is not None else 0
-        check(imports == ["from scripts import team_launcher as launcher"] and ast.unparse(node.body[first]) == imports[0],
+        # SYRD-605: and the no-follow helper's argv where the listener unit goes into the owner's home.
+        own = {"install_board_authority_files": ["from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv"]}.get(name, [])
+        check(imports == ["from scripts import team_launcher as launcher", *own] and ast.unparse(node.body[first]) == imports[0],
               f"{name}: the launcher imported once, first thing when it runs: {imports}")
         bare = sorted({x.id for x in ast.walk(node) if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) and x.id in expected})
         check(bare == [], f"{name}: none of them read past it: {bare}")

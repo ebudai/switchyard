@@ -831,9 +831,10 @@ def in_home_repair_cases(root: Path, journal_entries, readiness, repair, identit
         with identity():
             status, said = repair(project, apply=apply)
         joined = "\n".join(said)
-        check(status == 1 and f"{store} is a link (to {victim})" in joined and "Nothing was changed" in joined
+        # The no-follow helper refuses it while previewing, before anything runs (SYRD-605).
+        check(status == 1 and f"{store} is a symbolic link; root does not follow it" in joined and "Nothing was changed" in joined
               and "repository boundary is closed" not in joined, f"linked store, apply={apply}: {joined}")
-        check(outcome()["detail"] == "refused: linked path", f"{outcome()}")
+        check(outcome()["detail"].startswith(f"refused: {store} is a symbolic link"), f"{outcome()}")
     check(snapshot(victim) == untouched and os.stat(victim).st_uid == FOREIGN_UID, "the repair changed the link's target")
 
 

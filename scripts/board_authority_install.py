@@ -75,13 +75,29 @@ def install_board_authority_files(
         if not staged.is_file():
             problems.append(f"{unit} has not been generated under {staged_dir}")
             continue
-        result = runner(
-            ["install", "-D", "-m", "0644", *ownership, str(staged), str(destination)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if result.returncode != 0:
-            problems.append(f"could not install {unit} (exit {result.returncode})")
+        home = launcher.home_dir_for_user(owner)
+        if home is not None and Path(destination).is_relative_to(home):
+            # Into the owner's home -- the listener unit -- so through the
+            # no-follow helper, parents first: `install -D` would follow a
+            # link the owner left anywhere on the way (SYRD-605).
+            from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
+
+            parents = [str(Path(destination).parent)]
+            while Path(parents[-1]).parent != home and Path(parents[-1]).parent.is_relative_to(home):
+                parents.append(str(Path(parents[-1]).parent))
+            steps = [
+                tenant_paths_argv(str(home), "dir", "--mode", "0755", "--owner", owner, "--group", owner,
+                                  *reversed(parents)),
+                tenant_paths_argv(str(home), "install", "--mode", "0644", "--owner", owner, "--group", owner,
+                                  str(staged), str(destination)),
+            ]
+        else:
+            steps = [["install", "-D", "-m", "0644", *ownership, str(staged), str(destination)]]
+        for step in steps:
+            result = runner(step, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode != 0:
+                problems.append(f"could not install {unit} (exit {result.returncode})")
+                break
     if problems:
         return problems
     if runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode != 0:

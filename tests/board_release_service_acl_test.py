@@ -88,7 +88,9 @@ def board_tree_grants(lines: list[str], board_root: str, owner_home: str) -> lis
         if line != line.lstrip():
             continue
         stripped = line.strip()
-        if not stripped.startswith("sudo setfacl") and not stripped.startswith("sudo find"):
+        # The no-follow helper's ACL lines (SYRD-605) -- what `setfacl` and
+        # `find -exec setfacl` were.
+        if not stripped.startswith('sudo /usr/bin/python3 -I "$switchyard_tenant_paths" ') or "' 'acl' '" not in stripped:
             continue
         if board_root not in stripped and f"{owner_home}'" not in stripped and owner_home not in stripped:
             continue
@@ -98,8 +100,10 @@ def board_tree_grants(lines: list[str], board_root: str, owner_home: str) -> lis
 
 
 def run_grants(grants: list[str], *, cwd: Path) -> None:
+    # What the packet defines at its top: the release's no-follow helper (SYRD-605).
+    environment = {**os.environ, "switchyard_tenant_paths": str(ROOT / "scripts" / "tenant_paths.py")}
     for command in grants:
-        done = subprocess.run(command, shell=True, cwd=cwd, text=True, capture_output=True)
+        done = subprocess.run(command, shell=True, cwd=cwd, text=True, capture_output=True, env=environment)
         assert done.returncode == 0, (command, done.stderr)
 
 
@@ -191,9 +195,9 @@ def test_the_packet_grants_the_board_tree_before_it_deploys_into_it() -> None:
         lines = packet_lines(plan)
 
     deploy = line_index(lines, lambda l: "ticket-board-service.sh" in l and l.rstrip().endswith("deploy"))
-    named = line_index(lines, lambda l: f"setfacl -R -m u:{SERVICE}:rx" in l)
+    named = line_index(lines, lambda l: f"'acl' '--modify' 'u:{SERVICE}:rx' '--recursive'" in l)
     default = line_index(lines, lambda l: f"d:u:{SERVICE}:rx" in l)
-    traversal = line_index(lines, lambda l: f"setfacl -m u:{SERVICE}:--x" in l)
+    traversal = line_index(lines, lambda l: f"'acl' '--modify' 'u:{SERVICE}:--x'" in l)
     assert max(named, default, traversal) < deploy, (named, default, traversal, deploy)
     # And the grant is the tenant's board tree, not the tenant's home at large.
     assert plan.board_root in lines[named] and plan.board_root in lines[default]

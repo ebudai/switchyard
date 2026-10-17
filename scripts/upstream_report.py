@@ -188,7 +188,7 @@ def record_upstream_report_link(
         )
         return config, []
     try:
-        raw = launcher._load_json(config_path)
+        raw = launcher.read_owner_json(config.run_as_user or "", config_path)
     except (OSError, json.JSONDecodeError, SystemExit) as exc:
         return config, [f"{config_path} could not be read ({exc})"]
     raw["upstream_report_url"] = wanted_url

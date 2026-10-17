@@ -9,6 +9,13 @@ private (0700) directory (`_ensure_private_dir`), best effort where the mode
 cannot be set. If anything fails before the replace, `_write_json_atomic` removes
 its temporary file; the private writer leaves it.
 
+As root writing for a tenant (`owner_user`, not the caller), neither writer
+touches the path by name (SYRD-608): both publish through
+`owner_files.write_owner_file`, by descriptor from the owner's home, so a link
+the tenant planted at the file or at any directory above it is refused, and so
+is a path outside that home. The private writer then also makes the parent
+0700 on its descriptor rather than by name.
+
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-457). The launcher
 imports this module and re-exports all three, so every module that reads them
 through the launcher still reaches the launcher's names; the private writer
@@ -31,6 +38,11 @@ from typing import Any
 def _write_json_atomic(
     path: Path, payload: dict[str, Any], *, owner_user: str | None = None,
 ) -> None:
+    from scripts import team_launcher as launcher
+
+    if owner_user and launcher.root_writes_for(owner_user):
+        launcher.write_owner_file(owner_user, path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return
     owner = pwd.getpwnam(owner_user) if owner_user and os.geteuid() == 0 else None
     mode = 0o600
     if owner_user and path.exists():
@@ -69,9 +81,13 @@ def _ensure_private_dir(path: Path) -> None:
         pass
 
 
-def _write_private_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _write_private_json_atomic(path: Path, payload: dict[str, Any], *, owner_user: str | None = None) -> None:
     from scripts import team_launcher as launcher
 
+    if owner_user and launcher.root_writes_for(owner_user):
+        launcher.write_owner_file(owner_user, path, json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                                  mode=0o600, parents_mode=0o700, parent_mode=0o700)
+        return
     launcher._ensure_private_dir(path.parent)
     with tempfile.NamedTemporaryFile(
         "w",

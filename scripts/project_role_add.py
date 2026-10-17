@@ -166,7 +166,7 @@ def _update_project_design_artifact_for_role(
 
     artifact_path = config_path.parent.parent / f"{config.project}.project.json"
     try:
-        artifact = launcher._load_json(artifact_path)
+        artifact = launcher.read_owner_json(config.run_as_user, artifact_path)
     except OSError:
         return None
     project_data = artifact.get("project")
@@ -188,7 +188,7 @@ def _update_project_design_artifact_for_role(
         raw_role_clis = {}
         project_data["role_clis"] = raw_role_clis
     raw_role_clis[role_name] = cli
-    launcher._write_json_atomic(artifact_path, artifact)
+    launcher._write_json_atomic(artifact_path, artifact, owner_user=config.run_as_user)
     return artifact_path
 
 
@@ -251,7 +251,7 @@ def _write_added_role_config(
                     f"to add it headless, or pass --relayout to replace the existing layout with a generated "
                     f"{generated_count}-pane layout"
                 )
-    raw_config = launcher._load_json(config_path)
+    raw_config = launcher.read_owner_json(config.run_as_user, config_path)
     raw_roles = raw_config.get("roles")
     if not isinstance(raw_roles, list):
         raise SystemExit(f"{config_path} must define a roles list")
@@ -267,16 +267,16 @@ def _write_added_role_config(
             directorctl=directorctl,
         )
     )
-    launcher._write_json_atomic(config_path, raw_config)
+    launcher._write_json_atomic(config_path, raw_config, owner_user=config.run_as_user)
     launcher.ensure_owner_file(config, config_path, runner=runner)
     updated_config = launcher.load_project_config(config.project, config_path)
     if should_regenerate_layout:
         visible_count = max(
             (role.slot or 0) for role in updated_config.roles if not role.detached
         ) + 1
-        updated_config.layout.write_text(
+        launcher.write_owner_file(
+            updated_config.run_as_user, updated_config.layout,
             json.dumps(launcher._new_project_layout_payload(visible_count), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
         )
         launcher.ensure_owner_file(updated_config, updated_config.layout, runner=runner)
     artifact_path = launcher._update_project_design_artifact_for_role(
@@ -305,10 +305,11 @@ def _write_updated_project_plan_artifacts(
     plan_path = provision_dir / "plan.json"
     board_unit_path = provision_dir / plan.board_unit
     add_role_sql_path = provision_dir / f"{plan.project}-add-role.sql"
-    launcher._write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
-    # The text root installs, recorded here; never read back from here (SYRD-607).
-    board_unit_path.write_text(board_unit, encoding="utf-8")
-    add_role_sql_path.write_text(launcher.render_add_role_sql(plan, role_name), encoding="utf-8")
+    launcher._write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()}, owner_user=config.run_as_user)
+    # The text root installs, recorded here by descriptor from the owner's home; never read back from here
+    # (SYRD-607, SYRD-608).
+    launcher.write_owner_file(config.run_as_user, board_unit_path, board_unit)
+    launcher.write_owner_file(config.run_as_user, add_role_sql_path, launcher.render_add_role_sql(plan, role_name))
     for path in (plan_path, board_unit_path, add_role_sql_path):
         launcher.ensure_owner_file(config, path, runner=runner)
     return plan_path, board_unit_path, add_role_sql_path

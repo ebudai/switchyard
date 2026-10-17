@@ -491,15 +491,37 @@ def concurrent_swaps(root: Path) -> None:
     os.rename(aside, above)
     shutil.rmtree(decoy)
 
-    # Where nothing on the home's filesystem is root's alone to stage in, a
-    # creation is refused rather than raced.
+    # Root stages in the deepest directory above the home that only it can
+    # change: here not the home's parent, which is the tenant's, but the one
+    # above that (SYRD-608).
+    source = root / "swaps" / "staged-source"
+    source.write_text("root's\n", encoding="utf-8")
+    theirs = root / "swaps" / "tenant-parent"
+    (theirs / "tenant").mkdir(parents=True)
+    for item in (theirs, theirs / "tenant"):
+        os.lchown(item, OWNER_UID, OWNER_UID)
+    done = helper(theirs / "tenant", "install", "--mode", "0644", *owner, str(source), str(theirs / "tenant" / "f"))
+    check(done.returncode == 0 and (theirs / "tenant" / "f").read_text() == "root's\n"
+          and sorted(os.listdir(theirs)) == ["tenant"] and not any(n.startswith(".switchyard-new-") for n in os.listdir(root / "swaps")),
+          f"a home whose parent is the tenant's stages above it, and leaves nothing behind: {done.stderr}")
+    # Where nothing on the home's filesystem is root's alone -- the home on a
+    # filesystem of its own, under an open directory -- a creation is refused
+    # rather than raced.
     open_parent = root / "swaps" / "open-parent"
-    (open_parent / "tenant").mkdir(parents=True)
-    os.chmod(open_parent, 0o777)
-    os.lchown(open_parent / "tenant", OWNER_UID, OWNER_UID)
-    done = helper(open_parent / "tenant", "dir", "--mode", "0750", *owner, str(open_parent / "tenant" / "x"))
-    check(done.returncode == tenant_paths.REFUSED_EXIT and "cannot be made without a race" in done.stderr
-          and not (open_parent / "tenant" / "x").exists(), f"no root-only directory to make it in: refused: {done.stderr}")
+    open_parent.mkdir()
+    run(["mount", "-t", "tmpfs", "-o", "mode=0777", "tmpfs", str(open_parent)])
+    try:
+        (open_parent / "tenant").mkdir()
+        os.lchown(open_parent / "tenant", OWNER_UID, OWNER_UID)
+        done = helper(open_parent / "tenant", "dir", "--mode", "0750", *owner, str(open_parent / "tenant" / "x"))
+        check(done.returncode == tenant_paths.REFUSED_EXIT and "cannot be made without a race" in done.stderr
+              and not (open_parent / "tenant" / "x").exists(), f"no root-only directory to make it in: refused: {done.stderr}")
+        done = helper(open_parent / "tenant", "install", "--mode", "0644", *owner, str(source), str(open_parent / "tenant" / "f"))
+        check(done.returncode == tenant_paths.REFUSED_EXIT and "cannot be written without a race" in done.stderr
+              and sorted(os.listdir(open_parent / "tenant")) == [],
+              f"nor a file to write: refused, and nothing left in the tenant's directory (SYRD-608): {done.stderr}")
+    finally:
+        run(["umount", str(open_parent)])
 
     # A component that vanishes between root seeing it and opening it.
     (home / "gone-soon" / "inner").mkdir(parents=True)

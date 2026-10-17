@@ -9,7 +9,10 @@ root's own operator packet and checks every line against the shapes a boundary
 phase is made of. A boundary that is already closed is left alone. Otherwise the
 run is journalled: a dry run shows the repair, an applied run executes each
 statement, stops at the first failure without rolling back, and reports success
-only when the boundary reads as closed afterwards (SYRD-175).
+only when the boundary reads as closed afterwards (SYRD-175). Closed includes
+the board service's read of its commit store; one only another account can
+open is an operator dependency, and neither the dry run nor the apply reports
+success while it stands (SYRD-604).
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-359). The launcher
 imports this module at its top and re-exports the command, so the CLI and the
@@ -60,6 +63,7 @@ def switchyard_repair_boundary_command(
         repository_boundary_statements,
     )
     from scripts.ticket_board.rollout_journal import Attempt, resolve_operator
+    from scripts.commit_store_access import OperatorDependency
 
     slug = launcher._validate_project_slug(slug)
     said: list[str] = []
@@ -159,6 +163,12 @@ def switchyard_repair_boundary_command(
         operator=str(getattr(operator, "name", "") or ""),
     )
     attempt.operator = operator
+    # What the phase cannot close: a commit store only another account can
+    # open to the board service. The phase grants nothing there, so running it
+    # and calling the result repaired is exactly the false success SYRD-604
+    # found. The dry run says so and fails the same way the apply will.
+    dependencies = [objection for objection in open_before if isinstance(objection, OperatorDependency)]
+    repairable = [objection for objection in open_before if not isinstance(objection, OperatorDependency)]
     attempt.open()
     status, exit_status, detail = "failed", 1, ""
     try:
@@ -168,13 +178,32 @@ def switchyard_repair_boundary_command(
         say(f"switchyard: the repair, taken from {packet_path}:")
         for line in phase:
             say(f"    {line}")
+        if dependencies:
+            say(
+                f"switchyard: {len(dependencies)} of those need an operator outside {slug}'s "
+                "boundary, so applying this repair cannot finish it and will not report success."
+            )
         if not apply:
+            if dependencies:
+                say(
+                    "switchyard: dry run; nothing was changed. Resolve the operator dependency "
+                    f"above, then apply with `pkexec switchyard repair-boundary {slug} --apply`."
+                )
+                detail = "dry-run; commit store unreachable"
+                return 1
             say(
                 f"switchyard: dry run; nothing was changed. Apply it with "
                 f"`pkexec switchyard repair-boundary {slug} --apply`."
             )
             status, exit_status, detail = "completed", 0, "dry-run"
             return 0
+        if not repairable:
+            say(
+                "switchyard: nothing the repair carries can close what is open, so nothing was "
+                "run. The repair is incomplete."
+            )
+            detail = "commit store unreachable"
+            return 1
 
         for statement in repository_boundary_statements(phase):
             script = "\n".join(statement)
@@ -200,7 +229,11 @@ def switchyard_repair_boundary_command(
                 "switchyard: the repair ran and the boundary is not closed, so this does not "
                 "report success."
             )
-            detail = "still open"
+            detail = (
+                "commit store unreachable"
+                if any(isinstance(objection, OperatorDependency) for objection in open_after)
+                else "still open"
+            )
             return 1
         say(
             f"switchyard: {slug}'s repository boundary is closed "

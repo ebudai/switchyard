@@ -176,6 +176,15 @@ def new_project_command(
         include_audit=include_audit,
         audit_roles=audit_roles,
     )
+    # Router, when the design chose it, is declared before anything is rendered,
+    # so the packet, root's record and the launcher config all carry it (SYRD-599).
+    router = design_artifact.router if design_artifact is not None else ()
+    if router:
+        from scripts import router_onboarding
+
+        plan = router_onboarding.plan_with_router(
+            plan, router=router, role_clis=role_clis, repository=effective_repository, print_func=print_func
+        )
     launcher.precheck_new_project(
         plan,
         source_repo=effective_source_repo,
@@ -244,6 +253,8 @@ def new_project_command(
         upstream_report_token_file=upstream_report_token_file.strip(),
         print_func=print_func,
     )
+    if router:
+        router_onboarding.record_router_runtime(config_path, from_artifact, router=router)
     commands_path = artifact_dir / "operator-commands.sh"
     # The complete role-isolation handoff -- accounts, ownership, runtime,
     # tooling AND credential seeding -- is written beside the other artifacts, so

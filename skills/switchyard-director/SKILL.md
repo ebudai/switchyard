@@ -147,7 +147,9 @@ A project may run an optional **Router**: a low-cost role that picks the
 Implementation owner for work you have already admitted, or hands it back to
 you. It is a usability tool, not a delegate: everything else stays yours.
 
-- `switchyard router-role <project> enable --runtime <cli>` declares it,
+- `switchyard new` offers it, off by default, when a project has two or more
+  implementers. For an existing project,
+  `switchyard router-role <project> enable --runtime <cli>` declares it,
   detached, with its own prompt and the model of `--template-role` (the first
   Implementation owner by default). Choose a cheap model with
   `switchyard set-role-runtime <project> router --model <model>`. `disable`

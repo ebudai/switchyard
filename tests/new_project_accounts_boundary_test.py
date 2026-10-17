@@ -61,7 +61,7 @@ FROM_P0 = ("agy_source_origin", "artifact_path", "design_document", "director_on
            "include_designer", "owner_shell", "owner_user", "project_dir", "resolved_agy_credential_source",
            "resolved_project_name", "resolved_slug", "runner", "selected_audit_roles", "selected_desktop_policy",
            "selected_implementer_roles", "selected_role_efforts", "selected_role_models", "stages")
-FROM_P1 = ("effective_source_repo", "precheck_plan", "selected_role_clis", "worktree_branch")
+FROM_P1 = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "worktree_branch")  # SYRD-599: Router, as P1 settled it
 OWNER = "syrd371-agent"
 
 
@@ -124,7 +124,8 @@ class World:
         self.tmp, self.fail, self.log = tmp, fail, []
         self.owner = SimpleNamespace(created=created, shell_path=shell_path)
         self.agy_state, self.git_created = agy_state, git_created
-        self.artifact = artifact or SimpleNamespace(design_document=tmp / "artifact-design.md", include_designer=True)
+        self.artifact = artifact or SimpleNamespace(design_document=tmp / "artifact-design.md", include_designer=True,
+                                                    router=(("runtime", "claude"),))  # SYRD-599: as recorded, unchanged by P1
 
     def step(self, name: str, *detail: object) -> None:
         self.log.append((name, *detail))
@@ -164,7 +165,7 @@ def inputs(tmp: Path, world: World, said: list, **overrides: object) -> dict:
                   resolved_agy_credential_source="", resolved_project_name="Syrd Three Seventy-One", resolved_slug="s371",
                   runner=lambda *a, **k: None, selected_audit_roles=("audit",), selected_desktop_policy={"mode": "headless"},
                   selected_implementer_roles=("main",), selected_role_efforts={"main": "high"},
-                  selected_role_models={"main": "opus"}, stages=Stages(world.log),
+                  selected_role_models={"main": "opus"}, selected_router=(("runtime", "claude"),), stages=Stages(world.log),
                   effective_source_repo=tmp / "source", precheck_plan=SimpleNamespace(service_user="s371-board"),
                   selected_role_clis=(("director", "claude"), ("main", "codex")), worktree_branch="trunk")
     values.update(overrides)
@@ -330,9 +331,11 @@ def test_the_accounts_in_order_with_their_arguments() -> None:
         check(world.log[3] == ("owner", OWNER, tmp / "project", dict(runner=values["runner"], shell="fish", owner_home=tmp / "homes" / OWNER)),
               f"the owner and project directory, with the shell and home: {world.log[3]}")
         clis, kw = world.log[4][1:]
-        check(clis is values["selected_role_clis"] and kw == dict(owner_user=OWNER, owner_home=tmp / "homes" / OWNER,
-                                                                  runner=values["runner"], print_func=said.append),
-              f"the gate's roles verified for the owner once the account exists: {kw}")
+        # SYRD-599: Router's runtime is verified with them, as the owner, though it is no role to create.
+        check(tuple(clis) == (*values["selected_role_clis"], ("router", "claude"))
+              and kw == dict(owner_user=OWNER, owner_home=tmp / "homes" / OWNER,
+                             runner=values["runner"], print_func=said.append),
+              f"the gate's roles, and Router's runtime, verified for the owner once the account exists: {clis} {kw}")
 
 
 def test_what_is_said_about_the_account() -> None:
@@ -404,14 +407,15 @@ def test_the_fresh_branch() -> None:
         check(onboarding == expected, f"the onboarding files: {onboarding}")
         written = next(e[1] for e in world.log if e[0] == "artifact-write")
         identity = dict(implementer_roles="selected_implementer_roles", role_clis="selected_role_clis", role_models="selected_role_models",
-                        role_efforts="selected_role_efforts", audit_roles="selected_audit_roles")
+                        role_efforts="selected_role_efforts", audit_roles="selected_audit_roles", router="selected_router")
         check(all(written[k] is values[v] for k, v in identity.items()), "roles, models, efforts and audit roles, the very objects")
         check(written == dict(project_name=values["resolved_project_name"], slug="s371", owner_user=OWNER, project_dir=tmp / "project",
                               artifact_path=values["artifact_path"], design_document=values["design_document"], owner_shell="fish",
                               implementer_roles=values["selected_implementer_roles"], role_clis=values["selected_role_clis"],
                               role_models=values["selected_role_models"], role_efforts=values["selected_role_efforts"],
                               include_designer=False, include_audit=True, audit_roles=values["selected_audit_roles"],
-                              agy_credential_source="hostuser", agy_credential_source_origin="host"),
+                              agy_credential_source="hostuser", agy_credential_source_origin="host",
+                              router=values["selected_router"]),  # SYRD-599: Router, as P0 chose it
               f"and every other field of the initial artifact: {written}")
         check(next(e[1] for e in world.log if e[0] == "chown-files") == dict(owner_user=OWNER, project_dir=tmp / "project", runner=values["runner"]),
               "the project's files given to the owner")
@@ -434,6 +438,31 @@ def test_the_designer_document() -> None:
                   f"designer {include}, document {present}: {got}")
             if chowned:
                 check(world.names().index("chown-design") == world.names().index("chown-files") + 1, "right after the project's files")
+
+
+def test_a_switched_router_is_recorded_in_the_artifact_it_came_from() -> None:
+    """SYRD-599: on the --from path, a Router runtime P1's CLI gate switched is written back as project.router."""
+    import json
+
+    hermes = (("runtime", "hermes"), ("model", "h"), ("effort", "low"))
+    codex = (("runtime", "codex"), ("effort", "low"))
+    for recorded, settled in ((hermes, codex), (codex, codex)):
+        with tempfile.TemporaryDirectory(prefix="syrd371.") as tmp:
+            tmp = Path(tmp)
+            world, said = World(tmp, artifact=SimpleNamespace(design_document=tmp / "d.md", include_designer=False,
+                                                              router=recorded)), []
+            values = inputs(tmp, world, said, from_artifact=tmp / "a.json", selected_router=settled)
+            art = values["artifact_path"]
+            art.parent.mkdir(parents=True, exist_ok=True)
+            art.write_text(json.dumps({"project": {"slug": "s371", "router": {"enabled": True, **dict(recorded)}}}))
+            run(world, values)
+            wrote = [e[2] for e in world.log if e[0] == "policy" and e[1] == art]
+            if recorded != settled:
+                check(wrote == [{"project": {"slug": "s371", "router": {"enabled": True, "runtime": "codex", "effort": "low"}}}]
+                      and world.names().index("artifact-load") < next(i for i, e in enumerate(world.log) if e[0] == "policy"),
+                      f"the switched runtime replaces the recorded one, after the artifact is read: {wrote}")
+            else:
+                check(wrote == [], f"an unchanged Router leaves the artifact alone: {wrote}")
 
 
 def test_git_on_both_branches() -> None:
@@ -536,7 +565,7 @@ def earlier(tmp: Path, log: list) -> tuple:
                              artifact_path=tmp / "project" / ".switchyard" / "s371.project.json",
                              design_document=tmp / "project" / "DESIGN.md", runner=lambda *a, **k: None)
     p1 = m.NewProjectPreflight(effective_source_repo=tmp / "source", precheck_plan=SimpleNamespace(service_user="s371-board"),
-                               selected_role_clis=(("main", "codex"),), worktree_branch="trunk")
+                               selected_role_clis=(("main", "codex"),), selected_router=(), worktree_branch="trunk")
     return p0, p1
 
 

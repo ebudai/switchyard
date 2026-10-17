@@ -53,8 +53,8 @@ PARAMETERS = ("from_artifact", "source_repo", "commit_git_dir", "port", "databas
               "agent_cli_sources")
 FROM_P0 = ("include_audit", "include_designer", "owner_user", "project_dir", "resolved_agy_credential_source",
            "resolved_project_name", "resolved_slug", "runner", "selected_audit_roles", "selected_implementer_roles",
-           "selected_role_clis", "stages")
-OUTPUTS = ("effective_source_repo", "precheck_plan", "selected_role_clis", "worktree_branch")
+           "selected_role_clis", "selected_router", "stages")  # SYRD-599: + selected_router
+OUTPUTS = ("effective_source_repo", "precheck_plan", "selected_role_clis", "selected_router", "worktree_branch")  # SYRD-599: + selected_router
 OWNER = "syrd370-agent"
 
 
@@ -153,7 +153,7 @@ def inputs(tmp: Path, world: World, **overrides: object) -> dict:
                   owner_user=OWNER, project_dir=tmp / "project", resolved_agy_credential_source="",
                   resolved_project_name="Syrd Three Seventy", resolved_slug="s370", runner=lambda *a, **k: None,
                   selected_audit_roles=("audit",), selected_implementer_roles=("main",),
-                  selected_role_clis=(("director", "claude"), ("main", "codex")), stages=Stages(world.log))
+                  selected_role_clis=(("director", "claude"), ("main", "codex")), selected_router=(), stages=Stages(world.log))
     values.update(overrides)
     return values
 
@@ -263,9 +263,12 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     bound = {a.arg for a in fn.args.kwonlyargs} | {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     check(not bound & set(through), f"nothing the phase binds is read through the launcher: {bound & set(through)}")
     check(ast.unparse(fn.body[1]) == "stages.begin('host and agent CLI checks')", "the stage begun first")
-    gate = fn.body[-2]
-    check(ast.unparse(gate).startswith("selected_role_clis = launcher.require_agent_clis_for_new_tenant("),
-          "and the CLI gate last, right before the answer")
+    # SYRD-599: the gate settles Router's runtime too, and its answer is split back into roles and Router's record.
+    gate = fn.body[-3]
+    check(ast.unparse(gate).startswith("selected_role_clis = launcher.require_agent_clis_for_new_tenant(router_onboarding.with_router_cli(selected_role_clis, selected_router)")
+          and ast.unparse(fn.body[-4]) == "from scripts import router_onboarding"
+          and ast.unparse(fn.body[-2]) == "selected_role_clis, selected_router = router_onboarding.settled(selected_role_clis, selected_router, print_func=print_func)",
+          "and the CLI gate last, Router's runtime among the rest, then split back, right before the answer")
 
 
 def test_the_interface_and_the_result() -> None:
@@ -458,7 +461,7 @@ def choices(tmp: Path, log: list) -> object:
     return dataclasses.replace(answer, stages=Stages(log), owner_user=OWNER, project_dir=tmp / "project",
                                resolved_slug="s370", resolved_project_name="N", resolved_agy_credential_source="",
                                selected_implementer_roles=("main",), include_designer=False, include_audit=True,
-                               selected_audit_roles=("audit",), selected_role_clis=(("main", "codex"),),
+                               selected_audit_roles=("audit",), selected_role_clis=(("main", "codex"),), selected_router=(),
                                runner=lambda *a, **k: None)
 
 
@@ -476,7 +479,7 @@ def test_the_command_hands_p1_its_values_and_reads_back_each_field() -> None:
         log: list = []
         p0 = choices(tmp, log)
         answer = m.NewProjectPreflight(effective_source_repo=object(), precheck_plan=SimpleNamespace(service_user="svc"),
-                                       selected_role_clis=object(), worktree_branch=object())
+                                       selected_role_clis=object(), selected_router=object(), worktree_branch=object())
         handed: list = []
         seen: list = []
         given = {name: object() for name in PARAMETERS}
@@ -495,6 +498,48 @@ def test_the_command_hands_p1_its_values_and_reads_back_each_field() -> None:
         check(local["first_run_runner"] is p0.first_run_runner and local["runner"] is p0.runner, "P0's two runners untouched")
         check(log == [("begin", "project accounts and files")] and seen[0][:2] == ("service-user", "svc"),
               f"then P2 begins, with the plan's service user: {log} {seen}")
+
+
+def test_a_router_only_runtime_is_settled_before_anything_exists() -> None:
+    """SYRD-599: Router's runtime goes through the same CLI gate as every role's, and stays Router's."""
+    from scripts.agent_cli_promotion import AgentCliUnavailable
+
+    real = t.require_agent_clis_for_new_tenant
+
+    def real_gate(clis, **kw):
+        world.log.append(("gate", clis, kw))
+        return real(clis, which=which, **kw)
+
+    def which(binary, path=None):  # claude and codex host-wide; hermes nowhere
+        return f"/usr/local/bin/{binary}" if binary in ("claude", "codex") else None
+
+    router = (("runtime", "hermes"), ("model", "hermes-model"), ("effort", "low"))
+    for answers, expect in ((["a"], "abort"), (["s", "codex"], "switch")):
+        with tempfile.TemporaryDirectory(prefix="syrd370.") as tmp:
+            tmp = Path(tmp)
+            world = World(tmp)
+            said: list = []
+            pending = list(answers)
+            values = inputs(tmp, world, selected_role_clis=(("director", "codex"), ("main", "codex"), ("ops", "codex")),
+                            selected_router=router, yes=False, print_func=said.append,
+                            input_func=lambda _q: pending.pop(0))
+            with patched(t, **{**world.seams(), "require_agent_clis_for_new_tenant": real_gate}):
+                got = judged(m._check_new_project_preflight, **values)
+            gate = next(e for e in world.log if e[0] == "gate")
+            check(tuple(gate[1]) == (("director", "codex"), ("main", "codex"), ("ops", "codex"), ("router", "hermes")),
+                  f"{expect}: the gate is asked about Router's runtime with the rest: {gate[1]}")
+            check(any("hermes" in line for line in said), f"{expect}: and names it: {said[-3:]} {got!r}")
+            if expect == "abort":
+                check(isinstance(got, AgentCliUnavailable) and "aborted before creating anything" in str(got),
+                      f"a Router-only runtime nobody can run stops before anything exists: {got!r}")
+            else:
+                check(isinstance(got, m.NewProjectPreflight)
+                      and tuple(got.selected_role_clis) == (("director", "codex"), ("main", "codex"), ("ops", "codex"))
+                      and got.selected_router == (("runtime", "codex"), ("effort", "low")),
+                      f"switched, Router keeps its record, not a role, and drops the old runtime's model: "
+                      f"{getattr(got, 'selected_role_clis', got)} {getattr(got, 'selected_router', '')}")
+                check(any("Router now runs on codex instead of hermes" in line for line in said),
+                      f"and says so: {said[-2:]}")
 
 
 def test_the_real_phase_between_the_two() -> None:

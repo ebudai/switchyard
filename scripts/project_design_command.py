@@ -64,6 +64,9 @@ def design_project_command(
     supplementary_groups: Sequence[str] | None = None,
     linger: bool | None = None,
     owner_shell: str | None = None,
+    router_runtime: str | None = None,
+    router_model: str | None = None,
+    router_effort: str | None = None,
     input_func: Callable[[str], str] = input,
     print_func: Callable[[str], None] = print,
 ) -> int:
@@ -139,6 +142,17 @@ def design_project_command(
         else launcher._prompt_bool("Enable linger for the owner user", default=True, input_func=input_func),
         "shell": owner_shell or launcher._prompt_text("Owner shell", default="fish", input_func=input_func),
     }
+    # Router is off unless asked for by flag, and is checked by the rules a
+    # hand-written `project.router` is (SYRD-599).
+    if (router_model or router_effort) and not router_runtime:
+        raise SystemExit("team-launcher: --router-model and --router-effort need --router-runtime")
+    from scripts import router_onboarding
+
+    router = router_onboarding.artifact_router(
+        {"enabled": True, "runtime": router_runtime, "model": router_model or "", "effort": router_effort or ""}
+        if router_runtime else None,
+        path=target_artifact, implementer_roles=resolved_implementer_roles,
+    )
     artifact = launcher.ProjectDesignArtifact(
         project=project_slug,
         project_name=resolved_project_name,
@@ -162,6 +176,7 @@ def design_project_command(
         push_policy=resolved_push_policy,
         gates=gates,
         capability_grants=grants,
+        router=router,
     )
     target_design_document.parent.mkdir(parents=True, exist_ok=True)
     target_design_document.write_text(launcher._project_design_markdown(project_slug, title=title, body=body), encoding="utf-8")

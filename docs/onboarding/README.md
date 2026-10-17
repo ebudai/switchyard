@@ -53,7 +53,10 @@ Conventional implementer role names are: `main` for core/domain implementation
 and integration; `ops` for environment, services, tooling, and infrastructure;
 `app` for application/UI work; `research` for investigation and design support;
 and `perf` for measurement and performance work. Custom implementer role names
-are allowed when the project needs different vocabulary.
+are allowed when the project needs different vocabulary. With two or more
+implementers, `switchyard new` also offers the optional Router role, which assigns
+implementation work as one more low-cost model session. It is off unless you
+choose it.
 
 ## Not onboarding, but nearby in the Switchyard source checkout
 

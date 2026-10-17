@@ -211,6 +211,15 @@ def _prompt_switchyard_role_plan(
                 input_func=input_func, print_func=print_func,
             )
         )
+    # Optional and off by default; inside the same owner-catalog guard (SYRD-599).
+    from scripts import router_onboarding
+
+    router = router_onboarding.prompt_router(
+        implementers, runner=catalog_runner, owner_args=owner_args, unverified_because=unverified_because,
+        input_func=input_func, print_func=print_func,
+    )
+    if router is not None:
+        plan.append(router)
     return tuple(plan)
 
 
@@ -227,6 +236,7 @@ def _prompt_switchyard_role_choices(
         for selection in launcher._prompt_switchyard_role_plan(
             input_func=input_func, print_func=print_func
         )
+        if selection.role != "router"
     )
 
 

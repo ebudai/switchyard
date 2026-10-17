@@ -311,7 +311,7 @@ def test_new_warns_before_creating_anything() -> None:
                     project_dir=home / "otto-agent" / "Projects" / "otto_scheduler", resolved_agy_credential_source="",
                     resolved_project_name="Otto", resolved_slug="otto", runner=lambda *a, **k: None,
                     selected_audit_roles=("audit",), selected_implementer_roles=("main",),
-                    selected_role_clis=(("main", "codex"),), stages=SimpleNamespace(begin=lambda _name: None),
+                    selected_role_clis=(("main", "codex"),), selected_router=(), stages=SimpleNamespace(begin=lambda _name: None),
                 )
             finally:
                 (team_launcher._precheck_project_path_before_mutating, team_launcher.precheck_new_project,

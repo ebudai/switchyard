@@ -141,6 +141,7 @@ def _write_initial_switchyard_project_artifact(
     audit_roles: Sequence[str] | None = None,
     agy_credential_source: str = "",
     agy_credential_source_origin: str = "unset",
+    router: Sequence[tuple[str, str]] = (),
 ) -> None:
     from scripts import team_launcher as launcher
 
@@ -182,6 +183,7 @@ def _write_initial_switchyard_project_artifact(
             "agy_credential_source": agy_credential_source,
             "agy_credential_source_origin": agy_credential_source_origin,
         },
+        router=tuple(router),
     )
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     if include_designer and not design_document.exists():

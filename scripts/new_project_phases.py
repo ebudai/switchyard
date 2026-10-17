@@ -103,6 +103,8 @@ class NewProjectChoices:
     selected_role_clis: tuple[tuple[str, str], ...]
     selected_role_efforts: dict[str, str]
     selected_role_models: dict[str, str]
+    #: Router's runtime, model and effort, or () for off (SYRD-599).
+    selected_router: tuple[tuple[str, str], ...]
     stages: ProvisioningStages
 
 
@@ -155,6 +157,7 @@ def _resolve_new_project_choices(
         include_designer = artifact.include_designer
         include_audit = artifact.include_audit
         selected_audit_roles = artifact.audit_roles
+        selected_router = artifact.router
     else:
         resolved_project_name = (project_name or launcher._prompt_text("Project name", input_func=input_func)).strip()
         if not resolved_project_name:
@@ -178,6 +181,7 @@ def _resolve_new_project_choices(
         include_designer = True
         include_audit = True
         selected_audit_roles = ("audit",)
+        selected_router = ()
     artifact_agy_source = ""
     if from_artifact is not None:
         artifact_agy_source = str(
@@ -250,12 +254,16 @@ def _resolve_new_project_choices(
                 input_func=input_func,
                 print_func=print_func,
             )
-            chosen_pairs = [(entry.role, entry.cli) for entry in role_plan]
+            from scripts import router_onboarding
+
+            # Router is reviewed with the rest, and recorded on its own (SYRD-599).
+            roles, selected_router = router_onboarding.split_role_plan(role_plan)
+            chosen_pairs = [(entry.role, entry.cli) for entry in roles]
             selected_role_models = {
-                entry.role: entry.model for entry in role_plan if entry.model
+                entry.role: entry.model for entry in roles if entry.model
             }
             selected_role_efforts = {
-                entry.role: entry.effort for entry in role_plan if entry.effort
+                entry.role: entry.effort for entry in roles if entry.effort
             }
             launcher.print_role_plan_review(role_plan, print_func=print_func)
         selected_role_clis = launcher._dedupe_role_cli_pairs(chosen_pairs)
@@ -268,6 +276,9 @@ def _resolve_new_project_choices(
         include_designer = any(role == "designer" for role, _cli in selected_role_clis)
         include_audit = any(role == "audit" for role, _cli in selected_role_clis)
         selected_audit_roles = ("audit",) if include_audit else ()
+    from scripts import router_onboarding
+
+    print_func(router_onboarding.summary_line(selected_router))
 
     artifact_path = (from_artifact or (launcher._switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
     design_document = project_dir / launcher.SWITCHYARD_DESIGN_FILE_NAME
@@ -294,6 +305,7 @@ def _resolve_new_project_choices(
         selected_role_clis=selected_role_clis,
         selected_role_efforts=selected_role_efforts,
         selected_role_models=selected_role_models,
+        selected_router=selected_router,
         stages=stages,
     )
 
@@ -307,6 +319,8 @@ class NewProjectPreflight:
     effective_source_repo: Path
     precheck_plan: ProjectBoardProvision
     selected_role_clis: Sequence[tuple[str, str]]
+    #: Router's record after the same CLI settlement, which may switch its runtime (SYRD-599).
+    selected_router: tuple[tuple[str, str], ...]
     worktree_branch: str
 
 
@@ -338,6 +352,7 @@ def _check_new_project_preflight(
     selected_audit_roles: tuple[str, ...],
     selected_implementer_roles: tuple[str, ...],
     selected_role_clis: tuple[tuple[str, str], ...],
+    selected_router: tuple[tuple[str, str], ...],
     stages: ProvisioningStages,
 ) -> NewProjectPreflight:
     from scripts import team_launcher as launcher
@@ -404,8 +419,13 @@ def _check_new_project_preflight(
     # after any of them has already stranded a partly built tenant, which is
     # what "declining installation must never strand a partially provisioned
     # tenant" means in practice (SYRD-210).
+    # Router's runtime is settled with every role's, so a runtime only Router
+    # uses is found missing here too, before anything exists; it stays Router's,
+    # never a role to create (SYRD-599).
+    from scripts import router_onboarding
+
     selected_role_clis = launcher.require_agent_clis_for_new_tenant(
-        selected_role_clis,
+        router_onboarding.with_router_cli(selected_role_clis, selected_router),
         owner_user=owner_user,
         policy=agent_cli_policy,
         sources=launcher._parse_agent_cli_sources(agent_cli_sources),
@@ -413,10 +433,12 @@ def _check_new_project_preflight(
         input_func=input_func,
         print_func=print_func,
     )
+    selected_role_clis, selected_router = router_onboarding.settled(selected_role_clis, selected_router, print_func=print_func)
     return NewProjectPreflight(
         effective_source_repo=effective_source_repo,
         precheck_plan=precheck_plan,
         selected_role_clis=selected_role_clis,
+        selected_router=selected_router,
         worktree_branch=worktree_branch,
     )
 
@@ -458,6 +480,7 @@ def _prepare_new_project_accounts(
     effective_source_repo: Path,
     precheck_plan: ProjectBoardProvision,
     selected_role_clis: Sequence[tuple[str, str]],
+    selected_router: tuple[tuple[str, str], ...],
     worktree_branch: str,
 ) -> NewProjectAccounts:
     from scripts import team_launcher as launcher
@@ -478,8 +501,10 @@ def _prepare_new_project_accounts(
     # they can differ -- the owner's own PATH is searched first, so an
     # owner-local copy would win at pane launch and nothing else would say so
     # (SYRD-210).
+    from scripts import router_onboarding
+
     launcher.verify_agent_clis_for_owner(
-        selected_role_clis,
+        router_onboarding.with_router_cli(selected_role_clis, selected_router),
         owner_user=owner_user,
         owner_home=home_base / owner_user,
         runner=runner,
@@ -549,6 +574,7 @@ def _prepare_new_project_accounts(
             audit_roles=selected_audit_roles,
             agy_credential_source=resolved_agy_credential_source,
             agy_credential_source_origin=agy_source_origin,
+            router=selected_router,
         )
         launcher._chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
         if include_designer and design_document.exists():
@@ -583,6 +609,10 @@ def _prepare_new_project_accounts(
             )
     else:
         artifact = launcher.load_project_design_artifact(artifact_path)
+        if artifact.router != selected_router:
+            # The CLI gate switched Router's runtime: record it where the rest of
+            # provisioning, and any retry, reads it (SYRD-599).
+            router_onboarding.record_router_choice(artifact_path, selected_router)
         launcher._write_switchyard_onboarding_files(
             project_name=resolved_project_name,
             slug=resolved_slug,

@@ -1673,6 +1673,42 @@ and each role's selected CLI is recorded in the `switchyard.project.v1`
 artifact. The artifact still must not preconfigure workflow stages or
 transitions.
 
+**Router is a choice here, off by default (SYRD-599).** With two or more
+implementers, after every role's runtime, model and effort, `new` asks:
+
+```text
+Router (optional):
+  Router assigns each ticket the Director admits to Implementation to one of your implementers, ...
+  1) off -- the Director assigns implementation work; no Router session, no extra cost  [default]
+  2) on -- Router assigns implementation work, as one more low-cost model session
+Router (optional) [off]:
+```
+
+With one implementer the menu is not shown, and `new` says why: every ticket
+already has its owner. Choosing `on` asks Router's runtime, model and effort the
+way every role's are asked, with low effort offered first. Before anything is
+created, `new` prints `switchyard: Router: on (...)` or `switchyard: Router: off`.
+The choice is recorded in the design artifact as
+`project.router = {"enabled": true, "runtime": ..., "model": ..., "effort": ...}`.
+An artifact without the field, or with `{"enabled": false}`, means off. Noninteractively,
+`team-launcher <project> design --router-runtime <cli> [--router-model M] [--router-effort E]`
+records it; without those flags it is off.
+
+A project with Router on starts with a declared workflow. That is the one its
+plan describes, composed the way `migrate-workflow` composes it, or your own
+`--workflow-config`. Router is added to it by the same `with_router`
+`switchyard router-role <project> enable` uses, and Router starts detached with
+the other roles, its session record reported with theirs. A project with Router
+off is provisioned exactly as before, with no Router role, transition, session or
+cost. Router's runtime goes through the same agent CLI checks as every role's: the
+host-wide check before anything is created, where a runtime only Router uses can be
+promoted or switched (a switch drops the old runtime's model and is recorded in
+`project.router`), and the owner-account check once the account exists.
+`switchyard new --from <artifact>`, given the same `--workflow-config` if the first
+run had one, and `switchyard resume-provision` reuse the recorded choice, and
+`switchyard upgrade` never turns Router on.
+Existing projects use `switchyard router-role <project> enable|disable`.
+
 `switchyard add-role <project> <role> --cli <cli>` adds another implementer role
 after provisioning. `switchyard add-role <project> <role> --audit --cli <cli>`
 adds an auditor role instead. Auditor additions widen the Audit stage owners,

@@ -154,8 +154,9 @@ route it to an implementer for code. An implementer refusing work it was told no
 is doing its job — that refusal is a signal you routed wrongly.
 
 **Router is for the obvious cases; you keep the hard ones.** A project may run an optional
-Router role (`switchyard router-role`) that picks the Implementation owner for work you
-admit, or hands it back to you with a reason. Where it runs it is the default: an ordinary
+Router role that picks the Implementation owner for work you admit, or hands it back to
+you with a reason. It is chosen at `switchyard new` (off by default), or later with
+`switchyard router-role <project> enable`. Where it runs it is the default: an ordinary
 route with no owner named goes to Router, and is refused if Router is not running. Name an
 owner (`--assignee`, or "Assign directly") when you already know it or need to recover;
 that direct route is ordinary, never a fallback. Keep in triage what needs a decision. A Router abstention is cheap: one handoff to you. A wrong

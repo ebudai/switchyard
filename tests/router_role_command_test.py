@@ -289,6 +289,14 @@ def exercise_command(cluster, board: Board) -> None:
         code, out, _ = run("enable", "--runtime", "codex", "--dry-run")
         check(code == 0 and '"router_return"' in out and board.document() == before,
               f"a dry run shows the document and changes nothing: {code}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                code = launcher.switchyard_main(["router-role", "cerulean", "enable", "--runtime", "codex", "--dry-run"])
+            except SystemExit as exc:
+                code = exc.code
+        check(code == 0 and '"router_return"' in out.getvalue() and board.document() == before,
+              f"`switchyard router-role <project> enable`, as documented, is the same command: {code}")
         code, out, err = run("enable", "--runtime", "codex")
         stored = board.document()
         check(code == 0 and role(stored, "router")["active"] and role(stored, "router")["runtime"] == "codex"

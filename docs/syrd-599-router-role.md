@@ -106,6 +106,17 @@ is excluded from all of the following:
 Its notices are not serial-gated (it owns no stage). They go out one at a time
 through the pane-activity gate, as Router's pane finishes each turn.
 
+## Choosing it when a project is created
+
+Router is a default-off choice in `switchyard new` and in the design artifact
+(`project.router`, `team-launcher design --router-runtime`). It is offered only
+with two or more implementers. A project created with it starts with a declared
+workflow, the one its plan describes, composed as `migrate-workflow` composes
+it, naming in `remove_stages` the seeded stages it does not use. Router is
+added by `with_router`. See `scripts/router_onboarding.py` and
+`docs/team-launcher.md`. Off, nothing changes. Upgrades never read the
+artifact, so a release never turns Router on.
+
 ## Declaration
 
 A document declares Router with `switchyard router-role <project> enable

@@ -72,7 +72,7 @@ OUTPUTS = ("agy_source_origin", "artifact_path", "design_document", "director_on
            "include_audit", "include_designer", "owner_shell", "owner_user", "project_dir",
            "resolved_agy_credential_source", "resolved_project_name", "resolved_slug", "runner",
            "selected_audit_roles", "selected_desktop_policy", "selected_implementer_roles", "selected_role_clis",
-           "selected_role_efforts", "selected_role_models", "stages")
+           "selected_role_efforts", "selected_role_models", "selected_router", "stages")  # SYRD-599 added selected_router
 OWN = ("subprocess", "dataclass", "Path", "Any", "Callable", "Sequence")
 OWNER = "syrd369-agent"
 
@@ -218,7 +218,7 @@ def artifact(tmp: Path, **fields: object) -> SimpleNamespace:
     base = dict(project="art369", project_name="Art Three", owner_user="art-agent", repository=tmp / "repo",
                 capability_grants={"shell": "/bin/zsh", "agy_credential_source": "  hostuser  "},
                 role_clis=(("director", "claude"), ("main", "codex")), implementer_roles=("main",),
-                include_designer=False, include_audit=False, audit_roles=())
+                include_designer=False, include_audit=False, audit_roles=(), router=())
     base.update(fields)
     return SimpleNamespace(**base)
 
@@ -320,7 +320,10 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     check(not bound & set(through), f"nothing the phase binds is read through the launcher: {bound & set(through)}")
     local = [(i, ast.unparse(s)) for i, s in enumerate(fn.body) if isinstance(s, (ast.Import, ast.ImportFrom))]
     decided = [i for i, s in enumerate(fn.body) if "launcher._resolve_desktop_policy(" in ast.unparse(s)]
-    check(local == [(0, "from scripts import team_launcher as launcher"), (decided[0] + 1, "from scripts.desktop_access import validate_policy")]
+    # SYRD-599: Router's summary is printed by its own module, imported right where it is used.
+    summary = [i for i, s in enumerate(fn.body) if "router_onboarding.summary_line(" in ast.unparse(s)]
+    check(local == [(0, "from scripts import team_launcher as launcher"), (decided[0] + 1, "from scripts.desktop_access import validate_policy"),
+                    (summary[0] - 1, "from scripts import router_onboarding")]
           and "validate_policy(" in ast.unparse(fn.body[decided[0] + 2]),
           f"the desktop validation is imported inside the phase, right after the policy is decided, then used: {local}")
 
@@ -427,7 +430,7 @@ def test_an_empty_name_is_refused_before_anything_else() -> None:
 def test_the_design_artifact_path() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd369.") as tmp:
         tmp = Path(tmp)
-        design = artifact(tmp)
+        design = artifact(tmp, router=(("runtime", "claude"), ("effort", "low")))
         world = World(tmp, artifact=design)
         got = run(world, inputs(tmp, from_artifact=tmp / "art.project.json", role_clis=(("x", "y"),)))
         check(isinstance(got, m.NewProjectChoices), f"it goes on: {got!r}")
@@ -441,6 +444,7 @@ def test_the_design_artifact_path() -> None:
               "and its roles, not the caller's and not a plan")
         check(not {"plan", "dedupe", "require"} & set(world.names()), "no role plan at all")
         check(got.selected_role_models == {} and got.selected_role_efforts == {}, "no models or efforts")
+        check(got.selected_router is design.router, "Router as the artifact records it (SYRD-599)")
         agy = next(e[1] for e in world.log if e[0] == "agy")
         check(agy["artifact_value"] == "hostuser", f"the artifact's agy source, stripped: {agy['artifact_value']!r}")
         check(got.artifact_path == (tmp / "art.project.json").resolve(strict=False), "the artifact is the artifact path")
@@ -561,6 +565,25 @@ def test_the_guided_role_plan() -> None:
         check(("dedupe", [("director", "claude"), ("main", "codex"), ("audit", "claude")]) in world.log, "the plan's pairs")
         check(got.selected_role_models == {"director": "opus", "audit": "sonnet"} and got.selected_role_efforts == {"director": "high", "main": "low"},
               f"only the models and efforts the plan named: {got.selected_role_models} {got.selected_role_efforts}")
+        check(got.selected_router == (), "no Router in the plan is Router off")
+    with tempfile.TemporaryDirectory(prefix="syrd369.") as tmp:
+        tmp = Path(tmp)
+        router = SimpleNamespace(role="router", cli="claude", model="haiku", effort="low")
+        world = World(tmp, plan=[SimpleNamespace(role="director", cli="claude", model="opus", effort="high"),
+                                 SimpleNamespace(role="main", cli="codex", model="", effort="low"),
+                                 SimpleNamespace(role="ops", cli="codex", model="", effort=""), router])
+        said: list = []
+        got = run(world, inputs(tmp, project_name="N", slug="s369", agent_name=OWNER, project_path=tmp / "p",
+                                input_func=said.append, print_func=said.append))
+        check(("review", world.plan, said.append) in world.log, "SYRD-599: Router is reviewed with the other roles")
+        check(("dedupe", [("director", "claude"), ("main", "codex"), ("ops", "codex")]) in world.log
+              and got.selected_implementer_roles == ("main", "ops") and "router" not in got.selected_role_models
+              and "router" not in got.selected_role_efforts,
+              f"but is no role to create and no implementer: {got.selected_implementer_roles} {got.selected_role_models}")
+        check(got.selected_router == (("runtime", "claude"), ("model", "haiku"), ("effort", "low"))
+              and "switchyard: Router: on (claude -> haiku -> effort low) -- assigns implementation work as one more model "
+                  "session; it starts detached with the other roles" in said,
+              f"it is recorded on its own and summarised before anything is created: {got.selected_router}")
 
 
 def test_the_runner_the_rest_of_the_command_gets() -> None:

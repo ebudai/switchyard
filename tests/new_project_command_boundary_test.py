@@ -270,7 +270,8 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
             art = spec["artifact"]
             if art == "refuse":
                 raise SystemExit("team-launcher: syrd426 artifact refused")
-            return SimpleNamespace(**{k: place(v) for k, v in art.items()})
+            # The record's own default for a field the baseline's cases predate (SYRD-599: Router off).
+            return SimpleNamespace(**{"router": (), **{k: place(v) for k, v in art.items()}})
 
         def plan_for(**kwargs):
             note("build_plan", **kwargs)
@@ -500,7 +501,9 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         first = 1 if ast.get_docstring(node) is not None else 0
         # The command's two call-time imports of other modules stay exactly where the baseline had them.
-        nested = {"new_project_command": ["from scripts.desktop_access import validate_policy", "from scripts.workflow_launcher import assign_projection_owner"]}
+        # SYRD-599 adds one: Router, when the design chose it, is declared by its own module.
+        nested = {"new_project_command": ["from scripts.desktop_access import validate_policy", "from scripts.workflow_launcher import assign_projection_owner",
+                                          "from scripts import router_onboarding"]}
         check(imports[:1] == (["from scripts import team_launcher as launcher"] if expected else [])
               and sorted(imports[1:] if expected else imports) == sorted(nested.get(name, []))
               and (not expected or ast.unparse(node.body[first]) == imports[0]),

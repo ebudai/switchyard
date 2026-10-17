@@ -373,6 +373,10 @@ def switchyard_main(argv: list[str] | None = None) -> int:
                 type=Path,
                 help="read the prompt from a file, or from stdin when given as -",
             )
+        if router and len(argv) > 2 and argv[2] in ("enable", "disable") and not argv[1].startswith("-"):
+            # `switchyard router-role <project> enable|disable`, as the docs and the
+            # User write it, is the same command as `... enable --project <project>`.
+            argv = [argv[0], argv[2], "--project", argv[1], *argv[3:]]
         args = parser.parse_args(argv[1:])
         if not args.project.strip():
             raise SystemExit(

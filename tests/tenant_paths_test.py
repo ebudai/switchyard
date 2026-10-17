@@ -500,6 +500,12 @@ def concurrent_swaps(root: Path) -> None:
     done = helper(open_parent / "tenant", "dir", "--mode", "0750", *owner, str(open_parent / "tenant" / "x"))
     check(done.returncode == tenant_paths.REFUSED_EXIT and "cannot be made without a race" in done.stderr
           and not (open_parent / "tenant" / "x").exists(), f"no root-only directory to make it in: refused: {done.stderr}")
+    source = root / "swaps" / "staged-source"
+    source.write_text("root's\n", encoding="utf-8")
+    done = helper(open_parent / "tenant", "install", "--mode", "0644", *owner, str(source), str(open_parent / "tenant" / "f"))
+    check(done.returncode == tenant_paths.REFUSED_EXIT and "cannot be written without a race" in done.stderr
+          and sorted(os.listdir(open_parent / "tenant")) == [],
+          f"nor a file to write: refused, and nothing left in the tenant's directory (SYRD-608): {done.stderr}")
 
     # A component that vanishes between root seeing it and opening it.
     (home / "gone-soon" / "inner").mkdir(parents=True)

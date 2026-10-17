@@ -41,6 +41,7 @@ import pwd
 import stat
 import struct
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable, Iterator, Sequence
@@ -371,12 +372,47 @@ class Root:
             return None
 
     def _ours_alone(self, fd: int) -> bool:
-        """Whether nobody but this process's user -- root, in production -- can change this directory's entries."""
+        """Whether nobody but this process's user -- root, in production -- can change this directory's entries.
+
+        The kernel's effective uid (`getresuid`), the identity that will make
+        entries there.
+        """
         status = os.fstat(fd)
-        if status.st_uid != os.geteuid() or stat.S_IMODE(status.st_mode) & 0o022:
+        if status.st_uid != os.getresuid()[1] or stat.S_IMODE(status.st_mode) & 0o022:
             return False
         entries = _read(fd, ACCESS)
         return not entries or not any(perm & 2 for (tag, _i), perm in entries.items() if tag in (USER, GROUP))
+
+    def _stage_parent(self) -> int | None:
+        """Where root stages what it makes: the home's parent, which only root can change on a host."""
+        return self.parent_fd
+
+    @contextmanager
+    def _staging(self, parent: int, display: str, verb: str) -> Iterator[int]:
+        """A private directory only root can change, on `parent`'s filesystem, removed afterwards.
+
+        Something root makes and then moves into a directory the tenant can
+        write is made here first, so nobody else can reach it, by name or
+        otherwise, until it is in place.
+        """
+        stage_parent = self._stage_parent()
+        if (stage_parent is None or not self._ours_alone(stage_parent)
+                or os.fstat(stage_parent).st_dev != os.fstat(parent).st_dev):
+            raise Refused(display, f"cannot be {verb} without a race: there is no directory only root can change "
+                                   f"on its filesystem to make it in first")
+        stage_name = f".switchyard-new-{os.urandom(8).hex()}"
+        try:
+            os.mkdir(stage_name, 0o700, dir_fd=stage_parent)
+        except OSError as exc:
+            raise Refused(display, f"could not be {verb} ({exc.strerror})") from None
+        try:
+            stage = _openat(stage_name, DIRECTORY, stage_parent)
+            try:
+                yield stage
+            finally:
+                os.close(stage)
+        finally:
+            os.rmdir(stage_name, dir_fd=stage_parent)
 
     def _made(self, parent: int, name: str, display: str, mode: int) -> int:
         """Make `name` in `parent`, and return a descriptor on exactly the directory root made.
@@ -384,42 +420,25 @@ class Root:
         `mkdir` returns no descriptor, and looking the new directory up again
         by name in a directory the tenant can write -- however it is checked --
         opens whatever the tenant renamed there in between (audit of 451d5a91).
-        So it is made where only root can change the entries: a private
-        directory in the home's parent, which is root's and on the same
-        filesystem. It is opened there, then moved into place with
-        RENAME_NOREPLACE. The descriptor is the inode root made, wherever the
-        tenant moves names afterwards; and if anything has appeared under the
-        name meanwhile, nothing is adopted -- the creation is refused.
+        So it is made in a private staging directory (`_staging`), opened
+        there, then moved into place with RENAME_NOREPLACE. The descriptor is
+        the inode root made, wherever the tenant moves names afterwards; and if
+        anything has appeared under the name meanwhile, nothing is adopted --
+        the creation is refused.
         """
-        stage_parent = self.parent_fd
-        if (stage_parent is None or not self._ours_alone(stage_parent)
-                or os.fstat(stage_parent).st_dev != os.fstat(parent).st_dev):
-            raise Refused(display, "cannot be made without a race: there is no directory only root can change "
-                                   "on its filesystem to make it in first")
-        stage_name = f".switchyard-new-{os.urandom(8).hex()}"
-        try:
-            os.mkdir(stage_name, 0o700, dir_fd=stage_parent)
-        except OSError as exc:
-            raise Refused(display, f"could not be made ({exc.strerror})") from None
-        try:
-            stage = _openat(stage_name, DIRECTORY, stage_parent)
+        with self._staging(parent, display, "made") as stage:
+            os.mkdir("new", mode, dir_fd=stage)
+            child = _openat("new", DIRECTORY, stage)
             try:
-                os.mkdir("new", mode, dir_fd=stage)
-                child = _openat("new", DIRECTORY, stage)
-                try:
-                    _rename_noreplace(stage, "new", parent, name)
-                except OSError as exc:
-                    os.close(child)
-                    os.rmdir("new", dir_fd=stage)
-                    if exc.errno == errno.EEXIST:
-                        raise Refused(display, "appeared while root was making it; root does not adopt it") from None
-                    raise Refused(display, f"could not be made ({exc.strerror}): what holds it changed while "
-                                           "root was walking it") from None
-                return child
-            finally:
-                os.close(stage)
-        finally:
-            os.rmdir(stage_name, dir_fd=stage_parent)
+                _rename_noreplace(stage, "new", parent, name)
+            except OSError as exc:
+                os.close(child)
+                os.rmdir("new", dir_fd=stage)
+                if exc.errno == errno.EEXIST:
+                    raise Refused(display, "appeared while root was making it; root does not adopt it") from None
+                raise Refused(display, f"could not be made ({exc.strerror}): what holds it changed while "
+                                       "root was walking it") from None
+            return child
 
     def walk(self, parts: Sequence[str], *, create: tuple[int, int, int] | None = None) -> int | None:
         """A descriptor on the directory at `parts`, or None when it is missing (or, previewing, would be made).
@@ -714,24 +733,50 @@ def chown_tree(root: Root, path: str, uid: int, gid: int, if_exists: bool) -> No
 
 def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: int) -> None:
     """`install -m MODE -o U -g G SOURCE PATH`: a new file renamed into place, over a link if one is there."""
+    with open(source, "rb") as handle:  # root's own staged file
+        content = handle.read()
+    replace_file(root, content, path, mode, uid, gid)
+
+
+def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: int, gid: int, *,
+                 parents: tuple[int, int, int] | None = None, parent_mode: int | None = None) -> None:
+    """Publish `content` at `path` whole: a new file, owned and moded before it is written, renamed into place.
+
+    `mode` None keeps the mode of the regular file being replaced (0600 when
+    there is none). The parent is reached by descriptor from the home and,
+    with `parents` (mode, uid, gid), any missing directory on the way is made
+    as root makes any other; `parent_mode` then sets the parent's mode on its
+    descriptor. The new file is made, written, synced and given its owner and
+    mode in a private staging directory (`Root._staging`), where nobody but
+    root can reach it, and only then renamed into the parent: until it is in
+    place no other account -- not the tenant, not another account that can
+    write the parent -- can open, truncate or substitute it (audit of
+    6c7a4d9b). What is at the name is never opened for writing: a link or a
+    file planted there is replaced as a directory entry, and its target is
+    untouched. If anything fails before the rename the new file is removed;
+    after it, the parent is synced so the replacement is durable.
+    """
     parts = root.relative(path)
     if not parts:
         raise SystemExit("tenant_paths: the home itself is not a file")
-    with open(source, "rb") as handle:  # root's own staged file
-        content = handle.read()
-    parent = root.walk(parts[:-1])
+    parent = root.walk(parts[:-1], create=parents)
     if parent is None:
         if root.made_earlier(str(PurePosixPath(path).parent)):
             root.report(f"install {path}")
             return
         raise Refused(str(PurePosixPath(path).parent), "does not exist")
     try:
+        if parent_mode is not None:
+            root._own(parent, str(PurePosixPath(path).parent), parent_mode, None, None)
         try:
             existing = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
         if existing is not None and stat.S_ISDIR(existing.st_mode):
             raise Refused(path, "is a directory")
+        if mode is None:
+            mode = stat.S_IMODE(existing.st_mode) & 0o777 if existing is not None and stat.S_ISREG(existing.st_mode) \
+                else 0o600
         if existing is not None and stat.S_ISREG(existing.st_mode):
             fd = root.open_object(parent, parts[-1], path, existing)
             try:
@@ -743,22 +788,112 @@ def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: i
         root.report(f"install {path}")
         if root.preview:
             return
-        temporary = f".{parts[-1]}.switchyard-{os.getpid()}"
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                     dir_fd=parent)
-        try:
-            os.fchown(fd, uid, gid)
-            os.fchmod(fd, mode)
-            os.write(fd, content)
-            os.fsync(fd)
-        except BaseException:
-            os.close(fd)
-            os.unlink(temporary, dir_fd=parent)
-            raise
-        os.close(fd)
-        os.rename(temporary, parts[-1], src_dir_fd=parent, dst_dir_fd=parent)
+        with root._staging(parent, path, "written") as stage:
+            fd = os.open("new", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                         dir_fd=stage)
+            try:
+                view = memoryview(content)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fchown(fd, uid, gid)
+                os.fchmod(fd, mode)
+                os.fsync(fd)
+                os.close(fd)
+                fd = -1
+                os.rename("new", parts[-1], src_dir_fd=stage, dst_dir_fd=parent)
+            except BaseException:
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    os.unlink("new", dir_fd=stage)
+                except FileNotFoundError:
+                    pass
+                raise
+        os.fsync(parent)
     finally:
         os.close(parent)
+
+
+# -- in-process --------------------------------------------------------------
+
+
+# Root's own Python acting under a home it opens afresh for each call. Each
+# raises `Refused` for a link, a mount crossing or a swap anywhere below the
+# home, and `SystemExit` for a path that is not a normalised absolute path
+# inside it -- which is never normalised in.
+
+
+def _quiet(home: str) -> Root:
+    return Root(home, preview=False, report=lambda line: None)
+
+
+def write_file(home: str, path: str, content: bytes, *, uid: int, gid: int, mode: int | None = None,
+               parents: tuple[int, int, int] | None = None, parent_mode: int | None = None) -> None:
+    """Publish `content` at `path` whole (`replace_file`)."""
+    root = _quiet(home)
+    try:
+        replace_file(root, content, path, mode, uid, gid, parents=parents, parent_mode=parent_mode)
+    finally:
+        root.close()
+
+
+def read_file(home: str, path: str) -> bytes | None:
+    """The contents of the regular file at `path`, or None when nothing is there."""
+    root = _quiet(home)
+    try:
+        found = root.leaf(root.relative(path))
+        if found is None:
+            return None
+        parent, fd, display, status = found
+        try:
+            if not stat.S_ISREG(status.st_mode):
+                raise Refused(display, "is not a regular file")
+            chunks = []
+            while chunk := os.read(fd, 1 << 16):
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+            os.close(parent)
+    finally:
+        root.close()
+
+
+def open_file(home: str, path: str, *, uid: int, gid: int, mode: int,
+              parents: tuple[int, int, int] | None = None) -> int:
+    """A descriptor on the regular file at `path`, made (uid:gid, `mode`) when it is missing -- for a lock.
+
+    Made with O_EXCL in the held parent, so it is root's own new file; found,
+    it is opened bound to what was observed there. Never through a link.
+    """
+    root = _quiet(home)
+    try:
+        parts = root.relative(path)
+        if not parts:
+            raise SystemExit("tenant_paths: the home itself is not a file")
+        parent = root.walk(parts[:-1], create=parents)
+        if parent is None:
+            raise Refused(str(PurePosixPath(path).parent), "does not exist")
+        try:
+            try:
+                fd = os.open(parts[-1], os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode,
+                             dir_fd=parent)
+            except FileExistsError:
+                status = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+                if stat.S_ISDIR(status.st_mode):
+                    raise Refused(path, "is not a regular file") from None
+                return root.open_object(parent, parts[-1], path, status)
+            try:
+                os.fchown(fd, uid, gid)
+                os.fchmod(fd, mode)
+            except BaseException:
+                os.close(fd)
+                raise
+            return fd
+        finally:
+            os.close(parent)
+    finally:
+        root.close()
 
 
 # -- command line -----------------------------------------------------------

@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pwd
 import shlex
 import shutil
 import subprocess
@@ -53,6 +54,11 @@ from team_launcher_test_helpers import FakeRunner  # noqa: E402
 PROJECT = "porter607"
 OWNER = "syrd607tenant"
 TENANT = 2607
+#: SYRD-608: root writes for an owner by descriptor from a directory the owner owns -- here the repository `new` is
+#: handed -- so the owner is an account: a stand-in with uid TENANT, its home where the lookup put it before.
+_GETPWNAM = pwd.getpwnam
+pwd.getpwnam = lambda name: (pwd.struct_passwd((OWNER, "x", TENANT, TENANT, "", f"/home/{OWNER}", "/bin/sh"))
+                             if name == OWNER else _GETPWNAM(name))
 CALLER = 2700
 UNIT = f"{PROJECT}-ticket-board.service"
 PACKET = "operator-commands.sh"
@@ -727,6 +733,16 @@ def tenant_project(sb: Sandbox) -> tuple[Any, Path]:
     )
     for path in (sb.provision, *sb.provision.iterdir()):
         os.chown(path, TENANT, TENANT, follow_symlinks=False)
+    # Registered, as `new` leaves every project, in a registry root owns: where root's writes for its owner may go.
+    # The trusted registry is relocated to this sandbox's, proven from its root-owned base (SYRD-608).
+    from scripts import owner_writes
+
+    registry = Path(os.environ[launcher.SWITCHYARD_REGISTRY_DIR_ENV])
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / f"{PROJECT}.json").write_text(json.dumps({
+        "schema": launcher.SWITCHYARD_REGISTRY_SCHEMA, "slug": PROJECT, "name": "Porter", "config_path": str(config_path),
+    }), encoding="utf-8")
+    owner_writes.TRUSTED_REGISTRY = (registry, str(sb.base))
     return launcher.load_project_config(PROJECT, config_path), config_path
 
 

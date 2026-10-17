@@ -203,7 +203,7 @@ def assign_projection_owner(config, config_path: Path, *, runner) -> None:
     """Initial privileged provisioning hands generated controls to the tenant."""
     from scripts import team_launcher as launcher
 
-    raw = json.loads(config_path.read_text())
+    raw = launcher.read_owner_json(config.run_as_user, config_path)
     # Initially legacy projects need writable controls too: their first workflow
     # is applied after startup. Enumerate the projection paths without requiring
     # an existing workflow document or rendering a replacement configuration.

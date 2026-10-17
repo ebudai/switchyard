@@ -58,13 +58,14 @@ STAYED = ("KNOWN_LIVE_CLI_NAMES", "pane_pid_for_role", "_process_snapshot", "pro
 #: them through the launcher; the totals are unchanged.
 LAUNCHER_CALLS = {"live_cli_for_role": 1, "live_model_for_role": 1, "_drop_roles_with_stale_provider_runtime": 1,
                   "sync_reload_config_to_live_sessions": 1}
-#: Measured on the baseline: the moved code's calls, each through the launcher.
+#: Measured on the baseline: the moved code's calls, each through the launcher. SYRD-608: the config is read with
+#: `read_owner_json` (by descriptor when root reads it for the owner) where `_load_json` was.
 MOVED_CALLS = {"_process_snapshot": 1, "pane_pid_for_role": 2, "process_tree_command_names": 1, "_command_name": 1,
                "process_tree_argvs": 1, "_model_from_argv": 1, "_session_payload_model_for_role": 1,
                "_role_cli_name": 2, "provider_state_store_problem": 1, "recorded_provider_state_generation": 1,
                "provider_state_generation": 1, "unreadable_provider_state_roles": 1,
                "roles_with_stale_provider_runtime": 1, "role_process_runner_for": 2, "tmux_kill_session_args": 1,
-               "live_cli_for_role": 1, "live_model_for_role": 1, "_load_json": 1, "_write_json_atomic": 1,
+               "live_cli_for_role": 1, "live_model_for_role": 1, "read_owner_json": 1, "_write_json_atomic": 1,
                "role_session_dir": 1, "tmux_has_session_args": 1}
 READS = ("KNOWN_LIVE_CLI_NAMES",)
 HOME = Path("/nonexistent/syrd330/owner-home")
@@ -383,6 +384,7 @@ class SyncRole:
 class SyncConfig:
     project: str
     roles: list[SyncRole]
+    run_as_user: str = "syrd331-owner"
 
 
 CONFIG_PATH = Path("/nonexistent/syrd331/p331.json")
@@ -411,13 +413,15 @@ class Reload:
             role_runner.role = r.role
             return role_runner
 
-        def write(path: Path, payload: dict) -> None:
+        def write(path: Path, payload: dict, *, owner_user: str | None = None) -> None:
+            # SYRD-608: written for the config's owner, so root writes it by descriptor from the owner's home.
+            assert owner_user == "syrd331-owner", owner_user
             self.events.append(("write", path, json.loads(json.dumps(payload))))
             if self.write_error:
                 raise self.write_error
 
         return dict(
-            _load_json=lambda path: self.events.append(("load", path)) or self.raw,
+            read_owner_json=lambda owner, path: self.events.append(("load", path)) or self.raw,
             _write_json_atomic=write,
             role_process_runner_for=runner_for,
             tmux_has_session_args=lambda r: ["syrd331-has", r.role],

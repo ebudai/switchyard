@@ -103,12 +103,15 @@ def publish_packet_record(artifact_dir: Path, rendered: Mapping[str, bytes], *, 
     return ""
 
 
-def record_root_use(directory: Path, used: Mapping[str, tuple[bytes | str, str]]) -> Path:
+def record_root_use(directory: Path, used: Mapping[str, tuple[bytes | str, str]], *, owner_user: str = "") -> Path:
     """Name, beside the record, the digest of each file root used and where it used it from.
 
     Merged into what is there, so an updated unit replaces its own entry and
     leaves the packet's. What is there is read without following a link, and
-    is only ever a record: root never reads it to decide anything.
+    is only ever a record: root never reads it to decide anything. As root for
+    `owner_user`, it is written as root's own file by descriptor from the
+    owner's home, never through a link at any directory above it, and replaces
+    the old record whole rather than unlinking it by name (SYRD-608).
     """
     from scripts import team_launcher as launcher
 
@@ -122,9 +125,14 @@ def record_root_use(directory: Path, used: Mapping[str, tuple[bytes | str, str]]
         "about": "what root ran or installed for this project; the files beside this are records, not its source",
         "files": dict(sorted(entries.items())),
     }
+    body = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if owner_user and launcher.root_writes_for(owner_user):
+        from scripts import owner_writes
+
+        owner_writes.write_root_record(owner_user, path, body, mode=0o644)
+        return path
     path.unlink(missing_ok=True)
-    _write_record_file(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"), 0o644,
-                       exclusive=True)
+    _write_record_file(path, body, 0o644, exclusive=True)
     return path
 
 
@@ -132,8 +140,8 @@ def record_unit_install(provision_dir: Path, plan: ProjectBoardProvision, board_
     """After `add-role` or `set-vcs-close-role` installed the unit: its entry in the record, or why not."""
     target = f"/etc/systemd/system/{plan.board_unit}"
     try:
-        record_root_use(provision_dir, {plan.board_unit: (board_unit, target)})
-    except OSError as exc:
+        record_root_use(provision_dir, {plan.board_unit: (board_unit, target)}, owner_user=plan.owner_user)
+    except (OSError, SystemExit) as exc:
         return (
             f"installed {target} (sha256 {digest(board_unit)}) from the text root rendered, but could not "
             f"record that in {provision_dir}: {exc}"

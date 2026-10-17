@@ -55,7 +55,9 @@ CHECKS = 0
 MOVED = ('_path_owner_label', '_path_owner_ids', 'chown_owner_file_args', 'ensure_owner_file', '_chown_project_file')
 #: Measured on the baseline launcher: each moved body's call-time reads of launcher globals, siblings included.
 SEAMS = {
+    'chown_owner_file_args': {'owner_handoff_args': 1},
     'ensure_owner_file': {'_proc_failure_reason': 1, 'chown_owner_file_args': 1, 'current_user_name': 1},
+    '_chown_project_file': {'owner_handoff_args': 1},
 }
 #: Measured on the baseline launcher: every launcher definition outside the five that names them, and how often.
 DISPATCH = {}
@@ -63,6 +65,9 @@ DISPATCH = {}
 # SYRD-558: role_runtime's tenant-projection writer moved to scripts/runtime_projection.py.
 READERS = {'scripts/generated_layout_upgrade.py': {'launcher.ensure_owner_file': 2}, 'scripts/model_validation.py': {'launcher.ensure_owner_file': 1}, 'scripts/new_project_phases.py': {'launcher._chown_project_file': 1}, 'scripts/presentation_controller.py': {'team_launcher.ensure_owner_file': 2}, 'scripts/project_onboarding.py': {'launcher._chown_project_file': 3}, 'scripts/project_role_add.py': {'launcher.ensure_owner_file': 4}, 'scripts/project_vcs_close_role.py': {'launcher.ensure_owner_file': 1}, 'scripts/project_worktrees.py': {'launcher._path_owner_ids': 2, 'launcher._path_owner_label': 1}, 'scripts/role_runtime.py': {'team_launcher.ensure_owner_file': 1}, 'scripts/runtime_projection.py': {'team_launcher.ensure_owner_file': 1}, 'scripts/role_visibility.py': {'launcher.ensure_owner_file': 1}, 'scripts/workflow_launcher.py': {'launcher.ensure_owner_file': 1}, 'scripts/workflow_manage.py': {'launcher.ensure_owner_file': 1}}
 #: The BASELINE's own behaviour for the cases below (`gold461.py`, run on the baseline launcher under the guard).
+#: SYRD-608: the ten handoff labels are the baseline's, translated mechanically (`translate608.py`): every
+#: `chown <o>:<o> <P>` argv is now the launcher's `owner_handoff_args(<o>, <P>)` -- stood in below as
+#: `P608-HANDOFF <o> <P>` -- read just before it is used, and an empty owner is refused before anything runs.
 GOLDEN = {
     'label: a file': {'result': {'type': 'str', 'value': 'p461-user:p461-group'}, 'calls': [['pwd.getpwuid', ['UID'], {}], ['grp.getgrgid', ['GID'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'label: a directory': {'result': {'type': 'str', 'value': 'p461-user:p461-group'}, 'calls': [['pwd.getpwuid', ['UID'], {}], ['grp.getgrgid', ['GID'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
@@ -78,21 +83,21 @@ GOLDEN = {
     'ids: distinct synthetic ids': {'result': {'type': 'tuple', 'value': [1461, 2461]}, 'calls': [['lstat', [], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'ids: a dangling symlink, not followed': {'result': {'type': 'tuple', 'value': ['UID', 'GID']}, 'calls': [], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'ids: a missing path': {'result': {'type': 'NoneType', 'value': None}, 'calls': [], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'args: an owner': {'result': {'type': 'list', 'value': ['chown', 'p461-agent:p461-agent', 'TMP/file']}, 'calls': [], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'args: a path with a space': {'result': {'type': 'list', 'value': ['chown', 'p461-agent:p461-agent', 'TMP/a dir/state file.json']}, 'calls': [], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'args: an owner': {'result': {'type': 'list', 'value': ['P608-HANDOFF', 'p461-agent', 'TMP/file']}, 'calls': [['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'args: a path with a space': {'result': {'type': 'list', 'value': ['P608-HANDOFF', 'p461-agent', 'TMP/a dir/state file.json']}, 'calls': [['owner_handoff_args', ['p461-agent', 'PATH TMP/a dir/state file.json'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'args: no owner': {'result': {'raised': 'ValueError', 'message': 'file ownership repair requires run_as_user'}, 'calls': [], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'ensure: no owner': {'result': {'type': 'NoneType', 'value': None}, 'calls': [], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'ensure: the caller is the owner': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['current_user_name', [], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'ensure: not root': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'ensure: root, handed over': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'ensure: root, the chown fails with stderr': {'result': {'raised': 'SystemExit', 'message': "team-launcher: failed to assign generated file TMP/file to p461-agent: chown: changing ownership of 'x': Operation not permitted"}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 1, 'stdout': '', 'stderr': "chown: changing ownership of 'x':\n  Operation not permitted\n\n"}, 'chown failed with exit 1'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'ensure: root, the chown fails with bytes': {'result': {'raised': 'SystemExit', 'message': "team-launcher: failed to assign generated file TMP/file to p461-agent: chown: invalid user: �'p461-agent'"}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 1, 'stdout': '', 'stderr': "BYTES chown: invalid user: �'p461-agent'"}, 'chown failed with exit 1'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'ensure: root, the chown fails silently': {'result': {'raised': 'SystemExit', 'message': 'team-launcher: failed to assign generated file TMP/file to p461-agent: chown failed with exit 2'}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 2, 'stdout': '', 'stderr': '  \n'}, 'chown failed with exit 2'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'ensure: root, handed over': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'ensure: root, the chown fails with stderr': {'result': {'raised': 'SystemExit', 'message': "team-launcher: failed to assign generated file TMP/file to p461-agent: chown: changing ownership of 'x': Operation not permitted"}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 1, 'stdout': '', 'stderr': "chown: changing ownership of 'x':\n  Operation not permitted\n\n"}, 'chown failed with exit 1'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'ensure: root, the chown fails with bytes': {'result': {'raised': 'SystemExit', 'message': "team-launcher: failed to assign generated file TMP/file to p461-agent: chown: invalid user: �'p461-agent'"}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 1, 'stdout': '', 'stderr': "BYTES chown: invalid user: �'p461-agent'"}, 'chown failed with exit 1'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'ensure: root, the chown fails silently': {'result': {'raised': 'SystemExit', 'message': 'team-launcher: failed to assign generated file TMP/file to p461-agent: chown failed with exit 2'}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 2, 'stdout': '', 'stderr': '  \n'}, 'chown failed with exit 2'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
     'ensure: the argv helper rebound on the launcher': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['runner', [['P461-CHOWN', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'ensure: the error helper rebound on the launcher': {'result': {'raised': 'SystemExit', 'message': 'team-launcher: failed to assign generated file TMP/file to p461-agent: P461-REASON'}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 3, 'stdout': '', 'stderr': 'boom'}, 'chown failed with exit 3'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'project file: handed over': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'project file: the chown fails': {'result': {'raised': 'SystemExit', 'message': 'switchyard: failed to assign TMP/file to p461-agent'}, 'calls': [['runner', [['chown', 'p461-agent:p461-agent', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
-    'project file: an empty owner': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['runner', [['chown', ':', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'ensure: the error helper rebound on the launcher': {'result': {'raised': 'SystemExit', 'message': 'team-launcher: failed to assign generated file TMP/file to p461-agent: P461-REASON'}, 'calls': [['current_user_name', [], {}], ['os.geteuid', [], {}], ['chown_owner_file_args', [{'run_as_user': 'p461-agent', 'project': 'p461'}, 'PATH TMP/file'], {}], ['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}], ['_proc_failure_reason', [{'returncode': 3, 'stdout': '', 'stderr': 'boom'}, 'chown failed with exit 3'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'project file: handed over': {'result': {'type': 'NoneType', 'value': None}, 'calls': [['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'project file: the chown fails': {'result': {'raised': 'SystemExit', 'message': 'switchyard: failed to assign TMP/file to p461-agent'}, 'calls': [['owner_handoff_args', ['p461-agent', 'PATH TMP/file'], {}], ['runner', [['P608-HANDOFF', 'p461-agent', 'TMP/file']], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
+    'project file: an empty owner': {'result': {'raised': 'SystemExit', 'message': 'switchyard: failed to assign TMP/file to : there is no owner'}, 'calls': [['owner_handoff_args', ['', 'PATH TMP/file'], {}]], 'tree kept': ['dangling', 'dir', 'file', 'link-to-file']},
 }
 REACHED: set[str] = set()
 #: Measured on the candidate: what importing the module alone loads -- no other Switchyard module.
@@ -178,7 +183,7 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         reached.add(seam)
         calls.append([seam, norm(list(args)), norm(dict(kwargs))])
 
-    saved = {n: getattr(t, n) for n in (*FUNCTIONS, *PASSED, "current_user_name")}
+    saved = {n: getattr(t, n) for n in (*FUNCTIONS, *PASSED, "current_user_name", "owner_handoff_args")}
     saved_os = {"geteuid": os.geteuid}
     saved_pwd, saved_grp = pwd.getpwuid, grp.getgrgid
     try:
@@ -220,6 +225,14 @@ def run_case(t: object, holder: object, spec: dict, reached: set) -> dict:
         pwd.getpwuid, grp.getgrgid = getpwuid, getgrgid
         os.geteuid = lambda: note("os.geteuid") or spec.get("euid", 1461)
         t.current_user_name = lambda: note("current_user_name") or spec.get("caller", "switchyard461")
+
+        def owner_handoff_args(owner, path):
+            # SYRD-608: the descriptor helper's argv, which reads the owner's home; stood in, refusing as it does.
+            note("owner_handoff_args", owner, path)
+            if not owner:
+                raise ValueError("file ownership repair requires run_as_user")
+            return ["P608-HANDOFF", owner, str(path)]
+        t.owner_handoff_args = owner_handoff_args
         for name in PASSED:
             setattr(t, name, (lambda name: lambda *a, **k: note(name, *a, **k) or saved[name](*a, **k))(name))
         for name in spec.get("rebind", {}):
@@ -467,8 +480,8 @@ def test_every_answer_is_the_baselines() -> None:
 OWNER_PREFIX = ["sudo", "-u"]
 
 
-#: The command word the baseline builds: an expected argv head, compared and never run.
-CHOWN = "chown"
+#: The handoff the launcher's `owner_handoff_args` stand-in answers: an expected argv head, compared and never run.
+HANDOFF = "P608-HANDOFF"
 
 
 def test_the_rules_hold_in_the_measured_record() -> None:
@@ -493,15 +506,16 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and value("ids: distinct synthetic ids") == [1461, 2461] and result("ids: distinct synthetic ids")["type"] == "tuple"
           and calls("label: distinct synthetic ids") == ["lstat", "pwd.getpwuid", "grp.getgrgid"] and calls("ids: distinct synthetic ids") == ["lstat"],
           "with distinct ids: the user from st_uid, the group from st_gid, the ids a (uid, gid) tuple, each read once with lstat and never stat")
-    check(value("args: an owner") == [CHOWN, "p461-agent:p461-agent", "TMP/file"]
-          and value("args: a path with a space") == [CHOWN, "p461-agent:p461-agent", "TMP/a dir/state file.json"]
+    check(value("args: an owner") == [HANDOFF, "p461-agent", "TMP/file"]
+          and value("args: a path with a space") == [HANDOFF, "p461-agent", "TMP/a dir/state file.json"]
+          and calls("args: an owner") == ["owner_handoff_args"]
           and result("args: no owner") == {"raised": "ValueError", "message": "file ownership repair requires run_as_user"},
-          "the handoff argv: <owner>:<owner> and the path as one argument; refused without an owner")
+          "the handoff argv: the launcher's descriptor handoff for the owner and the path as one argument; refused without an owner")
     check(calls("ensure: no owner") == [] and calls("ensure: the caller is the owner") == ["current_user_name"]
           and calls("ensure: not root") == ["current_user_name", "os.geteuid"]
           and all(value(k) is None for k in ("ensure: no owner", "ensure: the caller is the owner", "ensure: not root", "ensure: root, handed over"))
-          and calls("ensure: root, handed over") == ["current_user_name", "os.geteuid", "chown_owner_file_args", "runner"]
-          and GOLDEN["ensure: root, handed over"]["calls"][-1][1] == [[CHOWN, "p461-agent:p461-agent", "TMP/file"]],
+          and calls("ensure: root, handed over") == ["current_user_name", "os.geteuid", "chown_owner_file_args", "owner_handoff_args", "runner"]
+          and GOLDEN["ensure: root, handed over"]["calls"][-1][1] == [[HANDOFF, "p461-agent", "TMP/file"]],
           "ensure: nothing without an owner, when the caller is the owner, or when not root; else the launcher's argv through the runner")
     PREFIX = "team-launcher: failed to assign generated file TMP/file to p461-agent: "
     check(result("ensure: root, the chown fails with stderr")["message"] == PREFIX + "chown: changing ownership of 'x': Operation not permitted"
@@ -510,10 +524,14 @@ def test_the_rules_hold_in_the_measured_record() -> None:
           and result("ensure: the error helper rebound on the launcher")["message"] == PREFIX + "P461-REASON"
           and GOLDEN["ensure: the argv helper rebound on the launcher"]["calls"][-1][1] == [["P461-CHOWN", "TMP/file"]],
           "a failed handoff exits with the launcher's error text (stderr on one line, else the exit status); the argv and error helpers are read through it")
-    check(value("project file: handed over") is None and GOLDEN["project file: handed over"]["calls"] == [["runner", [[CHOWN, "p461-agent:p461-agent", "TMP/file"]], {}]]
+    check(value("project file: handed over") is None
+          and GOLDEN["project file: handed over"]["calls"] == [["owner_handoff_args", ["p461-agent", "PATH TMP/file"], {}],
+                                                               ["runner", [[HANDOFF, "p461-agent", "TMP/file"]], {}]]
           and result("project file: the chown fails") == {"raised": "SystemExit", "message": "switchyard: failed to assign TMP/file to p461-agent"}
-          and GOLDEN["project file: an empty owner"]["calls"][0][1] == [[CHOWN, ":", "TMP/file"]],
-          "a project file: the same argv for the named owner (an empty one not refused, pinned), and a fixed refusal on a non-zero exit")
+          and result("project file: an empty owner")["raised"] == "SystemExit"
+          and [c[0] for c in GOLDEN["project file: an empty owner"]["calls"]] == ["owner_handoff_args"],
+          "a project file: the same handoff for the named owner, an empty one refused before anything runs (SYRD-608), "
+          "and a fixed refusal on a non-zero exit")
     check(all(GOLDEN[k]["tree kept"] == ["dangling", "dir", "file", "link-to-file"] for k in GOLDEN),
           "nothing in the synthetic tree was created, removed or renamed")
 
@@ -521,7 +539,7 @@ def test_the_rules_hold_in_the_measured_record() -> None:
 def test_every_launcher_seam_is_reached() -> None:
     # Every name ensure_owner_file reads on the launcher is a recorder or stand-in there.
     names = {name for reads in SEAMS.values() for name in reads}
-    check(names == {"current_user_name", "chown_owner_file_args", "_proc_failure_reason"} and names <= REACHED,
+    check(names == {"current_user_name", "chown_owner_file_args", "_proc_failure_reason", "owner_handoff_args"} and names <= REACHED,
           f"a recorder on the launcher reached every function: missing {sorted(names - REACHED)}")
 
 

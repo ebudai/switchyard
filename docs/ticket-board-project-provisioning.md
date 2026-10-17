@@ -132,6 +132,38 @@ artifacts alone: what is in them is unchanged, and who can read them is not a
 rebuild. Neither touches anything else in the directory, because a tenant's
 directory also holds an operator's own scripts from years of rollouts (SYRD-176).
 
+Root runs the packet from that directory, never from the project's
+`.switchyard/provision` (SYRD-607). That one is the tenant's whenever the project
+is a second one for an owner who already exists, or lives under a path the owner
+chose, and a file root reopened there by path could have been replaced between
+the write and the run -- a root script with the tenant's content. So `switchyard
+new`, running as root, renders every artifact once in a mode-0700 directory
+inside `/etc/switchyard/provision/<slug>/`, keeps its own copy there and runs
+`/etc/switchyard/provision/<slug>/operator-commands.sh`, whose companions are
+read beside it. The project directory gets a record made from the same bytes,
+and `root-provenance.json` beside it names the sha256 of each file root ran or
+installed and where it used it from; replacing or deleting the record changes
+nothing root does. A record that cannot be written is reported on its own line
+and gets no provenance entry, and a copy root cannot stage stops everything
+before anything privileged runs. `add-role` and `set-vcs-close-role` install
+the updated board unit from the text they rendered, on stdin into a staged name
+beside the target and renamed into place, and record its digest the same way.
+`team-launcher <slug> new --execute` run without root is refused before
+anything is written: its packet would be one the caller's own account could
+replace before root opened it, so it is run as root, which stages its own copy.
+A dry run prints the packet for review, but the only root command in its
+execution plan is the same `new` again with `--execute`, run through the active
+installed release's `team-launcher` -- `current` resolved to
+`/opt/switchyard/releases/<commit>/scripts/team-launcher` and proven root's from
+`/` down -- with every option absolute, so root renders, stages and runs its own
+copy. It never hands root a packet it wrote, nor a program from the checkout it
+ran from: both are their caller's to change before an operator runs the
+command. A `--source-repo` is passed on only when it is root's too, since the
+packet runs helpers from it; without an installed release root owns, or with a
+source it does not, the plan prints no root command and says why.
+`SWITCHYARD_SHARED_INSTALL_ROOT` may say where the release is; it never changes
+whose files count as root's, which is uid 0 for every component from `/`.
+
 The script is run by its own absolute path, from anywhere, and it is not
 preceded by a `cd`. Each artifact that ships beside it is addressed from
 `$provision_dir` -- the directory the script itself is in, computed from

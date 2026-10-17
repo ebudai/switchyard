@@ -298,6 +298,7 @@ def _write_updated_project_plan_artifacts(
     provision_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config: ProjectConfig,
+    board_unit: str,
 ) -> tuple[Path, Path, Path]:
     from scripts import team_launcher as launcher
 
@@ -305,7 +306,8 @@ def _write_updated_project_plan_artifacts(
     board_unit_path = provision_dir / plan.board_unit
     add_role_sql_path = provision_dir / f"{plan.project}-add-role.sql"
     launcher._write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
-    board_unit_path.write_text(launcher.render_board_unit(plan), encoding="utf-8")
+    # The text root installs, recorded here; never read back from here (SYRD-607).
+    board_unit_path.write_text(board_unit, encoding="utf-8")
     add_role_sql_path.write_text(launcher.render_add_role_sql(plan, role_name), encoding="utf-8")
     for path in (plan_path, board_unit_path, add_role_sql_path):
         launcher.ensure_owner_file(config, path, runner=runner)
@@ -404,15 +406,22 @@ def add_project_role_command(
         role_name=role,
         audit_role=audit_role,
     )
-    _plan_path, board_unit_path, _sql_path = launcher._write_updated_project_plan_artifacts(
+    from scripts import root_packet
+
+    board_unit = launcher.render_board_unit(plan)
+    launcher._write_updated_project_plan_artifacts(
         plan,
         role_name=role,
         provision_dir=config_path.parent,
         runner=runner,
         config=updated_config,
+        board_unit=board_unit,
     )
     launcher._apply_add_role_board_sql(plan, role_name=role, runner=runner)
-    launcher._install_and_restart_board_unit(plan, board_unit_path=board_unit_path, runner=runner)
+    launcher._install_and_restart_board_unit(plan, board_unit=board_unit, runner=runner)
+    record_problem = root_packet.record_unit_install(config_path.parent, plan, board_unit)
+    if record_problem:
+        print_func(f"team-launcher: {record_problem}")
     role_runner = runner
     if updated_config.run_as_user and launcher.current_user_name() != updated_config.run_as_user:
         role_runner = launcher._owner_project_git_runner(

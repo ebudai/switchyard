@@ -2,8 +2,8 @@
 """Split team-launcher regression tests."""
 
 from __future__ import annotations
-
 import stat
+from unittest.mock import patch
 
 from team_launcher_test_helpers import *
 
@@ -19,7 +19,7 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
         runner = FakeRunner()
         stdout = StringIO()
 
-        with redirect_stdout(stdout):
+        with redirect_stdout(stdout), patch.dict(os.environ, {"SWITCHYARD_SHARED_INSTALL_ROOT": str(tmp_path / "none")}):
             assert (
                 new_project_command(
                     "porter",
@@ -131,11 +131,11 @@ def test_new_project_dry_run_writes_board_and_launcher_artifacts() -> None:
     assert "TICKET_BOARD_COMMIT_GIT_DIR='/srv/git/review-cache.git'" in commands
     assert f"team-launcher: dry-run for porter; artifacts in {output_dir}" in rendered
     assert "  sudo -v\n" in rendered
-    # By absolute path, with nothing telling an operator to change directory
-    # first: the packet finds its own companions, and an instruction that
-    # depended on the cwd is what journal attempt 0007 tripped over (SYRD-149).
+    # Nothing tells an operator to change directory first (SYRD-149), and the root command is the
+    # same `new` executing, never the packet the dry run wrote: that is its caller's to replace (SYRD-607).
     packet = output_dir / "operator-commands.sh"
-    assert f"bash {packet}\n" in rendered, rendered
+    assert f"bash {packet}" not in rendered, rendered
+    assert f"  (no root command: no installed release provides {tmp_path}/none/current/scripts/team-launcher." in rendered
     assert "\n  cd " not in rendered, rendered
     assert not any(call[:1] == ["sudo"] for call in runner.calls)
     assert launch_plan["project"] == "porter"

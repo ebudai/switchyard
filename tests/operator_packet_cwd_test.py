@@ -426,8 +426,12 @@ def test_companions_are_addressed_safely_for_any_slug() -> None:
         raise AssertionError("an absolute path was accepted as a companion")
 
 
-def test_the_printed_instruction_names_the_packet_by_path() -> None:
+def test_the_printed_instruction_carries_its_own_location() -> None:
     """Acceptance 4: what an operator is told to run carries its own location.
+
+    Since SYRD-607 that instruction is no longer the packet: it is the same
+    `new` again with --execute, run as root, which stages and runs root's own
+    copy. The rule here is unchanged: absolute paths, and no `cd`.
 
     Driven through the command that prints it rather than through the helper
     that formats it, because the defect was never in the formatting: it was an
@@ -439,17 +443,39 @@ def test_the_printed_instruction_names_the_packet_by_path() -> None:
 
     from team_launcher_test_helpers import FakeRunner
 
-    from scripts.team_launcher import current_user_name, new_project_command
+    from unittest.mock import patch
+
+    from scripts.team_launcher import SWITCHYARD_RELEASE_MARKER_NAME, current_user_name, new_project_command
 
     with tempfile.TemporaryDirectory(prefix="syrd149-instruction.") as tmp:
         tmp_path = Path(tmp)
         output_dir = tmp_path / "out"
-        source_repo = tmp_path / "source-repo"
+        # An installed release to provision from, under the shared install
+        # root's documented test override: the root command names only that
+        # (SYRD-607), so this is what the instruction is judged on.
+        install = tmp_path / "opt-switchyard"
+        source_repo = install / "releases" / ("6" * 40)
+        (source_repo / "scripts").mkdir(parents=True)
+        (source_repo / SWITCHYARD_RELEASE_MARKER_NAME).write_text('{"commit": "' + "6" * 40 + '"}\n')
+        for name in ("switchyard", "scripts/team-launcher", "scripts/ticket-board-service.sh",
+                     "scripts/ticket-board-boardsvc-setup.sh"):
+            (source_repo / name).write_text("#!/bin/sh\n")
+        for directory in (install, install / "releases", source_repo, source_repo / "scripts"):
+            directory.chmod(0o755)
+        (install / "current").symlink_to(source_repo)
         project_repo = tmp_path / "project-repo"
-        source_repo.mkdir()
         project_repo.mkdir()
         printed = StringIO()
-        with redirect_stdout(printed):
+        # The fixture is this test's, not root's: the test judges it as root's below its own install root,
+        # a seam the runtime does not have -- there it is uid 0 from `/` (SYRD-607 audit).
+        from scripts import root_packet
+        from scripts.ticket_board.publication_boundary import root_controlled_problems
+
+        def fixture_is_root(path):
+            return next(iter(root_controlled_problems(str(path), expect_uid=os.getuid(), base=str(install))), "")
+
+        with redirect_stdout(printed), patch.dict(os.environ, {"SWITCHYARD_SHARED_INSTALL_ROOT": str(install)}), \
+                patch.object(root_packet, "root_controlled", fixture_is_root):
             assert (
                 new_project_command(
                     "porter",
@@ -471,16 +497,17 @@ def test_the_printed_instruction_names_the_packet_by_path() -> None:
         lines = printed_lines[start : printed_lines.index("", start)]
         packet = output_dir / "operator-commands.sh"
 
-    instruction = [line for line in lines if str(packet) in line]
-    assert instruction, lines
-    # The path is the whole instruction: absolute, and reached without first
-    # being sent anywhere.
+    instruction = [line for line in lines if line.strip().endswith(" --execute")]
+    assert len(instruction) == 1, lines
+    # Absolute, and reached without first being sent anywhere; and never the
+    # packet the dry run wrote, which is its caller's to replace (SYRD-607).
     assert not any(line.strip().startswith("cd ") for line in lines), lines
-    for line in instruction:
-        for token in shlex.split(line.strip()):
-            if token.endswith("operator-commands.sh"):
-                assert token == str(packet), token
-                assert Path(token).is_absolute(), token
+    assert not any(str(packet) in line for line in lines), lines
+    tokens = shlex.split(instruction[0].strip())
+    assert tokens[:2] == ["sudo", str(source_repo / "scripts" / "team-launcher")], tokens
+    for flag in ("--repository", "--source-repo", "--new-output-dir"):
+        assert Path(tokens[tokens.index(flag) + 1]).is_absolute(), tokens
+    assert tokens[tokens.index("--new-output-dir") + 1] == str(output_dir), tokens
 
 
 def main() -> int:

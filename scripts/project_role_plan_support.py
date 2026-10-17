@@ -15,8 +15,10 @@ The shared support of `switchyard add-role` (`scripts/project_role_add.py`) and
   reads the controller from the tenant's document: it comes from the installed
   root-owned grant.
 - **Applying the unit.** `_install_and_restart_board_unit` installs the updated
-  board unit, reloads systemd and restarts the board, stopping at the first
-  step that fails.
+  board unit from the text the command rendered -- on stdin, staged beside the
+  target and renamed, never from the tenant's provision directory (SYRD-607) --
+  reloads systemd and restarts the board, stopping at the first step that
+  fails.
 
 Moved out of `scripts/team_launcher.py` unchanged (SYRD-357). The launcher
 imports this module at its top and re-exports every name; both commands read
@@ -128,11 +130,26 @@ def _commit_git_dir_from_plan_data(config: ProjectConfig, plan_data: dict[str, A
 def _install_and_restart_board_unit(
     plan: ProjectBoardProvision,
     *,
-    board_unit_path: Path,
+    board_unit: str,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
 ) -> None:
-    install = runner(["sudo", "install", "-m", "0644", str(board_unit_path), f"/etc/systemd/system/{plan.board_unit}"])
+    """Install the unit from the text the caller rendered, never from a file in the tenant's directory.
+
+    The text goes to root on stdin, into a staged name beside the target in a
+    directory only root can write, and is renamed into place: a copy the tenant
+    replaced after it was recorded is never read, and an install that fails
+    leaves the loaded unit as it was (SYRD-607).
+    """
+    target = f"/etc/systemd/system/{plan.board_unit}"
+    staged = f"/etc/systemd/system/.{plan.board_unit}.switchyard-new"
+    install = runner(
+        ["sudo", "install", "-m", "0644", "-o", "root", "-g", "root", "/dev/stdin", staged],
+        input=board_unit, text=True,
+    )
+    if install.returncode == 0:
+        install = runner(["sudo", "mv", "-f", "-T", "--", staged, target])
     if install.returncode != 0:
+        runner(["sudo", "rm", "-f", "--", staged])
         raise SystemExit(f"team-launcher: failed to install updated board unit {plan.board_unit}")
     daemon_reload = runner(["sudo", "systemctl", "daemon-reload"])
     if daemon_reload.returncode != 0:

@@ -135,6 +135,7 @@ def test_either_import_order_gives_one_set_of_objects_and_the_defaults() -> None
                         "i = inspect.signature(m.install_privileged_artifacts).parameters; "
                         f"print(all(getattr(t, n) is getattr(m, n) for n in {MOVED!r}), "
                         "r['enable_owner_linger'].default is False and r['enable_owner_linger'].kind is inspect.Parameter.KEYWORD_ONLY "
+                        "and r['staging_root'].default is None and r['staging_root'].kind is inspect.Parameter.KEYWORD_ONLY "
                         "and i['privileged_root'].default is None and i['privileged_root'].kind is inspect.Parameter.KEYWORD_ONLY, "
                         "not hasattr(m, 'ProjectBoardProvision') and not hasattr(m, 'write_artifacts'))")
         check(result.stdout.strip() == "True True True", f"{' then '.join(order)}: {result.stdout}{result.stderr[-600:]}")
@@ -193,7 +194,7 @@ def render(owned: Path, *, names=("a.service", "missing.sh", "dir.sh", "z.sql"),
 
     def temporary(**kwargs):
         log.append(("tempdir", kwargs))
-        made = real_td(dir=owned, **kwargs)
+        made = real_td(**{**kwargs, "dir": owned})
         log.append(("staged", Path(made.name)))
         return made
 
@@ -223,7 +224,7 @@ def test_rendering_happens_where_only_root_can_reach() -> None:
         owned = Path(tmp)
         rendered, log = render(owned)
         staged = log[1][1]
-        check(log[0] == ("tempdir", {"prefix": f"switchyard-{PROJECT}-privileged."}), f"root's own temporary directory, named for the project: {log[0]}")
+        check(log[0] == ("tempdir", {"prefix": f"switchyard-{PROJECT}-privileged.", "dir": None}), f"root's own temporary directory, named for the project: {log[0]}")
         check([e[0] for e in log] == ["tempdir", "staged", "chmod", "write", "names"] and log[2] == ("chmod", staged, 0o700),
               f"closed to root before anything is written, then the names asked: {[e[0] for e in log]}")
         check(log[3] == ("write", PLAN, staged, False, 0o700), f"the plan written there, owner linger off by default: {log[3]}")
@@ -233,6 +234,9 @@ def test_rendering_happens_where_only_root_can_reach() -> None:
         check(not staged.exists() and list(owned.iterdir()) == [], "the temporary directory is gone afterwards")
         rendered, log = render(owned, enable_owner_linger=True)
         check(log[3][3] is True, "owner linger passed on")
+        rendered, log = render(owned, staging_root=owned / "judged")
+        check(log[0] == ("tempdir", {"prefix": f"switchyard-{PROJECT}-privileged.", "dir": owned / "judged"}),
+              f"made inside the directory the caller judged, when it names one (SYRD-607): {log[0]}")
         failure = RuntimeError("the writer failed")
         rendered, log = render(owned, writer_error=failure)
         check(rendered is failure and not log[1][1].exists() and list(owned.iterdir()) == [],

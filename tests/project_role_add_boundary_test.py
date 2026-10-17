@@ -208,6 +208,7 @@ class Command:
         self.regenerated = regenerated
         self.log: list[tuple] = []
         self.said: list[str] = []
+        self.records: list[tuple] = []
 
     def names(self) -> dict[str, object]:
         L = self.log
@@ -238,10 +239,12 @@ class Command:
             _project_plan_for_added_role=plan,
             render_add_role_sql=lambda plan, role: L.append(("preflight-sql", plan.name, role)) or "SQL",
             _write_added_role_config=lambda config, **kw: L.append(("write-config", kw)) or (self.updated, self.regenerated),
-            _write_updated_project_plan_artifacts=lambda plan, **kw: L.append(("artifacts", plan.name, kw["provision_dir"], kw["config"].name))
+            render_board_unit=lambda plan: f"UNIT {plan.name}",
+            _write_updated_project_plan_artifacts=lambda plan, **kw: L.append(("artifacts", plan.name, kw["provision_dir"], kw["config"].name,
+                                                                                kw["board_unit"]))
                 or (Path("plan.json"), Path("unit.service"), Path("add.sql")),
             _apply_add_role_board_sql=apply_sql,
-            _install_and_restart_board_unit=lambda plan, *, board_unit_path, runner: L.append(("restart", plan.name, board_unit_path)),
+            _install_and_restart_board_unit=lambda plan, *, board_unit, runner: L.append(("restart", plan.name, board_unit)),
             current_user_name=lambda: L.append(("caller?",)) or self.caller,
             _owner_project_git_runner=lambda **kw: L.append(("owner-runner", kw["owner_user"], kw["project_dir"], kw["owned_roots"])) or "OWNER-RUNNER",
             _control_repository_owned_roots=lambda config: L.append(("owned-roots", config.name)) or ("ROOTS",),
@@ -270,7 +273,14 @@ class Command:
         kwargs.setdefault("config_path", Path("/nonexistent/syrd355/provision/p355.json"))
         kwargs.setdefault("role_name", "Perf")
         kwargs.setdefault("account_exists", lambda account: self.log.append(("account?", account)) or True)
-        with patched(team_launcher, **self.names()), patched(project_provision, role_account_commands=account_commands):
+        from scripts import root_packet
+
+        def record(provision_dir, plan, board_unit):
+            self.records.append((provision_dir, plan.name, board_unit))
+            return ""
+
+        with patched(team_launcher, **self.names()), patched(project_provision, role_account_commands=account_commands), \
+                patched(root_packet, record_unit_install=record):
             return m.add_project_role_command(self.config, runner=self.runner, print_func=self.said.append, **kwargs)
 
     def kinds(self) -> list[str]:
@@ -332,9 +342,12 @@ def test_a_new_role_in_order_as_the_owner_and_started() -> None:
                         detached=False, slot=1, relayout=True, audit_role=False, runner=fx.runner),
           f"the config written with every choice: {write}")
     check(fx.log[5] == ("plan", "updated", "perf", False) and fx.log[6] == ("artifacts", "plan-for-updated",
-                                                                               Path("/nonexistent/syrd355/provision"), "updated")
-          and fx.log[7][1:] == ("plan-for-updated", "perf", fx.runner) and fx.log[8][2] == Path("unit.service"),
-          f"the plan for the written config, in the provision directory; the unit written is the one restarted: {fx.log[5:9]}")
+                                                                               Path("/nonexistent/syrd355/provision"), "updated",
+                                                                               "UNIT plan-for-updated")
+          and fx.log[7][1:] == ("plan-for-updated", "perf", fx.runner) and fx.log[8][2] == "UNIT plan-for-updated"
+          and fx.records == [(Path("/nonexistent/syrd355/provision"), "plan-for-updated", "UNIT plan-for-updated")],
+          f"the plan for the written config, in the provision directory; the one rendered unit text is recorded, "
+          f"installed and named in the record, never read back (SYRD-607): {fx.log[5:9]} {fx.records}")
     check(fx.log[11] == ("owner-runner", OWNER, Path("/nonexistent/syrd355/repo"), ("ROOTS",))
           and fx.log[12] == ("worktrees", ["perf"], True, "OWNER-RUNNER"),
           f"a caller other than the owner prepares the new role's worktree only, as the owner: {fx.log[11:13]}")
@@ -486,9 +499,10 @@ def test_plan_artifacts_and_board_sql() -> None:
     with tempfile.TemporaryDirectory(prefix="syrd355-plan.") as raw:
         owned: list[Path] = []
         plan = SimpleNamespace(board_unit="p355-ticket-board.service", project=PROJECT, x=1)
-        with patched(team_launcher, render_board_unit=lambda p: "UNIT", render_add_role_sql=lambda p, role: f"SQL {role}",
+        with patched(team_launcher, render_board_unit=lambda p: "NOT THIS", render_add_role_sql=lambda p, role: f"SQL {role}",
                      ensure_owner_file=lambda config, path, *, runner: owned.append(path)):
-            paths = m._write_updated_project_plan_artifacts(plan, role_name="perf", provision_dir=Path(raw), runner="R", config=Config())
+            paths = m._write_updated_project_plan_artifacts(plan, role_name="perf", provision_dir=Path(raw), runner="R", config=Config(),
+                                                            board_unit="UNIT")
         check(paths == (Path(raw) / "plan.json", Path(raw) / "p355-ticket-board.service", Path(raw) / "p355-add-role.sql")
               and owned == list(paths) and json.loads(paths[0].read_text()) == {"board_unit": "p355-ticket-board.service",
                                                                                  "project": PROJECT, "x": 1}

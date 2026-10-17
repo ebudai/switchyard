@@ -32,17 +32,20 @@ if TYPE_CHECKING:
 
 
 def render_privileged_artifacts(
-    plan: ProjectBoardProvision, *, enable_owner_linger: bool = False
+    plan: ProjectBoardProvision, *, enable_owner_linger: bool = False, staging_root: Path | None = None
 ) -> dict[str, bytes]:
     """Render everything root installs, in a directory only root can reach.
 
     Rendering into root's own temporary directory rather than reading the
     tenant's copies back means the bytes root publishes are the bytes root
     generated, with no window in which they could be replaced (SYRD-39).
+    `staging_root` puts that directory inside one whose ancestry the caller has
+    already judged, rather than under whatever temporary directory the
+    environment names (SYRD-607).
     """
     from scripts import team_launcher as launcher
 
-    with tempfile.TemporaryDirectory(prefix=f"switchyard-{plan.project}-privileged.") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f"switchyard-{plan.project}-privileged.", dir=staging_root) as tmp:
         staged = Path(tmp)
         os.chmod(staged, 0o700)
         launcher.write_artifacts(plan, staged, enable_owner_linger=enable_owner_linger)

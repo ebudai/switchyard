@@ -370,8 +370,9 @@ def run_checks(tree: Path, support) -> None:
     before = get(PORTS["alpha"])["pid"]
     restarted = attempt(project_role_plan_support._install_and_restart_board_unit,
                         SimpleNamespace(project="alpha", board_unit="alpha-ticket-board.service"),
-                        board_unit_path=UNITS / "alpha-ticket-board.service", runner=role_add_runner)
-    check(restarted is None and [call[:3] for call in calls] == [["sudo", "install", "-m"], ["sudo", "systemctl", "daemon-reload"]]
+                        board_unit=(UNITS / "alpha-ticket-board.service").read_text(), runner=role_add_runner)
+    check(restarted is None and [call[:3] for call in calls] == [["sudo", "install", "-m"], ["sudo", "mv", "-f"],
+                                                                  ["sudo", "systemctl", "daemon-reload"]]
           and wait_for(lambda: (get(PORTS["alpha"]) or {}).get("pid") not in (None, before), 10),
           f"adding a role installs the unit and restarts the supervised board through the supervisor: {restarted!r} {calls}")
     check(board_services.SUPERVISOR_UNIT == importlib.import_module("scripts.board_supervisor_spec").SUPERVISOR_UNIT

@@ -202,7 +202,8 @@ def dry_runs_never_stage() -> list[str]:
     golden = next(value for name, value in vars(boundary).items() if name.isupper() and isinstance(value, dict)
                   and any(str(key).startswith("new: ") for key in value))
     return sorted(label for label, recorded in golden.items()
-                  if any(call[0] == "install_privileged_artifacts" for call in recorded.get("calls", [])))
+                  # Since SYRD-607 the command stages through `root_packet.stage_root_packet`.
+                  if any(call[0] in ("install_privileged_artifacts", "stage_root_packet") for call in recorded.get("calls", [])))
 
 
 def main() -> int:
@@ -295,7 +296,11 @@ def main() -> int:
           f"interrupted after /etc/switchyard was made: the retry finds it safe and finishes: {interrupted}")
 
     # Dry runs never reach the staging at all; only an executing root run does.
-    check(dry_runs_never_stage() == ["new: execute as root, staged", "new: execute as root, staging fails"],
+    # Since SYRD-607 only root executes, so every executing case of the boundary suite is a root one.
+    check(dry_runs_never_stage() == ["new: execute as root, staged", "new: execute as root, staging fails",
+                                     "new: execute as root, the record fails", "new: execute with a desktop",
+                                     "new: execute, sudo refuses silently", "new: execute, sudo refuses with a reason",
+                                     "new: execute, the owner not required", "new: execute, the packet fails"],
           f"of the recorded `switchyard new` runs, only the executing root ones stage: {dry_runs_never_stage()}")
     print(f"root_staging_parent_test: {CHECKS} checks ok")
     return 0

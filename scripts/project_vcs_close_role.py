@@ -85,6 +85,7 @@ def _write_vcs_close_role_artifacts(
     provision_dir: Path,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     config: ProjectConfig,
+    board_unit: str,
 ) -> tuple[Path, Path, Path]:
     from scripts import team_launcher as launcher
 
@@ -92,7 +93,8 @@ def _write_vcs_close_role_artifacts(
     board_unit_path = provision_dir / plan.board_unit
     workflow_sql_path = provision_dir / f"{plan.project}-vcs-close-role.sql"
     launcher._write_json_atomic(plan_path, {key: value for key, value in plan.__dict__.items()})
-    board_unit_path.write_text(launcher.render_board_unit(plan), encoding="utf-8")
+    # The text root installs, recorded here; never read back from here (SYRD-607).
+    board_unit_path.write_text(board_unit, encoding="utf-8")
     workflow_sql_path.write_text(launcher.render_vcs_close_role_sql(plan), encoding="utf-8")
     for path in (plan_path, board_unit_path, workflow_sql_path):
         launcher.ensure_owner_file(config, path, runner=runner)
@@ -135,15 +137,22 @@ def set_project_vcs_close_role_command(
     plan = launcher._project_plan_for_vcs_close_role(config, config_path=config_path, role_name=role_name)
     role = dict(plan.operation_allowed_roles)["mark_done"][0]
     launcher.render_vcs_close_role_sql(plan)
+    from scripts import root_packet
+
+    board_unit = launcher.render_board_unit(plan)
     plan_path, board_unit_path, workflow_sql_path = launcher._write_vcs_close_role_artifacts(
         plan,
         role_name=role,
         provision_dir=config_path.parent,
         runner=runner,
         config=config,
+        board_unit=board_unit,
     )
     launcher._apply_vcs_close_role_board_sql(plan, role_name=role, runner=runner)
-    launcher._install_and_restart_board_unit(plan, board_unit_path=board_unit_path, runner=runner)
+    launcher._install_and_restart_board_unit(plan, board_unit=board_unit, runner=runner)
+    record_problem = root_packet.record_unit_install(config_path.parent, plan, board_unit)
+    if record_problem:
+        print_func(f"team-launcher: {record_problem}")
     print_func(
         f"team-launcher: set VCS close role for {config.project} to {role}; "
         f"updated {plan_path}, {board_unit_path}, and {workflow_sql_path}"

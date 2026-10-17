@@ -243,12 +243,23 @@ def test_the_board_unit_install_reload_restart_stopping_at_the_first_failure() -
     from scripts import project_role_plan_support as m
 
     plan = SimpleNamespace(board_unit="p357-ticket-board.service")
-    expected = [["sudo", "install", "-m", "0644", "/p/unit.service", "/etc/systemd/system/p357-ticket-board.service"],
-                ["sudo", "systemctl", "daemon-reload"], ["sudo", "systemctl", "restart", "p357-ticket-board.service"]]
-    messages = ["team-launcher: failed to install updated board unit p357-ticket-board.service",
-                "team-launcher: failed to reload systemd after updating the board unit",
-                "team-launcher: failed to restart p357-ticket-board.service"]
-    for failing in (None, 0, 1, 2):
+    target = "/etc/systemd/system/p357-ticket-board.service"
+    staged = "/etc/systemd/system/.p357-ticket-board.service.switchyard-new"
+    # From the text the command rendered, on stdin, staged beside the target
+    # and renamed; the staged name is removed when either step fails, so a
+    # failed install leaves what systemd has as it was (SYRD-607).
+    install = (["sudo", "install", "-m", "0644", "-o", "root", "-g", "root", "/dev/stdin", staged],
+               {"input": "[Unit]\nDescription=p357\n", "text": True})
+    move = (["sudo", "mv", "-f", "-T", "--", staged, target], {})
+    remove = (["sudo", "rm", "-f", "--", staged], {})
+    reload = (["sudo", "systemctl", "daemon-reload"], {})
+    restart = (["sudo", "systemctl", "restart", "p357-ticket-board.service"], {})
+    expected = {None: ([install, move, reload, restart], None),
+                0: ([install, remove], "team-launcher: failed to install updated board unit p357-ticket-board.service"),
+                1: ([install, move, remove], "team-launcher: failed to install updated board unit p357-ticket-board.service"),
+                2: ([install, move, reload], "team-launcher: failed to reload systemd after updating the board unit"),
+                3: ([install, move, reload, restart], "team-launcher: failed to restart p357-ticket-board.service")}
+    for failing, (steps, message) in expected.items():
         calls: list = []
 
         def runner(argv, **kw):
@@ -256,13 +267,11 @@ def test_the_board_unit_install_reload_restart_stopping_at_the_first_failure() -
             return subprocess.CompletedProcess(argv, 1 if len(calls) - 1 == failing else 0, "", "")
 
         try:
-            result = m._install_and_restart_board_unit(plan, board_unit_path=Path("/p/unit.service"), runner=runner); raised = None
+            result = m._install_and_restart_board_unit(plan, board_unit="[Unit]\nDescription=p357\n", runner=runner); raised = None
         except SystemExit as exc:
             result, raised = None, str(exc)
-        stop = 3 if failing is None else failing + 1
-        check([c[0] for c in calls] == expected[:stop] and all(c[1] == {} for c in calls)
-              and raised == (None if failing is None else messages[failing]) and result is None,
-              f"failing at {failing}: the steps up to it, its own message, nothing after: {raised}")
+        check(calls == steps and raised == message and result is None,
+              f"failing at {failing}: the steps up to it, its own message, nothing after: {calls} {raised}")
 
 
 #: Run first: a seam taken past the launcher must be caught before any

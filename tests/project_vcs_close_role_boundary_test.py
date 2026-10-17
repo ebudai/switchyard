@@ -224,9 +224,11 @@ def test_the_artifacts_beside_the_configuration_for_the_owner() -> None:
         owned: list[tuple] = []
         plan = SimpleNamespace(board_unit="p356-ticket-board.service", project=PROJECT, marker=1)
         cfg = config("main")
-        with patched(team_launcher, render_board_unit=lambda p: "UNIT", render_vcs_close_role_sql=lambda p: "CLOSE SQL",
+        # The unit text is the command's, the one root installs; it is not rendered again here (SYRD-607).
+        with patched(team_launcher, render_board_unit=lambda p: "NOT THIS", render_vcs_close_role_sql=lambda p: "CLOSE SQL",
                      ensure_owner_file=lambda c, path, *, runner: owned.append((c, path, runner))):
-            paths = m._write_vcs_close_role_artifacts(plan, role_name="ops", provision_dir=Path(raw), runner="R", config=cfg)
+            paths = m._write_vcs_close_role_artifacts(plan, role_name="ops", provision_dir=Path(raw), runner="R", config=cfg,
+                                                      board_unit="UNIT")
         expected = (Path(raw) / "plan.json", Path(raw) / "p356-ticket-board.service", Path(raw) / "p356-vcs-close-role.sql")
         check(paths == expected and [o[1] for o in owned] == list(expected) and all(o[0] is cfg and o[2] == "R" for o in owned)
               and json.loads(expected[0].read_text()) == {"board_unit": "p356-ticket-board.service", "project": PROJECT, "marker": 1}
@@ -263,8 +265,9 @@ def test_the_sql_as_postgres_and_its_refusal() -> None:
 class Command:
     """The command's launcher steps, answering from this test's objects, into one log."""
 
-    def __init__(self, *, preflight_error: str = "", sql_error: str = "", unit_error: str = "") -> None:
+    def __init__(self, *, preflight_error: str = "", sql_error: str = "", unit_error: str = "", record_problem: str = "") -> None:
         self.preflight_error, self.sql_error, self.unit_error = preflight_error, sql_error, unit_error
+        self.record_problem = record_problem
         self.plan = SimpleNamespace(operation_allowed_roles=[["create", ["main"]], ["mark_done", ["ops-rendered", "x"]]], name="plan")
         self.log: list[tuple] = []
         self.said: list[str] = []
@@ -278,19 +281,26 @@ class Command:
         return dict(
             _project_plan_for_vcs_close_role=lambda c, *, config_path, role_name: L.append(("plan", c, config_path, role_name)) or self.plan,
             render_vcs_close_role_sql=lambda plan: L.append(("preflight", plan)) or (fail(self.preflight_error) if self.preflight_error else "SQL"),
+            render_board_unit=lambda plan: L.append(("render", plan)) or "UNIT TEXT",
             _write_vcs_close_role_artifacts=lambda plan, **kw: L.append(("artifacts", plan, kw))
                 or (Path("/p/plan.json"), Path("/p/unit.service"), Path("/p/close.sql")),
             _apply_vcs_close_role_board_sql=lambda plan, *, role_name, runner: L.append(("sql", plan, role_name, runner))
                 or (fail(self.sql_error) if self.sql_error else None),
-            _install_and_restart_board_unit=lambda plan, *, board_unit_path, runner: L.append(("unit", plan, board_unit_path, runner))
+            _install_and_restart_board_unit=lambda plan, *, board_unit, runner: L.append(("unit", plan, board_unit, runner))
                 or (fail(self.unit_error) if self.unit_error else None),
         )
+
+    def record(self, provision_dir, plan, board_unit):
+        self.log.append(("record", provision_dir, plan, board_unit))
+        return self.record_problem
 
     def run(self, cfg=None, **kw):
         from scripts import project_vcs_close_role as m, team_launcher
 
+        from scripts import root_packet
+
         self.config = cfg or config("main", "ops")
-        with patched(team_launcher, **self.names()):
+        with patched(team_launcher, **self.names()), patched(root_packet, record_unit_install=self.record):
             return m.set_project_vcs_close_role_command(self.config, config_path=Path("/nonexistent/syrd356/provision/p356.json"),
                                                         role_name="Ops", runner="R", print_func=self.said.append, **kw)
 
@@ -301,14 +311,21 @@ class Command:
 def test_the_command_in_order() -> None:
     fx = Command()
     code = fx.run()
-    check(code == 0 and type(code) is int and fx.kinds() == ["plan", "preflight", "artifacts", "sql", "unit"],
-          f"plan, SQL checked, artifacts, SQL applied, then the unit: {fx.kinds()}")
+    check(code == 0 and type(code) is int and fx.kinds() == ["plan", "preflight", "render", "artifacts", "sql", "unit", "record"],
+          f"plan, SQL checked, the unit rendered once, artifacts, SQL applied, the unit, then its record: {fx.kinds()}")
     check(fx.log[0] == ("plan", fx.config, Path("/nonexistent/syrd356/provision/p356.json"), "Ops") and fx.log[1][1] is fx.plan
-          and fx.log[2][2] == dict(role_name="ops-rendered", provision_dir=Path("/nonexistent/syrd356/provision"), runner="R", config=fx.config)
-          and fx.log[3][2:] == ("ops-rendered", "R") and fx.log[4][2:] == (Path("/p/unit.service"), "R"),
-          f"the role the rendered plan closes with, beside the configuration, the unit that was written: {fx.log}")
+          and fx.log[2][1] is fx.plan
+          and fx.log[3][2] == dict(role_name="ops-rendered", provision_dir=Path("/nonexistent/syrd356/provision"), runner="R",
+                                   config=fx.config, board_unit="UNIT TEXT")
+          and fx.log[4][2:] == ("ops-rendered", "R") and fx.log[5][2:] == ("UNIT TEXT", "R")
+          and fx.log[6] == ("record", Path("/nonexistent/syrd356/provision"), fx.plan, "UNIT TEXT"),
+          f"the role the rendered plan closes with, beside the configuration; the one rendered text recorded, installed "
+          f"and named in the record (SYRD-607): {fx.log}")
     check(fx.said == ["team-launcher: set VCS close role for p356 to ops-rendered; updated /p/plan.json, /p/unit.service, and /p/close.sql"],
           f"said: {fx.said}")
+    fx = Command(record_problem="syrd356 could not record")
+    check(fx.run() == 0 and fx.said[0] == "team-launcher: syrd356 could not record" and len(fx.said) == 2,
+          f"a record that could not be written is said on its own; the install stands: {fx.said}")
 
 
 def test_each_failure_stops_where_it_happens() -> None:

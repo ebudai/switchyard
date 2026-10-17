@@ -196,6 +196,17 @@ def new_project_command(
         registry_dir=None,
         require_owner_user=execute if require_owner_user is None else require_owner_user,
     )
+    if execute and os.geteuid() != 0:
+        # Executing means root runs the packet, and root runs only a copy it
+        # staged itself. A packet the caller wrote can be replaced by the
+        # caller's own account between any check and root opening it, so a
+        # directory the caller owns, however closed, is no root trust boundary
+        # (SYRD-607).
+        raise SystemExit(
+            f"team-launcher: --execute runs {plan.project}'s provisioning packet as root, and root runs only a copy "
+            f"it staged itself: re-run it as root (`sudo team-launcher {plan.project} new --execute ...`), or "
+            "drop --execute to review the packet. Nothing was written or run."
+        )
     artifact_dir = (output_dir or launcher._new_project_artifact_dir(plan.project)).expanduser().resolve(strict=False)
     if desktop_policy is not None:
         from scripts.desktop_access import validate_policy
@@ -212,25 +223,32 @@ def new_project_command(
             (role, str(_role_worktree_base / role)) for role, _account in plan.role_accounts
         ),
     )
-    launcher.write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
-    if execute and os.geteuid() == 0:
-        # The provision directory is handed to the tenant, so root publishes its
-        # own copy of everything it later installs or executes -- rendered here
-        # from the plan root just computed, never copied back out of the tenant's
-        # directory -- and installs from that instead (SYRD-39).
-        rendered_privileged = launcher.render_privileged_artifacts(plan, enable_owner_linger=enable_owner_linger)
-        try:
-            mirrored_privileged = launcher.install_privileged_artifacts(plan, rendered_privileged)
-        except OSError as exc:
-            mirrored_privileged = None
-            print_func(
-                f"switchyard: could not stage {plan.project} privileged artifacts for root: {exc}. "
-                f"Run `switchyard upgrade {plan.project}` as root before installing its units."
-            )
-        if mirrored_privileged is not None:
-            print_func(
-                f"switchyard: root installs {plan.project} units, grants and SQL from {mirrored_privileged}"
-            )
+    from scripts import root_packet
+
+    root_packet_path: Path | None = None
+    if execute:
+        # Root, as checked above. The provision directory is handed to the tenant, so root renders once
+        # where only root can reach, keeps its own copy of everything it installs
+        # or executes there, and runs the packet from that copy. The tenant's
+        # directory gets a record made from the same bytes, never the source of
+        # what runs; a copy root cannot stage stops everything here (SYRD-39,
+        # SYRD-607).
+        rendered_privileged, mirrored_privileged = root_packet.stage_root_packet(
+            plan, enable_owner_linger=enable_owner_linger
+        )
+        root_packet_path = mirrored_privileged / root_packet.PACKET_NAME
+        record_problem = root_packet.publish_packet_record(
+            artifact_dir, rendered_privileged, root_copy=mirrored_privileged
+        )
+        print_func(
+            f"switchyard: root installs {plan.project} units, grants and SQL from {mirrored_privileged}, "
+            f"and runs its own {root_packet.PACKET_NAME} there "
+            f"(sha256 {root_packet.digest(rendered_privileged[root_packet.PACKET_NAME])})"
+        )
+        if record_problem:
+            print_func(f"switchyard: {record_problem}")
+    else:
+        launcher.write_artifacts(plan, artifact_dir, enable_owner_linger=enable_owner_linger)
     config_path = launcher.write_new_project_launcher_artifacts(
         plan,
         artifact_dir,
@@ -284,12 +302,35 @@ def new_project_command(
         print_func(f"team-launcher: launcher config {config_path}")
         print_func("team-launcher: execution plan:")
         print_func("  sudo -v")
-        # By absolute path, and with no `cd` in front of it. The packet resolves
-        # the artifacts beside it from its own location, so the directory an
-        # operator happens to be in is not part of the instruction -- and an
-        # instruction that told them to change directory first is what taught
-        # everyone the packet needed one (SYRD-149).
-        print_func(f"  {launcher.recorded_provisioning_command(plan.project, str(commands_path))}")
+        # Never a packet path for root to run, and never a program from the
+        # checkout the dry run ran from: whatever its caller owns, its caller can
+        # change before an operator runs the command. The plan is the same `new`
+        # again with --execute through the installed release's team-launcher,
+        # proven root's from `/` down, so root renders, stages and runs its own
+        # copy. A --source-repo goes with it only when it is root's too, since
+        # the packet runs helpers from it. Every path is absolute, so neither
+        # the directory the operator is in nor root's PATH chooses what runs
+        # (SYRD-149, SYRD-607).
+        script, unavailable = root_packet.trusted_launcher()
+        if script is not None and source_repo is not None:
+            problem = root_packet.root_controlled(source_repo.expanduser().resolve(strict=False))
+            unavailable = f"--source-repo {source_repo} is not root's: {problem}" if problem else ""
+        if script is None or unavailable:
+            print_func(f"  (no root command: {unavailable}. Install the release to provision from, as "
+                       "docs/team-launcher.md describes, and run this dry run again for the command.)")
+        else:
+            print_func("  " + root_packet.root_execute_command(
+                plan.project,
+                script=script,
+                options=(
+                    ("--from", from_artifact), ("--owner-user", owner_user), ("--repository", repository),
+                    ("--desktop-policy", desktop_policy), ("--port", port), ("--database", database),
+                    ("--source-repo", source_repo), ("--workflow-config", workflow_config),
+                    ("--commit-git-dir", commit_git_dir), ("--new-output-dir", output_dir),
+                    ("--upstream-report-url", upstream_report_url.strip()),
+                    ("--upstream-report-token-file", upstream_report_token_file.strip()),
+                ),
+            ))
         print_func(
             f"team-launcher: that leaves a root-owned record of the run; read it with "
             f"`switchyard rollout-log {plan.project}` (SYRD-128)"
@@ -311,14 +352,14 @@ def new_project_command(
     if recorder is not None:
         result = runner(
             ["sudo", str(recorder), plan.project, "--label", "provisioning",
-             "--", "bash", str(commands_path)],
+             "--", "bash", str(root_packet_path)],
         )
         print_func(
             f"team-launcher: the run is recorded; read it with "
             f"`switchyard rollout-log {plan.project}`"
         )
     else:
-        result = runner(["bash", str(commands_path)])
+        result = runner(["bash", str(root_packet_path)])
     if result.returncode != 0:
         raise SystemExit(f"team-launcher: provisioning failed with exit status {result.returncode}")
     config = launcher.load_project_config(plan.project, config_path)

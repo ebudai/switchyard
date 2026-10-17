@@ -1740,7 +1740,10 @@ provisioned project's terminal close role without re-provisioning. The role must
 already exist, so add it first with `add-role` when needed. The command updates
 the generated plan, board unit, and workflow SQL, applies the workflow change to
 Postgres, and restarts the tenant board so both the HTTP gate and SQL transition
-table agree. The built-in `pgu` project rejects this command by design.
+table agree. The built-in `pgu` project rejects this command by design. Both it
+and `add-role` install the unit from the text they rendered, never from the
+copy they leave in the provision directory, and name its digest in
+`root-provenance.json` there (SYRD-607).
 
 Generated Konsole layouts use a single horizontal row for up to four visible
 roles, so small teams get tall side-by-side panes. Five or more visible roles

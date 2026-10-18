@@ -150,7 +150,7 @@ def replace(desk: Desk, *, euid: int = 0, refuse: tuple[int, ...] = (), settle: 
 
     with patched(team_launcher, **desk.launcher_names()), patched(presentation_controller, **desk.controller_names()):
         result = presentation_window_replacement.replace_presentation_window_command(
-            SimpleNamespace(project=PROJECT), config_path=Path("/nonexistent/syrd329/p329.json"),
+            SimpleNamespace(project=PROJECT, run_as_user="syrd329-owner"), config_path=Path("/nonexistent/syrd329/p329.json"),
             proc_root=Path("/nonexistent/syrd329/proc"), euid_getter=lambda: euid, signaller=signaller,
             settle_seconds=settle, runner=RUNNER, print_func=printed.append, **options)
     return result, signalled, printed
@@ -301,7 +301,7 @@ def test_the_new_window_opens_from_a_fresh_layout_otherwise() -> None:
                                         pane_state_dir=Path("/nonexistent/syrd329/panes"))],
           f"the layout attaches or starts, with the launcher's pane launcher and path: {desk.named('layout')}")
     check(desk.named("konsole") == [(LAYOUT, dict(project=PROJECT, window_title="TITLE p329", gui_user=None,
-                                                  runner=RUNNER, process_launcher=None))],
+                                                  runner=RUNNER, process_launcher=None, layout_owner="syrd329-owner"))],
           f"Konsole opens that layout, as the desktop account or none when there is none: {desk.named('konsole')}")
     check(result == 0 and "worker sessions still running: none" in printed[-1], f"and says so: {printed[-1]!r}")
     given = Path("/nonexistent/syrd329/given-pane")

@@ -267,6 +267,7 @@ def _launch_separate(
         gui_user=gui_user or None,
         runner=runner,
         process_launcher=process_launcher,
+        layout_owner=gui_user or team_launcher.current_user_name(),
     )
     if result != 0:
         raise SystemExit(f"switchyard: could not launch separate presentation window (exit {result})")

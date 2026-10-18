@@ -125,7 +125,7 @@ KONSOLE_WINDOW_TITLE_DEFAULTS = "[KonsoleWindow]\nShowWindowTitleOnTitleBar[$i]=
 FALLBACK_XDG_CONFIG_DIRS = "/etc/xdg"
 
 
-def write_konsole_config_defaults(directory: Path, *, model: Path | None = None) -> str:
+def write_konsole_config_defaults(directory: Path, *, model: Path | None = None, owner: str = "") -> str:
     """Put the cascaded default beside the layout it belongs to.
 
     Beside it deliberately: the account that can read the layout is the account
@@ -139,6 +139,8 @@ def write_konsole_config_defaults(directory: Path, *, model: Path | None = None)
     preference file would be the worse failure.
     """
     target = directory / KONSOLE_DEFAULTS_NAME
+    if os.geteuid() == 0 and model is not None:
+        return _write_konsole_defaults_for(target, model, owner)
     try:
         directory.mkdir(parents=True, exist_ok=True)
         target.write_text(KONSOLE_WINDOW_TITLE_DEFAULTS, encoding="utf-8")
@@ -153,6 +155,39 @@ def write_konsole_config_defaults(directory: Path, *, model: Path | None = None)
             os.chown(target, stats.st_uid, stats.st_gid)
     except OSError as exc:
         return f"cannot hand the Konsole window-title default {target} to its reader: {exc}"
+    return ""
+
+
+def _write_konsole_defaults_for(target: Path, model: Path, owner: str) -> str:
+    """As root: the default written for the account whose layout this is, by descriptor from that account's root.
+
+    Root writing into somebody else's directory by name follows a link left
+    there, so the file is written as that account's own, through `owner_writes`
+    (SYRD-610). The account is the launch's to name, never read off the layout;
+    the layout's mode is read from a descriptor opened on it beneath that
+    account's root, so a link at it or at any directory above it is refused
+    before anything of it is used. No account named, no layout yet, or a layout
+    that cannot be read so: no default -- the window still opens, its title bar
+    following focus.
+    """
+    from scripts import owner_writes
+
+    if not owner:
+        return ""
+    try:
+        stats = owner_writes.owner_file_status(owner, model)
+    except SystemExit as stop:
+        return f"no Konsole window-title default is written beside {model}: {stop}"
+    except OSError as exc:
+        return f"cannot read the layout {model} the Konsole window-title default follows: {exc}"
+    if stats is None:
+        return ""
+    try:
+        owner_writes.write_owner_file(owner, target, KONSOLE_WINDOW_TITLE_DEFAULTS, mode=stat.S_IMODE(stats.st_mode))
+    except SystemExit as stop:
+        return f"cannot write the Konsole window-title default {target}: {stop}"
+    except OSError as exc:
+        return f"cannot write the Konsole window-title default {target}: {exc}"
     return ""
 
 
@@ -303,10 +338,11 @@ def launch_konsole_window(
     gui_user: str | None = None,
     runner: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
     process_launcher: Callable[..., Any] | None = None,
+    layout_owner: str = "",
 ) -> int:
     from scripts import team_launcher as launcher
 
-    defaults_refusal = write_konsole_config_defaults(layout_path.parent, model=layout_path)
+    defaults_refusal = write_konsole_config_defaults(layout_path.parent, model=layout_path, owner=layout_owner)
     if defaults_refusal:
         print(f"team-launcher: {defaults_refusal}", file=sys.stderr)
     args = konsole_launch_args(

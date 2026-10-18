@@ -164,13 +164,13 @@ def root_writes_for(owner_user: str) -> bool:
 
 
 def write_owner_file(owner_user: str, path: Path, content: bytes | str, *, mode: int | None = None,
-                     parents_mode: int = 0o755, parent_mode: int | None = None) -> None:
+                     parents_mode: int = 0o755, parent_mode: int | None = None, new_mode: int = 0o600) -> None:
     """Publish a generated file the owner is to own: whole, and as root by descriptor from the owner's home.
 
     As root (and not the owner), the file is `tenant_paths.write_file`d under
     the owner's home: never through a link at any component, never outside
     the home, made owner:owner-group with `mode` (None keeps the replaced
-    file's, else 0600) before it is renamed into place; a missing directory on
+    file's, else `new_mode`) before it is renamed into place; a missing directory on
     the way is made the owner's with `parents_mode`, and `parent_mode` sets the
     parent's own. Otherwise it is the caller's own file, written as before.
     """
@@ -187,7 +187,7 @@ def write_owner_file(owner_user: str, path: Path, content: bytes | str, *, mode:
     try:
         tenant_paths.write_file(owner_root(owner_user, path), str(path), data, uid=account.pw_uid, gid=account.pw_gid,
                                 mode=mode, parents=(parents_mode, account.pw_uid, account.pw_gid),
-                                parent_mode=parent_mode)
+                                parent_mode=parent_mode, new_mode=new_mode)
     except tenant_paths.Refused as refusal:
         raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {refusal}. Nothing was written.") from None
     except SystemExit as stop:
@@ -229,6 +229,22 @@ def read_owner_bytes(owner_user: str, path: Path) -> bytes | None:
             return None
     try:
         return tenant_paths.read_file(owner_root(owner_user, path), str(path))
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to read {path} for {owner_user}: {refusal}") from None
+    except SystemExit as stop:
+        raise SystemExit(f"switchyard: refusing to read {path} for {owner_user}: {stop}") from None
+
+
+def owner_file_status(owner_user: str, path: Path) -> os.stat_result | None:
+    """The status of a regular file in the owner's tree, opened by descriptor from its root; None when missing.
+
+    For root reading something of the owner's -- its mode, who it belongs to -- without following a link at the
+    file or any directory above it, so nothing reached through one informs what root does next (SYRD-610).
+    """
+    from scripts import tenant_paths
+
+    try:
+        return tenant_paths.stat_file(owner_root(owner_user, path), str(path))
     except tenant_paths.Refused as refusal:
         raise SystemExit(f"switchyard: refusing to read {path} for {owner_user}: {refusal}") from None
     except SystemExit as stop:

@@ -1082,7 +1082,7 @@ class Workers:
 
 
 def p78_config(*roles: tuple[str, bool]) -> SimpleNamespace:
-    return SimpleNamespace(project="p342", roles=[SimpleNamespace(role=name, detached=detached)
+    return SimpleNamespace(project="p342", run_as_user="syrd342-owner", roles=[SimpleNamespace(role=name, detached=detached)
                                                   for name, detached in roles])
 
 
@@ -1208,7 +1208,7 @@ def test_p78_detached_roles_start_direct_then_the_window_opens() -> None:
           and ("owner-dirs", EFFECTIVE, w.caller_runner) in w.log
           and ("refusal?", OUTPUT) in w.log
           and w.log[-1] == ("konsole", OUTPUT, dict(project="p342", window_title="P342 window",
-                                                   runner=w.caller_runner, process_launcher=konsole_launcher)),
+                                                   runner=w.caller_runner, process_launcher=konsole_launcher, layout_owner="syrd342-owner")),
           f"with the caller's layout mode, environment, runner and Konsole launcher: {w.log[-1]}")
     from scripts.launch_phases import WorkerStartup
     check(result == WorkerStartup(worker_start_exit_code=0, launch_started_at=342.25,

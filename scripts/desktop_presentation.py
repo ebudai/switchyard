@@ -494,6 +494,7 @@ def complete_desktop_presentation(
         gui_user=None,
         runner=runner,
         process_launcher=process_launcher,
+        layout_owner=caller,
     )
 
 

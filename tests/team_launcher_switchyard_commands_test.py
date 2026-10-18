@@ -102,6 +102,8 @@ def test_legacy_and_switchyard_entrypoints_render_same_plain_konsole_command() -
             registry_dir = tmp_path / "registry"
             registry_dir.mkdir()
             config_path = _write_minimal_shared_checkout_config(config_dir, repo, ["ops"], run_as_user="agent")
+            # Root reads and writes the owner's files only inside its roots (SYRD-610): here, the scratch directory.
+            __import__("owner_home_sandbox").hold_owner_root("agent", tmp_path, ids=(os.getuid(), os.getgid()))
             (config_dir / "layout.json").write_text(
                 json.dumps(
                     {

@@ -597,6 +597,7 @@ def _start_workers_and_present(
                     window_title=window_title,
                     runner=runner,
                     process_launcher=konsole_process_launcher,
+                    layout_owner=config.run_as_user,
                 )
     if launch_result != 0:
         return launch_result

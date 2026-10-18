@@ -126,6 +126,7 @@ def replace_presentation_window_command(
             gui_user=launcher.default_gui_user() or None,
             runner=runner,
             process_launcher=konsole_process_launcher,
+            layout_owner=config.run_as_user,
         )
     if result != 0:
         print_func(

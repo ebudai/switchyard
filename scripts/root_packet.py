@@ -80,20 +80,41 @@ def stage_root_packet(
     return rendered, mirrored
 
 
-def publish_packet_record(artifact_dir: Path, rendered: Mapping[str, bytes], *, root_copy: Path) -> str:
+def publish_packet_record(artifact_dir: Path, rendered: Mapping[str, bytes], *, root_copy: Path,
+                          owner_user: str = "") -> str:
     """The tenant's copy, from the bytes root rendered; returns what went wrong, or "".
 
     The old provenance record goes first, so a record that fails half-way is
-    never described as matching what root ran.
+    never described as matching what root ran. In `owner_user`'s tree -- the
+    tenant's provision directory under `switchyard new` -- each file is root's
+    own, removed, made and replaced by descriptor from the owner's root, so a
+    link the tenant left at a name or at any directory above it is refused,
+    never followed (SYRD-611).
     """
+    from scripts import owner_writes
+
+    in_tree = owner_writes.root_writes_in(owner_user, artifact_dir)
     try:
-        (artifact_dir / RECORD_NAME).unlink(missing_ok=True)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+        if in_tree:
+            owner_writes.remove_root_record(owner_user, artifact_dir / RECORD_NAME)
+        else:
+            (artifact_dir / RECORD_NAME).unlink(missing_ok=True)
+            artifact_dir.mkdir(parents=True, exist_ok=True)
         for name, body in rendered.items():
-            _write_record_file(artifact_dir / name, body, 0o755 if name.endswith(".sh") else 0o644, exclusive=False)
+            mode = 0o755 if name.endswith(".sh") else 0o644
+            if in_tree:
+                owner_writes.write_root_record(owner_user, artifact_dir / name, body, mode=mode, parents_mode=0o755)
+            else:
+                _write_record_file(artifact_dir / name, body, mode, exclusive=False)
         record_root_use(
             artifact_dir,
             {name: (body, str(root_copy / name)) for name, body in rendered.items() if name != "plan.json"},
+            owner_user=owner_user if in_tree else "",
+        )
+    except SystemExit as stop:
+        return (
+            f"could not publish the record of the packet in {artifact_dir}: {stop}. Root ran its own copy "
+            f"in {root_copy}; what {artifact_dir} holds is not a record of it"
         )
     except OSError as exc:
         return (
@@ -116,7 +137,17 @@ def record_root_use(directory: Path, used: Mapping[str, tuple[bytes | str, str]]
     from scripts import team_launcher as launcher
 
     path = directory / RECORD_NAME
-    existing, _problem = launcher.read_tenant_document_no_follow(path, what="the record of what root used")
+    if owner_user and launcher.root_writes_for(owner_user):
+        # By descriptor from the owner's root: nothing reached through a link above the record is carried into it.
+        from scripts import owner_writes
+
+        try:
+            raw = owner_writes.read_owner_bytes(owner_user, path)
+            existing = json.loads(raw.decode("utf-8")) if raw is not None else None
+        except (SystemExit, ValueError):
+            existing = None
+    else:
+        existing, _problem = launcher.read_tenant_document_no_follow(path, what="the record of what root used")
     files = existing.get("files") if isinstance(existing, dict) else None
     entries = dict(files) if isinstance(files, dict) else {}
     for name, (body, used_from) in used.items():

@@ -26,6 +26,7 @@ isolation and the sandboxed install roots are.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import os
 import pwd
 import shutil
@@ -83,3 +84,22 @@ def hold_owner_root(owner_user: str, root: Path, *, ids: tuple[int, int] | None 
         stand_in = pwd.struct_passwd((owner_user, "x", ids[0], ids[1], "", str(root), "/bin/sh"))
         owner_writes.pwd = SimpleNamespace(getpwnam=lambda name: stand_in if name == owner_user else real(name),
                                            getpwuid=pwd.getpwuid)
+
+
+@contextlib.contextmanager
+def root_stage_in(directory: Path):
+    """Root's staging directory, for a suite whose root child writes in a real home (SYRD-611).
+
+    Root stages in a directory only it can change on the destination's filesystem -- the home's parent on a
+    host, which a user namespace cannot own -- so, while this holds, a private one made in `directory` instead.
+    """
+    stage = directory / ".root-stage"
+    stage.mkdir(mode=0o700)
+    descriptor, shipped = os.open(stage, os.O_RDONLY | os.O_DIRECTORY), tenant_paths.Root._stage_parent
+    tenant_paths.Root._stage_parent = lambda _root: descriptor
+    try:
+        yield
+    finally:
+        tenant_paths.Root._stage_parent = shipped
+        os.close(descriptor)
+        stage.rmdir()

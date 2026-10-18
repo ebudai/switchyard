@@ -215,11 +215,11 @@ def _owner_linger_is_enabled(
     return result.returncode == 0 and str(getattr(result, "stdout", "") or "").strip() == "yes"
 
 
-def _existing_project_path_is_usable(project_dir: Path, owner_user: str) -> bool:
+def _existing_project_path_is_usable(project_dir: Path, owner_user: str, info: os.stat_result | None = None) -> bool:
     from scripts import team_launcher as launcher
 
     try:
-        info = project_dir.stat()
+        info = info if info is not None else project_dir.stat()
     except OSError:
         return False
     if not stat.S_ISDIR(info.st_mode):
@@ -237,11 +237,23 @@ def _existing_project_path_is_usable(project_dir: Path, owner_user: str) -> bool
 def _precheck_project_path_before_mutating(owner_user: str, project_dir: Path) -> None:
     from scripts import team_launcher as launcher
 
-    if not project_dir.exists():
+    from scripts import owner_writes
+
+    info = None
+    if owner_writes.root_writes_in(owner_user, project_dir):
+        # Root, for an owner that exists, in one of its roots: what is there is looked at by descriptor, never
+        # through a link at the path or above it (SYRD-611).
+        info = owner_writes.owner_entry_status(owner_user, project_dir)
+        if info is None:
+            return
+        if stat.S_ISLNK(info.st_mode):
+            raise SystemExit(f"switchyard: project path {project_dir} is a symbolic link; root does not follow it")
+    elif not project_dir.exists():
         return
-    if not project_dir.is_dir():
+    if not (stat.S_ISDIR(info.st_mode) if info is not None else project_dir.is_dir()):
         raise SystemExit(f"switchyard: project path {project_dir} already exists but is not a directory")
-    if not launcher._existing_project_path_is_usable(project_dir, owner_user):
+    # The status just read by descriptor, when there is one, so the permission check looks at nothing by path.
+    if not launcher._existing_project_path_is_usable(project_dir, owner_user, **({"info": info} if info is not None else {})):
         raise SystemExit(
             f"switchyard: project path {project_dir} already exists but is not readable and writable "
             f"by {owner_user}; choose a writable path or fix ownership/permissions first"
@@ -284,7 +296,12 @@ def _ensure_owner_user_and_project_dir(
 ) -> OwnerUserProvisionResult:
     from scripts import team_launcher as launcher
 
-    existed = project_dir.exists()
+    from scripts import owner_writes
+
+    # As root for an existing owner, in its roots, looked at by descriptor (SYRD-611); an owner not made yet has no
+    # tree of its own to plant anything in.
+    existed = (owner_writes.owner_entry_status(owner_user, project_dir) is not None
+               if owner_writes.root_writes_in(owner_user, project_dir) else project_dir.exists())
     launcher._precheck_project_path_before_mutating(owner_user, project_dir)
     id_args = ["id", "-u", owner_user]
     install_commands = launcher._owner_project_install_commands(
@@ -325,6 +342,14 @@ def _ensure_owner_user_and_project_dir(
         # this is not the tenant tree being confined.
         for install_args in install_commands:
             path = Path(install_args[-1])
+            if os.geteuid() == 0 and "--root" in install_args:
+                # The helper's own operation again, in-process: what it made is left as it is, and a link swapped
+                # in since is refused, where a by-path `mkdir` would have followed it (SYRD-611).
+                from scripts import tenant_paths
+
+                if tenant_paths.run(install_args[install_args.index("--root"):], report=lambda _line: None) != 0:
+                    raise SystemExit(f"switchyard: failed to create project directory {path}")
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             flag = "--mode" if "--mode" in install_args else "-m"
             path.mkdir(mode=int(install_args[install_args.index(flag) + 1], 8), exist_ok=True)

@@ -219,13 +219,19 @@ def _write_switchyard_onboarding_files(
     director_onboarding: Path,
     include_designer: bool = True,
 ) -> None:
+    from scripts import owner_writes
     from scripts import team_launcher as launcher
 
+    # As root, the owner's files from the start, by descriptor from the owner's root: never through a link the
+    # tenant left at `.switchyard` or above it (SYRD-611).
     switchyard_dir = launcher._switchyard_dir(project_dir)
-    switchyard_dir.mkdir(parents=True, exist_ok=True)
+    if not owner_writes.root_writes_for(owner_user):
+        switchyard_dir.mkdir(parents=True, exist_ok=True)
     if include_designer:
         designer_onboarding = switchyard_dir / SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME
-        designer_onboarding.write_text(
+        owner_writes.write_owner_file(
+            owner_user,
+            designer_onboarding,
             "\n".join(
                 [
                     f"# {project_name} Switchyard Design Session",
@@ -250,9 +256,11 @@ def _write_switchyard_onboarding_files(
                     "",
                 ]
             ),
-            encoding="utf-8",
+            new_mode=0o644,
         )
-    director_onboarding.write_text(
+    owner_writes.write_owner_file(
+        owner_user,
+        director_onboarding,
         "\n".join(
             [
                 f"# {project_name} Director Onboarding",
@@ -267,8 +275,38 @@ def _write_switchyard_onboarding_files(
                 "",
             ]
         ),
-        encoding="utf-8",
+        new_mode=0o644,
     )
+
+
+def _onboarding_docs_dir_args(owner_user: str, target_dir: Path) -> list[str]:
+    """The onboarding docs directory and its parent, the owner's at 0755: the descriptor helper's `dir`, rooted at
+    the owner's root, so a link the tenant left at either -- or above them -- is refused (SYRD-611)."""
+    from scripts import owner_writes
+    from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
+
+    return tenant_paths_argv(owner_writes.owner_root(owner_user, target_dir), "dir", "--mode", "0755", "--owner",
+                             owner_user, "--group", owner_user, str(target_dir.parent), str(target_dir))
+
+
+def _onboarding_doc_present(owner_user: str, path: Path) -> bool:
+    """Whether something is at an onboarding doc's name; as root, looked at by descriptor, a link counting and a
+    link above it refused."""
+    from scripts import owner_writes
+
+    return owner_writes.owner_entry_present(owner_user, path)
+
+
+def _write_onboarding_doc(owner_user: str, path: Path, text: str, *, runner, exclusive: bool) -> bool:
+    """One onboarding doc, the owner's: as root by descriptor, made the owner's before it is in place; otherwise
+    written and handed over as before. Whether it wrote."""
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    written = owner_writes.write_owner_file(owner_user, path, text, new_mode=0o644, exclusive=exclusive)
+    if written and not owner_writes.root_writes_for(owner_user):
+        launcher._chown_project_file(owner_user=owner_user, path=path, runner=runner)
+    return written
 
 
 def _switchyard_source_commit(
@@ -432,7 +470,7 @@ def upgrade_switchyard_onboarding_docs(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     print_func: Callable[[str], None],
 ) -> None:
-    from scripts import team_launcher as launcher
+    from scripts import owner_writes
 
     source_dir = source_repo / "docs" / "onboarding"
     target_dir = project_dir / "docs" / "onboarding"
@@ -446,23 +484,10 @@ def upgrade_switchyard_onboarding_docs(
 
     current_source_commit = _switchyard_source_commit(source_repo, runner=runner)
     if not dry_run:
-        install = runner(
-            [
-                "install",
-                "-d",
-                "-m",
-                "0755",
-                "-o",
-                owner_user,
-                "-g",
-                owner_user,
-                str(target_dir.parent),
-                str(target_dir),
-            ]
-        )
+        install = runner(_onboarding_docs_dir_args(owner_user, target_dir))
         if install.returncode != 0:
             raise SystemExit(f"switchyard: failed to create onboarding docs directory {target_dir} for {owner_user}")
-        if not target_dir.exists():
+        if not owner_writes.root_writes_for(owner_user) and not target_dir.exists():
             target_dir.mkdir(parents=True, exist_ok=True)
 
     for name in SWITCHYARD_ONBOARDING_DOC_NAMES:
@@ -478,15 +503,20 @@ def upgrade_switchyard_onboarding_docs(
             source_commit=current_source_commit,
             body=current_body,
         )
-        if not target_path.exists():
-            if not dry_run:
-                target_path.write_text(current_snapshot, encoding="utf-8")
-                launcher._chown_project_file(owner_user=owner_user, path=target_path, runner=runner)
+        if not _onboarding_doc_present(owner_user, target_path):
+            if not dry_run and not _write_onboarding_doc(owner_user, target_path, current_snapshot, runner=runner,
+                                                         exclusive=True):
+                print_func(f"switchyard: onboarding doc {name}: skipped, it appeared while being installed")
+                continue
             print_func(f"switchyard: onboarding doc {name}: {'would install' if dry_run else 'installed'}")
             continue
         try:
-            existing = target_path.read_text(encoding="utf-8")
-        except OSError as exc:
+            # As root, by descriptor: a link at the installed copy, or above it, is refused, never read (SYRD-611).
+            raw = owner_writes.read_owner_bytes(owner_user, target_path)
+            if raw is None:
+                raise FileNotFoundError(2, "No such file or directory", str(target_path))
+            existing = raw.decode("utf-8")
+        except (OSError, SystemExit, UnicodeDecodeError) as exc:
             print_func(f"switchyard: onboarding doc {name}: skipped, cannot read installed copy: {exc}")
             continue
         provenance = _parse_onboarding_snapshot(existing)
@@ -537,8 +567,7 @@ def upgrade_switchyard_onboarding_docs(
             )
             continue
         if not dry_run:
-            target_path.write_text(current_snapshot, encoding="utf-8")
-            launcher._chown_project_file(owner_user=owner_user, path=target_path, runner=runner)
+            _write_onboarding_doc(owner_user, target_path, current_snapshot, runner=runner, exclusive=False)
         print_func(f"switchyard: onboarding doc {name}: {'would refresh' if dry_run else 'refreshed'}")
 
 
@@ -550,7 +579,7 @@ def _install_switchyard_onboarding_docs(
     runner: Callable[..., subprocess.CompletedProcess[Any]],
     print_func: Callable[[str], None],
 ) -> None:
-    from scripts import team_launcher as launcher
+    from scripts import owner_writes
 
     source_dir = source_repo / "docs" / "onboarding"
     target_dir = project_dir / "docs" / "onboarding"
@@ -563,23 +592,10 @@ def _install_switchyard_onboarding_docs(
         )
         return
 
-    install = runner(
-        [
-            "install",
-            "-d",
-            "-m",
-            "0755",
-            "-o",
-            owner_user,
-            "-g",
-            owner_user,
-            str(target_dir.parent),
-            str(target_dir),
-        ]
-    )
+    install = runner(_onboarding_docs_dir_args(owner_user, target_dir))
     if install.returncode != 0:
         raise SystemExit(f"switchyard: failed to create onboarding docs directory {target_dir} for {owner_user}")
-    if not target_dir.exists():
+    if not owner_writes.root_writes_for(owner_user) and not target_dir.exists():
         target_dir.mkdir(parents=True, exist_ok=True)
 
     source_commit = _switchyard_source_commit(source_repo, runner=runner)
@@ -589,7 +605,7 @@ def _install_switchyard_onboarding_docs(
     for name in SWITCHYARD_ONBOARDING_DOC_NAMES:
         source_path = source_dir / name
         target_path = target_dir / name
-        if target_path.exists():
+        if _onboarding_doc_present(owner_user, target_path):
             skipped_existing.append(name)
             continue
         try:
@@ -597,11 +613,10 @@ def _install_switchyard_onboarding_docs(
         except OSError:
             skipped_missing.append(name)
             continue
-        target_path.write_text(
-            _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=body),
-            encoding="utf-8",
-        )
-        launcher._chown_project_file(owner_user=owner_user, path=target_path, runner=runner)
+        stamped = _stamp_onboarding_doc(source_name=name, source_commit=source_commit, body=body)
+        if not _write_onboarding_doc(owner_user, target_path, stamped, runner=runner, exclusive=True):
+            skipped_existing.append(name)
+            continue
         copied.append(name)
 
     if copied:

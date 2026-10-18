@@ -69,6 +69,9 @@ imports `team_launcher` at its top.
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -292,7 +295,10 @@ def _resolve_new_project_choices(
         print_func=print_func,
     )
 
-    artifact_path = (from_artifact or (launcher._switchyard_dir(project_dir) / f"{resolved_slug}.project.json")).expanduser().resolve(strict=False)
+    # Beneath the project directory as named, never resolved: a link the tenant left at `.switchyard` is refused
+    # when root writes there, not followed to wherever it points (SYRD-611).
+    artifact_path = Path(os.path.abspath(from_artifact.expanduser())) if from_artifact else \
+        launcher._switchyard_dir(project_dir) / f"{resolved_slug}.project.json"
     design_document = project_dir / launcher.SWITCHYARD_DESIGN_FILE_NAME
     director_onboarding = launcher._switchyard_dir(project_dir) / launcher.SWITCHYARD_DIRECTOR_ONBOARDING_FILE_NAME
     stages = launcher.ProvisioningStages(launcher.NEW_PROJECT_STAGES, print_func=print_func)
@@ -507,6 +513,11 @@ def _prepare_new_project_accounts(
         shell=owner_shell,
         owner_home=home_base / owner_user,
     )
+    # Root's own choice of where this owner's project lives: its writes for the owner there go by descriptor from
+    # it, while it is a real directory the owner owns (SYRD-608, SYRD-611).
+    from scripts import owner_writes
+
+    owner_writes.trust_project_root(owner_user, project_dir)
     # Only meaningful once the account exists, which is why it is HERE and not
     # beside the precheck. The precheck asks whether this host can serve a
     # tenant; this asks what the tenant it just created actually resolves, and
@@ -589,7 +600,9 @@ def _prepare_new_project_accounts(
             router=selected_router,
         )
         launcher._chown_switchyard_project_files(owner_user=owner_user, project_dir=project_dir, runner=runner)
-        if include_designer and design_document.exists():
+        # Looked at by descriptor, never through a link at the name or above it, and handed over only as the
+        # regular file it must be: a link there is the tenant's own entry, left alone (Audit of 94b20405).
+        if include_designer and _regular_owner_file(owner_user, design_document):
             launcher._chown_project_file(owner_user=owner_user, path=design_document, runner=runner)
         launcher._install_switchyard_onboarding_docs(
             source_repo=effective_source_repo,
@@ -624,7 +637,7 @@ def _prepare_new_project_accounts(
         if artifact.router != selected_router:
             # The CLI gate switched Router's runtime: record it where the rest of
             # provisioning, and any retry, reads it (SYRD-599).
-            router_onboarding.record_router_choice(artifact_path, selected_router)
+            router_onboarding.record_router_choice(artifact_path, selected_router, owner_user=owner_user)
         launcher._write_switchyard_onboarding_files(
             project_name=resolved_project_name,
             slug=resolved_slug,
@@ -665,12 +678,29 @@ def _prepare_new_project_accounts(
                 runner=runner,
             )
 
-    provision_dir = (output_dir or (launcher._switchyard_dir(project_dir) / "provision")).expanduser().resolve(strict=False)
-    provision_dir.mkdir(parents=True, exist_ok=True)
-    launcher._write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
+    provision_dir = Path(os.path.abspath(output_dir.expanduser())) if output_dir else \
+        launcher._switchyard_dir(project_dir) / "provision"
+    if owner_writes.root_writes_in(owner_user, provision_dir):
+        # Root's own record, as the by-path write made it, but by descriptor from the owner's root (SYRD-611).
+        owner_writes.write_root_record(owner_user, provision_dir / "desktop-policy.json",
+                                       (json.dumps(selected_desktop_policy, indent=2, sort_keys=True) + "\n").encode(),
+                                       mode=0o600, parents_mode=0o755)
+    else:
+        provision_dir.mkdir(parents=True, exist_ok=True)
+        launcher._write_json_atomic(provision_dir / "desktop-policy.json", selected_desktop_policy)
     return NewProjectAccounts(
         provision_dir=provision_dir,
     )
+
+
+def _regular_owner_file(owner_user: str, path: Path) -> bool:
+    """Whether a regular file is at `path`: as root for the owner, by descriptor; otherwise `is_file()`, as before."""
+    from scripts import owner_writes
+
+    if not owner_writes.root_writes_for(owner_user):
+        return path.is_file()
+    info = owner_writes.owner_entry_status(owner_user, path)
+    return info is not None and stat.S_ISREG(info.st_mode)
 
 
 @dataclass(frozen=True)

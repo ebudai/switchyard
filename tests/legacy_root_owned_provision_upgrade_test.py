@@ -34,6 +34,7 @@ if str(ROOT / "tests") not in sys.path:
 
 from scripts import team_launcher as launcher  # noqa: E402
 from scripts.ticket_board.project_provision import build_plan, write_artifacts  # noqa: E402
+from owner_home_sandbox import root_stage_in  # noqa: E402
 
 PROJECT = "porter"
 
@@ -60,9 +61,11 @@ class Tenant:
                           owner_home=self.home, source_repo=ROOT)
         self.plan = plan
         write_artifacts(plan, self.provision, enable_owner_linger=False)
-        self.config_path = launcher.write_new_project_launcher_artifacts(
-            plan, self.provision, repository=repository, print_func=lambda _t: None
-        )
+        # SYRD-611: root writes in the owner's tree by descriptor; in a real home it needs a stage of its own here.
+        with root_stage_in(self.tmp):
+            self.config_path = launcher.write_new_project_launcher_artifacts(
+                plan, self.provision, repository=repository, print_func=lambda _t: None
+            )
         # As the older release left it: everything created by root.
         for path in [self.provision, *self.provision.iterdir()]:
             os.chown(path, 0, 0, follow_symlinks=False)

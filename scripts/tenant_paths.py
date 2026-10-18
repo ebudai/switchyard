@@ -752,7 +752,7 @@ def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: i
 
 def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: int, gid: int, *,
                  parents: tuple[int, int, int] | None = None, parent_mode: int | None = None,
-                 new_mode: int = 0o600) -> None:
+                 new_mode: int = 0o600, exclusive: bool = False) -> bool:
     """Publish `content` at `path` whole: a new file, owned and moded before it is written, renamed into place.
 
     `mode` None keeps the mode of the regular file being replaced (`new_mode`,
@@ -768,6 +768,10 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
     file planted there is replaced as a directory entry, and its target is
     untouched. If anything fails before the rename the new file is removed;
     after it, the parent is synced so the replacement is durable.
+
+    `exclusive` publishes only where nothing is at the name -- a file, a link,
+    anything -- and renames with RENAME_NOREPLACE, so something that arrives
+    after the look is left as it is too (SYRD-611). Returns whether it wrote.
     """
     parts = root.relative(path)
     if not parts:
@@ -776,7 +780,7 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
     if parent is None:
         if root.made_earlier(str(PurePosixPath(path).parent)):
             root.report(f"install {path}")
-            return
+            return True
         raise Refused(str(PurePosixPath(path).parent), "does not exist")
     try:
         if parent_mode is not None:
@@ -785,6 +789,8 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
             existing = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
+        if exclusive and existing is not None:
+            return False
         if existing is not None and stat.S_ISDIR(existing.st_mode):
             raise Refused(path, "is a directory")
         if mode is None:
@@ -797,10 +803,10 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
             finally:
                 os.close(fd)
             if same and (existing.st_uid, existing.st_gid, stat.S_IMODE(existing.st_mode)) == (uid, gid, mode):
-                return
+                return False
         root.report(f"install {path}")
         if root.preview:
-            return
+            return True
         with root._staging(parent, path, "written") as stage:
             fd = os.open("new", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
                          dir_fd=stage)
@@ -813,7 +819,13 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
                 os.fsync(fd)
                 os.close(fd)
                 fd = -1
-                os.rename("new", parts[-1], src_dir_fd=stage, dst_dir_fd=parent)
+                if exclusive:
+                    _rename_noreplace(stage, "new", parent, parts[-1])
+                else:
+                    os.rename("new", parts[-1], src_dir_fd=stage, dst_dir_fd=parent)
+            except FileExistsError:
+                os.unlink("new", dir_fd=stage)
+                return False
             except BaseException:
                 if fd >= 0:
                     os.close(fd)
@@ -823,6 +835,7 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
                     pass
                 raise
         os.fsync(parent)
+        return True
     finally:
         os.close(parent)
 
@@ -842,11 +855,38 @@ def _quiet(home: str) -> Root:
 
 def write_file(home: str, path: str, content: bytes, *, uid: int, gid: int, mode: int | None = None,
                parents: tuple[int, int, int] | None = None, parent_mode: int | None = None,
-               new_mode: int = 0o600) -> None:
-    """Publish `content` at `path` whole (`replace_file`)."""
+               new_mode: int = 0o600, exclusive: bool = False) -> bool:
+    """Publish `content` at `path` whole (`replace_file`); whether it wrote."""
     root = _quiet(home)
     try:
-        replace_file(root, content, path, mode, uid, gid, parents=parents, parent_mode=parent_mode, new_mode=new_mode)
+        return replace_file(root, content, path, mode, uid, gid, parents=parents, parent_mode=parent_mode,
+                            new_mode=new_mode, exclusive=exclusive)
+    finally:
+        root.close()
+
+
+def remove_file(home: str, path: str) -> bool:
+    """Remove the entry at `path` -- a file or a link, never followed, never a directory; whether there was one."""
+    root = _quiet(home)
+    try:
+        parts = root.relative(path)
+        if not parts:
+            raise SystemExit("tenant_paths: the home itself is not a file")
+        parent = root.walk(parts[:-1])
+        if parent is None:
+            return False
+        try:
+            try:
+                status = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if stat.S_ISDIR(status.st_mode):
+                raise Refused(path, "is a directory")
+            os.unlink(parts[-1], dir_fd=parent)
+            os.fsync(parent)
+            return True
+        finally:
+            os.close(parent)
     finally:
         root.close()
 
@@ -868,6 +908,30 @@ def read_file(home: str, path: str) -> bytes | None:
             return b"".join(chunks)
         finally:
             os.close(fd)
+            os.close(parent)
+    finally:
+        root.close()
+
+
+def entry_status(home: str, path: str) -> os.stat_result | None:
+    """What is at `path` itself -- a link reported as a link, never followed -- or None when nothing is there.
+
+    Every directory above it is opened from the home without following a link, so a link above it is refused
+    rather than looked through (SYRD-611).
+    """
+    root = _quiet(home)
+    try:
+        parts = root.relative(path)
+        if not parts:
+            return None if root.fd is None else os.fstat(root.fd)
+        parent = root.walk(parts[:-1])
+        if parent is None:
+            return None
+        try:
+            return os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        finally:
             os.close(parent)
     finally:
         root.close()

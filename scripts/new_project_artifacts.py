@@ -269,11 +269,28 @@ def write_new_project_launcher_artifacts(
         )
     config_path = output_dir / f"{plan.project}.json"
     layout_path = output_dir / f"{plan.project}-konsole-layout.json"
-    layout_path.write_text(
-        json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    config_path.write_text(
+    from scripts import owner_writes
+
+    # Under `switchyard new` the output directory is the tenant's provision directory: root's files there are its
+    # own, as the by-path writes made them, but written and read by descriptor from the owner's root -- never
+    # through a link the tenant left at a name or above it (SYRD-611). Root's own or the operator's directory
+    # (`team-launcher new`) is written as before.
+    in_tree = owner_writes.root_writes_in(plan.owner_user, output_dir)
+
+    def put(path: Path, text: str, mode: int | None, new_mode: int) -> None:
+        if in_tree:
+            owner_writes.write_root_record(plan.owner_user, path, text.encode("utf-8"), mode=mode, new_mode=new_mode)
+        elif new_mode == 0o600:
+            launcher._write_json_atomic(path, json.loads(text))
+        else:
+            path.write_text(text, encoding="utf-8")
+
+    def load(path: Path) -> dict[str, Any]:
+        return owner_writes.read_owner_json(plan.owner_user, path) if in_tree else launcher._load_json(path)
+
+    put(layout_path, json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2,
+                                sort_keys=True) + "\n", None, 0o644)
+    config_text = (
         json.dumps(
             launcher._new_project_launcher_config_payload(
                 plan,
@@ -298,27 +315,40 @@ def write_new_project_launcher_artifacts(
             indent=2,
             sort_keys=True,
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
     # Not group-writable, because the configuration decides which account every
     # role runs as and which board they talk to, and root refuses to register a
     # document anybody in its group could rewrite. Some were written 0660, and
     # on the tenant this was written for that made the registered configuration
     # unadoptable by the ordinary command (SYRD-167).
-    config_path.chmod(config_path.stat().st_mode & ~(stat.S_IWGRP | stat.S_IWOTH))
+    if in_tree:
+        existing = owner_writes.owner_file_status(plan.owner_user, config_path)
+        mode = stat.S_IMODE(existing.st_mode) & 0o777 if existing is not None else 0o644
+        put(config_path, config_text, mode & ~(stat.S_IWGRP | stat.S_IWOTH), 0o644)
+    else:
+        config_path.write_text(config_text, encoding="utf-8")
+        config_path.chmod(config_path.stat().st_mode & ~(stat.S_IWGRP | stat.S_IWOTH))
     if plan.workflow:
-        projected = launcher._load_json(config_path)
+        projected = load(config_path)
         visible_role_count = max(1, 1 + max((role.get("slot", -1) for role in projected["roles"]), default=-1))
-        launcher._write_json_atomic(layout_path, launcher._new_project_layout_payload(visible_role_count))
-        if artifact_path and artifact_path.exists():
+        put(layout_path, json.dumps(launcher._new_project_layout_payload(visible_role_count), indent=2,
+                                    sort_keys=True) + "\n", 0o600, 0o600)
+        if artifact_path and owner_writes.root_writes_in(plan.owner_user, artifact_path):
+            # The owner's design artifact stays the owner's, read and replaced by descriptor (SYRD-611).
+            if owner_writes.owner_file_status(plan.owner_user, artifact_path) is not None:
+                artifact_data = owner_writes.read_owner_json(plan.owner_user, artifact_path)
+                artifact_data["workflow"] = plan.workflow
+                owner_writes.rewrite_owner_file(plan.owner_user, artifact_path,
+                                                json.dumps(artifact_data, indent=2, sort_keys=True) + "\n")
+        elif artifact_path and artifact_path.exists():
             artifact_data = launcher._load_json(artifact_path)
             artifact_data["workflow"] = plan.workflow
             launcher._write_json_atomic(artifact_path, artifact_data)
     policy_file = output_dir / "desktop-policy.json"
-    if policy_file.exists():
+    if (owner_writes.owner_file_status(plan.owner_user, policy_file) is not None) if in_tree else policy_file.exists():
         from scripts.desktop_access import validate_policy
-        payload = launcher._load_json(config_path)
-        payload["desktop_access"] = validate_policy(launcher._load_json(policy_file), project=plan.project, tenant=plan.owner_user)
-        launcher._write_json_atomic(config_path, payload)
+        payload = load(config_path)
+        payload["desktop_access"] = validate_policy(load(policy_file), project=plan.project, tenant=plan.owner_user)
+        put(config_path, json.dumps(payload, indent=2, sort_keys=True) + "\n", 0o600, 0o600)
     return config_path

@@ -371,9 +371,11 @@ def test_record_that_cannot_be_written_is_not_claimed() -> None:
         bystander.write_text("root's own\n")
 
         def plant() -> None:
-            (sb.provision / PACKET).symlink_to(bystander)
-            # A provenance file from an earlier run, which would now be a lie.
-            (sb.provision / root_packet.RECORD_NAME).write_text(json.dumps({"files": {PACKET: {"sha256": "x"}}}))
+            # SYRD-611: root replaces what is at a record's name as an entry, so a link there no longer stops it; a
+            # directory does. The earlier run's provenance -- which would now be a lie -- is a link to root's file,
+            # removed as the entry it is, never followed.
+            (sb.provision / PACKET).mkdir()
+            (sb.provision / root_packet.RECORD_NAME).symlink_to(bystander)
 
         as_tenant(plant)
         host, printed = PacketHost(), []
@@ -383,7 +385,8 @@ def test_record_that_cannot_be_written_is_not_claimed() -> None:
         check(any("could not publish the record of the packet" in line
                   and "is not a record of it" in line for line in printed),
               f"the failed record is reported on its own: {printed}")
-        check(not (sb.provision / root_packet.RECORD_NAME).exists(), "and no provenance claims it matches")
+        check(not (sb.provision / root_packet.RECORD_NAME).exists() and not (sb.provision / root_packet.RECORD_NAME).is_symlink(),
+              "and no provenance claims it matches")
     finally:
         sb.remove()
 

@@ -185,10 +185,15 @@ def _write_initial_switchyard_project_artifact(
         },
         router=tuple(router),
     )
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    if include_designer and not design_document.exists():
-        design_document.write_text(launcher._project_design_markdown(slug, title=project_name, body="Design in progress."), encoding="utf-8")
-    launcher._write_json_atomic(artifact_path, launcher.project_design_artifact_payload(artifact))
+    # As root, the owner's files by descriptor from the owner's root. The design document only where nothing is
+    # at its name: a link left there is not "missing" and is never written through (SYRD-611).
+    if not launcher.root_writes_for(owner_user):
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    if include_designer:
+        launcher.write_owner_file(owner_user, design_document, launcher._project_design_markdown(
+            slug, title=project_name, body="Design in progress."), new_mode=0o644, exclusive=True)
+    launcher._write_json_atomic(artifact_path, launcher.project_design_artifact_payload(artifact),
+                                owner_user=owner_user)
 
 
 def _chown_switchyard_project_files(
@@ -199,7 +204,9 @@ def _chown_switchyard_project_files(
 ) -> None:
     from scripts import team_launcher as launcher
 
-    result = runner(["chown", "-R", f"{owner_user}:{owner_user}", str(launcher._switchyard_dir(project_dir))])
+    # Never `chown -R` by path, which followed a link at `.switchyard` or above it: the helper's `chown-tree`,
+    # rooted at the owner's root, changes links inside as links (SYRD-611).
+    result = runner(launcher.owner_handoff_args(owner_user, launcher._switchyard_dir(project_dir), tree=True))
     if result.returncode != 0:
         raise SystemExit(f"switchyard: failed to assign {launcher._switchyard_dir(project_dir)} to {owner_user}")
 

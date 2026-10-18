@@ -66,3 +66,9 @@ def sandboxed_stage_parent(root: tenant_paths.Root) -> int | None:
 
 
 tenant_paths.Root._stage_parent = sandboxed_stage_parent
+
+
+def hold_owner_root(owner_user: str, root: Path) -> None:
+    """For a suite whose stand-in owner keeps its state in a scratch directory: that directory is its home here."""
+    shipped = owner_writes.owner_home
+    owner_writes.owner_home = lambda user: str(root) if user == owner_user else shipped(user)

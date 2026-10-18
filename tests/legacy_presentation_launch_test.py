@@ -154,7 +154,7 @@ sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
 from scripts import team_launcher
 import legacy_presentation_launch_test as suite
 
-tmp = Path(sys.argv[2])
+tmp = Path(sys.argv[2]); __import__("owner_home_sandbox").hold_owner_root("stellaris-agent", tmp)  # SYRD-609
 owner_uid, owner_gid = 1002, 1002
 config, config_path = suite.tenant(tmp, owner="stellaris-agent")
 home = tmp / "owner-home"; home.mkdir()
@@ -316,7 +316,7 @@ sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
 from scripts import team_launcher
 import legacy_presentation_launch_test as suite
 
-tmp = Path(sys.argv[2])
+tmp = Path(sys.argv[2]); __import__("owner_home_sandbox").hold_owner_root("stellaris-agent", tmp)  # SYRD-609
 owner_uid, owner_gid = 1002, 1002
 out = {}
 
@@ -444,7 +444,7 @@ sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
 from scripts import team_launcher
 import legacy_presentation_launch_test as suite
 
-tmp = Path(sys.argv[2])
+tmp = Path(sys.argv[2]); __import__("owner_home_sandbox").hold_owner_root("stellaris-agent", tmp)  # SYRD-609
 owner_uid, owner_gid = 1002, 1002
 config, _ = suite.tenant(tmp, owner="stellaris-agent")
 home = tmp / "owner-home"; home.mkdir(); os.chown(home, owner_uid, owner_gid)
@@ -736,7 +736,7 @@ sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
 from scripts import team_launcher
 import legacy_presentation_launch_test as suite
 
-tmp = Path("/mnt")
+tmp = Path("/mnt"); __import__("owner_home_sandbox").hold_owner_root("stellaris-agent", tmp)  # SYRD-609
 owner = "stellaris-agent"
 owner_uid = pwd.getpwnam(owner).pw_uid
 owner_gid = pwd.getpwnam(owner).pw_gid

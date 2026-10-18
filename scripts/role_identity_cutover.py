@@ -308,18 +308,23 @@ def _copy_tree_without_overwrite(
                 os.chown(destination, *owner)
 
 
-def _assign_tree_owner(path: Path, owner: tuple[int, int] | None) -> str:
+def _assign_tree_owner(path: Path, owner: tuple[int, int] | None, *, owner_user: str = "") -> str:
     """Give `path` and everything under it to `owner`. "" or why it was refused.
 
     Through the same no-following walk the ownership repair uses: this runs as
     root over a tree the tenant controls, so a symlink at the root of it, or a
     symlinked directory inside it, would otherwise carry a root-run chown
-    wherever it points (SYRD-233 DAT).
+    wherever it points (SYRD-233 DAT). The tree is the tenant's configuration's
+    to name -- its session store, a role's name -- so one outside the owner's
+    roots is refused before anything is walked (SYRD-609).
     """
+    from scripts import owner_writes
     from scripts import team_launcher as launcher
 
     if owner is None:
         return ""
+    if owner_user and owner_writes.root_writes_for(owner_user) and not owner_writes.within_owner_root(owner_user, path.expanduser()):
+        return f"{path} is outside {owner_user}'s home and every directory root chose for it; root does not give it away"
     uid, gid = owner
     _findings, refusals = launcher._walk_tenant_state_tree(
         path, lambda _p, _i, chown: (chown(uid, gid), "")[1]
@@ -485,6 +490,12 @@ def repatriate_role_runtime_state(
             )
     if problems:
         return False, problems
+    # Every path the configuration names that this moves state into or gives away -- each role's store, each
+    # legacy worktree -- is held to the owner's roots, all of them before the first record is read or copied, so a
+    # refusal changes nothing and a dry run says so too (SYRD-609).
+    outside = _outside_owner_roots(owner, config, legacy_roles)
+    if outside:
+        return False, outside
     if dry_run:
         return bool(legacy_roles or not config.role_state_isolation), []
 
@@ -583,7 +594,7 @@ def repatriate_role_runtime_state(
             )
             if not ok:
                 problems.append(f"{role.role}: copied session {migrated_id} is not resumable: {reason}")
-        refused = _assign_tree_owner(target_session_dir, owner_ids)
+        refused = _assign_tree_owner(target_session_dir, owner_ids, owner_user=owner)
         if refused:
             problems.append(f"{role.role}: {refused}")
             continue
@@ -618,6 +629,31 @@ def repatriate_role_runtime_state(
             _chown_tree(str(worktree), f"{uid}:{gid}", runner=runner)
         return False, [f"configuration publish failed after state copy: {exc}"]
     return True, []
+
+
+def _outside_owner_roots(owner: str, config: ProjectConfig, legacy_roles: list) -> list[str]:
+    """Each role store and legacy worktree, the configuration's to name, that is outside the owner's roots.
+
+    Only where root moves or gives them away on the owner's behalf (SYRD-609).
+    """
+    from scripts import owner_writes
+
+    if not owner_writes.root_writes_for(owner):
+        return []
+    stores = [f"{role.role}: session store {config.session_dir / 'roles' / role.role} is outside {owner}'s home and "
+              "every directory root chose for it; nothing was copied or given away"
+              for role in config.roles
+              if not owner_writes.within_owner_root(owner, (config.session_dir / "roles" / role.role).expanduser())]
+    return stores + _worktrees_outside_owner(owner, legacy_roles)
+
+
+def _worktrees_outside_owner(owner: str, roles: list) -> list[str]:
+    """Each role whose worktree, the configuration's to name, is outside the owner's roots (SYRD-609)."""
+    from scripts import owner_writes
+
+    return [f"{role.role}: worktree {role.workdir} is outside {owner}'s home and every directory root chose for it; "
+            "nothing was copied or given away"
+            for role in roles if os.path.lexists(role.workdir) and not owner_writes.within_owner_root(owner, Path(role.workdir))]
 
 
 def _worktree_ownership(config: ProjectConfig) -> dict[str, tuple[int, int]]:

@@ -217,8 +217,14 @@ def new_project_command(
         from scripts.desktop_access import validate_policy
         selected = {"mode": "headless"} if str(desktop_policy) == "headless" else launcher._load_json(desktop_policy)
         selected = validate_policy(selected, project=plan.project, tenant=plan.owner_user)
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        launcher._write_json_atomic(artifact_dir / "desktop-policy.json", selected)
+        if owner_writes.root_writes_in(plan.owner_user, artifact_dir):
+            # Root's own record in the tenant's provision directory, by descriptor from the owner's root (SYRD-611).
+            owner_writes.write_root_record(plan.owner_user, artifact_dir / "desktop-policy.json",
+                                           (json.dumps(selected, indent=2, sort_keys=True) + "\n").encode(),
+                                           mode=0o600, parents_mode=0o755)
+        else:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            launcher._write_json_atomic(artifact_dir / "desktop-policy.json", selected)
     # The rollout must hand each role the tree it works in, so record those
     # paths on the plan before the operator artifact is rendered (SYRD-39).
     _role_worktree_base = launcher._new_project_worktree_base(plan.project, plan.owner_user)
@@ -243,7 +249,7 @@ def new_project_command(
         )
         root_packet_path = mirrored_privileged / root_packet.PACKET_NAME
         record_problem = root_packet.publish_packet_record(
-            artifact_dir, rendered_privileged, root_copy=mirrored_privileged
+            artifact_dir, rendered_privileged, root_copy=mirrored_privileged, owner_user=plan.owner_user
         )
         print_func(
             f"switchyard: root installs {plan.project} units, grants and SQL from {mirrored_privileged}, "
@@ -277,7 +283,7 @@ def new_project_command(
         print_func=print_func,
     )
     if router:
-        router_onboarding.record_router_runtime(config_path, from_artifact, router=router)
+        router_onboarding.record_router_runtime(config_path, from_artifact, router=router, owner_user=plan.owner_user)
     commands_path = artifact_dir / "operator-commands.sh"
     # The complete role-isolation handoff -- accounts, ownership, runtime,
     # tooling AND credential seeding -- is written beside the other artifacts, so

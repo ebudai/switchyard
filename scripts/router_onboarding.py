@@ -35,6 +35,7 @@ remains how an existing project chooses it.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import stat
 import subprocess
@@ -145,11 +146,11 @@ def settled(role_clis: Sequence[tuple[str, str]], router: Sequence[tuple[str, st
     return roles, tuple((key, value) for key, value in (("runtime", runtime), ("effort", effort)) if value)
 
 
-def record_router_choice(artifact_path: Path, router: Sequence[tuple[str, str]]) -> None:
+def record_router_choice(artifact_path: Path, router: Sequence[tuple[str, str]], *, owner_user: str = "") -> None:
     """Write a settled Router back into an existing design artifact, if it changed."""
     from scripts import team_launcher as launcher
 
-    artifact = launcher._load_json(artifact_path)
+    artifact = _read(artifact_path, owner_user)
     project = artifact.get("project") or {}
     wanted = {"enabled": True, **dict(router)} if router else None
     if project.get("router") == wanted or (wanted is None and not (project.get("router") or {}).get("enabled")):
@@ -158,7 +159,7 @@ def record_router_choice(artifact_path: Path, router: Sequence[tuple[str, str]])
         project.pop("router", None)
     else:
         project["router"] = wanted
-    _rewrite(artifact_path, artifact)
+    _rewrite(artifact_path, artifact, owner_user=owner_user)
 
 
 def summary_line(router: Sequence[tuple[str, str]]) -> str:
@@ -267,7 +268,8 @@ def plan_with_router(
     return dataclasses.replace(plan, workflow=validate(document, project=plan.project))
 
 
-def record_router_runtime(config_path: Path, artifact_path: Path | None, *, router: Sequence[tuple[str, str]]) -> None:
+def record_router_runtime(config_path: Path, artifact_path: Path | None, *, router: Sequence[tuple[str, str]],
+                          owner_user: str = "") -> None:
     """Router's own model and effort on its projected launcher entry, not its template's.
 
     The declared workflow is not also written into the design artifact, whether
@@ -280,7 +282,7 @@ def record_router_runtime(config_path: Path, artifact_path: Path | None, *, rout
     from scripts import team_launcher as launcher
 
     chosen = dict(router)
-    payload = launcher._load_json(config_path)
+    payload = _read(config_path, owner_user)
     entry = next((role for role in payload.get("roles", []) if role.get("role") == ROUTER_ROLE), None)
     if entry is None:
         raise SystemExit(f"switchyard: {config_path} has no projected {ROUTER_ROLE} role; nothing was started")
@@ -288,17 +290,36 @@ def record_router_runtime(config_path: Path, artifact_path: Path | None, *, rout
         entry.pop(key, None)
         if chosen.get(key):
             entry[key] = chosen[key]
-    _rewrite(config_path, payload)
+    _rewrite(config_path, payload, owner_user=owner_user)
     if artifact_path is not None and artifact_path.exists():
-        artifact = launcher._load_json(artifact_path)
+        artifact = _read(artifact_path, owner_user)
         if artifact.pop("workflow", None) is not None:
-            _rewrite(artifact_path, artifact)
+            _rewrite(artifact_path, artifact, owner_user=owner_user)
 
 
-def _rewrite(path: Path, payload: dict[str, Any]) -> None:
-    """Replace `path` atomically, keeping the owner and mode it had."""
+def _read(path: Path, owner_user: str) -> dict[str, Any]:
+    """A document about to be rewritten: in the owner's tree as root, read by descriptor, never through a link."""
+    from scripts import owner_writes
     from scripts import team_launcher as launcher
 
+    return owner_writes.read_owner_json(owner_user, path) if owner_writes.root_writes_in(owner_user, path) \
+        else launcher._load_json(path)
+
+
+def _rewrite(path: Path, payload: dict[str, Any], *, owner_user: str = "") -> None:
+    """Replace `path` atomically, keeping the owner and mode it had.
+
+    As root in `owner_user`'s tree, by descriptor from the owner's root, with the
+    owner and mode read from a descriptor opened on it there: never a by-path
+    `lstat`, `lchown` or `chmod`, each of which a link swapped in -- at the
+    name or above it -- would have redirected (SYRD-611).
+    """
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    if owner_writes.root_writes_in(owner_user, path):
+        owner_writes.rewrite_owner_file(owner_user, path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return
     before = path.lstat()
     launcher._write_json_atomic(path, payload)
     if os.geteuid() == 0:

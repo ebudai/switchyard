@@ -62,8 +62,8 @@ SEAMS = {
     '_dedupe_role_cli_pairs': {'NEW_PROJECT_FIXED_ROLE_NAMES': 1, 'NEW_PROJECT_RESERVED_ROLE_NAMES': 1, '_validate_new_project_cli': 1, '_validate_new_project_implementer_role': 1},
     '_require_new_project_roles': {'NEW_PROJECT_REQUIRED_ROLES': 1},
     '_project_dir': {'_slug_from_project_name': 1},
-    '_write_initial_switchyard_project_artifact': {'PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS': 1, 'PROJECT_DESIGN_DEFAULT_GATES': 1, 'ProjectDesignArtifact': 1, '_dedupe_role_cli_pairs': 1, '_default_role_cli_pairs': 1, '_project_design_markdown': 1, '_write_json_atomic': 1, 'project_design_artifact_payload': 1, 'runtime_catalog': 1, 'validate_ticket_prefix': 1},
-    '_chown_switchyard_project_files': {'_switchyard_dir': 2},
+    '_write_initial_switchyard_project_artifact': {'PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS': 1, 'PROJECT_DESIGN_DEFAULT_GATES': 1, 'ProjectDesignArtifact': 1, '_dedupe_role_cli_pairs': 1, '_default_role_cli_pairs': 1, '_project_design_markdown': 1, '_write_json_atomic': 1, 'project_design_artifact_payload': 1, 'root_writes_for': 1, 'runtime_catalog': 1, 'validate_ticket_prefix': 1, 'write_owner_file': 1},
+    '_chown_switchyard_project_files': {'_switchyard_dir': 2, 'owner_handoff_args': 1},
     '_prepare_first_run_auth_worktrees': {'_control_repository_owned_roots': 1, '_owner_project_git_runner': 1, 'ensure_project_worktrees': 1},
     '_confirm_switchyard_new': {'_read_prompt': 1},
     '_report_new_project_to_caller': {'PROJECT_SLUG_RE': 1, '_int_env': 2, '_run_as_account': 1},
@@ -295,15 +295,17 @@ def test_the_initial_artifact() -> None:
         PROJECT_DESIGN_DEFAULT_GATES={"gate": "g"},
         PROJECT_DESIGN_DEFAULT_CAPABILITY_GRANTS={"grant": "x", "shell": "old"},
         _project_design_markdown=seam("_project_design_markdown", lambda slug, *, title, body: f"# {slug} {title} {body}"),
-        _write_json_atomic=seam("_write_json_atomic", lambda path, payload: written.append((path, payload))),
+        _write_json_atomic=seam("_write_json_atomic", lambda path, payload, **kw: written.append((path, payload, kw))),
         project_design_artifact_payload=seam("project_design_artifact_payload", lambda artifact: ("payload", artifact)),
+        root_writes_for=seam("root_writes_for", lambda user: False), write_owner_file=seam("write_owner_file", t.write_owner_file),
     )
     with tempfile.TemporaryDirectory() as tmp, patched(t, **stand_ins):
         base = Path(tmp)
         kwargs = dict(project_name="Proj", slug="p375", owner_user="o", project_dir=base / "repo",
                       artifact_path=base / "a" / "b" / "artifact.json", design_document=base / "DESIGN.md", owner_shell="/bin/zsh")
         check(judged(m._write_initial_switchyard_project_artifact, **kwargs) is None, "written, nothing refused")
-        check(len(written) == 1 and written[0][0] == kwargs["artifact_path"] and written[0][1][0] == "payload", f"one JSON write: {written}")
+        check(len(written) == 1 and written[0][0] == kwargs["artifact_path"] and written[0][1][0] == "payload"
+              and written[0][2] == {"owner_user": "o"}, f"one JSON write, the owner's (SYRD-611): {written}")
         fields = written[0][1][1].fields
         check(fields["implementer_roles"] == ("app", "main") and fields["audit_roles"] == ("audit",) and fields["ticket_prefix"] == "P375"
               and fields["role_clis"] == ("deduped",) and fields["catalog_version"] == 0 and fields["gates"] == {"gate": "g"}
@@ -337,11 +339,13 @@ def test_the_initial_artifact() -> None:
 def test_the_project_files_are_handed_to_the_owner() -> None:
     ran: list = []
     for code in (0, 1):
-        with patched(t, _switchyard_dir=seam("_switchyard_dir", lambda d: d / ".sy")):
+        # SYRD-611: the descriptor helper's chown-tree for the owner, never `chown -R` by path.
+        with patched(t, _switchyard_dir=seam("_switchyard_dir", lambda d: d / ".sy"),
+                     owner_handoff_args=seam("owner_handoff_args", lambda user, path, *, tree: ["HELPER", user, str(path), tree])):
             runner = lambda argv: ran.append(argv) or SimpleNamespace(returncode=code)  # noqa: E731
             answer = judged(m._chown_switchyard_project_files, owner_user="o", project_dir=Path("/nonexistent/syrd375"), runner=runner)
         if code == 0:
-            check(answer is None and ran == [["chown", "-R", "o:o", "/nonexistent/syrd375/.sy"]], f"the runner is asked, once: {ran}")
+            check(answer is None and ran == [["HELPER", "o", "/nonexistent/syrd375/.sy", True]], f"the runner is asked, once: {ran}")
         else:
             check(isinstance(answer, SystemExit) and str(answer) == "switchyard: failed to assign /nonexistent/syrd375/.sy to o",
                   f"a failure is the command's own: {answer!r}")

@@ -270,8 +270,11 @@ def test_the_seams_and_nothing_bound_read_through_the_launcher() -> None:
     check(not bound & set(through), f"nothing the phase binds is read through the launcher: {bound & set(through)}")
     check("Path" not in through and m.Path is Path, "`Path` is the module's own, the standard library's")
     check(ast.unparse(fn.body[1]) == "stages.begin('project accounts and files')", "the stage begun first")
-    check(ast.unparse(fn.body[-2]).startswith("launcher._write_json_atomic(provision_dir / 'desktop-policy.json'"),
-          "and the desktop policy written last")
+    # SYRD-611: in the tenant's tree, root's own record by descriptor; elsewhere the by-path write as before.
+    last = ast.unparse(fn.body[-2])
+    check(last.startswith("if owner_writes.root_writes_in(owner_user, provision_dir):")
+          and "owner_writes.write_root_record(owner_user, provision_dir / 'desktop-policy.json'" in last
+          and "launcher._write_json_atomic(provision_dir / 'desktop-policy.json'" in last, "and the desktop policy written last")
 
 
 def test_the_interface_and_the_result() -> None:

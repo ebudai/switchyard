@@ -325,6 +325,14 @@ def _ensure_owner_user_and_project_dir(
         # this is not the tenant tree being confined.
         for install_args in install_commands:
             path = Path(install_args[-1])
+            if os.geteuid() == 0 and "--root" in install_args:
+                # The helper's own operation again, in-process: what it made is left as it is, and a link swapped
+                # in since is refused, where a by-path `mkdir` would have followed it (SYRD-611).
+                from scripts import tenant_paths
+
+                if tenant_paths.run(install_args[install_args.index("--root"):], report=lambda _line: None) != 0:
+                    raise SystemExit(f"switchyard: failed to create project directory {path}")
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             flag = "--mode" if "--mode" in install_args else "-m"
             path.mkdir(mode=int(install_args[install_args.index(flag) + 1], 8), exist_ok=True)

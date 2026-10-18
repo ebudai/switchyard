@@ -149,10 +149,16 @@ def within_owner_root(owner_user: str, path: Path) -> bool:
     return text == root or text.startswith(root.rstrip("/") + "/")
 
 
-def owner_handoff_args(owner_user: str, path: Path) -> list[str]:
-    """The argv that gives `path` to `owner_user`: the descriptor helper's `attrs`, rooted at the owner's root."""
+def owner_handoff_args(owner_user: str, path: Path, *, tree: bool = False) -> list[str]:
+    """The argv that gives `path` to `owner_user`: the descriptor helper's `attrs`, rooted at the owner's root.
+
+    With `tree`, the whole tree below it: the helper's `chown-tree`, which changes a link inside as a link and
+    never follows one -- where `chown -R` by path followed a link at the top or above it (SYRD-611).
+    """
     from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
 
+    if tree:
+        return tenant_paths_argv(owner_root(owner_user, path), "chown-tree", "--owner", owner_user, str(path))
     return tenant_paths_argv(owner_root(owner_user, path), "attrs", "--owner", owner_user, "--group", owner_user, str(path))
 
 
@@ -163,8 +169,23 @@ def root_writes_for(owner_user: str) -> bool:
     return bool(owner_user) and os.geteuid() == 0 and launcher.current_user_name() != owner_user
 
 
+def root_writes_in(owner_user: str, path: Path) -> bool:
+    """Whether root, writing `path` now, writes into one of `owner_user`'s roots -- and so must by descriptor.
+
+    For a directory the caller chose that may be the tenant's or root's own:
+    `new`'s output directory is the tenant's provision directory under
+    `switchyard new`, and a temporary directory of root's own, or one the
+    operator named, under `team-launcher new` (SYRD-611).
+    """
+    try:
+        return root_writes_for(owner_user) and within_owner_root(owner_user, path)
+    except ValueError:  # no such account, so no tree of its to write into
+        return False
+
+
 def write_owner_file(owner_user: str, path: Path, content: bytes | str, *, mode: int | None = None,
-                     parents_mode: int = 0o755, parent_mode: int | None = None, new_mode: int = 0o600) -> None:
+                     parents_mode: int = 0o755, parent_mode: int | None = None, new_mode: int = 0o600,
+                     exclusive: bool = False) -> bool:
     """Publish a generated file the owner is to own: whole, and as root by descriptor from the owner's home.
 
     As root (and not the owner), the file is `tenant_paths.write_file`d under
@@ -173,43 +194,113 @@ def write_owner_file(owner_user: str, path: Path, content: bytes | str, *, mode:
     file's, else `new_mode`) before it is renamed into place; a missing directory on
     the way is made the owner's with `parents_mode`, and `parent_mode` sets the
     parent's own. Otherwise it is the caller's own file, written as before.
+
+    `exclusive` writes only where nothing is yet -- as root, nothing at all at
+    the name, a link included, and never over something that arrives after
+    the look (SYRD-611). Returns whether it wrote.
     """
     from scripts import tenant_paths
 
     data = content.encode("utf-8") if isinstance(content, str) else content
     if not root_writes_for(owner_user):
+        if exclusive and path.exists():
+            return False
         path.write_bytes(data)
-        return
+        return True
     try:
         account = pwd.getpwnam(owner_user)
     except KeyError:
         raise SystemExit(f"switchyard: refusing to write {path}: {owner_user} is not an account on this host") from None
     try:
-        tenant_paths.write_file(owner_root(owner_user, path), str(path), data, uid=account.pw_uid, gid=account.pw_gid,
-                                mode=mode, parents=(parents_mode, account.pw_uid, account.pw_gid),
-                                parent_mode=parent_mode, new_mode=new_mode)
+        return tenant_paths.write_file(owner_root(owner_user, path), str(path), data, uid=account.pw_uid,
+                                       gid=account.pw_gid, mode=mode, parents=(parents_mode, account.pw_uid,
+                                                                               account.pw_gid),
+                                       parent_mode=parent_mode, new_mode=new_mode, exclusive=exclusive)
     except tenant_paths.Refused as refusal:
         raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {refusal}. Nothing was written.") from None
     except SystemExit as stop:
         raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {stop}") from None
 
 
-def write_root_record(owner_user: str, path: Path, content: bytes, *, mode: int) -> None:
+def write_root_record(owner_user: str, path: Path, content: bytes, *, mode: int | None,
+                      parents_mode: int | None = None, new_mode: int = 0o600) -> None:
     """A record root keeps in a tenant's directory, as root's own file: written as `write_owner_file` writes.
 
     By descriptor from the owner's home, staged where only root can reach it
     and renamed into place; owned by the process's own (kernel) identity, as
-    a record root made, not handed to the tenant.
+    a record root made, not handed to the tenant. With `parents_mode`, a
+    missing directory on the way is made as root's own too, as a by-path
+    `mkdir -p` by root made it; `mode` None keeps the replaced file's, else
+    `new_mode` (SYRD-611).
     """
     from scripts import tenant_paths
 
+    uid, gid = os.getresuid()[1], os.getresgid()[1]
     try:
-        tenant_paths.write_file(owner_root(owner_user, path), str(path), content, uid=os.getresuid()[1],
-                                gid=os.getresgid()[1], mode=mode)
+        tenant_paths.write_file(owner_root(owner_user, path), str(path), content, uid=uid, gid=gid, mode=mode,
+                                parents=None if parents_mode is None else (parents_mode, uid, gid), new_mode=new_mode)
     except tenant_paths.Refused as refusal:
         raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {refusal}. Nothing was written.") from None
     except SystemExit as stop:
         raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {stop}") from None
+
+
+def rewrite_owner_file(owner_user: str, path: Path, content: bytes | str) -> None:
+    """Replace an existing file of the owner's tree whole, keeping the owner and mode it had (SYRD-611).
+
+    Both are read from a descriptor opened on it beneath the owner's root, so
+    nothing reached through a link informs them; it must belong to the owner
+    or to root, and keeps no special bit.
+    """
+    from scripts import tenant_paths
+
+    data = content.encode("utf-8") if isinstance(content, str) else content
+    status = owner_file_status(owner_user, path)
+    if status is None:
+        raise SystemExit(f"switchyard: refusing to rewrite {path} for {owner_user}: it does not exist")
+    try:
+        owner_uid = pwd.getpwnam(owner_user).pw_uid
+    except KeyError:
+        raise SystemExit(f"switchyard: refusing to write {path}: {owner_user} is not an account on this host") from None
+    if status.st_uid not in (owner_uid, 0):
+        raise SystemExit(f"switchyard: refusing to rewrite {path} for {owner_user}: it belongs to uid {status.st_uid}")
+    try:
+        tenant_paths.write_file(owner_root(owner_user, path), str(path), data, uid=status.st_uid, gid=status.st_gid,
+                                mode=stat.S_IMODE(status.st_mode) & 0o777)
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {refusal}. Nothing was written.") from None
+    except SystemExit as stop:
+        raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {stop}") from None
+
+
+def remove_root_record(owner_user: str, path: Path) -> None:
+    """Remove a record root keeps in the owner's tree: the entry at the name, by descriptor, never followed."""
+    from scripts import tenant_paths
+
+    try:
+        tenant_paths.remove_file(owner_root(owner_user, path), str(path))
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to remove {path} for {owner_user}: {refusal}") from None
+    except SystemExit as stop:
+        raise SystemExit(f"switchyard: refusing to remove {path} for {owner_user}: {stop}") from None
+
+
+def ensure_owner_dirs(owner_user: str, paths: list[Path], *, mode: int) -> None:
+    """Make or correct each directory as the owner's with `mode`, by descriptor from the owner's root (SYRD-611)."""
+    from scripts import tenant_paths
+
+    try:
+        account = pwd.getpwnam(owner_user)
+    except KeyError:
+        raise SystemExit(f"switchyard: refusing to make {paths[0]}: {owner_user} is not an account on this host") from None
+    for path in paths:
+        root = tenant_paths._quiet(owner_root(owner_user, path))
+        try:
+            tenant_paths.ensure_dirs(root, [str(path)], mode, account.pw_uid, account.pw_gid)
+        except tenant_paths.Refused as refusal:
+            raise SystemExit(f"switchyard: refusing to make {path} for {owner_user}: {refusal}. Nothing was made.") from None
+        finally:
+            root.close()
 
 
 def read_owner_bytes(owner_user: str, path: Path) -> bytes | None:

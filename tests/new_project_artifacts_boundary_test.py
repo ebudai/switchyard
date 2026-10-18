@@ -60,7 +60,9 @@ SEAMS = {
     '_new_project_launcher_config_payload': {'MAX_VISIBLE_PANES_PER_WINDOW': 3, '_dedupe_role_defs': 1, '_default_role_cli_pairs': 1, '_new_project_control_repository': 1, '_new_project_role_env': 1, '_new_project_session_dir': 1, '_new_project_worktree_base': 1, 'switchyard_shared_pane_launcher': 1},
     '_new_project_role_env': {'SWITCHYARD_DESIGN_ONBOARDING_FILE_NAME': 1, '_director_seed_project_dir': 1, '_switchyard_dir': 2, 'director_onboarding_seed_text': 1},
     '_director_seed_project_dir': {'SWITCHYARD_PROJECT_DIR_NAME': 1},
-    'write_new_project_launcher_artifacts': {'MAX_VISIBLE_PANES_PER_WINDOW': 3, '_dedupe_role_defs': 1, '_default_role_cli_pairs': 1, '_load_json': 4, '_new_project_launcher_config_payload': 1, '_new_project_layout_payload': 2, '_write_json_atomic': 3},
+    # SYRD-611: root's files in the tenant's provision directory go by descriptor (`owner_writes`), so the by-path
+    # reads and writes each collapse to the one place that still serves root's own or the operator's directory.
+    'write_new_project_launcher_artifacts': {'MAX_VISIBLE_PANES_PER_WINDOW': 3, '_dedupe_role_defs': 1, '_default_role_cli_pairs': 1, '_load_json': 2, '_new_project_launcher_config_payload': 1, '_new_project_layout_payload': 2, '_write_json_atomic': 2},
 }
 #: Measured on the baseline launcher: every launcher definition outside the six that names one of them, and how often.
 DISPATCH = {'new_project_command': {'write_new_project_launcher_artifacts': 1}}
@@ -452,7 +454,8 @@ def test_the_seams_read_through_the_launcher_and_nothing_bound() -> None:
         check(through == expected, f"{name}: each launcher name read through it exactly as often as before: {through}")
         imports = [ast.unparse(x) for x in ast.walk(node) if isinstance(x, (ast.Import, ast.ImportFrom))]
         nested = {"_new_project_launcher_config_payload": ["from scripts.workflow_launcher import project_roles"],
-                  "write_new_project_launcher_artifacts": ["from scripts.desktop_access import validate_policy"]}.get(name, [])
+                  "write_new_project_launcher_artifacts": ["from scripts import owner_writes",
+                                                           "from scripts.desktop_access import validate_policy"]}.get(name, [])
         first = 1 if ast.get_docstring(node) is not None else 0
         check(imports == ((["from scripts import team_launcher as launcher"] if expected else []) + nested)
               and (not expected or ast.unparse(node.body[first]) == imports[0]),

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
@@ -55,12 +56,31 @@ _NO_SOCKET = ("error connecting to", "(No such file or directory)")
 def operator_repair(environ: Mapping[str, str], *, euid: int | None = None) -> bool:
     """Whether this caller takes the stopped-project path rather than the Director's.
 
-    Root that does not claim to be the Director. A caller that does claim it
-    keeps the Director's path exactly as before; anyone else who is not root
-    is refused there, as before.
+    Root that does not claim to be the Director. Root that does is refused
+    (`refuse_root_director`); anyone else who is not root takes the
+    Director's path, and is refused there unless it is the Director.
     """
     actor = (environ.get("TICKET_BOARD_CALLER_ROLE") or "").strip().lower()
     return actor != DIRECTOR_ROLE and (os.geteuid() if euid is None else euid) == 0
+
+
+def refuse_root_director(operator: bool, *, euid: int | None = None) -> None:
+    """Refuse root that claims to be the Director: saying so earns root nothing here either (SYRD-612).
+
+    The Director's switch writes the board and restarts a live worker from the
+    Director's own session. Run by root it read display state, reloaded the
+    configuration and restarted the worker through the tenant's tree by path.
+    No crossing carries the claim -- `sudo` resets the environment it was made
+    in -- so root's one switch is this module's repair.
+    """
+    from scripts.role_runtime import RoleRuntimeRefusal
+
+    if not operator and (os.geteuid() if euid is None else euid) == 0:
+        raise RoleRuntimeRefusal(
+            "switchyard: root is not the Director by saying so: as root, set-role-runtime only repairs a stopped "
+            "role's model while the Director is not running (SYRD-593); the Director changes a runtime from its own "
+            "session"
+        )
 
 
 def session_problem(
@@ -129,13 +149,68 @@ def check_repair(
         )
 
 
-def make_owner_dirs(directory: Path, config_path: Path) -> None:
-    """Create `directory` and any missing parent, each owned by the configuration's owner."""
+def make_owner_dirs(directory: Path, config_path: Path, *, owner_user: str = "") -> None:
+    """Create `directory` and any missing parent, each owned by the configuration's owner.
+
+    As root for `owner_user` -- the owner the configuration names, never read
+    off a file -- by descriptor from the owner's root, never through a link at
+    any component (SYRD-612).
+    """
+    from scripts import owner_writes
+
+    if owner_writes.root_writes_for(owner_user):
+        owner_writes.ensure_owner_dirs(owner_user, [directory], mode=0o700)
+        return
     owner = os.stat(config_path)
     missing = [path for path in (directory, *directory.parents) if not path.exists()]
     for path in reversed(missing):
         path.mkdir(mode=0o700)
         os.chown(path, owner.st_uid, owner.st_gid, follow_symlinks=False)
+
+
+def clear_role_records(config: "ProjectConfig", role: "RoleConfig", *, pane_state_dir: Path) -> None:
+    """The role's resume record set aside and its pane state cleared: as root for the owner, by descriptor.
+
+    `clear_session_record_for_role` and `clear_pane_idle_state_for_role` rename and unlink by path, which as root
+    went through any link the tenant left at the store or above it (SYRD-612). A record that cannot be set aside
+    fails the switch, which then rolls back; pane state that cannot be cleared is said, as it always was.
+    """
+    from scripts import owner_writes, tenant_paths
+    from scripts import team_launcher as launcher
+
+    session_dir = launcher.role_session_dir(config, role)
+    owner = config.run_as_user or launcher.current_user_name()
+    if not owner_writes.root_writes_for(owner):
+        launcher.clear_session_record_for_role(role, session_dir)
+        launcher.clear_pane_idle_state_for_role(role, pane_state_dir=pane_state_dir)
+        return
+    record = session_dir / launcher.session_file_name(role.target)
+    account = owner if owner_writes.within_owner_root(owner, record) else launcher.role_run_as_user(config, role) or owner
+    owner_writes.supersede_owner_record(account, record)
+    pane_state = pane_state_dir / launcher.pane_state_file_name(role.target)
+    try:
+        tenant_paths.remove_file(owner_writes.owner_root(owner, pane_state), str(pane_state))
+    except tenant_paths.Refused as refusal:
+        if not refusal.reason.startswith("does not exist"):  # no runtime directory is no pane state to clear
+            print(f"team-launcher: failed to clear pane state for {role.role}: {refusal}", file=sys.stderr)
+    except SystemExit as stop:
+        print(f"team-launcher: failed to clear pane state for {role.role}: {stop}", file=sys.stderr)
+
+
+def remove_journal(path: Path, owner_user: str, print_func: Callable[[str], None] = print) -> None:
+    """A finished switch's journal, removed: as root for its owner by descriptor, never through a link (SYRD-612).
+
+    A journal that cannot be removed so is left where it is, and said; the switch it records has finished.
+    """
+    from scripts import owner_writes
+
+    if not owner_writes.root_writes_for(owner_user):
+        path.unlink(missing_ok=True)
+        return
+    try:
+        owner_writes.remove_root_record(owner_user, path)
+    except SystemExit as stop:
+        print_func(f"{stop}; the finished switch's journal is left there")
 
 
 def keep_owner(path: Path, config_path: Path) -> None:

@@ -480,6 +480,25 @@ def activate_board_authority(
     return []
 
 
+def read_installed_unit(config: ProjectConfig, path: Path) -> bytes | None:
+    """What is installed at one unit's path now, or None (`capture_installed_units`).
+
+    The owner's user unit is in the owner's home, so as root it is read by
+    descriptor from the owner's root: what a link there, or above it, points
+    at is never read into the copy a rollback would write back (SYRD-612).
+    """
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    owner = config.run_as_user or launcher.current_user_name()
+    if owner_writes.root_writes_in(owner, path):
+        return owner_writes.read_owner_bytes(owner, path)
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
 def restore_installed_units(
     config: ProjectConfig,
     captured: Mapping[str, bytes | None],
@@ -499,16 +518,27 @@ def restore_installed_units(
     destinations = {
         unit: path for unit, path, _ownership in authority_unit_installs(config, config_path=config_path)
     }
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    owner = config.run_as_user or launcher.current_user_name()
     for unit, body in captured.items():
         path = destinations.get(unit) or _owner_user_unit_path(config, unit, config_path=config_path)
         try:
-            if body is None:
+            if owner_writes.root_writes_in(owner, path):
+                # The owner's user unit, in its home: put back, or taken away, by descriptor from the owner's
+                # root, never through a link at it or above it (SYRD-612).
+                if body is None:
+                    owner_writes.remove_root_record(owner, path)
+                else:
+                    owner_writes.write_owner_file(owner, path, body, new_mode=0o644)
+            elif body is None:
                 if path.exists():
                     path.unlink()
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(body)
-        except OSError as exc:
+        except (OSError, SystemExit) as exc:
             problems.append(f"could not restore {unit}: {exc}")
     runner(["systemctl", "daemon-reload"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if board_is_supervised(config.project):

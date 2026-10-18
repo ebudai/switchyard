@@ -228,9 +228,14 @@ def revert_incomplete_role_account_cutover(
     anything between is reverted to the state the running sessions are in
     (SYRD-45).
     """
+    from scripts import owner_writes
+    from scripts import team_launcher as launcher
+
+    # As root for the owner, read and rewritten by descriptor, keeping its owner and mode (SYRD-612).
+    owner = config.run_as_user or launcher.current_user_name()
     try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = owner_writes.read_owner_json(owner, config_path)
+    except (OSError, ValueError, SystemExit) as exc:
         return False, f"switchyard: cannot read {config_path} to repair the role-account cutover: {exc}"
     roles = payload.get("roles")
     if not isinstance(roles, list):
@@ -250,7 +255,11 @@ def revert_incomplete_role_account_cutover(
     for role in roles:
         if isinstance(role, dict):
             role.pop("run_as_user", None)
-    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if owner_writes.root_writes_for(owner):
+        owner_writes.rewrite_owner_file(owner, config_path, text)
+    else:
+        config_path.write_text(text, encoding="utf-8")
     return True, (
         f"switchyard: returned {', '.join(sorted(reverted))} to the project account: their own "
         "accounts do not exist yet, and a configuration naming accounts that do not exist stops "
@@ -262,26 +271,42 @@ def revert_incomplete_role_account_cutover(
 _HERMES_DATABASE_FILES = ("state.db", "state.db-wal", "state.db-shm")
 
 
-def _copy_hermes_home(source: Path, target: Path, *, owner: tuple[int, int] | None = None) -> None:
+def _copy_hermes_home(source: Path, target: Path, *, owner: tuple[int, int] | None = None, source_user: str = "",
+                      owner_user: str = "") -> None:
     """A Hermes home's private state, merged without replacing the target's (SYRD-563).
 
     Entry by entry as the other providers are, except the database: a WAL
     copied beside another database's `state.db` would corrupt it, so the three
-    files move together, and only when the target has no database yet.
+    files move together, and only when the target has no database yet -- as
+    root for the owner, looked at by descriptor (SYRD-612).
     """
+    from scripts import owner_writes
     from scripts import team_launcher as launcher
 
-    keep_target_database = (target / "state.db").exists()
+    keep_target_database = owner_writes.owner_entry_present(owner_user, target / "state.db") if owner_user \
+        else (target / "state.db").exists()
     for state_name in sorted(launcher.HERMES_PRIVATE_HOME_ENTRIES):
         if state_name in _HERMES_DATABASE_FILES and keep_target_database:
             continue
-        _copy_tree_without_overwrite(source / state_name, target / state_name, owner=owner)
+        _copy_tree_without_overwrite(source / state_name, target / state_name, owner=owner, source_user=source_user,
+                                     owner_user=owner_user)
 
 
 def _copy_tree_without_overwrite(
-    source: Path, target: Path, *, owner: tuple[int, int] | None = None
+    source: Path, target: Path, *, owner: tuple[int, int] | None = None, source_user: str = "", owner_user: str = ""
 ) -> None:
-    """Merge durable session data while never replacing owner-side state."""
+    """Merge durable session data while never replacing owner-side state.
+
+    As root for `owner_user`, from `source_user`'s tree into the owner's by
+    descriptor, each from its own account's root: a link in the source is
+    never followed or copied, nothing in the target is created through one,
+    and nothing is decided by looking at either by path (SYRD-612).
+    """
+    from scripts import owner_writes
+
+    if owner_user and owner_writes.root_writes_for(owner_user):
+        owner_writes.copy_owner_tree(source_user or owner_user, source, owner_user, target)
+        return
     if source.is_file():
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -466,6 +491,7 @@ def repatriate_role_runtime_state(
     every recorded session that existed before the copy passes the normal
     provider resume preflight from its new role-local path.
     """
+    from scripts import owner_writes
     from scripts import team_launcher as launcher
 
     owner = config.run_as_user or launcher.current_user_name()
@@ -505,93 +531,123 @@ def repatriate_role_runtime_state(
         owner_ids: tuple[int, int] | None = (owner_record.pw_uid, owner_record.pw_gid)
     except KeyError:
         owner_ids = None
+    # As root for the owner, every record is read from its own account's tree by descriptor and every copy written
+    # into the owner's that way; nothing is looked at by path in either (SYRD-612).
+    by_descriptor = owner_writes.root_writes_for(owner)
     for role in config.roles:
         target_session_dir = config.session_dir / "roles" / role.role
-        sources = [config.session_dir]
+        sources = [(config.session_dir, owner)]
         if role.run_as_user and role.run_as_user != owner:
-            sources.insert(0, launcher.account_session_dir(role.run_as_user, project=config.project))
+            sources.insert(0, (launcher.account_session_dir(role.run_as_user, project=config.project), role.run_as_user))
         before: list[tuple[Path, str]] = []
-        for source_dir in sources:
-            record = launcher._session_record_for_role(role, source_dir)
+        for source_dir, account in sources:
+            record = _session_record(role, source_dir / launcher.session_file_name(role.target), account) \
+                if by_descriptor else launcher._session_record_for_role(role, source_dir)
             if record is not None:
                 before.append((source_dir, str(record.get("session_id") or "")))
                 for suffix in ("", ".superseded", ".resume_timeout"):
                     source = source_dir / f"{launcher.session_file_name(role.target)}{suffix}"
                     destination = target_session_dir / source.name
-                    if source.is_file() and not destination.exists():
+                    if by_descriptor:
+                        try:
+                            raw = owner_writes.read_owner_bytes(account, source)
+                            copied_payload = json.loads(raw.decode("utf-8")) if raw is not None else None
+                        except (SystemExit, ValueError) as exc:
+                            problems.append(f"{role.role}: cannot read session record {source}: {exc}")
+                            continue
+                        if copied_payload is None:
+                            continue
+                    elif source.is_file() and not destination.exists():
                         try:
                             copied_payload = json.loads(source.read_text(encoding="utf-8"))
                         except (OSError, json.JSONDecodeError):
                             problems.append(f"{role.role}: cannot read session record {source}")
                             continue
-                        payload_data = copied_payload.get("payload") if isinstance(copied_payload, dict) else None
-                        transcript = (
-                            str(payload_data.get("transcript_path") or "")
-                            if isinstance(payload_data, dict) else ""
-                        )
-                        if transcript:
-                            source_home = launcher._home_from_session_dir(source_dir)
-                            try:
-                                relative = Path(transcript).relative_to(source_home)
-                            except ValueError:
-                                pass
-                            else:
-                                payload_data["transcript_path"] = str(owner_home / relative)
-                        launcher._write_private_json_atomic(destination, copied_payload)
-                        if owner_ids is not None:
-                            os.chown(destination, *owner_ids)
-
-        if not config.role_state_isolation and launcher._uses_hermes(role) and not (role.run_as_user and role.run_as_user != owner):
-            # The one explicit, one-way move of a shared-account role's Hermes
-            # state into its own store: copied without overwriting, the old tree
-            # left as it was and never read again by any entry point (SYRD-563).
-            _copy_hermes_home(
-                launcher.hermes_home_for_role(role, session_dir=config.session_dir),
-                launcher.hermes_home_for_role(role, session_dir=target_session_dir),
-                owner=owner_ids,
-            )
-        if role.run_as_user and role.run_as_user != owner:
-            source_home = launcher.home_dir_for_user(role.run_as_user) or Path("/home") / role.run_as_user
-            cli = launcher._command_name(role.cli[0]) if role.cli else ""
-            if cli == "claude":
-                _copy_tree_without_overwrite(
-                    launcher._claude_project_dir_for_workdir(role.workdir, home=source_home),
-                    launcher._claude_project_dir_for_workdir(role.workdir, home=owner_home),
-                    owner=owner_ids,
-                )
-            elif cli == "codex":
-                _copy_tree_without_overwrite(
-                    source_home / launcher.CODEX_SESSIONS_DIR_NAME,
-                    owner_home / launcher.CODEX_SESSIONS_DIR_NAME,
-                    owner=owner_ids,
-                )
-            elif cli == "agy":
-                for state_name in ("conversations", "brain"):
-                    _copy_tree_without_overwrite(
-                        source_home / launcher.AGY_CREDENTIAL_DIR_NAME / state_name,
-                        owner_home / launcher.AGY_CREDENTIAL_DIR_NAME / state_name,
-                        owner=owner_ids,
+                    else:
+                        continue
+                    payload_data = copied_payload.get("payload") if isinstance(copied_payload, dict) else None
+                    transcript = (
+                        str(payload_data.get("transcript_path") or "")
+                        if isinstance(payload_data, dict) else ""
                     )
-            elif cli == "hermes":
-                legacy_session_dir = launcher.account_session_dir(
-                    role.run_as_user, project=config.project
+                    if transcript:
+                        source_home = launcher._home_from_session_dir(source_dir)
+                        try:
+                            relative = Path(transcript).relative_to(source_home)
+                        except ValueError:
+                            pass
+                        else:
+                            payload_data["transcript_path"] = str(owner_home / relative)
+                    if by_descriptor:
+                        # Only where nothing is at the name yet, a link included: never over the owner's own.
+                        try:
+                            owner_writes.write_owner_file(owner, destination, json.dumps(copied_payload, indent=2,
+                                                          sort_keys=True) + "\n", mode=0o600, parents_mode=0o700,
+                                                          parent_mode=0o700, exclusive=True)
+                        except SystemExit as stop:
+                            problems.append(f"{role.role}: {stop}")
+                        continue
+                    launcher._write_private_json_atomic(destination, copied_payload)
+                    if owner_ids is not None:
+                        os.chown(destination, *owner_ids)
+
+        try:
+            if not config.role_state_isolation and launcher._uses_hermes(role) and not (role.run_as_user and role.run_as_user != owner):
+                # The one explicit, one-way move of a shared-account role's Hermes
+                # state into its own store: copied without overwriting, the old tree
+                # left as it was and never read again by any entry point (SYRD-563).
+                _copy_hermes_home(
+                    launcher.hermes_home_for_role(role, session_dir=config.session_dir),
+                    launcher.hermes_home_for_role(role, session_dir=target_session_dir),
+                    owner=owner_ids, source_user=owner, owner_user=owner if by_descriptor else "",
                 )
-                source_hermes_home = launcher.hermes_home_for_role(
-                    role, session_dir=legacy_session_dir
-                )
-                target_hermes_home = launcher.hermes_home_for_role(
-                    role, session_dir=target_session_dir
-                )
-                _copy_hermes_home(source_hermes_home, target_hermes_home, owner=owner_ids)
+            if role.run_as_user and role.run_as_user != owner:
+                source_home = launcher.home_dir_for_user(role.run_as_user) or Path("/home") / role.run_as_user
+                cli = launcher._command_name(role.cli[0]) if role.cli else ""
+                if cli == "claude":
+                    _copy_tree_without_overwrite(
+                        launcher._claude_project_dir_for_workdir(role.workdir, home=source_home),
+                        launcher._claude_project_dir_for_workdir(role.workdir, home=owner_home),
+                        owner=owner_ids, source_user=role.run_as_user, owner_user=owner if by_descriptor else "",
+                    )
+                elif cli == "codex":
+                    _copy_tree_without_overwrite(
+                        source_home / launcher.CODEX_SESSIONS_DIR_NAME,
+                        owner_home / launcher.CODEX_SESSIONS_DIR_NAME,
+                        owner=owner_ids, source_user=role.run_as_user, owner_user=owner if by_descriptor else "",
+                    )
+                elif cli == "agy":
+                    for state_name in ("conversations", "brain"):
+                        _copy_tree_without_overwrite(
+                            source_home / launcher.AGY_CREDENTIAL_DIR_NAME / state_name,
+                            owner_home / launcher.AGY_CREDENTIAL_DIR_NAME / state_name,
+                            owner=owner_ids, source_user=role.run_as_user, owner_user=owner if by_descriptor else "",
+                        )
+                elif cli == "hermes":
+                    legacy_session_dir = launcher.account_session_dir(
+                        role.run_as_user, project=config.project
+                    )
+                    source_hermes_home = launcher.hermes_home_for_role(
+                        role, session_dir=legacy_session_dir
+                    )
+                    target_hermes_home = launcher.hermes_home_for_role(
+                        role, session_dir=target_session_dir
+                    )
+                    _copy_hermes_home(source_hermes_home, target_hermes_home, owner=owner_ids, source_user=role.run_as_user,
+                                      owner_user=owner if by_descriptor else "")
+        except SystemExit as stop:
+            # A refusal in either tree -- a link in the role's, or above the owner's copy -- is this role's problem,
+            # reported with the rest, and nothing is published (SYRD-612).
+            problems.append(f"{role.role}: {stop}")
+            continue
         if before:
-            migrated_id = launcher.session_id_for_role(role, target_session_dir)
+            # Checked as the owner, whose own view of its own tree it is: root looks at nothing there by path
+            # (SYRD-612).
+            migrated_id, ok, reason = _verify_copy(role, target_session_dir, owner_ids if by_descriptor else None)
             expected_id = before[0][1]
             if not migrated_id or migrated_id != expected_id:
                 problems.append(f"{role.role}: recorded session {expected_id} did not copy exactly")
                 continue
-            ok, reason = launcher._resume_preflight_allows_attempt(
-                role, migrated_id, session_dir=target_session_dir
-            )
             if not ok:
                 problems.append(f"{role.role}: copied session {migrated_id} is not resumable: {reason}")
         refused = _assign_tree_owner(target_session_dir, owner_ids, owner_user=owner)
@@ -604,19 +660,19 @@ def repatriate_role_runtime_state(
     previous_worktree_owners: list[tuple[Path, int, int]] = []
     for role in legacy_roles:
         worktree = Path(role.workdir)
-        if not worktree.exists():
+        info = _tree_status(owner, worktree) if by_descriptor else (worktree.stat() if worktree.exists() else None)
+        if info is None:
             continue
-        info = worktree.stat()
         previous_worktree_owners.append((worktree, info.st_uid, info.st_gid))
-        if not _chown_tree(str(worktree), f"{owner}:{owner}", runner=runner):
+        if not _give_tree(owner, worktree, owner, owner, runner=runner, by_descriptor=by_descriptor):
             problems.append(f"{role.role}: could not return worktree {worktree} to {owner}")
             break
     if problems:
         for worktree, uid, gid in previous_worktree_owners:
-            _chown_tree(str(worktree), f"{uid}:{gid}", runner=runner)
+            _give_tree(owner, worktree, str(uid), str(gid), runner=runner, by_descriptor=by_descriptor)
         return False, problems
 
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload = owner_writes.read_owner_json(owner, config_path)
     for section in (payload.get("roles", []), payload.get("retired_workflow_roles", {}).values()):
         for role in section:
             if isinstance(role, dict):
@@ -624,11 +680,76 @@ def repatriate_role_runtime_state(
     payload["role_state_isolation"] = True
     try:
         launcher._write_json_atomic(config_path, payload, owner_user=owner)
-    except OSError as exc:
+    except (OSError, SystemExit) as exc:
         for worktree, uid, gid in previous_worktree_owners:
-            _chown_tree(str(worktree), f"{uid}:{gid}", runner=runner)
+            _give_tree(owner, worktree, str(uid), str(gid), runner=runner, by_descriptor=by_descriptor)
         return False, [f"configuration publish failed after state copy: {exc}"]
     return True, []
+
+
+def _session_record(role, path: Path, account: str) -> dict[str, Any] | None:
+    """A role's session record, read from `account`'s tree by descriptor: `_session_record_at_path_for_role`'s
+    answer, with a link at the record or above it refused rather than read (SYRD-612)."""
+    from scripts import owner_writes
+
+    try:
+        raw = owner_writes.read_owner_bytes(account, path)
+        parsed = json.loads(raw.decode("utf-8")) if raw is not None else None
+    except (SystemExit, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) and str(parsed.get("target") or "") == role.target else None
+
+
+def _verify_copy(role, session_dir: Path, owner_ids: tuple[int, int] | None) -> tuple[str, bool, str]:
+    """The copied record's session id and whether the provider can resume it -- as the owner when `owner_ids`.
+
+    The checks read the owner's provider stores by path, as the launcher does when it resumes; done by root that
+    would look through any link the tenant left there, so a child that has become the owner does it (SYRD-612).
+    """
+    from scripts import team_launcher as launcher
+
+    def answer() -> tuple[str, bool, str]:
+        migrated = launcher.session_id_for_role(role, session_dir)
+        ok, reason = launcher._resume_preflight_allows_attempt(role, migrated, session_dir=session_dir) \
+            if migrated else (False, "")
+        return migrated, ok, reason
+
+    if owner_ids is None:
+        return answer()
+    reader, writer = os.pipe()
+
+    def report() -> None:
+        os.close(reader)
+        os.write(writer, json.dumps(answer()).encode("utf-8"))
+
+    try:
+        ran = launcher._run_as_account(owner_ids[0], owner_ids[1], report)
+    finally:
+        os.close(writer)
+    with os.fdopen(reader, "rb") as stream:
+        data = stream.read()
+    if not ran or not data:
+        return "", False, "the owner's own check of the copy did not complete"
+    migrated, ok, reason = json.loads(data.decode("utf-8"))
+    return str(migrated), bool(ok), str(reason)
+
+
+def _tree_status(owner: str, tree: Path) -> os.stat_result | None:
+    """What is at a tree the configuration names, looked at by descriptor from the owner's root; None if nothing."""
+    from scripts import owner_writes
+
+    return owner_writes.owner_entry_status(owner, tree) if owner_writes.within_owner_root(owner, tree) else None
+
+
+def _give_tree(owner: str, tree: Path, to: str, group: str, *, runner, by_descriptor: bool) -> bool:
+    """`tree`, in the owner's roots, to `to`:`group`: the helper's `chown-tree` from the owner's root -- links
+    inside changed as links, none followed -- as root for the owner; `chown -R` as before otherwise (SYRD-612)."""
+    from scripts import owner_writes
+
+    if not by_descriptor:
+        return _chown_tree(str(tree), f"{to}:{group}", runner=runner)
+    argv = owner_writes.owner_handoff_args(owner, tree, tree=True, to=to, group=group)
+    return runner(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
 
 
 def _outside_owner_roots(owner: str, config: ProjectConfig, legacy_roles: list) -> list[str]:
@@ -653,17 +774,25 @@ def _worktrees_outside_owner(owner: str, roles: list) -> list[str]:
 
     return [f"{role.role}: worktree {role.workdir} is outside {owner}'s home and every directory root chose for it; "
             "nothing was copied or given away"
-            for role in roles if os.path.lexists(role.workdir) and not owner_writes.within_owner_root(owner, Path(role.workdir))]
+            # Inside the owner's roots, nothing is looked at by path; only a path outside them is asked whether it is
+            # there at all, to refuse it rather than skip it (SYRD-612).
+            for role in roles if not owner_writes.within_owner_root(owner, Path(role.workdir)) and os.path.lexists(role.workdir)]
 
 
-def _worktree_ownership(config: ProjectConfig) -> dict[str, tuple[int, int]]:
-    """Who owns each role's tree right now, so it can be put back exactly."""
+def _worktree_ownership(config: ProjectConfig, *, owner: str = "") -> dict[str, tuple[int, int]]:
+    """Who owns each role's tree right now, so it can be put back exactly.
+
+    With `owner` (root acting for it), each is looked at by descriptor from the owner's root, never by path, and
+    one outside the owner's roots is not looked at at all (SYRD-612).
+    """
     owners: dict[str, tuple[int, int]] = {}
     for role in config.roles:
         path = Path(role.workdir)
         try:
-            info = os.stat(path, follow_symlinks=False)
-        except OSError:
+            info = _tree_status(owner, path) if owner else os.stat(path, follow_symlinks=False)
+        except (OSError, SystemExit):
+            continue
+        if info is None:
             continue
         owners[str(path)] = (info.st_uid, info.st_gid)
     return owners
@@ -804,7 +933,15 @@ def cutover_role_identities_command(
         )
         return 0
 
-    previous_config = config_path.read_bytes()
+    # As root for the owner, everything the transaction reads, hands over or puts back in the owner's tree goes by
+    # descriptor from the owner's root (SYRD-612).
+    from scripts import owner_writes
+
+    owner = config.run_as_user or team_launcher.current_user_name()
+    by_descriptor = owner_writes.root_writes_for(owner)
+    previous_config = owner_writes.read_owner_bytes(owner, config_path)
+    if previous_config is None:
+        raise SystemExit(f"switchyard: {config_path} does not exist; nothing was changed")
     # What the tenant could see before anything was stopped. A cutover that
     # ends -- either way -- with nobody able to see the project is not the
     # state it started in, and saying so is the only way an operator learns it
@@ -812,7 +949,7 @@ def cutover_role_identities_command(
     presentation_was_visible = team_launcher.presentation_is_attached(
         config, config_path=config_path, runner=runner
     )
-    previous_ownership = _worktree_ownership(config)
+    previous_ownership = _worktree_ownership(config, owner=owner if by_descriptor else "")
     previous_units = team_launcher.capture_installed_units(config, config_path=config_path)
     previous_listener_state = team_launcher.capture_listener_state(config, runner=runner, config_path=config_path)
     release_pointer, previous_release = team_launcher.capture_release_pointer(config, config_path=config_path)
@@ -844,9 +981,15 @@ def cutover_role_identities_command(
     ownership_failures: list[str] = []
     for role in config.roles:
         identity = identities.get(role.role)
-        if not identity or not Path(role.workdir).exists():
+        if not identity:
             continue
-        if not _chown_tree(role.workdir, f"{identity['account']}:", runner=runner):
+        if by_descriptor and not owner_writes.within_owner_root(owner, Path(role.workdir)):
+            ownership_failures.append(f"{role.role}: {role.workdir} is outside {owner}'s home and every directory root "
+                                      "chose for it; root does not give it away")
+            continue
+        if (_tree_status(owner, Path(role.workdir)) if by_descriptor else Path(role.workdir).exists() or None) is None:
+            continue
+        if not _give_tree(owner, Path(role.workdir), identity["account"], "", runner=runner, by_descriptor=by_descriptor):
             ownership_failures.append(f"{role.role}: could not transfer {role.workdir}")
 
     changed, message = team_launcher.upgrade_role_accounts_in_config(config_path)
@@ -969,16 +1112,20 @@ def cutover_role_identities_command(
         stop(config)
         restored: list[str] = []
         for path, (uid, gid) in previous_ownership.items():
-            if not _chown_tree(path, f"{uid}:{gid}", runner=runner):
+            if not _give_tree(owner, Path(path), str(uid), str(gid), runner=runner, by_descriptor=by_descriptor):
                 restored.append(f"could not restore ownership of {path}")
-        config_path.write_bytes(previous_config)
+        if by_descriptor:
+            owner_writes.rewrite_owner_file(owner, config_path, previous_config)
+        else:
+            config_path.write_bytes(previous_config)
         config = team_launcher.load_project_config(config.project, config_path)
         # The generated authority projection follows the configuration back, so
         # nothing is left describing identities the tenant is not using.
         team_launcher.refresh_generated_project_runtime_artifacts(
             config, config_path=config_path, runner=runner, print_func=print_func
         )
-        restored.extend(team_launcher.restore_release_pointer(release_pointer, previous_release, runner=runner))
+        restored.extend(team_launcher.restore_release_pointer(release_pointer, previous_release, runner=runner,
+                                                              owner_user=owner))
         restored.extend(
             team_launcher.restore_installed_units(
                 config,

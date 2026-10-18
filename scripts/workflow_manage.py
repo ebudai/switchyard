@@ -24,7 +24,14 @@ from scripts.workflow_launcher import (
 )
 
 
-def atomic(path: Path, content: str) -> None:
+def atomic(path: Path, content: str, *, owner_user: str = "") -> None:
+    """Replace `path` whole. As root for `owner_user`, by descriptor from the owner's root, the owner's file with the
+    mode it had (0600 when new, as `mkstemp` made it): never through a link at it or above it (SYRD-612)."""
+    from scripts import owner_writes
+
+    if owner_writes.root_writes_for(owner_user):
+        owner_writes.write_owner_file(owner_user, path, content)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
     try:
@@ -37,17 +44,38 @@ def atomic(path: Path, content: str) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def apply_files(files: dict[Path, str]) -> None:
-    prior = {p: p.read_text() if p.exists() else None for p in files}
+def prior_text(path: Path, owner_user: str = "") -> str | None:
+    """What is at `path` now, or None: as root for `owner_user`, read by descriptor -- a link at it or above it
+    refused, never read through -- and otherwise read as before (SYRD-612)."""
+    from scripts import owner_writes
+
+    if owner_writes.root_writes_for(owner_user):
+        raw = owner_writes.read_owner_bytes(owner_user, path)
+        return None if raw is None else raw.decode("utf-8")
+    return path.read_text() if path.exists() else None
+
+
+def remove(path: Path, owner_user: str = "") -> None:
+    """Take away what is at `path`: as root for `owner_user`, the entry, by descriptor; otherwise as before."""
+    from scripts import owner_writes
+
+    if owner_writes.root_writes_for(owner_user):
+        owner_writes.remove_root_record(owner_user, path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def apply_files(files: dict[Path, str], *, owner_user: str = "") -> None:
+    prior = {p: prior_text(p, owner_user) for p in files}
     try:
         for path, content in files.items():
-            atomic(path, content)
+            atomic(path, content, owner_user=owner_user)
     except Exception:
         for path, content in prior.items():
             if content is None:
-                path.unlink(missing_ok=True)
+                remove(path, owner_user)
             else:
-                atomic(path, content)
+                atomic(path, content, owner_user=owner_user)
         raise
 
 

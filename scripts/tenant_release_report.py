@@ -423,6 +423,12 @@ def capture_release_pointer(config: ProjectConfig, *, config_path: Path | None =
     if board_root is None:
         return None, ""
     current = board_root / "current"
+    from scripts import owner_writes
+
+    owner = config.run_as_user or launcher.current_user_name()
+    if owner_writes.root_writes_in(owner, current):
+        # In the owner's home: read through its parent held by descriptor, never through a link above it (SYRD-612).
+        return current, owner_writes.read_owner_link(owner, current)
     try:
         return current, os.readlink(current)
     except OSError:
@@ -492,9 +498,23 @@ def restore_release_pointer(
     target: str,
     *,
     runner: Callable[..., subprocess.CompletedProcess[Any]],
+    owner_user: str = "",
 ) -> list[str]:
-    """Put the release symlink back where the transaction found it."""
+    """Put the release symlink back where the transaction found it.
+
+    In `owner_user`'s home -- where a tenant's board root is -- as root, by
+    descriptor: made where only root can reach it and renamed into place,
+    never through a link above it (SYRD-612).
+    """
     if pointer is None or not target:
+        return []
+    from scripts import owner_writes
+
+    if owner_user and owner_writes.root_writes_in(owner_user, pointer):
+        try:
+            owner_writes.replace_owner_link(owner_user, pointer, target)
+        except SystemExit as stop:
+            return [f"could not restore the release pointer {pointer}: {stop}"]
         return []
     try:
         if os.path.islink(pointer) and os.readlink(pointer) == target:

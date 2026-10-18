@@ -514,6 +514,7 @@ from scripts.board_services import (
     board_system_unit_is_active,
     capture_listener_state,
     managed_unit_names,
+    read_installed_unit,
     MANAGER_RESPONDING,
     MANAGER_WEDGED,
     OWNER_USER_MANAGER_RESTART_TIMEOUT_SECONDS,
@@ -2489,13 +2490,8 @@ def capture_installed_units(
     can take back out -- the canary was installed by nothing here and restored
     by nothing here, which is only safe while nothing installs it (SYRD-63).
     """
-    captured: dict[str, bytes | None] = {}
-    for unit, path, _ownership in authority_unit_installs(config, config_path=config_path):
-        try:
-            captured[unit] = path.read_bytes()
-        except OSError:
-            captured[unit] = None
-    return captured
+    installs = authority_unit_installs(config, config_path=config_path)
+    return {unit: read_installed_unit(config, path) for unit, path, _ownership in installs}
 
 
 def _plan_data_from_config(config: ProjectConfig, config_path: Path) -> dict[str, Any]:

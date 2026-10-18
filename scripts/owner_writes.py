@@ -31,7 +31,7 @@ import os
 import pwd
 import stat
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 
 def owner_home(owner_user: str) -> str:
@@ -149,16 +149,19 @@ def within_owner_root(owner_user: str, path: Path) -> bool:
     return text == root or text.startswith(root.rstrip("/") + "/")
 
 
-def owner_handoff_args(owner_user: str, path: Path, *, tree: bool = False) -> list[str]:
+def owner_handoff_args(owner_user: str, path: Path, *, tree: bool = False, to: str = "", group: str = "") -> list[str]:
     """The argv that gives `path` to `owner_user`: the descriptor helper's `attrs`, rooted at the owner's root.
 
     With `tree`, the whole tree below it: the helper's `chown-tree`, which changes a link inside as a link and
-    never follows one -- where `chown -R` by path followed a link at the top or above it (SYRD-611).
+    never follows one -- where `chown -R` by path followed a link at the top or above it (SYRD-611). With `to`
+    (and `group`), a tree in the owner's tree goes to that account instead -- a role's, or what a rollback puts
+    back -- still rooted at the owner's root (SYRD-612).
     """
     from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
 
     if tree:
-        return tenant_paths_argv(owner_root(owner_user, path), "chown-tree", "--owner", owner_user, str(path))
+        return tenant_paths_argv(owner_root(owner_user, path), "chown-tree", "--owner", to or owner_user,
+                                 *(("--group", group) if group else ()), str(path))
     return tenant_paths_argv(owner_root(owner_user, path), "attrs", "--owner", owner_user, "--group", owner_user, str(path))
 
 
@@ -273,6 +276,62 @@ def rewrite_owner_file(owner_user: str, path: Path, content: bytes | str) -> Non
         raise SystemExit(f"switchyard: refusing to write {path} for {owner_user}: {stop}") from None
 
 
+def copy_owner_tree(source_user: str, source: Path, owner_user: str, target: Path) -> None:
+    """Merge `source_user`'s tree at `source` into `owner_user`'s at `target`, replacing nothing (SYRD-612).
+
+    Both by descriptor, each from its own account's root: nothing in the source is followed or copied through a
+    link, nothing in the target is created through one, and what is copied is the owner's, with the source's mode
+    and times (`tenant_paths.copy_tree`).
+    """
+    from scripts import tenant_paths
+
+    try:
+        account = pwd.getpwnam(owner_user)
+    except KeyError:
+        raise SystemExit(f"switchyard: refusing to copy into {target}: {owner_user} is not an account on this host") from None
+    source_home = owner_root(source_user, source)
+    if source_home == "/":
+        # An account whose home is `/` -- a system account -- has no tree of its own there to copy from, and what is
+        # under `/` is root's, which is never carried into a tenant's tree.
+        return
+    source_root = tenant_paths._quiet(source_home)
+    try:
+        target_root = tenant_paths._quiet(owner_root(owner_user, target))
+        try:
+            tenant_paths.copy_tree(source_root, str(source), target_root, str(target), account.pw_uid, account.pw_gid)
+        finally:
+            target_root.close()
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to copy {source} into {target} for {owner_user}: {refusal}") from None
+    except SystemExit as stop:
+        raise SystemExit(f"switchyard: refusing to copy {source} into {target} for {owner_user}: {stop}") from None
+    finally:
+        source_root.close()
+
+
+def read_owner_link(owner_user: str, path: Path) -> str:
+    """Where the link at `path`, in the owner's tree, points -- its parent reached by descriptor; "" if no link."""
+    from scripts import tenant_paths
+
+    try:
+        return tenant_paths.link_target(owner_root(owner_user, path), str(path))
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to read {path} for {owner_user}: {refusal}") from None
+
+
+def replace_owner_link(owner_user: str, path: Path, target: str) -> None:
+    """Point the link at `path`, in the owner's tree, at `target`: by descriptor, renamed into place (SYRD-612)."""
+    from scripts import tenant_paths
+
+    root = tenant_paths._quiet(owner_root(owner_user, path))
+    try:
+        tenant_paths.replace_link(root, str(path), target)
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to point {path} at {target} for {owner_user}: {refusal}") from None
+    finally:
+        root.close()
+
+
 def remove_root_record(owner_user: str, path: Path) -> None:
     """Remove a record root keeps in the owner's tree: the entry at the name, by descriptor, never followed."""
     from scripts import tenant_paths
@@ -283,6 +342,46 @@ def remove_root_record(owner_user: str, path: Path) -> None:
         raise SystemExit(f"switchyard: refusing to remove {path} for {owner_user}: {refusal}") from None
     except SystemExit as stop:
         raise SystemExit(f"switchyard: refusing to remove {path} for {owner_user}: {stop}") from None
+
+
+def supersede_owner_record(owner_user: str, path: Path) -> bool:
+    """`clear_session_record_for_role` by descriptor from the owner's root: the record moved aside to `.superseded`
+    (an earlier one to `.superseded.1`) and its resume timeout removed, each entry as itself, never followed
+    (SYRD-612). Whether there was a record."""
+    from scripts import tenant_paths
+
+    root, name = owner_root(owner_user, path), path.name
+    try:
+        if tenant_paths.entry_status(root, str(path)) is None:
+            return False
+        tenant_paths.rename_file(root, str(path.with_name(f"{name}.superseded")), f"{name}.superseded.1")
+        tenant_paths.remove_file(root, str(path.with_name(f"{name}.resume_timeout")))
+        return tenant_paths.rename_file(root, str(path), f"{name}.superseded")
+    except (tenant_paths.Refused, SystemExit) as refusal:
+        raise SystemExit(f"switchyard: refusing to clear {path} for {owner_user}: {refusal}") from None
+
+
+def holds_as_owner(owner_user: str, predicate: Callable[[], bool]) -> bool:
+    """Whether `predicate()` holds -- asked, when root acts for `owner_user`, in a child that has become the owner.
+
+    For a question answered by reading the owner's tree by path, as the providers' trust records are: a link there
+    leads the child only where the owner can go, never where root can (SYRD-612). An owner that is no account, or a
+    child that does not finish, is no.
+    """
+    from scripts.account_drop import _run_as_account
+
+    if not root_writes_for(owner_user):
+        return predicate()
+    try:
+        account = pwd.getpwnam(owner_user)
+    except KeyError:
+        return False
+
+    def ask() -> None:
+        if not predicate():
+            raise LookupError(f"not so for {owner_user}")
+
+    return _run_as_account(account.pw_uid, account.pw_gid, ask)
 
 
 def ensure_owner_dirs(owner_user: str, paths: list[Path], *, mode: int) -> None:

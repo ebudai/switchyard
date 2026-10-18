@@ -139,6 +139,8 @@ def write_konsole_config_defaults(directory: Path, *, model: Path | None = None)
     preference file would be the worse failure.
     """
     target = directory / KONSOLE_DEFAULTS_NAME
+    if os.geteuid() == 0 and model is not None:
+        return _write_konsole_defaults_for(target, model)
     try:
         directory.mkdir(parents=True, exist_ok=True)
         target.write_text(KONSOLE_WINDOW_TITLE_DEFAULTS, encoding="utf-8")
@@ -153,6 +155,41 @@ def write_konsole_config_defaults(directory: Path, *, model: Path | None = None)
             os.chown(target, stats.st_uid, stats.st_gid)
     except OSError as exc:
         return f"cannot hand the Konsole window-title default {target} to its reader: {exc}"
+    return ""
+
+
+def _write_konsole_defaults_for(target: Path, model: Path) -> str:
+    """As root: the default written for the account that owns the layout, by descriptor from that account's root.
+
+    Root writing into somebody else's directory by name follows a link left
+    there, so the file is written as the layout's owner's own, with the layout's
+    mode, through `owner_writes` (SYRD-610). The owner is read off the layout
+    without following a link; a layout that is a link, or that no account but
+    root owns, gets no default -- the window still opens, its title bar
+    following focus.
+    """
+    import pwd
+
+    from scripts import owner_writes
+
+    try:
+        stats = model.lstat()
+    except FileNotFoundError:
+        return ""  # no layout yet, so nobody to write it for; the window opens without it
+    except OSError as exc:
+        return f"cannot read the layout {model} the Konsole window-title default follows: {exc}"
+    if not stat.S_ISREG(stats.st_mode) or stats.st_uid == 0:
+        return f"the layout {model} is not a file an account owns; no Konsole window-title default is written beside it"
+    try:
+        account = pwd.getpwuid(stats.st_uid).pw_name
+    except KeyError:
+        return f"the layout {model} belongs to no account; no Konsole window-title default is written beside it"
+    try:
+        owner_writes.write_owner_file(account, target, KONSOLE_WINDOW_TITLE_DEFAULTS, mode=stat.S_IMODE(stats.st_mode))
+    except SystemExit as stop:
+        return f"cannot write the Konsole window-title default {target}: {stop}"
+    except OSError as exc:
+        return f"cannot write the Konsole window-title default {target}: {exc}"
     return ""
 
 

@@ -751,11 +751,12 @@ def install_file(root: Root, source: str, path: str, mode: int, uid: int, gid: i
 
 
 def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: int, gid: int, *,
-                 parents: tuple[int, int, int] | None = None, parent_mode: int | None = None) -> None:
+                 parents: tuple[int, int, int] | None = None, parent_mode: int | None = None,
+                 new_mode: int = 0o600) -> None:
     """Publish `content` at `path` whole: a new file, owned and moded before it is written, renamed into place.
 
-    `mode` None keeps the mode of the regular file being replaced (0600 when
-    there is none). The parent is reached by descriptor from the home and,
+    `mode` None keeps the mode of the regular file being replaced (`new_mode`,
+    0600 unless said, when there is none). The parent is reached by descriptor from the home and,
     with `parents` (mode, uid, gid), any missing directory on the way is made
     as root makes any other; `parent_mode` then sets the parent's mode on its
     descriptor. The new file is made, written, synced and given its owner and
@@ -788,7 +789,7 @@ def replace_file(root: Root, content: bytes, path: str, mode: int | None, uid: i
             raise Refused(path, "is a directory")
         if mode is None:
             mode = stat.S_IMODE(existing.st_mode) & 0o777 if existing is not None and stat.S_ISREG(existing.st_mode) \
-                else 0o600
+                else new_mode
         if existing is not None and stat.S_ISREG(existing.st_mode):
             fd = root.open_object(parent, parts[-1], path, existing)
             try:
@@ -840,11 +841,12 @@ def _quiet(home: str) -> Root:
 
 
 def write_file(home: str, path: str, content: bytes, *, uid: int, gid: int, mode: int | None = None,
-               parents: tuple[int, int, int] | None = None, parent_mode: int | None = None) -> None:
+               parents: tuple[int, int, int] | None = None, parent_mode: int | None = None,
+               new_mode: int = 0o600) -> None:
     """Publish `content` at `path` whole (`replace_file`)."""
     root = _quiet(home)
     try:
-        replace_file(root, content, path, mode, uid, gid, parents=parents, parent_mode=parent_mode)
+        replace_file(root, content, path, mode, uid, gid, parents=parents, parent_mode=parent_mode, new_mode=new_mode)
     finally:
         root.close()
 

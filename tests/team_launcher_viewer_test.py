@@ -1085,15 +1085,15 @@ def test_root_materialized_owner_state_layout_is_owner_writable_on_next_launch()
         )
         synthetic_owner: dict[Path, str] = {}
         active_user = "root"
-        expected_chown_args = ["chown", "-R", "porter-agent:porter-agent", str(layout_output.parent)]
+        expected_chown_args = team_launcher.chown_layout_output_args(config, layout_output)  # SYRD-610: the helper's
 
         class OwnershipRunner(FakeRunner):
             def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if args[:1] == ["chown"]:
+                if "chown-tree" in args:  # SYRD-610: the layout directory is handed over by the helper's chown-tree
                     self.calls.append(args)
-                    owner = args[-2] if len(args) >= 3 else ""
-                    target = Path(args[-1]) if len(args) >= 3 else Path("/nonexistent")
-                    recursive = "-R" in args[1:-2]
+                    owner = f"{args[args.index('--owner') + 1]}:{args[args.index('--owner') + 1]}"
+                    target = Path(args[-1])
+                    recursive = True
                     if owner == f"{config.run_as_user}:{config.run_as_user}":
                         synthetic_owner[target] = config.run_as_user
                         if recursive:

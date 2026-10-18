@@ -68,7 +68,18 @@ def sandboxed_stage_parent(root: tenant_paths.Root) -> int | None:
 tenant_paths.Root._stage_parent = sandboxed_stage_parent
 
 
-def hold_owner_root(owner_user: str, root: Path) -> None:
-    """For a suite whose stand-in owner keeps its state in a scratch directory: that directory is its home here."""
+def hold_owner_root(owner_user: str, root: Path, *, ids: tuple[int, int] | None = None) -> None:
+    """For a suite whose stand-in owner keeps its state in a scratch directory: that directory is its home here.
+
+    With `ids`, root's writes for that owner are owned by them -- for a suite that only stands in root, which cannot
+    hand a file to another account -- through `owner_writes`' own view of the account and nothing else's.
+    """
     shipped = owner_writes.owner_home
     owner_writes.owner_home = lambda user: str(root) if user == owner_user else shipped(user)
+    if ids is not None:
+        from types import SimpleNamespace
+
+        real = pwd.getpwnam
+        stand_in = pwd.struct_passwd((owner_user, "x", ids[0], ids[1], "", str(root), "/bin/sh"))
+        owner_writes.pwd = SimpleNamespace(getpwnam=lambda name: stand_in if name == owner_user else real(name),
+                                           getpwuid=pwd.getpwuid)

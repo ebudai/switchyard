@@ -111,7 +111,11 @@ def materialize_layout(
             f"{launcher.MAX_VISIBLE_PANES_PER_WINDOW} panes can be visible in one window; detach extra roles or open an "
             "additional director-invoked window"
         )
-    layout = json.loads(config.layout.read_text(encoding="utf-8"))
+    # The tenant's template, read without following a link when root reads it for the owner (SYRD-610).
+    template = launcher.read_owner_bytes(config.run_as_user, config.layout)
+    if template is None:
+        raise FileNotFoundError(2, "No such file or directory", str(config.layout))
+    layout = json.loads(template.decode("utf-8"))
     leaves = launcher._layout_leaves(layout)
     for role in config.roles:
         if role.detached:
@@ -152,8 +156,14 @@ def materialize_layout(
         # reader comparing the file with the window is not told two different
         # things (SYRD-122).
         leaf["Title"] = launcher.pane_split_title(config, role)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(layout, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    text = json.dumps(layout, indent=2, sort_keys=True) + "\n"
+    if launcher.root_writes_for(config.run_as_user):
+        # As root, by descriptor from the owner's root: the owner's from the start, readable by the desktop account
+        # that may open it, as the file `chown -R` used to hand over was (SYRD-610).
+        launcher.write_owner_file(config.run_as_user, output_path, text, new_mode=0o644)
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text, encoding="utf-8")
     return output_path
 
 
@@ -184,9 +194,18 @@ def default_layout_output_path(config: ProjectConfig, *, config_path: Path) -> P
 
 
 def chown_layout_output_args(config: ProjectConfig, output_path: Path) -> list[str]:
+    """The layout directory handed to the owner: the descriptor helper's `chown-tree`, rooted at the owner's root.
+
+    Never `chown -R` on the path, which followed a link at any directory above
+    it and gave whatever it reached to the tenant (SYRD-610).
+    """
+    from scripts import owner_writes
+    from scripts.ticket_board.provision_tenant_paths import tenant_paths_argv
+
     if not config.run_as_user:
         raise ValueError("layout ownership repair requires run_as_user")
-    return ["chown", "-R", f"{config.run_as_user}:{config.run_as_user}", str(output_path.parent)]
+    owner, directory = config.run_as_user, output_path.parent
+    return tenant_paths_argv(owner_writes.owner_root(owner, directory), "chown-tree", "--owner", owner, str(directory))
 
 
 def desktop_state_dir(project: str, user: str) -> Path:

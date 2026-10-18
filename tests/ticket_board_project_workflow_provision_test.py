@@ -332,7 +332,7 @@ $$;
 """.lstrip(),
         encoding="utf-8",
     )
-    (migrations_dir / "pgu999_provision_probe.sql").write_text(
+    (migrations_dir / f"pgu{max(int(p.name.split('_')[0].removeprefix('pgu')) for p in migrations_dir.glob('*.sql')) + 1}_provision_probe.sql").write_text(
         """
 CREATE TABLE ticket_board.provision_probe (
     id integer PRIMARY KEY,

@@ -36,6 +36,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
+from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
 
@@ -46,8 +47,8 @@ BUNDLE = "/home/switchyard-agent/.local/state/switchyard/publish-outbox/syrd/SYR
 
 
 def migration_files() -> list[Path]:
-    """In the order the runner applies them: a plain filename sort."""
-    return sorted(MIGRATIONS.glob("*.sql"))
+    """In the order the runner applies them: by number."""
+    return ordered_files(MIGRATIONS)
 
 
 def migrations_from(first: str, *, through: str) -> list[Path]:

@@ -39,6 +39,7 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t
 from publication_cache_fixture import GIT as REAL_GIT
 from publication_cache_fixture import build_cache, claim, commit_file, publish
+from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
 from scripts.ticket_board.app import PUBLISHED_REF_NAMESPACE
 from scripts.ticket_board.workflow_config import validate
 from temporary_cluster import temporary_cluster
@@ -141,7 +142,7 @@ def test_the_upgrade_carries_it_to_an_existing_board(cluster, cache: Path, work:
     t.psql(admin, at_release(PREVIOUS, "scripts/ticket_board/rbac.sql"))
     t.seed_postgres_ticket(admin, "PGU-9", title="Upgraded work", state="in_progress", assignee="main")
 
-    names = [path.name for path in sorted(MIGRATIONS.glob("*.sql")) if path.name != MINE]
+    names = [path.name for path in ordered_files(MIGRATIONS) if path.name != MINE]
     t.psql(
         admin,
         "CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations ("

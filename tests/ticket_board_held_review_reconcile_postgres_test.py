@@ -316,7 +316,8 @@ def main() -> int:
                 ["git", "ls-tree", "--name-only", "origin/main",
                  "scripts/ticket_board/migrations/"], capture=True
             ).stdout.split())
-            for path in sorted((ROOT / "scripts/ticket_board/migrations").glob("*.sql")):
+            from scripts.ticket_board.migration_order import ordered_files
+            for path in ordered_files(ROOT / "scripts/ticket_board/migrations"):
                 if f"scripts/ticket_board/migrations/{path.name}" not in on_main:
                     fixture.psql(upgrade_admin, path.read_text(encoding="utf-8"))
             fixture.psql(upgrade_admin, fixture.RBAC_PATH.read_text())

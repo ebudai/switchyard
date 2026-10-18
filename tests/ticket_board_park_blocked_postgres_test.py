@@ -39,6 +39,7 @@ isolate_tmux_bus()
 
 import ticket_board_director_defer_backlog_test as defer_suite  # noqa: E402
 import ticket_board_write_api_test as t  # noqa: E402
+from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import parking_stage_names, validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
@@ -177,8 +178,8 @@ def test_the_fix_lives_in_both_bodies_and_they_do_not_drift() -> None:
 
 
 def test_the_migration_sorts_after_every_migration_before_it() -> None:
-    """The runner applies them by sorted filename, so ordering is the filename."""
-    names = sorted(path.name for path in MIGRATION_PATH.parent.glob("*.sql"))
+    """The runner applies them in number order, so ordering is the number."""
+    names = [path.name for path in ordered_files(MIGRATION_PATH.parent)]
     check(names[-1] == MIGRATION_PATH.name, f"it applies last: {names[-3:]}")
     body = MIGRATION_PATH.read_text()
     check(body.lstrip().startswith("--"), "it says what it is for")

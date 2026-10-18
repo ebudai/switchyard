@@ -34,13 +34,14 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t
 from publication_cache_fixture import build_cache, commit_file, publish
 from schema_function_drift import assert_no_drift
+from scripts.ticket_board.migration_order import number as migration_number, ordered_files
 from scripts.ticket_board.workflow_config import available_transitions, validate
 from temporary_cluster import temporary_cluster
 
 MIGRATIONS = ROOT / "scripts/ticket_board/migrations"
 #: Every migration from the one that introduced relaying onward. An upgraded
 #: board applies the sequence, not one file, and the last body installed wins.
-UPGRADE = [p.read_text() for p in sorted(MIGRATIONS.glob("*.sql")) if p.name >= "pgu952"]
+UPGRADE = [p.read_text() for p in ordered_files(MIGRATIONS) if migration_number(p.name) >= 952]
 
 RELAY = "relay_user_sign_off"
 KICK_BACK_RELAY = "relay_user_kick_back"

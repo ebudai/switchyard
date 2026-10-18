@@ -43,6 +43,7 @@ if str(ROOT / "tests") not in sys.path:
 import ticket_board_write_api_test as t  # noqa: E402
 from schema_function_drift import rbac_before, schema_before  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, number as migration_number, ordered_files  # noqa: E402
 
 MIGRATIONS = ROOT / "scripts/ticket_board/migrations"
 #: The board is installed just before this migration and deployed past it.
@@ -103,8 +104,8 @@ def main() -> int:
         (scratch / "at-install/schema.sql").write_text(schema_before(INSTALLED_BEFORE))
         earlier = scratch / "at-install/migrations"
         earlier.mkdir()
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name < INSTALLED_BEFORE.name:
+        for path in ordered_files(MIGRATIONS):
+            if migration_key(path.name) < migration_key(INSTALLED_BEFORE.name):
                 shutil.copy(path, earlier / path.name)
 
         def service(verb: str, admin: str, **env: str) -> subprocess.CompletedProcess:
@@ -190,7 +191,9 @@ def main() -> int:
         shutil.copy(ROOT / "scripts/ticket_board/schema.sql", scratch / "failing/schema.sql")
         failing = scratch / "failing/migrations"
         shutil.copytree(MIGRATIONS, failing)
-        (failing / "pgu999_syrd530_fails_after_creating.sql").write_text(
+        # Numbered after the newest migration, where a new one goes: one file per number (SYRD-617).
+        fails = f"pgu{migration_number(ordered_files(MIGRATIONS)[-1].name) + 1}_syrd530_fails_after_creating.sql"
+        (failing / fails).write_text(
             "CREATE OR REPLACE FUNCTION ticket_board.syrd530_created_then_failed() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n"
             "SELECT 1 / 0;\n")
         failed = installed_before("failed")
@@ -200,7 +203,7 @@ def main() -> int:
               "having created its function")
         check(public(failed) == [], f"and still leaves nothing PUBLIC-executable, the half-made function included: {public(failed)}")
         check(t.psql(failed, "SELECT count(*) FROM ticket_board.schema_migrations "
-                             "WHERE name = 'pgu999_syrd530_fails_after_creating.sql';").strip() == "0",
+                             f"WHERE name = '{fails}';").strip() == "0",
               "the failed migration is not recorded, so the next deploy retries it")
 
         # 5. FRESH. Provisioning's schema.sql, then install's database steps.
@@ -229,6 +232,7 @@ def main() -> int:
         release = scratch / "release"
         (release / "scripts/ticket_board").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts/ticket-board-migrate", release / "scripts/ticket-board-migrate")
+        shutil.copy2(ROOT / "scripts/ticket_board/migration_order.py", release / "scripts/ticket_board/migration_order.py")
         shutil.copy(ROOT / "scripts/ticket_board/schema.sql", release / "scripts/ticket_board/schema.sql")
         shutil.copytree(MIGRATIONS, release / "scripts/ticket_board/migrations")
         marker = "GRANT EXECUTE ON FUNCTION ticket_board.normalize_blocker_ref(text) TO research;\n"

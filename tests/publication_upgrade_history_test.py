@@ -32,6 +32,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
 from workflow_document_eras import before_relaying
+from scripts.ticket_board.migration_order import number as migration_number, ordered_files
 from temporary_cluster import temporary_cluster
 
 MIGRATIONS = ROOT / "scripts/ticket_board/migrations"
@@ -45,19 +46,19 @@ CANONICAL = before_relaying()
 def migration_numbers() -> dict[int, list[str]]:
     numbers: dict[int, list[str]] = {}
     for path in sorted(MIGRATIONS.glob("pgu*.sql")):
-        numbers.setdefault(int(path.name[3:].split("_", 1)[0]), []).append(path.name)
+        numbers.setdefault(migration_number(path.name), []).append(path.name)
     return numbers
 
 
 def test_the_number_is_unused_and_sorts_after_everything_before_it() -> None:
     """The defect this guards against happened: two branches both took pgu929.
 
-    The runner applies every file it has not recorded, in filename order, so a
+    The runner applies every file it has not recorded, in number order, so a
     number is not decoration -- it is the only thing that makes a fresh install
     apply these in the order an upgraded tenant did.
     """
     numbers = migration_numbers()
-    mine = int(MINE.name[3:].split("_", 1)[0])
+    mine = migration_number(MINE.name)
     assert numbers[mine] == [MINE.name], numbers[mine]
     assert mine > max(n for n in numbers if n < mine)
     for number, names in numbers.items():
@@ -73,7 +74,7 @@ def bodies(text: str, name: str) -> list[str]:
 
 def last_migration_to_create(name: str) -> tuple[Path, str]:
     """The body a tenant ends up with: the highest-numbered migration wins."""
-    for path in sorted(MIGRATIONS.glob("pgu*.sql"), reverse=True):
+    for path in reversed(ordered_files(MIGRATIONS)):
         found = bodies(path.read_text(), name)
         if found:
             return path, found[-1]
@@ -83,7 +84,7 @@ def last_migration_to_create(name: str) -> tuple[Path, str]:
 def test_every_function_it_re_creates_matches_the_schema_it_ships_with() -> None:
     """A body older than the schema beside it is a rollback nobody is told about.
 
-    The runner applies every migration in filename order, so what a tenant ends
+    The runner applies every migration in number order, so what a tenant ends
     up with is whichever migration creates the function last -- and that is what
     has to agree with schema.sql, or a fresh install and an upgraded tenant are
     running different code. This migration is allowed to be superseded by a
@@ -172,7 +173,7 @@ def run_migration_runner(cluster, db: str) -> str:
 
 
 def pre_record_migrations(admin: str, *, applying: set[str]) -> None:
-    names = [path.name for path in sorted(MIGRATIONS.glob("*.sql")) if path.name not in applying]
+    names = [path.name for path in ordered_files(MIGRATIONS) if path.name not in applying]
     assert applying <= {path.name for path in MIGRATIONS.glob("*.sql")}
     values = ",".join(f"('{name}')" for name in names)
     t.psql(

@@ -27,6 +27,7 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from standalone_test_runner import run_module_tests
+from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener
 
 
@@ -171,10 +172,10 @@ def test_the_owner_prompt_no_longer_claims_the_director_knows() -> None:
     )
     assert "The Director has NOT " in effective, effective[-1200:]
 
-    # An upgraded board runs every migration in name order, so the newest
+    # An upgraded board runs every migration in number order, so the newest
     # migration that defines the guard is the one it executes (pgu951 when
     # this was written; SYRD-514's pgu966 since).
-    migrations = sorted((ROOT / "scripts" / "ticket_board" / "migrations").glob("*.sql"))
+    migrations = ordered_files(ROOT / "scripts" / "ticket_board" / "migrations")
     defining = [path for path in migrations if pattern.findall(path.read_text(encoding="utf-8"))]
     assert defining, "no migration defines the guard"
     newest = defining[-1]

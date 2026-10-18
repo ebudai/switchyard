@@ -37,6 +37,7 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
 from schema_function_drift import assert_no_drift, definition, owning_migration  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 
 WORKFLOW = json.loads((ROOT / "examples" / "workflows" / "inspection.json").read_text())
 MIGRATIONS = ROOT / "scripts" / "ticket_board" / "migrations"
@@ -77,7 +78,7 @@ def board(cluster, db: str, *, legacy: bool, document: dict):
         # What the runner applies to a board that predates this release: this
         # migration and every one after it, in one pass -- rbac.sql, applied
         # next, may grant what a later one creates (SYRD-270).
-        for later in [MIGRATION, *(p for p in sorted(MIGRATIONS.glob("pgu*.sql")) if p.name > MIGRATION.name)]:
+        for later in [MIGRATION, *(p for p in ordered_files(MIGRATIONS) if migration_key(p.name) > migration_key(MIGRATION.name))]:
             t.psql(admin, later.read_text())
     t.psql(admin, t.RBAC_PATH.read_text())
     app = t.TicketBoardApp(

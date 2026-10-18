@@ -313,7 +313,12 @@ PostgreSQL board backend:
   `pgu<num>_slug.sql` naming scheme. The legacy `270-287` numbered filenames
   are preserved as historical names and backfilled as already-applied when a DB
   was provisioned directly from `schema.sql`.
-- Migration apply order is deterministic filename order only. If two unapplied
+- Migration apply order is the number in the name, then nothing else
+  (`scripts/ticket_board/migration_order.py`, SYRD-617): `pgu1000` follows
+  `pgu999`. One number is one file; a reused number, a leading zero or a
+  malformed name is refused before anything is applied. Test helpers that need
+  the order use `ordered_files()` and `key()` from that module, never a text
+  sort or a string comparison of names. If two unapplied
   migrations genuinely depend on each other, rebase/combine them before merge
   rather than expecting the runner to infer dependencies.
 - Tickets are stored in normalized ticket, blocker, comment, and attachment tables.

@@ -37,6 +37,7 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.router_setup import ROUTER_PROMPT, with_router, without_router  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
@@ -199,7 +200,7 @@ def drift_check() -> None:
         final = schema[starts[-1]:schema.index("\n$$;\n", starts[-1]) + 5]
         # A later migration may define it again (SYRD-598's pgu999 redefines enforce_declared_ticket_update);
         # then schema.sql's final copy is that migration's, which must carry pgu997's change along.
-        definers = [p for p in sorted(MIGRATION.parent.glob("*.sql")) if p.name >= MIGRATION.name
+        definers = [p for p in ordered_files(MIGRATION.parent) if migration_key(p.name) >= migration_key(MIGRATION.name)
                     and re.search(r"^CREATE OR REPLACE FUNCTION ticket_board\." + re.escape(signature), p.read_text(), re.M)]
         check(definers and final in definers[-1].read_text(),
               f"schema.sql's final {signature} is the copy of the last migration to define it: "

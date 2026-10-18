@@ -43,6 +43,7 @@ import ticket_board_notify_listener_test as lt  # noqa: E402
 import ticket_board_write_api_test as t  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.notify_listener import (  # noqa: E402
     SESSION_CLEAR_COMMANDS,
     SESSION_CLEAR_KINDS,
@@ -759,10 +760,10 @@ def run_upgrade_checks(cluster: Any) -> int:
     # would ask a board of that vintage to grant on functions a later migration
     # creates, and the failure would look like this change's rather than like a
     # replay that stopped early.
-    later = sorted(
-        path for path in (ROOT / "scripts/ticket_board/migrations").glob("*.sql")
-        if path.name > MIGRATION
-    )
+    later = [
+        path for path in ordered_files(ROOT / "scripts/ticket_board/migrations")
+        if migration_key(path.name) > migration_key(MIGRATION)
+    ]
     for path in later:
         t.psql(admin, path.read_text(encoding="utf-8"))
     t.psql(admin, t.RBAC_PATH.read_text(encoding="utf-8"))

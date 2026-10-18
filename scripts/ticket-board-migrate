@@ -282,6 +282,15 @@ apply_migration() {
     record_migration "$filename"
 }
 
+# SYRD-617: the order is the migrations' numbers, read by one parser that the
+# tests share; text order put pgu1000 before pgu367. It is decided for the
+# whole directory before the database is touched, so a malformed, ambiguous or
+# reused number stops the run with nothing applied, instead of being reached
+# halfway through it.
+planned_migrations() {
+    python3 -I "$SCRIPT_DIR/ticket_board/migration_order.py" "$MIGRATIONS_DIR"
+}
+
 # SYRD-530: PostgreSQL lets PUBLIC execute every function it creates. rbac.sql
 # takes that back, but only install runs rbac.sql; deploy and deploy-restart run
 # this runner alone, so every function a migration added since the last install
@@ -343,20 +352,19 @@ main() {
     [[ -n "$DATABASE_URL" ]] || die "TICKET_BOARD_ADMIN_DATABASE_URL or TICKET_BOARD_DATABASE_URL is required; refusing to default to the live pgu database"
     command -v psql >/dev/null 2>&1 || die "psql is required to apply ticket-board migrations"
     [[ -d "$MIGRATIONS_DIR" ]] || die "missing migrations directory: $MIGRATIONS_DIR"
+    local listing migrations=()
+    listing="$(planned_migrations)" || die "no migration was applied"
+    [[ -z "$listing" ]] || mapfile -t migrations <<<"$listing"
     ensure_tracking_table
     trap close_public_function_execute_on_exit EXIT
     backfill_schema_snapshot_legacy_migrations
 
-    local found=0
     local migration
-    while IFS= read -r -d '' migration; do
-        found=1
-        apply_migration "$migration"
-    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\0' | sort -z | while IFS= read -r -d '' name; do
-        printf '%s\0' "$MIGRATIONS_DIR/$name"
-    done)
+    for migration in "${migrations[@]}"; do
+        apply_migration "$MIGRATIONS_DIR/$migration"
+    done
 
-    if [[ "$found" == "0" ]]; then
+    if [[ "${#migrations[@]}" == "0" ]]; then
         log "no migrations found in $MIGRATIONS_DIR"
     fi
 }

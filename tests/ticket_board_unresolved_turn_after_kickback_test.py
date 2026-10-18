@@ -363,9 +363,11 @@ WHERE n.nspname='ticket_board' AND p.proname='notify_unresolved_turn_end';""").s
             show = lambda path: fixture.run(["git", "show", f"{baseline}:{path}"]).stdout
             fixture.psql(upgrade_admin, show("scripts/ticket_board/schema.sql"))
             fixture.psql(upgrade_admin, show("scripts/ticket_board/rbac.sql"))
-            migrations = sorted(
-                path for path in (ROOT / "scripts" / "ticket_board" / "migrations").glob("pgu9*.sql")
-            )
+            from scripts.ticket_board.migration_order import number, ordered_files
+            migrations = [
+                path for path in ordered_files(ROOT / "scripts" / "ticket_board" / "migrations")
+                if number(path.name) >= 900
+            ]
             applied = [path.name for path in migrations]
             check(applied.index("pgu950_syrd203_staged_turn_recovery.sql")
                   > applied.index("pgu948_syrd194_unresolved_turn_guard.sql"),

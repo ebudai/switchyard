@@ -40,6 +40,7 @@ from psycopg.rows import dict_row  # noqa: E402
 
 import ticket_board_write_api_test as fixture  # noqa: E402
 from schema_function_drift import assert_no_drift, owning_migration  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key  # noqa: E402
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
@@ -257,7 +258,7 @@ def main() -> int:
     # SYRD-537 redefines it later (one added snooze condition), so the copy an
     # upgraded board runs is the newest one: it must still carry SYRD-513's clause.
     owner = owning_migration("ticket_turn_is_resolved")
-    check(owner.name >= "pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql"
+    check(migration_key(owner.name) >= migration_key("pgu968_syrd513_undelivered_assignment_is_not_a_turn.sql")
           and "AND q.kind = 'transition'" in owner.read_text().split("FUNCTION ticket_board.ticket_turn_is_resolved(")[-1].split("$$;")[0],
           "the SYRD-513 rule is in the copy an upgraded board runs")
     assert_no_drift("ticket_turn_is_resolved")

@@ -190,7 +190,10 @@ BEGIN
 END;
 $$;
 SQL
-cat >"$TRANSITION_MIGRATIONS_DIR/pgu999_runner_probe.sql" <<'SQL'
+# The probe is numbered after the newest real migration, which is where a new
+# one goes: a number is one file's (SYRD-617), and pgu999 is taken.
+RUNNER_PROBE="pgu$(( $(ls "$TRANSITION_MIGRATIONS_DIR" | sed -E 's/^(pgu)?([0-9]+)_.*/\2/' | sort -n | tail -n 1) + 1 ))_runner_probe.sql"
+cat >"$TRANSITION_MIGRATIONS_DIR/$RUNNER_PROBE" <<'SQL'
 CREATE TABLE ticket_board.runner_probe (
     id integer PRIMARY KEY,
     value text NOT NULL
@@ -210,7 +213,9 @@ SQL
 expected_transition_applied="$(
     {
         printf 'schema.sql\n'
-        find "$TRANSITION_MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort
+        # By number, then name (only the historical shared numbers tie), not by text.
+        find "$TRANSITION_MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' \
+            | sed -E 's/^(pgu)?([0-9]+)_.*/\2 &/' | LC_ALL=C sort -k1,1n -k2,2 | cut -d' ' -f2
     } | paste -sd ','
 )"
 [[ "$transition_applied" == "$expected_transition_applied" ]] || {
@@ -397,7 +402,7 @@ expected_append_action_result='{"PGU-47701": {"state": "done", "assignee": "dire
 
 transition_value="$(psql -X -v ON_ERROR_STOP=1 -tA "$TRANSITION_CONN" -c "SELECT value FROM ticket_board.runner_probe WHERE id = 1;")"
 [[ "$transition_value" == "applied" ]] || {
-    echo "FAIL: pgu999_runner_probe.sql did not apply on top of schema.sql snapshot: $transition_value" >&2
+    echo "FAIL: $RUNNER_PROBE did not apply on top of schema.sql snapshot: $transition_value" >&2
     exit 1
 }
 
@@ -545,6 +550,7 @@ git init "$SOURCE_REPO" >/dev/null
 git -C "$SOURCE_REPO" config user.name Test
 git -C "$SOURCE_REPO" config user.email test@example.com
 cp "$REPO_ROOT/scripts/ticket-board-migrate" "$SOURCE_REPO/scripts/ticket-board-migrate"
+cp "$REPO_ROOT/scripts/ticket_board/migration_order.py" "$SOURCE_REPO/scripts/ticket_board/migration_order.py"
 chmod +x "$SOURCE_REPO/scripts/ticket-board-migrate"
 # A release carries its grants: since SYRD-530 its database step is its
 # migrations and then its own rbac.sql. This release is a probe, so its rbac.sql
@@ -561,7 +567,7 @@ UPDATE ticket_board.migration_probe
 SET value = value || '+deploy'
 WHERE id = 1;
 SQL
-git -C "$SOURCE_REPO" add scripts/ticket-board-migrate scripts/ticket_board/rbac.sql scripts/ticket-board.py scripts/ticket_board/migrations/pgu404_deploy_probe.sql
+git -C "$SOURCE_REPO" add scripts/ticket-board-migrate scripts/ticket_board/migration_order.py scripts/ticket_board/rbac.sql scripts/ticket-board.py scripts/ticket_board/migrations/pgu404_deploy_probe.sql
 git -C "$SOURCE_REPO" commit -m "seed deploy migration" >/dev/null
 
 BOARD_ROOT="$DEPLOY_ROOT" SOURCE_REPO="$SOURCE_REPO" DEPLOY_REF=HEAD TICKET_BOARD_ADMIN_DATABASE_URL="$ADMIN_CONN" \

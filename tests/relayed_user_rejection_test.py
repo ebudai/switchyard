@@ -31,6 +31,7 @@ from tmux_bus_isolation import isolate_tmux_bus
 isolate_tmux_bus()
 import ticket_board_write_api_test as t
 from schema_function_drift import assert_no_drift
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files
 from scripts.ticket_board.workflow_config import available_transitions, validate
 from temporary_cluster import temporary_cluster
 
@@ -38,11 +39,11 @@ MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu952_syrd214_relay_us
 MIGRATION = MIGRATION_PATH.read_text()
 #: Applied after pgu952 on any board that takes the upgrade path, and it is the
 #: later of the two that decides which function bodies an upgraded board runs.
-LATER_MIGRATIONS = sorted(
+LATER_MIGRATIONS = [
     p.read_text()
-    for p in (ROOT / "scripts/ticket_board/migrations").glob("*.sql")
-    if p.name > MIGRATION_PATH.name
-)
+    for p in ordered_files(ROOT / "scripts/ticket_board/migrations")
+    if migration_key(p.name) > migration_key(MIGRATION_PATH.name)
+]
 
 RELAY = "relay_user_kick_back"
 

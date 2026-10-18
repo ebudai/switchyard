@@ -32,6 +32,7 @@ isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
 from workflow_document_eras import before_relaying
+from scripts.ticket_board.migration_order import key as migration_key, number as migration_number, ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import parking_stage_names, validate  # noqa: E402
 
 from temporary_cluster import temporary_cluster  # noqa: E402
@@ -47,8 +48,8 @@ MIGRATION = MIGRATION_PATH.read_text()
 #: rest of the tail in the same pass -- so neither does this suite.
 LATER_MIGRATIONS = [
     path.read_text()
-    for path in sorted(MIGRATION_PATH.parent.glob("pgu*.sql"))
-    if path.name > MIGRATION_PATH.name
+    for path in ordered_files(MIGRATION_PATH.parent)
+    if migration_key(path.name) > migration_key(MIGRATION_PATH.name)
 ]
 
 
@@ -174,21 +175,21 @@ def test_a_review_stage_is_not_exempt_from_the_floor() -> None:
 def migration_numbers() -> dict[int, list[str]]:
     numbers: dict[int, list[str]] = {}
     for path in sorted(MIGRATION_PATH.parent.glob("pgu*.sql")):
-        numbers.setdefault(int(path.name[3:].split("_", 1)[0]), []).append(path.name)
+        numbers.setdefault(migration_number(path.name), []).append(path.name)
     return numbers
 
 
 def test_the_migration_is_numbered_above_everything_that_preceded_it() -> None:
     """A new migration may not reuse or undercut a number already in the tree.
 
-    The runner applies every file it has not recorded, in filename order. A
+    The runner applies every file it has not recorded, in number order. A
     tenant that already ran a higher-numbered migration will still apply a new
     lower-numbered one, out of order, whenever it arrives -- so the number is
     not decoration, it is the only thing that keeps a fresh install applying
     these in the same order an upgraded tenant did.
     """
     numbers = migration_numbers()
-    mine = int(MIGRATION_PATH.name[3:].split("_", 1)[0])
+    mine = migration_number(MIGRATION_PATH.name)
     # This file shares its number with nothing, and sorts after every migration
     # that existed when it was written.
     assert numbers[mine] == [MIGRATION_PATH.name], numbers[mine]
@@ -236,8 +237,8 @@ def test_the_migration_carries_the_schema_definition_of_every_function_it_create
     # then that one is checked instead.
     later = [
         path
-        for path in sorted(MIGRATION_PATH.parent.glob("pgu*.sql"))
-        if path.name > MIGRATION_PATH.name
+        for path in ordered_files(MIGRATION_PATH.parent)
+        if migration_key(path.name) > migration_key(MIGRATION_PATH.name)
     ]
     for name in created:
         in_schema = bodies(schema, name)
@@ -513,7 +514,7 @@ def pre_record_migrations(admin: str, *, applying: set[str]) -> None:
     Everything in the tree except `applying`, so the runner is left with exactly
     the upgrade under test rather than replaying the whole history.
     """
-    names = [path.name for path in sorted(MIGRATION_PATH.parent.glob("*.sql")) if path.name not in applying]
+    names = [path.name for path in ordered_files(MIGRATION_PATH.parent) if path.name not in applying]
     assert names and applying <= {path.name for path in MIGRATION_PATH.parent.glob("*.sql")}
     values = ",".join(f"('{name}')" for name in names)
     t.psql(
@@ -595,13 +596,13 @@ def run_upgrade_history_checks(cluster) -> None:
     tail = {
         path.name
         for path in MIGRATION_PATH.parent.glob("pgu*.sql")
-        if path.name >= "pgu928_syrd83_director_edit.sql"
+        if migration_key(path.name) >= migration_key("pgu928_syrd83_director_edit.sql")
     }
     histories = {
         "ordered-tail": (schema_before("pgu928_syrd83_director_edit.sql"), tail),
         "pgu928-tenant": (
             t.SCHEMA_PATH.read_text(),
-            {path.name for path in MIGRATION_PATH.parent.glob("pgu*.sql") if path.name >= MIGRATION_PATH.name},
+            {path.name for path in MIGRATION_PATH.parent.glob("pgu*.sql") if migration_key(path.name) >= migration_key(MIGRATION_PATH.name)},
         ),
     }
     for label, (schema, applying) in histories.items():

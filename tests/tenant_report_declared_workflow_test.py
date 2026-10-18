@@ -50,6 +50,7 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
 from report_confirmation_fixture import confirmed_report  # noqa: E402
 from schema_function_drift import definition, owning_migration  # noqa: E402
+from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
@@ -324,7 +325,7 @@ def test_a_fresh_board_and_an_upgraded_board_run_the_same_function() -> None:
           f"pgu981 owns file_report: {owning_migration('file_report').name}")
     check(definition("file_report") in owner.read_text(),
           "schema.sql's copy is the migration's, character for character")
-    names = sorted(p.name for p in MIGRATIONS.glob("*.sql"))
+    names = [p.name for p in ordered_files(MIGRATIONS)]
     check(names.index(MIGRATION.name) > names.index(OLD_COPY.name) and names.index(owner.name) > names.index(MIGRATION.name),
           "and each applies after the copy it replaces")
     schema = SCHEMA.read_text()

@@ -25,6 +25,7 @@ isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
 from workflow_document_eras import before_relaying
 from scripts.ticket_board import write_client  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
 
 from temporary_cluster import temporary_cluster  # noqa: E402
@@ -393,11 +394,11 @@ def run_checks(app, admin, base, write_token, document):
     # a hand-maintained tail silently stops being "today's code" the moment a
     # migration is added after it, and then today's document fails against the
     # validator of whatever release the list ended at (SYRD-133).
-    later = sorted(
+    later = [
         path
-        for path in (ROOT / "scripts/ticket_board/migrations").glob("pgu*.sql")
-        if path.name > "pgu926_syrd77_director_reassign.sql"
-    )
+        for path in ordered_files(ROOT / "scripts/ticket_board/migrations")
+        if migration_key(path.name) > migration_key("pgu926_syrd77_director_reassign.sql")
+    ]
     for path in later:
         t.psql(admin, "BEGIN;\n" + path.read_text() + "\nCOMMIT;")
     after = app.workflow_document()

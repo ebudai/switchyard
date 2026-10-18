@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 
@@ -917,10 +918,12 @@ def main() -> int:
         staged_recovery_migration_text
     )
     # And it must sort AFTER the migration that last defined the old body:
-    # ticket-board-migrate applies these in alphabetical order, so a lower
+    # ticket-board-migrate applies these in number order, so a lower
     # number would be overwritten by pgu948 on any clean build or replay.
-    migrations = sorted(path.name for path in
-                        (ROOT / "scripts" / "ticket_board" / "migrations").glob("pgu*.sql"))
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.ticket_board.migration_order import ordered_files
+    migrations = [path.name for path in ordered_files(ROOT / "scripts" / "ticket_board" / "migrations")]
     assert migrations.index("pgu950_syrd203_staged_turn_recovery.sql") > migrations.index(
         "pgu948_syrd194_unresolved_turn_guard.sql"
     ), migrations[-4:]

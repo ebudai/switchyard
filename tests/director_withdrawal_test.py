@@ -37,16 +37,17 @@ from tmux_bus_isolation import isolate_tmux_bus  # noqa: E402
 
 isolate_tmux_bus()
 import ticket_board_write_api_test as t  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import available_transitions, validate  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
 
 MIGRATION_PATH = ROOT / "scripts/ticket_board/migrations/pgu955_syrd237_director_withdrawal.sql"
 MIGRATION = MIGRATION_PATH.read_text()
-LATER_MIGRATIONS = sorted(
+LATER_MIGRATIONS = [
     p.read_text()
-    for p in (ROOT / "scripts/ticket_board/migrations").glob("*.sql")
-    if p.name > MIGRATION_PATH.name
-)
+    for p in ordered_files(ROOT / "scripts/ticket_board/migrations")
+    if migration_key(p.name) > migration_key(MIGRATION_PATH.name)
+]
 SHIPPED = json.loads((ROOT / "examples/workflows/inspection.json").read_text())
 
 WITHDRAW = "director_withdraw"

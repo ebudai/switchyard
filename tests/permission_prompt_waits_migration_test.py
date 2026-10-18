@@ -34,6 +34,7 @@ if str(ROOT / "tests") not in sys.path:
 import ticket_board_write_api_test as t  # noqa: E402
 from schema_function_drift import assert_no_drift, owning_migration  # noqa: E402
 from temporary_cluster import temporary_cluster  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 
 MIGRATIONS = ROOT / "scripts" / "ticket_board" / "migrations"
 MIGRATION = MIGRATIONS / "pgu956_syrd243_permission_prompt_waits.sql"
@@ -99,8 +100,8 @@ def build(cluster, db: str, *, legacy: bool) -> str:
     if legacy:
         # The ordered tail, in the order the shipped runner applies it: every
         # migration at or after the release this tenant starts from.
-        for path in sorted(MIGRATIONS.glob("pgu*.sql")):
-            if path.name >= LEGACY_FROM:
+        for path in ordered_files(MIGRATIONS):
+            if migration_key(path.name) >= migration_key(LEGACY_FROM):
                 t.psql(admin, path.read_text(encoding="utf-8"))
     # And then the current RBAC pass, which is where the upgrade used to stop.
     t.psql(admin, RBAC.read_text(encoding="utf-8"))
@@ -195,8 +196,8 @@ def main() -> int:
     legacy_floor = schema_before(LEGACY_FROM)
     earlier = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in sorted(MIGRATIONS.glob("*.sql"))
-        if path.name < MIGRATION.name
+        for path in ordered_files(MIGRATIONS)
+        if migration_key(path.name) < migration_key(MIGRATION.name)
     )
     missing = [
         name for name in depends_on

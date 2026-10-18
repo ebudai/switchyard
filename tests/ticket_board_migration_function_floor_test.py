@@ -34,6 +34,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
+from scripts.ticket_board.migration_order import ordered_files  # noqa: E402
 from ticket_board_schema_function_migration_test import (
     MIGRATION_FUNCTION_RE,
     MIGRATIONS_PREFIX,
@@ -47,9 +48,8 @@ CALL_RE = re.compile(r"(?i)\bticket_board\.([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 def migration_paths() -> list[str]:
-    """Every migration, in the order the runner applies them: a filename sort."""
-    directory = ROOT / MIGRATIONS_PREFIX
-    return sorted(f"{MIGRATIONS_PREFIX}{path.name}" for path in directory.glob("*.sql"))
+    """Every migration, in the order the runner applies them: by number."""
+    return [f"{MIGRATIONS_PREFIX}{path.name}" for path in ordered_files(ROOT / MIGRATIONS_PREFIX)]
 
 
 def bare(names: object) -> set[str]:

@@ -41,6 +41,7 @@ isolate_tmux_bus()
 
 import ticket_board_write_api_test as t  # noqa: E402
 from scripts.ticket_board.app import TicketBoardApp  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.notify_listener import TicketBoardNotifyListener  # noqa: E402
 from scripts.ticket_board.read_client import director_payload, queue_payload  # noqa: E402
 from scripts.ticket_board.workflow_config import validate  # noqa: E402
@@ -488,7 +489,7 @@ def case_the_upgrade_carries_it_to_an_existing_board(cluster, tmpdir: Path) -> i
     # claiming migrations it never ran, and the current rbac.sql -- which grants
     # on functions those later releases add -- then fails on a board that is not
     # broken (the same pairing SYRD-119 found from the other side).
-    names = [path.name for path in sorted(MIGRATIONS.glob("*.sql")) if path.name < MINE]
+    names = [path.name for path in ordered_files(MIGRATIONS) if migration_key(path.name) < migration_key(MINE)]
     t.psql(
         admin,
         "CREATE TABLE IF NOT EXISTS ticket_board.schema_migrations ("

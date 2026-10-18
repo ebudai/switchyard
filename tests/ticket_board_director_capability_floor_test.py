@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from scripts import onboarding_readiness  # noqa: E402
 from workflow_document_eras import before_relaying  # noqa: E402
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 from scripts.ticket_board.workflow_config import (  # noqa: E402
     DIRECTOR_CONTROL_CAPABILITIES,
     DIRECTOR_IDENTIFYING_CAPABILITIES,
@@ -321,8 +322,8 @@ def test_the_upgrade_brings_an_existing_tenant_up_to_the_floor() -> None:
     # (SYRD-133).
     migrations = [
         path.read_text(encoding="utf-8")
-        for path in sorted((ROOT / "scripts/ticket_board/migrations").glob("pgu*.sql"))
-        if path.name >= "pgu927_syrd82_director_capability_floor.sql"
+        for path in ordered_files(ROOT / "scripts/ticket_board/migrations")
+        if migration_key(path.name) >= migration_key("pgu927_syrd82_director_capability_floor.sql")
     ]
 
     with temporary_cluster(prefix="floor-upgrade-", shutdown="immediate") as cluster:

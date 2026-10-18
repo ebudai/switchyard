@@ -192,11 +192,15 @@ You can run only the migration bootstrap with
 `TICKET_BOARD_ADMIN_DATABASE_URL` because migrations may need DDL privileges.
 The underlying runner is `scripts/ticket-board-migrate`; it applies
 legacy `NNN_description.sql` files plus new `pgu<num>_description.sql` files
-in deterministic filename order, skips names already present in
+in number order (`pgu999`, then `pgu1000`; SYRD-617), skips names already present in
 `ticket_board.schema_migrations`, and records a migration name only after that
 SQL file successfully applies. The runner does not do dependency resolution:
 if two unapplied migrations genuinely depend on each other, they must be
-rebased/combined before merge so the file order is already settled.
+rebased/combined before merge so the file order is already settled. The
+order is decided for the whole directory before the database is touched
+(`scripts/ticket_board/migration_order.py`): a number used by two files, a
+leading zero, or any other name that is not `pgu<num>_<lowercase description>.sql`
+stops the run with nothing applied.
 
 ## Controlled deploy / restart
 

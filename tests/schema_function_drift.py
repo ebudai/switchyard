@@ -15,11 +15,15 @@ migration defining the function, not all of them.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = ROOT / "scripts" / "ticket_board" / "schema.sql"
 MIGRATIONS = ROOT / "scripts" / "ticket_board" / "migrations"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from scripts.ticket_board.migration_order import key as migration_key, ordered_files  # noqa: E402
 
 
 def definition(name: str) -> str:
@@ -32,7 +36,7 @@ def definition(name: str) -> str:
 def owning_migration(name: str) -> Path:
     """The migration whose copy of `name` an upgraded board is left running."""
     needle = f"CREATE OR REPLACE FUNCTION ticket_board.{name}("
-    owners = sorted(p for p in MIGRATIONS.glob("*.sql") if needle in p.read_text())
+    owners = [p for p in ordered_files(MIGRATIONS) if needle in p.read_text()]
     assert owners, f"no migration installs ticket_board.{name}"
     return owners[-1]
 
@@ -89,4 +93,4 @@ def migrations_from(migration: Path) -> list[Path]:
     migration under test and then current rbac.sql is not an upgrade any board
     takes.
     """
-    return [path for path in sorted(MIGRATIONS.glob("*.sql")) if path.name >= migration.name]
+    return [path for path in ordered_files(MIGRATIONS) if migration_key(path.name) >= migration_key(migration.name)]

@@ -34,6 +34,7 @@ reach it through the launcher.
 
 from __future__ import annotations
 
+import os
 import pwd
 import shlex
 import stat
@@ -41,7 +42,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -413,7 +414,7 @@ CONTROL_REPOSITORY_OCCUPIED = "occupied"
 CONTROL_REPOSITORY_UNREADABLE = "unreadable"
 
 
-def control_repository_state(path: Path) -> str:
+def control_repository_state(path: Path, *, owner_user: str = "") -> str:
     """Tell a repository, a placeholder and somebody else's data apart.
 
     `switchyard new` and the operator packet now create the commit store as an
@@ -427,7 +428,14 @@ def control_repository_state(path: Path) -> str:
     directory is the placeholder provisioning left and is cloned into. Anything
     else is somebody's data at a path this project was pointed at, and nothing
     here will delete or write over it.
+
+    As root for `owner_user` it looks by descriptor from the owner's home, never
+    by path, and a link above the store is refused (SYRD-613).
     """
+    from scripts import team_launcher as launcher
+
+    if owner_user and launcher.root_writes_for(owner_user):
+        return _control_repository_state_as_root(path, owner_user)
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -445,6 +453,23 @@ def control_repository_state(path: Path) -> str:
     except OSError:
         return CONTROL_REPOSITORY_UNREADABLE
     return CONTROL_REPOSITORY_OCCUPIED if occupied else CONTROL_REPOSITORY_EMPTY
+
+
+def _control_repository_state_as_root(path: Path, owner_user: str) -> str:
+    """`control_repository_state` for root: each question asked of the owner's tree by descriptor (SYRD-613)."""
+    from scripts import owner_writes
+
+    info = owner_writes.owner_entry_status(owner_user, path)
+    if info is None:
+        return CONTROL_REPOSITORY_MISSING
+    if not stat.S_ISDIR(info.st_mode):
+        return CONTROL_REPOSITORY_OCCUPIED
+    kinds = [owner_writes.owner_entry_status(owner_user, path / name) for name in ("HEAD", "objects", "refs")]
+    if all(kind is not None for kind in kinds) and stat.S_ISREG(kinds[0].st_mode) and all(
+            stat.S_ISDIR(kind.st_mode) for kind in kinds[1:]):
+        return CONTROL_REPOSITORY_READY
+    names = owner_writes.owner_directory_names(owner_user, path)
+    return CONTROL_REPOSITORY_OCCUPIED if names else CONTROL_REPOSITORY_EMPTY
 
 
 def _git_config_value(raw: str) -> str:
@@ -468,17 +493,24 @@ def _git_config_value(raw: str) -> str:
     return "".join(out).strip()
 
 
-def _control_remote_url(control: Path, remote: str) -> str:
+def _control_remote_url(control: Path, remote: str, *, owner_user: str = "") -> str:
     """The URL a bare repository records for `remote`, read from its config file, or "".
 
     Read from the file rather than by running git, as `control_repository_state`
     reads the store: nothing runs against a store that may be somebody else's,
-    and a store this cannot read is no evidence either way.
+    and a store this cannot read is no evidence either way. As root for
+    `owner_user` it is read by descriptor from the owner's home: a link at the
+    file or above it is refused, so nothing root alone can read is reported
+    back as the store's URL (SYRD-613).
     """
+    from scripts import owner_writes
+
     try:
-        lines = (control / "config").read_text(encoding="utf-8", errors="replace").splitlines()
+        raw = (owner_writes.read_owner_bytes(owner_user, control / "config") if owner_user
+               else (control / "config").read_bytes())
     except OSError:
         return ""
+    lines = (raw or b"").decode("utf-8", errors="replace").splitlines()
     header = f'[remote "{remote}"]'
     inside = False
     for line in lines:
@@ -494,14 +526,16 @@ def _control_remote_url(control: Path, remote: str) -> str:
     return ""
 
 
-def _same_local_repository(recorded: str, repository: Path, *, base: Path) -> bool:
-    """Whether a remote URL git recorded names this local repository."""
+def _same_local_repository(recorded: str, repository: Path, *, base: Path, by_name: bool = False) -> bool:
+    """Whether a remote URL git recorded names this local repository; `by_name`, as written, looking nothing up."""
     url = recorded[len("file://"):] if recorded.startswith("file://") else recorded
     if "://" in url or (":" in url.split("/", 1)[0] and not url.startswith("/")):
         return False
     path = Path(url).expanduser()
     if not path.is_absolute():
         path = base / path
+    if by_name:
+        return os.path.normpath(path) == os.path.normpath(repository)
     return path.resolve(strict=False) == repository.expanduser().resolve(strict=False)
 
 
@@ -520,10 +554,15 @@ def control_repository_origin_mismatch(config: ProjectConfig) -> str:
     this cannot read, is left to the fetch as before, which says what is wrong
     in git's words.
     """
+    from scripts import team_launcher as launcher
+
     if config.control_repository is None or config.repository is None:
         return ""
-    recorded = _control_remote_url(config.control_repository, config.worktree_remote)
-    if not recorded or _same_local_repository(recorded, config.repository, base=config.control_repository):
+    as_root = bool(config.run_as_user) and launcher.root_writes_for(config.run_as_user)
+    owner = config.run_as_user if as_root else ""
+    recorded = _control_remote_url(config.control_repository, config.worktree_remote, owner_user=owner)
+    if not recorded or _same_local_repository(recorded, config.repository, base=config.control_repository,
+                                              by_name=as_root):
         return ""
     control = config.control_repository
     worktrees = f" and the role worktrees under {config.worktree_base}" if config.worktree_base is not None else ""
@@ -601,7 +640,12 @@ def ensure_control_repository(
     if mkdir_proc.returncode != 0:
         reason = launcher._proc_failure_reason(mkdir_proc, f"mkdir failed with exit {mkdir_proc.returncode}")
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    state = control_repository_state(config.control_repository)
+    try:
+        state = control_repository_state(config.control_repository, owner_user=config.run_as_user)
+        # Before anything writes to it or fetches into it (SYRD-545).
+        foreign = control_repository_origin_mismatch(config) if state == CONTROL_REPOSITORY_READY else ""
+    except SystemExit as refusal:  # as root, a link at or above the store: refused, never looked through
+        return WorktreeProvisionResult({role.role: str(refusal) for role in config.roles})
     if state == CONTROL_REPOSITORY_OCCUPIED:
         reason = (
             f"{config.control_repository} exists, is not a Git repository, and is not empty. "
@@ -609,11 +653,8 @@ def ensure_control_repository(
             "project's commit store at another path, and start again."
         )
         return WorktreeProvisionResult({role.role: reason for role in config.roles})
-    if state == CONTROL_REPOSITORY_READY:
-        # Before anything writes to it or fetches into it (SYRD-545).
-        foreign = control_repository_origin_mismatch(config)
-        if foreign:
-            return WorktreeProvisionResult({role.role: foreign for role in config.roles})
+    if foreign:
+        return WorktreeProvisionResult({role.role: foreign for role in config.roles})
     if state in (
         CONTROL_REPOSITORY_MISSING,
         CONTROL_REPOSITORY_EMPTY,
@@ -781,6 +822,8 @@ def repair_control_repository_ownership(
 
     if config.control_repository is None or not config.run_as_user:
         return WorktreeProvisionResult({})
+    if launcher.root_writes_for(config.run_as_user):
+        return _repair_control_repository_as_root(config)
     repair_paths, mismatch = _control_repository_repair_paths(config)
     if mismatch is None:
         return WorktreeProvisionResult({})
@@ -798,6 +841,41 @@ def repair_control_repository_ownership(
                 f"{mismatch} is owned by {actual_owner}, expected {config.run_as_user}:{config.run_as_user}"
             )
             return WorktreeProvisionResult({role.role: message for role in config.roles})
+    return WorktreeProvisionResult({})
+
+
+def _repair_control_repository_as_root(config: ProjectConfig) -> WorktreeProvisionResult:
+    """Root's repair for the owner, by descriptor from the owner's home (SYRD-613).
+
+    The checks above look by path, and `chown`/`chown -R` by path followed a
+    link swapped in at the store, or at a directory above it, after they
+    looked. Here nothing is looked at by path: the store must name, as written,
+    a directory under the owner's managed root, and `repair_owner_tree` opens
+    everything from the home down, refuses a link or a mount, and changes
+    owners on what it opened.
+    """
+    from scripts import owner_writes, tenant_paths
+
+    control = config.control_repository
+
+    def refused(why: object) -> WorktreeProvisionResult:
+        message = f"refusing to repair control repository ownership for {control}: {why}"
+        return WorktreeProvisionResult({role.role: message for role in config.roles})
+
+    try:
+        pwd.getpwnam(config.run_as_user)
+        home = owner_writes.owner_home(config.run_as_user)
+    except (KeyError, ValueError):
+        return refused(f"target user {config.run_as_user!r} does not exist")
+    managed = f"{home.rstrip('/')}/.local/state/switchyard/projects"
+    text = str(control)
+    parent = str(PurePosixPath(text).parent)
+    if text != str(PurePosixPath(text)) or "/../" in f"{text}/" or not parent.startswith(f"{managed}/"):
+        return refused(f"{parent} is not a switchyard-managed control directory under {managed}")
+    try:
+        owner_writes.repair_owner_tree(config.run_as_user, control)
+    except (tenant_paths.Refused, OSError, SystemExit) as refusal:
+        return refused(refusal)
     return WorktreeProvisionResult({})
 
 

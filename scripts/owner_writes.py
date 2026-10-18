@@ -402,6 +402,73 @@ def ensure_owner_dirs(owner_user: str, paths: list[Path], *, mode: int) -> None:
             root.close()
 
 
+def repair_owner_tree(owner_user: str, path: Path) -> None:
+    """Give the tree at `path` back to the owner, with each directory above it that is not the owner's, up to the
+    nearest one that is: `chown o:o` on those and `chown -R o:o` on the tree, by descriptor from the owner's home
+    (SYRD-613).
+
+    Every directory is opened from the home down without following a link or crossing a mount and changed on what
+    was opened, so a link at the tree or above it -- planted, or swapped in after root looked -- is refused and what
+    it points at keeps its owner. A link inside the tree is changed as a link (`tenant_paths.chown_tree`). A path
+    outside the home is refused, never normalised in, and nothing missing is made.
+    """
+    from scripts import tenant_paths
+
+    account = pwd.getpwnam(owner_user)
+    owned = (account.pw_uid, account.pw_gid)
+    root = tenant_paths._quiet(owner_home(owner_user))
+    held: list[tuple[str, int, os.stat_result]] = []
+    try:
+        parts = root.relative(str(path))
+        if root.fd is None:
+            return
+        held.append((root.home, os.dup(root.fd), os.fstat(root.fd)))
+        for part in parts:
+            display = f"{held[-1][0]}/{part}"
+            observed = root._observe(held[-1][1], part)
+            if observed is None or not (stat.S_ISDIR(observed.st_mode) or stat.S_ISLNK(observed.st_mode)):
+                break
+            descriptor = root.open_directory(held[-1][1], part, display, observed)
+            held.append((display, descriptor, os.fstat(descriptor)))
+        reached = len(held) == len(parts) + 1
+        first = len(held)
+        while first > 0 and (held[first - 1][2].st_uid, held[first - 1][2].st_gid) != owned:
+            first -= 1
+        for display, descriptor, _status in held[first:len(held) - reached]:
+            root._own(descriptor, display, None, *owned)
+        if reached:
+            tenant_paths.chown_tree(root, str(path), *owned, if_exists=True)
+    finally:
+        for _display, descriptor, _status in held:
+            os.close(descriptor)
+        root.close()
+
+
+def owner_directory_names(owner_user: str, path: Path) -> list[str] | None:
+    """The names in the owner's directory at `path`, listed on a descriptor opened from its root; None when missing.
+
+    A link at the directory or above it is refused, never listed through (SYRD-613).
+    """
+    from scripts import tenant_paths
+
+    try:
+        root = tenant_paths._quiet(owner_root(owner_user, path))
+        try:
+            descriptor = root.walk(root.relative(str(path)))
+            if descriptor is None:
+                return None
+            try:
+                return sorted(os.listdir(descriptor))
+            finally:
+                os.close(descriptor)
+        finally:
+            root.close()
+    except tenant_paths.Refused as refusal:
+        raise SystemExit(f"switchyard: refusing to look in {path} for {owner_user}: {refusal}") from None
+    except SystemExit as stop:
+        raise SystemExit(f"switchyard: refusing to look in {path} for {owner_user}: {stop}") from None
+
+
 def read_owner_bytes(owner_user: str, path: Path) -> bytes | None:
     """A tenant's file that root is about to act on, read without following a link; None when it is missing.
 
